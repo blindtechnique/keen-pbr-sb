@@ -1,0 +1,1878 @@
+openapi: "3.1.0"
+info:
+  title: keen-pbr API
+  description: REST API for the keen-pbr policy-based routing daemon.
+  version: "3.0.0"
+
+servers:
+  - url: http://127.0.0.1:12121
+    description: Example local API address. Runtime default listen is `0.0.0.0:12121`.
+
+paths:
+  /api/health/service:
+    get:
+      summary: Service health and outbound status
+      description: >
+        Returns the running daemon version, routing runtime status, and
+        resolver/config summary for the daemon. Outbound runtime diagnostics
+        are exposed via `/api/runtime/outbounds`.
+      operationId: getHealthService
+      responses:
+        "200":
+          description: Service health and outbound status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/service/start:
+    post:
+      summary: Start routing runtime
+      description: >
+        Applies keen-pbr routing/firewall runtime state and runs dnsmasq
+        registration hooks to activate the managed resolver config without
+        stopping the API process.
+      operationId: postServiceStart
+      responses:
+        "200":
+          description: Service start requested successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReloadResponse"
+
+  /api/service/stop:
+    post:
+      summary: Stop routing runtime
+      description: >
+        Removes keen-pbr routing/firewall runtime state and runs dnsmasq
+        deactivation hooks to load fallback resolver config while keeping the
+        API process running.
+      operationId: postServiceStop
+      responses:
+        "200":
+          description: Service stop requested successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReloadResponse"
+
+  /api/service/restart:
+    post:
+      summary: Restart routing runtime
+      description: >
+        Re-applies keen-pbr routing/firewall runtime state and dnsmasq
+        registration hooks for the managed resolver config.
+      operationId: postServiceRestart
+      responses:
+        "200":
+          description: Service restart requested successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReloadResponse"
+
+  /api/lists/refresh:
+    post:
+      summary: Refresh remote URL lists
+      description: >
+        Refreshes one URL-backed list or all URL-backed lists from the active
+        daemon config. If a changed list is used by active routing or DNS rules
+        and the routing runtime is running, the runtime is rebuilt so the new
+        list contents take effect immediately.
+      operationId: postListsRefresh
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListRefreshRequest"
+      responses:
+        "200":
+          description: List refresh completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRefreshResponse"
+        "400":
+          description: Requested list exists but is not URL-backed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Requested list not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Draft config exists or another config/runtime operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/config:
+    get:
+      summary: Get current config state
+      description: >
+        Returns the latest editable configuration object together with a flag
+        indicating whether it is a staged in-memory draft.
+      operationId: getConfig
+      responses:
+        "200":
+          description: Current configuration and draft status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigStateResponse"
+        "500":
+          description: Error reading config file
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Stage config in memory
+      description: >
+        Validates the provided JSON body as a config file and stages it in
+        daemon memory without writing it to disk or applying it to the routing
+        runtime.
+      operationId: postConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigObject"
+      responses:
+        "200":
+          description: Config staged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Unexpected server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/config/save:
+    post:
+      summary: Apply staged config
+      description: >
+        Persists the currently staged in-memory config to disk and then applies
+        it to the routing runtime.
+      operationId: postConfigSave
+      responses:
+        "200":
+          description: Config saved and applied successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          description: No staged config or validation/dry-run failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Save/apply error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/routing/test:
+    post:
+      summary: Test routing for an IP or domain
+      description: >
+        Resolves the target (if a domain name), scans configured route rules
+        against cached list data to determine the expected outbound, and
+        queries the live kernel firewall sets to determine the actual outbound.
+        Useful for diagnosing routing mismatches without restarting the daemon.
+      operationId: postRoutingTest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoutingTestRequest"
+      responses:
+        "200":
+          description: Routing test result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingTestResponse"
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/health/routing:
+    get:
+      summary: Routing and firewall health
+      description: >
+        Verifies the live kernel routing and firewall state against the expected
+        configuration. Checks that the firewall chain exists, all rules are
+        present, route tables are populated, and policy rules are in place.
+      operationId: getHealthRouting
+      responses:
+        "200":
+          description: Routing health report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingHealthResponse"
+        "500":
+          description: Unexpected error during health check
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingHealthErrorResponse"
+
+  /api/runtime/outbounds:
+    get:
+      summary: Live outbound and interface runtime state
+      description: >
+        Returns the daemon's current outbound runtime state derived from the
+        live routing tables, urltest runtime selection, and current interface
+        reachability. Use this to distinguish the currently active interface
+        from interfaces that are merely on standby as backups.
+      operationId: getRuntimeOutbounds
+      responses:
+        "200":
+          description: Live outbound/interface runtime state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeOutboundsResponse"
+
+  /api/runtime/interfaces:
+    get:
+      summary: Live system interface inventory
+      description: >
+        Returns the daemon's current system interface inventory derived from
+        live netlink link and address state. This endpoint is interface-centric
+        and is intended for UI selectors and diagnostics rather than outbound
+        health. It includes all detected system interfaces, optional live
+        detail such as carrier and operstate, and best-effort IPv4/IPv6
+        addresses.
+      operationId: getRuntimeInterfaces
+      responses:
+        "200":
+          description: Live system interface inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+  /api/dns/test:
+    get:
+      summary: Stream DNS test queries
+      description: >
+        Streams DNS query names observed by the built-in `dns.test_server`
+        listener as Server-Sent Events. Each connection receives `HELLO`
+        first, then one event per queried DNS name.
+      operationId: getDnsTest
+      responses:
+        "200":
+          description: Live DNS query stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                data: {"type":"HELLO"}
+
+                data: {"type":"DNS","domain":"example.com","source_ip":"192.168.1.10","ecs":"203.0.113.0/24"}
+
+                data: {"type":"DNS","domain":"connectivity-check.local","source_ip":"192.168.1.11","ecs":null}
+
+  /api/transports:
+    get:
+      summary: Transport manager runtime state
+      description: >
+        Proxies the loopback-only transport manager API and returns the
+        current state of native and managed tunnel interfaces.
+      operationId: getTransports
+      responses:
+        "200":
+          description: Transport runtime states
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TransportStatus"
+        "503":
+          description: Transport manager is not configured or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Start or stop a transport
+      operationId: postTransportAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportActionRequest"
+      responses:
+        "200":
+          description: Action accepted by the transport manager
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportActionResponse"
+        "400":
+          description: Invalid tag or action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/transports/config:
+    get:
+      summary: Editable transport definitions
+      operationId: getTransportConfig
+      responses:
+        "200":
+          description: Transport definitions with secret UUID values redacted
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TransportSpec"
+        "503":
+          description: Transport manager is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Create, update, or delete a transport definition
+      operationId: postTransportConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportConfigOperation"
+      responses:
+        "200":
+          description: Configuration operation completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportConfigResponse"
+        "400":
+          description: Invalid transport definition or operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+
+    TransportStatus:
+      type: object
+      required: [tag, type, interface, state, updated_at, desired_up]
+      properties:
+        tag:
+          type: string
+        type:
+          type: string
+        interface:
+          type: string
+        state:
+          type: string
+          enum: [down, starting, up, degraded]
+        pid:
+          type: integer
+        error:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        desired_up:
+          type: boolean
+          description: Whether the supervisor should keep this managed transport up
+        retry_count:
+          type: integer
+          minimum: 0
+        next_retry_at:
+          type: string
+          format: date-time
+
+    TransportActionRequest:
+      type: object
+      required: [tag, action]
+      properties:
+        tag:
+          type: string
+          pattern: "^[a-z][a-z0-9_]{0,23}$"
+        action:
+          type: string
+          enum: [up, down]
+
+    TransportActionResponse:
+      type: object
+      required: [status, at]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+        at:
+          type: string
+          format: date-time
+
+    TransportSpec:
+      type: object
+      required: [tag, type, interface]
+      properties:
+        tag:
+          type: string
+          pattern: "^[a-z][a-z0-9_]{0,23}$"
+        type:
+          type: string
+          enum: [native, sing-box, sing-box-vless-reality]
+        interface:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]{1,15}$"
+        auto_start:
+          type: boolean
+          default: false
+        link:
+          type: string
+          description: >
+            Share link accepted by transport-manager. Supported schemes include
+            vless, vmess, trojan, shadowsocks, hysteria2, tuic, anytls, socks
+            and HTTP proxies. Blank on update preserves the stored secret.
+        outbound_json:
+          type: string
+          description: >
+            A complete sing-box outbound JSON object for protocols without a
+            standard share-link format. Blank on update preserves the stored secret.
+        mtu:
+          type: integer
+          minimum: 576
+          maximum: 9000
+        bootstrap_dns:
+          type: array
+          description: IP addresses (optionally with port) used to resolve the sing-box server before the tunnel starts.
+          items:
+            type: string
+          example: ["1.1.1.1", "9.9.9.9:53"]
+          default: 1420
+        vless:
+          $ref: "#/components/schemas/VlessRealitySpec"
+          deprecated: true
+
+    VlessRealitySpec:
+      type: object
+      required: [server, server_port, server_name, public_key]
+      properties:
+        server:
+          type: string
+        server_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        uuid:
+          type: string
+          description: Required when creating; blank on update preserves the stored UUID.
+        flow:
+          type: string
+          default: xtls-rprx-vision
+        server_name:
+          type: string
+        public_key:
+          type: string
+        short_id:
+          type: string
+        fingerprint:
+          type: string
+          default: chrome
+        mtu:
+          type: integer
+          minimum: 576
+          maximum: 9000
+          default: 1420
+
+    TransportConfigOperation:
+      type: object
+      required: [operation]
+      properties:
+        operation:
+          type: string
+          enum: [create, update, delete]
+        tag:
+          type: string
+        transport:
+          $ref: "#/components/schemas/TransportSpec"
+
+    TransportConfigResponse:
+      type: object
+      required: [status, tag]
+      properties:
+        status:
+          type: string
+          enum: [created, updated, deleted]
+        tag:
+          type: string
+
+    # -------------------------------------------------------------------------
+    # /api/config — configuration object schema
+    # -------------------------------------------------------------------------
+
+    DaemonConfig:
+      type: object
+      properties:
+        pid_file:
+          type: string
+          description: Path to the PID file.
+          example: "/var/run/keen-pbr.pid"
+        cache_dir:
+          type: string
+          description: Directory for cached list data.
+          default: "/var/cache/keen-pbr"
+          example: "/var/cache/keen-pbr"
+        firewall_backend:
+          type: string
+          description: Firewall backend selection.
+          enum: [auto, iptables, nftables]
+          default: auto
+          example: auto
+        firewall_verify_max_bytes:
+          type: integer
+          minimum: 0
+          description: Max stdout bytes captured per firewall verification command (0 = unlimited).
+          default: 262144
+          example: 262144
+        skip_marked_packets:
+          type: boolean
+          nullable: true
+          description: >
+            Whether firewall prefilter rules should bypass packets that already carry
+            a fwmark. Defaults to `true` when omitted or set to `null`.
+          example: true
+        ipv6_enabled:
+          type: boolean
+          nullable: true
+          description: >
+            Whether keen-pbr should install IPv6 firewall sets/rules and emit IPv6
+            resolver set targets. Defaults to `true` when omitted or set to `null`.
+            If enabled but the system lacks IPv6 support, keen-pbr logs an error and
+            continues in IPv4-only mode.
+          default: true
+          example: true
+        strict_enforcement:
+          type: boolean
+          description: >
+            Default strict routing enforcement for interface outbounds. When enabled,
+            an unreachable default route is installed if the outbound gateway/interface
+            cannot be confirmed reachable.
+          default: false
+          example: true
+        max_file_size_bytes:
+          type: integer
+          description: >
+            Maximum allowed size in bytes for downloaded remote content such as URL-backed
+            lists. Defaults to 8 MiB.
+          default: 8388608
+          example: 8388608
+
+    ApiConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          example: true
+        listen:
+          type: string
+          description: Address and port for the HTTP API.
+          default: "0.0.0.0:12121"
+          example: "0.0.0.0:12121"
+
+    RetryConfig:
+      type: object
+      properties:
+        attempts:
+          type: integer
+          default: 3
+          example: 3
+        interval_ms:
+          type: integer
+          description: Delay between retry attempts in milliseconds.
+          default: 1000
+          example: 1000
+
+    CircuitBreakerConfig:
+      type: object
+      properties:
+        failure_threshold:
+          type: integer
+          description: Number of consecutive failures before opening the circuit.
+          default: 5
+          example: 5
+        success_threshold:
+          type: integer
+          description: Number of consecutive successes in half-open state to close the circuit.
+          default: 2
+          example: 2
+        timeout_ms:
+          type: integer
+          description: Time in milliseconds before the circuit transitions from open to half-open.
+          default: 30000
+          example: 30000
+        half_open_max_requests:
+          type: integer
+          description: Maximum number of probe requests allowed in half-open state.
+          default: 1
+          example: 1
+
+    OutboundGroup:
+      type: object
+      required: [outbounds]
+      properties:
+        weight:
+          type: integer
+          description: Relative weight for selecting this group when multiple groups are healthy.
+          default: 1
+          example: 1
+        outbounds:
+          type: array
+          description: Ordered list of outbound tags to try within this group.
+          items:
+            type: string
+          example: ["vpn"]
+
+    Outbound:
+      type: object
+      required: [type, tag]
+      discriminator:
+        propertyName: type
+      properties:
+        type:
+          type: string
+          enum: [interface, table, blackhole, ignore, urltest]
+          description: Outbound type.
+          example: "interface"
+        tag:
+          type: string
+          description: >
+            Unique identifier for this outbound. Must match
+            `^[a-z][a-z0-9_]*$` and be at most 24 characters.
+          example: "vpn"
+        interface:
+          type: string
+          description: >
+            Egress network interface name. Required for `interface` outbound type.
+          example: "tun0"
+        gateway:
+          type: string
+          description: >
+            Optional IPv4 gateway address. Used with `interface` outbound type.
+          example: "10.8.0.1"
+        gateway6:
+          type: string
+          description: >
+            Optional IPv6 gateway address. Used with `interface` outbound type.
+          example: "2001:db8::1"
+        strict_enforcement:
+          type: boolean
+          description: >
+            Per-outbound override for strict routing enforcement. When enabled for
+            an `interface` outbound, install an unreachable default route if the
+            configured gateway/interface cannot be confirmed reachable. Overrides
+            `daemon.strict_enforcement` when present.
+          example: true
+        table:
+          type: integer
+          description: >
+            Kernel routing table ID. Required for `table` outbound type.
+          example: 200
+        url:
+          type: string
+          description: >
+            Probe URL for latency measurements. Required for `urltest` outbound type.
+          example: "https://www.gstatic.com/generate_204"
+        interval_ms:
+          type: integer
+          description: >
+            Interval between probes in milliseconds. Used with `urltest` outbound type.
+          default: 180000
+          example: 180000
+        probe_timeout_ms:
+          type: integer
+          nullable: true
+          description: >
+            Timeout for each individual urltest probe attempt in milliseconds.
+            Used with `urltest` outbound type. When omitted or null, the daemon
+            uses a default of `5000`.
+          example: 5000
+        tolerance_ms:
+          type: integer
+          description: >
+            Latency tolerance in milliseconds; outbounds within this range of the
+            best are considered equivalent. Used with `urltest` outbound type.
+          default: 100
+          example: 100
+        outbound_groups:
+          type: array
+          description: >
+            Ordered list of outbound groups. Required for `urltest` outbound type.
+            Groups are tried in order; within a group the outbound is selected by weight.
+          items:
+            $ref: "#/components/schemas/OutboundGroup"
+        retry:
+          $ref: "#/components/schemas/RetryConfig"
+        circuit_breaker:
+          $ref: "#/components/schemas/CircuitBreakerConfig"
+
+    ListConfig:
+      type: object
+      description: >
+        Defines a named list of domains and/or IP CIDRs used in routing and DNS rules.
+        At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided.
+        List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$`
+        and be at most 24 characters.
+      properties:
+        url:
+          type: string
+          description: URL to a remote list file to download and cache.
+          example: "https://raw.githubusercontent.com/v2fly/domain-list-community/refs/heads/master/data/apple"
+        domains:
+          type: array
+          description: Inline list of domain patterns (supports `*.` wildcards).
+          items:
+            type: string
+          example: ["example.com", "*.example.org"]
+        ip_cidrs:
+          type: array
+          description: Inline list of IP addresses or CIDR ranges.
+          items:
+            type: string
+          example: ["93.184.216.34", "10.0.0.0/8"]
+        file:
+          type: string
+          description: Path to a local list file.
+          example: "./my-list.txt"
+        ttl_ms:
+          type: integer
+          description: >
+            TTL for dnsmasq-resolved ipset entries in milliseconds.
+            `0` means no timeout.
+          default: 0
+          example: 86400000
+        detour:
+          type: string
+          description: >
+            Optional outbound tag to use when downloading this list.
+            If set, download traffic is marked with the outbound's fwmark
+            and routed via its dedicated routing table.
+            If omitted, the system default routing table is used.
+
+    DnsServer:
+      type: object
+      required: [tag]
+      properties:
+        tag:
+          type: string
+          description: >
+            Unique identifier for this DNS server. Must match
+            `^[a-z][a-z0-9_]*$`, be at most 24 characters, and be unique
+            within `dns.servers`.
+          example: "vpn-dns"
+        type:
+          type: string
+          description: DNS server source type.
+          enum: [static, keenetic]
+          default: static
+          example: "static"
+        address:
+          type: string
+          description: >
+            IPv4 or IPv6 address of the DNS server, with optional port.
+            Required for `type=static`. Must be omitted for `type=keenetic`.
+            Formats: "8.8.8.8", "8.8.8.8:5353", "::1", "[::1]:5353".
+            Default port is 53.
+          example: "10.8.0.1"
+        detour:
+          type: string
+          description: Outbound tag to use when querying this DNS server.
+          example: "vpn"
+
+    DnsRule:
+      type: object
+      required: [list, server]
+      properties:
+        enabled:
+          type: boolean
+          nullable: true
+          description: >
+            Whether this DNS rule is active. `false` disables the rule.
+            `true`, omitted, or `null` all mean the rule is active.
+          example: true
+        list:
+          type: array
+          description: List names whose domains should be resolved by this server.
+          items:
+            type: string
+          example: ["my-domains", "remote-list"]
+        server:
+          type: string
+          description: DNS server tag to use for matched domains.
+          example: "vpn-dns"
+        allow_domain_rebinding:
+          type: boolean
+          default: false
+          description: >
+            Allow DNS responses for matched domains to resolve to internal/private
+            network addresses (for example 10.0.0.0/8, 172.16.0.0/12,
+            192.168.0.0/16, and other local ranges).
+          example: false
+
+    DnsTestServer:
+      type: object
+      required: [listen]
+      properties:
+        listen:
+          type: string
+          description: IPv4 listen address for the built-in DNS test server.
+          example: "127.0.0.88:53"
+        answer_ipv4:
+          type: string
+          description: IPv4 address returned in synthetic `A` answers. Defaults to the host part of `listen`.
+          example: "127.0.0.88"
+
+    DnsSystemResolver:
+      type: object
+      required: [address]
+      description: >
+        System resolver integration used by daemon runtime. This object is
+        required for service startup, reload, and applied config updates,
+        although non-daemon commands may still parse configs without it.
+      properties:
+        address:
+          type: string
+          description: >
+            IP address or host for the system resolver, with optional port.
+            This is also the resolver endpoint used for TXT lookup of
+            `config-hash.keen.pbr`; if the port is omitted, runtime behavior
+            defaults to 53.
+          example: "127.0.0.1"
+
+    DnsConfig:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsServer"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsRule"
+        fallback:
+          type: array
+          description: Ordered DNS server tags to use when no rule matches.
+          items:
+            type: string
+          example: ["google-dns", "quad9"]
+        dns_test_server:
+          $ref: "#/components/schemas/DnsTestServer"
+        system_resolver:
+          $ref: "#/components/schemas/DnsSystemResolver"
+
+    RouteRule:
+      type: object
+      required: [outbound]
+      properties:
+        enabled:
+          type: boolean
+          nullable: true
+          description: >
+            Whether this route rule is active. `false` disables the rule.
+            `true`, omitted, or `null` all mean the rule is active.
+          example: true
+        list:
+          type: array
+          description: List names whose traffic this rule matches. Optional when another route condition is present.
+          items:
+            type: string
+          example: ["my-domains", "my-ips"]
+        outbound:
+          type: string
+          description: Outbound tag to route matched traffic through.
+          example: "vpn"
+        proto:
+          type: string
+          description: Protocol to match ("tcp", "udp", or "tcp/udp"). Omit for any.
+          example: "tcp"
+        dscp:
+          type: integer
+          minimum: 1
+          maximum: 63
+          description: DSCP tag value to match. Omit for any DSCP value.
+          example: 46
+        src_port:
+          type: string
+          description: >
+            Source port spec to match: single port ("1024"), list ("80,443"),
+            or range ("8000-9000"). Omit for any source port.
+            Prefix with "!" to negate (e.g. "!443" matches all ports except 443).
+          example: "1024-65535"
+        dest_port:
+          type: string
+          description: >
+            Destination port spec to match: single port ("443"), list ("80,443"),
+            or range ("8000-9000"). Omit for any destination port.
+            Prefix with "!" to negate (e.g. "!80,443" matches all ports except 80 and 443).
+          example: "443"
+        src_addr:
+          type: string
+          description: >
+            Source CIDR(s) to match. Omit for any source address.
+            Use a comma-separated list for multiple CIDRs
+            (e.g. "192.168.1.0/24,10.0.0.0/8").
+            Prefix with "!" to negate the entire spec
+            (e.g. "!192.168.1.0/24" matches traffic NOT from 192.168.1.0/24).
+          example: "192.168.10.0/24"
+        dest_addr:
+          type: string
+          description: >
+            Destination CIDR(s) to match. Omit for any destination address.
+            Use a comma-separated list for multiple CIDRs
+            (e.g. "10.0.0.0/8,172.16.0.0/12").
+            Prefix with "!" to negate the entire spec
+            (e.g. "!10.0.0.0/8" matches traffic NOT destined for 10.0.0.0/8).
+          example: "10.0.0.0/8"
+
+    RouteConfig:
+      type: object
+      properties:
+        inbound_interfaces:
+          type: array
+          description: >
+            Optional ingress interface filter for route processing. If omitted or empty,
+            route processing applies to packets from any interface. If present and non-empty,
+            KeenPbrTable processes packets only when they arrive via one of the listed
+            ingress interfaces.
+          items:
+            type: string
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteRule"
+
+    FwmarkConfig:
+      type: object
+      properties:
+        start:
+          type: string
+          description: First fwmark value to assign to outbounds as hex string.
+          default: "0x00010000"
+          example: "0x00010000"
+        mask:
+          type: string
+          description: >
+            Fwmark bitmask as hex string. Must contain one or more consecutive F nibbles (e.g. 0x000F0000, 0x00FF0000).
+          default: "0x00FF0000"
+          example: "0x00FF0000"
+
+    IprouteConfig:
+      type: object
+      properties:
+        table_start:
+          type: integer
+          description: First routing table ID to allocate for outbounds.
+          default: 150
+          example: 150
+
+    ListsAutoupdateConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: Whether automatic list refresh is enabled.
+          default: false
+          example: true
+        cron:
+          type: string
+          description: >
+            Standard 5-field cron expression controlling when lists are refreshed.
+            Required when `enabled` is `true`. Validated even when `enabled` is `false`.
+          example: "0 4 * * 0"
+
+    ConfigObject:
+      type: object
+      description: keen-pbr configuration file.
+      properties:
+        daemon:
+          $ref: "#/components/schemas/DaemonConfig"
+        api:
+          $ref: "#/components/schemas/ApiConfig"
+        outbounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/Outbound"
+        lists:
+          type: object
+          description: Named list definitions keyed by list name.
+          additionalProperties:
+            $ref: "#/components/schemas/ListConfig"
+        dns:
+          $ref: "#/components/schemas/DnsConfig"
+        route:
+          $ref: "#/components/schemas/RouteConfig"
+        fwmark:
+          $ref: "#/components/schemas/FwmarkConfig"
+        iproute:
+          $ref: "#/components/schemas/IprouteConfig"
+        lists_autoupdate:
+          $ref: "#/components/schemas/ListsAutoupdateConfig"
+      example:
+        daemon:
+          pid_file: "/var/run/keen-pbr.pid"
+          cache_dir: "/var/cache/keen-pbr"
+          firewall_backend: auto
+          firewall_verify_max_bytes: 262144
+          skip_marked_packets: true
+          ipv6_enabled: true
+          strict_enforcement: true
+          max_file_size_bytes: 8388608
+        api:
+          enabled: true
+          listen: "0.0.0.0:12121"
+        outbounds:
+          - type: "interface"
+            tag: "vpn"
+            interface: "tun0"
+            gateway: "10.8.0.1"
+            gateway6: "2001:db8::1"
+            strict_enforcement: true
+          - type: "interface"
+            tag: "wan"
+            interface: "eth0"
+            gateway: "192.168.1.1"
+          - type: "table"
+            tag: "custom_table"
+            table: 200
+          - type: "blackhole"
+            tag: "block"
+          - type: "ignore"
+            tag: "direct"
+          - type: "urltest"
+            tag: "auto_select"
+            url: "https://www.gstatic.com/generate_204"
+            interval_ms: 180000
+            probe_timeout_ms: 5000
+            tolerance_ms: 100
+            outbound_groups:
+              - weight: 1
+                outbounds: ["vpn"]
+              - weight: 2
+                outbounds: ["wan"]
+            retry:
+              attempts: 3
+              interval_ms: 1000
+            circuit_breaker:
+              failure_threshold: 5
+              success_threshold: 2
+              timeout_ms: 30000
+              half_open_max_requests: 1
+        lists:
+          my_domains:
+            domains:
+              - "example.com"
+              - "*.example.org"
+          my_ips:
+            ip_cidrs:
+              - "93.184.216.34"
+              - "10.0.0.0/8"
+          remote_list:
+            url: "https://raw.githubusercontent.com/v2fly/domain-list-community/refs/heads/master/data/apple"
+          local_list:
+            file: "./my-list.txt"
+        dns:
+          servers:
+            - tag: "vpn_dns"
+              address: "10.8.0.1"
+            - tag: "google_dns"
+              address: "8.8.8.8"
+          rules:
+            - list: ["my_domains", "remote_list"]
+              server: "vpn_dns"
+          fallback: ["google_dns", "quad9"]
+        fwmark:
+          start: "0x00010000"
+          mask: "0x00FF0000"
+        iproute:
+          table_start: 150
+        lists_autoupdate:
+          enabled: true
+          cron: "0 4 * * 0"
+        route:
+          rules:
+            - list: ["my-domains", "my-ips", "remote-list"]
+              outbound: "vpn"
+            - list: ["local-list"]
+              outbound: "auto-select"
+
+    # -------------------------------------------------------------------------
+    # /api/routing/test
+    # -------------------------------------------------------------------------
+
+    RoutingTestRequest:
+      type: object
+      required: [target]
+      properties:
+        target:
+          type: string
+          description: IP address or domain name to test routing for.
+          example: "www.google.com"
+
+    RoutingTestListMatch:
+      type: object
+      required: [list, via]
+      properties:
+        list:
+          type: string
+          description: Name of the list that matched.
+          example: "my-domains"
+        via:
+          type: string
+          description: >
+            The specific entry that triggered the match: an IP address, CIDR,
+            or domain name. For domain queries the most-specific matching
+            parent domain is shown (e.g. "google.com" when querying
+            "www.google.com").
+          example: "google.com"
+
+    RoutingTestEntry:
+      type: object
+      required: [ip, expected_outbound, actual_outbound, ok]
+      properties:
+        ip:
+          type: string
+          description: IP address being tested.
+          example: "142.250.74.4"
+        list_match:
+          $ref: "#/components/schemas/RoutingTestListMatch"
+          description: >
+            Details of the list entry that matched. Absent when no rule matched.
+        expected_outbound:
+          type: string
+          description: >
+            Outbound tag determined by scanning route rules against cached list
+            data. "(default)" when no rule matches.
+          example: "vpn"
+        actual_outbound:
+          type: string
+          description: >
+            Outbound tag found in the live kernel firewall sets.
+            "(default)" when the IP is not present in any set.
+            "(unknown)" when the firewall tool is unavailable.
+          example: "vpn"
+        ok:
+          type: boolean
+          description: true when expected_outbound equals actual_outbound.
+          example: true
+
+    RoutingTestRuleIpDiagnostic:
+      type: object
+      required: [ip]
+      properties:
+        ip:
+          type: string
+          description: Resolved IP represented by this matrix row.
+        in_ipset:
+          type: boolean
+          nullable: true
+          description: |
+            Whether the IP exists in this rule's firewall set.
+            null when firewall check is unavailable.
+
+    RoutingTestRuleDiagnostic:
+      type: object
+      required: [rule_index, rule, outbound, interface_name, target_in_lists, ip_rows]
+      properties:
+        rule_index:
+          type: integer
+        rule:
+          $ref: "#/components/schemas/RouteRule"
+        outbound:
+          type: string
+        interface_name:
+          type: string
+        target_in_lists:
+          type: boolean
+        target_match:
+          $ref: "#/components/schemas/RoutingTestListMatch"
+        ip_rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestRuleIpDiagnostic"
+
+    RoutingTestResponse:
+      type: object
+      required: [target, is_domain, resolved_ips, warnings, results, rule_diagnostics, no_matching_rule]
+      properties:
+        target:
+          type: string
+          description: The original input value passed to the test.
+          example: "www.google.com"
+        is_domain:
+          type: boolean
+          description: true when the target was interpreted as a domain name.
+          example: true
+        resolved_ips:
+          type: array
+          description: >
+            IP addresses resolved from the domain via DNS. Empty array for
+            IP targets.
+          items:
+            type: string
+          example: ["142.250.74.4", "2a00:1450:4001:82e::2004"]
+        warnings:
+          type: array
+          description: Non-fatal warnings such as DNS resolution failures.
+          items:
+            type: string
+          example: []
+        dns_error:
+          type: string
+          nullable: true
+          description: DNS resolution error message for domain targets.
+        no_matching_rule:
+          type: boolean
+          description: true when no routing rule matched target lists.
+        rule_diagnostics:
+          type: array
+          description: Rule-by-rule matrix diagnostics for UI rendering.
+          items:
+            $ref: "#/components/schemas/RoutingTestRuleDiagnostic"
+        results:
+          type: array
+          description: Per-IP routing test results.
+          items:
+            $ref: "#/components/schemas/RoutingTestEntry"
+
+    # -------------------------------------------------------------------------
+    # Internal: cache metadata (not exposed via API paths)
+    # -------------------------------------------------------------------------
+
+    CacheMetadata:
+      type: object
+      properties:
+        etag:
+          type: string
+        last_modified:
+          type: string
+        url:
+          type: string
+        download_time:
+          type: string
+        ips:
+          type: integer
+        cidrs:
+          type: integer
+        domains:
+          type: integer
+
+    HealthResponse:
+      type: object
+      required:
+        [version, build, status, os_type, os_version, build_variant, resolver_live_status, config_is_draft]
+      properties:
+        version:
+          type: string
+          description: Daemon version string.
+          example: "3.0.0"
+        build:
+          type: string
+          description: Daemon build string (git commit UTC timestamp).
+          example: "20260424231043"
+        status:
+          type: string
+          enum: [running, stopped]
+          example: "running"
+        os_type:
+          type: string
+          description: Normalized host OS family used by the running daemon.
+          example: "keenetic"
+        os_version:
+          type: string
+          description: Host OS version string reported by the system.
+          example: "4.2.7"
+        build_variant:
+          type: string
+          description: >
+            Host platform build variant. On OpenWrt this includes
+            `target/subtarget`; on other OSes it contains the detected target.
+          example: "mediatek/filogic"
+        resolver_config_hash:
+          type: string
+          description: >
+            MD5 hex digest of the current domain-to-ipset mapping.
+            Matches the txt-record written by generate-resolver-config; use to
+            verify the dnsmasq config is up to date.
+          example: "a3f7c1d9e2b84560abcdef1234567890"
+        resolver_config_hash_actual:
+          type: string
+          description: >
+            MD5 hex digest read from TXT record `config-hash.keen.pbr` using
+            `dns.system_resolver.address` (optional `:port`, default `:53`),
+            normalized to a raw md5 string.
+          example: "a3f7c1d9e2b84560abcdef1234567890"
+        resolver_config_hash_actual_ts:
+          type: integer
+          format: int64
+          description: >
+            Resolver TXT metadata timestamp from `config-hash.keen.pbr`, when
+            published as `<ts>|<hash>`. Represents when dnsmasq last reloaded
+            resolver config (Unix seconds).
+          example: 1712345678
+        resolver_live_status:
+          $ref: "#/components/schemas/RuntimeOutboundStatus"
+        resolver_config_probe_status:
+          $ref: "#/components/schemas/ResolverConfigProbeStatus"
+        resolver_last_probe_ts:
+          type: integer
+          format: int64
+          description: >
+            Unix timestamp (seconds) when the daemon last completed a live TXT
+            probe against the configured system resolver.
+          example: 1712345681
+        apply_started_ts:
+          type: integer
+          format: int64
+          description: >
+            Server-authoritative Unix timestamp (seconds) captured when
+            `POST /api/config/save` started applying the staged config.
+          example: 1712345680
+        resolver_config_sync_state:
+          $ref: "#/components/schemas/ResolverConfigSyncState"
+        config_is_draft:
+          type: boolean
+          description: >
+            Whether a newer configuration has been staged in memory but not yet
+            persisted and applied.
+          example: false
+
+    ResolverConfigSyncState:
+      type: string
+      description: >
+        Resolver config synchronization state derived from
+        `resolver_config_hash_actual_ts`, `apply_started_ts`, and hash comparison:
+        - converging: `actual_ts < apply_started_ts` during a short post-apply window (15s)
+        - converged: `actual_ts >= apply_started_ts && hash_equal`
+        - stale: `actual_ts >= apply_started_ts && hash_mismatch`, or when the
+          post-apply converging window has elapsed but timestamp is still behind
+          and hashes do not match
+      enum: [converging, converged, stale]
+
+    ResolverConfigProbeStatus:
+      type: string
+      description: >
+        Result of the latest resolver TXT probe for `config-hash.keen.pbr`.
+        Missing or invalid TXT means dnsmasq config sync cannot be verified and
+        may be stale; query_failed means the daemon could not query the
+        configured resolver endpoint.
+      enum: [success, missing_txt, invalid_txt, query_failed, not_configured, unknown]
+
+    # -------------------------------------------------------------------------
+    # /api/runtime/outbounds
+    # -------------------------------------------------------------------------
+
+    RuntimeInterfaceStatus:
+      type: string
+      enum: [active, backup, degraded, unavailable, unknown]
+      description: >
+        - active: interface is currently selected by the live service state
+        - backup: interface is reachable and ready to take over if needed
+        - degraded: interface exists but recent checks failed
+        - unavailable: interface cannot currently be used
+        - unknown: runtime state could not be determined
+
+    RuntimeOutboundStatus:
+      type: string
+      enum: [healthy, degraded, unavailable, unknown]
+      description: >
+        - healthy: outbound has an active live interface/path
+        - degraded: outbound has partial availability or live/runtime mismatch
+        - unavailable: outbound currently has no usable interface/path
+        - unknown: runtime state is not applicable or cannot be determined
+
+    RuntimeInterfaceState:
+      type: object
+      required: [outbound_tag, status]
+      properties:
+        outbound_tag:
+          type: string
+          description: Configured child outbound tag for this interface candidate.
+          example: "vpn0"
+        interface_name:
+          type: string
+          description: Interface name when the candidate resolves to an interface outbound.
+          example: "tun0"
+        status:
+          $ref: "#/components/schemas/RuntimeInterfaceStatus"
+        latency_ms:
+          type: integer
+          description: Optional probe latency in milliseconds for runtime entries backed by urltest data.
+          example: 42
+        detail:
+          type: string
+          description: Optional runtime detail explaining degradation or mismatch.
+          example: "live route selection differs from urltest manager selection"
+
+    RuntimeOutboundState:
+      type: object
+      required: [tag, type, status, interfaces]
+      properties:
+        tag:
+          type: string
+          description: Configured outbound tag.
+          example: "auto-select"
+        type:
+          type: string
+          enum: [interface, table, blackhole, ignore, urltest]
+          example: "urltest"
+        status:
+          $ref: "#/components/schemas/RuntimeOutboundStatus"
+        detail:
+          type: string
+          description: Optional runtime detail for mismatches or degraded state.
+          example: "live route selection differs from urltest manager selection"
+        interfaces:
+          type: array
+          description: Candidate interfaces or live interface paths for this outbound.
+          items:
+            $ref: "#/components/schemas/RuntimeInterfaceState"
+
+    RuntimeOutboundsResponse:
+      type: object
+      required: [outbounds]
+      properties:
+        outbounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeOutboundState"
+
+    # -------------------------------------------------------------------------
+    # /api/runtime/interfaces
+    # -------------------------------------------------------------------------
+
+    RuntimeInterfaceInventoryStatus:
+      type: string
+      enum: [up, down]
+      description: >
+        - up: interface is administratively up
+        - down: interface is not administratively up
+
+    RuntimeInterfaceInventoryEntry:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          description: System interface name.
+          example: "eth0"
+        status:
+          $ref: "#/components/schemas/RuntimeInterfaceInventoryStatus"
+        admin_up:
+          type: boolean
+          description: Whether the interface has the kernel IFF_UP flag set.
+          example: true
+        oper_state:
+          type: string
+          description: Best-effort kernel operstate label.
+          example: "up"
+        carrier:
+          type: boolean
+          description: Link carrier state when reported by the kernel.
+          example: true
+        ipv4_addresses:
+          type: array
+          items:
+            type: string
+          description: Best-effort IPv4 addresses in CIDR form.
+          example: ["192.168.1.1/24"]
+        ipv6_addresses:
+          type: array
+          items:
+            type: string
+          description: Best-effort IPv6 addresses in CIDR form.
+          example: ["fe80::1/64"]
+
+    RuntimeInterfaceInventoryResponse:
+      type: object
+      required: [interfaces]
+      properties:
+        interfaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeInterfaceInventoryEntry"
+
+    # -------------------------------------------------------------------------
+    # /api/service/*
+    # -------------------------------------------------------------------------
+
+    ReloadResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          example: "ok"
+        message:
+          type: string
+          example: "Routing runtime restarted"
+
+    ListRefreshRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: >
+            Optional list name. When omitted, all URL-backed lists from the
+            active config are refreshed.
+          example: "apple"
+
+    ListRefreshState:
+      type: object
+      properties:
+        last_updated:
+          type: string
+          description: >
+            ISO-8601 timestamp of the last successful download or conditional
+            refresh attempt for a URL-backed list.
+          example: "2026-04-05T12:34:56Z"
+
+    ListRefreshResponse:
+      type: object
+      required: [status, message, refreshed_lists, changed_lists, failed_lists, reloaded]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          example: "ok"
+        message:
+          type: string
+          example: "Lists refreshed"
+        refreshed_lists:
+          type: array
+          items:
+            type: string
+          description: URL-backed lists that were refreshed.
+          example: ["apple", "google"]
+        changed_lists:
+          type: array
+          items:
+            type: string
+          description: Refreshed lists whose cached contents changed.
+          example: ["apple"]
+        failed_lists:
+          type: array
+          items:
+            type: string
+          description: URL-backed lists that could not be refreshed.
+          example: ["google"]
+        reloaded:
+          type: boolean
+          description: >
+            Whether the running routing runtime was rebuilt because relevant
+            list contents changed while the runtime was active.
+          example: true
+
+    # -------------------------------------------------------------------------
+    # /api/config
+    # -------------------------------------------------------------------------
+
+    ConfigStateResponse:
+      type: object
+      required: [config, is_draft]
+      properties:
+        config:
+          $ref: "#/components/schemas/ConfigObject"
+        is_draft:
+          type: boolean
+          description: >
+            Whether the returned config is a staged in-memory draft rather than
+            the currently persisted config.
+          example: false
+        list_refresh_state:
+          type: object
+          description: >
+            URL list refresh metadata keyed by list name. Present only for
+            URL-backed lists visible in the returned config.
+          additionalProperties:
+            $ref: "#/components/schemas/ListRefreshState"
+
+    ConfigUpdateResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          example: "ok"
+        message:
+          type: string
+          example: "Config staged in memory"
+        apply_started_ts:
+          type: integer
+          format: int64
+          description: >
+            Present for `POST /api/config/save`: server-authoritative Unix
+            timestamp (seconds) when apply started.
+          example: 1712345680
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Error message.
+          example: "Cannot open config file"
+        validation_errors:
+          type: array
+          description: Optional list of validation failures returned by `POST /api/config`.
+          items:
+            $ref: "#/components/schemas/ValidationError"
+
+    ValidationError:
+      type: object
+      required: [message]
+      properties:
+        path:
+          type: string
+          description: Dot-style config path associated with the validation failure.
+          example: "fwmark.mask"
+        message:
+          type: string
+          description: Human-readable validation message.
+          example: "fwmark.mask must have one or more consecutive hex nibbles set to F (e.g. 0x000F0000, 0x00FF0000, 0x0FFF0000), got 0x0f0f0000"
+
+    # -------------------------------------------------------------------------
+    # /api/health/routing
+    # -------------------------------------------------------------------------
+
+    CheckStatus:
+      type: string
+      enum: [ok, missing, mismatch]
+      description: >
+        Result of an individual routing/firewall check.
+        - ok: check passed
+        - missing: expected element not found
+        - mismatch: element found but configuration differs
+
+    FirewallChain:
+      type: object
+      required: [chain_present, prerouting_hook_present]
+      properties:
+        chain_present:
+          type: boolean
+          description: Whether the keen-pbr firewall chain exists.
+          example: true
+        prerouting_hook_present:
+          type: boolean
+          description: Whether the chain is hooked into PREROUTING.
+          example: true
+        detail:
+          type: string
+          description: Human-readable detail. Omitted when empty.
+          example: "chain keen-pbr found in table mangle"
+
+    FirewallRuleCheck:
+      type: object
+      required: [set_name, action, status]
+      properties:
+        set_name:
+          type: string
+          description: IP set or nftables set name for this rule.
+          example: "keen-pbr-russia"
+        action:
+          type: string
+          description: Expected firewall action (e.g. "MARK", "DROP", "PASS").
+          example: "MARK"
+        expected_fwmark:
+          type: string
+          description: Expected fwmark value as hex string. Present when applicable.
+          example: "0x00010000"
+        actual_fwmark:
+          type: string
+          description: Actual fwmark found in the kernel rule. Present when rule exists.
+          example: "0x00010000"
+        status:
+          $ref: "#/components/schemas/CheckStatus"
+        detail:
+          type: string
+          description: Human-readable detail. Omitted when empty.
+
+    RouteTableCheck:
+      type: object
+      required: [table_id, outbound_tag, table_exists, default_route_present, interface_matches, gateway_matches, status]
+      properties:
+        table_id:
+          type: integer
+          description: Routing table ID.
+          example: 100
+        outbound_tag:
+          type: string
+          description: Outbound tag associated with this table.
+          example: "vpn0"
+        expected_destination:
+          type: string
+          description: Expected route destination. Present when known.
+          example: "default"
+        expected_interface:
+          type: string
+          description: Expected egress interface. Present when configured.
+          example: "tun0"
+        expected_gateway:
+          type: string
+          description: Expected gateway IP. Present when configured.
+          example: "10.8.0.1"
+        expected_metric:
+          type: integer
+          description: Expected route metric/priority. Present when non-zero.
+          example: 1000
+        expected_route_type:
+          type: string
+          description: Expected route type.
+          example: "unreachable"
+        table_exists:
+          type: boolean
+          description: Whether the routing table exists in the kernel.
+          example: true
+        default_route_present:
+          type: boolean
+          description: Whether a default route (0.0.0.0/0 or ::/0) is present in the table.
+          example: true
+        interface_matches:
+          type: boolean
+          description: Whether the actual egress interface matches the expected one.
+          example: true
+        gateway_matches:
+          type: boolean
+          description: Whether the actual gateway matches the expected one.
+          example: true
+        status:
+          $ref: "#/components/schemas/CheckStatus"
+        detail:
+          type: string
+          description: Human-readable detail. Omitted when empty.
+
+    PolicyRuleCheck:
+      type: object
+      required: [fwmark, fwmask, expected_table, priority, rule_present_v4, rule_present_v6, status]
+      properties:
+        fwmark:
+          type: string
+          description: Firewall mark as hex string.
+          example: "0x00010000"
+        fwmask:
+          type: string
+          description: Firewall mask as hex string.
+          example: "0x00ff0000"
+        expected_table:
+          type: integer
+          description: Expected routing table ID for this policy rule.
+          example: 100
+        priority:
+          type: integer
+          description: Policy rule priority.
+          example: 1000
+        rule_present_v4:
+          type: boolean
+          description: Whether the IPv4 policy rule is present.
+          example: true
+        rule_present_v6:
+          type: boolean
+          description: Whether the IPv6 policy rule is present.
+          example: true
+        status:
+          $ref: "#/components/schemas/CheckStatus"
+        detail:
+          type: string
+          description: Human-readable detail. Omitted when empty.
+
+    RoutingHealthResponse:
+      type: object
+      required: [overall, firewall_backend, firewall, firewall_rules, route_tables, policy_rules]
+      properties:
+        overall:
+          type: string
+          enum: [ok, degraded, error]
+          description: >
+            - ok: all checks passed
+            - degraded: one or more checks failed
+            - error: an exception prevented checks from completing
+          example: "ok"
+        firewall_backend:
+          type: string
+          enum: [iptables, nftables]
+          description: Active firewall backend.
+          example: "nftables"
+        firewall:
+          $ref: "#/components/schemas/FirewallChain"
+        firewall_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/FirewallRuleCheck"
+        route_tables:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteTableCheck"
+        policy_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRuleCheck"
+
+    RoutingHealthErrorResponse:
+      type: object
+      required: [overall, error]
+      properties:
+        overall:
+          type: string
+          enum: [error]
+          example: "error"
+        error:
+          type: string
+          description: Exception message.
+          example: "failed to connect to netlink socket"

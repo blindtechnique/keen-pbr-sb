@@ -1,0 +1,140 @@
+name: Build packages
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'dev'
+      - 'dev-*'
+    paths:
+      - 'build_scripts/**'
+      - 'cmake/**'
+      - 'docker/**'
+      - 'frontend/**'
+      - 'include/**'
+      - 'packages/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'third_party/**'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'version.mk'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  prepare-frontend:
+    runs-on: ubuntu-latest
+    outputs:
+      target_root: ${{ steps.context.outputs.target_root }}
+      use_signing_secrets: ${{ steps.context.outputs.use_signing_secrets }}
+      allow_publish: ${{ steps.context.outputs.allow_publish }}
+      source_ref_type: ${{ steps.context.outputs.source_ref_type }}
+      source_ref_name: ${{ steps.context.outputs.source_ref_name }}
+      source_pr_number: ${{ steps.context.outputs.source_pr_number }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Derive workflow context
+        id: context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          target_root="$REF_NAME"
+          use_signing_secrets=false
+          allow_publish=false
+          source_ref_type=branch
+          source_ref_name="$REF_NAME"
+          source_pr_number=
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            target_root="pr/$PR_NUMBER"
+            source_ref_name="$PR_HEAD_REF"
+            source_pr_number="$PR_NUMBER"
+            if [ "$PR_HEAD_REPO_FULL_NAME" = "$REPOSITORY" ]; then
+              target_root="$PR_HEAD_REF"
+              use_signing_secrets=true
+              allow_publish=true
+            fi
+          elif [[ "$REF" == refs/heads/* ]]; then
+            use_signing_secrets=true
+            allow_publish=true
+          fi
+
+          echo "target_root=$target_root" >> "$GITHUB_OUTPUT"
+          echo "use_signing_secrets=$use_signing_secrets" >> "$GITHUB_OUTPUT"
+          echo "allow_publish=$allow_publish" >> "$GITHUB_OUTPUT"
+          echo "source_ref_type=$source_ref_type" >> "$GITHUB_OUTPUT"
+          echo "source_ref_name=$source_ref_name" >> "$GITHUB_OUTPUT"
+          echo "source_pr_number=$source_pr_number" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+      - name: Build frontend
+        run: make frontend-build
+      - name: Prepare frontend artifact
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/frontend-artifact"
+          mkdir -p "$GITHUB_WORKSPACE/frontend-artifact"
+          cp -a "$GITHUB_WORKSPACE/frontend/dist"/. "$GITHUB_WORKSPACE/frontend-artifact"/
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: frontend-dist
+          path: frontend-artifact
+
+  openwrt:
+    needs: [prepare-frontend]
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - openwrt_version: "24.10.6"
+            architecture: "aarch64_cortex-a53"
+          - openwrt_version: "25.12.2"
+            architecture: "aarch64_cortex-a53"
+          - openwrt_version: "25.12.2"
+            architecture: "x86_64"
+    uses: ./.github/workflows/reusable-openwrt-packages.yml
+    with:
+      openwrt_version: ${{ matrix.build.openwrt_version }}
+      architecture: ${{ matrix.build.architecture }}
+      frontend_artifact_name: frontend-dist
+      use_signing_secrets: ${{ needs.prepare-frontend.outputs.use_signing_secrets == 'true' }}
+    secrets: inherit
+
+  keenetic:
+    needs: [prepare-frontend]
+    uses: ./.github/workflows/reusable-keenetic-packages.yml
+    with:
+      build_scope: default
+      keenetic_version: current
+      frontend_artifact_name: frontend-dist
+    secrets: inherit
+
+  debian:
+    needs: [prepare-frontend]
+    uses: ./.github/workflows/reusable-deb-packages.yml
+    with:
+      build_scope: default
+      frontend_artifact_name: frontend-dist
+      use_signing_secrets: ${{ needs.prepare-frontend.outputs.use_signing_secrets == 'true' }}
+    secrets: inherit
+
+  publish-repository:
+    needs: [prepare-frontend, openwrt, keenetic, debian]
+    if: ${{ needs.prepare-frontend.outputs.allow_publish == 'true' }}
+    uses: ./.github/workflows/reusable-publish-repository.yml
+    with:
+      target_root: ${{ needs.prepare-frontend.outputs.target_root }}
+      source_ref_type: ${{ needs.prepare-frontend.outputs.source_ref_type }}
+      source_ref_name: ${{ needs.prepare-frontend.outputs.source_ref_name }}
+      source_pr_number: ${{ needs.prepare-frontend.outputs.source_pr_number }}
+    secrets: inherit

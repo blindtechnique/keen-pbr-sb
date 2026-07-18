@@ -1,0 +1,115 @@
+name: Reusable Keenetic packages
+
+on:
+  workflow_call:
+    inputs:
+      build_scope:
+        required: true
+        type: string
+      keenetic_version:
+        required: true
+        type: string
+      configs:
+        required: false
+        type: string
+        default: ""
+      frontend_artifact_name:
+        required: false
+        type: string
+        default: "frontend-dist"
+
+jobs:
+  generate-config:
+    runs-on: ubuntu-latest
+    outputs:
+      job-config: ${{ steps.gen.outputs.job-config }}
+    steps:
+      - name: Generate config matrix
+        id: gen
+        env:
+          BUILD_SCOPE: ${{ inputs.build_scope }}
+          CONFIGS_INPUT: ${{ inputs.configs }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          all_configs = [
+              "aarch64-3.10.config",
+              "mips-3.4.config",
+              "mipsel-3.4.config",
+              "x64-3.2.config",
+              "armv7-3.2.config",
+          ]
+
+          build_scope = os.environ["BUILD_SCOPE"]
+          raw = os.environ.get("CONFIGS_INPUT", "")
+          if build_scope == "default":
+              builds = ["mipsel-3.4.config", "aarch64-3.10.config"]
+          else:
+              selected = [item.strip() for item in raw.split(",") if item.strip()]
+              builds = [cfg for cfg in all_configs if cfg in selected] if selected else all_configs
+
+          matrix = []
+          for config in builds:
+              matrix.append(
+                  {
+                      "config_file": config,
+                      "config_name": config.removesuffix(".config"),
+                  }
+              )
+
+          print(f"job-config={json.dumps(matrix)}")
+          PY
+
+  build:
+    name: "build: ${{ matrix.build_env.config_name }}"
+    runs-on: ubuntu-latest
+    needs: [generate-config]
+    strategy:
+      fail-fast: false
+      matrix:
+        build_env: ${{ fromJson(needs.generate-config.outputs.job-config) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Set up Go for transport manager
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: extensions/transport-manager/go.mod
+      - name: Download frontend bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.frontend_artifact_name }}
+          path: frontend-artifact
+      - name: Stage frontend dist
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/frontend/dist"
+          mkdir -p "$GITHUB_WORKSPACE/frontend/dist"
+          cp -a "$GITHUB_WORKSPACE/frontend-artifact"/. "$GITHUB_WORKSPACE/frontend/dist/"
+      - name: Build packages
+        run: |
+          make keenetic-packages KEENETIC_CONFIG="${{ matrix.build_env.config_name }}" KEENETIC_VERSION="${{ inputs.keenetic_version }}"
+      - name: Validate full package contents
+        shell: bash
+        run: |
+          arch="${{ matrix.build_env.config_name }}"
+          arch="${arch%%-*}"
+          mapfile -d '' packages < <(find build/packages/keenetic -type f -name 'keen-pbr_*.ipk' -print0)
+          test "${#packages[@]}" -gt 0
+          for package in "${packages[@]}"; do
+            python3 build_scripts/validate-keenetic-ipk.py --arch "$arch" "$package"
+          done
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: packages-keenetic-${{ matrix.build_env.config_name }}
+          path: build/packages/keenetic
+      - name: Upload debug symbol artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: debug-symbols-keenetic-${{ matrix.build_env.config_name }}
+          path: build/packages/keenetic-debug
+          if-no-files-found: error

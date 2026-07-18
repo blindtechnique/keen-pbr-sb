@@ -1,0 +1,192 @@
+#pragma once
+
+#ifdef WITH_API
+
+#include "generated/api_types.hpp"
+
+#include "../cmd/test_routing.hpp"
+#include "../config/config.hpp"
+#include "../health/routing_health.hpp"
+#include "sse_broadcaster.hpp"
+#include "server.hpp"
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace keen_pbr3 {
+
+enum class ConfigOperationState : uint8_t {
+    Idle = 0,
+    Saving,
+    Reloading,
+};
+
+struct ConfigApplyResult {
+    bool applied{false};
+    bool rolled_back{false};
+    std::optional<std::int64_t> apply_started_ts;
+    std::string error;
+};
+
+struct ServiceHealthState {
+    api::HealthResponseStatus status{api::HealthResponseStatus::STOPPED};
+    std::string os_type{"unknown"};
+    std::string os_version{"unknown"};
+    std::string build_variant{"unknown"};
+    std::string resolver_config_hash;
+    std::string resolver_config_hash_actual;
+    std::optional<std::int64_t> resolver_config_hash_actual_ts;
+    api::ResolverLiveStatus resolver_live_status{api::ResolverLiveStatus::UNKNOWN};
+    api::ResolverConfigProbeStatus resolver_config_probe_status{api::ResolverConfigProbeStatus::UNKNOWN};
+    std::optional<std::int64_t> resolver_last_probe_ts;
+    std::optional<std::int64_t> apply_started_ts;
+    std::optional<api::ResolverConfigSyncState> resolver_config_sync_state;
+    bool config_is_draft{false};
+};
+
+struct ListRefreshOperationResult {
+    std::vector<std::string> refreshed_lists;
+    std::vector<std::string> changed_lists;
+    std::vector<std::string> failed_lists;
+    bool reloaded{false};
+    std::string message;
+};
+
+// Context struct holding thread-safe accessors to daemon runtime state.
+struct ApiContext {
+    const std::string& config_path;
+    SseBroadcaster& dns_test_broadcaster;
+
+    std::function<Config()> get_visible_config_fn;
+    std::function<bool()> config_is_draft_fn;
+    std::function<void(Config, std::string)> stage_config_fn;
+    std::function<std::optional<std::pair<Config, std::string>>()> get_staged_config_snapshot_fn;
+    std::function<void()> clear_staged_config_fn;
+    std::function<void(const Config&)> validate_candidate_config_fn;
+    std::function<ServiceHealthState()> get_service_health_fn;
+    std::function<RoutingHealthReport()> get_routing_health_fn;
+    std::function<api::RuntimeOutboundsResponse()> get_runtime_outbounds_fn;
+    std::function<api::RuntimeInterfaceInventoryResponse()> get_runtime_interfaces_fn;
+    std::function<std::map<std::string, api::ListRefreshStateValue>(const Config&)>
+        get_list_refresh_state_map_fn;
+    std::function<TestRoutingResult(const std::string&)> compute_test_routing_fn;
+
+    std::function<void()> begin_save_operation_fn;
+    std::function<void()> finish_config_operation_fn;
+
+    // Callbacks that mutate daemon runtime state from event loop.
+    std::function<ConfigApplyResult(Config, std::string)> enqueue_apply_validated_config_fn;
+    std::function<void()> start_runtime_fn;
+    std::function<void()> stop_runtime_fn;
+    std::function<void()> restart_runtime_fn;
+    std::function<ListRefreshOperationResult(std::optional<std::string>)> refresh_lists_fn;
+
+    Config get_visible_config() const {
+        return get_visible_config_fn();
+    }
+
+    bool config_is_draft() const {
+        return config_is_draft_fn();
+    }
+
+    std::optional<std::pair<Config, std::string>> get_staged_config_snapshot() const {
+        return get_staged_config_snapshot_fn();
+    }
+
+    void clear_staged_config() const {
+        clear_staged_config_fn();
+    }
+
+    void stage_config(Config config, std::string staged_config_json) const {
+        stage_config_fn(std::move(config), std::move(staged_config_json));
+    }
+
+    void validate_candidate_config(const Config& config) const {
+        validate_candidate_config_fn(config);
+    }
+
+    ServiceHealthState get_service_health() const {
+        return get_service_health_fn();
+    }
+
+    RoutingHealthReport get_routing_health() const {
+        return get_routing_health_fn();
+    }
+
+    api::RuntimeOutboundsResponse get_runtime_outbounds() const {
+        return get_runtime_outbounds_fn();
+    }
+
+    api::RuntimeInterfaceInventoryResponse get_runtime_interfaces() const {
+        return get_runtime_interfaces_fn();
+    }
+
+    std::map<std::string, api::ListRefreshStateValue> get_list_refresh_state_map(
+        const Config& config) const {
+        return get_list_refresh_state_map_fn(config);
+    }
+
+    TestRoutingResult compute_test_routing(const std::string& target) const {
+        return compute_test_routing_fn(target);
+    }
+
+    void begin_save_operation() const {
+        begin_save_operation_fn();
+    }
+
+    void finish_config_operation() const {
+        finish_config_operation_fn();
+    }
+
+    ConfigApplyResult enqueue_apply_validated_config(
+        Config config,
+        std::string saved_config_json) const {
+        return enqueue_apply_validated_config_fn(
+            std::move(config),
+            std::move(saved_config_json));
+    }
+
+    void start_runtime() const {
+        start_runtime_fn();
+    }
+
+    void stop_runtime() const {
+        stop_runtime_fn();
+    }
+
+    void restart_runtime() const {
+        restart_runtime_fn();
+    }
+
+    ListRefreshOperationResult refresh_lists(
+        const std::optional<std::string>& requested_name) const {
+        return refresh_lists_fn(requested_name);
+    }
+};
+
+// Register all API endpoint handlers on the given ApiServer.
+//   GET  /api/health/service  - daemon version/status + resolver/config summary
+//   POST /api/service/start   - start routing runtime and activate dnsmasq hook
+//   POST /api/service/stop    - stop routing runtime and deactivate dnsmasq hook
+//   POST /api/service/restart - restart routing runtime and activate dnsmasq hook
+//   POST /api/lists/refresh   - refresh one or all URL-backed lists
+//   GET  /api/config          - return current config and draft status
+//   POST /api/config          - validate + stage config in memory
+//   POST /api/config/save     - persist staged config and apply it
+//   GET  /api/health/routing  - routing and firewall health verification
+//   GET  /api/runtime/outbounds - live outbound/interface runtime state
+//   GET  /api/runtime/interfaces - live system interface inventory
+//   GET  /api/transports       - transport manager runtime state
+//   POST /api/transports       - start or stop a managed transport
+//   GET  /api/transports/config - editable transport definitions
+//   POST /api/transports/config - create, update, or delete a transport
+//   POST /api/routing/test    - test expected/actual routing for an IP or domain
+void register_api_handlers(ApiServer& server, ApiContext& ctx);
+
+} // namespace keen_pbr3
+
+#endif // WITH_API
