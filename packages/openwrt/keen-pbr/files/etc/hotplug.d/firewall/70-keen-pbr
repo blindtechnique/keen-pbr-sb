@@ -1,3 +1,0 @@
-#!/bin/sh
-
-exec /usr/lib/keen-pbr/firewall.sh
