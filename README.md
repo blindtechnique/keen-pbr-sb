@@ -80,14 +80,7 @@ https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-categor
 
 keen-pbr скачивает набор и вызывает `sing-box rule-set decompile`. Поддерживаются точные домены, суффиксы доменов и IP CIDR. Regex, keyword, source CIDR и инвертированные правила нельзя без потерь представить в dnsmasq/ipset, поэтому они пропускаются; для SRS требуется sing-box 1.10 или новее.
 
-## Сборка и публикация
 
-Инструкции по первой публикации находятся в [docs/PUBLISH_GITHUB.ru.md](docs/PUBLISH_GITHUB.ru.md), по синхронизации с оригинальным проектом — в [docs/FORK_MAINTENANCE.ru.md](docs/FORK_MAINTENANCE.ru.md).
-
-```sh
-make test
-make package-keenetic-all
-```
 
 Не добавляйте в Git `.cache`, `build`, `frontend/node_modules` и готовые архивы. Пакеты `.ipk` публикуются как assets отдельного GitHub Release.
 
