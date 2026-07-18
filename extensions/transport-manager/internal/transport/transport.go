@@ -22,6 +22,7 @@ type Status struct {
 	Tag         string     `json:"tag"`
 	Type        string     `json:"type"`
 	Interface   string     `json:"interface"`
+	Server      string     `json:"server,omitempty"`
 	State       State      `json:"state"`
 	PID         int        `json:"pid,omitempty"`
 	Error       string     `json:"error,omitempty"`

@@ -29,6 +29,9 @@ esac
 sh "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" "$WORKSPACE" "$FRONTEND_DIST"
 
 cd "$ENTWARE_DIR"
+# Reusable builder images may already contain our local feed from a previous
+# build. Keep a single entry so feeds update does not abort on duplicates.
+sed -i '/^src-link keenPbr /d' feeds.conf
 printf '\nsrc-link keenPbr %s/packages/keenetic\n' "$WORKSPACE" >> feeds.conf
 ./scripts/feeds update keenPbr
 ./scripts/feeds install -p keenPbr keen-pbr

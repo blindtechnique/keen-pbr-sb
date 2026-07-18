@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,6 +33,7 @@ type TransportSpec struct {
 	OutboundJSON string     `json:"outbound_json,omitempty"`
 	MTU          uint32     `json:"mtu,omitempty"`
 	BootstrapDNS []string   `json:"bootstrap_dns,omitempty"`
+	TunAddress   string     `json:"tun_address,omitempty"`
 	VLESS        *VLESSSpec `json:"vless,omitempty"` // Legacy configuration compatibility.
 }
 
@@ -53,19 +59,38 @@ type SingBox struct {
 	state              State
 	lastErr            string
 	updated            time.Time
+	healthEndpoint     RoutingHealthEndpoint
+	healthFailures     int
+	server             string
 }
 
-func NewSingBox(spec TransportSpec, binary, runtimeDir string) (*SingBox, error) {
+type RoutingHealthEndpoint struct {
+	URL    string
+	APIKey string
+}
+
+func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...RoutingHealthEndpoint) (*SingBox, error) {
 	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
 		return nil, fmt.Errorf("tag and interface are required")
 	}
-	if _, err := outboundFromSpec(spec); err != nil {
+	outbound, err := outboundFromSpec(spec)
+	if err != nil {
 		return nil, err
 	}
-	return &SingBox{spec: spec, binary: binary, runtimeDir: runtimeDir, state: StateDown, updated: time.Now().UTC()}, nil
+	if _, err := tunAddressForSpec(spec); err != nil {
+		return nil, err
+	}
+	result := &SingBox{spec: spec, binary: binary, runtimeDir: runtimeDir, state: StateDown, updated: time.Now().UTC()}
+	if server, ok := outbound["server"].(string); ok {
+		result.server = server
+	}
+	if len(health) > 0 {
+		result.healthEndpoint = health[0]
+	}
+	return result, nil
 }
 
-func NewFromSpec(spec TransportSpec, binary, runtimeDir string) (Transport, error) {
+func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...RoutingHealthEndpoint) (Transport, error) {
 	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
 		return nil, fmt.Errorf("invalid tag or interface")
 	}
@@ -73,7 +98,7 @@ func NewFromSpec(spec TransportSpec, binary, runtimeDir string) (Transport, erro
 	case "native":
 		return NewNative(spec.Tag, spec.Interface), nil
 	case "sing-box", "sing-box-vless-reality":
-		return NewSingBox(spec, binary, runtimeDir)
+		return NewSingBox(spec, binary, runtimeDir, health...)
 	default:
 		return nil, fmt.Errorf("unsupported type %q", spec.Type)
 	}
@@ -211,29 +236,120 @@ func (s *SingBox) ensureForwardingRules() error {
 			}
 			continue
 		}
-		args := []string{"FORWARD", "-o", s.spec.Interface, "-j", "ACCEPT"}
+		args := forwardingRuleArgs(s.spec.Interface)
 		if exec.Command(binary, append([]string{"-C"}, args...)...).Run() == nil {
 			continue
 		}
-		if output, err := exec.Command(binary, append([]string{"-I"}, args...)...).CombinedOutput(); err != nil {
-			return fmt.Errorf("allow forwarding into %s with %s: %w: %s", s.spec.Interface, binary, err, string(output))
+		output, err := exec.Command(binary, append([]string{"-A"}, args...)...).CombinedOutput()
+		if err == nil {
+			continue
+		}
+		// Some older Keenetic kernels do not expose xt_comment. Keep the
+		// compatibility rule append-only and reconcile it on every start.
+		legacy := []string{"FORWARD", "-o", s.spec.Interface, "-j", "ACCEPT"}
+		if exec.Command(binary, append([]string{"-C"}, legacy...)...).Run() == nil {
+			continue
+		}
+		if legacyOutput, legacyErr := exec.Command(binary, append([]string{"-A"}, legacy...)...).CombinedOutput(); legacyErr != nil {
+			return fmt.Errorf("allow forwarding into %s with %s: marked rule: %w: %s; compatibility rule: %v: %s", s.spec.Interface, binary, err, string(output), legacyErr, string(legacyOutput))
 		}
 	}
 	return nil
 }
 
 func (s *SingBox) removeForwardingRules() {
+	removeForwardingRules(s.spec.Interface, true)
+}
+
+func forwardingRuleArgs(interfaceName string) []string {
+	return []string{"FORWARD", "-o", interfaceName, "-m", "comment", "--comment", "keen-pbr-sb:" + interfaceName, "-j", "ACCEPT"}
+}
+
+func removeForwardingRules(interfaceName string, includeLegacy bool) {
 	for _, binary := range []string{"iptables", "ip6tables"} {
 		if _, err := exec.LookPath(binary); err != nil {
 			continue
 		}
-		args := []string{"FORWARD", "-o", s.spec.Interface, "-j", "ACCEPT"}
-		for exec.Command(binary, append([]string{"-C"}, args...)...).Run() == nil {
-			if exec.Command(binary, append([]string{"-D"}, args...)...).Run() != nil {
-				break
+		rules := [][]string{forwardingRuleArgs(interfaceName)}
+		if includeLegacy {
+			rules = append(rules, []string{"FORWARD", "-o", interfaceName, "-j", "ACCEPT"})
+		}
+		for _, args := range rules {
+			for exec.Command(binary, append([]string{"-C"}, args...)...).Run() == nil {
+				if exec.Command(binary, append([]string{"-D"}, args...)...).Run() != nil {
+					break
+				}
 			}
 		}
 	}
+}
+
+// CleanupForwardingRules removes rules left behind by an unclean manager exit.
+// Only interfaces belonging to configured sing-box transports are touched.
+func CleanupForwardingRules(specs []TransportSpec) {
+	for _, spec := range specs {
+		if spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality" {
+			removeForwardingRules(spec.Interface, true)
+		}
+	}
+}
+
+// CleanupOrphanProcesses terminates sing-box children that survived an
+// unclean transport-manager exit. Matching is restricted to the exact config
+// paths owned by configured transports in our runtime directory.
+func CleanupOrphanProcesses(specs []TransportSpec, runtimeDir string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	ownedConfigs := make(map[string]bool)
+	for _, spec := range specs {
+		if spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality" {
+			ownedConfigs[filepath.Join(runtimeDir, spec.Tag+".json")] = true
+		}
+	}
+	if len(ownedConfigs) == 0 {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return fmt.Errorf("inspect /proc for orphan sing-box processes: %w", err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil || !matchesOwnedSingBoxCommand(cmdline, ownedConfigs) {
+			continue
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("find orphan sing-box pid %d: %w", pid, err))
+			continue
+		}
+		if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			errs = append(errs, fmt.Errorf("kill orphan sing-box pid %d: %w", pid, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func matchesOwnedSingBoxCommand(cmdline []byte, ownedConfigs map[string]bool) bool {
+	parts := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+	for executable := 0; executable+1 < len(parts); executable++ {
+		base := filepath.Base(parts[executable])
+		if (base != "sing-box" && base != "sing-box.real") || parts[executable+1] != "run" {
+			continue
+		}
+		for index := executable + 2; index+1 < len(parts); index++ {
+			if (parts[index] == "-c" || parts[index] == "--config") && ownedConfigs[parts[index+1]] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *SingBox) Down(ctx context.Context) error {
@@ -266,9 +382,8 @@ func (s *SingBox) Down(ctx context.Context) error {
 	return nil
 }
 
-func (s *SingBox) Status(context.Context) Status {
+func (s *SingBox) Status(ctx context.Context) Status {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	pid := 0
 	if s.cmd != nil && s.cmd.Process != nil {
 		pid = s.cmd.Process.Pid
@@ -279,7 +394,82 @@ func (s *SingBox) Status(context.Context) Status {
 			state = StateDegraded
 		}
 	}
-	return Status{Tag: s.spec.Tag, Type: s.spec.Type, Interface: s.spec.Interface, State: state, PID: pid, Error: s.lastErr, UpdatedAt: s.updated}
+	status := Status{Tag: s.spec.Tag, Type: s.spec.Type, Interface: s.spec.Interface, Server: s.server, State: state, PID: pid, Error: s.lastErr, UpdatedAt: s.updated}
+	s.mu.Unlock()
+	if state == StateUp {
+		s.applyRoutingHealth(ctx, &status)
+	}
+	return status
+}
+
+func (s *SingBox) applyRoutingHealth(ctx context.Context, status *Status) {
+	verdict, detail, known := s.routingHealth(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !known || verdict == "healthy" || verdict == "active" || verdict == "backup" {
+		s.healthFailures = 0
+		return
+	}
+	s.healthFailures++
+	if s.healthFailures < 3 {
+		return
+	}
+	status.State = StateDegraded
+	status.Error = "keen-pbr routing health: " + verdict
+	if detail != "" {
+		status.Error += ": " + detail
+	}
+}
+
+func (s *SingBox) routingHealth(ctx context.Context) (string, string, bool) {
+	if s.healthEndpoint.URL == "" {
+		return "", "", false
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.healthEndpoint.URL, nil)
+	if err != nil {
+		return "", "", false
+	}
+	if s.healthEndpoint.APIKey != "" {
+		request.Header.Set("Authorization", "Bearer "+s.healthEndpoint.APIKey)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", "", false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", "", false
+	}
+	var body struct {
+		Outbounds []struct {
+			Interfaces []struct {
+				InterfaceName string `json:"interface_name"`
+				Status        string `json:"status"`
+				Detail        string `json:"detail"`
+			} `json:"interfaces"`
+		} `json:"outbounds"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return "", "", false
+	}
+	bestVerdict := ""
+	bestDetail := ""
+	for _, outbound := range body.Outbounds {
+		for _, candidate := range outbound.Interfaces {
+			if candidate.InterfaceName != s.spec.Interface {
+				continue
+			}
+			if candidate.Status == "active" || candidate.Status == "backup" {
+				return candidate.Status, candidate.Detail, true
+			}
+			bestVerdict, bestDetail = candidate.Status, candidate.Detail
+		}
+	}
+	if bestVerdict == "" || bestVerdict == "unknown" {
+		return bestVerdict, bestDetail, false
+	}
+	return bestVerdict, bestDetail, true
 }
 
 func (s *SingBox) buildConfig() (map[string]any, error) {
@@ -295,9 +485,13 @@ func (s *SingBox) buildConfig() (map[string]any, error) {
 		return nil, err
 	}
 	outbound["tag"] = "proxy-out"
+	tunAddress, err := tunAddressForSpec(s.spec)
+	if err != nil {
+		return nil, err
+	}
 	config := map[string]any{
 		"log":       map[string]any{"level": "info", "timestamp": true},
-		"inbounds":  []any{map[string]any{"type": "tun", "tag": "tun-in", "interface_name": s.spec.Interface, "address": []string{"172.19.0.1/30"}, "mtu": mtu, "stack": "gvisor", "dns_mode": "disabled", "auto_route": false, "strict_route": false}},
+		"inbounds":  []any{map[string]any{"type": "tun", "tag": "tun-in", "interface_name": s.spec.Interface, "address": []string{tunAddress}, "mtu": mtu, "stack": "gvisor", "auto_route": false, "strict_route": false}},
 		"outbounds": []any{outbound},
 		"route":     map[string]any{"auto_detect_interface": true, "final": "proxy-out"},
 	}
@@ -319,6 +513,50 @@ func (s *SingBox) buildConfig() (map[string]any, error) {
 		}
 	}
 	return config, nil
+}
+
+func tunAddressForSpec(spec TransportSpec) (string, error) {
+	if spec.TunAddress == "" {
+		hash := fnv.New32a()
+		_, _ = hash.Write([]byte(spec.Tag))
+		slot := hash.Sum32() % (1 << 14) // 16,384 non-overlapping /30s in 172.19.0.0/16.
+		third := slot >> 6
+		fourth := (slot & 63) * 4
+		return fmt.Sprintf("172.19.%d.%d/30", third, fourth+1), nil
+	}
+	ip, network, err := net.ParseCIDR(spec.TunAddress)
+	if err != nil || ip.To4() == nil {
+		return "", fmt.Errorf("tun_address must be an IPv4 /30 host address, got %q", spec.TunAddress)
+	}
+	ones, bits := network.Mask.Size()
+	if bits != 32 || ones != 30 {
+		return "", fmt.Errorf("tun_address must use an IPv4 /30 prefix, got %q", spec.TunAddress)
+	}
+	host := ip.To4()[3] & 3
+	if host == 0 || host == 3 {
+		return "", fmt.Errorf("tun_address must be a usable /30 host address, got %q", spec.TunAddress)
+	}
+	return spec.TunAddress, nil
+}
+
+func ValidateUniqueTunAddresses(specs []TransportSpec) error {
+	used := make(map[string]string)
+	for _, spec := range specs {
+		if spec.Type != "sing-box" && spec.Type != "sing-box-vless-reality" {
+			continue
+		}
+		address, err := tunAddressForSpec(spec)
+		if err != nil {
+			return fmt.Errorf("transport %q: %w", spec.Tag, err)
+		}
+		_, network, _ := net.ParseCIDR(address)
+		subnet := network.String()
+		if previous, exists := used[subnet]; exists {
+			return fmt.Errorf("transports %q and %q use the same TUN subnet %s; set tun_address manually", previous, spec.Tag, subnet)
+		}
+		used[subnet] = spec.Tag
+	}
+	return nil
 }
 
 func parseBootstrapDNS(address string) (string, uint16, error) {

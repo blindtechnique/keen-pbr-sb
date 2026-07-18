@@ -361,6 +361,38 @@ std::string cookie_value(const httplib::Request& request, const std::string& nam
     return {};
 }
 
+bool is_loopback_address(const std::string& address) {
+    return address == "127.0.0.1" || address == "::1" || address == "::ffff:127.0.0.1";
+}
+
+bool valid_local_transport_manager_request(const httplib::Request& request) {
+    if (request.path != "/api/runtime/outbounds" || !is_loopback_address(request.remote_addr)) {
+        return false;
+    }
+
+    const auto authorization = request.get_header_value("Authorization");
+    constexpr const char* prefix = "Bearer ";
+    if (authorization.rfind(prefix, 0) != 0) {
+        return false;
+    }
+
+    const char* configured = std::getenv("KEEN_PBR_TRANSPORT_CONFIG");
+    const std::filesystem::path path = configured && *configured
+        ? configured : "/opt/etc/keen-pbr/transports.json";
+    std::ifstream input(path);
+    if (!input) {
+        return false;
+    }
+    try {
+        const auto document = nlohmann::json::parse(input);
+        const auto expected = document.value("api_key", std::string{});
+        const auto provided = authorization.substr(std::char_traits<char>::length(prefix));
+        return !expected.empty() && constant_time_equal(provided, expected);
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 } // namespace
 
 struct ApiServer::Impl {
@@ -458,6 +490,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     });
     impl_->server.set_pre_routing_handler([state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
+        if (valid_local_transport_manager_request(req)) {
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
         if (!state->auth.enabled || req.path.rfind("/api/", 0) != 0 ||
             req.path == "/api/auth/status" || req.path == "/api/auth/login" ||
             req.path == "/api/auth/logout") {

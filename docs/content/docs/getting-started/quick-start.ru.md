@@ -22,7 +22,7 @@ weight: 2
         preload="metadata"
         style="width: 100%; border-radius: 12px;"
         >
-        <source src="/docs/getting-started/quick-start-video.mp4" type="video/mp4">
+        <source src="https://raw.githubusercontent.com/maksimkurb/keen-pbr/main/docs/content/docs/getting-started/quick-start-video.mp4" type="video/mp4">
         Your browser does not support the video tag.
         </video>
     </figure>

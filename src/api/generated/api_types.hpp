@@ -486,11 +486,13 @@ namespace api {
 
     struct Transport {
         std::optional<bool> auto_start;
+        std::optional<std::vector<std::string>> bootstrap_dns;
         std::string interface;
         std::optional<std::string> link;
         std::optional<int64_t> mtu;
         std::optional<std::string> outbound_json;
         std::string tag;
+        std::optional<std::string> tun_address;
         TransportSpecType type;
         std::optional<Vless> vless;
     };
@@ -517,6 +519,7 @@ namespace api {
         std::optional<std::string> next_retry_at;
         std::optional<int64_t> pid;
         std::optional<int64_t> retry_count;
+        std::optional<std::string> server;
         State state;
         std::string tag;
         std::string type;
@@ -1574,11 +1577,13 @@ namespace api {
 
     inline void from_json(const json & j, Transport& x) {
         x.auto_start = get_stack_optional<bool>(j, "auto_start");
+        x.bootstrap_dns = get_stack_optional<std::vector<std::string>>(j, "bootstrap_dns");
         x.interface = j.at("interface").get<std::string>();
         x.link = get_stack_optional<std::string>(j, "link");
         x.mtu = get_stack_optional<int64_t>(j, "mtu");
         x.outbound_json = get_stack_optional<std::string>(j, "outbound_json");
         x.tag = j.at("tag").get<std::string>();
+        x.tun_address = get_stack_optional<std::string>(j, "tun_address");
         x.type = j.at("type").get<TransportSpecType>();
         x.vless = get_stack_optional<Vless>(j, "vless");
     }
@@ -1586,11 +1591,13 @@ namespace api {
     inline void to_json(json & j, const Transport & x) {
         j = json::object();
         j["auto_start"] = x.auto_start;
+        j["bootstrap_dns"] = x.bootstrap_dns;
         j["interface"] = x.interface;
         j["link"] = x.link;
         j["mtu"] = x.mtu;
         j["outbound_json"] = x.outbound_json;
         j["tag"] = x.tag;
+        j["tun_address"] = x.tun_address;
         j["type"] = x.type;
         j["vless"] = x.vless;
     }
@@ -1626,6 +1633,7 @@ namespace api {
         x.next_retry_at = get_stack_optional<std::string>(j, "next_retry_at");
         x.pid = get_stack_optional<int64_t>(j, "pid");
         x.retry_count = get_stack_optional<int64_t>(j, "retry_count");
+        x.server = get_stack_optional<std::string>(j, "server");
         x.state = j.at("state").get<State>();
         x.tag = j.at("tag").get<std::string>();
         x.type = j.at("type").get<std::string>();
@@ -1640,6 +1648,7 @@ namespace api {
         j["next_retry_at"] = x.next_retry_at;
         j["pid"] = x.pid;
         j["retry_count"] = x.retry_count;
+        j["server"] = x.server;
         j["state"] = x.state;
         j["tag"] = x.tag;
         j["type"] = x.type;

@@ -1,4 +1,6 @@
 import { useTranslation } from "react-i18next"
+import { DownloadIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
 
 import { useForm } from "@tanstack/react-form"
 import { useQueryClient } from "@tanstack/react-query"
@@ -340,6 +342,8 @@ function LoadedGeneralConfigPage({
         </CardContent>
       </Card>
 
+      <SoftwareUpdateCard />
+
       <Card>
         <CardHeader>
           <CardTitle>{t("pages.settings.autoupdate.title")}</CardTitle>
@@ -583,6 +587,205 @@ function LoadedGeneralConfigPage({
         </form.Subscribe>
       </div>
     </>
+  )
+}
+
+type SoftwareUpdateStatus = {
+  current: string
+  latest: string
+  available: boolean
+  current_ahead: boolean
+  release_name: string
+  release_notes: string
+  release_url: string
+  changelog_url: string
+  running: boolean
+  log: string
+}
+
+function SoftwareUpdateCard() {
+  const { t } = useTranslation()
+  const [status, setStatus] = useState<SoftwareUpdateStatus | null>(null)
+  const [error, setError] = useState("")
+  const [showResult, setShowResult] = useState(false)
+  const refresh = useCallback(async () => {
+    try {
+      const response = await fetch("/api/system/update")
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok)
+        throw new Error(body.error ?? `HTTP ${response.status}`)
+      setStatus(body as SoftwareUpdateStatus)
+      setError("")
+    } catch (refreshError) {
+      setError(
+        refreshError instanceof Error
+          ? refreshError.message
+          : t("pages.settings.softwareUpdate.checkFailed")
+      )
+    }
+  }, [t])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  useEffect(() => {
+    if (!status?.running) return
+    const timer = window.setInterval(() => void refresh(), 3000)
+    return () => window.clearInterval(timer)
+  }, [refresh, status?.running])
+
+  const startUpdate = async () => {
+    if (
+      !window.confirm(
+        t("pages.settings.softwareUpdate.confirm", {
+          version: status?.latest ?? "",
+        })
+      )
+    )
+      return
+    try {
+      const response = await fetch("/api/system/update", { method: "POST" })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok)
+        throw new Error(body.error ?? `HTTP ${response.status}`)
+      setStatus((previous) =>
+        previous ? { ...previous, running: true } : previous
+      )
+      setShowResult(true)
+      setError("")
+      window.setTimeout(() => void refresh(), 1200)
+    } catch (updateError) {
+      setError(
+        updateError instanceof Error
+          ? updateError.message
+          : t("pages.settings.softwareUpdate.startFailed")
+      )
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("pages.settings.softwareUpdate.title")}</CardTitle>
+        <CardDescription>
+          {t("pages.settings.softwareUpdate.description")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-2 text-sm sm:grid-cols-2">
+          <div>
+            <span className="text-muted-foreground">
+              {t("pages.settings.softwareUpdate.current")}: {" "}
+            </span>
+            <code>{status?.current ?? "—"}</code>
+          </div>
+          <div>
+            <span className="text-muted-foreground">
+              {t("pages.settings.softwareUpdate.latest")}: {" "}
+            </span>
+            <code>{status?.latest ?? "—"}</code>
+          </div>
+        </div>
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        {status?.running ? (
+          <p className="text-sm font-medium">
+            {t("pages.settings.softwareUpdate.running")}
+          </p>
+        ) : status?.current_ahead ? (
+          <p className="text-sm text-muted-foreground">
+            {t("pages.settings.softwareUpdate.newerThanPublished")}
+          </p>
+        ) : status && !status.available ? (
+          <p className="text-sm text-muted-foreground">
+            {t("pages.settings.softwareUpdate.upToDate")}
+          </p>
+        ) : null}
+        {status?.available ? (
+          <div className="space-y-3 rounded-md border p-4">
+            <div>
+              <p className="font-medium">
+                {t("pages.settings.softwareUpdate.changesTitle", {
+                  version: status.latest,
+                })}
+              </p>
+              {status.release_name ? (
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {status.release_name}
+                </p>
+              ) : null}
+            </div>
+            {status.release_notes ? (
+              <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-muted p-3 text-sm">
+                {status.release_notes}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {t("pages.settings.softwareUpdate.releaseNotesMissing")}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+              {status.release_url ? (
+                <a
+                  className="inline-flex items-center gap-1 text-primary underline underline-offset-4"
+                  href={status.release_url}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  {t("pages.settings.softwareUpdate.releasePage")}
+                  <ExternalLinkIcon className="size-3.5" />
+                </a>
+              ) : null}
+              {status.changelog_url ? (
+                <a
+                  className="inline-flex items-center gap-1 text-primary underline underline-offset-4"
+                  href={status.changelog_url}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  {t("pages.settings.softwareUpdate.fullChangelog")}
+                  <ExternalLinkIcon className="size-3.5" />
+                </a>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            disabled={!status?.available || status.running}
+            onClick={() => void startUpdate()}
+          >
+            <DownloadIcon />
+            {t("pages.settings.softwareUpdate.install")}
+          </Button>
+          <Button
+            disabled={status?.running}
+            onClick={() => void refresh()}
+            variant="outline"
+          >
+            <RefreshCwIcon className={status?.running ? "animate-spin" : ""} />
+            {t("pages.settings.softwareUpdate.check")}
+          </Button>
+        </div>
+        {showResult ? (
+          <div className="space-y-3 rounded-md border p-3">
+            <p className="font-medium">
+              {t("pages.settings.softwareUpdate.result")}
+            </p>
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-muted p-3 text-xs">
+              {status?.log || t("pages.settings.softwareUpdate.waitingForLog")}
+            </pre>
+            <Button
+              onClick={() => setShowResult(false)}
+              size="sm"
+              variant="outline"
+            >
+              {t("common.close")}
+            </Button>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   )
 }
 

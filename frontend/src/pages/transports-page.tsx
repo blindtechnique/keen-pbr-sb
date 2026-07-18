@@ -3,6 +3,7 @@ import {
   PlayIcon,
   PlusIcon,
   RefreshCwIcon,
+  ShieldCheckIcon,
   SquareIcon,
   TrashIcon,
   WorkflowIcon,
@@ -23,8 +24,10 @@ import {
 import {
   usePostTransportActionMutation,
   usePostTransportConfigMutation,
+  usePostConfigMutation,
 } from "@/api/mutations"
-import { useGetTransportConfig, useGetTransports } from "@/api/queries"
+import { useGetConfig, useGetTransportConfig, useGetTransports } from "@/api/queries"
+import { selectConfig } from "@/api/selectors"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { PageHeader } from "@/components/shared/page-header"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
@@ -50,6 +53,8 @@ export function TransportsPage() {
     query.data?.status === 200 ? query.data.data : []
   const error = getApiErrorMessage(query.error as ApiError | null)
   const configQuery = useGetTransportConfig()
+  const keenConfigQuery = useGetConfig()
+  const keenConfig = selectConfig(keenConfigQuery.data)
   const environmentQuery = useQuery({
     queryKey: ["transport-environment"],
     queryFn: async () => {
@@ -97,6 +102,63 @@ export function TransportsPage() {
       },
     },
   })
+  const bypassMutation = usePostConfigMutation({
+    mutation: {
+      onSuccess: () => toast.success(t("transports.loopProtection.saved")),
+      onError: (mutationError) =>
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        }),
+    },
+  })
+
+  const addLoopProtection = (server: string) => {
+    if (!keenConfig) return
+    const bypassTag = "transport_bypass"
+    const listName = "transport_servers"
+    const existingBypass = (keenConfig.outbounds ?? []).find(
+      (outbound) => outbound.tag === bypassTag
+    )
+    if (existingBypass && existingBypass.type !== "ignore") {
+      toast.error(t("transports.loopProtection.tagConflict", { tag: bypassTag }))
+      return
+    }
+    if (!window.confirm(t("transports.loopProtection.confirm", { server }))) {
+      return
+    }
+    const existingList = keenConfig.lists?.[listName] ?? {}
+    const isIp = server.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(server)
+    const domains = new Set(existingList.domains ?? [])
+    const ipCidrs = new Set(existingList.ip_cidrs ?? [])
+    if (isIp) ipCidrs.add(server)
+    else domains.add(server)
+    const rules = keenConfig.route?.rules ?? []
+    const hasRule = rules.some(
+      (rule) => rule.outbound === bypassTag && rule.list?.includes(listName)
+    )
+    bypassMutation.mutate({
+      data: {
+        ...keenConfig,
+        outbounds: existingBypass
+          ? keenConfig.outbounds
+          : [{ type: "ignore", tag: bypassTag }, ...(keenConfig.outbounds ?? [])],
+        lists: {
+          ...keenConfig.lists,
+          [listName]: {
+            ...existingList,
+            domains: [...domains],
+            ip_cidrs: [...ipCidrs],
+          },
+        },
+        route: {
+          ...keenConfig.route,
+          rules: hasRule
+            ? rules
+            : [{ list: [listName], outbound: bypassTag }, ...rules],
+        },
+      },
+    })
+  }
 
   const saveTransport = (spec: TransportSpec) => {
     configMutation.mutate({
@@ -200,10 +262,12 @@ export function TransportsPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         {items.map((item) => (
-          <Card key={item.tag}>
-            <CardHeader className="flex-row items-start justify-between gap-3">
-              <div>
-                <CardTitle>{item.tag}</CardTitle>
+          <Card className="min-w-0 overflow-hidden" key={item.tag}>
+            <CardHeader className="min-w-0 flex-col items-start gap-3 sm:flex-row sm:justify-between">
+              <div className="min-w-0">
+                <CardTitle className="break-words [overflow-wrap:anywhere]">
+                  {item.tag}
+                </CardTitle>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {item.type}
                 </p>
@@ -212,7 +276,7 @@ export function TransportsPage() {
                 {t(`transports.states.${item.state}`)}
               </Badge>
             </CardHeader>
-            <CardContent className="grid gap-2 text-sm">
+            <CardContent className="grid min-w-0 gap-2 text-sm">
               <TransportField
                 label={t("transports.interface")}
                 value={item.interface}
@@ -252,6 +316,12 @@ export function TransportsPage() {
                   {item.error}
                 </p>
               ) : null}
+              {item.server ? (
+                <TransportField
+                  label={t("transports.server")}
+                  value={item.server}
+                />
+              ) : null}
               {item.type === "native" ? (
                 <p className="mt-2 text-muted-foreground">
                   {t("transports.nativeManagedExternally")}
@@ -264,8 +334,21 @@ export function TransportsPage() {
                   stopLabel={t("transports.stop")}
                 />
               )}
-              <div className="mt-2 flex justify-end gap-2">
+              <div className="mt-2 flex min-w-0 flex-wrap items-center justify-start gap-2 border-t pt-4 sm:justify-end">
+                {item.server ? (
+                  <Button
+                    className="h-auto max-w-full whitespace-normal text-left"
+                    disabled={bypassMutation.isPending || !keenConfig}
+                    onClick={() => addLoopProtection(item.server!)}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <ShieldCheckIcon />
+                    {t("transports.loopProtection.action")}
+                  </Button>
+                ) : null}
                 <Button
+                  className="h-auto max-w-full whitespace-normal text-left"
                   size="sm"
                   variant="outline"
                   onClick={() =>
@@ -278,6 +361,7 @@ export function TransportsPage() {
                   {t("transports.routing.bindOutbound")}
                 </Button>
                 <Button
+                  className="h-auto max-w-full whitespace-normal"
                   size="sm"
                   variant="ghost"
                   onClick={() => {
@@ -294,6 +378,7 @@ export function TransportsPage() {
                   {t("common.edit")}
                 </Button>
                 <Button
+                  className="h-auto max-w-full whitespace-normal"
                   size="sm"
                   variant="ghost"
                   onClick={() =>
@@ -361,8 +446,9 @@ function TransportActions({
     mutation.isPending && mutation.variables?.data.tag === item.tag
 
   return (
-    <div className="mt-3 flex justify-end border-t pt-4">
+    <div className="mt-3 flex min-w-0 flex-wrap justify-start border-t pt-4 sm:justify-end">
       <Button
+        className="h-auto max-w-full whitespace-normal"
         disabled={mutation.isPending}
         onClick={() => mutation.mutate({ data: { tag: item.tag, action } })}
         variant={isRunning ? "outline" : "default"}
@@ -376,9 +462,11 @@ function TransportActions({
 
 function TransportField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-4">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="min-w-0 truncate font-mono">{value}</span>
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-baseline gap-4">
+      <span className="min-w-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-words text-right font-mono [overflow-wrap:anywhere]">
+        {value}
+      </span>
     </div>
   )
 }

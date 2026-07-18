@@ -60,6 +60,20 @@ if [ -f "$TRANSPORT_CONFIG" ] && grep -q 'REPLACE_WITH_A_LONG_RANDOM_VALUE' "$TR
     sed -i "s/REPLACE_WITH_A_LONG_RANDOM_VALUE/$transport_api_key/" "$TRANSPORT_CONFIG"
 fi
 chmod 600 "$TRANSPORT_CONFIG" 2>/dev/null || true
+
+# Older keen-pbr-sb builds could atomically replace nfqws2 files with mode
+# 0600. nfqws2 drops privileges to nobody, so repair read/traverse access on
+# upgrade without changing file contents.
+if [ -d /opt/etc/nfqws2 ]; then
+    chmod 0755 /opt/etc/nfqws2 2>/dev/null || true
+    for directory in /opt/etc/nfqws2/lists /opt/etc/nfqws2/lua; do
+        [ -d "$directory" ] || continue
+        chmod 0755 "$directory" 2>/dev/null || true
+        find "$directory" -type f \( -name '*.list' -o -name '*.lua' \) \
+            -exec chmod 0644 {} \; 2>/dev/null || true
+    done
+    chmod 0644 /opt/etc/nfqws2/nfqws2.conf 2>/dev/null || true
+fi
 /opt/etc/init.d/S79transport-manager start || echo "Failed to start transport-manager service"
 /opt/etc/init.d/S80keen-pbr start || echo "Failed to start keen-pbr service"
 echo ""

@@ -56,6 +56,11 @@ set_active_state() {
 }
 
 emit_dnsmasq_config_entry() {
+    # Store a bounded, tmpfs-backed DNS observation stream. The connections
+    # page uses it to show best-effort domain names next to exact destination
+    # IP addresses; no query history is written to persistent storage.
+    printf 'log-queries=extra\n'
+    printf 'log-facility=/tmp/dnsmasq-keen-pbr-queries.log\n'
     if is_active; then
         active_conf_line
         log_info "Produced dnsmasq keen-pbr managed config"

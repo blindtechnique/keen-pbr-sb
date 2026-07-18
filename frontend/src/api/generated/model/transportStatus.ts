@@ -11,6 +11,8 @@ export interface TransportStatus {
   tag: string;
   type: string;
   interface: string;
+  /** Proxy server hostname or IP, exposed without credentials for loop-prevention setup. */
+  server?: string;
   state: TransportStatusState;
   pid?: number;
   error?: string;

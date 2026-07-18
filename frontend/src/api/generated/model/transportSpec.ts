@@ -26,7 +26,10 @@ export interface TransportSpec {
      * @maximum 9000
      */
   mtu?: number;
+  /** IP addresses (optionally with port) used to resolve the sing-box server before the tunnel starts. */
   bootstrap_dns?: string[];
+  /** Optional manual IPv4 /30 host address for the sing-box TUN. By default a stable unique subnet from 172.19.0.0/16 is derived from the transport tag. */
+  tun_address?: string;
   /** @deprecated */
   vless?: VlessRealitySpec;
 }

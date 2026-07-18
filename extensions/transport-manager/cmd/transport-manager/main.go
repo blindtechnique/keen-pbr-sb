@@ -28,8 +28,12 @@ func main() {
 
 	manager := transport.NewManager()
 	supervisor := transport.NewSupervisor(manager)
+	if err := transport.CleanupOrphanProcesses(cfg.Transports, cfg.RuntimeDir); err != nil {
+		log.Fatalf("clean up orphan sing-box processes: %v", err)
+	}
+	transport.CleanupForwardingRules(cfg.Transports)
 	for _, item := range cfg.Transports {
-		managed, err := transport.NewFromSpec(item, cfg.SingBoxBinary, cfg.RuntimeDir)
+		managed, err := transport.NewFromSpec(item, cfg.SingBoxBinary, cfg.RuntimeDir, cfg.HealthEndpoint())
 		if err != nil {
 			log.Fatalf("transport %q: %v", item.Tag, err)
 		}

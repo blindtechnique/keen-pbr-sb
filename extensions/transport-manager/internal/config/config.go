@@ -17,6 +17,7 @@ type Config struct {
 	APIKey        string                    `json:"api_key"`
 	SingBoxBinary string                    `json:"sing_box_binary"`
 	RuntimeDir    string                    `json:"runtime_dir"`
+	KeenPBRAPI    string                    `json:"keen_pbr_api"`
 	Transports    []transport.TransportSpec `json:"transports"`
 }
 
@@ -71,6 +72,10 @@ type Admin struct {
 	supervisor *transport.Supervisor
 }
 
+func (c Config) HealthEndpoint() transport.RoutingHealthEndpoint {
+	return transport.RoutingHealthEndpoint{URL: c.KeenPBRAPI, APIKey: c.APIKey}
+}
+
 func NewAdmin(path string, cfg Config, manager *transport.Manager, supervisor *transport.Supervisor) *Admin {
 	return &Admin{path: path, config: cfg, manager: manager, supervisor: supervisor}
 }
@@ -95,7 +100,11 @@ func (a *Admin) Specs() []transport.TransportSpec {
 func (a *Admin) Create(ctx context.Context, spec transport.TransportSpec) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	managed, err := transport.NewFromSpec(spec, a.config.SingBoxBinary, a.config.RuntimeDir)
+	nextSpecs := append(append([]transport.TransportSpec{}, a.config.Transports...), spec)
+	if err := transport.ValidateUniqueTunAddresses(nextSpecs); err != nil {
+		return err
+	}
+	managed, err := transport.NewFromSpec(spec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 	if err != nil {
 		return err
 	}
@@ -104,7 +113,7 @@ func (a *Admin) Create(ctx context.Context, spec transport.TransportSpec) error 
 	}
 	a.supervisor.Register(spec)
 	next := a.config
-	next.Transports = append(append([]transport.TransportSpec{}, a.config.Transports...), spec)
+	next.Transports = nextSpecs
 	if err := Save(a.path, next); err != nil {
 		a.supervisor.Forget(spec.Tag)
 		_ = a.manager.Remove(ctx, spec.Tag)
@@ -134,7 +143,12 @@ func (a *Admin) Update(ctx context.Context, tag string, spec transport.Transport
 	if spec.VLESS != nil && spec.VLESS.UUID == "" && oldSpec.VLESS != nil {
 		spec.VLESS.UUID = oldSpec.VLESS.UUID
 	}
-	managed, err := transport.NewFromSpec(spec, a.config.SingBoxBinary, a.config.RuntimeDir)
+	nextSpecs := append([]transport.TransportSpec{}, a.config.Transports...)
+	nextSpecs[index] = spec
+	if err := transport.ValidateUniqueTunAddresses(nextSpecs); err != nil {
+		return err
+	}
+	managed, err := transport.NewFromSpec(spec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 	if err != nil {
 		return err
 	}
@@ -144,19 +158,18 @@ func (a *Admin) Update(ctx context.Context, tag string, spec transport.Transport
 		return err
 	}
 	if err := a.manager.Add(managed); err != nil {
-		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir)
+		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 		_ = a.manager.Add(oldManaged)
 		a.supervisor.Register(oldSpec)
 		return err
 	}
 	a.supervisor.Register(spec)
 	next := a.config
-	next.Transports = append([]transport.TransportSpec{}, a.config.Transports...)
-	next.Transports[index] = spec
+	next.Transports = nextSpecs
 	if err := Save(a.path, next); err != nil {
 		a.supervisor.Forget(tag)
 		_ = a.manager.Remove(ctx, tag)
-		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir)
+		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 		_ = a.manager.Add(oldManaged)
 		a.supervisor.Register(oldSpec)
 		return err
@@ -182,7 +195,7 @@ func (a *Admin) Delete(ctx context.Context, tag string) error {
 	next.Transports = append([]transport.TransportSpec{}, a.config.Transports[:index]...)
 	next.Transports = append(next.Transports, a.config.Transports[index+1:]...)
 	if err := Save(a.path, next); err != nil {
-		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir)
+		oldManaged, _ := transport.NewFromSpec(oldSpec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
 		_ = a.manager.Add(oldManaged)
 		a.supervisor.Register(oldSpec)
 		return err
@@ -219,8 +232,14 @@ func Load(path string) (Config, error) {
 	if cfg.RuntimeDir == "" {
 		cfg.RuntimeDir = "/opt/var/run/keen-pbr/transports"
 	}
+	if cfg.KeenPBRAPI == "" {
+		cfg.KeenPBRAPI = "http://127.0.0.1:12121/api/runtime/outbounds"
+	}
 	if cfg.APIKey == "" {
 		return Config{}, fmt.Errorf("api_key must not be empty")
+	}
+	if err := transport.ValidateUniqueTunAddresses(cfg.Transports); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }

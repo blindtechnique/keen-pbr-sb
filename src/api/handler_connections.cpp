@@ -2,14 +2,18 @@
 
 #include "handler_connections.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <fstream>
+#include <filesystem>
 #include <iterator>
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <arpa/inet.h>
 
 namespace keen_pbr3 {
 namespace {
@@ -25,8 +29,12 @@ struct Connection {
 
 std::mutex connections_mutex;
 std::map<std::string, Connection> history;
-constexpr std::int64_t retention_seconds = 2 * 60 * 60;
-constexpr size_t maximum_history_entries = 20000;
+constexpr size_t maximum_history_entries = 1500;
+constexpr size_t maximum_dns_addresses = 3000;
+constexpr size_t maximum_domains_per_address = 4;
+constexpr const char* dns_query_log = "/tmp/dnsmasq-keen-pbr-queries.log";
+std::map<std::string, std::deque<std::string>> domains_by_address;
+std::streamoff dns_log_offset{0};
 
 std::int64_t now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(Clock::now().time_since_epoch()).count();
@@ -40,6 +48,50 @@ std::string value_after(const std::string& token, const char* prefix) {
 uint32_t number(const std::string& value) {
     try { return static_cast<uint32_t>(std::stoul(value, nullptr, 0)); }
     catch (...) { return 0; }
+}
+
+bool is_ip_address(const std::string& value) {
+    in_addr ipv4{};
+    in6_addr ipv6{};
+    return inet_pton(AF_INET, value.c_str(), &ipv4) == 1 ||
+           inet_pton(AF_INET6, value.c_str(), &ipv6) == 1;
+}
+
+void remember_domain(const std::string& address, const std::string& domain) {
+    if (!is_ip_address(address) || domain.empty() || domain == "<Name>") return;
+    auto& names = domains_by_address[address];
+    names.erase(std::remove(names.begin(), names.end(), domain), names.end());
+    names.push_front(domain);
+    while (names.size() > maximum_domains_per_address) names.pop_back();
+    while (domains_by_address.size() > maximum_dns_addresses)
+        domains_by_address.erase(domains_by_address.begin());
+}
+
+void read_dns_query_log() {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(dns_query_log, ec);
+    if (ec) return;
+    if (size < static_cast<std::uintmax_t>(dns_log_offset)) dns_log_offset = 0;
+    std::ifstream input(dns_query_log);
+    if (!input) return;
+    input.seekg(dns_log_offset);
+    for (std::string line; std::getline(input, line);) {
+        auto marker = line.find(" reply ");
+        if (marker == std::string::npos) marker = line.find(" cached ");
+        if (marker == std::string::npos) continue;
+        std::istringstream fields(line.substr(marker + 7));
+        std::string domain, separator, address;
+        if (fields >> domain >> separator >> address && separator == "is")
+            remember_domain(address, domain);
+    }
+    dns_log_offset = static_cast<std::streamoff>(size);
+
+    // The log lives in tmpfs and is used only as a short DNS observation
+    // stream. Keep it bounded; dnsmasq opens the file with append semantics.
+    if (size > 2U * 1024U * 1024U) {
+        std::ofstream truncate(dns_query_log, std::ios::trunc);
+        dns_log_offset = 0;
+    }
 }
 
 std::map<uint32_t, std::string> routes(const Config& config) {
@@ -139,8 +191,7 @@ void read_conntrack(const Config& config) {
     }
     for (auto it = history.begin(); it != history.end();) {
         if (!it->second.active) it->second.state = "CLOSED";
-        if (timestamp - it->second.last_seen > retention_seconds) it = history.erase(it);
-        else ++it;
+        ++it;
     }
     while (history.size() > maximum_history_entries) {
         auto oldest = history.begin();
@@ -156,16 +207,21 @@ void read_conntrack(const Config& config) {
 void register_connections_handler(ApiServer& server, ApiContext& ctx) {
     server.get("/api/connections", [&ctx]() -> std::string {
         std::lock_guard lock(connections_mutex);
+        read_dns_query_log();
         read_conntrack(ctx.get_visible_config());
         const auto devices = device_names();
         nlohmann::json result = nlohmann::json::array();
         for (const auto& [id, c] : history) {
             const auto device = devices.find(c.source);
+            const auto domains = domains_by_address.find(c.destination);
             result.push_back({{"id", id}, {"protocol", c.protocol}, {"state", c.state},
                 {"source", c.source}, {"source_port", c.source_port},
                 {"destination", c.destination}, {"destination_port", c.destination_port},
                 {"route", c.route}, {"mark", c.mark}, {"active", c.active},
                 {"device", device == devices.end() ? "" : device->second},
+                {"destination_domains", domains == domains_by_address.end()
+                    ? nlohmann::json::array()
+                    : nlohmann::json(domains->second)},
                 {"first_seen", c.first_seen}, {"last_seen", c.last_seen}});
         }
         return result.dump();

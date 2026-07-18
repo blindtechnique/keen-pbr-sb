@@ -52,6 +52,7 @@ type Status = {
   version: string
   files: NfqwsFile[]
   strategies: Strategy[]
+  active_strategy: string
 }
 type Tab = "settings" | "strategies" | "lists" | "lua" | "logs" | "check"
 
@@ -83,11 +84,12 @@ export function NfqwsPage() {
   })
   const status = query.data
   const [tab, setTab] = useState<Tab>("settings")
+  const [operationResult, setOperationResult] = useState("")
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => nfqwsAction(payload),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      if (result.output) toast.info(result.output, { duration: 8000 })
+      setOperationResult(result.output?.trim() || t("nfqws.operationCompleted"))
     },
     onError: (error) => toast.error(error.message, { richColors: true }),
   })
@@ -175,6 +177,24 @@ export function NfqwsPage() {
             </CardContent>
           </Card>
 
+          {operationResult ? (
+            <Alert>
+              <AlertTitle>{t("nfqws.operationResult")}</AlertTitle>
+              <AlertDescription className="space-y-3">
+                <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-foreground">
+                  {operationResult}
+                </pre>
+                <Button
+                  onClick={() => setOperationResult("")}
+                  size="sm"
+                  variant="outline"
+                >
+                  {t("nfqws.closeResult")}
+                </Button>
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
           <div className="flex flex-wrap gap-2 rounded-lg border p-2">
             {(
               [
@@ -205,6 +225,7 @@ export function NfqwsPage() {
           ) : null}
           {tab === "strategies" ? (
             <StrategiesEditor
+              onOperationResult={setOperationResult}
               status={status}
               refresh={() => void query.refetch()}
             />
@@ -400,16 +421,24 @@ function SettingsEditor({
 }
 
 function StrategiesEditor({
+  onOperationResult,
   status,
   refresh,
 }: {
+  onOperationResult: (output: string) => void
   status: Status
   refresh: () => void
 }) {
   const { t } = useTranslation()
-  const [selected, setSelected] = useState(status.strategies[0]?.name ?? "")
+  const preferredStrategy =
+    status.active_strategy || status.strategies[0]?.name || ""
+  const [selected, setSelected] = useState(preferredStrategy)
   const strategy = status.strategies.find((item) => item.name === selected)
   const [content, setContent] = useState(strategy?.content ?? "")
+  useEffect(() => {
+    if (!status.strategies.some((item) => item.name === selected))
+      setSelected(preferredStrategy)
+  }, [preferredStrategy, selected, status.strategies])
   useEffect(
     () => setContent(strategy?.content ?? ""),
     [strategy?.name, strategy?.content]
@@ -422,8 +451,16 @@ function StrategiesEditor({
     }
   }
   const run = async (action: string) => {
-    await nfqwsAction({ action, name: selected, content })
-    toast.success(t("nfqws.saved"))
+    const result = await nfqwsAction<{ ok: boolean; output?: string }>({
+      action,
+      name: selected,
+      content,
+    })
+    if (action === "apply_strategy")
+      onOperationResult(
+        result.output?.trim() || t("nfqws.strategyAppliedAndRestarted")
+      )
+    else toast.success(t("nfqws.saved"))
     refresh()
   }
   return (
@@ -443,6 +480,9 @@ function StrategiesEditor({
               <option key={item.name} value={item.name}>
                 {item.name}
                 {item.builtin ? ` (${t("nfqws.builtin")})` : ""}
+                {item.name === status.active_strategy
+                  ? ` — ${t("nfqws.activeStrategy")}`
+                  : ""}
               </option>
             ))}
           </select>
@@ -450,6 +490,21 @@ function StrategiesEditor({
             <FilePlusIcon />
             {t("nfqws.addStrategy")}
           </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-muted-foreground">
+            {t("nfqws.activeStrategyLabel")}
+          </span>
+          {status.active_strategy ? (
+            <Badge>{status.active_strategy}</Badge>
+          ) : (
+            <Badge variant="secondary">{t("nfqws.activeStrategyCustom")}</Badge>
+          )}
+          {selected && selected !== status.active_strategy ? (
+            <span className="text-muted-foreground">
+              {t("nfqws.selectedForEditing", { name: selected })}
+            </span>
+          ) : null}
         </div>
         <Textarea
           className="min-h-[30rem] font-mono text-xs"

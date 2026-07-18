@@ -12,6 +12,9 @@ export const enTranslation = {
     restart: "Restart",
     reload: "Reload configuration",
     upgrade: "Upgrade package",
+    operationResult: "nfqws2 operation result",
+    operationCompleted: "The operation completed successfully.",
+    closeResult: "Close message",
     tabs: {
       settings: "Settings",
       strategies: "Strategies",
@@ -34,6 +37,12 @@ export const enTranslation = {
     strategiesDescription:
       "Select a bundled strategy, edit it, save a user version or apply it to nfqws2.",
     builtin: "bundled",
+    activeStrategy: "active",
+    activeStrategyLabel: "Currently applied:",
+    activeStrategyCustom: "manually modified configuration",
+    selectedForEditing: "Selected for editing: {{name}}",
+    strategyAppliedAndRestarted:
+      "The strategy was applied and the nfqws2 service restarted.",
     addStrategy: "New strategy",
     strategyName: "New strategy name",
     applyStrategy: "Apply",
@@ -179,8 +188,8 @@ export const enTranslation = {
   connections: {
     title: "Connections",
     description:
-      "Active connections and two hours of recent history. Data refreshes every 3 seconds.",
-    filter: "Filter by address, state, or route",
+      "Active connections and up to 1,500 recent records. DNS traffic observed by keen-pbr adds the last known domain next to the exact IP. Data refreshes every 3 seconds.",
+    filter: "Filter by device, domain, address, state, or route",
     activeOnly: "Active only",
     sort: "Sort",
     sortRecent: "Newest first",
@@ -207,6 +216,15 @@ export const enTranslation = {
     unavailable: "Transport manager unavailable",
     empty: "No transports configured.",
     interface: "Interface",
+    server: "Server",
+    loopProtection: {
+      action: "Exclude server from tunnel",
+      confirm:
+        "Add {{server}} to the first pass-through rule? This creates the transport_servers list, an ignore outbound named transport_bypass, and a highest-priority routing rule.",
+      saved: "Routing-loop protection was added",
+      tagConflict:
+        "Tag {{tag}} is already used by another outbound type. Rename it and try again.",
+    },
     pid: "PID",
     updatedAt: "Updated",
     autoRecovery: "Auto recovery",
@@ -258,6 +276,10 @@ export const enTranslation = {
       fingerprint: "uTLS fingerprint",
       mtu: "MTU",
       bootstrapDns: "Bootstrap DNS",
+      tunAddress: "TUN address (optional)",
+      tunAddressPlaceholder: "Automatic dedicated /30 subnet",
+      tunAddressHint:
+        "Leave blank to derive a stable address from 172.19.0.0/16 using the tag. For a manual override, enter a usable /30 host such as 10.77.0.1/30.",
       bootstrapDnsHint:
         "DNS server IP addresses, one per line. They resolve the VPN server before the tunnel starts; an optional port is supported.",
       keepSecret: "Leave blank to keep the saved UUID",
@@ -539,6 +561,31 @@ export const enTranslation = {
         cronHintPrefix: "How often to check for updates. Uses cron format. Use",
         cronHintSuffix: "for help.",
         openInGuru: "Open in Crontab Guru",
+      },
+      softwareUpdate: {
+        title: "keen-pbr-sb update",
+        description:
+          "Checks the latest published Release, verifies SHA256SUMS, and installs the IPK while preserving configuration, transports, and the web account.",
+        current: "Installed",
+        latest: "Latest release",
+        check: "Check for updates",
+        install: "Install update",
+        running:
+          "The update is running. The web UI may be unavailable for a few seconds and will reconnect automatically.",
+        upToDate: "The latest published version is installed.",
+        newerThanPublished:
+          "The installed version is newer than the latest published release. A downgrade will not be offered.",
+        changesTitle: "What changed in {{version}}",
+        releaseNotesMissing:
+          "This release has no short notes. Open the full changelog instead.",
+        releasePage: "Release page",
+        fullChangelog: "Full changelog",
+        confirm:
+          "Install keen-pbr-sb {{version}}? Routing services and the web UI will restart briefly. Review the changes on this page before continuing.",
+        result: "Update log",
+        waitingForLog: "Update started; waiting for the first log lines…",
+        checkFailed: "Could not check for updates.",
+        startFailed: "Could not start the update.",
       },
       advanced: {
         title: "Advanced routing settings",

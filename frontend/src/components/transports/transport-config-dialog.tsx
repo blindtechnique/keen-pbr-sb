@@ -238,6 +238,23 @@ export function TransportConfigDialog({
                   value={spec.mtu ?? 1420}
                 />
               </Field>
+              <Field label={t("transports.form.tunAddress")}>
+                <Input
+                  onChange={(event) =>
+                    setSpec({
+                      ...spec,
+                      tun_address: event.target.value.trim() || undefined,
+                    })
+                  }
+                  pattern="(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/30"
+                  placeholder={t("transports.form.tunAddressPlaceholder")}
+                  title={t("transports.form.tunAddressHint")}
+                  value={spec.tun_address ?? ""}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t("transports.form.tunAddressHint")}
+                </p>
+              </Field>
               <Field label={t("transports.form.bootstrapDns")}>
                 <Textarea
                   className="min-h-20 font-mono text-xs"

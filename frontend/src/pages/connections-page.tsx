@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 type Connection = {
   id: string; protocol: string; state: string; source: string; source_port: number
   destination: string; destination_port: number; route: string; device: string; active: boolean; last_seen: number
+  destination_domains: string[]
 }
 
 export function ConnectionsPage() {
@@ -32,7 +33,7 @@ export function ConnectionsPage() {
     const needle = filter.trim().toLowerCase()
     return (query.data ?? [])
       .filter((item) => !activeOnly || item.active)
-      .filter((item) => !needle || `${item.source} ${item.destination} ${item.route} ${item.state} ${item.protocol}`.toLowerCase().includes(needle))
+      .filter((item) => !needle || `${item.source} ${item.destination} ${item.destination_domains.join(" ")} ${item.device} ${item.route} ${item.state} ${item.protocol}`.toLowerCase().includes(needle))
       .sort((a, b) => sort === "recent" ? b.last_seen - a.last_seen :
         sort === "source" ? a.source.localeCompare(b.source) :
         sort === "destination" ? a.destination.localeCompare(b.destination) :
@@ -58,7 +59,19 @@ export function ConnectionsPage() {
         {rows.map((item) => <TableRow key={item.id}>
           <TableCell><Badge variant={item.active ? "default" : "secondary"}>{item.state}</Badge></TableCell>
           <TableCell><div>{item.device || item.source}</div><div className="font-mono text-xs text-muted-foreground">{item.source}:{item.source_port}</div></TableCell>
-          <TableCell className="font-mono text-xs">{item.destination}:{item.destination_port}</TableCell>
+          <TableCell>
+            {item.destination_domains[0] ? (
+              <div>{item.destination_domains[0]}</div>
+            ) : null}
+            <div className="font-mono text-xs text-muted-foreground">
+              {item.destination}:{item.destination_port}
+            </div>
+            {item.destination_domains.length > 1 ? (
+              <div className="max-w-80 truncate text-xs text-muted-foreground" title={item.destination_domains.slice(1).join(", ")}>
+                {item.destination_domains.slice(1).join(", ")}
+              </div>
+            ) : null}
+          </TableCell>
           <TableCell>{item.protocol.toUpperCase()}</TableCell><TableCell>{item.route}</TableCell>
         </TableRow>)}
       </TableBody></Table>

@@ -413,6 +413,9 @@ components:
           type: string
         interface:
           type: string
+        server:
+          type: string
+          description: Proxy server hostname or IP, exposed without credentials for loop-prevention setup.
         state:
           type: string
           enum: [down, starting, up, degraded]
@@ -492,7 +495,10 @@ components:
           items:
             type: string
           example: ["1.1.1.1", "9.9.9.9:53"]
-          default: 1420
+        tun_address:
+          type: string
+          description: Optional manual IPv4 /30 host address for the sing-box TUN. By default a stable unique subnet from 172.19.0.0/16 is derived from the transport tag.
+          example: "10.77.0.1/30"
         vless:
           $ref: "#/components/schemas/VlessRealitySpec"
           deprecated: true

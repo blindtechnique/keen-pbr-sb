@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# opkg runs postrm for the previous package during an upgrade/reinstall too.
+# Do not report a final removal while the replacement package is being installed.
+[ "${PKG_UPGRADE:-0}" = "1" ] && exit 0
+
 cat <<'EOF'
 keen-pbr has been removed.
 dnsmasq fallback config from keen-pbr is no longer available.

@@ -81,6 +81,7 @@ set(KEEN_PBR_TARGET_OS "linux" CACHE STRING
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(LIBCURL IMPORTED_TARGET libcurl)
+pkg_check_modules(ZLIB REQUIRED IMPORTED_TARGET zlib)
 if(TARGET PkgConfig::LIBCURL)
   # Prefer the distro-provided libcurl discovered via pkg-config so CI does not
   # accidentally link against a runner-local /usr/local curl build.
@@ -283,6 +284,7 @@ if(WITH_API)
     src/api/handlers.cpp
     src/api/sse_broadcaster.cpp
     src/api/handler_health_service.cpp
+    src/api/update_version.cpp
     src/api/handler_reload.cpp
     src/api/handler_lists_refresh.cpp
     src/api/handler_config.cpp
@@ -327,6 +329,7 @@ if(USE_KEENETIC_API)
 endif()
 target_link_libraries(keen-pbr PRIVATE
   ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
   PkgConfig::LIBNL
   PkgConfig::LIBNL_ROUTE
   Threads::Threads

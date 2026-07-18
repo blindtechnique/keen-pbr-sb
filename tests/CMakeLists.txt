@@ -19,6 +19,7 @@ add_executable(keen-pbr-tests
   test_runtime_interface_inventory.cpp
   test_api_runtime_interfaces.cpp
   test_api_transports.cpp
+  test_update_version.cpp
   test_api_test_routing.cpp
   test_api_static.cpp
   test_resolver_health.cpp
@@ -62,6 +63,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/resolver_health.cpp
   ../src/daemon/resolver_sync_state_machine.cpp
   ../src/http/http_client.cpp
+  ../src/api/update_version.cpp
   ../src/routing/netlink.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp

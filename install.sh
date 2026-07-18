@@ -7,6 +7,13 @@ GITHUB_API="https://api.github.com/repos"
 SING_BOX_TESTED_VERSION="1.13.14"
 TMP_DIR="${TMPDIR:-/tmp}/mykeenpbr-install.$$"
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
+UPDATE_ONLY=0
+
+case "${1:-}" in
+    --update) UPDATE_ONLY=1 ;;
+    "") ;;
+    *) printf '%s\n' "ОШИБКА: неизвестный параметр: $1" >&2; exit 2 ;;
+esac
 
 cleanup() {
     rm -rf "$TMP_DIR"
@@ -324,12 +331,19 @@ configure_nfqws2() {
     fi
     case "$answer" in y|Y|yes|YES|д|Д|да|ДА) ;; *) return 0 ;; esac
 
-    say "Добавляю официальный репозиторий nfqws2 и устанавливаю пакет..."
+    say "Подготавливаю HTTPS и официальный репозиторий nfqws2..."
+    # Старый wget из Entware понимает только HTTP/FTP. Сначала обновляем
+    # обычные feeds и заменяем его на SSL-вариант, и только после этого
+    # добавляем HTTPS-feed nfqws2. Удаление feed также чинит повторный запуск
+    # после ранее прерванной установки.
     mkdir -p /opt/etc/opkg
-    printf '%s\n' 'src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all' > /opt/etc/opkg/nfqws2-keenetic.conf
-    /opt/bin/opkg update
-    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить зависимости nfqws2"
+    rm -f /opt/etc/opkg/nfqws2-keenetic.conf
+    /opt/bin/opkg update || die "не удалось обновить список пакетов Entware"
+    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить HTTPS-зависимости nfqws2"
     /opt/bin/opkg remove wget-nossl >/dev/null 2>&1 || true
+    printf '%s\n' 'src/gz nfqws2-keenetic https://nfqws.github.io/nfqws2-keenetic/all' > /opt/etc/opkg/nfqws2-keenetic.conf
+    /opt/bin/opkg update || die "не удалось загрузить официальный репозиторий nfqws2"
+    say "Устанавливаю пакет nfqws2..."
     if /opt/bin/opkg status nfqws2-keenetic 2>/dev/null | grep -q '^Status:.* installed'; then
         /opt/bin/opkg upgrade nfqws2-keenetic || die "не удалось обновить nfqws2"
     else
@@ -338,12 +352,34 @@ configure_nfqws2() {
     say "nfqws2 установлен. Управление доступно в разделе «nfqws2» веб-интерфейса keen-pbr-sb."
 }
 
+repair_interrupted_nfqws_bootstrap() {
+    feed=/opt/etc/opkg/nfqws2-keenetic.conf
+    [ -f "$feed" ] || return 0
+    if /opt/bin/opkg status wget-ssl 2>/dev/null | grep -q '^Status:.* installed'; then
+        return 0
+    fi
+    say "Обнаружена незавершённая настройка nfqws2. Сначала восстанавливаю поддержку HTTPS..."
+    saved_feed="$TMP_DIR/nfqws2-keenetic.conf"
+    mv "$feed" "$saved_feed"
+    /opt/bin/opkg update || die "не удалось обновить пакеты Entware при восстановлении HTTPS"
+    /opt/bin/opkg install ca-certificates wget-ssl || die "не удалось установить wget с поддержкой HTTPS"
+    /opt/bin/opkg remove wget-nossl >/dev/null 2>&1 || true
+    mv "$saved_feed" "$feed"
+}
+
 [ "$(id -u)" = "0" ] || die "запустите установщик от пользователя root"
 mkdir -p "$TMP_DIR"
 detect_target
 say "Установка keen-pbr-sb для ${KEEN_ARCH}-${KEEN_ABI} из $PROJECT_REPOSITORY"
 download_package
+if [ "$UPDATE_ONLY" = "1" ]; then
+    say "Устанавливаю обновление keen-pbr-sb без изменения пользовательских настроек..."
+    KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N /opt/bin/opkg install "$PACKAGE_FILE"
+    say "Обновление keen-pbr-sb установлено. Веб-интерфейс перезапускается."
+    exit 0
+fi
 choose_sing_box
+repair_interrupted_nfqws_bootstrap
 /opt/bin/opkg update
 KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N /opt/bin/opkg install "$PACKAGE_FILE"
 set_sing_box_path
