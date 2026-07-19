@@ -38,6 +38,13 @@ jobs:
 
       - name: Build IPK in entware-builder
         run: |
+          # resolve-version.sh derives the release number from the last commit
+          # date whenever it runs inside a git tree, which would produce
+          # keen-pbr_3.0.7-20260719075511_*.ipk instead of the released
+          # keen-pbr_3.0.7-5_*.ipk. Pin it to version.mk for reproducible names.
+          KEEN_PBR_RELEASE_OVERRIDE="$(sed -n 's/^KEEN_PBR_RELEASE=//p' version.mk)"
+          export KEEN_PBR_RELEASE_OVERRIDE
+          echo "Building release $KEEN_PBR_RELEASE_OVERRIDE"
           make keenetic-packages \
             KEENETIC_CONFIG="$KEENETIC_CONFIG" \
             KEENETIC_VERSION="$KEENETIC_VERSION" \
@@ -68,6 +75,21 @@ jobs:
             echo "Автоматическая сборка $GITHUB_REF_NAME. Подробности в CHANGELOG.md." > RELEASE_BODY.md
           fi
           cat RELEASE_BODY.md
+
+      - name: Drop stale assets from an existing release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # install.sh picks the first matching asset, so a re-run must not
+          # leave an older IPK next to the new one (its checksum is no longer
+          # in SHA256SUMS and the install would abort).
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            for asset in $(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name'); do
+              echo "Removing stale asset: $asset"
+              gh release delete-asset "$GITHUB_REF_NAME" "$asset" -y || true
+            done
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
