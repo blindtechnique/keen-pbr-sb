@@ -220,6 +220,9 @@ export const ruTranslation = {
     route: "Маршрут",
   },
   transports: {
+    latencyValue: "{{value}} мс",
+    latencyAge: "{{seconds}} с назад",
+    latencyRefresh: "Измерить сейчас",
     dnsDetour: "DNS через этот туннель",
     singBoxMissing: {
       title: "sing-box не установлен",

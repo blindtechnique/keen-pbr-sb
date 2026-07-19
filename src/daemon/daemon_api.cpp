@@ -406,6 +406,54 @@ void Daemon::setup_api() {
     });
     register_api_handlers(*api_server_, *api_ctx_);
 
+    // Latency with its measurement age. Kept out of the generated runtime
+    // types on purpose: a stale figure that looks live is worse than one
+    // labelled "measured 12 s ago", and the age belongs to the probe rather
+    // than to the outbound state schema.
+    api_server_->get("/api/system/probes", [this]() -> std::string {
+        const Config config_snapshot = config_store_.active_config();
+        const auto now = std::chrono::steady_clock::now();
+
+        nlohmann::json response;
+        response["interval_seconds"] = 20;
+        nlohmann::json probes = nlohmann::json::object();
+
+        for (const auto& outbound :
+             config_snapshot.outbounds.value_or(std::vector<Outbound>{})) {
+            if (outbound.type != OutboundType::INTERFACE) {
+                continue;
+            }
+            const auto result = interface_probe_.result_for(outbound.tag);
+            if (!result.has_value()) {
+                continue;
+            }
+            nlohmann::json entry;
+            entry["success"] = result->success;
+            entry["latency_ms"] = result->latency_ms;
+            entry["age_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                       now - result->measured_at).count();
+            if (!result->error.empty()) {
+                entry["error"] = result->error;
+            }
+            if (outbound.interface.has_value()) {
+                entry["interface"] = *outbound.interface;
+            }
+            probes[outbound.tag] = std::move(entry);
+        }
+
+        response["probes"] = std::move(probes);
+        return response.dump();
+    });
+
+    // Manual "measure now": the scheduled round is deliberately unhurried, so
+    // there has to be a way to ask for a fresh figure on the spot.
+    api_server_->post("/api/system/probes/run", [this]() -> std::string {
+        post_control_task([this]() { probe_interfaces_now(); });
+        nlohmann::json response;
+        response["ok"] = true;
+        return response.dump();
+    });
+
     const std::filesystem::path frontend_root(KEEN_PBR_FRONTEND_ROOT);
     const std::filesystem::path frontend_index = frontend_root / "index.html";
     std::filesystem::path frontend_index_gzip = frontend_index;

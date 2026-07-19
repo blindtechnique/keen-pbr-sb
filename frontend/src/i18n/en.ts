@@ -219,6 +219,9 @@ export const enTranslation = {
     route: "Route",
   },
   transports: {
+    latencyValue: "{{value}} ms",
+    latencyAge: "{{seconds}}s ago",
+    latencyRefresh: "Measure now",
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
       title: "sing-box is not installed",

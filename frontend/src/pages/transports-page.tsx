@@ -2,12 +2,13 @@ import {
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
+  RotateCw,
   ShieldCheckIcon,
   TrashIcon,
   WorkflowIcon,
 } from "lucide-react"
 import { useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
@@ -40,6 +41,69 @@ import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { cn } from "@/lib/utils"
+
+type ProbeEntry = {
+  success: boolean
+  latency_ms: number
+  age_seconds: number
+  error?: string
+  interface?: string
+}
+
+type ProbesResponse = {
+  interval_seconds: number
+  probes: Record<string, ProbeEntry>
+}
+
+/**
+ * Latency with the age of the measurement next to it. A figure that refreshes
+ * on screen but was taken minutes ago reads as live and misleads; saying how
+ * old it is costs one line and makes the number honest.
+ */
+function LatencyPill({
+  probe,
+  fallbackMs,
+  onRefresh,
+  refreshing,
+  t,
+}: {
+  probe?: ProbeEntry
+  fallbackMs?: number
+  onRefresh: () => void
+  refreshing: boolean
+  t: (key: string, options?: Record<string, unknown>) => string
+}) {
+  const latency = probe?.success ? probe.latency_ms : fallbackMs
+
+  if (latency === undefined) {
+    return null
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Badge size="xs" variant="success">
+        {t("transports.latencyValue", { value: latency })}
+      </Badge>
+      {probe ? (
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {t("transports.latencyAge", { seconds: probe.age_seconds })}
+        </span>
+      ) : null}
+      <Button
+        aria-label={t("transports.latencyRefresh")}
+        className="size-6"
+        disabled={refreshing}
+        onClick={onRefresh}
+        size="icon"
+        title={t("transports.latencyRefresh")}
+        variant="ghost"
+      >
+        <RotateCw className={cn("size-3", refreshing && "animate-spin")} />
+      </Button>
+    </span>
+  )
+}
 
 export function TransportsPage() {
   const { t } = useTranslation()
@@ -66,6 +130,37 @@ export function TransportsPage() {
       refetchIntervalInBackground: false,
     },
   })
+  const probesQuery = useQuery<ProbesResponse>({
+    queryKey: ["system-probes"],
+    queryFn: async () => {
+      const response = await fetch("/api/system/probes")
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    },
+    refetchInterval: 3_000,
+    refetchIntervalInBackground: false,
+  })
+
+  const runProbeMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch("/api/system/probes/run", { method: "POST" })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    },
+    onSuccess: () => {
+      // The probe runs in the background; give it a moment before re-reading.
+      setTimeout(() => probesQuery.refetch(), 2_000)
+    },
+  })
+
+  // Probe results are keyed by outbound tag but shown per interface.
+  const probeByInterface = new Map<string, ProbeEntry>()
+  for (const entry of Object.values(probesQuery.data?.probes ?? {})) {
+    if (entry.interface) {
+      probeByInterface.set(entry.interface, entry)
+    }
+  }
+
   const transportLatencyByInterface = new Map<string, number>()
   if (runtimeOutboundsQuery.data?.status === 200) {
     for (const outbound of runtimeOutboundsQuery.data.data.outbounds) {
@@ -349,11 +444,14 @@ export function TransportsPage() {
                     {t(`transports.states.${item.state}`)}
                   </Badge>
                 )}
-                {item.state === "up" &&
-                transportLatencyByInterface.has(item.interface) ? (
-                  <Badge size="xs" variant="success">
-                    {`${transportLatencyByInterface.get(item.interface)} ms`}
-                  </Badge>
+                {item.state === "up" ? (
+                  <LatencyPill
+                    fallbackMs={transportLatencyByInterface.get(item.interface)}
+                    onRefresh={() => runProbeMutation.mutate()}
+                    probe={probeByInterface.get(item.interface)}
+                    refreshing={runProbeMutation.isPending}
+                    t={t}
+                  />
                 ) : null}
               </div>
             </CardHeader>

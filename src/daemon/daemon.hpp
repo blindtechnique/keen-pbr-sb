@@ -186,6 +186,8 @@ private:
     void schedule_startup_firewall_retry(int attempt = 1);
     // Periodic HTTP probe of every interface outbound.
     void schedule_interface_probe();
+    // Runs a probe round immediately, for the manual refresh button.
+    void probe_interfaces_now();
     ListsRefreshExecutionResult execute_remote_list_refresh(
         const std::set<std::string>* target_lists = nullptr);
     void refresh_lists_and_maybe_reload();

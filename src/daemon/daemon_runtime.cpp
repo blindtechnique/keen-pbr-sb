@@ -247,40 +247,44 @@ void Daemon::register_urltest_outbounds() {
     }
 }
 
+void Daemon::probe_interfaces_now() {
+    const auto outbounds = config_.outbounds.value_or(std::vector<Outbound>{});
+
+    std::vector<InterfaceProbe::Target> targets;
+    std::vector<std::string> known_tags;
+    for (const auto& outbound : outbounds) {
+        if (outbound.type != OutboundType::INTERFACE) {
+            continue;
+        }
+        const auto mark_it = outbound_marks_.find(outbound.tag);
+        if (mark_it == outbound_marks_.end()) {
+            continue;
+        }
+        targets.push_back({outbound.tag, mark_it->second});
+        known_tags.push_back(outbound.tag);
+    }
+
+    interface_probe_.retain_only(known_tags);
+
+    if (targets.empty()) {
+        return;
+    }
+    // Probing blocks on the network, so it must not run on the event loop.
+    blocking_executor_.try_post("interface-probe", [this, targets]() {
+        interface_probe_.probe(targets);
+    });
+}
+
 void Daemon::schedule_interface_probe() {
-    // Same cadence as urltest so a group member and a standalone interface are
-    // never compared across wildly different measurement ages.
-    constexpr auto kInterval = std::chrono::seconds(180);
+    // Twenty seconds keeps the figure feeling live without turning every
+    // tunnel into a permanent TLS handshake generator: each probe is a full
+    // HTTPS request, and network latency does not change faster than this.
+    constexpr auto kInterval = std::chrono::seconds(20);
 
     scheduler_->schedule_oneshot(
         kInterval,
         [this]() {
-            const auto outbounds = config_.outbounds.value_or(std::vector<Outbound>{});
-
-            std::vector<InterfaceProbe::Target> targets;
-            std::vector<std::string> known_tags;
-            for (const auto& outbound : outbounds) {
-                if (outbound.type != OutboundType::INTERFACE) {
-                    continue;
-                }
-                const auto mark_it = outbound_marks_.find(outbound.tag);
-                if (mark_it == outbound_marks_.end()) {
-                    continue;
-                }
-                targets.push_back({outbound.tag, mark_it->second});
-                known_tags.push_back(outbound.tag);
-            }
-
-            interface_probe_.retain_only(known_tags);
-
-            if (!targets.empty()) {
-                // Probing blocks on the network, so it must not run on the
-                // event loop thread.
-                blocking_executor_.try_post("interface-probe", [this, targets]() {
-                    interface_probe_.probe(targets);
-                });
-            }
-
+            probe_interfaces_now();
             schedule_interface_probe();
         },
         "interface-probe");
