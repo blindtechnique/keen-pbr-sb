@@ -22,7 +22,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div
         className={cn(
           "flex min-h-screen w-full max-w-full overflow-x-clip",
-          isOverview ? "bg-background" : "bg-card"
+          isOverview ? "bg-background" : "bg-[var(--page)]"
         )}
       >
         <a
@@ -55,7 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function DesktopSystemBar() {
   return (
-    <div className="sticky top-0 z-20 hidden h-16 items-center justify-between bg-card px-8 md:flex">
+    <div className="sticky top-0 z-20 hidden h-16 items-center justify-between bg-card px-6 md:flex">
       <div className="flex items-center gap-3">
         <span className="size-2.5 rounded-full bg-success shadow-[0_0_0_4px_color-mix(in_srgb,var(--success)_14%,transparent)]" />
         <span className="text-[15px] font-medium text-primary">keen-pbr</span>
