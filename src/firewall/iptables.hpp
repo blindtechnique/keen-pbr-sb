@@ -33,6 +33,9 @@ public:
     void create_drop_rule(const FirewallRuleCriteria& criteria = {}) override;
     // Buffer NAT REDIRECT rules that force LAN plain-DNS to the local resolver.
     void create_dns_redirect_rules() override;
+    // Buffer NAT MASQUERADE rules for traffic leaving via tunnel interfaces.
+    void create_tunnel_snat_rules(
+        const std::vector<std::string>& interfaces) override;
     // Buffer an iptables/ip6tables -j RETURN rule for the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -124,6 +127,8 @@ private:
     // DNS redirect (client DNS enforcement) state
     bool dns_redirect_requested_ = false;
     bool router_origin_snat_requested_ = false;
+    // Tunnel interfaces whose egress needs masquerading.
+    std::vector<std::string> snat_interfaces_;
     bool dns_nat_v4_created_ = false;
     bool dns_nat_v6_created_ = false;
 
@@ -132,7 +137,8 @@ private:
     static std::string build_dns_nat_script(
         const FirewallGlobalPrefilter& prefilter,
         bool dns_redirect,
-        bool router_origin_snat);
+        bool router_origin_snat,
+        const std::vector<std::string>& snat_interfaces);
 
 #ifdef KEEN_PBR3_TESTING
     friend class IptablesBuilderTest;

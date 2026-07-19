@@ -15,6 +15,7 @@
 
 #include "cache/cache_manager.hpp"
 #include "crash/crash_diagnostics.hpp"
+#include "log/file_sink.hpp"
 #include "config/config.hpp"
 #include "cmd/status.hpp"
 #include "cmd/test_routing.hpp"
@@ -36,6 +37,7 @@ namespace {
 struct CliOptions {
     std::string config_path{KEEN_PBR_DEFAULT_CONFIG_PATH};
     std::string log_level{"info"};
+    std::string log_file{KEEN_PBR_DEFAULT_LOG_FILE};
     std::string pid_file_override;
     bool no_api{false};
     bool has_pid_file_override{false};
@@ -57,6 +59,7 @@ void print_usage(const char* argv0) {
               << "Options:\n"
               << "  --config <path>    Path to JSON config file (default: " << KEEN_PBR_DEFAULT_CONFIG_PATH << ")\n"
               << "  --log-level <lvl>  Log level: error, warn, info, verbose, debug (default: info)\n"
+              << "  --log-file <path>  Write the log to a file as well (empty value disables)\n"
               << "  --pid-file <path>  Override daemon.pid_file when running the service command\n"
               << "  --no-api           Disable REST API at runtime\n"
               << "  --version          Show version and exit\n"
@@ -87,6 +90,12 @@ CliOptions parse_args(int argc, char* argv[]) {
                 std::exit(1);
             }
             opts.log_level = argv[++i];
+        } else if (std::strcmp(argv[i], "--log-file") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --log-file requires an argument\n";
+                std::exit(1);
+            }
+            opts.log_file = argv[++i];
         } else if (std::strcmp(argv[i], "--pid-file") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --pid-file requires an argument\n";
@@ -197,6 +206,20 @@ int main(int argc, char* argv[]) {
         // Initialize logger
         auto& logger = keen_pbr3::Logger::instance();
         logger.set_level(keen_pbr3::parse_log_level(opts.log_level));
+
+        // Only the long-running service keeps a log file: one-shot commands
+        // are run by hand and would just churn the file with noise.
+        if (opts.run_service && !opts.log_file.empty()) {
+            std::string log_file_error;
+            if (keen_pbr3::install_file_log_sink(opts.log_file, &log_file_error)) {
+                logger.info("keen-pbr {} (build {}) starting, log file: {}",
+                            KEEN_PBR3_VERSION_STRING,
+                            KEEN_PBR3_VERSION_RELEASE,
+                            opts.log_file);
+            } else {
+                logger.warn("Log file disabled: {}", log_file_error);
+            }
+        }
 
         // Load and parse configuration
         std::string json_str = read_file(opts.config_path);

@@ -151,6 +151,13 @@ public:
     // inbound interfaces to the router's local resolver (client DNS
     // enforcement). Backends implement this with a NAT REDIRECT chain.
     virtual void create_dns_redirect_rules() = 0;
+    // Masquerade forwarded traffic leaving through the listed tunnel
+    // interfaces. The firmware only masquerades source networks it routed
+    // itself, so clients of a VPN server on the router (and any other network
+    // it does not consider LAN) would enter the tunnel with a private source
+    // address and never receive an answer.
+    virtual void create_tunnel_snat_rules(
+        const std::vector<std::string>& interfaces) = 0;
 
     // Create a firewall rule that stops keen-pbr processing for matching packets
     // and leaves them unmodified for normal system routing.

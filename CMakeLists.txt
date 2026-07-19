@@ -70,6 +70,8 @@ option(ENABLE_THREAD_SAFETY_ANALYSIS "Enable Clang thread-safety diagnostics for
 option(KEEN_PBR_STATIC_LIBUNWIND "Prefer linking libunwind statically when a static archive is available" ON)
 set(KEEN_PBR_DEFAULT_CONFIG_PATH "${CMAKE_INSTALL_FULL_SYSCONFDIR}/keen-pbr/config.json" CACHE STRING
   "Default config file path used by keen-pbr when --config is not passed")
+set(KEEN_PBR_DEFAULT_LOG_FILE "${CMAKE_INSTALL_FULL_LOCALSTATEDIR}/log/keen-pbr.log" CACHE STRING
+  "Default log file written by the service command; empty disables file logging")
 set(KEEN_PBR_FRONTEND_ROOT "${CMAKE_INSTALL_FULL_DATADIR}/keen-pbr/frontend" CACHE STRING
   "Default frontend static root served by API (SPA assets)")
 set(KEEN_PBR_SYSTEM_RESOLVER_HOOK "${CMAKE_INSTALL_FULL_LIBDIR}/keen-pbr/dnsmasq.sh" CACHE STRING
@@ -216,6 +218,7 @@ endfunction()
 # Sources
 set(SOURCES
   src/log/logger.cpp
+  src/log/file_sink.cpp
   src/log/trace.cpp
   src/http/http_client.cpp
   src/crash/crash_diagnostics.cpp
@@ -297,6 +300,8 @@ if(WITH_API)
     src/api/handler_dns_test.cpp
     src/api/handler_connections.cpp
     src/api/handler_nfqws.cpp
+    src/api/handler_logs.cpp
+    src/api/handler_router_info.cpp
   )
 endif()
 
@@ -321,6 +326,7 @@ target_include_directories(keen-pbr PRIVATE
 )
 target_compile_definitions(keen-pbr PRIVATE
   KEEN_PBR_DEFAULT_CONFIG_PATH="${KEEN_PBR_DEFAULT_CONFIG_PATH}"
+  KEEN_PBR_DEFAULT_LOG_FILE="${KEEN_PBR_DEFAULT_LOG_FILE}"
   KEEN_PBR_FRONTEND_ROOT="${KEEN_PBR_FRONTEND_ROOT}"
   KEEN_PBR_SYSTEM_RESOLVER_HOOK="${KEEN_PBR_SYSTEM_RESOLVER_HOOK}"
   KEEN_PBR_TARGET_OS="${KEEN_PBR_TARGET_OS}"

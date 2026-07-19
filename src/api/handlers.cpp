@@ -13,6 +13,8 @@
 #include "handler_dns_test.hpp"
 #include "handler_connections.hpp"
 #include "handler_nfqws.hpp"
+#include "handler_logs.hpp"
+#include "handler_router_info.hpp"
 
 namespace keen_pbr3 {
 
@@ -29,6 +31,8 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_dns_test_handler(server, ctx);
     register_connections_handler(server, ctx);
     register_nfqws_handler(server, ctx);
+    register_logs_handler(server, ctx);
+    register_router_info_handler(server, ctx);
 }
 
 } // namespace keen_pbr3

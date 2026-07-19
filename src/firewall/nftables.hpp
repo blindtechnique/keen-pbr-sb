@@ -34,6 +34,8 @@ public:
     void create_drop_rule(const FirewallRuleCriteria& criteria = {}) override;
     // Buffer NAT redirect rules that force LAN plain-DNS to the local resolver.
     void create_dns_redirect_rules() override;
+    void create_tunnel_snat_rules(
+        const std::vector<std::string>& interfaces) override;
     // Buffer a pass-through verdict rule that matches the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -110,6 +112,7 @@ private:
     static nlohmann::json build_snat_chain_json();
     static nlohmann::json build_delete_snat_chain_json();
     static nlohmann::json build_snat_rule_json();
+    static nlohmann::json build_interface_snat_rule_json(const std::string& interface);
     // Build all prerouting rule add-commands, including global prefilter rules.
     static nlohmann::json build_rule_add_commands(
         const FirewallGlobalPrefilter& prefilter,
@@ -162,6 +165,7 @@ private:
     // Client DNS enforcement requested for the next apply().
     bool dns_redirect_requested_ = false;
     bool router_origin_snat_requested_ = false;
+    std::vector<std::string> snat_interfaces_;
 
 #ifdef KEEN_PBR3_TESTING
     friend class NftablesBuilderTest;

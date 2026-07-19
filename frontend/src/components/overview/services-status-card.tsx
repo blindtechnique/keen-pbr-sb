@@ -9,7 +9,10 @@ import { useGetHealthService, useGetTransports } from "@/api/generated/keen-api"
 import {
   usePostServiceActionMutation,
   usePostTransportActionMutation,
+  useRoutingControlPendingState,
 } from "@/api/mutations"
+import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
+import { Switch } from "@/components/ui/switch"
 import { SectionCard } from "@/components/shared/section-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -27,6 +30,14 @@ type ServiceRow = {
   state: "up" | "down" | "absent"
   onRestart?: () => void
   restarting?: boolean
+  // Only the routing service itself can be switched off from here.
+  toggle?: {
+    checked: boolean
+    disabled: boolean
+    label: string
+    onChange: (checked: boolean) => void
+  }
+  badges?: { label: string; tone: "success" | "warning" | "destructive" }[]
 }
 
 /**
@@ -64,6 +75,9 @@ export function ServicesStatusCard() {
     query: { refetchInterval: 10_000 },
   })
   const serviceRestartMutation = usePostServiceActionMutation("restart")
+  const serviceStartMutation = usePostServiceActionMutation("start")
+  const serviceStopMutation = usePostServiceActionMutation("stop")
+  const { anyPending: routingActionPending } = useRoutingControlPendingState()
   const transportActionMutation = usePostTransportActionMutation()
   const nfqwsRestartMutation = useMutation({
     mutationFn: async () => {
@@ -99,6 +113,11 @@ export function ServicesStatusCard() {
     serviceHealthQuery.data?.status === 200 ? serviceHealthQuery.data.data : undefined
   const serviceRunning = serviceHealth?.status === "running"
 
+  const dnsmasqBadge = getDnsmasqBadgeState(
+    serviceHealth?.resolver_live_status,
+    serviceHealth?.resolver_config_sync_state
+  )
+
   const nfqws = nfqwsQuery.data
   const rows: ServiceRow[] = [
     {
@@ -115,6 +134,25 @@ export function ServicesStatusCard() {
         ? () => serviceRestartMutation.mutate()
         : undefined,
       restarting: serviceRestartMutation.isPending,
+      toggle: {
+        checked: serviceRunning,
+        disabled: routingActionPending || !serviceHealth,
+        label: serviceRunning
+          ? t("overview.runtime.actions.stop")
+          : t("overview.runtime.actions.start"),
+        onChange: (checked: boolean) =>
+          checked
+            ? serviceStartMutation.mutate()
+            : serviceStopMutation.mutate(),
+      },
+      badges: serviceHealth
+        ? [
+            {
+              label: t(dnsmasqBadge.labelKey),
+              tone: dnsmasqBadge.tone,
+            },
+          ]
+        : undefined,
     },
     {
       key: "singbox",
@@ -160,12 +198,28 @@ export function ServicesStatusCard() {
             key={row.key}
           >
             <div className="min-w-0">
-              <div className="truncate text-sm font-medium">{row.label}</div>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="truncate text-sm font-medium">{row.label}</span>
+                {row.badges?.map((badge) => (
+                  <Badge key={badge.label} size="xs" variant={badge.tone}>
+                    {badge.label}
+                  </Badge>
+                ))}
+              </div>
               <div className="truncate text-xs text-muted-foreground">
                 {row.detail}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
+            {row.toggle ? (
+              <Switch
+                aria-label={row.toggle.label}
+                checked={row.toggle.checked}
+                disabled={row.toggle.disabled}
+                onCheckedChange={row.toggle.onChange}
+                title={row.toggle.label}
+              />
+            ) : null}
             {row.onRestart ? (
               <Button
                 aria-label={t("overview.services.restart")}

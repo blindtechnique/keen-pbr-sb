@@ -237,6 +237,22 @@ std::vector<RuleState> apply_runtime_firewall(
         }
     }
 
+    // Masquerade egress on every interface policy routing can steer traffic
+    // into. Without it, sources the firmware does not treat as LAN - notably
+    // clients of a VPN server running on the router - enter the tunnel with a
+    // private address and their connections hang unanswered.
+    {
+        std::vector<std::string> tunnel_interfaces;
+        for (const auto& outbound : all_outbounds) {
+            if (outbound.type != OutboundType::INTERFACE ||
+                !outbound.interface.has_value() || outbound.interface->empty()) {
+                continue;
+            }
+            tunnel_interfaces.push_back(*outbound.interface);
+        }
+        firewall.create_tunnel_snat_rules(tunnel_interfaces);
+    }
+
     firewall.apply(mode);
     return rule_states;
 }

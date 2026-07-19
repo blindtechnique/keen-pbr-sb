@@ -354,6 +354,22 @@ export const enTranslation = {
     },
   },
   overview: {
+    router: {
+      title: "Router",
+      unavailable: "Router details are unavailable: the firmware is not answering service requests.",
+      cpu: "CPU",
+      memory: "Memory",
+      memoryValue: "{{used}} MB / {{total}} MB ({{percent}}%)",
+      memoryTotalOnly: "{{total}} MB",
+      wifi: "Wi-Fi",
+      wan: "WAN address",
+      clients: "Clients",
+      clientsValue: "{{active}} active / {{total}} total",
+      firmware: "Firmware",
+      uptime: "Uptime",
+      uptimeValue: "{{days}}d {{hours}}h {{minutes}}m",
+      loadAverage: "Load average",
+    },
     services: {
       version: "Version {{version}}, build {{build}}",
       unknown: "State unknown",

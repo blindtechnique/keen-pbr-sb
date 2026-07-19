@@ -32,6 +32,7 @@ import { RoutingHealthCard } from "@/components/overview/routing-health-card"
 import { DnsCheckWidget } from "@/components/overview/dns-check-widget"
 import { OutboundStateList } from "@/components/overview/outbound-state-list"
 import { ServicesStatusCard } from "@/components/overview/services-status-card"
+import { RouterInfoCard } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
 import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
@@ -120,97 +121,7 @@ export function OverviewPage() {
   return (
     <div className="space-y-3">
       <div className="grid gap-3 xl:grid-cols-3">
-        <SectionCard
-          className="h-full"
-          contentClassName="flex flex-1 flex-col"
-          title={t("overview.runtime.title")}
-          description={t("overview.runtime.description")}
-        >
-          {serviceHealthQuery.isLoading ? <ServiceSummarySkeleton /> : null}
-
-          {serviceHealthQuery.isError ? (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
-              <AlertDescription>
-                {t("overview.runtime.loadError")}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          {serviceHealth ? (
-            <div className="flex h-full flex-1 flex-col">
-              <div className="mb-2 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                <div>
-                  <div className="mb-1 text-sm text-muted-foreground">
-                    {t("overview.runtime.version")}
-                  </div>
-                  <div className="text-lg font-semibold">
-                    {serviceHealth.version}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    build {serviceHealth.build}
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1 text-sm text-muted-foreground">
-                    {t("overview.runtime.router")}
-                  </div>
-                  <div className="text-lg font-semibold">
-                    {`${serviceHealth.os_type} ${serviceHealth.os_version}`}
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1 text-sm text-muted-foreground">
-                    {t("overview.runtime.status")}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge
-                      tone={mapServiceStatusTone(serviceHealth.status)}
-                    >
-                      {serviceHealth.status}
-                    </StatusBadge>
-                    <StatusBadge tone={dnsmasqBadge.tone}>
-                      {t(dnsmasqBadge.labelKey)}
-                    </StatusBadge>
-                  </div>
-                </div>
-              </div>
-              <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-2">
-                <label className="flex min-w-0 cursor-pointer items-center gap-2">
-                  <Switch
-                    aria-label={
-                      isServiceRunning
-                        ? t("overview.runtime.actions.stop")
-                        : t("overview.runtime.actions.start")
-                    }
-                    checked={isServiceRunning}
-                    disabled={actionPending || !hasServiceHealth}
-                    onCheckedChange={(checked) =>
-                      checked
-                        ? postServiceStartMutation.mutate()
-                        : postServiceStopMutation.mutate()
-                    }
-                  />
-                  <span className="truncate text-sm text-muted-foreground">
-                    {isServiceRunning
-                      ? t("overview.runtime.actions.stop")
-                      : t("overview.runtime.actions.start")}
-                  </span>
-                </label>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={
-                    actionPending || !hasServiceHealth || !isServiceRunning
-                  }
-                  onClick={() => postServiceRestartMutation.mutate()}
-                >
-                  <RotateCw className="mr-1 h-3 w-3" />
-                  {t("overview.runtime.actions.restart")}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </SectionCard>
+        <RouterInfoCard />
 
         <DnsCheckWidget
           dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}

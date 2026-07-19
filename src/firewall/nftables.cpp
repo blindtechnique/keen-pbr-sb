@@ -6,6 +6,7 @@
 #include "../util/safe_exec.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <sys/socket.h>
@@ -142,6 +143,20 @@ void NftablesFirewall::create_output_mark_rule(uint32_t fwmark,
                             /*output_scope=*/true);
     append_rules_for_family(AF_INET6, PendingRule::Mark, fwmark, criteria,
                             /*output_scope=*/true);
+}
+
+void NftablesFirewall::create_tunnel_snat_rules(
+    const std::vector<std::string>& interfaces) {
+    if (interfaces.empty()) {
+        return;
+    }
+    router_origin_snat_requested_ = true;
+    for (const auto& iface : interfaces) {
+        if (std::find(snat_interfaces_.begin(), snat_interfaces_.end(), iface) ==
+            snat_interfaces_.end()) {
+            snat_interfaces_.push_back(iface);
+        }
+    }
 }
 
 void NftablesFirewall::create_dns_redirect_rules() {
@@ -331,6 +346,24 @@ nlohmann::json NftablesFirewall::build_snat_rule_json() {
             kRouterOriginMark
         })}}},
         {"right", kRouterOriginMark}
+    }}});
+    expr.push_back({{"counter", nullptr}});
+    expr.push_back({{"masquerade", nlohmann::json::object()}});
+    return {{"add", {{"rule", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"chain", SNAT_CHAIN_NAME},
+        {"expr", expr}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_interface_snat_rule_json(
+    const std::string& interface) {
+    nlohmann::json expr = nlohmann::json::array();
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"meta", {{"key", "oifname"}}}}},
+        {"right", interface}
     }}});
     expr.push_back({{"counter", nullptr}});
     expr.push_back({{"masquerade", nlohmann::json::object()}});
@@ -838,6 +871,11 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     if (router_origin_snat_requested_) {
         arr.push_back(build_snat_chain_json());
         arr.push_back(build_snat_rule_json());
+        // Forwarded traffic from networks the firmware does not masquerade for
+        // this interface, such as clients of a VPN server on the router.
+        for (const auto& iface : snat_interfaces_) {
+            arr.push_back(build_interface_snat_rule_json(iface));
+        }
     }
 
     // Rules
@@ -893,6 +931,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     pending_rules_.clear();
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
+    snat_interfaces_.clear();
     table_created_ = true;
 }
 

@@ -357,6 +357,22 @@ export const ruTranslation = {
     },
   },
   overview: {
+    router: {
+      title: "Роутер",
+      unavailable: "Сведения о роутере недоступны: прошивка не отвечает на служебные запросы.",
+      cpu: "Процессор",
+      memory: "Память",
+      memoryValue: "{{used}} МБ / {{total}} МБ ({{percent}}%)",
+      memoryTotalOnly: "{{total}} МБ",
+      wifi: "Wi-Fi",
+      wan: "Адрес WAN",
+      clients: "Клиенты",
+      clientsValue: "{{active}} активно / {{total}} всего",
+      firmware: "Версия ПО",
+      uptime: "Время работы",
+      uptimeValue: "{{days}} д {{hours}} ч {{minutes}} мин",
+      loadAverage: "Средняя нагрузка",
+    },
     services: {
       version: "Версия {{version}}, сборка {{build}}",
       unknown: "Состояние неизвестно",

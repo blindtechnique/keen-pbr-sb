@@ -125,9 +125,17 @@ public:
   static std::string build_dns_nat_script(
       const FirewallGlobalPrefilter &prefilter,
       bool dns_redirect = true,
-      bool router_origin_snat = false) {
-    return IptablesFirewall::build_dns_nat_script(prefilter, dns_redirect,
-                                                  router_origin_snat);
+      bool router_origin_snat = false,
+      const std::vector<std::string> &snat_interfaces = {}) {
+    return IptablesFirewall::build_dns_nat_script(
+        prefilter, dns_redirect, router_origin_snat, snat_interfaces);
+  }
+
+  static std::size_t tunnel_snat_interface_count(
+      const std::vector<std::string> &interfaces) {
+    IptablesFirewall fw;
+    fw.create_tunnel_snat_rules(interfaces);
+    return fw.snat_interfaces_.size();
   }
 
   static std::string build_output_mark_script_with_snat(
@@ -394,6 +402,21 @@ TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {
   CHECK(s.find(":KeenPbrSnat - [0:0]\n-A POSTROUTING -j KeenPbrSnat\n") != std::string::npos);
   CHECK(s.find("-A KeenPbrSnat -m mark --mark 0x1000000/0x1000000 -j MASQUERADE\n") != std::string::npos);
   CHECK(s.find("KeenPbrDnsRdr") == std::string::npos);
+}
+
+TEST_CASE("build_dns_nat_script: tunnel interfaces masquerade forwarded traffic") {
+  // Clients of a VPN server on the router are not a network the firmware
+  // masquerades for these interfaces, so keen-pbr has to do it itself.
+  auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
+                                   /*router_origin_snat=*/true,
+                                   {"nwg2", "mooo_vless"});
+  CHECK(s.find("-A KeenPbrSnat -o nwg2 -j MASQUERADE\n") != std::string::npos);
+  CHECK(s.find("-A KeenPbrSnat -o mooo_vless -j MASQUERADE\n") !=
+        std::string::npos);
+}
+
+TEST_CASE("create_tunnel_snat_rules: deduplicates interfaces") {
+  CHECK(T::tunnel_snat_interface_count({"nwg2", "nwg2", "nwg3"}) == 2);
 }
 
 TEST_CASE("create_output_mark_rule: carries the router-origin bit for masquerading") {

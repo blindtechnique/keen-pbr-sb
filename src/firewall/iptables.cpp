@@ -6,6 +6,7 @@
 #include "../util/ipv6_support.hpp"
 #include "../util/safe_exec.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <set>
 #include <string>
@@ -165,6 +166,20 @@ void IptablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
     append_rules_for_family(true, PendingRule::Pass, 0, criteria);
 }
 
+void IptablesFirewall::create_tunnel_snat_rules(
+    const std::vector<std::string>& interfaces) {
+    if (interfaces.empty()) {
+        return;
+    }
+    router_origin_snat_requested_ = true;
+    for (const auto& iface : interfaces) {
+        if (std::find(snat_interfaces_.begin(), snat_interfaces_.end(), iface) ==
+            snat_interfaces_.end()) {
+            snat_interfaces_.push_back(iface);
+        }
+    }
+}
+
 void IptablesFirewall::create_dns_redirect_rules() {
     dns_redirect_requested_ = true;
 }
@@ -172,7 +187,8 @@ void IptablesFirewall::create_dns_redirect_rules() {
 std::string IptablesFirewall::build_dns_nat_script(
     const FirewallGlobalPrefilter& prefilter,
     bool dns_redirect,
-    bool router_origin_snat) {
+    bool router_origin_snat,
+    const std::vector<std::string>& snat_interfaces) {
     std::vector<std::string> iface_frags;
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
@@ -204,6 +220,15 @@ std::string IptablesFirewall::build_dns_nat_script(
         s += keen_pbr3::format(
             "-A {} -m mark --mark {:#x}/{:#x} -j MASQUERADE\n",
             SNAT_CHAIN_NAME, kRouterOriginMark, kRouterOriginMark);
+        // Forwarded traffic from networks the firmware does not masquerade for
+        // this interface - clients of a VPN server running on the router, guest
+        // segments, anything routed here by policy rather than by the firmware.
+        // Flows the firmware already translated keep their conntrack entry and
+        // are unaffected, so this only fills the gap.
+        for (const auto& iface : snat_interfaces) {
+            s += keen_pbr3::format("-A {} -o {} -j MASQUERADE\n",
+                                   SNAT_CHAIN_NAME, iface);
+        }
     }
     s += "COMMIT\n";
     return s;
@@ -537,7 +562,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     if (dns_redirect_requested_ || router_origin_snat_requested_) {
         const std::string nat_script = build_dns_nat_script(
             global_prefilter_, dns_redirect_requested_,
-            router_origin_snat_requested_);
+            router_origin_snat_requested_, snat_interfaces_);
         pipe_to_cmd({"iptables-restore", "--noflush", "--counters"}, nat_script);
         dns_nat_v4_created_ = true;
         if (effective_ipv6) {
@@ -555,6 +580,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     }
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
+    snat_interfaces_.clear();
 
     // Clear pending buffers
     pending_sets_.clear();
