@@ -34,7 +34,12 @@ fetch_url() {
 }
 
 fetch_url "$RELEASE_JSON" "$RELEASE_API"
-release_tag=$(grep '"tag_name"' "$RELEASE_JSON" | head -n 1 | cut -d '"' -f 4)
+# The GitHub API may answer with pretty-printed or compact JSON. Splitting on
+# commas first makes the extraction work for both instead of relying on the
+# tag sitting alone on its own line.
+release_tag=$(tr ',' '\n' < "$RELEASE_JSON" \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1)
 case "$release_tag" in
     ""|*[!A-Za-z0-9._-]*) echo "ОШИБКА: GitHub вернул некорректный тег выпуска"; exit 1 ;;
 esac

@@ -65,7 +65,9 @@ fetch() {
 }
 
 github_asset_urls() {
-    grep '"browser_download_url"' "$1" | cut -d '"' -f 4
+    # Tolerate both pretty-printed and compact GitHub API responses.
+    tr ',' '\n' < "$1" \
+        | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
 detect_target() {
