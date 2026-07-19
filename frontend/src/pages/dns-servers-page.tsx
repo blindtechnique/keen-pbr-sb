@@ -125,7 +125,7 @@ export function DnsServersPage() {
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
       {!configQuery.isLoading && !configQuery.isError ? (
-        <div className="mb-4 max-w-3xl">
+        <div className="mb-4">
           <FallbackServersField
             config={config}
             onChange={handleFallbackChange}

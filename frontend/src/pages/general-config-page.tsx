@@ -348,8 +348,6 @@ function LoadedGeneralConfigPage({
 
       <AuthSettingsCard />
 
-      <SoftwareUpdateCard />
-
       <Card>
         <CardHeader>
           <CardTitle>{t("pages.settings.autoupdate.title")}</CardTitle>
@@ -530,6 +528,8 @@ function LoadedGeneralConfigPage({
           </FieldGroup>
         </CardContent>
       </Card>
+
+      <SoftwareUpdateCard />
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 

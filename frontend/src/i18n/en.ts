@@ -186,6 +186,12 @@ export const enTranslation = {
     },
   },
   connections: {
+    age: {
+      now: "just now",
+      seconds: "{{count}}s ago",
+      minutes: "{{count}}m ago",
+      hours: "{{count}}h ago",
+    },
     deviceCount: "{{count}} devices",
     routeDirect: "Direct",
     empty: "No connections",

@@ -200,7 +200,7 @@ function SessionRow({
   t,
 }: {
   item: Connection
-  t: (key: string) => string
+  t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const [primaryDomain, ...otherDomains] = item.destination_domains
 
@@ -223,6 +223,12 @@ function SessionRow({
         ) : null}
       </div>
       <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+        <span
+          className="text-xs tabular-nums text-muted-foreground"
+          title={new Date(item.last_seen * 1000).toLocaleString()}
+        >
+          {formatLastSeen(item.last_seen, t)}
+        </span>
         <span className="text-xs text-muted-foreground">
           {item.protocol.toUpperCase()}
         </span>
@@ -233,6 +239,31 @@ function SessionRow({
       </div>
     </div>
   )
+}
+
+/**
+ * Relative age reads better than a clock here: what matters is whether a
+ * connection is live right now, not the exact second it appeared. The absolute
+ * time stays available in the tooltip.
+ */
+function formatLastSeen(
+  lastSeen: number,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (!lastSeen) {
+    return ""
+  }
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - lastSeen)
+  if (seconds < 10) {
+    return t("connections.age.now")
+  }
+  if (seconds < 60) {
+    return t("connections.age.seconds", { count: seconds })
+  }
+  if (seconds < 3600) {
+    return t("connections.age.minutes", { count: Math.floor(seconds / 60) })
+  }
+  return t("connections.age.hours", { count: Math.floor(seconds / 3600) })
 }
 
 /** Direct traffic stays neutral; anything routed into a tunnel is highlighted. */

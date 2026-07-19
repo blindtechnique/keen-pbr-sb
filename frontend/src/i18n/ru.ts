@@ -187,6 +187,12 @@ export const ruTranslation = {
     },
   },
   connections: {
+    age: {
+      now: "только что",
+      seconds: "{{count}} с назад",
+      minutes: "{{count}} мин назад",
+      hours: "{{count}} ч назад",
+    },
     deviceCount: "Устройств: {{count}}",
     routeDirect: "Напрямую",
     empty: "Соединений нет",
@@ -1134,18 +1140,18 @@ export const ruTranslation = {
       },
       validation: {
         invalidFallback:
-          "Основные DNS сервера должны ссылаться на существующие теги серверов.",
+          "Основные DNS-серверы должны ссылаться на существующие теги серверов.",
         invalidFallbackChange:
           "Нельзя изменить fallback, пока DNS-правила невалидны.",
         invalidResult:
           "Нельзя сохранить, потому что итоговые DNS-правила невалидны.",
       },
       fallback: {
-        title: "Основные DNS сервера",
+        title: "Основные DNS-серверы",
         description:
           "Упорядоченный список DNS-серверов, которые dnsmasq использует, когда ни одно DNS-правило не подходит.",
         add: "Добавить основной DNS сервер",
-        placeholderTitle: "Основные DNS сервера не выбраны",
+        placeholderTitle: "Основные DNS-серверы не выбраны",
         placeholderDescription:
           "Добавьте один или несколько DNS-серверов. Их порядок сохраняется и используется в сгенерированном конфиге dnsmasq.",
         noneDefined: "На странице DNS-серверы не добавлено ни одного сервера.",
