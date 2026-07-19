@@ -107,6 +107,10 @@ void IptablesFirewall::append_rules_for_family(bool ipv6,
                 pr.criteria.dst_addr = dst.empty()
                     ? std::vector<std::string>{}
                     : std::vector<std::string>{dst};
+                if (output_scope && action == PendingRule::Mark) {
+                    pr.fwmark |= kRouterOriginMark;
+                    pr.fwmark_mask |= kRouterOriginMark;
+                }
                 pr.output = output_scope;
                 pending_rules_.push_back(std::move(pr));
             }
@@ -128,6 +132,7 @@ void IptablesFirewall::create_mark_rule(uint32_t fwmark,
 
 void IptablesFirewall::create_output_mark_rule(uint32_t fwmark,
                                                const FirewallRuleCriteria& criteria) {
+    router_origin_snat_requested_ = true;
     // Router-originated traffic (dnsmasq upstream queries, list downloads with
     // detour) never traverses PREROUTING, so DNS detour marks must also be
     // present in mangle OUTPUT. Ipset-based criteria are intentionally not
@@ -165,7 +170,9 @@ void IptablesFirewall::create_dns_redirect_rules() {
 }
 
 std::string IptablesFirewall::build_dns_nat_script(
-    const FirewallGlobalPrefilter& prefilter) {
+    const FirewallGlobalPrefilter& prefilter,
+    bool dns_redirect,
+    bool router_origin_snat) {
     std::vector<std::string> iface_frags;
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
@@ -177,14 +184,26 @@ std::string IptablesFirewall::build_dns_nat_script(
     }
 
     std::string s;
-    s += keen_pbr3::format("*nat\n:{} - [0:0]\n-A PREROUTING -j {}\n",
-                           DNS_NAT_CHAIN_NAME, DNS_NAT_CHAIN_NAME);
-    for (const auto& iface_frag : iface_frags) {
-        for (const char* proto : {"udp", "tcp"}) {
-            s += keen_pbr3::format(
-                "-A {}{} -p {} --dport 53 -j REDIRECT --to-ports 53\n",
-                DNS_NAT_CHAIN_NAME, iface_frag, proto);
+    s += "*nat\n";
+    if (dns_redirect) {
+        s += keen_pbr3::format(":{} - [0:0]\n-A PREROUTING -j {}\n",
+                               DNS_NAT_CHAIN_NAME, DNS_NAT_CHAIN_NAME);
+        for (const auto& iface_frag : iface_frags) {
+            for (const char* proto : {"udp", "tcp"}) {
+                s += keen_pbr3::format(
+                    "-A {}{} -p {} --dport 53 -j REDIRECT --to-ports 53\n",
+                    DNS_NAT_CHAIN_NAME, iface_frag, proto);
+            }
         }
+    }
+    if (router_origin_snat) {
+        // Without this the packet keeps the source address chosen before the
+        // mark was applied and the tunnel peer drops it.
+        s += keen_pbr3::format(":{} - [0:0]\n-A POSTROUTING -j {}\n",
+                               SNAT_CHAIN_NAME, SNAT_CHAIN_NAME);
+        s += keen_pbr3::format(
+            "-A {} -m mark --mark {:#x}/{:#x} -j MASQUERADE\n",
+            SNAT_CHAIN_NAME, kRouterOriginMark, kRouterOriginMark);
     }
     s += "COMMIT\n";
     return s;
@@ -513,9 +532,12 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         chain_v6_created_ = true;
     }
 
-    // Phase 3: client DNS enforcement (NAT REDIRECT for plain DNS).
-    if (dns_redirect_requested_) {
-        const std::string nat_script = build_dns_nat_script(global_prefilter_);
+    // Phase 3: nat rules — client DNS enforcement and the masquerade that keeps
+    // router-originated detour traffic usable.
+    if (dns_redirect_requested_ || router_origin_snat_requested_) {
+        const std::string nat_script = build_dns_nat_script(
+            global_prefilter_, dns_redirect_requested_,
+            router_origin_snat_requested_);
         pipe_to_cmd({"iptables-restore", "--noflush", "--counters"}, nat_script);
         dns_nat_v4_created_ = true;
         if (effective_ipv6) {
@@ -532,6 +554,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         }
     }
     dns_redirect_requested_ = false;
+    router_origin_snat_requested_ = false;
 
     // Clear pending buffers
     pending_sets_.clear();
@@ -571,12 +594,18 @@ void IptablesFirewall::cleanup_rules_impl() {
         safe_exec({"iptables", "-t", "nat", "-D", "PREROUTING", "-j", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"iptables", "-t", "nat", "-F", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"iptables", "-t", "nat", "-X", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "nat", "-D", "POSTROUTING", "-j", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "nat", "-F", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "nat", "-X", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
         dns_nat_v4_created_ = false;
     }
     if (dns_nat_v6_created_) {
         safe_exec({"ip6tables", "-t", "nat", "-D", "PREROUTING", "-j", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"ip6tables", "-t", "nat", "-F", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"ip6tables", "-t", "nat", "-X", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "nat", "-D", "POSTROUTING", "-j", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "nat", "-F", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "nat", "-X", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
         dns_nat_v6_created_ = false;
     }
 }

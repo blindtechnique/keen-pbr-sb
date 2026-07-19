@@ -23,7 +23,7 @@
   --destructive-foreground: oklch(1 0 0);
   --warning: oklch(0.769 0.188 70.08);
   --warning-foreground: oklch(52.354% 0.12011 59.695);
-  --success: lab(59.0978% -58.6621 41.2579);
+  --success: #23974a;
   --success-foreground: oklch(0.98 0 0);
   --border: #dce2e6;
   --input: #cfd7dc;
@@ -42,8 +42,8 @@
   --sidebar-border: #dfe5e8;
   --sidebar-ring: #0086cb;
   --font-sans:
-    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+    Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif,
     "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol",
     "Noto Color Emoji";
   --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
@@ -90,7 +90,7 @@
   --destructive-foreground: oklch(0.985 0 0);
   --warning: oklch(0.8 0.18 90);
   --warning-foreground: oklch(86.616% 0.13654 92.109);
-  --success: oklch(0.696 0.17 162.48);
+  --success: #48b96c;
   --success-foreground: oklch(0.985 0 0);
   --border: #2a3a45;
   --input: #3a4a54;

@@ -9,9 +9,7 @@ import {
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
-import { LanguageSelector } from "@/components/language-selector"
 import { AppBrandHeader } from "@/components/layout/app-brand-header"
-import { ThemeSelector } from "@/components/theme-selector"
 import { NavMain } from "@/components/nav-main"
 import {
   Sidebar,
@@ -83,10 +81,6 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             title: t("nav.items.routingRules"),
             url: "/routing-rules",
           },
-          {
-            title: t("nav.items.dnsRules"),
-            url: "/dns-rules",
-          },
         ],
       },
     ],
@@ -102,8 +96,6 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
       </SidebarContent>
       <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t px-3 py-3 group-data-[collapsible=icon]:hidden"}>
         <div className="space-y-3">
-          <LanguageSelector />
-          <ThemeSelector />
           <Button
             className="w-full justify-start"
             onClick={async () => {

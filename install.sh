@@ -280,6 +280,22 @@ configure_web_auth() {
             ;;
     esac
 
+    say "Вход можно проверять учётной записью самого роутера — тогда отдельный пароль не нужен и не хранится."
+    router_auth=$(ask "Использовать учётную запись роутера (Keenetic/Netcraze)? [Y/n]:" "Y")
+    case "$router_auth" in
+        n|N|no|NO) ;;
+        *)
+            endpoint=$(ask "Адрес веб-интерфейса роутера (по умолчанию 127.0.0.1:80):" "127.0.0.1:80")
+            umask 077
+            printf '{"enabled":true,"provider":"keenetic","keenetic_endpoint":"%s","session_ttl_seconds":604800}\n' \
+                "$endpoint" > "$auth_file"
+            chmod 0600 "$auth_file"
+            /opt/etc/init.d/S80keen-pbr restart
+            say "Вход в keen-pbr-sb теперь выполняется логином и паролем администратора роутера."
+            return 0
+            ;;
+    esac
+
     say "По возможности используйте отдельный пароль. Можно ввести реквизиты root Entware или администратора Keenetic, но keen-pbr-sb хранит и проверяет собственную локальную копию."
     username=$(ask "Логин веб-интерфейса (по умолчанию admin):" "admin")
     password=$(ask_secret "Пароль веб-интерфейса:")
@@ -287,7 +303,7 @@ configure_web_auth() {
     escaped_username=$(printf '%s' "$username" | sed 's/[\\"]/\\&/g')
     escaped_password=$(printf '%s' "$password" | sed 's/[\\"]/\\&/g')
     umask 077
-    printf '{"enabled":true,"username":"%s","password":"%s","session_ttl_seconds":604800}\n' \
+    printf '{"enabled":true,"provider":"local","username":"%s","password":"%s","session_ttl_seconds":604800}\n' \
         "$escaped_username" "$escaped_password" > "$auth_file"
     chmod 0600 "$auth_file"
     /opt/etc/init.d/S80keen-pbr restart

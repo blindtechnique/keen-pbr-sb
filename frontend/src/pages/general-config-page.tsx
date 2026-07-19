@@ -24,6 +24,8 @@ import {
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
+import { SchedulePicker } from "@/components/shared/schedule-picker"
+import { AuthSettingsCard } from "@/components/settings/auth-settings-card"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { Button } from "@/components/ui/button"
 import {
@@ -44,7 +46,6 @@ import {
 import { toast } from "sonner"
 
 type SettingsDraft = {
-  strictEnforcement: boolean
   skipMarkedPackets: boolean
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
@@ -57,7 +58,6 @@ type SettingsDraft = {
 }
 
 const fallbackDraft: SettingsDraft = {
-  strictEnforcement: true,
   skipMarkedPackets: true,
   ipv6Enabled: true,
   clientDnsEnforcement: false,
@@ -70,7 +70,6 @@ const fallbackDraft: SettingsDraft = {
 }
 
 const SETTINGS_FIELD_NAMES = {
-  strictEnforcement: "strictEnforcement",
   skipMarkedPackets: "skipMarkedPackets",
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
@@ -91,7 +90,7 @@ export function GeneralConfigPage() {
   const loadedConfig = selectConfig(configQuery.data)
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         description={t("pages.settings.description")}
         title={t("pages.settings.title")}
@@ -212,37 +211,6 @@ function LoadedGeneralConfigPage({
         </CardHeader>
         <CardContent>
           <FieldGroup>
-            <form.Field name={SETTINGS_FIELD_NAMES.strictEnforcement}>
-              {(field) => (
-                <Field>
-                  <FieldContent>
-                    <div className="flex items-center space-x-3">
-                      <Checkbox
-                        checked={field.state.value}
-                        id="strict-enforcement"
-                        onCheckedChange={(checked) =>
-                          field.handleChange(checked === true)
-                        }
-                      />
-                      <FieldLabel
-                        className="cursor-pointer flex-col items-start gap-0"
-                        htmlFor="strict-enforcement"
-                      >
-                        {t("pages.settings.general.strictEnforcementLabel")}
-                      </FieldLabel>
-                    </div>
-                    <FieldHint
-                      description={t(
-                        "pages.settings.general.strictEnforcementHint"
-                      )}
-                    />
-                  </FieldContent>
-                </Field>
-              )}
-            </form.Field>
-
-            <FieldSeparator />
-
             <form.Field name={SETTINGS_FIELD_NAMES.skipMarkedPackets}>
               {(field) => (
                 <Field>
@@ -378,6 +346,8 @@ function LoadedGeneralConfigPage({
         </CardContent>
       </Card>
 
+      <AuthSettingsCard />
+
       <SoftwareUpdateCard />
 
       <Card>
@@ -424,50 +394,19 @@ function LoadedGeneralConfigPage({
 
                 return (
                   <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor="general-cron">
+                    <FieldLabel>
                       {t("pages.settings.autoupdate.cronLabel")}
                     </FieldLabel>
                     <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id="general-cron"
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
+                      <SchedulePicker
+                        onChange={(value) => field.handleChange(value)}
                         value={field.state.value}
                       />
                       <FieldHint
-                        description={
-                          <>
-                            {t("pages.settings.autoupdate.cronHintPrefix")}{" "}
-                            <a
-                              className="underline underline-offset-3 hover:text-foreground"
-                              href={getCrontabGuruUrl(field.state.value)}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              Crontab Guru
-                            </a>{" "}
-                            {t("pages.settings.autoupdate.cronHintSuffix")}
-                          </>
-                        }
-                        error={
-                          error ? (
-                            <>
-                              {error}{" "}
-                              <a
-                                className="underline underline-offset-3 hover:text-foreground"
-                                href={getCrontabGuruUrl(field.state.value)}
-                                rel="noreferrer"
-                                target="_blank"
-                              >
-                                {t("pages.settings.autoupdate.openInGuru")}
-                              </a>
-                              .
-                            </>
-                          ) : null
-                        }
+                        description={t(
+                          "pages.settings.autoupdate.scheduleHint"
+                        )}
+                        error={error}
                       />
                     </FieldContent>
                   </Field>
@@ -853,7 +792,7 @@ function GeneralConfigPageSkeleton() {
           <Skeleton className="h-4 w-64" />
         </CardHeader>
         <CardContent>
-          <div className="space-y-6">
+          <div className="space-y-3">
             <div className="flex items-start gap-3">
               <Skeleton className="mt-0.5 h-4 w-4 rounded-sm" />
               <div className="space-y-2">
@@ -877,7 +816,7 @@ function GeneralConfigPageSkeleton() {
           <Skeleton className="h-4 w-72" />
         </CardHeader>
         <CardContent>
-          <div className="space-y-6">
+          <div className="space-y-3">
             {[0, 1, 2].map((index) => (
               <div className="space-y-6" key={index}>
                 {index > 0 ? <Skeleton className="h-px w-full" /> : null}
@@ -907,8 +846,6 @@ function getFirstFieldError(errors: unknown[]) {
 
 function getDraftFromConfig(config: ConfigObject): SettingsDraft {
   return {
-    strictEnforcement:
-      config.daemon?.strict_enforcement ?? fallbackDraft.strictEnforcement,
     skipMarkedPackets:
       config.daemon?.skip_marked_packets ?? fallbackDraft.skipMarkedPackets,
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
@@ -939,7 +876,6 @@ function buildUpdatedConfig(
     ...config,
     daemon: {
       ...config.daemon,
-      strict_enforcement: draft.strictEnforcement,
       skip_marked_packets: draft.skipMarkedPackets,
       ipv6_enabled: draft.ipv6Enabled,
     },
@@ -1010,14 +946,6 @@ function toBackendIntegerValue(parsed: number | null, raw: string): number {
   return raw as unknown as number
 }
 
-function getCrontabGuruUrl(value: string) {
-  if (getCronHash(value) === null) {
-    return "https://crontab.guru/"
-  }
-
-  return `https://crontab.guru/#${getCronHash(value)}`
-}
-
 function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
   if (
     path === "route.inbound_interfaces" ||
@@ -1027,8 +955,6 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
   }
 
   switch (path) {
-    case "daemon.strict_enforcement":
-      return SETTINGS_FIELD_NAMES.strictEnforcement
     case "daemon.skip_marked_packets":
       return SETTINGS_FIELD_NAMES.skipMarkedPackets
     case "daemon.ipv6_enabled":
@@ -1050,16 +976,3 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
   }
 }
 
-function getCronHash(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return null
-  }
-
-  const fields = trimmed.split(/\s+/)
-  if (fields.length !== 5) {
-    return null
-  }
-
-  return fields.join("_")
-}

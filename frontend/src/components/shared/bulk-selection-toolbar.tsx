@@ -9,7 +9,7 @@ export function BulkSelectionToolbar({
 }) {
   return (
     <div
-      className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2"
+      className="flex h-11 w-full items-center gap-2 overflow-x-auto rounded-md border bg-muted/20 px-3"
       data-testid="bulk-selection-toolbar"
     >
       <span

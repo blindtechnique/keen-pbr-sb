@@ -257,6 +257,18 @@ func (s *SingBox) ensureForwardingRules() error {
 	return nil
 }
 
+// EnsureRuntimeRules re-applies the firewall state this transport owns. Safe to
+// call repeatedly: each rule is checked before it is added.
+func (s *SingBox) EnsureRuntimeRules() error {
+	s.mu.Lock()
+	running := s.cmd != nil && s.cmd.Process != nil
+	s.mu.Unlock()
+	if !running {
+		return nil
+	}
+	return s.ensureForwardingRules()
+}
+
 func (s *SingBox) removeForwardingRules() {
 	removeForwardingRules(s.spec.Interface, true)
 }

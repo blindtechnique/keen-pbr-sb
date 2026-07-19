@@ -41,7 +41,7 @@ export function NavMain({
 
             return (
               <SidebarMenuItem key={item.title}>
-                <div className="flex h-10 items-center gap-2.5 px-2 text-xs font-semibold tracking-[0.03em] text-primary uppercase group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
+                <div className="mt-1 flex h-8 items-center gap-2.5 px-2 text-[11px] font-semibold tracking-[0.04em] text-primary uppercase group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
                   {Icon ? <Icon className="size-4 text-primary" /> : null}
                   <span className="group-data-[collapsible=icon]:hidden">{item.title}</span>
                 </div>
@@ -56,8 +56,8 @@ export function NavMain({
                             aria-current={navActive ? "page" : undefined}
                             className={
                               navActive
-                                ? "min-h-9 rounded-none border-0 bg-sidebar-accent px-3 text-sm font-medium text-sidebar-accent-foreground"
-                                : "min-h-9 rounded-none border-0 px-3 text-sm text-sidebar-foreground/85 hover:bg-sidebar-accent/70"
+                                ? "h-8 min-h-8 rounded-none border-0 bg-sidebar-accent px-3 text-[13px] font-medium text-foreground"
+                                : "h-8 min-h-8 rounded-none border-0 px-3 text-[13px] text-foreground hover:bg-sidebar-accent/70"
                             }
                             data-nav-item={subItem.url}
                             href={subItem.url}

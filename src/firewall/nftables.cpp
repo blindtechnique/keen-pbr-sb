@@ -108,6 +108,10 @@ void NftablesFirewall::append_rules_for_family(int family,
         if (!criteria.dst_addr.empty()) {
             pr.criteria.dst_addr = filtered_dst_addrs;
         }
+        if (output_scope && action == PendingRule::Mark) {
+            pr.fwmark |= kRouterOriginMark;
+            pr.fwmark_mask |= kRouterOriginMark;
+        }
         pr.output = output_scope;
         pending_rules_.push_back(std::move(pr));
     }
@@ -131,6 +135,7 @@ void NftablesFirewall::create_mark_rule(uint32_t fwmark,
 
 void NftablesFirewall::create_output_mark_rule(uint32_t fwmark,
                                                const FirewallRuleCriteria& criteria) {
+    router_origin_snat_requested_ = true;
     // Router-originated traffic (dnsmasq upstream queries with detour) never
     // traverses the prerouting hook; these marks live in the output chain.
     append_rules_for_family(AF_INET, PendingRule::Mark, fwmark, criteria,
@@ -294,6 +299,46 @@ nlohmann::json NftablesFirewall::build_delete_dns_nat_chain_json() {
         {"family", "inet"},
         {"table", TABLE_NAME},
         {"name", DNS_NAT_CHAIN_NAME}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_snat_chain_json() {
+    return {{"add", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", SNAT_CHAIN_NAME},
+        {"type", "nat"},
+        {"hook", "postrouting"},
+        {"prio", 100},
+        {"policy", "accept"}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_delete_snat_chain_json() {
+    return {{"delete", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", SNAT_CHAIN_NAME}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_snat_rule_json() {
+    nlohmann::json expr = nlohmann::json::array();
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"&", nlohmann::json::array({
+            {{"meta", {{"key", "mark"}}}},
+            kRouterOriginMark
+        })}}},
+        {"right", kRouterOriginMark}
+    }}});
+    expr.push_back({{"counter", nullptr}});
+    expr.push_back({{"masquerade", nlohmann::json::object()}});
+    return {{"add", {{"rule", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"chain", SNAT_CHAIN_NAME},
+        {"expr", expr}
     }}}}};
 }
 
@@ -717,6 +762,11 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
                 && chain.value("name", "") == DNS_NAT_CHAIN_NAME) {
                 state.dns_nat_chain_exists = true;
             }
+            if (chain.value("family", "") == "inet"
+                && chain.value("table", "") == TABLE_NAME
+                && chain.value("name", "") == SNAT_CHAIN_NAME) {
+                state.snat_chain_exists = true;
+            }
             continue;
         }
 
@@ -780,6 +830,16 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         }
     }
 
+    // Masquerade for router-originated detour traffic: its source address was
+    // chosen before the mark existed, so without this the tunnel peer drops it.
+    if (!emit_full_table && live_state.snat_chain_exists) {
+        arr.push_back(build_delete_snat_chain_json());
+    }
+    if (router_origin_snat_requested_) {
+        arr.push_back(build_snat_chain_json());
+        arr.push_back(build_snat_rule_json());
+    }
+
     // Rules
     for (const auto& cmd : build_rule_add_commands(global_prefilter_, pending_rules_)) {
         arr.push_back(cmd);
@@ -832,6 +892,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     pending_elements_.clear();
     pending_rules_.clear();
     dns_redirect_requested_ = false;
+    router_origin_snat_requested_ = false;
     table_created_ = true;
 }
 

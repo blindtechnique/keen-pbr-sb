@@ -175,21 +175,6 @@ export function ListsPage() {
     },
   })
 
-  const handleDelete = (listId: string) => {
-    if (!loadedConfig) {
-      return
-    }
-
-    const request = {
-      ids: [listId],
-      impact: getListDeleteImpact(loadedConfig, [listId]),
-      config: loadedConfig,
-      clearSelectionOnSuccess: false,
-    }
-    setDeletePreview(request)
-    setDeleteRequest(request)
-  }
-
   const handleBulkDelete = () => {
     if (!loadedConfig || listSelection.selectedCount === 0) {
       return
@@ -269,7 +254,7 @@ export function ListsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         actions={
           <div className="flex flex-wrap justify-end gap-2">
@@ -327,6 +312,7 @@ export function ListsPage() {
         />
       ) : (
         <div className="space-y-3">
+          <div className="flex h-11 items-center">
           {listSelection.hasSelection ? (
             <BulkSelectionToolbar
               countLabel={t("pages.lists.bulk.selected", {
@@ -361,6 +347,7 @@ export function ListsPage() {
               </Button>
             </BulkSelectionToolbar>
           ) : null}
+          </div>
           <DataTable
             headers={[
               t("pages.lists.headers.name"),
@@ -450,12 +437,6 @@ export function ListsPage() {
                     icon: <Pencil className="h-4 w-4" />,
                     label: t("common.edit"),
                     onClick: () => navigate(`/lists/${list.id}/edit`),
-                  },
-                  {
-                    disabled: configMutationPending,
-                    icon: <Trash2 className="h-4 w-4" />,
-                    label: t("common.delete"),
-                    onClick: () => handleDelete(list.id),
                   },
                 ]}
                 key={`${list.id}-actions`}

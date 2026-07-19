@@ -21,7 +21,7 @@ type Props = {
   initial?: TransportSpec
   isPending: boolean
   onOpenChange: (open: boolean) => void
-  onSubmit: (spec: TransportSpec) => void
+  onSubmit: (spec: TransportSpec, options: { createOutbound: boolean }) => void
   open: boolean
   singBoxAvailable?: boolean
 }
@@ -48,27 +48,36 @@ export function TransportConfigDialog({
     initial ? structuredClone(initial) : emptySpec()
   )
   const [sourceMode, setSourceMode] = useState<SourceMode>("link")
+  // A transport only becomes a route once an interface outbound points at it,
+  // so offer that step right here instead of sending people to another page.
+  const [createOutbound, setCreateOutbound] = useState(!initial)
 
   const isSingBox = spec.type !== TransportSpecType.native
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (!isSingBox) {
-      onSubmit({
-        ...spec,
-        link: undefined,
-        outbound_json: undefined,
-        mtu: undefined,
-        vless: undefined,
-      })
+      onSubmit(
+        {
+          ...spec,
+          link: undefined,
+          outbound_json: undefined,
+          mtu: undefined,
+          vless: undefined,
+        },
+        { createOutbound: createOutbound && !initial }
+      )
       return
     }
-    onSubmit({
-      ...spec,
-      link: sourceMode === "link" ? spec.link : undefined,
-      outbound_json: sourceMode === "json" ? spec.outbound_json : undefined,
-      bootstrap_dns: spec.bootstrap_dns?.filter(Boolean),
-      vless: undefined,
-    })
+    onSubmit(
+      {
+        ...spec,
+        link: sourceMode === "link" ? spec.link : undefined,
+        outbound_json: sourceMode === "json" ? spec.outbound_json : undefined,
+        bootstrap_dns: spec.bootstrap_dns?.filter(Boolean),
+        vless: undefined,
+      },
+      { createOutbound: createOutbound && !initial }
+    )
   }
 
   return (
@@ -155,6 +164,23 @@ export function TransportConfigDialog({
               }
             />
           </div>
+          {!initial ? (
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="min-w-0 pr-3">
+                <Label htmlFor="transport-create-outbound">
+                  {t("transports.form.createOutbound")}
+                </Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("transports.form.createOutboundHint")}
+                </p>
+              </div>
+              <Switch
+                checked={createOutbound}
+                id="transport-create-outbound"
+                onCheckedChange={setCreateOutbound}
+              />
+            </div>
+          ) : null}
 
           {isSingBox ? (
             <div className="grid gap-4 rounded-lg border p-4">

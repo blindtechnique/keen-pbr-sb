@@ -1019,3 +1019,88 @@ TEST_CASE("populate_routing_state: non-strict urltest still appends dual-stack k
                                    route.metric == kUnreachableRouteMetric;
                         }) == 2);
 }
+
+// A failover group may list another failover group. Routing has to follow the
+// selections down to a real interface, otherwise the table would hold nothing
+// but the kill-switch and the traffic would be dropped.
+TEST_CASE("populate_routing_state: nested urltest resolves to a leaf interface") {
+    auto cfg = parse_minimal_config(R"({
+        "daemon":{"strict_enforcement":false},
+        "iproute":{"table_start":100},
+        "outbounds":[
+            {"tag":"vpn_a","type":"interface","interface":"wg0","gateway":"10.0.0.1"},
+            {"tag":"vpn_b","type":"interface","interface":"wg1","gateway":"10.0.1.1"},
+            {"tag":"inner","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["vpn_a","vpn_b"]}]},
+            {"tag":"outer","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["inner"]}]}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}),
+                                         cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    std::map<std::string, std::string> selections{
+        {"outer", "inner"},
+        {"inner", "vpn_b"},
+    };
+    populate_routing_state(cfg, marks, routes, rules,
+                           [](const Outbound&) { return true; }, &selections);
+
+    // The outer group gets its own table; it must carry the leaf interface.
+    const auto& installed = routes.get_routes();
+    const bool has_leaf = std::any_of(
+        installed.begin(), installed.end(), [](const RouteSpec& route) {
+            return route.interface == std::optional<std::string>{"wg1"} &&
+                   !route.unreachable && route.metric == 0;
+        });
+    CHECK(has_leaf);
+}
+
+// A group that references itself is rejected outright, so a mis-typed config
+// can never send the resolver into a loop.
+TEST_CASE("config validation: self-referencing urltest is rejected") {
+    CHECK_THROWS(parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "outbounds":[
+            {"tag":"loop","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["loop"]}]}
+        ]
+    })"));
+}
+
+// Two groups pointing at each other must terminate as well: the depth guard
+// stops the walk even though neither references itself directly.
+TEST_CASE("populate_routing_state: mutually referencing urltests terminate") {
+    auto cfg = parse_minimal_config(R"({
+        "daemon":{"strict_enforcement":false},
+        "iproute":{"table_start":100},
+        "outbounds":[
+            {"tag":"first","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["second"]}]},
+            {"tag":"second","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["first"]}]}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}),
+                                         cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+    std::map<std::string, std::string> selections{
+        {"first", "second"},
+        {"second", "first"},
+    };
+
+    populate_routing_state(cfg, marks, routes, rules,
+                           [](const Outbound&) { return true; }, &selections);
+
+    // No interface can be reached, so only the kill-switch stays.
+    for (const auto& route : routes.get_routes()) {
+        CHECK(route.unreachable);
+    }
+}

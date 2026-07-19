@@ -1,13 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
-  CloudIcon,
-  CloudOffIcon,
   DownloadIcon,
   FilePlusIcon,
   PlayIcon,
   RefreshCwIcon,
   SaveIcon,
-  SquareIcon,
   TrashIcon,
   UploadIcon,
 } from "lucide-react"
@@ -19,7 +16,9 @@ import { PageHeader } from "@/components/shared/page-header"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
 import {
+  CardAction,
   Card,
   CardContent,
   CardDescription,
@@ -29,7 +28,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Textarea } from "@/components/ui/textarea"
+import { CodeEditor } from "@/components/shared/code-editor"
 import {
   formatNfqwsConfig,
   parseNfqwsConfig,
@@ -107,7 +106,7 @@ export function NfqwsPage() {
   })
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         actions={
           <Button
@@ -128,51 +127,39 @@ export function NfqwsPage() {
       {status?.installed ? (
         <>
           <Card>
-            <CardHeader className="flex-row items-start justify-between gap-4">
-              <div>
-                <CardTitle>{t("nfqws.service")}</CardTitle>
-                <CardDescription>
-                  {t("nfqws.version", { version: status.version || "—" })}
-                </CardDescription>
-              </div>
-              <div
-                className={
-                  status.running
-                    ? "keen-service-state keen-service-state--online"
-                    : "keen-service-state keen-service-state--offline"
-                }
-                title={
-                  status.running
-                    ? t("nfqws.running")
-                    : t("nfqws.stopped")
-                }
-              >
-                {status.running ? <CloudIcon /> : <CloudOffIcon />}
-                <span>
+            <CardHeader>
+              <CardTitle>{t("nfqws.service")}</CardTitle>
+              <CardDescription>
+                {t("nfqws.version", { version: status.version || "—" })}
+              </CardDescription>
+              <CardAction>
+                <Badge
+                  size="xs"
+                  variant={status.running ? "success" : "secondary"}
+                >
+                  <span className="mr-1.5 size-1.5 rounded-full bg-current" />
                   {status.running ? t("nfqws.running") : t("nfqws.stopped")}
-                </span>
-              </div>
+                </Badge>
+              </CardAction>
             </CardHeader>
-            <CardContent className="flex flex-wrap gap-2">
-              <Button
-                disabled={mutation.isPending || status.running}
-                onClick={() =>
-                  mutation.mutate({ action: "service", command: "start" })
-                }
-              >
-                <PlayIcon />
-                {t("nfqws.start")}
-              </Button>
-              <Button
-                disabled={mutation.isPending || !status.running}
-                onClick={() =>
-                  mutation.mutate({ action: "service", command: "stop" })
-                }
-                variant="outline"
-              >
-                <SquareIcon />
-                {t("nfqws.stop")}
-              </Button>
+            <CardContent className="flex flex-wrap items-center justify-between gap-2">
+              <label className="flex cursor-pointer items-center gap-2">
+                <Switch
+                  aria-label={status.running ? t("nfqws.stop") : t("nfqws.start")}
+                  checked={status.running}
+                  disabled={mutation.isPending}
+                  onCheckedChange={(checked) =>
+                    mutation.mutate({
+                      action: "service",
+                      command: checked ? "start" : "stop",
+                    })
+                  }
+                />
+                <span className="text-sm text-muted-foreground">
+                  {status.running ? t("nfqws.stop") : t("nfqws.start")}
+                </span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
               <Button
                 disabled={mutation.isPending}
                 onClick={() =>
@@ -200,6 +187,7 @@ export function NfqwsPage() {
                 <DownloadIcon />
                 {t("nfqws.upgrade")}
               </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -388,11 +376,10 @@ function SettingsEditor({
           <div className="grid gap-1.5" key={key}>
             <Label>{key}</Label>
             {key.includes("ARGS") ? (
-              <Textarea
-                className="min-h-24 font-mono text-xs"
-                onChange={(event) =>
-                  setForm({ ...form, [key]: event.target.value })
-                }
+              <CodeEditor
+                className="min-h-24"
+                onChange={(next) => setForm({ ...form, [key]: next })}
+                syntax="nfqws"
                 value={String(form[key])}
               />
             ) : (
@@ -543,9 +530,10 @@ function StrategiesEditor({
             </span>
           ) : null}
         </div>
-        <Textarea
-          className="min-h-[30rem] font-mono text-xs"
-          onChange={(event) => setContent(event.target.value)}
+        <CodeEditor
+          className="min-h-[30rem]"
+          onChange={setContent}
+          syntax={selected.endsWith(".list") ? "list" : "nfqws"}
           value={content}
         />
         <div className="flex flex-wrap justify-end gap-2">
@@ -743,10 +731,11 @@ function FilesEditor({
             </Button>
           ) : null}
         </div>
-        <Textarea
-          className="min-h-[30rem] font-mono text-xs"
-          onChange={(event) => setContent(event.target.value)}
+        <CodeEditor
+          className="min-h-[30rem]"
+          onChange={setContent}
           readOnly={readonly}
+          syntax={readonly ? "log" : "nfqws"}
           value={content}
         />
         {!readonly ? (

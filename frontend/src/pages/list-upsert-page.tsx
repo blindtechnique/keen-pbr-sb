@@ -7,6 +7,7 @@ import {
   CloudIcon,
   FileTextIcon,
   ScrollTextIcon,
+  SparklesIcon,
 } from "lucide-react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -14,6 +15,7 @@ import { useLocation } from "wouter"
 import { toast } from "sonner"
 
 import type { ApiError } from "@/api/client"
+import type { DnsRule } from "@/api/generated/model/dnsRule"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { Outbound } from "@/api/generated/model/outbound"
@@ -29,6 +31,8 @@ import {
   FieldHint,
   FieldLabel,
 } from "@/components/shared/field"
+import { CodeEditor } from "@/components/shared/code-editor"
+import { TemplatePicker } from "@/components/lists/template-picker"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { UpsertPage } from "@/components/shared/upsert-page"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -37,6 +41,7 @@ import { ButtonGroup } from "@/components/ui/button-group"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -51,7 +56,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Textarea } from "@/components/ui/textarea"
 import {
   clearFormServerErrors,
   setFormServerErrors,
@@ -235,6 +239,14 @@ function ListForm({
     createDnsRule: false,
     dnsServer: dnsServerTags[0] ?? "",
   })
+  // DNS rules are edited where they belong — next to the list they apply to —
+  // instead of in a separate section listing every rule at once.
+  const currentDnsServer =
+    (loadedConfig.dns?.rules ?? []).find((rule) =>
+      (rule.list ?? []).includes(listId ?? "")
+    )?.server ?? ""
+  const [dnsServerForList, setDnsServerForList] = useState(currentDnsServer)
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
 
   const form = useForm({
     defaultValues: draft,
@@ -266,7 +278,8 @@ function ListForm({
           mode,
           value,
           listId,
-          mode === "create" ? quickSetup : undefined
+          mode === "create" ? quickSetup : undefined,
+          mode === "edit" ? dnsServerForList : undefined
         )
 
         try {
@@ -524,6 +537,17 @@ function ListForm({
             <CardDescription>
               {t("pages.listUpsert.sourceGroups.url.description")}
             </CardDescription>
+            <CardAction>
+              <Button
+                onClick={() => setTemplatePickerOpen(true)}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <SparklesIcon className="mr-1 h-4 w-4" />
+                {t("pages.listUpsert.templates.button")}
+              </Button>
+            </CardAction>
           </CardHeader>
           <CardContent>
             <FieldGroup>
@@ -643,13 +667,12 @@ function ListForm({
                       {t("pages.listUpsert.fields.domains")}
                     </FieldLabel>
                     <FieldContent>
-                      <Textarea
+                      <CodeEditor
                         className="min-h-24"
                         id="list-domains"
                         onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
+                        onChange={(next) => field.handleChange(next)}
+                        syntax="list"
                         value={field.state.value}
                       />
                       <FieldHint
@@ -666,13 +689,12 @@ function ListForm({
                       {t("pages.listUpsert.fields.ipCidrs")}
                     </FieldLabel>
                     <FieldContent>
-                      <Textarea
+                      <CodeEditor
                         className="min-h-24"
                         id="list-ip-cidrs"
                         onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
+                        onChange={(next) => field.handleChange(next)}
+                        syntax="list"
                         value={field.state.value}
                       />
                       <FieldHint
@@ -686,6 +708,57 @@ function ListForm({
           </CardContent>
         </Card>
       ) : null}
+
+      {!isCreate ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("pages.listUpsert.dnsRule.title")}</CardTitle>
+            <CardDescription>
+              {t("pages.listUpsert.dnsRule.description")}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Select
+              onValueChange={(value) => setDnsServerForList(value ?? "")}
+              value={dnsServerForList || NO_DNS_RULE}
+            >
+              <SelectTrigger>
+                <SelectValue
+                  placeholder={t("pages.listUpsert.quickSetup.selectDnsServer")}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value={NO_DNS_RULE}>
+                    {t("pages.listUpsert.dnsRule.none")}
+                  </SelectItem>
+                  {dnsServerTags.map((tag) => (
+                    <SelectItem key={tag} value={tag}>
+                      {tag}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            {dnsServerTags.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {t("pages.listUpsert.quickSetup.noDnsServers")}
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <TemplatePicker
+        onOpenChange={setTemplatePickerOpen}
+        onSelect={(template) => {
+          form.setFieldValue(LIST_FIELD_NAMES.url, template.url)
+          if (isCreate && !form.getFieldValue(LIST_FIELD_NAMES.name)) {
+            form.setFieldValue(LIST_FIELD_NAMES.name, template.id)
+          }
+        }}
+        open={templatePickerOpen}
+      />
 
       {isCreate ? (
         <Card>
@@ -889,12 +962,15 @@ function getDraftFromMapEntry(
   }
 }
 
+const NO_DNS_RULE = "__none__"
+
 function buildUpdatedConfigForListUpsert(
   config: ConfigObject,
   mode: "create" | "edit",
   nextDraft: ListDraft,
   originalName?: string,
-  quickSetup?: QuickSetup
+  quickSetup?: QuickSetup,
+  dnsServerForList?: string
 ): ConfigObject {
   const nextLists = { ...(config.lists ?? {}) }
   const trimmedName = nextDraft.name.trim()
@@ -935,7 +1011,60 @@ function buildUpdatedConfigForListUpsert(
       ],
     }
   }
+
+  if (dnsServerForList !== undefined) {
+    updated.dns = {
+      ...(config.dns ?? {}),
+      rules: applyDnsRuleForList(
+        config.dns?.rules ?? [],
+        resolvedName,
+        dnsServerForList === NO_DNS_RULE ? "" : dnsServerForList
+      ),
+    }
+  }
   return updated
+}
+
+/**
+ * Keeps at most one DNS rule per list. An empty server drops the binding; a
+ * rule shared with other lists only loses this list instead of disappearing.
+ */
+function applyDnsRuleForList(
+  rules: DnsRule[],
+  listName: string,
+  server: string
+): DnsRule[] {
+  const next: DnsRule[] = []
+  let applied = false
+
+  for (const rule of rules) {
+    const lists = rule.list ?? []
+    if (!lists.includes(listName)) {
+      next.push(rule)
+      continue
+    }
+
+    if (lists.length > 1) {
+      next.push({ ...rule, list: lists.filter((item) => item !== listName) })
+      continue
+    }
+
+    if (server) {
+      next.push({ ...rule, server })
+      applied = true
+    }
+  }
+
+  if (server && !applied) {
+    next.push({
+      enabled: true,
+      list: [listName],
+      server,
+      allow_domain_rebinding: false,
+    })
+  }
+
+  return next
 }
 
 function getListConfigFromDraft(draft: ListDraft): ListConfig {

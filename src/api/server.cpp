@@ -2,6 +2,8 @@
 
 #include "server.hpp"
 
+#include "keenetic_auth.hpp"
+
 #include "../log/logger.hpp"
 #include "../log/trace.hpp"
 #include "../util/traced_mutex.hpp"
@@ -294,9 +296,14 @@ bool is_regular_file_or_gzip(const std::filesystem::path& path) {
 
 struct WebAuthConfig {
     bool enabled{false};
+    // "local" checks auth.json, "keenetic" asks the router firmware instead.
+    std::string provider{"local"};
+    std::string keenetic_endpoint{"127.0.0.1:80"};
     std::string username;
     std::string password;
     std::chrono::seconds session_ttl{std::chrono::hours(24 * 7)};
+
+    bool uses_router_account() const { return provider == "keenetic"; }
 };
 
 WebAuthConfig load_web_auth_config() {
@@ -309,11 +316,15 @@ WebAuthConfig load_web_auth_config() {
         const auto document = nlohmann::json::parse(input);
         WebAuthConfig config;
         config.enabled = document.value("enabled", false);
+        config.provider = document.value("provider", std::string{"local"});
+        config.keenetic_endpoint =
+            document.value("keenetic_endpoint", std::string{"127.0.0.1:80"});
         config.username = document.value("username", std::string{});
         config.password = document.value("password", std::string{});
         const auto ttl = document.value("session_ttl_seconds", 604800);
         if (ttl >= 300 && ttl <= 2592000) config.session_ttl = std::chrono::seconds(ttl);
-        if (config.enabled && (config.username.empty() || config.password.empty())) {
+        if (config.enabled && !config.uses_router_account() &&
+            (config.username.empty() || config.password.empty())) {
             Logger::instance().error("Web authentication is enabled without credentials");
             return {};
         }
@@ -445,6 +456,8 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                             session->second > std::chrono::system_clock::now();
         }
         res.set_content(nlohmann::json{{"enabled", state->auth.enabled},
+                                       {"provider", state->auth.provider},
+                                       {"keenetic_endpoint", state->auth.keenetic_endpoint},
                                        {"authenticated", authenticated}}.dump(),
                         "application/json");
     });
@@ -458,8 +471,23 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const auto body = nlohmann::json::parse(req.body);
             const auto username = body.value("username", std::string{});
             const auto password = body.value("password", std::string{});
-            if (!constant_time_equal(username, state->auth.username) ||
-                !constant_time_equal(password, state->auth.password)) {
+
+            if (state->auth.uses_router_account()) {
+                const auto verdict = verify_keenetic_credentials(
+                    state->auth.keenetic_endpoint, username, password);
+                if (!verdict.authenticated) {
+                    // A router that cannot be reached is an outage, not a typo.
+                    res.status = verdict.reachable ? 401 : 503;
+                    res.set_content(
+                        nlohmann::json{{"error", verdict.error.empty()
+                                                     ? "invalid credentials"
+                                                     : verdict.error}}
+                            .dump(),
+                        "application/json");
+                    return;
+                }
+            } else if (!constant_time_equal(username, state->auth.username) ||
+                       !constant_time_equal(password, state->auth.password)) {
                 res.status = 401;
                 res.set_content(R"({"error":"invalid credentials"})", "application/json");
                 return;
@@ -478,6 +506,87 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             res.set_content(R"({"error":"invalid login request"})", "application/json");
         }
     });
+    // Switching the login mode from the interface: writing auth.json by hand on
+    // the router was the only way before.
+    impl_->server.Post("/api/auth/settings", [state = impl_.get()](const httplib::Request& req,
+                                                                    httplib::Response& res) {
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            const auto provider = body.value("provider", std::string{"local"});
+            if (provider != "local" && provider != "keenetic") {
+                res.status = 400;
+                res.set_content(R"({"error":"unknown provider"})", "application/json");
+                return;
+            }
+
+            nlohmann::json document;
+            document["enabled"] = body.value("enabled", true);
+            document["provider"] = provider;
+            document["session_ttl_seconds"] =
+                static_cast<long long>(state->auth.session_ttl.count());
+
+            if (provider == "keenetic") {
+                const auto endpoint =
+                    body.value("keenetic_endpoint", std::string{"127.0.0.1:80"});
+                const auto username = body.value("username", std::string{});
+                const auto password = body.value("password", std::string{});
+                // Refuse to lock the user out: the credentials must work first.
+                if (!username.empty() || !password.empty()) {
+                    const auto verdict =
+                        verify_keenetic_credentials(endpoint, username, password);
+                    if (!verdict.authenticated) {
+                        res.status = verdict.reachable ? 401 : 503;
+                        res.set_content(
+                            nlohmann::json{{"error", verdict.error}}.dump(),
+                            "application/json");
+                        return;
+                    }
+                }
+                document["keenetic_endpoint"] = endpoint;
+            } else {
+                const auto username = body.value("username", std::string{});
+                const auto password = body.value("password", std::string{});
+                if (document["enabled"].get<bool>() &&
+                    (username.empty() || password.empty())) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"username and password are required"})",
+                                    "application/json");
+                    return;
+                }
+                document["username"] = username;
+                document["password"] = password;
+            }
+
+            const char* configured = std::getenv("KEEN_PBR_AUTH_FILE");
+            const std::filesystem::path path = configured && *configured
+                ? configured : "/opt/etc/keen-pbr/auth.json";
+            std::ofstream output(path, std::ios::trunc);
+            if (!output) {
+                res.status = 500;
+                res.set_content(R"({"error":"cannot write auth.json"})", "application/json");
+                return;
+            }
+            output << document.dump() << "\n";
+            output.close();
+            std::filesystem::permissions(path,
+                                         std::filesystem::perms::owner_read |
+                                             std::filesystem::perms::owner_write,
+                                         std::filesystem::perm_options::replace);
+
+            state->auth = load_web_auth_config();
+            {
+                // Existing sessions belong to the previous mode.
+                std::lock_guard lock(state->sessions_mutex);
+                state->sessions.clear();
+            }
+            res.set_content(R"({"saved":true})", "application/json");
+        } catch (const std::exception& error) {
+            res.status = 400;
+            res.set_content(nlohmann::json{{"error", error.what()}}.dump(),
+                            "application/json");
+        }
+    });
+
     impl_->server.Post("/api/auth/logout", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
         const auto token = cookie_value(req, "keen_pbr_session");

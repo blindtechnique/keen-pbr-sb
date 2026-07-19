@@ -270,14 +270,17 @@ function OutboundForm({
       runtimeInterface,
     ])
   )
-  const interfaceOutboundByTag = new Map(
-    existingOutbounds
-      .filter((item) => item.type === "interface" && item.tag !== draft.tag)
-      .map((item) => [item.tag, item])
+  // A failover group may contain plain interfaces as well as other failover
+  // groups; routing resolves nested selections down to a leaf interface.
+  const groupMemberCandidates = existingOutbounds.filter(
+    (item) =>
+      (item.type === "interface" || item.type === "urltest") &&
+      item.tag !== draft.tag
   )
-  const interfaceOutboundOptions = existingOutbounds
-    .filter((item) => item.type === "interface" && item.tag !== draft.tag)
-    .map((item) => item.tag)
+  const interfaceOutboundByTag = new Map(
+    groupMemberCandidates.map((item) => [item.tag, item])
+  )
+  const interfaceOutboundOptions = groupMemberCandidates.map((item) => item.tag)
   const strictSelectItems = strictOptions.map((option) => ({
     value: option,
     label: getStrictOptionLabel(option, t),
@@ -517,7 +520,7 @@ function OutboundForm({
       </FieldGroup>
 
       {isInterface ? (
-        <SectionCard
+        <SectionCard flat
           description={t("pages.outboundUpsert.interface.description")}
           title={t("pages.outboundUpsert.interface.title")}
         >
@@ -621,7 +624,7 @@ function OutboundForm({
       ) : null}
 
       {isTable ? (
-        <SectionCard
+        <SectionCard flat
           description={t("pages.outboundUpsert.table.description")}
           title={t("pages.outboundUpsert.table.title")}
         >
@@ -656,7 +659,7 @@ function OutboundForm({
       ) : null}
 
       {isBlackhole ? (
-        <SectionCard
+        <SectionCard flat
           description={t("pages.outboundUpsert.blackhole.description")}
           title={t("pages.outboundUpsert.blackhole.title")}
         >
@@ -667,7 +670,7 @@ function OutboundForm({
       ) : null}
 
       {isIgnore ? (
-        <SectionCard
+        <SectionCard flat
           description={t("pages.outboundUpsert.ignore.description")}
           title={t("pages.outboundUpsert.ignore.title")}
         >
@@ -683,7 +686,7 @@ function OutboundForm({
             const error = getFirstFieldError(field.state.meta.errors)
             const groups = normalizeOutboundGroups(field.state.value)
             return (
-              <SectionCard
+              <SectionCard flat
                 description={t(
                   "pages.outboundUpsert.urltest.groupsDescription"
                 )}
@@ -813,7 +816,7 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
-        <SectionCard
+        <SectionCard flat
           description={t("pages.outboundUpsert.urltest.probingDescription")}
           title={t("pages.outboundUpsert.urltest.probingTitle")}
         >
@@ -972,7 +975,7 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
-        <SectionCard
+        <SectionCard flat
           description={t("pages.outboundUpsert.circuitBreaker.description")}
           title={t("pages.outboundUpsert.circuitBreaker.title")}
         >

@@ -16,6 +16,7 @@ import { useGetConfig } from "@/api/queries"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
+import { FallbackServersField } from "@/components/dns/fallback-servers-field"
 import { DataTable } from "@/components/shared/data-table"
 import {
   DeleteImpactDialog,
@@ -48,25 +49,21 @@ export function DnsServersPage() {
   const postConfigMutation = usePostConfigMutation()
 
   const config = getConfigData(configQuery.data)
+
+  // The fallback chain lives here now: it is a property of the servers
+  // themselves, not of the per-list rules.
+  const handleFallbackChange = (fallback: string[]) => {
+    if (!config) {
+      return
+    }
+    postConfigMutation.mutate({
+      data: { ...config, dns: { ...config.dns, fallback } },
+    })
+  }
   const visibleDeleteRequest = deleteRequest ?? deletePreview
   const dnsServers = useMemo(() => config?.dns?.servers ?? [], [config])
   const serverRowIds = dnsServers.map((server) => server.tag)
   const serverSelection = useRowSelection(serverRowIds)
-
-  const deleteServer = (serverTag: string) => {
-    if (!config) {
-      return
-    }
-
-    const request = {
-      tags: [serverTag],
-      impact: getDnsServerDeleteImpact(config, [serverTag]),
-      config,
-      clearSelectionOnSuccess: false,
-    }
-    setDeletePreview(request)
-    setDeleteRequest(request)
-  }
 
   const deleteServersBulk = () => {
     if (!config || serverSelection.selectedCount === 0) {
@@ -110,7 +107,7 @@ export function DnsServersPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         actions={
           <Button
@@ -127,6 +124,15 @@ export function DnsServersPage() {
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
+      {!configQuery.isLoading && !configQuery.isError ? (
+        <div className="mb-4 max-w-3xl">
+          <FallbackServersField
+            config={config}
+            onChange={handleFallbackChange}
+          />
+        </div>
+      ) : null}
+
       {configQuery.isLoading ? (
         <TableSkeleton />
       ) : configQuery.isError ? (
@@ -142,6 +148,7 @@ export function DnsServersPage() {
         />
       ) : (
         <div className="space-y-3">
+          <div className="flex h-11 items-center">
           {serverSelection.hasSelection ? (
             <BulkSelectionToolbar
               countLabel={t("pages.dnsServers.bulk.selected", {
@@ -159,6 +166,7 @@ export function DnsServersPage() {
               </Button>
             </BulkSelectionToolbar>
           ) : null}
+          </div>
           <DataTable
             headers={[
               t("pages.dnsServers.headers.name"),
@@ -194,12 +202,6 @@ export function DnsServersPage() {
                       navigate(
                         `/dns-servers/${encodeURIComponent(server.tag)}/edit`
                       ),
-                  },
-                  {
-                    disabled: configMutationPending,
-                    icon: <Trash2 className="h-4 w-4" />,
-                    label: t("common.delete"),
-                    onClick: () => deleteServer(server.tag),
                   },
                 ]}
                 key={`${server.tag}-actions`}

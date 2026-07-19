@@ -798,15 +798,25 @@ void validate_config(const Config& cfg) {
                     }
 
                     found = true;
+                    // A group may also nest another group: routing follows the
+                    // chain of selections down to a leaf interface.
                     if (target.type != OutboundType::INTERFACE &&
                         target.type != OutboundType::TABLE &&
-                        target.type != OutboundType::BLACKHOLE) {
+                        target.type != OutboundType::BLACKHOLE &&
+                        target.type != OutboundType::URLTEST) {
                         add_issue(
                             issues,
                             group_path + ".outbounds",
                             "Urltest outbound '" + ob.tag +
                                 "' references outbound '" + ref_tag +
-                                "' which is not an interface, table, or blackhole outbound");
+                                "' which is not an interface, table, blackhole, "
+                                "or urltest outbound");
+                    }
+                    if (target.type == OutboundType::URLTEST && target.tag == ob.tag) {
+                        add_issue(issues,
+                                  group_path + ".outbounds",
+                                  "Urltest outbound '" + ob.tag +
+                                      "' cannot reference itself");
                     }
                     break;
                 }

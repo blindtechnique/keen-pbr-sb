@@ -1,10 +1,8 @@
 import {
   PencilIcon,
-  PlayIcon,
   PlusIcon,
   RefreshCwIcon,
   ShieldCheckIcon,
-  SquareIcon,
   TrashIcon,
   WorkflowIcon,
 } from "lucide-react"
@@ -38,6 +36,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
+import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { getApiErrorMessage } from "@/lib/api-errors"
@@ -50,7 +49,7 @@ export function TransportsPage() {
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
   const query = useGetTransports({
     query: {
-      refetchInterval: 10_000,
+      refetchInterval: 3_000,
       refetchIntervalInBackground: false,
     },
   })
@@ -61,7 +60,9 @@ export function TransportsPage() {
   const keenConfigQuery = useGetConfig()
   const runtimeOutboundsQuery = useGetRuntimeOutbounds({
     query: {
-      refetchInterval: 10_000,
+      // The latency pill doubles as a liveness indicator, so it refreshes
+      // noticeably faster than the rest of the runtime data.
+      refetchInterval: 3_000,
       refetchIntervalInBackground: false,
     },
   })
@@ -87,6 +88,31 @@ export function TransportsPage() {
     }
   }
   const keenConfig = selectConfig(keenConfigQuery.data)
+  // DNS detour is a property of the DNS server, not of the transport, so the
+  // card only points at it instead of duplicating the setting.
+  const dnsServersByInterface = new Map<string, string[]>()
+  const outboundInterfaces = (tag: string, depth = 0): string[] => {
+    if (depth > 4) return []
+    const outbound = (keenConfig?.outbounds ?? []).find(
+      (candidate) => candidate.tag === tag
+    )
+    if (!outbound) return []
+    if (outbound.interface) return [outbound.interface]
+    // A detour may point at a failover group, so expand it to its members.
+    return (outbound.outbound_groups ?? []).flatMap((group) =>
+      (group.outbounds ?? []).flatMap((child) =>
+        outboundInterfaces(child, depth + 1)
+      )
+    )
+  }
+  for (const server of keenConfig?.dns?.servers ?? []) {
+    if (!server.detour || !server.tag) continue
+    for (const interfaceName of outboundInterfaces(server.detour)) {
+      const current = dnsServersByInterface.get(interfaceName) ?? []
+      if (!current.includes(server.tag)) current.push(server.tag)
+      dnsServersByInterface.set(interfaceName, current)
+    }
+  }
   const environmentQuery = useQuery({
     queryKey: ["transport-environment"],
     queryFn: async () => {
@@ -194,19 +220,49 @@ export function TransportsPage() {
     })
   }
 
-  const saveTransport = (spec: TransportSpec) => {
-    configMutation.mutate({
-      data: editing
-        ? {
-            operation: TransportConfigOperationOperation.update,
-            tag: editing.tag,
-            transport: spec,
-          }
-        : {
-            operation: TransportConfigOperationOperation.create,
-            transport: spec,
-          },
+  // Creating the matching interface outbound right away is what turns a fresh
+  // transport into an actual route; doing it here saves a trip to Outbounds.
+  const createInterfaceOutbound = (spec: TransportSpec) => {
+    if (!keenConfig) return
+    const outbounds = keenConfig.outbounds ?? []
+    if (outbounds.some((outbound) => outbound.tag === spec.tag)) {
+      toast.error(t("transports.form.outboundExists", { tag: spec.tag }))
+      return
+    }
+    bypassMutation.mutate({
+      data: {
+        ...keenConfig,
+        outbounds: [
+          ...outbounds,
+          { type: "interface", tag: spec.tag, interface: spec.interface },
+        ],
+      },
     })
+  }
+
+  const saveTransport = (
+    spec: TransportSpec,
+    options: { createOutbound: boolean }
+  ) => {
+    configMutation.mutate(
+      {
+        data: editing
+          ? {
+              operation: TransportConfigOperationOperation.update,
+              tag: editing.tag,
+              transport: spec,
+            }
+          : {
+              operation: TransportConfigOperationOperation.create,
+              transport: spec,
+            },
+      },
+      {
+        onSuccess: () => {
+          if (!editing && options.createOutbound) createInterfaceOutbound(spec)
+        },
+      }
+    )
   }
 
   return (
@@ -262,30 +318,6 @@ export function TransportsPage() {
         </Alert>
       ) : null}
 
-      <Alert className="mb-6">
-        <WorkflowIcon />
-        <AlertTitle>{t("transports.routing.title")}</AlertTitle>
-        <AlertDescription className="space-y-3">
-          <p>{t("transports.routing.description")}</p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              onClick={() => navigate("/outbounds/create")}
-              size="sm"
-              variant="outline"
-            >
-              {t("transports.routing.createOutbound")}
-            </Button>
-            <Button
-              onClick={() => navigate("/outbounds/create?type=urltest")}
-              size="sm"
-              variant="outline"
-            >
-              {t("transports.routing.createFailover")}
-            </Button>
-          </div>
-        </AlertDescription>
-      </Alert>
-
       {!query.isLoading && !error && items.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
@@ -306,9 +338,24 @@ export function TransportsPage() {
                   {item.type}
                 </p>
               </div>
-              <Badge variant={item.state === "up" ? "default" : "secondary"}>
-                {t(`transports.states.${item.state}`)}
-              </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                {item.state === "up" ? (
+                  <Badge size="xs" variant="success">
+                    <span className="mr-1.5 size-1.5 rounded-full bg-current" />
+                    {t("transports.states.connected")}
+                  </Badge>
+                ) : (
+                  <Badge size="xs" variant="secondary">
+                    {t(`transports.states.${item.state}`)}
+                  </Badge>
+                )}
+                {item.state === "up" &&
+                transportLatencyByInterface.has(item.interface) ? (
+                  <Badge size="xs" variant="success">
+                    {`${transportLatencyByInterface.get(item.interface)} ms`}
+                  </Badge>
+                ) : null}
+              </div>
             </CardHeader>
             <CardContent className="grid min-w-0 gap-2 text-sm">
               <TransportField
@@ -323,14 +370,6 @@ export function TransportsPage() {
                 label={t("transports.updatedAt")}
                 value={new Date(item.updated_at).toLocaleString()}
               />
-              <TransportField
-                label={t("transports.latency")}
-                value={
-                  transportLatencyByInterface.has(item.interface)
-                    ? `${transportLatencyByInterface.get(item.interface)} ms`
-                    : t("transports.latencyUnavailable")
-                }
-              />
               {item.type !== "native" ? (
                 <TransportField
                   label={t("transports.autoRecovery")}
@@ -339,6 +378,14 @@ export function TransportsPage() {
                       ? t("transports.enabled")
                       : t("transports.paused")
                   }
+                />
+              ) : null}
+              {dnsServersByInterface.has(item.interface) ? (
+                <TransportField
+                  label={t("transports.dnsDetour")}
+                  value={(dnsServersByInterface.get(item.interface) ?? []).join(
+                    ", "
+                  )}
                 />
               ) : null}
               {item.retry_count ? (
@@ -484,9 +531,6 @@ function TransportActions({
   stopLabel: string
 }) {
   const isRunning = item.state === "up" || item.state === "starting"
-  const action = isRunning
-    ? TransportActionRequestAction.down
-    : TransportActionRequestAction.up
   // Only the card whose action is in flight reacts: a restart briefly takes the
   // transport down, so the pending action decides what stays on screen instead
   // of the live state, and other cards remain operable.
@@ -495,45 +539,53 @@ function TransportActions({
   const pendingAction = isPendingForItem
     ? mutation.variables?.data.action
     : undefined
-  const isRestarting =
-    pendingAction === TransportActionRequestAction.restart
-  const showRestart = isRunning || isRestarting
+  const isRestarting = pendingAction === TransportActionRequestAction.restart
+  // While a restart is in flight the transport dips to "down"; keep the switch
+  // reading as on so it does not flicker mid-operation.
+  const switchChecked = isRestarting ? true : isRunning
 
   return (
-    <div className="mt-3 flex min-w-0 flex-wrap justify-start border-t pt-4 sm:justify-end">
-      <Button
-        className="h-auto max-w-full whitespace-normal"
-        disabled={isPendingForItem}
-        onClick={() => mutation.mutate({ data: { tag: item.tag, action } })}
-        variant={isRunning ? "outline" : "default"}
-      >
-        {isRunning ? <SquareIcon /> : <PlayIcon />}
-        {isPendingForItem && !isRestarting
-          ? "…"
-          : isRunning
-            ? stopLabel
-            : startLabel}
-      </Button>
-      {showRestart ? (
-        <Button
-          className="ml-2 h-auto max-w-full whitespace-normal"
+    <div className="mt-3 flex min-w-0 flex-wrap items-center justify-between gap-3 border-t pt-4">
+      <label className="flex min-w-0 cursor-pointer items-center gap-2">
+        <Switch
+          aria-label={switchChecked ? stopLabel : startLabel}
+          checked={switchChecked}
           disabled={isPendingForItem}
-          onClick={() =>
+          onCheckedChange={(checked) =>
             mutation.mutate({
               data: {
                 tag: item.tag,
-                action: TransportActionRequestAction.restart,
+                action: checked
+                  ? TransportActionRequestAction.up
+                  : TransportActionRequestAction.down,
               },
             })
           }
-          variant="outline"
-        >
-          <RefreshCwIcon
-            className={isRestarting ? "animate-spin" : undefined}
-          />
-          {restartLabel}
-        </Button>
-      ) : null}
+        />
+        <span className="truncate text-sm text-muted-foreground">
+          {isPendingForItem && !isRestarting
+            ? "…"
+            : switchChecked
+              ? stopLabel
+              : startLabel}
+        </span>
+      </label>
+      <Button
+        className="h-auto max-w-full whitespace-normal"
+        disabled={isPendingForItem || !switchChecked}
+        onClick={() =>
+          mutation.mutate({
+            data: {
+              tag: item.tag,
+              action: TransportActionRequestAction.restart,
+            },
+          })
+        }
+        variant="outline"
+      >
+        <RefreshCwIcon className={isRestarting ? "animate-spin" : undefined} />
+        {restartLabel}
+      </Button>
     </div>
   )
 }

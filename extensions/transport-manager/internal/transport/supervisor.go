@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 )
@@ -24,6 +25,12 @@ type Supervisor struct {
 	baseBackoff  time.Duration
 	maxBackoff   time.Duration
 	stablePeriod time.Duration
+}
+
+// Implemented by transports that own firewall state which the firmware may
+// drop from under them.
+type runtimeRuleEnforcer interface {
+	EnsureRuntimeRules() error
 }
 
 func NewSupervisor(manager *Manager) *Supervisor {
@@ -122,6 +129,19 @@ func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryS
 	}
 	status, err := s.manager.Status(ctx, tag)
 	if err == nil && status.State == StateUp {
+		// Keenetic rebuilds its iptables ruleset on every network event and
+		// wipes rules it does not own, including the FORWARD accept that lets
+		// LAN traffic into the tunnel. FORWARD policy is DROP, so losing it
+		// silently breaks routed clients while the router itself keeps
+		// working. Re-assert it while the transport is healthy; the helper
+		// checks with -C first, so a present rule costs one cheap exec.
+		if transport, ok := s.manager.Get(tag); ok {
+			if enforcer, ok := transport.(runtimeRuleEnforcer); ok {
+				if ruleErr := enforcer.EnsureRuntimeRules(); ruleErr != nil {
+					log.Printf("transport %s: restore forwarding rules: %v", tag, ruleErr)
+				}
+			}
+		}
 		s.recordHealthy(tag, state)
 		return
 	}

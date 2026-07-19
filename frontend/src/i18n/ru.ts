@@ -187,6 +187,9 @@ export const ruTranslation = {
     },
   },
   connections: {
+    deviceCount: "Устройств: {{count}}",
+    routeDirect: "Напрямую",
+    empty: "Соединений нет",
     title: "Соединения",
     description:
       "Активные соединения и до 1500 последних записей. Для DNS-запросов через keen-pbr рядом с точным IP показывается последний известный домен. Данные обновляются каждые 3 секунды.",
@@ -204,6 +207,7 @@ export const ruTranslation = {
     route: "Маршрут",
   },
   transports: {
+    dnsDetour: "DNS через этот туннель",
     singBoxMissing: {
       title: "sing-box не установлен",
       description:
@@ -252,6 +256,9 @@ export const ruTranslation = {
       delete: "Транспорт удалён",
     },
     form: {
+      createOutbound: "Сразу создать outbound",
+      createOutboundHint: "Создаст interface-outbound с тем же тегом — транспорт сразу можно выбрать в правилах маршрутизации.",
+      outboundExists: "Outbound с тегом {{tag}} уже существует",
       createTitle: "Добавить транспорт",
       editTitle: "Изменить транспорт",
       description:
@@ -300,6 +307,7 @@ export const ruTranslation = {
       bindOutbound: "Создать outbound для этого интерфейса",
     },
     states: {
+      connected: "Подключено",
       down: "Остановлен",
       starting: "Запускается",
       up: "Работает",
@@ -349,6 +357,24 @@ export const ruTranslation = {
     },
   },
   overview: {
+    services: {
+      version: "Версия {{version}}, сборка {{build}}",
+      unknown: "Состояние неизвестно",
+      restart: "Перезапустить",
+      restartRequested: "Перезапуск запрошен",
+      restartFailed: "Не удалось перезапустить",
+      title: "Службы",
+      singbox: "sing-box",
+      nfqws: "nfqws2",
+      transportsRunning: "Запущено {{running}} из {{total}}",
+      noTransports: "Транспорты не настроены",
+      notInstalled: "Не установлен",
+      running: "Служба запущена",
+      stopped: "Служба остановлена",
+      badgeUp: "Работает",
+      badgeDown: "Остановлен",
+      badgeAbsent: "Нет",
+    },
     pageDescription:
       "Обзор состояния маршрутизации, конфигурации и активных outbounds",
     runtime: {
@@ -370,6 +396,26 @@ export const ruTranslation = {
       },
     },
     outbounds: {
+      members: "{{count}} в группе",
+      kind: {
+        failover: "Failover",
+        table: "Таблица",
+        blackhole: "Блокировка",
+        ignore: "Без изменений",
+        interface: "Интерфейс",
+      },
+      status: {
+        healthy: "Исправен",
+        degraded: "Не работает",
+        unknown: "Неизвестно",
+        misconfigured: "Ошибка настройки",
+      },
+      member: {
+        active: "Активен",
+        backup: "Резервный",
+        unavailable: "Недоступен",
+        unknown: "Неизвестно",
+      },
       title: "Состояние outbounds",
       loadError: "Не удалось загрузить состояние outbounds.",
       emptyTitle: "Outbounds не настроены",
@@ -528,6 +574,23 @@ export const ruTranslation = {
   },
   pages: {
     settings: {
+      auth: {
+        title: "Вход в веб-интерфейс",
+        description: "Кто и как подтверждает вход в keen-pbr-sb.",
+        enabled: "Требовать вход",
+        provider: "Способ проверки",
+        providerRouter: "Учётная запись роутера",
+        providerLocal: "Отдельный пароль keen-pbr-sb",
+        providerRouterHint: "Логин и пароль проверяются самой прошивкой Keenetic. keen-pbr-sb пароль не хранит.",
+        providerLocalHint: "Логин и пароль хранятся в auth.json на роутере.",
+        endpoint: "Адрес веб-интерфейса роутера",
+        username: "Логин",
+        password: "Пароль",
+        verifyHint: "Укажите учётные данные роутера — они будут проверены перед сохранением, чтобы вход не оказался заблокирован.",
+        localStoreHint: "Задайте логин и пароль, которыми будете входить в keen-pbr-sb.",
+        save: "Сохранить способ входа",
+        saved: "Настройки входа сохранены, войдите заново",
+      },
       title: "Настройки",
       description:
         "Глобальные настройки, действующие на все outbounds и правила.",
@@ -569,6 +632,25 @@ export const ruTranslation = {
           "Этот интерфейс сохранён в конфиге, но сейчас отсутствует в живом списке интерфейсов системы.",
       },
       autoupdate: {
+        scheduleHint: "Как часто проверять обновления списков.",
+        schedule: {
+          hourly: "Каждый час",
+          daily: "Каждый день",
+          weekly: "Каждую неделю",
+          monthly: "Каждый месяц",
+          custom: "Своё расписание (cron)",
+          atHour: "в {{hour}}:00",
+          dayOfMonth: "{{day}}-го числа",
+          weekdays: {
+            sunday: "По воскресеньям",
+            monday: "По понедельникам",
+            tuesday: "По вторникам",
+            wednesday: "По средам",
+            thursday: "По четвергам",
+            friday: "По пятницам",
+            saturday: "По субботам",
+          },
+        },
         title: "Автообновление списков",
         description: "Автоматическое обновление удалённых списков.",
         enabledLabel: "Включить автообновление списков",
@@ -729,6 +811,7 @@ export const ruTranslation = {
       description:
         "Правила, определяющие, какой outbound обрабатывает подходящий трафик. Проверяются сверху вниз.",
       actions: {
+        reorder: "Перетащите, чтобы изменить порядок",
         addRule: "Добавить правило маршрутизации",
         enableRule: "Включить правило",
         disableRule: "Выключить правило",
@@ -833,6 +916,11 @@ export const ruTranslation = {
       },
     },
     outbounds: {
+      groups: {
+        interfaces: "Туннели и интерфейсы",
+        failover: "Failover-группы",
+        system: "Системные выходы",
+      },
       title: "Outbounds (выходы)",
       description: "Настроенные outbounds и группы urltest.",
       actions: { new: "Добавить outbound" },
@@ -1189,6 +1277,24 @@ export const ruTranslation = {
       },
     },
     listUpsert: {
+      templates: {
+        button: "Выбрать из готовых",
+        title: "Готовые списки",
+        description: "Подборка правил sing-box: выберите нужный сервис, и ссылка подставится в поле URL.",
+        search: "Поиск по названию или адресу",
+        add: "Выбрать",
+        empty: "Ничего не найдено",
+        categories: {
+          ai: "Нейросети",
+          social: "Соцсети и мессенджеры",
+          media: "Медиа и стриминги",
+          gaming: "Игры",
+          developer: "Разработка и работа",
+          cloud: "Облака и платформы",
+          block: "Блокировки",
+          other: "Прочее",
+        },
+      },
       createTitle: "Создать список",
       editTitle: "Изменить список",
       editCardTitle: "Изменить {{name}}",
@@ -1243,6 +1349,11 @@ export const ruTranslation = {
           title: "Домены / IP",
           description: "Позволяет указать домены и IP-адреса прямо в конфиге.",
         },
+      },
+      dnsRule: {
+        title: "DNS-сервер для этого списка",
+        description: "Домены из списка будут разрешаться через выбранный DNS-сервер. Без выбора список использует основные серверы.",
+        none: "Не задан",
       },
       quickSetup: {
         title: "Быстрая настройка правил",

@@ -186,6 +186,9 @@ export const enTranslation = {
     },
   },
   connections: {
+    deviceCount: "{{count}} devices",
+    routeDirect: "Direct",
+    empty: "No connections",
     title: "Connections",
     description:
       "Active connections and up to 1,500 recent records. DNS traffic observed by keen-pbr adds the last known domain next to the exact IP. Data refreshes every 3 seconds.",
@@ -203,6 +206,7 @@ export const enTranslation = {
     route: "Route",
   },
   transports: {
+    dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
       title: "sing-box is not installed",
       description:
@@ -251,6 +255,9 @@ export const enTranslation = {
       delete: "Transport deleted",
     },
     form: {
+      createOutbound: "Create an outbound right away",
+      createOutboundHint: "Adds an interface outbound with the same tag so the transport can be picked in routing rules immediately.",
+      outboundExists: "An outbound tagged {{tag}} already exists",
       createTitle: "Add transport",
       editTitle: "Edit transport",
       description:
@@ -299,6 +306,7 @@ export const enTranslation = {
       bindOutbound: "Create outbound for this interface",
     },
     states: {
+      connected: "Connected",
       down: "Down",
       starting: "Starting",
       up: "Up",
@@ -346,6 +354,24 @@ export const enTranslation = {
     },
   },
   overview: {
+    services: {
+      version: "Version {{version}}, build {{build}}",
+      unknown: "State unknown",
+      restart: "Restart",
+      restartRequested: "Restart requested",
+      restartFailed: "Restart failed",
+      title: "Services",
+      singbox: "sing-box",
+      nfqws: "nfqws2",
+      transportsRunning: "{{running}} of {{total}} running",
+      noTransports: "No transports configured",
+      notInstalled: "Not installed",
+      running: "Service is running",
+      stopped: "Service is stopped",
+      badgeUp: "Running",
+      badgeDown: "Stopped",
+      badgeAbsent: "None",
+    },
     pageDescription:
       "Overview of routing runtime, config state, and active outbounds",
     runtime: {
@@ -367,6 +393,26 @@ export const enTranslation = {
       },
     },
     outbounds: {
+      members: "{{count}} in group",
+      kind: {
+        failover: "Failover",
+        table: "Table",
+        blackhole: "Blackhole",
+        ignore: "Pass-through",
+        interface: "Interface",
+      },
+      status: {
+        healthy: "Healthy",
+        degraded: "Down",
+        unknown: "Unknown",
+        misconfigured: "Misconfigured",
+      },
+      member: {
+        active: "Active",
+        backup: "Backup",
+        unavailable: "Unavailable",
+        unknown: "Unknown",
+      },
       title: "Outbounds health",
       loadError: "Unable to load outbound health.",
       emptyTitle: "No outbounds configured",
@@ -520,6 +566,23 @@ export const enTranslation = {
   },
   pages: {
     settings: {
+      auth: {
+        title: "Web interface login",
+        description: "How access to keen-pbr-sb is verified.",
+        enabled: "Require sign-in",
+        provider: "Verification method",
+        providerRouter: "Router account",
+        providerLocal: "Separate keen-pbr-sb password",
+        providerRouterHint: "The Keenetic firmware checks the credentials; keen-pbr-sb never stores the password.",
+        providerLocalHint: "Login and password are stored in auth.json on the router.",
+        endpoint: "Router web interface address",
+        username: "Username",
+        password: "Password",
+        verifyHint: "Enter the router credentials: they are verified before saving so you cannot lock yourself out.",
+        localStoreHint: "Set the login and password you will use for keen-pbr-sb.",
+        save: "Save login method",
+        saved: "Login settings saved, sign in again",
+      },
       title: "Settings",
       description:
         "Global defaults that apply to all your outbounds and rules.",
@@ -559,6 +622,25 @@ export const enTranslation = {
           "This interface is saved in config but is not present in the current live interface inventory.",
       },
       autoupdate: {
+        scheduleHint: "How often to check the remote lists for updates.",
+        schedule: {
+          hourly: "Every hour",
+          daily: "Every day",
+          weekly: "Every week",
+          monthly: "Every month",
+          custom: "Custom schedule (cron)",
+          atHour: "at {{hour}}:00",
+          dayOfMonth: "on day {{day}}",
+          weekdays: {
+            sunday: "On Sundays",
+            monday: "On Mondays",
+            tuesday: "On Tuesdays",
+            wednesday: "On Wednesdays",
+            thursday: "On Thursdays",
+            friday: "On Fridays",
+            saturday: "On Saturdays",
+          },
+        },
         title: "Lists autoupdate",
         description: "Keep your remote lists up to date automatically.",
         enabledLabel: "Enable lists autoupdate",
@@ -718,6 +800,7 @@ export const enTranslation = {
       description:
         "Rules that decide which outbound handles matching traffic. Evaluated top to bottom.",
       actions: {
+        reorder: "Drag to reorder",
         addRule: "Add routing rule",
         enableRule: "Enable rule",
         disableRule: "Disable rule",
@@ -818,6 +901,11 @@ export const enTranslation = {
       },
     },
     outbounds: {
+      groups: {
+        interfaces: "Tunnels and interfaces",
+        failover: "Failover groups",
+        system: "System outbounds",
+      },
       title: "Outbounds",
       description: "Your configured outbounds and urltest groups.",
       actions: { new: "Add outbound" },
@@ -1162,6 +1250,24 @@ export const enTranslation = {
       },
     },
     listUpsert: {
+      templates: {
+        button: "Pick a ready-made list",
+        title: "Ready-made lists",
+        description: "Curated sing-box rule sets: choose a service and its URL fills the field.",
+        search: "Search by name or address",
+        add: "Select",
+        empty: "Nothing found",
+        categories: {
+          ai: "AI services",
+          social: "Social and messengers",
+          media: "Media and streaming",
+          gaming: "Games",
+          developer: "Work and development",
+          cloud: "Clouds and platforms",
+          block: "Blocking",
+          other: "Other",
+        },
+      },
       createTitle: "Create list",
       editTitle: "Edit list",
       editCardTitle: "Edit {{name}}",
@@ -1213,6 +1319,11 @@ export const enTranslation = {
           title: "Domains / IPs",
           description: "Enter domains and IPs directly in the config.",
         },
+      },
+      dnsRule: {
+        title: "DNS server for this list",
+        description: "Domains from this list resolve through the selected server. Without one the list uses the primary servers.",
+        none: "Not set",
       },
       quickSetup: {
         title: "Quick rule setup",

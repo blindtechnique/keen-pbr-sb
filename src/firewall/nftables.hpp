@@ -55,6 +55,7 @@ private:
     static constexpr const char* CHAIN_NAME = "prerouting";
     static constexpr const char* OUTPUT_CHAIN_NAME = "output";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "dns_redirect";
+    static constexpr const char* SNAT_CHAIN_NAME = "router_origin_snat";
     void cleanup_live_impl();
     void cleanup_impl();
     bool table_exists() const;
@@ -64,6 +65,7 @@ private:
         bool chain_exists{false};
         bool output_chain_exists{false};
         bool dns_nat_chain_exists{false};
+        bool snat_chain_exists{false};
         std::set<std::string> set_names;
     };
 
@@ -105,6 +107,9 @@ private:
     static nlohmann::json build_delete_dns_nat_chain_json();
     static nlohmann::json build_dns_redirect_rules_json(
         const FirewallGlobalPrefilter& prefilter);
+    static nlohmann::json build_snat_chain_json();
+    static nlohmann::json build_delete_snat_chain_json();
+    static nlohmann::json build_snat_rule_json();
     // Build all prerouting rule add-commands, including global prefilter rules.
     static nlohmann::json build_rule_add_commands(
         const FirewallGlobalPrefilter& prefilter,
@@ -156,6 +161,7 @@ private:
 
     // Client DNS enforcement requested for the next apply().
     bool dns_redirect_requested_ = false;
+    bool router_origin_snat_requested_ = false;
 
 #ifdef KEEN_PBR3_TESTING
     friend class NftablesBuilderTest;

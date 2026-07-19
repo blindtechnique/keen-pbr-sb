@@ -123,8 +123,20 @@ public:
   }
 
   static std::string build_dns_nat_script(
-      const FirewallGlobalPrefilter &prefilter) {
-    return IptablesFirewall::build_dns_nat_script(prefilter);
+      const FirewallGlobalPrefilter &prefilter,
+      bool dns_redirect = true,
+      bool router_origin_snat = false) {
+    return IptablesFirewall::build_dns_nat_script(prefilter, dns_redirect,
+                                                  router_origin_snat);
+  }
+
+  static std::string build_output_mark_script_with_snat(
+      uint32_t fwmark, const FirewallRuleCriteria &criteria,
+      uint32_t fwmark_mask) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(fwmark_mask);
+    fw.create_output_mark_rule(fwmark, criteria);
+    return IptablesFirewall::build_ipt_script(false, fw.pending_rules_, {});
   }
 };
 
@@ -374,6 +386,25 @@ TEST_CASE("build_dns_nat_script: no inbound interfaces redirects from any interf
   auto s = T::build_dns_nat_script({});
   CHECK(s.find("-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
   CHECK(s.find("-i ") == std::string::npos);
+}
+
+TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {
+  auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
+                                   /*router_origin_snat=*/true);
+  CHECK(s.find(":KeenPbrSnat - [0:0]\n-A POSTROUTING -j KeenPbrSnat\n") != std::string::npos);
+  CHECK(s.find("-A KeenPbrSnat -m mark --mark 0x1000000/0x1000000 -j MASQUERADE\n") != std::string::npos);
+  CHECK(s.find("KeenPbrDnsRdr") == std::string::npos);
+}
+
+TEST_CASE("create_output_mark_rule: carries the router-origin bit for masquerading") {
+  FirewallRuleCriteria criteria;
+  criteria.proto = L4Proto::Udp;
+  criteria.dst_port = "53";
+  criteria.dst_addr = {"8.8.8.8"};
+  auto s = T::build_output_mark_script_with_snat(0x20000, criteria, 0x00FF0000);
+  // Without the extra bit the packet would leave the tunnel with the source
+  // address picked before the mark existed and never get an answer back.
+  CHECK(s.find("-j MARK --set-xmark 0x1020000/0x1ff0000") != std::string::npos);
 }
 
 TEST_CASE("build_ipt_script: global prefilter RETURN lines are emitted before route rules") {

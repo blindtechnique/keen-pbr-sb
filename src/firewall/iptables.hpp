@@ -55,6 +55,7 @@ private:
     static constexpr const char* CHAIN_NAME = "KeenPbrTable";
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
+    static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
     void cleanup_live_impl();
     void cleanup_impl();
     void cleanup_rules_impl();
@@ -122,12 +123,16 @@ private:
 
     // DNS redirect (client DNS enforcement) state
     bool dns_redirect_requested_ = false;
+    bool router_origin_snat_requested_ = false;
     bool dns_nat_v4_created_ = false;
     bool dns_nat_v6_created_ = false;
 
-    // Build the nat-table restore script with REDIRECT rules for port 53.
+    // Build the nat-table restore script: REDIRECT rules for port 53 and the
+    // masquerade rule for router-originated detour traffic.
     static std::string build_dns_nat_script(
-        const FirewallGlobalPrefilter& prefilter);
+        const FirewallGlobalPrefilter& prefilter,
+        bool dns_redirect,
+        bool router_origin_snat);
 
 #ifdef KEEN_PBR3_TESTING
     friend class IptablesBuilderTest;

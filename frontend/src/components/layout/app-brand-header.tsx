@@ -28,19 +28,27 @@ export function AppBrandHeader({
           <MenuIcon className="h-4 w-4" />
         </IconButtonWithTooltip>
       ) : null}
-      <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-primary/25 bg-primary shadow-sm ring-1 ring-primary/10">
-        <img
-          alt={t("brand.logoAlt")}
-          className="size-full object-contain"
-          src={logoUrl}
-        />
-      </div>
-      <div className="grid min-w-0 flex-1 text-left leading-tight group-data-[collapsible=icon]:hidden">
-        <span className="truncate text-base font-semibold tracking-[-0.01em]">keen-pbr-sb</span>
-        <span className="truncate text-xs text-muted-foreground">
-          {t("brand.tagline")}
+      <a
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        href="/"
+        title={t("nav.items.systemMonitor")}
+      >
+        <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-md bg-primary">
+          <img
+            alt={t("brand.logoAlt")}
+            className="size-full object-contain"
+            src={logoUrl}
+          />
         </span>
-      </div>
+        <span className="flex min-w-0 items-baseline gap-1.5 text-left group-data-[collapsible=icon]:hidden">
+          <span className="truncate text-[19px] leading-6 font-medium tracking-[0.01em] text-primary">
+            keen-pbr
+          </span>
+          <span className="truncate text-[19px] leading-6 font-light tracking-[0.08em] text-foreground/80 uppercase">
+            sb
+          </span>
+        </span>
+      </a>
     </div>
   )
 }

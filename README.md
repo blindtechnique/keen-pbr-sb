@@ -247,7 +247,8 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb
 - [maksimkurb/keen-pbr](https://github.com/maksimkurb/keen-pbr) — основа policy-based routing;
 - [SagerNet/sing-box](https://github.com/SagerNet/sing-box) — proxy-транспорты и SRS;
 - [nfqws/nfqws2-keenetic](https://github.com/nfqws/nfqws2-keenetic) — пакет nfqws2 для Keenetic;
-- [nfqws/nfqws-keenetic-web](https://github.com/nfqws/nfqws-keenetic-web) — функции управления, перенесённые в общий интерфейс.
+- [nfqws/nfqws-keenetic-web](https://github.com/nfqws/nfqws-keenetic-web) — функции управления, перенесённые в общий интерфейс;
+- [hoaxisr/awg-manager](https://github.com/hoaxisr/awg-manager) — подборка готовых rule-set для списков адресов: каталог шаблонов в интерфейсе собран по её мотивам. Часть ссылок ведёт на репозиторий автора `repo.hoaxisr.ru`, часть — на официальный [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite).
 
 ## Публикация и разработка
 

@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Pencil, Plus, Trash2 } from "lucide-react"
+import { Pencil, Plus, Trash2 } from "lucide-react"
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
@@ -107,28 +107,19 @@ export function RoutingRulesPage() {
     )
   }
 
-  const handleDelete = (index: number) => {
+  const handleReorder = (fromIndex: number, toIndex: number) => {
     if (!loadedConfig) {
       return
     }
-
-    const nextRules = routeRules.filter(
-      (_rule: RouteRule, ruleIndex: number) => ruleIndex !== index
-    )
-    persistRules(loadedConfig, nextRules)
-  }
-
-  const handleMove = (index: number, direction: -1 | 1) => {
-    if (!loadedConfig) {
+    if (
+      fromIndex === toIndex ||
+      toIndex < 0 ||
+      toIndex >= routeRules.length
+    ) {
       return
     }
 
-    const targetIndex = index + direction
-    if (targetIndex < 0 || targetIndex >= routeRules.length) {
-      return
-    }
-
-    const nextRules = reorderRules(routeRules, index, targetIndex)
+    const nextRules = reorderRules(routeRules, fromIndex, toIndex)
     persistRules(loadedConfig, nextRules)
   }
 
@@ -173,7 +164,7 @@ export function RoutingRulesPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         actions={
           <div className="flex flex-wrap justify-end gap-2">
@@ -215,7 +206,10 @@ export function RoutingRulesPage() {
         />
       ) : (
         <div className="space-y-3">
-          {ruleSelection.hasSelection ? (
+          {/* The toolbar shares a fixed-height slot so selecting a rule does not
+              push the whole table down. */}
+          <div className="flex h-11 items-center">
+            {ruleSelection.hasSelection ? (
             <BulkSelectionToolbar
               countLabel={t("pages.routingRules.bulk.selected", {
                 count: ruleSelection.selectedCount,
@@ -247,7 +241,8 @@ export function RoutingRulesPage() {
                 {t("pages.routingRules.bulk.delete")}
               </Button>
             </BulkSelectionToolbar>
-          ) : null}
+            ) : null}
+          </div>
           <DataTable
             headers={[
               "",
@@ -257,6 +252,11 @@ export function RoutingRulesPage() {
               t("pages.routingRules.headers.actions"),
             ]}
             narrowColumns={[0, 1]}
+            reorder={{
+              disabled: configMutationPending,
+              handleLabel: t("pages.routingRules.actions.reorder"),
+              onReorder: handleReorder,
+            }}
             rows={tableRows.map((row: ReturnType<typeof getRouteRuleRow>) => [
               <div className="flex items-center" key={`${row.id}-enabled`}>
                 <Switch
@@ -307,27 +307,9 @@ export function RoutingRulesPage() {
                 actions={[
                   {
                     disabled: configMutationPending,
-                    icon: <ArrowUp className="h-4 w-4" />,
-                    label: t("common.moveUp"),
-                    onClick: () => handleMove(row.index, -1),
-                  },
-                  {
-                    disabled: configMutationPending,
-                    icon: <ArrowDown className="h-4 w-4" />,
-                    label: t("common.moveDown"),
-                    onClick: () => handleMove(row.index, 1),
-                  },
-                  {
-                    disabled: configMutationPending,
                     icon: <Pencil className="h-4 w-4" />,
                     label: t("common.edit"),
                     onClick: () => navigate(`/routing-rules/${row.index}/edit`),
-                  },
-                  {
-                    disabled: configMutationPending,
-                    icon: <Trash2 className="h-4 w-4" />,
-                    label: t("common.delete"),
-                    onClick: () => handleDelete(row.index),
                   },
                 ]}
                 key={`${row.id}-actions`}

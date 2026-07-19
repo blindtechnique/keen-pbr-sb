@@ -1,15 +1,14 @@
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Download, Play, RotateCw, Square } from "lucide-react"
+import { Download, RotateCw } from "lucide-react"
 
 import type { ApiError } from "@/api/client"
-import type { Outbound, RuntimeOutboundState } from "@/api/generated/model"
+
 import type { DnsCheckStatus } from "@/hooks/use-dns-check"
 import {
   useGetConfig,
   useGetHealthRouting,
   useGetHealthService,
-  useGetRuntimeInterfaces,
   useGetRuntimeOutbounds,
 } from "@/api/queries"
 import {
@@ -19,7 +18,7 @@ import {
 import { selectConfig } from "@/api/selectors"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ButtonGroup } from "@/components/ui/button-group"
+import { Switch } from "@/components/ui/switch"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
   Empty,
@@ -28,12 +27,11 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { Skeleton } from "@/components/ui/skeleton"
-import { DataTable } from "@/components/shared/data-table"
-import { PageHeader } from "@/components/shared/page-header"
-import { RuntimeOutboundDetails } from "@/components/shared/runtime-outbound-state"
 import { SectionCard } from "@/components/shared/section-card"
 import { RoutingHealthCard } from "@/components/overview/routing-health-card"
 import { DnsCheckWidget } from "@/components/overview/dns-check-widget"
+import { OutboundStateList } from "@/components/overview/outbound-state-list"
+import { ServicesStatusCard } from "@/components/overview/services-status-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
 import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
@@ -59,12 +57,6 @@ export function OverviewPage() {
     },
   })
   const runtimeOutboundsQuery = useGetRuntimeOutbounds({
-    query: {
-      refetchInterval: 30_000,
-      refetchIntervalInBackground: false,
-    },
-  })
-  const runtimeInterfacesQuery = useGetRuntimeInterfaces({
     query: {
       refetchInterval: 30_000,
       refetchIntervalInBackground: false,
@@ -102,16 +94,6 @@ export function OverviewPage() {
       ),
     [runtimeOutbounds]
   )
-  const runtimeInterfaceByName = useMemo(
-    () =>
-      new Map(
-        (runtimeInterfacesQuery.data?.status === 200
-          ? runtimeInterfacesQuery.data.data.interfaces
-          : []
-        ).map((runtimeInterface) => [runtimeInterface.name, runtimeInterface])
-      ),
-    [runtimeInterfacesQuery.data]
-  )
   const dnsmasqBadge = getDnsmasqBadgeState(
     serviceHealth?.resolver_live_status,
     serviceHealth?.resolver_config_sync_state
@@ -130,52 +112,14 @@ export function OverviewPage() {
     dnsCheckStatus !== "checking" &&
     !configIsDraft
 
-  const outboundRows = useMemo(() => {
-    const configuredOutbounds = loadedConfig?.outbounds ?? []
-    if (configuredOutbounds.length === 0) {
-      return []
-    }
-
-    return configuredOutbounds.map((outbound) => {
-      const runtimeState = runtimeOutboundByTag.get(outbound.tag)
-      const detailContent = runtimeState ? (
-        <RuntimeOutboundDetails
-          fallbackLabel={getRuntimeFallbackLabel(outbound, t)}
-          fallbackTone={getRuntimeFallbackTone(outbound)}
-          runtimeState={runtimeState}
-          runtimeInterfaces={runtimeInterfaceByName}
-          t={t}
-          variant="tree"
-        />
-      ) : null
-      const tagCell =
-        outbound.type === "urltest" ||
-        outbound.type === "interface" ||
-        detailContent ? (
-          <div className="space-y-2">
-            <OutboundHeader outbound={outbound} runtimeState={runtimeState} />
-            {detailContent}
-          </div>
-        ) : (
-          <OutboundHeader outbound={outbound} runtimeState={runtimeState} />
-        )
-
-      return [tagCell]
-    })
-  }, [loadedConfig, runtimeInterfaceByName, runtimeOutboundByTag, t])
 
   const routingHealthErrorMessage = routingHealthQuery.isError
     ? getRoutingHealthErrorMessage(routingHealthQuery.error, t)
     : null
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        description={t("overview.pageDescription")}
-        title={t("nav.items.systemMonitor")}
-      />
-
-      <div className="grid gap-4 xl:grid-cols-2">
+    <div className="space-y-3">
+      <div className="grid gap-3 xl:grid-cols-3">
         <SectionCard
           className="h-full"
           contentClassName="flex flex-1 flex-col"
@@ -230,29 +174,28 @@ export function OverviewPage() {
                   </div>
                 </div>
               </div>
-              <ButtonGroup className="mt-auto w-full [&>[data-slot=button]]:flex-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={
-                    actionPending || !hasServiceHealth || isServiceRunning
-                  }
-                  onClick={() => postServiceStartMutation.mutate()}
-                >
-                  <Play className="mr-1 h-3 w-3" />
-                  {t("overview.runtime.actions.start")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={
-                    actionPending || !hasServiceHealth || !isServiceRunning
-                  }
-                  onClick={() => postServiceStopMutation.mutate()}
-                >
-                  <Square className="mr-1 h-3 w-3" />
-                  {t("overview.runtime.actions.stop")}
-                </Button>
+              <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-2">
+                <label className="flex min-w-0 cursor-pointer items-center gap-2">
+                  <Switch
+                    aria-label={
+                      isServiceRunning
+                        ? t("overview.runtime.actions.stop")
+                        : t("overview.runtime.actions.start")
+                    }
+                    checked={isServiceRunning}
+                    disabled={actionPending || !hasServiceHealth}
+                    onCheckedChange={(checked) =>
+                      checked
+                        ? postServiceStartMutation.mutate()
+                        : postServiceStopMutation.mutate()
+                    }
+                  />
+                  <span className="truncate text-sm text-muted-foreground">
+                    {isServiceRunning
+                      ? t("overview.runtime.actions.stop")
+                      : t("overview.runtime.actions.start")}
+                  </span>
+                </label>
                 <Button
                   size="sm"
                   variant="outline"
@@ -264,7 +207,7 @@ export function OverviewPage() {
                   <RotateCw className="mr-1 h-3 w-3" />
                   {t("overview.runtime.actions.restart")}
                 </Button>
-              </ButtonGroup>
+              </div>
             </div>
           ) : null}
         </SectionCard>
@@ -273,11 +216,13 @@ export function OverviewPage() {
           dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
           onStatusChange={setDnsCheckStatus}
         />
+
+        <ServicesStatusCard />
       </div>
 
       <RoutingTestPanel />
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-3 xl:grid-cols-2">
         <SectionCard className="h-full" title={t("overview.outbounds.title")}>
           {configQuery.isLoading ? <TableSkeleton /> : null}
           {configQuery.isError || runtimeOutboundsQuery.isError ? (
@@ -287,7 +232,7 @@ export function OverviewPage() {
               </AlertDescription>
             </Alert>
           ) : null}
-          {!configQuery.isLoading && outboundRows.length === 0 ? (
+          {!configQuery.isLoading && (loadedConfig?.outbounds ?? []).length === 0 ? (
             <Empty className="border">
               <EmptyHeader>
                 <EmptyTitle>{t("overview.outbounds.emptyTitle")}</EmptyTitle>
@@ -297,8 +242,11 @@ export function OverviewPage() {
               </EmptyHeader>
             </Empty>
           ) : null}
-          {outboundRows.length > 0 ? (
-            <DataTable compact rows={outboundRows} />
+          {(loadedConfig?.outbounds ?? []).length > 0 ? (
+            <OutboundStateList
+              outbounds={loadedConfig?.outbounds ?? []}
+              runtimeByTag={runtimeOutboundByTag}
+            />
           ) : null}
         </SectionCard>
 
@@ -368,7 +316,7 @@ export function OverviewPage() {
 
 function ServiceSummarySkeleton() {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <div className="space-y-2">
         <Skeleton className="h-4 w-20" />
         <Skeleton className="h-7 w-28" />
@@ -445,65 +393,3 @@ function StatusBadge({
   )
 }
 
-function OutboundHeader({
-  outbound,
-  runtimeState,
-}: {
-  outbound: Outbound
-  runtimeState?: RuntimeOutboundState
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="font-medium">{outbound.tag}</div>
-      <Badge size="xs" variant="outline">
-        {outbound.type}
-      </Badge>
-      <StatusBadge tone={mapRuntimeHealthTone(runtimeState?.status)}>
-        {runtimeState?.status ?? "unknown"}
-      </StatusBadge>
-    </div>
-  )
-}
-
-function mapRuntimeHealthTone(
-  status: RuntimeOutboundState["status"] | undefined
-): "healthy" | "warning" | "degraded" {
-  if (status === "healthy") {
-    return "healthy"
-  }
-
-  if (status === "unknown" || status === undefined) {
-    return "warning"
-  }
-
-  return "degraded"
-}
-
-function getRuntimeFallbackLabel(
-  outbound: Outbound,
-  t: (key: string, options?: Record<string, unknown>) => string
-): string | undefined {
-  if (outbound.type === "table" && typeof outbound.table === "number") {
-    return t("runtime.fallback.table", { value: outbound.table })
-  }
-
-  if (outbound.type === "blackhole") {
-    return t("runtime.fallback.blackhole")
-  }
-
-  return undefined
-}
-
-function getRuntimeFallbackTone(
-  outbound: Outbound
-): "info" | "unknown" | undefined {
-  if (outbound.type === "table") {
-    return "info"
-  }
-
-  if (outbound.type === "blackhole") {
-    return "unknown"
-  }
-
-  return undefined
-}

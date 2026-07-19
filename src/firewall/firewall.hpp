@@ -77,6 +77,14 @@ struct FirewallGlobalPrefilter {
     }
 };
 
+// Marks packets the router itself emitted into a detour tunnel. The kernel
+// picks a source address during the first route lookup, before mangle OUTPUT
+// runs, so a marked packet would leave the tunnel carrying the WAN address and
+// never get an answer back. Backends masquerade packets carrying this bit so
+// the source becomes the tunnel address. The bit lives outside the configurable
+// fwmark mask, which keeps the policy rules matching as before.
+inline constexpr uint32_t kRouterOriginMark = 0x01000000u;
+
 class FirewallError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;

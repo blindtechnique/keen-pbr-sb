@@ -80,24 +80,23 @@ export function AuthGate({ children }: { children: ReactNode }) {
   if (!status.enabled || status.authenticated) return children
 
   return (
-    <main className="grid min-h-screen bg-background lg:grid-cols-[minmax(20rem,0.8fr)_minmax(28rem,1.2fr)]">
-      <section className="relative hidden overflow-hidden bg-[#145a96] p-12 text-white lg:flex lg:flex-col lg:justify-between">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgb(100_181_246_/_0.42),transparent_38%),linear-gradient(145deg,#1976d2,#123d63)]" />
+    <main className="grid min-h-screen bg-background lg:grid-cols-2">
+      <section className="relative hidden overflow-hidden bg-primary p-12 text-white lg:flex lg:flex-col lg:justify-between">
         <div className="relative">
           <div className="mb-5 size-20 overflow-hidden rounded-2xl border border-white/25 shadow-lg">
             <img alt={t("brand.logoAlt")} className="size-full object-cover" src={logoUrl} />
           </div>
-          <p className="text-sm font-semibold tracking-[0.18em] text-blue-100 uppercase">
+          <p className="text-sm font-semibold tracking-[0.18em] text-white/85 uppercase">
             Keenetic / Netcraze
           </p>
           <h1 className="mt-3 text-4xl font-semibold tracking-[-0.04em]">
             keen-pbr-sb
           </h1>
-          <p className="mt-4 max-w-md text-base leading-7 text-blue-100">
+          <p className="mt-4 max-w-md text-base leading-7 text-white/85">
             {t("brand.tagline")}
           </p>
         </div>
-        <p className="relative text-xs text-blue-100/80">Entware · Local control</p>
+        <p className="relative text-xs text-white/70">Entware · Local control</p>
       </section>
       <div className="grid place-items-center p-4 sm:p-8">
       <Card className="w-full max-w-md">

@@ -106,32 +106,6 @@ export function DnsRulesPage() {
     })
   }
 
-  const handleDeleteRule = (index: number) => {
-    if (!loadedConfig) {
-      return
-    }
-
-    const nextDraftRules = rules
-      .filter((_rule, ruleIndex) => ruleIndex !== index)
-      .map((rule) => getRuleDraft(rule))
-
-    const validation = validateRules(nextDraftRules, serverTags, listOptions)
-    if (Object.keys(validation).length > 0) {
-      toast.error(t("pages.dnsRules.validation.invalidResult"), {
-        richColors: true,
-      })
-      return
-    }
-
-    postConfigMutation.mutate({
-      data: buildUpdatedConfigWithRules(
-        loadedConfig,
-        loadedConfig.dns?.fallback ?? [],
-        nextDraftRules
-      ),
-    })
-  }
-
   const handleEnabledChange = (index: number, enabled: boolean) => {
     if (!loadedConfig) {
       return
@@ -233,7 +207,7 @@ export function DnsRulesPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         actions={
           <Button
@@ -303,6 +277,7 @@ export function DnsRulesPage() {
             />
           ) : (
             <div className="space-y-3">
+              <div className="flex h-11 items-center">
               {ruleSelection.hasSelection ? (
                 <BulkSelectionToolbar
                   countLabel={t("pages.dnsRules.bulk.selected", {
@@ -336,6 +311,7 @@ export function DnsRulesPage() {
                   </Button>
                 </BulkSelectionToolbar>
               ) : null}
+              </div>
               <DataTable
                 headers={[
                   "",
@@ -396,12 +372,6 @@ export function DnsRulesPage() {
                         icon: <Pencil className="h-4 w-4" />,
                         label: t("common.edit"),
                         onClick: () => navigate(`/dns-rules/${index}/edit`),
-                      },
-                      {
-                        disabled: configMutationPending,
-                        icon: <Trash2 className="h-4 w-4" />,
-                        label: t("common.delete"),
-                        onClick: () => handleDeleteRule(index),
                       },
                     ]}
                     key={`actions-${index}`}

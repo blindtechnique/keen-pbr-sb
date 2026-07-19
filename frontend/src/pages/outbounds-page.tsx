@@ -115,6 +115,24 @@ export function OutboundsPage() {
   )
   const outboundRowIds = outboundItems.map((outbound) => outbound.id)
   const outboundSelection = useRowSelection(outboundRowIds)
+  // Grouped so the page reads as "what carries traffic" first, then failover
+  // groups, then the plumbing, instead of one undifferentiated list.
+  const outboundGroups = [
+    {
+      key: "interfaces",
+      items: outboundItems.filter((item) => item.type === "interface"),
+    },
+    {
+      key: "failover",
+      items: outboundItems.filter((item) => item.type === "urltest"),
+    },
+    {
+      key: "system",
+      items: outboundItems.filter(
+        (item) => item.type !== "interface" && item.type !== "urltest"
+      ),
+    },
+  ].filter((group) => group.items.length > 0)
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -140,21 +158,6 @@ export function OutboundsPage() {
       },
     },
   })
-
-  const handleDelete = (tag: string) => {
-    if (!loadedConfig) {
-      return
-    }
-
-    const request = {
-      tags: [tag],
-      impact: getOutboundDeleteImpact(loadedConfig, [tag]),
-      config: loadedConfig,
-      clearSelectionOnSuccess: false,
-    }
-    setDeletePreview(request)
-    setDeleteRequest(request)
-  }
 
   const handleBulkDelete = () => {
     if (!loadedConfig || outboundSelection.selectedCount === 0) {
@@ -196,7 +199,7 @@ export function OutboundsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
         actions={
           <Button
@@ -228,6 +231,7 @@ export function OutboundsPage() {
         />
       ) : (
         <div className="space-y-3">
+          <div className="flex h-11 items-center">
           {outboundSelection.hasSelection ? (
             <BulkSelectionToolbar
               countLabel={t("pages.outbounds.bulk.selected", {
@@ -245,6 +249,12 @@ export function OutboundsPage() {
               </Button>
             </BulkSelectionToolbar>
           ) : null}
+          </div>
+          {outboundGroups.map((group) => (
+          <div className="space-y-2" key={group.key}>
+            <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+              {t(`pages.outbounds.groups.${group.key}`)}
+            </h2>
           <DataTable
             headers={[
               t("pages.outbounds.headers.tag"),
@@ -253,7 +263,7 @@ export function OutboundsPage() {
               t("pages.outbounds.headers.runtime"),
               t("pages.outbounds.headers.actions"),
             ]}
-            rows={outboundItems.map((outbound) => [
+            rows={group.items.map((outbound) => [
               <RuntimeOutboundEntry
                 key={`${outbound.id}-tag`}
                 runtimeState={outbound.runtimeState}
@@ -285,18 +295,12 @@ export function OutboundsPage() {
                     label: t("common.edit"),
                     onClick: () => navigate(`/outbounds/${outbound.id}/edit`),
                   },
-                  {
-                    disabled: configMutationPending,
-                    icon: <Trash2 className="h-4 w-4" />,
-                    label: t("common.delete"),
-                    onClick: () => handleDelete(outbound.id),
-                  },
                 ]}
                 key={`${outbound.id}-actions`}
               />,
             ])}
             selection={{
-              rowIds: outboundRowIds,
+              rowIds: group.items.map((item) => item.id),
               selectedIds: outboundSelection.selectedIds,
               disabled: configMutationPending,
               onToggle: outboundSelection.toggleOne,
@@ -306,6 +310,8 @@ export function OutboundsPage() {
                 t("common.selection.selectRow", { rowLabel: rowId }),
             }}
           />
+          </div>
+          ))}
         </div>
       )}
       <DeleteImpactDialog

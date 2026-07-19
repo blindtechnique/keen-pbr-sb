@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <cstring>
+#include <set>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -300,6 +301,81 @@ std::vector<const Outbound*> ordered_urltest_children(const std::vector<Outbound
     return ordered;
 }
 
+// A urltest group may contain other urltest groups. Routing needs a concrete
+// interface, so follow the chain of selections down to a leaf. The depth guard
+// keeps a mis-typed configuration that references itself from looping forever.
+constexpr int kMaxUrltestDepth = 8;
+
+const Outbound* resolve_selected_interface(
+    const std::vector<Outbound>& outbounds,
+    const Outbound& outbound,
+    const std::map<std::string, std::string>* selections,
+    int depth = 0) {
+    if (depth > kMaxUrltestDepth) {
+        return nullptr;
+    }
+    if (outbound.type == OutboundType::INTERFACE) {
+        return &outbound;
+    }
+    if (outbound.type != OutboundType::URLTEST) {
+        return nullptr;
+    }
+
+    const std::string selected_tag = resolve_urltest_selection(selections, outbound.tag);
+    if (selected_tag.empty()) {
+        return nullptr;
+    }
+    const Outbound* child = find_outbound(outbounds, selected_tag);
+    if (!child) {
+        return nullptr;
+    }
+    return resolve_selected_interface(outbounds, *child, selections, depth + 1);
+}
+
+// Same walk, but stops at whatever the chain ends with — a blackhole child, for
+// instance, still has to turn the rule into a drop.
+const Outbound* resolve_effective_outbound(
+    const std::vector<Outbound>& outbounds,
+    const Outbound& outbound,
+    const std::map<std::string, std::string>* selections,
+    int depth = 0) {
+    if (outbound.type != OutboundType::URLTEST) {
+        return &outbound;
+    }
+    if (depth > kMaxUrltestDepth) {
+        return nullptr;
+    }
+    const std::string selected_tag = resolve_urltest_selection(selections, outbound.tag);
+    if (selected_tag.empty()) {
+        return nullptr;
+    }
+    const Outbound* child = find_outbound(outbounds, selected_tag);
+    if (!child) {
+        return nullptr;
+    }
+    return resolve_effective_outbound(outbounds, *child, selections, depth + 1);
+}
+
+// Flattens a group into the interfaces that can actually carry traffic, keeping
+// the configured order so the fallback metrics stay meaningful.
+void collect_urltest_leaf_interfaces(const std::vector<Outbound>& outbounds,
+                                     const Outbound& urltest,
+                                     std::vector<const Outbound*>& collected,
+                                     std::set<std::string>& visited,
+                                     int depth = 0) {
+    if (depth > kMaxUrltestDepth || !visited.insert(urltest.tag).second) {
+        return;
+    }
+    for (const Outbound* child : ordered_urltest_children(outbounds, urltest)) {
+        if (child->type == OutboundType::INTERFACE) {
+            collected.push_back(child);
+        } else if (child->type == OutboundType::URLTEST) {
+            collect_urltest_leaf_interfaces(outbounds, *child, collected, visited,
+                                            depth + 1);
+        }
+    }
+}
+
 // Returns the (offset)th non-reserved table ID starting from table_start.
 static uint32_t safe_table_id(uint32_t table_start, uint32_t offset) {
     uint32_t id = table_start;
@@ -389,14 +465,18 @@ void populate_routing_state(const Config& cfg,
             uint32_t table_id = safe_table_id(table_start, table_offset);
             ++table_offset;
 
-            const auto ordered_children = ordered_urltest_children(outbounds, ob);
+            std::vector<const Outbound*> ordered_children;
+            {
+                std::set<std::string> visited;
+                collect_urltest_leaf_interfaces(outbounds, ob, ordered_children, visited);
+            }
 
             const std::string selected_tag = resolve_urltest_selection(urltest_selections, ob.tag);
             const bool selection_ready = !selected_tag.empty();
             if (selection_ready) {
-                const Outbound* selected = find_outbound(outbounds, selected_tag);
+                const Outbound* selected =
+                    resolve_selected_interface(outbounds, ob, urltest_selections);
                 if (selected &&
-                    selected->type == OutboundType::INTERFACE &&
                     (!reachability_check || reachability_check(*selected))) {
                     for (const auto& route : make_default_routes(table_id, *selected)) {
                         add_route_if_enabled(route);
@@ -408,9 +488,6 @@ void populate_routing_state(const Config& cfg,
 
                 uint32_t metric = 1;
                 for (const Outbound* child : ordered_children) {
-                    if (child->type != OutboundType::INTERFACE) {
-                        continue;
-                    }
                     if (reachability_check && !reachability_check(*child)) {
                         continue;
                     }
@@ -645,13 +722,13 @@ std::vector<RuleState> build_fw_rule_states(
         const Outbound* effective_ob = ob;
 
         if (ob->type == OutboundType::URLTEST) {
-            auto selected = resolve_urltest_selection(urltest_selections, effective_tag);
-            if (!selected.empty()) {
-                const Outbound* child = find_outbound(all_outbounds, selected);
-                if (child) {
-                    effective_ob = child;
-                    effective_tag = selected;
-                }
+            // Nested groups resolve down to whatever ends the chain, so a
+            // blackhole still becomes a drop and an interface lends its mark.
+            const Outbound* leaf =
+                resolve_effective_outbound(all_outbounds, *ob, urltest_selections);
+            if (leaf) {
+                effective_ob = leaf;
+                effective_tag = leaf->tag;
             }
         }
 

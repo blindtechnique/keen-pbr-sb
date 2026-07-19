@@ -281,6 +281,7 @@ set(SOURCES
 if(WITH_API)
   list(APPEND SOURCES
     src/api/server.cpp
+    src/api/keenetic_auth.cpp
     src/api/handlers.cpp
     src/api/sse_broadcaster.cpp
     src/api/handler_health_service.cpp

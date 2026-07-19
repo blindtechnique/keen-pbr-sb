@@ -167,3 +167,84 @@ func TestSupervisorDoesNotRegisterNativeTransport(t *testing.T) {
 		t.Fatal("native transport must not be supervised")
 	}
 }
+
+// enforcerFake reports as healthy from the start and counts how often the
+// supervisor asks it to restore its firewall rules.
+type enforcerFake struct {
+	tag       string
+	mu        sync.Mutex
+	ensured   int
+	ensureErr error
+}
+
+func (f *enforcerFake) Tag() string              { return f.tag }
+func (f *enforcerFake) Up(context.Context) error { return nil }
+func (f *enforcerFake) Down(context.Context) error {
+	return nil
+}
+
+func (f *enforcerFake) Status(context.Context) Status {
+	return Status{
+		Tag: f.tag, Type: "sing-box", Interface: "pbr0",
+		State: StateUp, UpdatedAt: time.Now().UTC(),
+	}
+}
+
+func (f *enforcerFake) EnsureRuntimeRules() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensured++
+	return f.ensureErr
+}
+
+func (f *enforcerFake) ensureCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ensured
+}
+
+// The firmware rebuilds its iptables ruleset on network events and drops the
+// FORWARD accept that lets LAN traffic into the tunnel. FORWARD policy is DROP,
+// so a healthy transport must keep re-asserting the rule instead of relying on
+// it having been installed once at start-up.
+func TestSupervisorRestoresForwardingRulesWhileHealthy(t *testing.T) {
+	manager := NewManager()
+	fake := &enforcerFake{tag: "reality"}
+	if err := manager.Add(fake); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := newSupervisor(manager, time.Millisecond, 2*time.Millisecond, 4*time.Millisecond)
+	supervisor.Register(TransportSpec{Tag: fake.tag, Type: "sing-box", AutoStart: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go supervisor.Run(ctx)
+
+	waitFor(t, func() bool { return fake.ensureCount() >= 2 })
+	if fake.ensureCount() < 2 {
+		t.Fatalf("expected repeated rule restoration, got %d", fake.ensureCount())
+	}
+}
+
+// A failure to restore rules must not knock a healthy transport out of its
+// steady state: the tunnel itself is still up.
+func TestSupervisorKeepsTransportHealthyWhenRuleRestoreFails(t *testing.T) {
+	manager := NewManager()
+	fake := &enforcerFake{tag: "reality", ensureErr: context.DeadlineExceeded}
+	if err := manager.Add(fake); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := newSupervisor(manager, time.Millisecond, 2*time.Millisecond, 4*time.Millisecond)
+	supervisor.Register(TransportSpec{Tag: fake.tag, Type: "sing-box", AutoStart: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go supervisor.Run(ctx)
+
+	waitFor(t, func() bool { return fake.ensureCount() >= 2 })
+	status, err := supervisor.Status(context.Background(), fake.tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != StateUp || status.RetryCount != 0 {
+		t.Fatalf("healthy transport was disturbed by rule restore failure: %#v", status)
+	}
+}

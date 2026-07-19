@@ -72,8 +72,9 @@ export function DnsCheckWidget({
             <DnsStatusSummary disabled={isDisabled} status={status} />
           </div>
 
-          <div className="mt-auto grid gap-2 sm:grid-cols-2">
+          <div className="mt-auto grid gap-2">
             <Button
+              className="h-auto w-full justify-center text-center whitespace-normal"
               disabled={isChecking || isDisabled}
               onClick={() => {
                 reset()
@@ -88,6 +89,7 @@ export function DnsCheckWidget({
                 : t("overview.dnsCheck.card.runAgain")}
             </Button>
             <Button
+              className="h-auto w-full justify-center text-center whitespace-normal"
               disabled={isDisabled}
               onClick={() => setShowPcCheckDialog(true)}
               size="sm"

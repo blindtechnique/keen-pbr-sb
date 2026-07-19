@@ -6,9 +6,7 @@ import {
   useApplyConfigMutation,
   usePostServiceActionMutation,
 } from "@/api/mutations"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { useSidebar } from "@/components/ui/sidebar-context"
 import { cn } from "@/lib/utils"
 import type {
   WarningBannerMode,
@@ -23,7 +21,6 @@ export function WarningBanner({
   state: WarningBannerState
 }) {
   const { t } = useTranslation()
-  const { isMobile, open } = useSidebar()
   const applyConfigMutation = useApplyConfigMutation()
   const restartServiceMutation = usePostServiceActionMutation("restart")
   const containerRef = useRef<HTMLDivElement>(null)
@@ -76,35 +73,38 @@ export function WarningBanner({
   }
 
   return (
+    // Sits under the system bar instead of floating above the page: the old
+    // fixed footer covered action buttons at the bottom of long forms.
     <div
       ref={containerRef}
       className={cn(
-        "pointer-events-none fixed inset-x-0 bottom-0 z-50 px-4 pb-5",
-        !isMobile && open
-          ? "right-4 left-[calc(var(--sidebar-width)+1rem)]"
-          : null,
+        "sticky top-0 z-30 border-b md:top-16",
+        "bg-card/95 backdrop-blur-md",
+        isError
+          ? "border-destructive/40"
+          : isConverging
+            ? "border-primary/30"
+            : "border-warning/50",
         className
       )}
     >
-      <Alert
-        variant={isError ? "destructive" : isConverging ? "default" : "warning"}
-        className="pointer-events-auto mx-auto w-full max-w-7xl gap-4 rounded-2xl border border-white/10 px-4 py-4 shadow-[0_10px_30px_hsl(0_0%_0%/0.18),0_24px_80px_hsl(0_0%_0%/0.4)] ring-1 ring-black/5 dark:border-white/12 dark:ring-white/6"
-      >
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0 space-y-1">
-            <AlertTitle>{t(getWarningBannerTitleKey(state.mode))}</AlertTitle>
-            <AlertDescription>
+      <div className="mx-auto flex max-w-[92rem] flex-col gap-2 px-4 py-2 sm:px-6 lg:px-8">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            <p className="text-[13px] leading-5 font-medium text-foreground">
+              {t(getWarningBannerTitleKey(state.mode))}
+            </p>
+            <p className="text-[12px] leading-4 text-muted-foreground">
               {t(getWarningBannerDescriptionKey(state.mode))}
-            </AlertDescription>
+            </p>
           </div>
 
           {!isConverging ? (
             <Button
               disabled={state.isActionDisabled}
               onClick={handleApplyAndReload}
-              size="lg"
-              variant="outline"
-              className="shrink-0 bg-background hover:bg-background dark:bg-card dark:hover:bg-card"
+              size="sm"
+              className="shrink-0"
             >
               <SaveIcon className="mr-1 h-4 w-4" />
               {state.actionPending
@@ -115,14 +115,14 @@ export function WarningBanner({
         </div>
 
         {isConverging ? (
-          <div className="h-2 rounded bg-muted">
+          <div className="h-1.5 rounded bg-muted">
             <div
-              className="h-2 rounded bg-primary transition-[width] duration-700"
+              className="h-1.5 rounded bg-primary transition-[width] duration-700"
               style={{ width: `${state.progressPercent}%` }}
             />
           </div>
         ) : null}
-      </Alert>
+      </div>
     </div>
   )
 }

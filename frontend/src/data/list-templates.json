@@ -1,0 +1,541 @@
+[
+  {
+    "id": "anthropic_claude",
+    "name": "Anthropic / Claude",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/claude.srs",
+    "category": "ai"
+  },
+  {
+    "id": "gemini",
+    "name": "Gemini",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/gemini.srs",
+    "category": "ai"
+  },
+  {
+    "id": "github_copilot",
+    "name": "GitHub Copilot",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/copilot.srs",
+    "category": "ai"
+  },
+  {
+    "id": "grok_xai",
+    "name": "Grok (xAI)",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/grok.srs",
+    "category": "ai"
+  },
+  {
+    "id": "openai",
+    "name": "OpenAI",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/openai.srs",
+    "category": "ai"
+  },
+  {
+    "id": "perplexity",
+    "name": "Perplexity",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-perplexity.srs",
+    "category": "ai"
+  },
+  {
+    "id": "ai",
+    "name": "Все AI сервисы",
+    "description": "ChatGPT, Claude, Gemini, Perplexity и другие (кроме китайских)",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-!cn.srs",
+    "category": "ai"
+  },
+  {
+    "id": "bluesky",
+    "name": "Bluesky",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-bluesky.srs",
+    "category": "social"
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/discord-full.srs",
+    "category": "social"
+  },
+  {
+    "id": "duckduckgo",
+    "name": "DuckDuckGo",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-duckduckgo.srs",
+    "category": "social"
+  },
+  {
+    "id": "facebook",
+    "name": "Facebook",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-facebook.srs",
+    "category": "social"
+  },
+  {
+    "id": "google",
+    "name": "Google",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs",
+    "category": "social"
+  },
+  {
+    "id": "instagram",
+    "name": "Instagram",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/instagram.srs",
+    "category": "social"
+  },
+  {
+    "id": "medium",
+    "name": "Medium",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-medium.srs",
+    "category": "social"
+  },
+  {
+    "id": "meta",
+    "name": "Meta (все сервисы)",
+    "description": "Facebook, Instagram, Threads, WhatsApp — sing-box: geosite-meta.",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-meta.srs",
+    "category": "social"
+  },
+  {
+    "id": "patreon",
+    "name": "Patreon",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-patreon.srs",
+    "category": "social"
+  },
+  {
+    "id": "pinterest",
+    "name": "Pinterest",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-pinterest.srs",
+    "category": "social"
+  },
+  {
+    "id": "reddit",
+    "name": "Reddit",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-reddit.srs",
+    "category": "social"
+  },
+  {
+    "id": "signal",
+    "name": "Signal",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-signal.srs",
+    "category": "social"
+  },
+  {
+    "id": "telegram",
+    "name": "Telegram",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/telegram.srs",
+    "category": "social"
+  },
+  {
+    "id": "threads",
+    "name": "Threads",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-threads.srs",
+    "category": "social"
+  },
+  {
+    "id": "tiktok",
+    "name": "TikTok",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/tiktok.srs",
+    "category": "social"
+  },
+  {
+    "id": "whatsapp",
+    "name": "WhatsApp",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs",
+    "category": "social"
+  },
+  {
+    "id": "x_twitter",
+    "name": "X (Twitter)",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/x.srs",
+    "category": "social"
+  },
+  {
+    "id": "youtube",
+    "name": "YouTube",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/youtube.srs",
+    "category": "social"
+  },
+  {
+    "id": "bbc",
+    "name": "BBC",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-bbc.srs",
+    "category": "media"
+  },
+  {
+    "id": "deezer",
+    "name": "Deezer",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-deezer.srs",
+    "category": "media"
+  },
+  {
+    "id": "disney",
+    "name": "Disney+",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-disney.srs",
+    "category": "media"
+  },
+  {
+    "id": "hbo",
+    "name": "HBO",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-hbo.srs",
+    "category": "media"
+  },
+  {
+    "id": "hulu",
+    "name": "Hulu",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-hulu.srs",
+    "category": "media"
+  },
+  {
+    "id": "kino_pub",
+    "name": "Kino.pub",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-kinopub.srs",
+    "category": "media"
+  },
+  {
+    "id": "netflix",
+    "name": "Netflix",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/netflix.srs",
+    "category": "media"
+  },
+  {
+    "id": "prime_video",
+    "name": "Prime Video",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-primevideo.srs",
+    "category": "media"
+  },
+  {
+    "id": "soundcloud",
+    "name": "SoundCloud",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-soundcloud.srs",
+    "category": "media"
+  },
+  {
+    "id": "spotify",
+    "name": "Spotify",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-spotify.srs",
+    "category": "media"
+  },
+  {
+    "id": "tidal",
+    "name": "Tidal",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-tidal.srs",
+    "category": "media"
+  },
+  {
+    "id": "twitch",
+    "name": "Twitch",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-twitch.srs",
+    "category": "media"
+  },
+  {
+    "id": "vimeo",
+    "name": "Vimeo",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-vimeo.srs",
+    "category": "media"
+  },
+  {
+    "id": "wikipedia",
+    "name": "Wikipedia",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-wikimedia.srs",
+    "category": "media"
+  },
+  {
+    "id": "list",
+    "name": "Всё медиа",
+    "description": "Композитный список стриминговых сервисов",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-media.srs",
+    "category": "media"
+  },
+  {
+    "id": "blizzard",
+    "name": "Blizzard",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-blizzard.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "ea",
+    "name": "EA",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-ea.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "epic_games",
+    "name": "Epic Games",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-epicgames.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "nintendo",
+    "name": "Nintendo",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/nintendo.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "oculus_quest",
+    "name": "Oculus / Quest",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-oculus.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "playstation",
+    "name": "PlayStation",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-playstation.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "roblox",
+    "name": "Roblox",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/roblox.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "steam",
+    "name": "Steam",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-steam.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "xbox",
+    "name": "Xbox",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-xbox.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "list",
+    "name": "Все игры",
+    "description": "Steam, Epic, PlayStation, Xbox, Nintendo, Blizzard и другие",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-games.srs",
+    "category": "gaming"
+  },
+  {
+    "id": "adobe",
+    "name": "Adobe",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-adobe.srs",
+    "category": "developer"
+  },
+  {
+    "id": "canva",
+    "name": "Canva",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-canva.srs",
+    "category": "developer"
+  },
+  {
+    "id": "docker",
+    "name": "Docker",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-docker.srs",
+    "category": "developer"
+  },
+  {
+    "id": "figma",
+    "name": "Figma",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-figma.srs",
+    "category": "developer"
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-github.srs",
+    "category": "developer"
+  },
+  {
+    "id": "gitlab",
+    "name": "GitLab",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gitlab.srs",
+    "category": "developer"
+  },
+  {
+    "id": "jetbrains",
+    "name": "JetBrains",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-jetbrains.srs",
+    "category": "developer"
+  },
+  {
+    "id": "linkedin",
+    "name": "LinkedIn",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/linkedin.srs",
+    "category": "developer"
+  },
+  {
+    "id": "notion",
+    "name": "Notion",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-notion.srs",
+    "category": "developer"
+  },
+  {
+    "id": "npm",
+    "name": "npm",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-npmjs.srs",
+    "category": "developer"
+  },
+  {
+    "id": "slack",
+    "name": "Slack",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-slack.srs",
+    "category": "developer"
+  },
+  {
+    "id": "vercel",
+    "name": "Vercel",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-vercel.srs",
+    "category": "developer"
+  },
+  {
+    "id": "zoom",
+    "name": "Zoom",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-zoom.srs",
+    "category": "developer"
+  },
+  {
+    "id": "akamai",
+    "name": "Akamai",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-akamai.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "amazon_aws",
+    "name": "Amazon AWS",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-aws.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "apple",
+    "name": "Apple",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-apple.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "binance",
+    "name": "Binance",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-binance.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "cloudflare",
+    "name": "Cloudflare",
+    "description": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cloudflare.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "google_play",
+    "name": "Google Play",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google-play.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "microsoft",
+    "name": "Microsoft",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-microsoft.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "nvidia",
+    "name": "NVIDIA",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-nvidia.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "paypal",
+    "name": "PayPal",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-paypal.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "xiaomi_iot_mi_home",
+    "name": "Xiaomi IoT / Mi Home",
+    "description": "",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-xiaomi.srs",
+    "category": "cloud"
+  },
+  {
+    "id": "adult_content_18",
+    "name": "Adult content (18+)",
+    "description": "Контент 18+ через VPN",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-porn.srs",
+    "category": "block"
+  },
+  {
+    "id": "list",
+    "name": "Заблокировано в РФ",
+    "description": "Содержит более 90 000 доменов, заблокированных в РФ",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/rkn.srs",
+    "category": "block"
+  },
+  {
+    "id": "hoaxisr_rulesets",
+    "name": "Недоступно из РФ (hoaxisr/rulesets)",
+    "description": "",
+    "url": "https://repo.hoaxisr.ru/rulesets/srs/unavailable-in-russia.srs",
+    "category": "block"
+  },
+  {
+    "id": "list",
+    "name": "Реклама и трекеры",
+    "description": "Блокирует рекламу и трекеры через action:reject — выбор outbound не требуется",
+    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
+    "category": "block"
+  }
+]

@@ -72,6 +72,15 @@ func (m *Manager) get(tag string) (Transport, error) {
 	return t, nil
 }
 
+// Get returns the live transport object so callers can reach behaviour that is
+// not part of the minimal Transport interface.
+func (m *Manager) Get(tag string) (Transport, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, ok := m.transports[tag]
+	return t, ok
+}
+
 func (m *Manager) Statuses(ctx context.Context) []Status {
 	m.mu.RLock()
 	items := make([]Transport, 0, len(m.transports))
