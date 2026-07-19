@@ -185,8 +185,14 @@ export const enTranslation = {
       dnsRules: "DNS Rules",
     },
   },
+  notifications: {
+    title: "Notifications",
+    empty: "Nothing to report",
+    updateAvailable: "Version {{version}} is available",
+  },
   connections: {
     age: {
+      live: "Active",
       now: "just now",
       seconds: "{{count}}s ago",
       minutes: "{{count}}m ago",
@@ -377,6 +383,11 @@ export const enTranslation = {
       loadAverage: "Load average",
     },
     services: {
+      summary: {
+        keenPbr: "Routes traffic into the right tunnel by list",
+        singbox: "Runs the VLESS, Trojan and similar tunnels",
+        nfqws: "Circumvents blocking for traffic that stays direct",
+      },
       version: "Version {{version}}, build {{build}}",
       unknown: "State unknown",
       restart: "Restart",
@@ -432,6 +443,7 @@ export const enTranslation = {
       member: {
         active: "Active",
         backup: "Backup",
+        degraded: "Not responding",
         unavailable: "Unavailable",
         unknown: "Unknown",
       },
@@ -588,6 +600,25 @@ export const enTranslation = {
   },
   pages: {
     settings: {
+      logging: {
+        title: "Log",
+        description: "What keen-pbr-sb records about its own work.",
+        enabled: "Write the log to a file",
+        level: "Verbosity",
+        levelHint:
+          "Normal is enough day to day. The detailed levels are for investigating a problem and grow the file noticeably.",
+        pathHint:
+          "File: /opt/var/log/keen-pbr.log. A new one starts at one megabyte and the previous is kept alongside.",
+        levels: {
+          error: "Errors only",
+          warn: "Errors and warnings",
+          info: "Normal",
+          verbose: "Detailed",
+          debug: "Debug",
+        },
+        save: "Save",
+        saved: "Logging settings saved",
+      },
       auth: {
         title: "Web interface login",
         description: "How access to keen-pbr-sb is verified.",
@@ -963,7 +994,7 @@ export const enTranslation = {
       },
       headers: {
         tag: "Name",
-        type: "Type",
+        type: "Source",
         summary: "Details",
         runtime: "Runtime",
         actions: "Actions",
@@ -1208,9 +1239,9 @@ export const enTranslation = {
       },
       headers: {
         name: "Name",
-        type: "Type",
+        type: "Source",
         stats: "Entries",
-        rules: "Used in rules",
+        rules: "Used in",
         actions: "Actions",
       },
       delete: {
@@ -1264,10 +1295,10 @@ export const enTranslation = {
       neverUpdated: "Never updated",
       noStats: "-",
       source: {
-        url: "URL",
-        file: "File",
-        domains: "Domains",
-        ip_cidrs: "IP CIDRs",
+        url: "From a link",
+        file: "From a file",
+        domains: "Domain list",
+        ip_cidrs: "Address list",
         empty: "Empty",
       },
     },

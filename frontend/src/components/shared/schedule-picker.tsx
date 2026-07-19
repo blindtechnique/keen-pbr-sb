@@ -69,7 +69,15 @@ export function SchedulePicker({
         value={parsed.frequency}
       >
         <SelectTrigger>
-          <SelectValue />
+          <SelectValue>
+            {(selected) =>
+              t(
+                `pages.settings.autoupdate.schedule.${
+                  selected === CUSTOM_SCHEDULE ? "custom" : String(selected)
+                }`
+              )
+            }
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           <SelectGroup>
@@ -98,7 +106,15 @@ export function SchedulePicker({
           value={String(parsed.weekday)}
         >
           <SelectTrigger>
-            <SelectValue />
+            <SelectValue>
+              {(selected) =>
+                t(
+                  `pages.settings.autoupdate.schedule.weekdays.${
+                    WEEKDAY_KEYS[Number(selected)] ?? WEEKDAY_KEYS[0]
+                  }`
+                )
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectGroup>
@@ -118,7 +134,13 @@ export function SchedulePicker({
           value={String(parsed.day)}
         >
           <SelectTrigger>
-            <SelectValue />
+            <SelectValue>
+              {(selected) =>
+                t("pages.settings.autoupdate.schedule.dayOfMonth", {
+                  day: Number(selected),
+                })
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectGroup>
@@ -138,7 +160,13 @@ export function SchedulePicker({
           value={String(parsed.hour)}
         >
           <SelectTrigger>
-            <SelectValue />
+            <SelectValue>
+              {(selected) =>
+                t("pages.settings.autoupdate.schedule.atHour", {
+                  hour: String(Number(selected)).padStart(2, "0"),
+                })
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectGroup>

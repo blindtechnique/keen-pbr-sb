@@ -122,7 +122,13 @@ export function AuthSettingsCard() {
                 value={provider}
               >
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue>
+                    {(selected) =>
+                      selected === "local"
+                        ? t("pages.settings.auth.providerLocal")
+                        : t("pages.settings.auth.providerRouter")
+                    }
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>

@@ -5,7 +5,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: #f0f1f2;
+  --background: #ffffff;
   --foreground: #26343f;
   --card: #ffffff;
   --card-foreground: #26343f;
@@ -13,9 +13,9 @@
   --popover-foreground: #26343f;
   --primary: #0086cb;
   --primary-foreground: #ffffff;
-  --secondary: #eef2f4;
+  --secondary: #f4f7f8;
   --secondary-foreground: #26343f;
-  --muted: #f3f6f7;
+  --muted: #fafbfc;
   --muted-foreground: #6f7d87;
   --accent: #e5f4fa;
   --accent-foreground: #006da6;
@@ -25,7 +25,7 @@
   --warning-foreground: oklch(52.354% 0.12011 59.695);
   --success: #23974a;
   --success-foreground: oklch(0.98 0 0);
-  --border: #dce2e6;
+  --border: #e8ecee;
   --input: #cfd7dc;
   --ring: #0086cb;
   --chart-1: oklch(0.646 0.222 41.116);
@@ -39,7 +39,7 @@
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #ebebeb;
   --sidebar-accent-foreground: #202020;
-  --sidebar-border: #dfe5e8;
+  --sidebar-border: #eceff1;
   --sidebar-ring: #0086cb;
   --font-sans:
     Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -196,6 +196,8 @@
 
   body {
     @apply bg-background text-foreground antialiased;
+    font-size: 0.9375rem;
+    line-height: 1.55;
     overflow-x: clip;
     min-width: 320px;
     background-image: none;
@@ -209,7 +211,20 @@
 @layer components {
   [data-slot="card"] {
     border: 1px solid var(--border);
-    box-shadow: 0 1px 5px rgb(24 48 61 / 8%);
+    box-shadow: none;
+  }
+
+  [data-slot="table"] tbody tr {
+    border-color: #f1f4f5;
+  }
+
+  .dark [data-slot="table"] tbody tr {
+    border-color: color-mix(in srgb, var(--border) 55%, transparent);
+  }
+
+  [data-slot="table"] thead th {
+    font-weight: 400;
+    color: var(--muted-foreground);
   }
 
   .dark [data-slot="card"] {

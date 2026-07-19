@@ -227,7 +227,9 @@ function SessionRow({
           className="text-xs tabular-nums text-muted-foreground"
           title={new Date(item.last_seen * 1000).toLocaleString()}
         >
-          {formatLastSeen(item.last_seen, t)}
+          {item.active
+            ? t("connections.age.live")
+            : formatLastSeen(item.last_seen, t)}
         </span>
         <span className="text-xs text-muted-foreground">
           {item.protocol.toUpperCase()}
@@ -242,9 +244,8 @@ function SessionRow({
 }
 
 /**
- * Relative age reads better than a clock here: what matters is whether a
- * connection is live right now, not the exact second it appeared. The absolute
- * time stays available in the tooltip.
+ * Only closed connections get an age. While one is live the age is always
+ * "a moment ago" and says nothing, so the word "active" carries more.
  */
 function formatLastSeen(
   lastSeen: number,

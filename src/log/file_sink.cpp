@@ -2,6 +2,7 @@
 
 #include "logger.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -96,6 +97,18 @@ void FileLogSink::write(const std::string& line) {
     rotate_if_needed();
 }
 
+namespace {
+std::atomic<bool> g_file_logging_enabled{true};
+} // namespace
+
+void set_file_logging_enabled(bool enabled) {
+    g_file_logging_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool file_logging_enabled() {
+    return g_file_logging_enabled.load(std::memory_order_relaxed);
+}
+
 bool install_file_log_sink(const std::string& path, std::string* error_out) {
     // Deliberately leaked: the logger sink may fire from atexit paths and
     // fatal signal handlers, after ordinary static destructors have run.
@@ -112,7 +125,11 @@ bool install_file_log_sink(const std::string& path, std::string* error_out) {
         return false;
     }
 
-    Logger::instance().set_sink([](const std::string& line) { sink->write(line); });
+    Logger::instance().set_sink([](const std::string& line) {
+        if (file_logging_enabled()) {
+            sink->write(line);
+        }
+    });
     return true;
 }
 

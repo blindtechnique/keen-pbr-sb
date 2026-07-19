@@ -186,8 +186,14 @@ export const ruTranslation = {
       dnsRules: "DNS-правила",
     },
   },
+  notifications: {
+    title: "Уведомления",
+    empty: "Пока всё спокойно",
+    updateAvailable: "Доступна версия {{version}}",
+  },
   connections: {
     age: {
+      live: "Активно",
       now: "только что",
       seconds: "{{count}} с назад",
       minutes: "{{count}} мин назад",
@@ -380,6 +386,11 @@ export const ruTranslation = {
       loadAverage: "Средняя нагрузка",
     },
     services: {
+      summary: {
+        keenPbr: "Направляет трафик по спискам в нужный туннель",
+        singbox: "Поднимает туннели VLESS, Trojan и подобные",
+        nfqws: "Обходит блокировки для трафика, идущего мимо туннелей",
+      },
       version: "Версия {{version}}, сборка {{build}}",
       unknown: "Состояние неизвестно",
       restart: "Перезапустить",
@@ -435,6 +446,7 @@ export const ruTranslation = {
       member: {
         active: "Активен",
         backup: "Резервный",
+        degraded: "Не отвечает",
         unavailable: "Недоступен",
         unknown: "Неизвестно",
       },
@@ -596,6 +608,25 @@ export const ruTranslation = {
   },
   pages: {
     settings: {
+      logging: {
+        title: "Журнал",
+        description: "Что keen-pbr-sb записывает о своей работе.",
+        enabled: "Вести журнал в файл",
+        level: "Подробность",
+        levelHint:
+          "Обычно достаточно «Основное». Подробные уровни нужны при разборе проблем и заметно увеличивают файл.",
+        pathHint:
+          "Файл: /opt/var/log/keen-pbr.log. При достижении мегабайта заводится новый, предыдущий сохраняется рядом.",
+        levels: {
+          error: "Только ошибки",
+          warn: "Ошибки и предупреждения",
+          info: "Основное",
+          verbose: "Подробно",
+          debug: "Отладка",
+        },
+        save: "Сохранить",
+        saved: "Настройки журнала сохранены",
+      },
       auth: {
         title: "Вход в веб-интерфейс",
         description: "Кто и как подтверждает вход в keen-pbr-sb.",
@@ -1232,10 +1263,10 @@ export const ruTranslation = {
           "Создайте первый список, чтобы использовать его в правилах маршрутизации и DNS.",
       },
       headers: {
-        name: "Имя",
-        type: "Тип",
-        stats: "Записи",
-        rules: "Исп. в правилах",
+        name: "Название",
+        type: "Источник",
+        stats: "Записей",
+        rules: "Где используется",
         actions: "Действия",
       },
       delete: {
@@ -1259,13 +1290,13 @@ export const ruTranslation = {
       },
       bulk: {
         selected: "Выбрано: {{count}}",
-        refreshSelected: "Обновить выбранные (URL)",
+        refreshSelected: "Обновить выбранные",
         deleteSelected: "Удалить выбранные списки",
         confirmDeleteSimple: "Удалить списки: {{names}}?",
         confirmDeleteWithRefs:
           "Удалить списки: {{names}} и при необходимости убрать ссылки из правил маршрутизации и DNS?",
         noUrlBacked:
-          "Ни один выбранный список не основан на URL (обновлять нечего).",
+          "Ни один из выбранных списков не загружается по ссылке — обновлять нечего.",
       },
       location: {
         inline: "Встроенный",
@@ -1291,10 +1322,10 @@ export const ruTranslation = {
       neverUpdated: "Ещё не обновлялся",
       noStats: "-",
       source: {
-        url: "URL",
-        file: "Файл",
-        domains: "Домены",
-        ip_cidrs: "IP CIDR",
+        url: "По ссылке",
+        file: "Из файла",
+        domains: "Список доменов",
+        ip_cidrs: "Список адресов",
         empty: "Пусто",
       },
     },

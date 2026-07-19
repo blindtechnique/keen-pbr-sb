@@ -2,6 +2,7 @@ import { useState } from "react"
 import { LanguagesIcon, PaletteIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import { NotificationsBell } from "@/components/layout/notifications-bell"
 import { useLanguage } from "@/components/language-provider"
 import { useTheme } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
@@ -35,6 +36,8 @@ export function TopBarControls() {
 
   return (
     <div className="flex items-center gap-0.5">
+      <NotificationsBell />
+
       <IconMenu
         icon={<LanguagesIcon className="size-4" />}
         label={t("common.language")}

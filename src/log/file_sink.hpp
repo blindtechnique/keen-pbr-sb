@@ -47,4 +47,11 @@ private:
 // Ownership stays with the returned object, which must outlive the logger use.
 bool install_file_log_sink(const std::string& path, std::string* error_out = nullptr);
 
+// Turns file logging on and off at runtime. The sink stays installed either
+// way, so the setting takes effect without restarting the service - which
+// matters, because restarting is exactly what you cannot do while chasing a
+// problem that only shows up at boot.
+void set_file_logging_enabled(bool enabled);
+bool file_logging_enabled();
+
 } // namespace keen_pbr3

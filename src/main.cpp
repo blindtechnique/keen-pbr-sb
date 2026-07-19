@@ -16,6 +16,9 @@
 #include "cache/cache_manager.hpp"
 #include "crash/crash_diagnostics.hpp"
 #include "log/file_sink.hpp"
+#ifdef WITH_API
+#include "api/handler_logs.hpp"
+#endif
 #include "config/config.hpp"
 #include "cmd/status.hpp"
 #include "cmd/test_routing.hpp"
@@ -216,6 +219,12 @@ int main(int argc, char* argv[]) {
                             KEEN_PBR3_VERSION_STRING,
                             KEEN_PBR3_VERSION_RELEASE,
                             opts.log_file);
+#ifdef WITH_API
+                // Preferences stored on the router win over the defaults, but
+                // only after the banner above is written: if logging is off we
+                // still want a trace that the service came up.
+                keen_pbr3::apply_stored_log_settings();
+#endif
             } else {
                 logger.warn("Log file disabled: {}", log_file_error);
             }

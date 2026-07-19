@@ -35,6 +35,9 @@ type NfqwsStatus = {
 type ServiceRow = {
   key: string
   label: string
+  // One line on what the service is for. The card has the room, and the
+  // names alone mean nothing to someone who did not set this up.
+  summary: string
   detail: string
   state: "up" | "down" | "absent"
   onRestart?: () => void
@@ -132,6 +135,7 @@ export function ServicesStatusCard() {
     {
       key: "keen-pbr",
       label: "keen-pbr-sb",
+      summary: t("overview.services.summary.keenPbr"),
       detail: serviceHealth
         ? t("overview.services.version", {
             version: serviceHealth.version,
@@ -166,6 +170,7 @@ export function ServicesStatusCard() {
     {
       key: "singbox",
       label: t("overview.services.singbox"),
+      summary: t("overview.services.summary.singbox"),
       detail:
         singboxTransports.length === 0
           ? t("overview.services.noTransports")
@@ -185,6 +190,7 @@ export function ServicesStatusCard() {
     {
       key: "nfqws",
       label: t("overview.services.nfqws"),
+      summary: t("overview.services.summary.nfqws"),
       detail: !nfqws?.installed
         ? t("overview.services.notInstalled")
         : nfqws.running
@@ -203,7 +209,7 @@ export function ServicesStatusCard() {
       <div className="space-y-3">
         {rows.map((row) => (
           <div
-            className="flex items-center justify-between gap-3"
+            className="flex items-start justify-between gap-3"
             key={row.key}
           >
             <div className="min-w-0">
@@ -216,6 +222,9 @@ export function ServicesStatusCard() {
                 ))}
               </div>
               <div className="truncate text-xs text-muted-foreground">
+                {row.summary}
+              </div>
+              <div className="truncate text-xs text-muted-foreground/80">
                 {row.detail}
               </div>
             </div>
