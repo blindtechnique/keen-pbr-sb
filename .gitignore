@@ -14,8 +14,11 @@ install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
 _deps/
-*.cmake
-!cmake/*.cmake
+# NOTE: do not blanket-ignore *.cmake here. Generated CMake files already live
+# in the ignored build directories above, while vendored dependencies ship
+# required modules such as third_party/fmt/support/cmake/JoinPaths.cmake and
+# third_party/cpptrace/cmake/*.cmake. Ignoring them breaks every build made
+# from a fresh clone (CMake: "include could not find requested file").
 .clangd
 /**/__pycache__
 cmake-build-*/
