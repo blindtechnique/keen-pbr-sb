@@ -221,7 +221,7 @@ export function ServicesStatusCard() {
                   </Badge>
                 ))}
               </div>
-              <div className="truncate text-xs text-muted-foreground">
+              <div className="text-xs leading-snug text-muted-foreground">
                 {row.summary}
               </div>
               <div className="truncate text-xs text-muted-foreground/80">

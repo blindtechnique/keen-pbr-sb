@@ -229,9 +229,11 @@ std::optional<uint32_t> outbound_table_id(const Config& config,
     return std::nullopt;
 }
 
-api::RuntimeOutboundStateElement build_interface_outbound_state(const Config& config,
-                                                                const Outbound& outbound,
-                                                                NetlinkManager& netlink) {
+api::RuntimeOutboundStateElement build_interface_outbound_state(
+    const Config& config,
+    const Outbound& outbound,
+    NetlinkManager& netlink,
+    const InterfaceProbeLookupFn& interface_probe_lookup) {
     api::RuntimeOutboundStateElement state;
     state.tag = outbound.tag;
     state.type = outbound.type;
@@ -252,10 +254,22 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(const Config& co
         ? api::RuntimeInterfaceStatusEnum::ACTIVE
         : api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
 
-    if (!reachable) {
-        interface_state.detail = std::string("interface is not reachable from the main routing table");
-    } else if (!active && primary_route == nullptr) {
-        interface_state.detail = std::string("no active default route is installed in the outbound table");
+    if (interface_probe_lookup) {
+        if (const auto probe = interface_probe_lookup(outbound.tag)) {
+            if (probe->success) {
+                interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
+            } else if (!probe->error.empty()) {
+                interface_state.detail = probe->error;
+            }
+        }
+    }
+
+    if (interface_state.detail == std::nullopt) {
+        if (!reachable) {
+            interface_state.detail = std::string("interface is not reachable from the main routing table");
+        } else if (!active && primary_route == nullptr) {
+            interface_state.detail = std::string("no active default route is installed in the outbound table");
+        }
     }
 
     state.interfaces = std::vector<api::RuntimeInterfaceState>{interface_state};
@@ -286,7 +300,8 @@ api::RuntimeOutboundStateElement build_table_outbound_state(const Config& config
 api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& config,
                                                               const Outbound& outbound,
                                                               NetlinkManager& netlink,
-                                                              const UrltestStateLookupFn& urltest_state_lookup) {
+                                                              const UrltestStateLookupFn& urltest_state_lookup,
+                                                              const InterfaceProbeLookupFn& interface_probe_lookup) {
     api::RuntimeOutboundStateElement state;
     state.tag = outbound.tag;
     state.type = outbound.type;
@@ -341,6 +356,14 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
             }
         }
 
+        if (interface_state.latency_ms == std::nullopt && interface_probe_lookup) {
+            if (const auto probe = interface_probe_lookup(child->tag)) {
+                if (probe->success) {
+                    interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
+                }
+            }
+        }
+
         if (interface_state.detail == std::nullopt &&
             interface_state.status == api::RuntimeInterfaceStatusEnum::UNAVAILABLE &&
             child->type == OutboundType::INTERFACE) {
@@ -372,7 +395,8 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
 api::RuntimeOutboundsResponse build_runtime_outbounds_response(
     const Config& config,
     NetlinkManager& netlink,
-    const UrltestStateLookupFn& urltest_state_lookup) {
+    const UrltestStateLookupFn& urltest_state_lookup,
+    const InterfaceProbeLookupFn& interface_probe_lookup) {
     api::RuntimeOutboundsResponse response;
     const auto outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     response.outbounds.reserve(outbounds.size());
@@ -380,8 +404,8 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
     for (const auto& outbound : outbounds) {
         switch (outbound.type) {
             case OutboundType::INTERFACE:
-                response.outbounds.push_back(
-                    build_interface_outbound_state(config, outbound, netlink));
+                response.outbounds.push_back(build_interface_outbound_state(
+                    config, outbound, netlink, interface_probe_lookup));
                 break;
             case OutboundType::TABLE:
                 response.outbounds.push_back(
@@ -389,7 +413,9 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
                 break;
             case OutboundType::URLTEST:
                 response.outbounds.push_back(
-                    build_urltest_outbound_state(config, outbound, netlink, urltest_state_lookup));
+                    build_urltest_outbound_state(config, outbound, netlink,
+                                                 urltest_state_lookup,
+                                                 interface_probe_lookup));
                 break;
             case OutboundType::BLACKHOLE:
             case OutboundType::IGNORE: {

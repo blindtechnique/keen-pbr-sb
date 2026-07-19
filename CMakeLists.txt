@@ -240,6 +240,7 @@ set(SOURCES
   src/routing/routing_verifier.cpp
   src/health/circuit_breaker.cpp
   src/health/url_tester.cpp
+  src/health/interface_probe.cpp
   src/health/routing_health_checker.cpp
   src/health/runtime_outbound_state.cpp
   src/health/runtime_interface_inventory.cpp

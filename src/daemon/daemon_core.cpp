@@ -623,6 +623,7 @@ void Daemon::run() {
     }
 
     schedule_lists_autoupdate();
+    schedule_interface_probe();
 
     if (preload_result.any_relevant_changed()) {
         apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);

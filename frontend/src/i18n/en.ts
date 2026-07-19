@@ -186,6 +186,7 @@ export const enTranslation = {
     },
   },
   notifications: {
+    clear: "Clear",
     title: "Notifications",
     empty: "Nothing to report",
     updateAvailable: "Version {{version}} is available",

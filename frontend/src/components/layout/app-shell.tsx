@@ -55,7 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function DesktopSystemBar() {
   return (
-    <div className="sticky top-0 z-20 hidden h-16 items-center justify-between border-b bg-card/95 px-8 backdrop-blur-md md:flex">
+    <div className="sticky top-0 z-20 hidden h-16 items-center justify-between bg-card px-8 md:flex">
       <div className="flex items-center gap-3">
         <span className="size-2.5 rounded-full bg-success shadow-[0_0_0_4px_color-mix(in_srgb,var(--success)_14%,transparent)]" />
         <span className="text-[15px] font-medium text-primary">keen-pbr</span>
@@ -75,8 +75,8 @@ function MobileSidebarHeader() {
   const { toggleSidebar } = useSidebar()
 
   return (
-    <div className="sticky top-0 z-30 bg-card/95 shadow-sm backdrop-blur-md md:hidden">
-      <div className="flex items-center gap-2 border-b px-4 py-2.5">
+    <div className="sticky top-0 z-30 bg-card md:hidden">
+      <div className="flex items-center gap-2 px-4 py-2.5">
         <AppBrandHeader
           className="min-w-0 flex-1"
           onMenuClick={toggleSidebar}

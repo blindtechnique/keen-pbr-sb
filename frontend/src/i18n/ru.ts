@@ -187,6 +187,7 @@ export const ruTranslation = {
     },
   },
   notifications: {
+    clear: "Очистить",
     title: "Уведомления",
     empty: "Пока всё спокойно",
     updateAvailable: "Доступна версия {{version}}",

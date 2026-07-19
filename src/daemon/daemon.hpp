@@ -16,6 +16,7 @@
 #include "../config/config.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
+#include "../health/interface_probe.hpp"
 #include "../health/url_tester.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
@@ -183,6 +184,8 @@ private:
     void schedule_lists_autoupdate();
     // Re-applies rules after a failed startup attempt, backing off each time.
     void schedule_startup_firewall_retry(int attempt = 1);
+    // Periodic HTTP probe of every interface outbound.
+    void schedule_interface_probe();
     ListsRefreshExecutionResult execute_remote_list_refresh(
         const std::set<std::string>* target_lists = nullptr);
     void refresh_lists_and_maybe_reload();
@@ -311,6 +314,9 @@ private:
     PolicyRuleManager policy_rules_;
     FirewallState firewall_state_;
     URLTester url_tester_;
+    // Latency for every interface outbound, including native tunnels the
+    // firmware owns and standalone outbounds urltest never looks at.
+    InterfaceProbe interface_probe_;
     OutboundMarkMap outbound_marks_;
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;

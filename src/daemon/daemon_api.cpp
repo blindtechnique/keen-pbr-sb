@@ -345,6 +345,9 @@ void Daemon::setup_api() {
                         return std::nullopt;
                     }
                     return it->second;
+                },
+                [this](const std::string& tag) -> std::optional<InterfaceProbeResult> {
+                    return interface_probe_.result_for(tag);
                 });
         },
         [this]() {
