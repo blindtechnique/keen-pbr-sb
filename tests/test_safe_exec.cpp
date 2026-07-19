@@ -176,4 +176,37 @@ TEST_CASE("iptables_ipv6_supported: probes ip6tables-restore test script") {
     CHECK(read_file(restore_stdin_path) == "*mangle\nCOMMIT\n");
 }
 
+TEST_CASE("wait_for_child_with_timeout: reaps a child that finishes in time") {
+  const pid_t pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    _exit(7);
+  }
+
+  const auto result = wait_for_child_with_timeout(pid, std::chrono::seconds(5));
+  CHECK_FALSE(result.timed_out);
+  CHECK(WIFEXITED(result.status));
+  CHECK(WEXITSTATUS(result.status) == 7);
+}
+
+TEST_CASE("wait_for_child_with_timeout: kills a child that overstays") {
+  // This is the boot hang in miniature: iptables-restore blocked on the xtables
+  // lock used to keep the daemon waiting forever.
+  const pid_t pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    pause();
+    _exit(0);
+  }
+
+  const auto started_at = std::chrono::steady_clock::now();
+  const auto result = wait_for_child_with_timeout(pid, std::chrono::seconds(1));
+  const auto elapsed = std::chrono::steady_clock::now() - started_at;
+
+  CHECK(result.timed_out);
+  // Killed rather than waited out: well under the child's own lifetime.
+  CHECK(elapsed < std::chrono::seconds(5));
+  CHECK(waitpid(pid, nullptr, WNOHANG) == -1);
+}
+
 } // namespace keen_pbr3

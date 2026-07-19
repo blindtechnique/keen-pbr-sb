@@ -247,6 +247,35 @@ void Daemon::register_urltest_outbounds() {
     }
 }
 
+void Daemon::schedule_startup_firewall_retry(int attempt) {
+    // Backing off matters here: the contention that caused the failure is the
+    // firmware settling after boot, and it clears on its own within seconds.
+    constexpr int kMaxAttempts = 6;
+    const auto delay = std::chrono::seconds{5 * attempt};
+
+    scheduler_->schedule_oneshot(
+        delay,
+        [this, attempt]() {
+            auto& log = Logger::instance();
+            try {
+                apply_firewall(FirewallApplyMode::Destructive);
+                log.info("Firewall rules and routing applied on retry {}.", attempt);
+            } catch (const std::exception& e) {
+                if (attempt >= kMaxAttempts) {
+                    log.error("Giving up on applying firewall rules after {} retries: {}",
+                              attempt, e.what());
+                    return;
+                }
+                log.warn("Firewall retry {} failed: {}. Trying again.", attempt, e.what());
+                schedule_startup_firewall_retry(attempt + 1);
+            }
+        },
+        "startup-firewall-retry");
+
+    Logger::instance().info("Firewall apply retry {} scheduled in {}s.",
+                            attempt, delay.count());
+}
+
 void Daemon::schedule_lists_autoupdate() {
     if (!config_.lists_autoupdate) return;
     if (!config_.lists_autoupdate->enabled.value_or(false)) return;

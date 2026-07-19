@@ -181,6 +181,8 @@ private:
     bool routing_runtime_active() const;
     void run_system_resolver_hook_reload();
     void schedule_lists_autoupdate();
+    // Re-applies rules after a failed startup attempt, backing off each time.
+    void schedule_startup_firewall_retry(int attempt = 1);
     ListsRefreshExecutionResult execute_remote_list_refresh(
         const std::set<std::string>* target_lists = nullptr);
     void refresh_lists_and_maybe_reload();

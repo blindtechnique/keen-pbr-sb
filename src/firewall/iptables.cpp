@@ -240,8 +240,49 @@ std::unique_ptr<ListEntryVisitor> IptablesFirewall::create_batch_loader(
     return std::make_unique<IpsetRestoreVisitor>(buf, set_name);
 }
 
+// Whether the local iptables-restore understands -w. Probed once: busybox and
+// older builds reject the option outright, newer ones need it to avoid blocking
+// forever on the xtables lock.
+static int xtables_wait_supported = -1; // -1 unknown, 0 no, 1 yes
+
+// Inserts "-w <seconds>" right after the program name for the restore tools.
+static std::vector<std::string> with_wait_option(const std::vector<std::string>& args) {
+    std::vector<std::string> out;
+    out.reserve(args.size() + 2);
+    out.push_back(args.front());
+    out.emplace_back("-w");
+    out.emplace_back("10");
+    out.insert(out.end(), args.begin() + 1, args.end());
+    return out;
+}
+
+static bool is_restore_tool(const std::string& program) {
+    return program == "iptables-restore" || program == "ip6tables-restore";
+}
+
 static void pipe_to_cmd(const std::vector<std::string>& args, const std::string& input) {
     Logger::instance().verbose("{} script:\n{}", args[0], input);
+
+    // The Keenetic firmware reconfigures iptables dozens of times a second while
+    // it brings interfaces up at boot. Without -w our restore call waits on the
+    // xtables lock indefinitely and the daemon never reaches its event loop.
+    if (is_restore_tool(args[0]) && xtables_wait_supported != 0) {
+        const int status = safe_exec_pipe_stdin(with_wait_option(args), input);
+        if (status == 0) {
+            xtables_wait_supported = 1;
+            return;
+        }
+        if (xtables_wait_supported == 1) {
+            throw FirewallError(
+                keen_pbr3::format("{} exited with status {}", args[0], status));
+        }
+        // First attempt and it failed: the option may simply be unsupported.
+        // Fall through to the plain invocation and remember the answer.
+        Logger::instance().verbose(
+            "{} rejected -w, falling back to an unguarded invocation", args[0]);
+        xtables_wait_supported = 0;
+    }
+
     int status = safe_exec_pipe_stdin(args, input);
     if (status != 0) {
         throw FirewallError(keen_pbr3::format("{} exited with status {}", args[0], status));

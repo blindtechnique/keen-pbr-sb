@@ -609,8 +609,18 @@ void Daemon::run() {
         list_service_.download_uncached(config_, outbound_marks_, &relevant_lists);
 
     register_urltest_outbounds();
-    apply_firewall(FirewallApplyMode::Destructive);
-    log.info("Firewall rules and routing applied.");
+    // Applying rules must never abort startup. At boot the firmware holds the
+    // xtables lock while it brings interfaces up, so this can legitimately fail;
+    // coming up without rules and retrying beats leaving the router with no
+    // service at all, because a running daemon can still be reached and fixed.
+    try {
+        apply_firewall(FirewallApplyMode::Destructive);
+        log.info("Firewall rules and routing applied.");
+    } catch (const std::exception& e) {
+        log.error("Could not apply firewall rules at startup: {}. "
+                  "The service continues and will retry shortly.", e.what());
+        schedule_startup_firewall_retry();
+    }
 
     schedule_lists_autoupdate();
 

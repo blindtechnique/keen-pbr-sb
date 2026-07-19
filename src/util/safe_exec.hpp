@@ -41,6 +41,62 @@ inline bool redirect_child_stdin_to_devnull() {
     return true;
 }
 
+
+// Verdict of waiting for a child process.
+struct ChildWaitResult {
+    bool timed_out{false};
+    int status{0};
+};
+
+// Default budget for firewall tooling. iptables-restore and ipset serialise on
+// the xtables lock, which the Keenetic firmware grabs dozens of times a second
+// while it brings interfaces up at boot. Waiting forever there used to wedge
+// the daemon before it ever reached its event loop, leaving the router with no
+// policy routing at all and no hint of why.
+inline constexpr std::chrono::seconds kDefaultExecTimeout{30};
+
+// waitpid with a deadline: polls, then escalates TERM to KILL so a stuck child
+// cannot hold the daemon hostage.
+inline ChildWaitResult wait_for_child_with_timeout(pid_t pid,
+                                                   std::chrono::seconds timeout) {
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + timeout;
+    constexpr auto poll_interval = std::chrono::milliseconds(20);
+
+    ChildWaitResult result;
+    while (true) {
+        const pid_t reaped = waitpid(pid, &result.status, WNOHANG);
+        if (reaped == pid) {
+            return result;
+        }
+        if (reaped == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            result.status = -1;
+            return result;
+        }
+        if (clock::now() >= deadline) {
+            break;
+        }
+        usleep(static_cast<useconds_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(poll_interval).count()));
+    }
+
+    result.timed_out = true;
+    kill(pid, SIGTERM);
+    const auto kill_deadline = clock::now() + std::chrono::seconds(2);
+    while (clock::now() < kill_deadline) {
+        if (waitpid(pid, &result.status, WNOHANG) == pid) {
+            return result;
+        }
+        usleep(20000);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, &result.status, 0);
+    return result;
+}
+
 inline std::string safe_exec_command_string(const std::vector<std::string>& args) {
     std::ostringstream out;
     for (size_t i = 0; i < args.size(); ++i) {
@@ -98,8 +154,17 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
         _exit(127); // execvp failed
     }
 
-    int status = 0;
-    if (waitpid(pid, &status, 0) == -1) {
+    const ChildWaitResult wait_result = wait_for_child_with_timeout(pid, kDefaultExecTimeout);
+    if (wait_result.timed_out) {
+        Logger::instance().error(
+            "Command '{}' exceeded {} s and was killed. On Keenetic this usually "
+            "means the firmware is holding the xtables lock; the operation will "
+            "be retried.",
+            command, kDefaultExecTimeout.count());
+        return -1;
+    }
+    int status = wait_result.status;
+    if (status == -1) {
         Logger::instance().verbose("safe_exec_error cmd={} duration_ms={} reason=waitpid_failed errno={}",
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -193,8 +258,17 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
     }
     close(pipefd[1]);
 
-    int status = 0;
-    if (waitpid(pid, &status, 0) == -1) {
+    const ChildWaitResult wait_result = wait_for_child_with_timeout(pid, kDefaultExecTimeout);
+    if (wait_result.timed_out) {
+        Logger::instance().error(
+            "Command '{}' exceeded {} s and was killed. On Keenetic this usually "
+            "means the firmware is holding the xtables lock; the operation will "
+            "be retried.",
+            command, kDefaultExecTimeout.count());
+        return -1;
+    }
+    int status = wait_result.status;
+    if (status == -1) {
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=waitpid_failed errno={}",
                                  command,
