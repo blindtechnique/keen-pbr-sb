@@ -1,3 +1,5 @@
+import type { ReactNode } from "react"
+
 import { useQuery } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 
@@ -145,7 +147,7 @@ function Row({
   children,
 }: {
   label: string
-  children: React.ReactNode
+  children: ReactNode
 }) {
   return (
     <div className="flex items-baseline justify-between gap-3">

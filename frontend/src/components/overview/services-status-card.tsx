@@ -18,6 +18,15 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
+/** The dnsmasq status vocabulary is not the badge vocabulary. */
+function badgeVariantForTone(
+  tone: "healthy" | "warning" | "degraded"
+): "success" | "warning" | "destructive" {
+  if (tone === "healthy") return "success"
+  if (tone === "warning") return "warning"
+  return "destructive"
+}
+
 type NfqwsStatus = {
   installed: boolean
   running: boolean
@@ -149,7 +158,7 @@ export function ServicesStatusCard() {
         ? [
             {
               label: t(dnsmasqBadge.labelKey),
-              tone: dnsmasqBadge.tone,
+              tone: badgeVariantForTone(dnsmasqBadge.tone),
             },
           ]
         : undefined,

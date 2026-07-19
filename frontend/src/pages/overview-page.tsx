@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Download, RotateCw } from "lucide-react"
+import { Download } from "lucide-react"
 
 import type { ApiError } from "@/api/client"
 
@@ -11,14 +11,8 @@ import {
   useGetHealthService,
   useGetRuntimeOutbounds,
 } from "@/api/queries"
-import {
-  usePostServiceActionMutation,
-  useRoutingControlPendingState,
-} from "@/api/mutations"
 import { selectConfig } from "@/api/selectors"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Switch } from "@/components/ui/switch"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
   Empty,
@@ -34,7 +28,6 @@ import { OutboundStateList } from "@/components/overview/outbound-state-list"
 import { ServicesStatusCard } from "@/components/overview/services-status-card"
 import { RouterInfoCard } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
-import { getDnsmasqBadgeState } from "@/components/overview/dnsmasq-status"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
@@ -64,11 +57,6 @@ export function OverviewPage() {
     },
   })
 
-  const postServiceStartMutation = usePostServiceActionMutation("start")
-  const postServiceStopMutation = usePostServiceActionMutation("stop")
-  const postServiceRestartMutation = usePostServiceActionMutation("restart")
-  const { anyPending: actionPending } = useRoutingControlPendingState()
-
   const serviceHealth =
     serviceHealthQuery.data?.status === 200
       ? serviceHealthQuery.data.data
@@ -95,12 +83,6 @@ export function OverviewPage() {
       ),
     [runtimeOutbounds]
   )
-  const dnsmasqBadge = getDnsmasqBadgeState(
-    serviceHealth?.resolver_live_status,
-    serviceHealth?.resolver_config_sync_state
-  )
-  const hasServiceHealth = Boolean(serviceHealth)
-  const isServiceRunning = serviceHealth?.status === "running"
   const configIsDraft =
     configQuery.data?.status === 200 ? configQuery.data.data.is_draft : false
 
@@ -225,20 +207,6 @@ export function OverviewPage() {
   )
 }
 
-function ServiceSummarySkeleton() {
-  return (
-    <div className="grid gap-3 md:grid-cols-2">
-      <div className="space-y-2">
-        <Skeleton className="h-4 w-20" />
-        <Skeleton className="h-7 w-28" />
-      </div>
-      <div className="space-y-2">
-        <Skeleton className="h-4 w-28" />
-        <Skeleton className="h-7 w-32" />
-      </div>
-    </div>
-  )
-}
 
 function TableSkeleton() {
   return (
@@ -267,40 +235,5 @@ function getRoutingHealthErrorMessage(
   )
 }
 
-function mapServiceStatusTone(
-  status: string
-): "healthy" | "warning" | "degraded" {
-  if (status === "running") {
-    return "healthy"
-  }
 
-  if (status === "starting" || status === "reloading") {
-    return "warning"
-  }
-
-  return "degraded"
-}
-
-function StatusBadge({
-  tone,
-  children,
-}: {
-  tone: "healthy" | "warning" | "degraded"
-  children: string
-}) {
-  return (
-    <Badge
-      size="xs"
-      variant={
-        tone === "warning"
-          ? "warning"
-          : tone === "degraded"
-            ? "destructive"
-            : "success"
-      }
-    >
-      {children}
-    </Badge>
-  )
-}
 
