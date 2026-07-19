@@ -112,6 +112,20 @@ public:
         parse_test_proto(proto), PortSpec(src_port), PortSpec(dst_port),
         negate_src, negate_dst);
   }
+
+  static std::string build_output_mark_script(
+      uint32_t fwmark,
+      const FirewallRuleCriteria &criteria,
+      const FirewallGlobalPrefilter &prefilter) {
+    IptablesFirewall fw;
+    fw.create_output_mark_rule(fwmark, criteria);
+    return IptablesFirewall::build_ipt_script(false, fw.pending_rules_, prefilter);
+  }
+
+  static std::string build_dns_nat_script(
+      const FirewallGlobalPrefilter &prefilter) {
+    return IptablesFirewall::build_dns_nat_script(prefilter);
+  }
 };
 
 } // namespace keen_pbr3
@@ -319,7 +333,47 @@ TEST_CASE("build_ipt_script: empty rules still build KeenPbrTable scaffold") {
   CHECK(s.find(":KeenPbrTable - [0:0]\n") != std::string::npos);
   CHECK(s.find("-A PREROUTING -j KeenPbrTable\n") != std::string::npos);
   CHECK(s.find("-A KeenPbrTable ") == std::string::npos);
-  CHECK(s == "*mangle\n:KeenPbrTable - [0:0]\n-A PREROUTING -j KeenPbrTable\nCOMMIT\n");
+  // The OUTPUT scaffold for router-originated traffic is always materialized.
+  CHECK(s.find(":KeenPbrOutput - [0:0]\n") != std::string::npos);
+  CHECK(s.find("-A OUTPUT -j KeenPbrOutput\n") != std::string::npos);
+  CHECK(s == "*mangle\n:KeenPbrTable - [0:0]\n-A PREROUTING -j KeenPbrTable\n"
+             ":KeenPbrOutput - [0:0]\n-A OUTPUT -j KeenPbrOutput\nCOMMIT\n");
+}
+
+TEST_CASE("create_output_mark_rule: rules land in KeenPbrOutput without iface guard") {
+  FirewallRuleCriteria criteria;
+  criteria.proto = L4Proto::TcpUdp;
+  criteria.dst_port = "53";
+  criteria.dst_addr = {"8.8.8.8"};
+
+  FirewallGlobalPrefilter prefilter;
+  prefilter.skip_marked_packets = true;
+  prefilter.inbound_interfaces = std::vector<std::string>{"br0", "br1"};
+  auto s = T::build_output_mark_script(0x20000, criteria, prefilter);
+
+  // The OUTPUT chain rules must not carry inbound-interface matches.
+  CHECK(s.find("-A KeenPbrOutput -d 8.8.8.8 -p udp --dport 53 -j MARK") != std::string::npos);
+  CHECK(s.find("-A KeenPbrOutput -d 8.8.8.8 -p tcp --dport 53 -j MARK") != std::string::npos);
+  CHECK(s.find("-A KeenPbrOutput -i ") == std::string::npos);
+  CHECK(s.find("-A KeenPbrOutput -m mark ! --mark 0x0/0xffffffff -j ACCEPT") != std::string::npos);
+  // Nothing about the detour rule leaks into the PREROUTING chain.
+  CHECK(s.find("-A KeenPbrTable -d 8.8.8.8") == std::string::npos);
+}
+
+TEST_CASE("build_dns_nat_script: REDIRECT rules cover udp and tcp per inbound interface") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces = std::vector<std::string>{"br0"};
+  auto s = T::build_dns_nat_script(prefilter);
+  CHECK(s.find("*nat\n:KeenPbrDnsRdr - [0:0]\n-A PREROUTING -j KeenPbrDnsRdr\n") != std::string::npos);
+  CHECK(s.find("-A KeenPbrDnsRdr -i br0 -p udp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
+  CHECK(s.find("-A KeenPbrDnsRdr -i br0 -p tcp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
+  CHECK(s.substr(s.size() - 7) == "COMMIT\n");
+}
+
+TEST_CASE("build_dns_nat_script: no inbound interfaces redirects from any interface") {
+  auto s = T::build_dns_nat_script({});
+  CHECK(s.find("-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
+  CHECK(s.find("-i ") == std::string::npos);
 }
 
 TEST_CASE("build_ipt_script: global prefilter RETURN lines are emitted before route rules") {

@@ -7,7 +7,7 @@
 //
 //  Then include this file, and then do
 //
-//     ApiTypes data = nlohmann::json::parse(jsonString);
+//     KeenPbrTypesCwjZ2W data = nlohmann::json::parse(jsonString);
 
 #pragma once
 
@@ -114,6 +114,11 @@ namespace api {
         std::optional<int64_t> timeout_ms;
     };
 
+    struct ClientDnsEnforcement {
+        std::optional<bool> block_dot;
+        std::optional<bool> enabled;
+    };
+
     enum class DaemonConfigFirewallBackend : int { AUTO, IPTABLES, NFTABLES };
 
     struct Daemon {
@@ -153,6 +158,7 @@ namespace api {
     };
 
     struct Dns {
+        std::optional<ClientDnsEnforcement> client_dns_enforcement;
         std::optional<DnsTestServer> dns_test_server;
         std::optional<std::vector<std::string>> fallback;
         std::optional<std::vector<DnsRuleElement>> rules;
@@ -526,11 +532,12 @@ namespace api {
         std::string updated_at;
     };
 
-    struct ApiTypes {
+    struct KeenPbrTypesCwjZ2W {
         std::optional<ApiConfig> api_config;
         std::optional<CacheMetadata> cache_metadata;
         std::optional<CheckStatus> check_status;
         std::optional<CircuitBreakerConfig> circuit_breaker_config;
+        std::optional<ClientDnsEnforcement> client_dns_enforcement;
         std::optional<ConfigObject> config_object;
         std::optional<ConfigStateResponse> config_state_response;
         std::optional<ConfigUpdateResponse> config_update_response;
@@ -599,6 +606,9 @@ namespace api {
 
     void from_json(const json & j, CircuitBreakerConfig & x);
     void to_json(json & j, const CircuitBreakerConfig & x);
+
+    void from_json(const json & j, ClientDnsEnforcement & x);
+    void to_json(json & j, const ClientDnsEnforcement & x);
 
     void from_json(const json & j, Daemon & x);
     void to_json(json & j, const Daemon & x);
@@ -747,8 +757,8 @@ namespace api {
     void from_json(const json & j, TransportStatus & x);
     void to_json(json & j, const TransportStatus & x);
 
-    void from_json(const json & j, ApiTypes & x);
-    void to_json(json & j, const ApiTypes & x);
+    void from_json(const json & j, KeenPbrTypesCwjZ2W & x);
+    void to_json(json & j, const KeenPbrTypesCwjZ2W & x);
 
     void from_json(const json & j, CheckStatus & x);
     void to_json(json & j, const CheckStatus & x);
@@ -854,6 +864,17 @@ namespace api {
         j["timeout_ms"] = x.timeout_ms;
     }
 
+    inline void from_json(const json & j, ClientDnsEnforcement& x) {
+        x.block_dot = get_stack_optional<bool>(j, "block_dot");
+        x.enabled = get_stack_optional<bool>(j, "enabled");
+    }
+
+    inline void to_json(json & j, const ClientDnsEnforcement & x) {
+        j = json::object();
+        j["block_dot"] = x.block_dot;
+        j["enabled"] = x.enabled;
+    }
+
     inline void from_json(const json & j, Daemon& x) {
         x.cache_dir = get_stack_optional<std::string>(j, "cache_dir");
         x.firewall_backend = get_stack_optional<DaemonConfigFirewallBackend>(j, "firewall_backend");
@@ -928,6 +949,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, Dns& x) {
+        x.client_dns_enforcement = get_stack_optional<ClientDnsEnforcement>(j, "client_dns_enforcement");
         x.dns_test_server = get_stack_optional<DnsTestServer>(j, "dns_test_server");
         x.fallback = get_stack_optional<std::vector<std::string>>(j, "fallback");
         x.rules = get_stack_optional<std::vector<DnsRuleElement>>(j, "rules");
@@ -937,6 +959,7 @@ namespace api {
 
     inline void to_json(json & j, const Dns & x) {
         j = json::object();
+        j["client_dns_enforcement"] = x.client_dns_enforcement;
         j["dns_test_server"] = x.dns_test_server;
         j["fallback"] = x.fallback;
         j["rules"] = x.rules;
@@ -1655,11 +1678,12 @@ namespace api {
         j["updated_at"] = x.updated_at;
     }
 
-    inline void from_json(const json & j, ApiTypes& x) {
+    inline void from_json(const json & j, KeenPbrTypesCwjZ2W& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
         x.cache_metadata = get_stack_optional<CacheMetadata>(j, "CacheMetadata");
         x.check_status = get_stack_optional<CheckStatus>(j, "CheckStatus");
         x.circuit_breaker_config = get_stack_optional<CircuitBreakerConfig>(j, "CircuitBreakerConfig");
+        x.client_dns_enforcement = get_stack_optional<ClientDnsEnforcement>(j, "ClientDnsEnforcement");
         x.config_object = get_stack_optional<ConfigObject>(j, "ConfigObject");
         x.config_state_response = get_stack_optional<ConfigStateResponse>(j, "ConfigStateResponse");
         x.config_update_response = get_stack_optional<ConfigUpdateResponse>(j, "ConfigUpdateResponse");
@@ -1716,12 +1740,13 @@ namespace api {
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
     }
 
-    inline void to_json(json & j, const ApiTypes & x) {
+    inline void to_json(json & j, const KeenPbrTypesCwjZ2W & x) {
         j = json::object();
         j["ApiConfig"] = x.api_config;
         j["CacheMetadata"] = x.cache_metadata;
         j["CheckStatus"] = x.check_status;
         j["CircuitBreakerConfig"] = x.circuit_breaker_config;
+        j["ClientDnsEnforcement"] = x.client_dns_enforcement;
         j["ConfigObject"] = x.config_object;
         j["ConfigStateResponse"] = x.config_state_response;
         j["ConfigUpdateResponse"] = x.config_update_response;

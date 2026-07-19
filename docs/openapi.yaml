@@ -920,6 +920,30 @@ components:
           $ref: "#/components/schemas/DnsTestServer"
         system_resolver:
           $ref: "#/components/schemas/DnsSystemResolver"
+        client_dns_enforcement:
+          $ref: "#/components/schemas/ClientDnsEnforcement"
+
+    ClientDnsEnforcement:
+      type: object
+      description: >
+        Forces LAN clients to use the router's DNS. When enabled, plain DNS
+        (port 53) from inbound interfaces is transparently redirected to the
+        local resolver and DNS-over-TLS (port 853) is blocked, so browser
+        Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port
+        443 cannot be blocked generically.
+      properties:
+        enabled:
+          type: boolean
+          nullable: true
+          description: Master switch. Default false.
+          example: true
+        block_dot:
+          type: boolean
+          nullable: true
+          description: >
+            Also block DNS-over-TLS (tcp/udp 853) from inbound interfaces.
+            Default true when enforcement is enabled.
+          example: true
 
     RouteRule:
       type: object

@@ -128,9 +128,21 @@ public:
     virtual void create_mark_rule(uint32_t fwmark,
                                   const FirewallRuleCriteria& criteria = {}) = 0;
 
+    // Create a mark rule for router-originated (locally generated) packets.
+    // Backends hook this into the OUTPUT path (mangle OUTPUT / nft output hook)
+    // so DNS detour marks apply to dnsmasq upstream queries as well.
+    // Only static addr/port criteria are supported; dst_set_name is ignored.
+    virtual void create_output_mark_rule(uint32_t fwmark,
+                                         const FirewallRuleCriteria& criteria = {}) = 0;
+
     // Create a firewall rule that drops packets matching the given criteria.
     // Used for blackhole outbounds that don't need routing tables or fwmarks.
     virtual void create_drop_rule(const FirewallRuleCriteria& criteria = {}) = 0;
+
+    // Redirect plain DNS (tcp/udp dport 53) arriving from the configured
+    // inbound interfaces to the router's local resolver (client DNS
+    // enforcement). Backends implement this with a NAT REDIRECT chain.
+    virtual void create_dns_redirect_rules() = 0;
 
     // Create a firewall rule that stops keen-pbr processing for matching packets
     // and leaves them unmodified for normal system routing.

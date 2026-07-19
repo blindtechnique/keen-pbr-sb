@@ -304,7 +304,8 @@ TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") 
       {mark_rule("myset", AF_INET, 256)});
 
   REQUIRE(cmds.is_array());
-  REQUIRE(cmds.size() == 4);
+  // 3 prefilter rules + 1 route rule + 1 output-chain skip-marked prefilter.
+  REQUIRE(cmds.size() == 5);
 
   const auto &dnat_expr = cmds[0]["add"]["rule"]["expr"];
   CHECK(dnat_expr[0]["match"]["op"] == "in");
@@ -332,6 +333,10 @@ TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") 
   CHECK(mark_expr[0]["match"]["right"] == "@myset");
   CHECK(mark_expr[2]["mangle"]["value"] == 256);
   CHECK(mark_expr[3].contains("accept"));
+
+  // Output-chain prefilter mirrors the skip-marked guard.
+  CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
+  CHECK(cmds[4]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
 }
 
 TEST_CASE("build_rule_add_commands: config-derived prefilter omits interface guard when inbound list is empty") {
@@ -355,11 +360,13 @@ TEST_CASE("build_rule_add_commands: config-derived prefilter omits interface gua
       {mark_rule("myset", AF_INET, 256)});
 
   REQUIRE(cmds.is_array());
-  REQUIRE(cmds.size() == 3);
+  // + output-chain skip-marked prefilter at the tail.
+  REQUIRE(cmds.size() == 4);
   CHECK(cmds[0]["add"]["rule"]["expr"][0]["match"]["op"] == "in");
   CHECK(cmds[0]["add"]["rule"]["expr"][0]["match"]["left"]["ct"]["key"] == "status");
   CHECK(cmds[1]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
   CHECK(cmds[2]["add"]["rule"]["expr"][0]["match"]["right"] == "@myset");
+  CHECK(cmds[3]["add"]["rule"]["chain"] == "output");
 }
 
 TEST_CASE("build_rule_add_commands: config-derived prefilter inserts interface guard before route rule") {
@@ -383,11 +390,13 @@ TEST_CASE("build_rule_add_commands: config-derived prefilter inserts interface g
       {mark_rule("myset", AF_INET, 256)});
 
   REQUIRE(cmds.is_array());
-  REQUIRE(cmds.size() == 4);
+  // + output-chain skip-marked prefilter at the tail.
+  REQUIRE(cmds.size() == 5);
   CHECK(cmds[1]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
   CHECK(cmds[2]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "iifname");
   CHECK(cmds[2]["add"]["rule"]["expr"][0]["match"]["right"] == "br0");
   CHECK(cmds[3]["add"]["rule"]["expr"][0]["match"]["right"] == "@myset");
+  CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
 }
 
 TEST_CASE("create_mark_rule: port-only tcp/udp rule emits one tcp and one udp entry") {

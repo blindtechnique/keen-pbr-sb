@@ -18,6 +18,7 @@ export * from './configUpdateResponse';
 export * from './configUpdateResponseStatus';
 export * from './daemonConfig';
 export * from './daemonConfigFirewallBackend';
+export * from './clientDnsEnforcement';
 export * from './dnsConfig';
 export * from './dnsRule';
 export * from './dnsServer';

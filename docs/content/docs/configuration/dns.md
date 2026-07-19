@@ -34,6 +34,7 @@ On package-based router installs, keen-pbr normally takes care of dnsmasq integr
 | `rules` | array | Rules mapping lists to DNS servers |
 | `fallback` | array of string | Ordered DNS server tags for queries that match no rule |
 | `dns_test_server` | object | Optional built-in DNS probe listener for advanced troubleshooting |
+| `client_dns_enforcement` | object | Force LAN clients to use the router DNS: `{"enabled": true}` transparently redirects plain DNS (port 53) from inbound interfaces to the local resolver and blocks DNS-over-TLS (port 853, disable with `"block_dot": false`). DoH on port 443 cannot be blocked generically. |
 
 ## System Resolver
 

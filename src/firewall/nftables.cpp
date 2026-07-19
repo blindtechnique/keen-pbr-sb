@@ -76,7 +76,8 @@ void NftablesFirewall::create_ipset(const std::string& set_name, int family,
 void NftablesFirewall::append_rules_for_family(int family,
                                                PendingRule::Action action,
                                                uint32_t fwmark,
-                                               const FirewallRuleCriteria& criteria) {
+                                               const FirewallRuleCriteria& criteria,
+                                               bool output_scope) {
     if (family == AF_INET6 && !ipv6_enabled()) {
         return;
     }
@@ -107,6 +108,7 @@ void NftablesFirewall::append_rules_for_family(int family,
         if (!criteria.dst_addr.empty()) {
             pr.criteria.dst_addr = filtered_dst_addrs;
         }
+        pr.output = output_scope;
         pending_rules_.push_back(std::move(pr));
     }
 }
@@ -125,6 +127,20 @@ void NftablesFirewall::create_mark_rule(uint32_t fwmark,
     }
     append_rules_for_family(AF_INET, PendingRule::Mark, fwmark, criteria);
     append_rules_for_family(AF_INET6, PendingRule::Mark, fwmark, criteria);
+}
+
+void NftablesFirewall::create_output_mark_rule(uint32_t fwmark,
+                                               const FirewallRuleCriteria& criteria) {
+    // Router-originated traffic (dnsmasq upstream queries with detour) never
+    // traverses the prerouting hook; these marks live in the output chain.
+    append_rules_for_family(AF_INET, PendingRule::Mark, fwmark, criteria,
+                            /*output_scope=*/true);
+    append_rules_for_family(AF_INET6, PendingRule::Mark, fwmark, criteria,
+                            /*output_scope=*/true);
+}
+
+void NftablesFirewall::create_dns_redirect_rules() {
+    dns_redirect_requested_ = true;
 }
 
 void NftablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
@@ -239,6 +255,99 @@ nlohmann::json NftablesFirewall::build_delete_chain_json() {
     }}}}};
 }
 
+nlohmann::json NftablesFirewall::build_output_chain_json() {
+    // type "route" is required: it makes the kernel re-evaluate the routing
+    // decision for locally generated packets after the mark is applied.
+    return {{"add", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", OUTPUT_CHAIN_NAME},
+        {"type", "route"},
+        {"hook", "output"},
+        {"prio", -150},
+        {"policy", "accept"}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_delete_output_chain_json() {
+    return {{"delete", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", OUTPUT_CHAIN_NAME}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_dns_nat_chain_json() {
+    return {{"add", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", DNS_NAT_CHAIN_NAME},
+        {"type", "nat"},
+        {"hook", "prerouting"},
+        {"prio", -100},
+        {"policy", "accept"}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_delete_dns_nat_chain_json() {
+    return {{"delete", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", DNS_NAT_CHAIN_NAME}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
+    const FirewallGlobalPrefilter& prefilter) {
+    nlohmann::json commands = nlohmann::json::array();
+
+    nlohmann::json iface_match = nullptr;
+    if (prefilter.has_inbound_interfaces()
+        && prefilter.inbound_interfaces.has_value()) {
+        nlohmann::json iface_rhs;
+        if (prefilter.inbound_interfaces->size() == 1) {
+            iface_rhs = prefilter.inbound_interfaces->front();
+        } else {
+            iface_rhs = {{"set", nlohmann::json::array()}};
+            for (const auto& iface : *prefilter.inbound_interfaces) {
+                iface_rhs["set"].push_back(iface);
+            }
+        }
+        iface_match = {{"match", {
+            {"op", "=="},
+            {"left", {{"meta", {{"key", "iifname"}}}}},
+            {"right", iface_rhs}
+        }}};
+    }
+
+    for (const char* proto : {"udp", "tcp"}) {
+        nlohmann::json expr = nlohmann::json::array();
+        if (!iface_match.is_null()) {
+            expr.push_back(iface_match);
+        }
+        expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"meta", {{"key", "l4proto"}}}}},
+            {"right", proto}
+        }}});
+        expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"payload", {{"protocol", proto}, {"field", "dport"}}}}},
+            {"right", 53}
+        }}});
+        expr.push_back({{"counter", nullptr}});
+        expr.push_back({{"redirect", {{"port", 53}}}});
+        commands.push_back({{"add", {{"rule", {
+            {"family", "inet"},
+            {"table", TABLE_NAME},
+            {"chain", DNS_NAT_CHAIN_NAME},
+            {"expr", expr}
+        }}}}});
+    }
+
+    return commands;
+}
+
 nlohmann::json NftablesFirewall::build_rule_add_commands(
     const FirewallGlobalPrefilter& prefilter,
     const std::vector<PendingRule>& rules) {
@@ -307,6 +416,37 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
     }
 
     for (const auto& pr : rules) {
+        if (pr.output) continue;
+        if (pr.action == PendingRule::Mark) {
+            commands.push_back(build_mark_rule_json(pr));
+        } else if (pr.action == PendingRule::Drop) {
+            commands.push_back(build_drop_rule_json(pr));
+        } else {
+            commands.push_back(build_pass_rule_json(pr));
+        }
+    }
+
+    // Output-chain prefilter: skip already-marked packets. The DNAT and
+    // inbound-interface guards do not apply to router-originated traffic.
+    if (prefilter.skip_marked_packets) {
+        nlohmann::json marked_expr = nlohmann::json::array();
+        marked_expr.push_back({{"match", {
+            {"op", "!="},
+            {"left", {{"meta", {{"key", "mark"}}}}},
+            {"right", 0}
+        }}});
+        marked_expr.push_back({{"counter", nullptr}});
+        marked_expr.push_back({{"accept", nullptr}});
+        commands.push_back({{"add", {{"rule", {
+            {"family", "inet"},
+            {"table", TABLE_NAME},
+            {"chain", OUTPUT_CHAIN_NAME},
+            {"expr", marked_expr}
+        }}}}});
+    }
+
+    for (const auto& pr : rules) {
+        if (!pr.output) continue;
         if (pr.action == PendingRule::Mark) {
             commands.push_back(build_mark_rule_json(pr));
         } else if (pr.action == PendingRule::Drop) {
@@ -444,7 +584,7 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(const PendingRule& pr) {
     return {{"add", {{"rule", {
         {"family", "inet"},
         {"table", TABLE_NAME},
-        {"chain", CHAIN_NAME},
+        {"chain", pr.output ? OUTPUT_CHAIN_NAME : CHAIN_NAME},
         {"expr", expr}
     }}}}};
 }
@@ -473,7 +613,7 @@ nlohmann::json NftablesFirewall::build_drop_rule_json(const PendingRule& pr) {
     return {{"add", {{"rule", {
         {"family", "inet"},
         {"table", TABLE_NAME},
-        {"chain", CHAIN_NAME},
+        {"chain", pr.output ? OUTPUT_CHAIN_NAME : CHAIN_NAME},
         {"expr", expr}
     }}}}};
 }
@@ -500,7 +640,7 @@ nlohmann::json NftablesFirewall::build_pass_rule_json(const PendingRule& pr) {
     return {{"add", {{"rule", {
         {"family", "inet"},
         {"table", TABLE_NAME},
-        {"chain", CHAIN_NAME},
+        {"chain", pr.output ? OUTPUT_CHAIN_NAME : CHAIN_NAME},
         {"expr", expr}
     }}}}};
 }
@@ -567,6 +707,16 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
                 && chain.value("name", "") == CHAIN_NAME) {
                 state.chain_exists = true;
             }
+            if (chain.value("family", "") == "inet"
+                && chain.value("table", "") == TABLE_NAME
+                && chain.value("name", "") == OUTPUT_CHAIN_NAME) {
+                state.output_chain_exists = true;
+            }
+            if (chain.value("family", "") == "inet"
+                && chain.value("table", "") == TABLE_NAME
+                && chain.value("name", "") == DNS_NAT_CHAIN_NAME) {
+                state.dns_nat_chain_exists = true;
+            }
             continue;
         }
 
@@ -612,6 +762,23 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         arr.push_back(build_delete_chain_json());
     }
     arr.push_back(build_chain_json());
+
+    // Chain with output hook (router-originated traffic, e.g. DNS detour)
+    if (!emit_full_table && live_state.output_chain_exists) {
+        arr.push_back(build_delete_output_chain_json());
+    }
+    arr.push_back(build_output_chain_json());
+
+    // DNS redirect nat chain (client DNS enforcement)
+    if (!emit_full_table && live_state.dns_nat_chain_exists) {
+        arr.push_back(build_delete_dns_nat_chain_json());
+    }
+    if (dns_redirect_requested_) {
+        arr.push_back(build_dns_nat_chain_json());
+        for (const auto& cmd : build_dns_redirect_rules_json(global_prefilter_)) {
+            arr.push_back(cmd);
+        }
+    }
 
     // Rules
     for (const auto& cmd : build_rule_add_commands(global_prefilter_, pending_rules_)) {
@@ -664,6 +831,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    dns_redirect_requested_ = false;
     table_created_ = true;
 }
 

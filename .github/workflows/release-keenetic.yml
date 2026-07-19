@@ -1,0 +1,89 @@
+name: Release Keenetic IPK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      KEENETIC_CONFIG: aarch64-3.10
+      KEENETIC_VERSION: "3.10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: extensions/transport-manager/go.sum
+
+      - name: Build IPK in entware-builder
+        run: |
+          make keenetic-packages \
+            KEENETIC_CONFIG="$KEENETIC_CONFIG" \
+            KEENETIC_VERSION="$KEENETIC_VERSION" \
+            KEENETIC_BUILD_JOBS=4
+
+      - name: Collect artifacts and checksums
+        id: artifacts
+        run: |
+          set -e
+          ls -R build/packages
+          IPK=$(find build/packages -name 'keen-pbr_*.ipk' | head -1)
+          test -n "$IPK"
+          cp "$IPK" .
+          IPK_NAME=$(basename "$IPK")
+          sha256sum "$IPK_NAME" > SHA256SUMS
+          echo "ipk=$IPK_NAME" >> "$GITHUB_OUTPUT"
+          cat SHA256SUMS
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          awk -v ver="$TAG" '
+            $0 ~ "^## \\[" ver "\\]" {flag=1; next}
+            /^## \[/ {flag=0}
+            flag {print}
+          ' CHANGELOG.md > RELEASE_BODY.md
+          if ! [ -s RELEASE_BODY.md ]; then
+            echo "Автоматическая сборка $GITHUB_REF_NAME. Подробности в CHANGELOG.md." > RELEASE_BODY.md
+          fi
+          cat RELEASE_BODY.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: "keen-pbr-sb ${{ github.ref_name }}"
+          body_path: RELEASE_BODY.md
+          files: |
+            ${{ steps.artifacts.outputs.ipk }}
+            SHA256SUMS
+
+      - name: Upload workflow artifacts (non-tag runs)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: keen-pbr-ipk
+          path: |
+            ${{ steps.artifacts.outputs.ipk }}
+            SHA256SUMS

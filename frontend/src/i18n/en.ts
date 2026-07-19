@@ -533,6 +533,9 @@ export const enTranslation = {
         ipv6EnabledLabel: "Enable IPv6 support",
         ipv6EnabledHint:
           "Install IPv6 firewall sets and emit IPv6 dnsmasq targets. Disable this on older firmware without IPv6 netfilter support.",
+        clientDnsEnforcementLabel: "Force clients to use router DNS",
+        clientDnsEnforcementHint:
+          "Transparently redirect plain DNS (port 53) from LAN clients to the router's resolver and block DNS-over-TLS (port 853), so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked this way; disable Secure DNS in browsers for full coverage.",
         inboundInterfacesLabel: "Inbound interfaces",
         inboundInterfacesHint:
           "Only packets arriving on the selected interfaces will be processed by policy routing. Leave this empty to match traffic from any interface.",

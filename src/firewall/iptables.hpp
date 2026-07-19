@@ -25,8 +25,14 @@ public:
     // Buffer an iptables/ip6tables -j MARK --set-mark rule for the given ipset.
     void create_mark_rule(uint32_t fwmark,
                           const FirewallRuleCriteria& criteria = {}) override;
+    // Buffer a MARK rule for router-originated traffic (mangle OUTPUT hook).
+    // Used for DNS detour so dnsmasq upstream queries are policy-routed too.
+    void create_output_mark_rule(uint32_t fwmark,
+                                 const FirewallRuleCriteria& criteria = {}) override;
     // Buffer an iptables/ip6tables -j DROP rule for the given criteria.
     void create_drop_rule(const FirewallRuleCriteria& criteria = {}) override;
+    // Buffer NAT REDIRECT rules that force LAN plain-DNS to the local resolver.
+    void create_dns_redirect_rules() override;
     // Buffer an iptables/ip6tables -j RETURN rule for the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -47,6 +53,8 @@ public:
 
 private:
     static constexpr const char* CHAIN_NAME = "KeenPbrTable";
+    static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
+    static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     void cleanup_live_impl();
     void cleanup_impl();
     void cleanup_rules_impl();
@@ -66,6 +74,7 @@ private:
         uint32_t fwmark; // only for Mark
         uint32_t fwmark_mask{0xFFFFFFFFu}; // only for Mark
         FirewallRuleCriteria criteria; // optional packet match criteria
+        bool output{false}; // true → KeenPbrOutput (mangle OUTPUT), false → KeenPbrTable (PREROUTING)
     };
 
     // Build the 'create <name> hash:net family <f> [timeout <t>]' line.
@@ -94,7 +103,8 @@ private:
     void append_rules_for_family(bool ipv6,
                                  PendingRule::Action action,
                                  uint32_t fwmark,
-                                 const FirewallRuleCriteria& criteria);
+                                 const FirewallRuleCriteria& criteria,
+                                 bool output_scope = false);
 
     // Sets queued for creation, flushed by apply().
     std::vector<PendingSet> pending_sets_;
@@ -109,6 +119,15 @@ private:
     // Track whether chain + jump rule exist for each protocol
     bool chain_v4_created_ = false;
     bool chain_v6_created_ = false;
+
+    // DNS redirect (client DNS enforcement) state
+    bool dns_redirect_requested_ = false;
+    bool dns_nat_v4_created_ = false;
+    bool dns_nat_v6_created_ = false;
+
+    // Build the nat-table restore script with REDIRECT rules for port 53.
+    static std::string build_dns_nat_script(
+        const FirewallGlobalPrefilter& prefilter);
 
 #ifdef KEEN_PBR3_TESTING
     friend class IptablesBuilderTest;

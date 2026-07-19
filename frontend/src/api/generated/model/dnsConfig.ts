@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { ClientDnsEnforcement } from './clientDnsEnforcement';
 import type { DnsRule } from './dnsRule';
 import type { DnsServer } from './dnsServer';
 import type { DnsSystemResolver } from './dnsSystemResolver';
@@ -17,4 +18,5 @@ export interface DnsConfig {
   fallback?: string[];
   dns_test_server?: DnsTestServer;
   system_resolver?: DnsSystemResolver;
+  client_dns_enforcement?: ClientDnsEnforcement;
 }

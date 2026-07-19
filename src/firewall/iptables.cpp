@@ -75,7 +75,8 @@ void IptablesFirewall::create_ipset(const std::string& set_name, int family,
 void IptablesFirewall::append_rules_for_family(bool ipv6,
                                                PendingRule::Action action,
                                                uint32_t fwmark,
-                                               const FirewallRuleCriteria& criteria) {
+                                               const FirewallRuleCriteria& criteria,
+                                               bool output_scope) {
     const std::vector<std::string> any_addr{""};
     const auto filtered_src_addrs = criteria.src_addr.empty()
         ? any_addr
@@ -106,6 +107,7 @@ void IptablesFirewall::append_rules_for_family(bool ipv6,
                 pr.criteria.dst_addr = dst.empty()
                     ? std::vector<std::string>{}
                     : std::vector<std::string>{dst};
+                pr.output = output_scope;
                 pending_rules_.push_back(std::move(pr));
             }
         }
@@ -122,6 +124,18 @@ void IptablesFirewall::create_mark_rule(uint32_t fwmark,
     }
     append_rules_for_family(false, PendingRule::Mark, fwmark, criteria);
     append_rules_for_family(true, PendingRule::Mark, fwmark, criteria);
+}
+
+void IptablesFirewall::create_output_mark_rule(uint32_t fwmark,
+                                               const FirewallRuleCriteria& criteria) {
+    // Router-originated traffic (dnsmasq upstream queries, list downloads with
+    // detour) never traverses PREROUTING, so DNS detour marks must also be
+    // present in mangle OUTPUT. Ipset-based criteria are intentionally not
+    // supported here: only static addr/port matches are used for detours.
+    append_rules_for_family(false, PendingRule::Mark, fwmark, criteria,
+                            /*output_scope=*/true);
+    append_rules_for_family(true, PendingRule::Mark, fwmark, criteria,
+                            /*output_scope=*/true);
 }
 
 void IptablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
@@ -144,6 +158,36 @@ void IptablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
     }
     append_rules_for_family(false, PendingRule::Pass, 0, criteria);
     append_rules_for_family(true, PendingRule::Pass, 0, criteria);
+}
+
+void IptablesFirewall::create_dns_redirect_rules() {
+    dns_redirect_requested_ = true;
+}
+
+std::string IptablesFirewall::build_dns_nat_script(
+    const FirewallGlobalPrefilter& prefilter) {
+    std::vector<std::string> iface_frags;
+    if (prefilter.has_inbound_interfaces()
+        && prefilter.inbound_interfaces.has_value()) {
+        for (const auto& iface : *prefilter.inbound_interfaces) {
+            iface_frags.push_back(" -i " + iface);
+        }
+    } else {
+        iface_frags.push_back("");
+    }
+
+    std::string s;
+    s += keen_pbr3::format("*nat\n:{} - [0:0]\n-A PREROUTING -j {}\n",
+                           DNS_NAT_CHAIN_NAME, DNS_NAT_CHAIN_NAME);
+    for (const auto& iface_frag : iface_frags) {
+        for (const char* proto : {"udp", "tcp"}) {
+            s += keen_pbr3::format(
+                "-A {}{} -p {} --dport 53 -j REDIRECT --to-ports 53\n",
+                DNS_NAT_CHAIN_NAME, iface_frag, proto);
+        }
+    }
+    s += "COMMIT\n";
+    return s;
 }
 
 std::unique_ptr<ListEntryVisitor> IptablesFirewall::create_batch_loader(
@@ -252,10 +296,14 @@ std::string IptablesFirewall::build_prefilter_lines(
 std::vector<std::string> IptablesFirewall::build_rule_lines(
     const PendingRule& pr,
     const FirewallGlobalPrefilter& prefilter) {
+    // OUTPUT-scoped rules live in KeenPbrOutput and match router-originated
+    // packets, which never carry an input interface.
+    const char* chain = pr.output ? OUTPUT_CHAIN_NAME : CHAIN_NAME;
     // iptables cannot express a multi-value negated -i guard in one rule, so
     // multi-interface allowlists are expanded into one positive -i match per rule.
     std::vector<std::string> iface_frags;
-    if (prefilter.has_inbound_interfaces()
+    if (!pr.output
+        && prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()
         && prefilter.inbound_interfaces->size() > 1) {
         iface_frags.reserve(prefilter.inbound_interfaces->size());
@@ -293,7 +341,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         pr.fwmark_mask);
                     lines.push_back(keen_pbr3::format(
                         "[0:0] -A {}{}{}{}{} {}\n",
-                        CHAIN_NAME,
+                        chain,
                         iface_frag,
                         addr_frag,
                         dscp_frag,
@@ -301,7 +349,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         mark_target));
                     lines.push_back(keen_pbr3::format(
                         "-A {}{}{}{}{} -j RETURN\n",
-                        CHAIN_NAME,
+                        chain,
                         iface_frag,
                         addr_frag,
                         dscp_frag,
@@ -309,7 +357,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                 } else if (pr.action == PendingRule::Drop) {
                     lines.push_back(keen_pbr3::format(
                         "-A {}{}{}{}{} -j DROP\n",
-                        CHAIN_NAME,
+                        chain,
                         iface_frag,
                         addr_frag,
                         dscp_frag,
@@ -317,7 +365,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                 } else {
                     lines.push_back(keen_pbr3::format(
                         "-A {}{}{}{}{} -j RETURN\n",
-                        CHAIN_NAME,
+                        chain,
                         iface_frag,
                         addr_frag,
                         dscp_frag,
@@ -331,7 +379,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         pr.fwmark_mask);
                     lines.push_back(keen_pbr3::format(
                         "[0:0] -A {} -m set --match-set {} dst{}{}{}{} {}\n",
-                        CHAIN_NAME,
+                        chain,
                         *pr.criteria.dst_set_name,
                         iface_frag,
                         addr_frag,
@@ -340,7 +388,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         mark_target));
                     lines.push_back(keen_pbr3::format(
                         "-A {} -m set --match-set {} dst{}{}{}{} -j RETURN\n",
-                        CHAIN_NAME,
+                        chain,
                         *pr.criteria.dst_set_name,
                         iface_frag,
                         addr_frag,
@@ -349,7 +397,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                 } else if (pr.action == PendingRule::Drop) {
                     lines.push_back(keen_pbr3::format(
                         "-A {} -m set --match-set {} dst{}{}{}{} -j DROP\n",
-                        CHAIN_NAME,
+                        chain,
                         *pr.criteria.dst_set_name,
                         iface_frag,
                         addr_frag,
@@ -358,7 +406,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                 } else {
                     lines.push_back(keen_pbr3::format(
                         "-A {} -m set --match-set {} dst{}{}{}{} -j RETURN\n",
-                        CHAIN_NAME,
+                        chain,
                         *pr.criteria.dst_set_name,
                         iface_frag,
                         addr_frag,
@@ -380,7 +428,23 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
                            CHAIN_NAME, CHAIN_NAME);
     s += build_prefilter_lines(prefilter);
     for (const auto& pr : rules) {
-        if (pr.ipv6 != ipv6) continue;
+        if (pr.ipv6 != ipv6 || pr.output) continue;
+        for (const auto& line : build_rule_lines(pr, prefilter)) {
+            s += line;
+        }
+    }
+    // Router-originated traffic hook. The scaffold is always materialized so
+    // cleanup and diagnostics stay deterministic; the inbound-interface
+    // prefilter is intentionally omitted (OUTPUT packets carry no in-iface).
+    s += keen_pbr3::format(":{} - [0:0]\n-A OUTPUT -j {}\n",
+                           OUTPUT_CHAIN_NAME, OUTPUT_CHAIN_NAME);
+    if (prefilter.skip_marked_packets) {
+        s += keen_pbr3::format(
+            "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
+            OUTPUT_CHAIN_NAME);
+    }
+    for (const auto& pr : rules) {
+        if (pr.ipv6 != ipv6 || !pr.output) continue;
         for (const auto& line : build_rule_lines(pr, prefilter)) {
             s += line;
         }
@@ -449,6 +513,26 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         chain_v6_created_ = true;
     }
 
+    // Phase 3: client DNS enforcement (NAT REDIRECT for plain DNS).
+    if (dns_redirect_requested_) {
+        const std::string nat_script = build_dns_nat_script(global_prefilter_);
+        pipe_to_cmd({"iptables-restore", "--noflush", "--counters"}, nat_script);
+        dns_nat_v4_created_ = true;
+        if (effective_ipv6) {
+            try {
+                pipe_to_cmd({"ip6tables-restore", "--noflush", "--counters"},
+                            nat_script);
+                dns_nat_v6_created_ = true;
+            } catch (const std::exception& e) {
+                // ip6table_nat is missing on some older Keenetic kernels;
+                // IPv4 enforcement still applies.
+                Logger::instance().warn(
+                    "IPv6 DNS redirect unavailable ({}); continuing IPv4-only", e.what());
+            }
+        }
+    }
+    dns_redirect_requested_ = false;
+
     // Clear pending buffers
     pending_sets_.clear();
     pending_elements_.clear();
@@ -460,20 +544,40 @@ void IptablesFirewall::cleanup_rules_impl() {
 
     // Remove jump rules, flush and delete custom chain for IPv4
     if (chain_v4_created_) {
-        log.verbose("iptables cleanup: removing IPv4 chain {}", CHAIN_NAME);
+        log.verbose("iptables cleanup: removing IPv4 chains {} and {}", CHAIN_NAME, OUTPUT_CHAIN_NAME);
         safe_exec({"iptables", "-t", "mangle", "-D", "PREROUTING", "-j", CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"iptables", "-t", "mangle", "-F", CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"iptables", "-t", "mangle", "-X", CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "mangle", "-D", "OUTPUT", "-j", OUTPUT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "mangle", "-F", OUTPUT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "mangle", "-X", OUTPUT_CHAIN_NAME}, /*suppress_output=*/true);
         chain_v4_created_ = false;
     }
 
     // Same for IPv6
     if (chain_v6_created_) {
-        log.verbose("iptables cleanup: removing IPv6 chain {}", CHAIN_NAME);
+        log.verbose("iptables cleanup: removing IPv6 chains {} and {}", CHAIN_NAME, OUTPUT_CHAIN_NAME);
         safe_exec({"ip6tables", "-t", "mangle", "-D", "PREROUTING", "-j", CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"ip6tables", "-t", "mangle", "-F", CHAIN_NAME}, /*suppress_output=*/true);
         safe_exec({"ip6tables", "-t", "mangle", "-X", CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "mangle", "-D", "OUTPUT", "-j", OUTPUT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "mangle", "-F", OUTPUT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "mangle", "-X", OUTPUT_CHAIN_NAME}, /*suppress_output=*/true);
         chain_v6_created_ = false;
+    }
+
+    // DNS redirect NAT chains (client DNS enforcement)
+    if (dns_nat_v4_created_) {
+        safe_exec({"iptables", "-t", "nat", "-D", "PREROUTING", "-j", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "nat", "-F", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"iptables", "-t", "nat", "-X", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        dns_nat_v4_created_ = false;
+    }
+    if (dns_nat_v6_created_) {
+        safe_exec({"ip6tables", "-t", "nat", "-D", "PREROUTING", "-j", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "nat", "-F", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        safe_exec({"ip6tables", "-t", "nat", "-X", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
+        dns_nat_v6_created_ = false;
     }
 }
 

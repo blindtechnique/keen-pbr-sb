@@ -66,7 +66,19 @@ bool strict_enforcement_enabled(const Config& cfg, const Outbound& ob) {
     if (ob.strict_enforcement.has_value()) {
         return *ob.strict_enforcement;
     }
-    return cfg.daemon.value_or(DaemonConfig{}).strict_enforcement.value_or(false);
+    const auto daemon_cfg = cfg.daemon.value_or(DaemonConfig{});
+    if (daemon_cfg.strict_enforcement.has_value()) {
+        return *daemon_cfg.strict_enforcement;
+    }
+    // Built-in default: tunnel-style interface outbounds (no gateway, e.g.
+    // sing-box TUN or WireGuard/AmneziaWG links) get a kill-switch so marked
+    // traffic cannot leak to the direct route while the tunnel is down or
+    // restarting. Gateway-based outbounds (second WAN etc.) stay permissive.
+    if (ob.type == OutboundType::INTERFACE
+        && !ob.gateway.has_value() && !ob.gateway6.has_value()) {
+        return true;
+    }
+    return false;
 }
 
 bool parse_ip(const std::string& ip, int family, void* out) {

@@ -16,7 +16,7 @@ weight: 5
 | `pid_file` | string | — | Путь к PID-файлу |
 | `cache_dir` | string | `/var/cache/keen-pbr` | Каталог для кэшированных данных списков |
 | `firewall_backend` | string | `"auto"` | Бэкенд firewall: `auto`, `iptables` или `nftables` |
-| `strict_enforcement` | boolean | `false` | Строгое применение маршрутизации для outbound типа `interface`: если включено, при недоступности шлюза или интерфейса устанавливается недостижимый маршрут по умолчанию. Можно переопределить для каждого outbound отдельно. |
+| `strict_enforcement` | boolean | зависит от типа | Строгое применение маршрутизации для outbound типа `interface`: если включено, при недоступности шлюза или интерфейса устанавливается недостижимый маршрут по умолчанию. С 3.0.7-sb.5 встроенное значение по умолчанию — `true` для туннельных interface-outbound без шлюза (sing-box TUN, WireGuard/AmneziaWG) и `false` для outbound со шлюзом; явное значение здесь или в outbound всегда приоритетнее. |
 | `max_file_size_bytes` | integer | `8388608` (8 MiB) | Максимальный размер загруженного удалённого списка в байтах |
 | `firewall_verify_max_bytes` | integer | `262144` | Максимальное число байт stdout, захватываемых за одну команду проверки firewall (`0` = без ограничений) |
 

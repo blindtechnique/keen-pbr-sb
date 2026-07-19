@@ -212,6 +212,27 @@ std::vector<RuleState> apply_runtime_firewall(
                 criteria.dst_port = std::to_string(resolved_server->port);
                 criteria.dst_addr = {resolved_server->resolved_ip};
                 firewall.create_mark_rule(mark_it->second, criteria);
+                // dnsmasq upstream queries originate on the router itself and
+                // never traverse PREROUTING; mirror the detour mark into the
+                // OUTPUT path so they are policy-routed through the detour too.
+                firewall.create_output_mark_rule(mark_it->second, criteria);
+            }
+        }
+    }
+
+    if (config.dns.has_value() && config.dns->client_dns_enforcement.has_value()) {
+        const auto& enforcement = *config.dns->client_dns_enforcement;
+        if (enforcement.enabled.value_or(false)) {
+            // Transparently redirect plain DNS from LAN to the local resolver
+            // so clients cannot bypass domain-based routing with a custom DNS.
+            firewall.create_dns_redirect_rules();
+            if (enforcement.block_dot.value_or(true)) {
+                // DNS-over-TLS has a dedicated port and can be blocked outright;
+                // clients fall back to plain DNS, which is redirected above.
+                FirewallRuleCriteria dot_criteria;
+                dot_criteria.proto = L4Proto::TcpUdp;
+                dot_criteria.dst_port = "853";
+                firewall.create_drop_rule(dot_criteria);
             }
         }
     }

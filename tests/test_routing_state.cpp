@@ -756,7 +756,9 @@ TEST_CASE("populate_routing_state: interface outbound without gateway installs d
         return true;
     });
 
-    REQUIRE(routes.get_routes().size() == 2);
+    // Tunnel-style outbounds (no gateway) default to strict enforcement:
+    // two real defaults plus a dual-stack unreachable kill-switch.
+    REQUIRE(routes.get_routes().size() == 4);
     CHECK(find_route(routes.get_routes(), 100, false, false, 0, std::optional<std::string>{"wg0"}) != nullptr);
     CHECK(std::count_if(routes.get_routes().begin(),
                         routes.get_routes().end(),
@@ -767,6 +769,59 @@ TEST_CASE("populate_routing_state: interface outbound without gateway installs d
                                    route.interface == std::optional<std::string>{"wg0"} &&
                                    (route.family == AF_INET || route.family == AF_INET6);
                         }) == 2);
+    CHECK(std::count_if(routes.get_routes().begin(),
+                        routes.get_routes().end(),
+                        [](const RouteSpec& route) {
+                            return route.table == 100 && route.unreachable;
+                        }) == 2);
+}
+
+TEST_CASE("populate_routing_state: tunnel outbound strict default can be disabled per outbound") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "outbounds":[
+            {"tag":"vpn","type":"interface","interface":"wg0","strict_enforcement":false}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}),
+                                         cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    populate_routing_state(cfg, marks, routes, rules, [](const Outbound&) {
+        return true;
+    });
+
+    REQUIRE(routes.get_routes().size() == 2);
+    CHECK(std::count_if(routes.get_routes().begin(),
+                        routes.get_routes().end(),
+                        [](const RouteSpec& route) {
+                            return route.table == 100 && route.unreachable;
+                        }) == 0);
+}
+
+TEST_CASE("populate_routing_state: daemon strict_enforcement=false overrides tunnel default") {
+    auto cfg = parse_minimal_config(R"({
+        "daemon":{"strict_enforcement":false},
+        "iproute":{"table_start":100},
+        "outbounds":[
+            {"tag":"vpn","type":"interface","interface":"wg0"}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}),
+                                         cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    populate_routing_state(cfg, marks, routes, rules, [](const Outbound&) {
+        return true;
+    });
+
+    REQUIRE(routes.get_routes().size() == 2);
 }
 
 TEST_CASE("populate_routing_state: interface outbound with IPv4 gateway closes IPv6 with unreachable default") {

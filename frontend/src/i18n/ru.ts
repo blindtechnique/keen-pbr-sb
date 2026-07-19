@@ -542,6 +542,9 @@ export const ruTranslation = {
         ipv6EnabledLabel: "Включить поддержку IPv6",
         ipv6EnabledHint:
           "Создавать IPv6-наборы firewall и IPv6-цели dnsmasq. Отключите на старых прошивках без поддержки IPv6 netfilter.",
+        clientDnsEnforcementLabel: "Принудительно направлять DNS клиентов через роутер",
+        clientDnsEnforcementHint:
+          "Прозрачно перенаправлять обычный DNS (порт 53) от клиентов на резолвер роутера и блокировать DNS-over-TLS (порт 853), чтобы Secure DNS в браузерах не обходил доменную маршрутизацию. DNS-over-HTTPS на порту 443 так заблокировать нельзя — для полного покрытия отключите Secure DNS в браузерах.",
         inboundInterfacesLabel: "Входящие интерфейсы",
         inboundInterfacesHint:
           "Policy routing будет применяться только к пакетам, пришедшим через выбранные интерфейсы. Оставьте поле пустым, чтобы обрабатывать трафик с любых интерфейсов.",

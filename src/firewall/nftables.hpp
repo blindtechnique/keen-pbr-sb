@@ -26,8 +26,14 @@ public:
     // Buffer a meta mark set rule that matches the given criteria.
     void create_mark_rule(uint32_t fwmark,
                           const FirewallRuleCriteria& criteria = {}) override;
+    // Buffer a mark rule for router-originated traffic (output hook, type route
+    // so marked local packets are re-routed after the mark is applied).
+    void create_output_mark_rule(uint32_t fwmark,
+                                 const FirewallRuleCriteria& criteria = {}) override;
     // Buffer a drop verdict rule that matches the given criteria.
     void create_drop_rule(const FirewallRuleCriteria& criteria = {}) override;
+    // Buffer NAT redirect rules that force LAN plain-DNS to the local resolver.
+    void create_dns_redirect_rules() override;
     // Buffer a pass-through verdict rule that matches the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -47,6 +53,8 @@ public:
 private:
     static constexpr const char* TABLE_NAME = "KeenPbrTable";
     static constexpr const char* CHAIN_NAME = "prerouting";
+    static constexpr const char* OUTPUT_CHAIN_NAME = "output";
+    static constexpr const char* DNS_NAT_CHAIN_NAME = "dns_redirect";
     void cleanup_live_impl();
     void cleanup_impl();
     bool table_exists() const;
@@ -54,6 +62,8 @@ private:
     struct LiveTableState {
         bool table_exists{false};
         bool chain_exists{false};
+        bool output_chain_exists{false};
+        bool dns_nat_chain_exists{false};
         std::set<std::string> set_names;
     };
 
@@ -75,6 +85,7 @@ private:
         uint32_t fwmark; // only for Mark
         uint32_t fwmark_mask{0xFFFFFFFFu}; // only for Mark
         FirewallRuleCriteria criteria; // optional packet match criteria
+        bool output{false}; // true → output chain (router-originated traffic)
     };
 
     // Build the nftables JSON object for creating the inet KeenPbrTable table.
@@ -83,8 +94,17 @@ private:
     static nlohmann::json build_set_json(const PendingSet& ps);
     // Build the JSON object for the prerouting chain (type filter, hook prerouting).
     static nlohmann::json build_chain_json();
+    // Build the JSON object for the output chain (type route, hook output).
+    static nlohmann::json build_output_chain_json();
     // Build the JSON object for deleting the prerouting chain.
     static nlohmann::json build_delete_chain_json();
+    // Build the JSON object for deleting the output chain.
+    static nlohmann::json build_delete_output_chain_json();
+    // Build the JSON objects for the DNS redirect nat chain and its rules.
+    static nlohmann::json build_dns_nat_chain_json();
+    static nlohmann::json build_delete_dns_nat_chain_json();
+    static nlohmann::json build_dns_redirect_rules_json(
+        const FirewallGlobalPrefilter& prefilter);
     // Build all prerouting rule add-commands, including global prefilter rules.
     static nlohmann::json build_rule_add_commands(
         const FirewallGlobalPrefilter& prefilter,
@@ -118,7 +138,8 @@ private:
     void append_rules_for_family(int family,
                                  PendingRule::Action action,
                                  uint32_t fwmark,
-                                 const FirewallRuleCriteria& criteria);
+                                 const FirewallRuleCriteria& criteria,
+                                 bool output_scope = false);
 
     // Sets queued for creation, flushed by apply().
     std::vector<PendingSet> pending_sets_;
@@ -132,6 +153,9 @@ private:
 
     // True once the inet KeenPbrTable table has been created via apply().
     bool table_created_ = false;
+
+    // Client DNS enforcement requested for the next apply().
+    bool dns_redirect_requested_ = false;
 
 #ifdef KEEN_PBR3_TESTING
     friend class NftablesBuilderTest;

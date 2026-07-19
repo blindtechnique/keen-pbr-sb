@@ -47,6 +47,7 @@ type SettingsDraft = {
   strictEnforcement: boolean
   skipMarkedPackets: boolean
   ipv6Enabled: boolean
+  clientDnsEnforcement: boolean
   inboundInterfaces: string[]
   listsAutoupdateEnabled: boolean
   cron: string
@@ -59,6 +60,7 @@ const fallbackDraft: SettingsDraft = {
   strictEnforcement: true,
   skipMarkedPackets: true,
   ipv6Enabled: true,
+  clientDnsEnforcement: false,
   inboundInterfaces: [],
   listsAutoupdateEnabled: false,
   cron: "0 4 * * 0",
@@ -71,6 +73,7 @@ const SETTINGS_FIELD_NAMES = {
   strictEnforcement: "strictEnforcement",
   skipMarkedPackets: "skipMarkedPackets",
   ipv6Enabled: "ipv6Enabled",
+  clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
   listsAutoupdateEnabled: "listsAutoupdateEnabled",
   cron: "cron",
@@ -292,6 +295,39 @@ function LoadedGeneralConfigPage({
                     </div>
                     <FieldHint
                       description={t("pages.settings.general.ipv6EnabledHint")}
+                    />
+                  </FieldContent>
+                </Field>
+              )}
+            </form.Field>
+
+            <FieldSeparator />
+
+            <form.Field name={SETTINGS_FIELD_NAMES.clientDnsEnforcement}>
+              {(field) => (
+                <Field>
+                  <FieldContent>
+                    <div className="flex items-center space-x-3">
+                      <Checkbox
+                        checked={field.state.value}
+                        id="client-dns-enforcement"
+                        onCheckedChange={(checked) =>
+                          field.handleChange(checked === true)
+                        }
+                      />
+                      <FieldLabel
+                        className="cursor-pointer flex-col items-start gap-0"
+                        htmlFor="client-dns-enforcement"
+                      >
+                        {t(
+                          "pages.settings.general.clientDnsEnforcementLabel"
+                        )}
+                      </FieldLabel>
+                    </div>
+                    <FieldHint
+                      description={t(
+                        "pages.settings.general.clientDnsEnforcementHint"
+                      )}
                     />
                   </FieldContent>
                 </Field>
@@ -876,6 +912,9 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     skipMarkedPackets:
       config.daemon?.skip_marked_packets ?? fallbackDraft.skipMarkedPackets,
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
+    clientDnsEnforcement:
+      config.dns?.client_dns_enforcement?.enabled ??
+      fallbackDraft.clientDnsEnforcement,
     inboundInterfaces:
       config.route?.inbound_interfaces ?? fallbackDraft.inboundInterfaces,
     listsAutoupdateEnabled:
@@ -907,6 +946,13 @@ function buildUpdatedConfig(
     route: {
       ...config.route,
       inbound_interfaces: draft.inboundInterfaces,
+    },
+    dns: {
+      ...config.dns,
+      client_dns_enforcement: {
+        ...config.dns?.client_dns_enforcement,
+        enabled: draft.clientDnsEnforcement,
+      },
     },
     fwmark: {
       ...config.fwmark,
@@ -987,6 +1033,8 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.skipMarkedPackets
     case "daemon.ipv6_enabled":
       return SETTINGS_FIELD_NAMES.ipv6Enabled
+    case "dns.client_dns_enforcement.enabled":
+      return SETTINGS_FIELD_NAMES.clientDnsEnforcement
     case "lists_autoupdate.enabled":
       return SETTINGS_FIELD_NAMES.listsAutoupdateEnabled
     case "lists_autoupdate.cron":
