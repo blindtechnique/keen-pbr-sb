@@ -41,12 +41,12 @@ export function NavMain({
 
             return (
               <SidebarMenuItem key={item.title}>
-                <div className="flex h-11 items-center gap-3 px-2 text-base font-medium md:h-10 md:text-sm">
+                <div className="flex h-10 items-center gap-2.5 px-2 text-xs font-semibold tracking-[0.03em] text-primary uppercase group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
                   {Icon ? <Icon className="size-4 text-primary" /> : null}
-                  <span>{item.title}</span>
+                  <span className="group-data-[collapsible=icon]:hidden">{item.title}</span>
                 </div>
                 {hasChildren ? (
-                  <SidebarMenuSub className="mx-4">
+                  <SidebarMenuSub className="mx-1 border-l-0 px-0">
                     {item.items?.map((subItem) => {
                       const navActive = matchesNavHref(location, subItem.url)
 
@@ -54,7 +54,11 @@ export function NavMain({
                         <SidebarMenuSubItem key={subItem.title}>
                           <SidebarMenuSubButton
                             aria-current={navActive ? "page" : undefined}
-                            className="min-h-11 text-base md:min-h-7 md:text-sm"
+                            className={
+                              navActive
+                                ? "min-h-9 rounded-none border-0 bg-sidebar-accent px-3 text-sm font-medium text-sidebar-accent-foreground"
+                                : "min-h-9 rounded-none border-0 px-3 text-sm text-sidebar-foreground/85 hover:bg-sidebar-accent/70"
+                            }
                             data-nav-item={subItem.url}
                             href={subItem.url}
                             isActive={navActive}

@@ -94,10 +94,10 @@ export function DataTable({
   }
 
   return (
-    <div className="max-w-full overflow-x-auto rounded-md border">
-      <Table className={compact ? "w-full text-sm" : "w-full text-base"}>
+    <div className="max-w-full overflow-x-auto rounded-xl border bg-card shadow-sm">
+      <Table className={compact ? "w-full text-sm" : "w-full text-sm"}>
         {headersWithSelection && (
-          <TableHeader className="bg-muted/50">
+          <TableHeader className="bg-muted/70 text-xs tracking-wide text-muted-foreground uppercase">
             <TableRow>
               {headersWithSelection.map((header, headerIndex) => (
                 <TableHead

@@ -26,7 +26,12 @@ import {
   usePostTransportConfigMutation,
   usePostConfigMutation,
 } from "@/api/mutations"
-import { useGetConfig, useGetTransportConfig, useGetTransports } from "@/api/queries"
+import {
+  useGetConfig,
+  useGetRuntimeOutbounds,
+  useGetTransportConfig,
+  useGetTransports,
+} from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { PageHeader } from "@/components/shared/page-header"
@@ -54,6 +59,33 @@ export function TransportsPage() {
   const error = getApiErrorMessage(query.error as ApiError | null)
   const configQuery = useGetTransportConfig()
   const keenConfigQuery = useGetConfig()
+  const runtimeOutboundsQuery = useGetRuntimeOutbounds({
+    query: {
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
+    },
+  })
+  const transportLatencyByInterface = new Map<string, number>()
+  if (runtimeOutboundsQuery.data?.status === 200) {
+    for (const outbound of runtimeOutboundsQuery.data.data.outbounds) {
+      for (const candidate of outbound.interfaces) {
+        if (
+          candidate.interface_name &&
+          typeof candidate.latency_ms === "number"
+        ) {
+          const current = transportLatencyByInterface.get(
+            candidate.interface_name
+          )
+          if (current === undefined || candidate.latency_ms < current) {
+            transportLatencyByInterface.set(
+              candidate.interface_name,
+              candidate.latency_ms
+            )
+          }
+        }
+      }
+    }
+  }
   const keenConfig = selectConfig(keenConfigQuery.data)
   const environmentQuery = useQuery({
     queryKey: ["transport-environment"],
@@ -75,7 +107,9 @@ export function TransportsPage() {
         toast.success(
           variables.data.action === TransportActionRequestAction.up
             ? t("transports.started")
-            : t("transports.stopped")
+            : variables.data.action === TransportActionRequestAction.restart
+              ? t("transports.restarted")
+              : t("transports.stopped")
         )
       },
       onError: (mutationError) => {
@@ -289,6 +323,14 @@ export function TransportsPage() {
                 label={t("transports.updatedAt")}
                 value={new Date(item.updated_at).toLocaleString()}
               />
+              <TransportField
+                label={t("transports.latency")}
+                value={
+                  transportLatencyByInterface.has(item.interface)
+                    ? `${transportLatencyByInterface.get(item.interface)} ms`
+                    : t("transports.latencyUnavailable")
+                }
+              />
               {item.type !== "native" ? (
                 <TransportField
                   label={t("transports.autoRecovery")}
@@ -330,6 +372,7 @@ export function TransportsPage() {
                 <TransportActions
                   item={item}
                   mutation={actionMutation}
+                  restartLabel={t("transports.restart")}
                   startLabel={t("transports.start")}
                   stopLabel={t("transports.stop")}
                 />
@@ -430,11 +473,13 @@ export function TransportsPage() {
 function TransportActions({
   item,
   mutation,
+  restartLabel,
   startLabel,
   stopLabel,
 }: {
   item: TransportStatus
   mutation: ReturnType<typeof usePostTransportActionMutation>
+  restartLabel: string
   startLabel: string
   stopLabel: string
 }) {
@@ -442,20 +487,53 @@ function TransportActions({
   const action = isRunning
     ? TransportActionRequestAction.down
     : TransportActionRequestAction.up
+  // Only the card whose action is in flight reacts: a restart briefly takes the
+  // transport down, so the pending action decides what stays on screen instead
+  // of the live state, and other cards remain operable.
   const isPendingForItem =
     mutation.isPending && mutation.variables?.data.tag === item.tag
+  const pendingAction = isPendingForItem
+    ? mutation.variables?.data.action
+    : undefined
+  const isRestarting =
+    pendingAction === TransportActionRequestAction.restart
+  const showRestart = isRunning || isRestarting
 
   return (
     <div className="mt-3 flex min-w-0 flex-wrap justify-start border-t pt-4 sm:justify-end">
       <Button
         className="h-auto max-w-full whitespace-normal"
-        disabled={mutation.isPending}
+        disabled={isPendingForItem}
         onClick={() => mutation.mutate({ data: { tag: item.tag, action } })}
         variant={isRunning ? "outline" : "default"}
       >
         {isRunning ? <SquareIcon /> : <PlayIcon />}
-        {isPendingForItem ? "…" : isRunning ? stopLabel : startLabel}
+        {isPendingForItem && !isRestarting
+          ? "…"
+          : isRunning
+            ? stopLabel
+            : startLabel}
       </Button>
+      {showRestart ? (
+        <Button
+          className="ml-2 h-auto max-w-full whitespace-normal"
+          disabled={isPendingForItem}
+          onClick={() =>
+            mutation.mutate({
+              data: {
+                tag: item.tag,
+                action: TransportActionRequestAction.restart,
+              },
+            })
+          }
+          variant="outline"
+        >
+          <RefreshCwIcon
+            className={isRestarting ? "animate-spin" : undefined}
+          />
+          {restartLabel}
+        </Button>
+      ) : null}
     </div>
   )
 }

@@ -234,8 +234,12 @@ export const enTranslation = {
     nextRetryAt: "Next retry",
     start: "Start",
     stop: "Stop",
+    restart: "Restart",
+    latency: "Latency",
+    latencyUnavailable: "not measured",
     started: "Transport start requested",
     stopped: "Transport stop requested",
+    restarted: "Transport restart requested",
     nativeManagedExternally:
       "This native interface is managed by KeeneticOS or another service.",
     deleteTitle: "Delete transport?",
@@ -302,7 +306,7 @@ export const enTranslation = {
     },
   },
   brand: {
-    logoAlt: "keen-pbr logo",
+    logoAlt: "keen-pbr-sb logo",
     tagline: "Get packets sorted",
     openMenu: "Open menu",
   },

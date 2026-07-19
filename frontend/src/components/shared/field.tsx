@@ -14,7 +14,7 @@ function FieldGroup({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
-const fieldVariants = cva("group/field flex w-full gap-3", {
+const fieldVariants = cva("group/field flex w-full gap-2", {
   variants: {
     orientation: {
       vertical: "flex-col",
@@ -52,7 +52,7 @@ function FieldLabel({
   return (
     <Label
       className={cn(
-        "flex w-fit items-center gap-2 text-base font-medium md:text-sm",
+        "flex w-fit items-center gap-2 text-sm font-semibold text-foreground",
         className
       )}
       data-slot="field-label"
@@ -78,7 +78,7 @@ function FieldDescription({
   return (
     <div
       className={cn(
-        "text-sm leading-normal text-muted-foreground md:text-xs",
+        "text-xs leading-5 text-muted-foreground",
         className
       )}
       data-slot="field-description"
@@ -139,7 +139,7 @@ function FieldError({
   return (
     <div
       className={cn(
-        "text-sm font-normal text-destructive md:text-xs",
+        "rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1.5 text-xs font-medium text-destructive",
         className
       )}
       data-slot="field-error"

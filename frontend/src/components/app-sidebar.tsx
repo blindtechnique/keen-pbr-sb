@@ -93,14 +93,14 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
   }
 
   return (
-    <Sidebar collapsible="offcanvas" {...props}>
-      <SidebarHeader className={isMobile ? "border-b px-4 py-2" : "border-b"}>
+    <Sidebar collapsible="icon" {...props}>
+      <SidebarHeader className={isMobile ? "h-16 border-b px-4 py-2" : "h-16 justify-center border-b px-4 py-0 group-data-[collapsible=icon]:px-2"}>
         <SidebarMenuHeader isMobile={isMobile} onMenuClick={toggleSidebar} />
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent className="px-2 py-3">
         <NavMain items={data.navMain} />
       </SidebarContent>
-      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t"}>
+      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t px-3 py-3 group-data-[collapsible=icon]:hidden"}>
         <div className="space-y-3">
           <LanguageSelector />
           <ThemeSelector />

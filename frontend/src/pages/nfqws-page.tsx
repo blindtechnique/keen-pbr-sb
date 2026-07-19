@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
+  CloudIcon,
+  CloudOffIcon,
   DownloadIcon,
   FilePlusIcon,
   PlayIcon,
@@ -26,7 +28,7 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Textarea } from "@/components/ui/textarea"
 import {
   formatNfqwsConfig,
@@ -49,6 +51,8 @@ type Strategy = {
 type Status = {
   installed: boolean
   running: boolean
+  process_running: boolean
+  queue_active: boolean
   version: string
   files: NfqwsFile[]
   strategies: Strategy[]
@@ -65,8 +69,13 @@ async function nfqwsAction<T = { ok: boolean; output?: string }>(
     body: JSON.stringify(payload),
   })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok)
-    throw new Error(data.error ?? data.message ?? `HTTP ${response.status}`)
+  if (!response.ok || data.ok === false)
+    throw new Error(
+      data.error ??
+        data.message ??
+        data.output?.trim() ??
+        `HTTP ${response.status}`
+    )
   return data as T
 }
 
@@ -91,7 +100,10 @@ export function NfqwsPage() {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
       setOperationResult(result.output?.trim() || t("nfqws.operationCompleted"))
     },
-    onError: (error) => toast.error(error.message, { richColors: true }),
+    onError: (error) => {
+      setOperationResult(error.message)
+      toast.error(error.message, { richColors: true })
+    },
   })
 
   return (
@@ -123,9 +135,23 @@ export function NfqwsPage() {
                   {t("nfqws.version", { version: status.version || "—" })}
                 </CardDescription>
               </div>
-              <Badge variant={status.running ? "default" : "secondary"}>
-                {status.running ? t("nfqws.running") : t("nfqws.stopped")}
-              </Badge>
+              <div
+                className={
+                  status.running
+                    ? "keen-service-state keen-service-state--online"
+                    : "keen-service-state keen-service-state--offline"
+                }
+                title={
+                  status.running
+                    ? t("nfqws.running")
+                    : t("nfqws.stopped")
+                }
+              >
+                {status.running ? <CloudIcon /> : <CloudOffIcon />}
+                <span>
+                  {status.running ? t("nfqws.running") : t("nfqws.stopped")}
+                </span>
+              </div>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
               <Button
@@ -195,7 +221,7 @@ export function NfqwsPage() {
             </Alert>
           ) : null}
 
-          <div className="flex flex-wrap gap-2 rounded-lg border p-2">
+          <div className="flex flex-wrap gap-x-1 border-b">
             {(
               [
                 "settings",
@@ -208,9 +234,14 @@ export function NfqwsPage() {
             ).map((value) => (
               <Button
                 key={value}
+                className={
+                  tab === value
+                    ? "rounded-none border-x-0 border-t-0 border-b-2 border-primary bg-transparent px-4 text-foreground shadow-none hover:bg-transparent"
+                    : "rounded-none border-0 border-b-2 border-transparent bg-transparent px-4 text-muted-foreground shadow-none hover:bg-muted/50 hover:text-foreground"
+                }
                 onClick={() => setTab(value)}
-                size="sm"
-                variant={tab === value ? "default" : "ghost"}
+                size="default"
+                variant="ghost"
               >
                 {t(`nfqws.tabs.${value}`)}
               </Button>
@@ -395,18 +426,18 @@ function SettingsEditor({
         </div>
         {(["IPV6_ENABLED", "POLICY_EXCLUDE", "LOG_LEVEL"] as const).map(
           (key) => (
-            <div
-              className="flex items-center justify-between rounded-md border p-3"
+            <label
+              className="flex min-h-10 cursor-pointer items-center gap-3 py-1"
               key={key}
             >
-              <Label>{key}</Label>
-              <Switch
+              <Checkbox
                 checked={form[key]}
                 onCheckedChange={(checked) =>
-                  setForm({ ...form, [key]: checked })
+                  setForm({ ...form, [key]: checked === true })
                 }
               />
-            </div>
+              <span className="text-sm">{key}</span>
+            </label>
           )
         )}
         <div className="flex justify-end">
@@ -451,17 +482,23 @@ function StrategiesEditor({
     }
   }
   const run = async (action: string) => {
-    const result = await nfqwsAction<{ ok: boolean; output?: string }>({
-      action,
-      name: selected,
-      content,
-    })
-    if (action === "apply_strategy")
-      onOperationResult(
-        result.output?.trim() || t("nfqws.strategyAppliedAndRestarted")
-      )
-    else toast.success(t("nfqws.saved"))
-    refresh()
+    try {
+      const result = await nfqwsAction<{ ok: boolean; output?: string }>({
+        action,
+        name: selected,
+        content,
+      })
+      if (action === "apply_strategy")
+        onOperationResult(
+          result.output?.trim() || t("nfqws.strategyAppliedAndRestarted")
+        )
+      else toast.success(t("nfqws.saved"))
+      refresh()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      onOperationResult(message)
+      toast.error(message, { richColors: true })
+    }
   }
   return (
     <Card>

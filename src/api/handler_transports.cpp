@@ -143,8 +143,8 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
         if (!valid_transport_tag(tag)) {
             throw ApiError("invalid transport tag", 400);
         }
-        if (action != "up" && action != "down") {
-            throw ApiError("transport action must be up or down", 400);
+        if (action != "up" && action != "down" && action != "restart") {
+            throw ApiError("transport action must be up, down, or restart", 400);
         }
 
         const auto endpoint = load_endpoint(ctx.config_path);

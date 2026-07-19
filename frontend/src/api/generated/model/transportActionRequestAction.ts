@@ -12,4 +12,5 @@ export type TransportActionRequestAction = typeof TransportActionRequestAction[k
 export const TransportActionRequestAction = {
   up: 'up',
   down: 'down',
+  restart: 'restart',
 } as const;

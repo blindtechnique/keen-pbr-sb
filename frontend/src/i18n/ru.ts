@@ -235,8 +235,12 @@ export const ruTranslation = {
     nextRetryAt: "Следующая попытка",
     start: "Запустить",
     stop: "Остановить",
+    restart: "Перезапустить",
+    latency: "Задержка",
+    latencyUnavailable: "нет замера",
     started: "Запуск транспорта запрошен",
     stopped: "Остановка транспорта запрошена",
+    restarted: "Перезапуск транспорта запрошен",
     nativeManagedExternally:
       "Этот нативный интерфейс управляется KeeneticOS или другим сервисом.",
     deleteTitle: "Удалить транспорт?",
@@ -303,7 +307,7 @@ export const ruTranslation = {
     },
   },
   brand: {
-    logoAlt: "логотип keen-pbr",
+    logoAlt: "логотип keen-pbr-sb",
     tagline: "Пакет для пакетов с пакетами",
     openMenu: "Открыть меню",
   },

@@ -5,42 +5,42 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.4437 0.1039 252.7245);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --background: #f0f1f2;
+  --foreground: #26343f;
+  --card: #ffffff;
+  --card-foreground: #26343f;
+  --popover: #ffffff;
+  --popover-foreground: #26343f;
+  --primary: #0086cb;
+  --primary-foreground: #ffffff;
+  --secondary: #eef2f4;
+  --secondary-foreground: #26343f;
+  --muted: #f3f6f7;
+  --muted-foreground: #6f7d87;
+  --accent: #e5f4fa;
+  --accent-foreground: #006da6;
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(1 0 0);
   --warning: oklch(0.769 0.188 70.08);
   --warning-foreground: oklch(52.354% 0.12011 59.695);
   --success: lab(59.0978% -58.6621 41.2579);
   --success-foreground: oklch(0.98 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: #dce2e6;
+  --input: #cfd7dc;
+  --ring: #0086cb;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #ffffff;
+  --sidebar-foreground: #31404b;
+  --sidebar-primary: #0086cb;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #ebebeb;
+  --sidebar-accent-foreground: #202020;
+  --sidebar-border: #dfe5e8;
+  --sidebar-ring: #0086cb;
   --font-sans:
     ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
@@ -50,7 +50,7 @@
   --font-mono:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
-  --radius: 0.45rem;
+  --radius: 0.375rem;
   --shadow-2xs: 0 1px 4.5px 0px hsl(213.75 37.5% 25.098% / 0.07);
   --shadow-xs: 0 1px 4.5px 0px hsl(213.75 37.5% 25.098% / 0.07);
   --shadow-sm:
@@ -72,42 +72,42 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.269 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.371 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #10181f;
+  --foreground: #eef3f5;
+  --card: #17232c;
+  --card-foreground: #eef3f5;
+  --popover: #1b2933;
+  --popover-foreground: #eef3f5;
+  --primary: #43a7dc;
+  --primary-foreground: #061b2c;
+  --secondary: #22313b;
+  --secondary-foreground: #eef3f5;
+  --muted: #1e2c36;
+  --muted-foreground: #9eabb3;
+  --accent: #17364f;
+  --accent-foreground: #91caf8;
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.985 0 0);
   --warning: oklch(0.8 0.18 90);
   --warning-foreground: oklch(86.616% 0.13654 92.109);
   --success: oklch(0.696 0.17 162.48);
   --success-foreground: oklch(0.985 0 0);
-  --border: oklch(0.275 0 0);
-  --input: oklch(0.325 0 0);
-  --ring: oklch(0.556 0 0);
+  --border: #2a3a45;
+  --input: #3a4a54;
+  --ring: #43a7dc;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.275 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
+  --sidebar: #141f27;
+  --sidebar-foreground: #dce5e9;
+  --sidebar-primary: #43a7dc;
+  --sidebar-primary-foreground: #061b2c;
+  --sidebar-accent: #17364f;
+  --sidebar-accent-foreground: #91caf8;
+  --sidebar-border: #293942;
+  --sidebar-ring: #43a7dc;
   --shadow-2xs: 0 1px 4.5px 0px hsl(0 0% 0% / 0.07);
   --shadow-xs: 0 1px 4.5px 0px hsl(0 0% 0% / 0.07);
   --shadow-sm:
@@ -197,5 +197,57 @@
   body {
     @apply bg-background text-foreground antialiased;
     overflow-x: clip;
+    min-width: 320px;
+    background-image: none;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+}
+
+@layer components {
+  [data-slot="card"] {
+    border: 1px solid var(--border);
+    box-shadow: 0 1px 5px rgb(24 48 61 / 8%);
+  }
+
+  .dark [data-slot="card"] {
+    box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
+  }
+
+  [data-slot="input"],
+  [data-slot="textarea"],
+  [data-slot="select-trigger"] {
+    background-color: var(--card);
+  }
+
+  .keen-service-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.25rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  .keen-service-state svg {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+
+  .keen-service-state--online {
+    border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+    background: color-mix(in srgb, var(--success) 12%, var(--card));
+    color: var(--success);
+  }
+
+  .keen-service-state--offline {
+    border-color: color-mix(in srgb, var(--destructive) 35%, var(--border));
+    background: color-mix(in srgb, var(--destructive) 10%, var(--card));
+    color: var(--destructive);
   }
 }

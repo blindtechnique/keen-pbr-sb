@@ -445,7 +445,7 @@ components:
           pattern: "^[a-z][a-z0-9_]{0,23}$"
         action:
           type: string
-          enum: [up, down]
+          enum: [up, down, restart]
 
     TransportActionResponse:
       type: object

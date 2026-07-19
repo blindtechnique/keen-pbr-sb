@@ -626,6 +626,9 @@ function OutboundRuntimeCell({
           isVirtual={!runtimeInterface}
           name={outbound.interface ?? "-"}
         />
+        {typeof runtimeInterfaceState?.latency_ms === "number" ? (
+          <SummaryChip value={`${runtimeInterfaceState.latency_ms} ms`} />
+        ) : null}
         {outbound.gateway ? (
           <SummaryChip
             value={t("pages.outbounds.summary.gateway4", {

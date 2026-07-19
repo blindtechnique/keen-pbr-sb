@@ -134,11 +134,23 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 }
 func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	var err error
+	// Transport actions must not inherit the request context: bringing a
+	// sing-box TUN up takes several seconds and SingBox.Up() kills the freshly
+	// started process when its context is cancelled. A client that navigates
+	// away, retries, or times out mid-restart would otherwise leave the
+	// transport permanently down.
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 	switch r.PathValue("action") {
 	case "up":
-		err = a.manager.Up(r.Context(), r.PathValue("tag"))
+		err = a.manager.Up(ctx, r.PathValue("tag"))
 	case "down":
-		err = a.manager.Down(r.Context(), r.PathValue("tag"))
+		err = a.manager.Down(ctx, r.PathValue("tag"))
+	case "restart":
+		err = a.manager.Down(ctx, r.PathValue("tag"))
+		if err == nil {
+			err = a.manager.Up(ctx, r.PathValue("tag"))
+		}
 	default:
 		write(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
 		return

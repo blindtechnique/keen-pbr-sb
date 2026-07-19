@@ -14,8 +14,10 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <signal.h>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -28,6 +30,7 @@ namespace {
 namespace fs = std::filesystem;
 constexpr const char* kBinary = "/opt/usr/bin/nfqws2";
 constexpr const char* kInit = "/opt/etc/init.d/S51nfqws2";
+constexpr const char* kPidfile = "/opt/var/run/nfqws2.pid";
 constexpr const char* kConfigDir = "/opt/etc/nfqws2";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
@@ -182,6 +185,133 @@ std::string installed_version() {
     return output;
 }
 
+std::vector<pid_t> nfqws_processes() {
+    std::vector<pid_t> result;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator("/proc", ec)) {
+        if (!entry.is_directory(ec)) continue;
+        const auto name = entry.path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+                return std::isdigit(ch);
+            }))
+            continue;
+
+        std::ifstream comm(entry.path() / "comm");
+        std::string process_name;
+        std::getline(comm, process_name);
+        if (process_name != "nfqws2" && process_name != "nfqws") continue;
+
+        try {
+            result.push_back(static_cast<pid_t>(std::stol(name)));
+        } catch (const std::exception&) {
+        }
+    }
+    return result;
+}
+
+// nfqws2.conf carries the queue the daemon binds to. Hardcoding 300 makes the
+// health check and the start/restart verification report failure whenever the
+// user changes NFQUEUE_NUM from the web interface, so read it back instead.
+int configured_nfqueue_num() {
+    constexpr int kDefaultQueue = 300;
+    std::ifstream input(fs::path(kConfigDir) / "nfqws2.conf");
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto key = line.find("NFQUEUE_NUM");
+        if (key == std::string::npos) continue;
+        if (line.find_first_not_of(" \t") != key) continue; // skip comments
+        const auto eq = line.find('=', key);
+        if (eq == std::string::npos) continue;
+
+        std::string value = line.substr(eq + 1);
+        value.erase(0, value.find_first_not_of(" \t\"'"));
+        const auto end = value.find_first_not_of("0123456789");
+        if (end != std::string::npos) value.erase(end);
+        if (value.empty()) continue;
+        try {
+            const int parsed = std::stoi(value);
+            if (parsed >= 0 && parsed <= 65535) return parsed;
+        } catch (const std::exception&) {
+        }
+    }
+    return kDefaultQueue;
+}
+
+bool nfqueue_active(int queue_number) {
+    std::ifstream input("/proc/net/netfilter/nfnetlink_queue");
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream fields(line);
+        int current_queue = -1;
+        if (fields >> current_queue && current_queue == queue_number) return true;
+    }
+    return false;
+}
+
+// nfqws2 1.0.2 can leave an empty PID file even though the daemon and its
+// NFQUEUE socket are alive. Its init script then treats the empty string as a
+// number, fails to stop the old daemon and starts a second process which cannot
+// bind queue 300. Repair the file only immediately before an explicit service
+// command and only when there is exactly one unambiguous daemon process.
+void repair_nfqws_pidfile() {
+    const auto processes = nfqws_processes();
+    if (processes.size() != 1) return;
+
+    std::ofstream output(kPidfile, std::ios::trunc);
+    if (output) output << processes.front() << '\n';
+}
+
+bool wait_for_nfqws_exit(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    do {
+        if (nfqws_processes().empty() && !nfqueue_active(configured_nfqueue_num())) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } while (std::chrono::steady_clock::now() < deadline);
+    return nfqws_processes().empty() && !nfqueue_active(configured_nfqueue_num());
+}
+
+std::string run_nfqws_service_command(const std::string& command, int& status) {
+    if (command == "reload") {
+        repair_nfqws_pidfile();
+        return run_command(std::string(kInit) + " reload", status);
+    }
+
+    if (command == "start") {
+        auto output = run_command(std::string(kInit) + " start", status);
+        for (int attempt = 0;
+             attempt < 30 && (nfqws_processes().empty() || !nfqueue_active(configured_nfqueue_num()));
+             ++attempt)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        repair_nfqws_pidfile();
+        status = status == 0 && !nfqws_processes().empty() && nfqueue_active(configured_nfqueue_num()) ? 0 : 1;
+        return output;
+    }
+
+    repair_nfqws_pidfile();
+    int stop_status = 0;
+    auto output = run_command(std::string(kInit) + " stop", stop_status);
+    if (!wait_for_nfqws_exit(std::chrono::seconds(3))) {
+        output += "nfqws2 did not stop in time; terminating the stale process.\n";
+        for (const auto pid : nfqws_processes()) ::kill(pid, SIGKILL);
+        wait_for_nfqws_exit(std::chrono::seconds(2));
+    }
+
+    if (command == "stop") {
+        status = nfqws_processes().empty() && !nfqueue_active(configured_nfqueue_num()) ? 0 : 1;
+        return output;
+    }
+
+    int start_status = 0;
+    output += run_command(std::string(kInit) + " start", start_status);
+    for (int attempt = 0;
+         attempt < 30 && (nfqws_processes().empty() || !nfqueue_active(configured_nfqueue_num()));
+         ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    repair_nfqws_pidfile();
+    status = start_status == 0 && !nfqws_processes().empty() && nfqueue_active(configured_nfqueue_num()) ? 0 : 1;
+    return output;
+}
+
 void append_files(nlohmann::json& files, const fs::path& directory,
                   const std::string& category, const std::string& suffix,
                   bool removable) {
@@ -257,12 +387,9 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
     server.get("/api/nfqws", []() -> std::string {
         std::error_code ec;
         const bool installed = fs::is_regular_file(kBinary, ec);
-        bool running = false;
-        if (installed && fs::is_regular_file(kInit, ec)) {
-            int status = 0;
-            const auto output = run_command(std::string(kInit) + " status", status);
-            running = output.find("is running") != std::string::npos;
-        }
+        const bool process_running = installed && !nfqws_processes().empty();
+        const bool queue_active = installed && nfqueue_active(configured_nfqueue_num());
+        const bool running = process_running && queue_active;
         nlohmann::json files = nlohmann::json::array();
         append_files(files, kConfigDir, "config", ".conf", false);
         append_files(files, kListsDir, "list", ".list", true);
@@ -282,6 +409,8 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             }
         }
         return nlohmann::json{{"installed", installed}, {"running", running},
+                              {"process_running", process_running},
+                              {"queue_active", queue_active},
                               {"version", installed ? installed_version() : ""},
                               {"files", files}, {"strategies", strategies},
                               {"active_strategy", active_strategy}}
@@ -334,7 +463,7 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
                 throw ApiError("unsupported nfqws service command", 400);
             if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
             int status = 0;
-            const auto output = run_command(std::string(kInit) + " " + command, status);
+            const auto output = run_nfqws_service_command(command, status);
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
         }
         if (action == "upgrade") {
@@ -359,7 +488,7 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             write_file_atomic(fs::path(kConfigDir) / "nfqws2.conf", content);
             if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
             int status = 0;
-            const auto output = run_command(std::string(kInit) + " restart", status);
+            const auto output = run_nfqws_service_command("restart", status);
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
         }
         if (action == "delete_strategy") {

@@ -7,7 +7,7 @@
 //
 //  Then include this file, and then do
 //
-//     KeenPbrTypesCwjZ2W data = nlohmann::json::parse(jsonString);
+//     KeenPbrTypesWqKtnW data = nlohmann::json::parse(jsonString);
 
 #pragma once
 
@@ -462,8 +462,10 @@ namespace api {
         std::vector<RuntimeOutboundStateElement> outbounds;
     };
 
+    enum class Action : int { DOWN, RESTART, UP };
+
     struct TransportActionRequest {
-        RuntimeInterfaceInventoryStatusEnum action;
+        Action action;
         std::string tag;
     };
 
@@ -532,7 +534,7 @@ namespace api {
         std::string updated_at;
     };
 
-    struct KeenPbrTypesCwjZ2W {
+    struct KeenPbrTypesWqKtnW {
         std::optional<ApiConfig> api_config;
         std::optional<CacheMetadata> cache_metadata;
         std::optional<CheckStatus> check_status;
@@ -757,8 +759,8 @@ namespace api {
     void from_json(const json & j, TransportStatus & x);
     void to_json(json & j, const TransportStatus & x);
 
-    void from_json(const json & j, KeenPbrTypesCwjZ2W & x);
-    void to_json(json & j, const KeenPbrTypesCwjZ2W & x);
+    void from_json(const json & j, KeenPbrTypesWqKtnW & x);
+    void to_json(json & j, const KeenPbrTypesWqKtnW & x);
 
     void from_json(const json & j, CheckStatus & x);
     void to_json(json & j, const CheckStatus & x);
@@ -801,6 +803,9 @@ namespace api {
 
     void from_json(const json & j, RuntimeInterfaceStatusEnum & x);
     void to_json(json & j, const RuntimeInterfaceStatusEnum & x);
+
+    void from_json(const json & j, Action & x);
+    void to_json(json & j, const Action & x);
 
     void from_json(const json & j, TransportActionResponseStatus & x);
     void to_json(json & j, const TransportActionResponseStatus & x);
@@ -1552,7 +1557,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, TransportActionRequest& x) {
-        x.action = j.at("action").get<RuntimeInterfaceInventoryStatusEnum>();
+        x.action = j.at("action").get<Action>();
         x.tag = j.at("tag").get<std::string>();
     }
 
@@ -1678,7 +1683,7 @@ namespace api {
         j["updated_at"] = x.updated_at;
     }
 
-    inline void from_json(const json & j, KeenPbrTypesCwjZ2W& x) {
+    inline void from_json(const json & j, KeenPbrTypesWqKtnW& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
         x.cache_metadata = get_stack_optional<CacheMetadata>(j, "CacheMetadata");
         x.check_status = get_stack_optional<CheckStatus>(j, "CheckStatus");
@@ -1740,7 +1745,7 @@ namespace api {
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
     }
 
-    inline void to_json(json & j, const KeenPbrTypesCwjZ2W & x) {
+    inline void to_json(json & j, const KeenPbrTypesWqKtnW & x) {
         j = json::object();
         j["ApiConfig"] = x.api_config;
         j["CacheMetadata"] = x.cache_metadata;
@@ -2024,6 +2029,22 @@ namespace api {
             case RuntimeInterfaceStatusEnum::UNAVAILABLE: j = "unavailable"; break;
             case RuntimeInterfaceStatusEnum::UNKNOWN: j = "unknown"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RuntimeInterfaceStatusEnum\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Action & x) {
+        if (j == "down") x = Action::DOWN;
+        else if (j == "restart") x = Action::RESTART;
+        else if (j == "up") x = Action::UP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Action\""); }
+    }
+
+    inline void to_json(json & j, const Action & x) {
+        switch (x) {
+            case Action::DOWN: j = "down"; break;
+            case Action::RESTART: j = "restart"; break;
+            case Action::UP: j = "up"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Action\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
