@@ -71,44 +71,49 @@
   --shadow-2xl: 0 1px 4.5px 0px hsl(213.75 37.5% 25.098% / 0.35);
 }
 
+/* Taken from the `.dark` block of the real NDMS stylesheet rather than guessed.
+   Two things differ from our light theme by design, because they differ in
+   KeeneticOS: cards stop being lighter than the canvas and are told apart by
+   their border alone, and the menu becomes the darkest surface on the page
+   instead of the lightest. */
 .dark {
-  --background: #10181f;
-  --page: #131d25;
-  --foreground: #eef3f5;
-  --card: #17232c;
-  --card-foreground: #eef3f5;
-  --popover: #1b2933;
-  --popover-foreground: #eef3f5;
-  --primary: #43a7dc;
-  --primary-foreground: #061b2c;
-  --secondary: #22313b;
-  --secondary-foreground: #eef3f5;
-  --muted: #1e2c36;
-  --muted-foreground: #9eabb3;
-  --accent: #17364f;
-  --accent-foreground: #91caf8;
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.8 0.18 90);
-  --warning-foreground: oklch(86.616% 0.13654 92.109);
-  --success: #48b96c;
-  --success-foreground: oklch(0.985 0 0);
-  --border: #2a3a45;
-  --input: #3a4a54;
-  --ring: #43a7dc;
+  --background: #1b2434;
+  --page: #1b2434;
+  --foreground: #c2c2c2;
+  --card: #1b2434;
+  --card-foreground: #c2c2c2;
+  --popover: #243146;
+  --popover-foreground: #c2c2c2;
+  --primary: #0086cb;
+  --primary-foreground: #ffffff;
+  --secondary: #2e3d57;
+  --secondary-foreground: #cacdcf;
+  --muted: #2f3745;
+  --muted-foreground: #949b9f;
+  --accent: #2e3d57;
+  --accent-foreground: #ffffff;
+  --destructive: #ea4c4c;
+  --destructive-foreground: #ffffff;
+  --warning: #ffbb57;
+  --warning-foreground: #ffbb57;
+  --success: #25c478;
+  --success-foreground: #ffffff;
+  --border: #4d545f;
+  --input: #4d545f;
+  --ring: #77bce4;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: #141f27;
-  --sidebar-foreground: #dce5e9;
-  --sidebar-primary: #43a7dc;
-  --sidebar-primary-foreground: #061b2c;
-  --sidebar-accent: #17364f;
-  --sidebar-accent-foreground: #91caf8;
-  --sidebar-border: #293942;
-  --sidebar-ring: #43a7dc;
+  --sidebar: #161c27;
+  --sidebar-foreground: #c2c2c2;
+  --sidebar-primary: #0086cb;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #2e3d57;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #2e3d57;
+  --sidebar-ring: #77bce4;
   --shadow-2xs: 0 1px 4.5px 0px hsl(0 0% 0% / 0.07);
   --shadow-xs: 0 1px 4.5px 0px hsl(0 0% 0% / 0.07);
   --shadow-sm:
@@ -245,7 +250,7 @@
   }
 
   .dark [data-slot="table"] thead th {
-    background: color-mix(in srgb, var(--card) 70%, #000);
+    background: #2F3745;
     border-bottom-color: var(--border);
   }
 
@@ -262,7 +267,7 @@
   }
 
   .dark [data-slot="table"] tbody tr:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: #161C27;
   }
 
   /* There is no gradient in NDMS at all - I had invented one. The depth under
@@ -311,8 +316,10 @@
     scrollbar-color: #3D5073 #2E3D57;
   }
 
+  /* NDMS keeps its dark cards flat and lets the border do the separating -
+     there is no lifted-card shadow in the dark theme at all. */
   .dark [data-slot="card"] {
-    box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
+    box-shadow: 0 2px 6px #06080b;
   }
 
   [data-slot="input"],
@@ -347,7 +354,7 @@
 
   .dark [data-slot="sidebar-menu-button"]:hover,
   .dark [data-slot="sidebar-menu-sub-button"]:hover {
-    background: color-mix(in srgb, var(--sidebar-accent) 55%, transparent);
+    background: #1B2434;
   }
 
   /* The selected row in KeeneticOS spans the whole column - from the screen
