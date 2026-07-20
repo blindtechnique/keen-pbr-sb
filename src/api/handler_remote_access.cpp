@@ -2,11 +2,11 @@
 
 #include "handler_remote_access.hpp"
 
-#include "../http/http_client.hpp"
 #include "../log/logger.hpp"
 #include "../util/safe_exec.hpp"
 
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -78,26 +78,74 @@ bool login_required() {
     }
 }
 
-// The interface the firmware itself routes through, so the hole is opened on
-// the real uplink rather than on a name that differs per router.
-std::string wan_interface() {
-    try {
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(2));
-        client.set_max_response_size(64U * 1024U);
-        const auto status = nlohmann::json::parse(
-            client.download("http://127.0.0.1:79/rci/show/internet/status"));
-        const auto gateway = status.find("gateway");
-        if (gateway == status.end() || !gateway->is_object()) return {};
-        const auto id = gateway->value("interface", std::string{});
-        if (id.empty()) return {};
+// True when the kernel actually has an interface by this name.
+//
+// iptables accepts "-i" for names that do not exist, on the assumption the
+// interface will appear later. That turned a wrong name into a rule which is
+// present, looks right in -S output, and never matches anything.
+bool kernel_interface_exists(const std::string& name) {
+    std::ifstream dev("/proc/net/dev");
+    if (!dev.is_open()) {
+        return true; // Cannot check; do not block on our own inability to tell.
+    }
+    std::string line;
+    while (std::getline(dev, line)) {
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        const auto begin = line.find_first_not_of(" \t");
+        if (begin == std::string::npos || begin >= colon) {
+            continue;
+        }
+        if (line.substr(begin, colon - begin) == name) {
+            return true;
+        }
+    }
+    return false;
+}
 
-        const auto interface = nlohmann::json::parse(
-            client.download("http://127.0.0.1:79/rci/show/interface/" + id));
-        return interface.value("interface-name", interface.value("id", std::string{}));
-    } catch (const std::exception&) {
+// The device carrying the default route in the main table.
+//
+// Asking the firmware was the mistake: RCI answers in its own vocabulary -
+// "ISP", "GigabitEthernet1" - and those are roles and configuration ids, not
+// kernel device names. The routing table is where the two worlds already
+// agree, and keen-pbr keeps tunnel defaults in tables of their own, so the
+// main table's default is the uplink by construction.
+std::string wan_interface() {
+    std::ifstream routes("/proc/net/route");
+    if (!routes.is_open()) {
         return {};
     }
+
+    std::string line;
+    std::getline(routes, line); // header
+
+    std::string best_iface;
+    long best_metric = std::numeric_limits<long>::max();
+
+    while (std::getline(routes, line)) {
+        std::istringstream fields(line);
+        std::string iface, destination, gateway, flags, refcnt, use, metric;
+        if (!(fields >> iface >> destination >> gateway >> flags >> refcnt >> use >> metric)) {
+            continue;
+        }
+        if (destination != "00000000" || iface == "lo") {
+            continue;
+        }
+        long metric_value = 0;
+        try {
+            metric_value = std::stol(metric);
+        } catch (const std::exception&) {
+            metric_value = 0;
+        }
+        if (metric_value < best_metric) {
+            best_metric = metric_value;
+            best_iface = iface;
+        }
+    }
+
+    return best_iface;
 }
 
 void drop_rules() {
@@ -149,8 +197,17 @@ void apply_remote_access_rules(const std::string& listen_address) {
 
     const auto wan = wan_interface();
     if (wan.empty()) {
-        Logger::instance().warn(
-            "Remote access: could not determine the WAN interface, keeping the panel closed");
+        Logger::instance().error(
+            "Remote access: no default route to hang the rule on, keeping the panel closed");
+        return;
+    }
+    // Checked because the previous version installed a rule on the firmware's
+    // name for the uplink ("ISP"), which iptables accepted and never matched.
+    if (!kernel_interface_exists(wan)) {
+        Logger::instance().error(
+            "Remote access: '{}' is not a kernel interface, so the rule would never match; "
+            "keeping the panel closed",
+            wan);
         return;
     }
 
