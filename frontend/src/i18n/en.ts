@@ -445,6 +445,21 @@ export const enTranslation = {
       },
     },
     outbounds: {
+      summary: {
+        tunnels: "Into tunnels - {{count}} lists",
+        direct: "Direct - {{count}}",
+        blocked: "Blocked - {{count}}",
+      },
+      listCount: "{{count}} lists",
+      idle: "Unused: {{names}} - all healthy",
+      hint: {
+        table: "Traffic goes straight through the provider, past the tunnels",
+        blackhole: "Connections are not let out",
+        ignore: "Traffic passes without changing its route",
+        groupVia: "Going through {{active}}, {{backup}} on standby",
+        groupViaOnly: "Going through {{active}}",
+        groupIdle: "No exit in the group is answering",
+      },
       members: "{{count}} in group",
       kind: {
         failover: "Failover",

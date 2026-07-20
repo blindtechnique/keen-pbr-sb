@@ -138,6 +138,7 @@ export function OverviewPage() {
           {(loadedConfig?.outbounds ?? []).length > 0 ? (
             <OutboundStateList
               outbounds={loadedConfig?.outbounds ?? []}
+              rules={loadedConfig?.route?.rules ?? []}
               runtimeByTag={runtimeOutboundByTag}
             />
           ) : null}

@@ -39,7 +39,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
   useServerLocations,
@@ -488,7 +494,7 @@ export function TransportsPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         {items.map((item) => (
           <Card className="flex h-full min-w-0 flex-col overflow-hidden" key={item.tag}>
-            <CardHeader className="min-w-0 flex-row items-start justify-between gap-3">
+            <CardHeader className="min-w-0">
               <div className="min-w-0">
                 <CardTitle className="truncate">{item.tag}</CardTitle>
                 {/* Что за туннель и куда он ведёт — двумя словами. Тип
@@ -498,10 +504,11 @@ export function TransportsPage() {
                   {describeTransport(item, locationOf(item.server))}
                 </p>
               </div>
-              {/* Выключатель — в правом верхнем углу: это единственное
-                  действие, которое меняет состояние туннеля, и искать его
-                  среди кнопок внизу незачем. */}
-              <div className="flex shrink-0 items-center gap-2">
+              {/* Правый верхний угол — штатный слот карточки: CardHeader это
+                  сетка, и CardAction занимает в ней вторую колонку. Раньше
+                  тут стоял flex с justify-between, который спорил с сеткой и
+                  проигрывал, поэтому управление съезжало под заголовок. */}
+              <CardAction className="flex items-center gap-1">
                 {item.state === "up" ? (
                   <LatencyPill
                     fallbackMs={transportLatencyByInterface.get(item.interface)}
@@ -556,7 +563,7 @@ export function TransportsPage() {
                     }
                   />
                 ) : null}
-              </div>
+              </CardAction>
             </CardHeader>
             <CardContent className="flex min-w-0 flex-1 flex-col gap-1.5 text-sm">
               {/* Три строки, всегда одни и те же и в одном порядке: только так
@@ -761,6 +768,26 @@ function countryMark(location?: ServerLocation): string {
  * Ничего из этого не секрет, но без этих трёх вещей по карточке нельзя
  * понять, чем именно отличаются два внешне одинаковых транспорта.
  */
+/**
+ * sing-box зовёт транспорты сокращениями, люди — словами. Незнакомое
+ * оставляем как есть: чужое слово честнее выдуманного.
+ */
+function transportName(network: string): string {
+  const names: Record<string, string> = {
+    tcp: "TCP",
+    udp: "UDP",
+    ws: "WebSocket",
+    websocket: "WebSocket",
+    grpc: "gRPC",
+    httpupgrade: "HTTPUpgrade",
+    xhttp: "XHTTP",
+    http: "HTTP",
+    h2: "HTTP",
+    quic: "QUIC",
+  }
+  return names[network.toLowerCase()] ?? network
+}
+
 function describeConnection(item: TransportStatus): string {
   const parts: string[] = []
   if (item.security) {
@@ -768,7 +795,7 @@ function describeConnection(item: TransportStatus): string {
   }
   // tcp — это отсутствие обёртки, показывать его не о чем.
   if (item.network && item.network !== "tcp") {
-    parts.push(item.network)
+    parts.push(transportName(item.network))
   }
   if (item.sni && item.sni !== item.server) {
     parts.push(`SNI ${item.sni}`)

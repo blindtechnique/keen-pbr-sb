@@ -448,6 +448,21 @@ export const ruTranslation = {
       },
     },
     outbounds: {
+      summary: {
+        tunnels: "В туннели — списков: {{count}}",
+        direct: "Напрямую — {{count}}",
+        blocked: "Блокировка — {{count}}",
+      },
+      listCount: "{{count}} списков",
+      idle: "Не используются: {{names}} — все исправны",
+      hint: {
+        table: "Трафик идёт напрямую через провайдера, мимо туннелей",
+        blackhole: "Соединения не выпускаются наружу",
+        ignore: "Трафик проходит без изменения маршрута",
+        groupVia: "Идёт через {{active}}, запасной — {{backup}}",
+        groupViaOnly: "Идёт через {{active}}",
+        groupIdle: "Ни один выход в группе не отвечает",
+      },
       members: "{{count}} в группе",
       kind: {
         failover: "Резервирование",
