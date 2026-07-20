@@ -1,4 +1,4 @@
-import { ArrowRight, Pencil, Plus, Trash2 } from "lucide-react"
+import { ArrowRight, Plus, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -23,29 +23,19 @@ import {
   useGetRuntimeOutbounds,
 } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
-import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
-import { DataTable } from "@/components/shared/data-table"
+import { OutboundCard } from "@/components/outbounds/outbound-card"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
 } from "@/components/shared/delete-impact-dialog"
-import { InterfaceRowContent } from "@/components/shared/interface-picker"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
-import {
-  RuntimeInterfaceStatusRow,
-  RuntimeStateBadge,
-} from "@/components/shared/outbound-interface-status-list"
+
 import { PageHeader } from "@/components/shared/page-header"
-import {
-  RuntimeOutboundDetails,
-  RuntimeOutboundEntry,
-} from "@/components/shared/runtime-outbound-state"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { toast } from "sonner"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
@@ -113,6 +103,18 @@ export function OutboundsPage() {
       t
     )
   )
+  // Сколько правил ведёт в это направление и сколько списков через них
+  // проходит. Это единственное, чего в прежней таблице не было совсем, а
+  // именно оно отвечает на вопрос «можно ли это удалить».
+  const usageByOutbound = new Map<string, { lists: number; rules: number }>()
+  for (const rule of loadedConfig?.route?.rules ?? []) {
+    if (!rule.outbound) continue
+    const current = usageByOutbound.get(rule.outbound) ?? { lists: 0, rules: 0 }
+    current.rules += 1
+    current.lists += rule.list?.length ?? 0
+    usageByOutbound.set(rule.outbound, current)
+  }
+
   const outboundRowIds = outboundItems.map((outbound) => outbound.id)
   const outboundSelection = useRowSelection(outboundRowIds)
   // Grouped so the page reads as "what carries traffic" first, then failover
@@ -255,61 +257,21 @@ export function OutboundsPage() {
             <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
               {t(`pages.outbounds.groups.${group.key}`)}
             </h2>
-          <DataTable
-            headers={[
-              t("pages.outbounds.headers.tag"),
-              t("pages.outbounds.headers.type"),
-              t("pages.outbounds.headers.summary"),
-              t("pages.outbounds.headers.runtime"),
-              t("pages.outbounds.headers.actions"),
-            ]}
-            rows={group.items.map((outbound) => [
-              <RuntimeOutboundEntry
-                key={`${outbound.id}-tag`}
-                runtimeState={outbound.runtimeState}
-                title={outbound.tag}
-                t={t}
-              />,
-              <Badge key={`${outbound.id}-type`} variant="outline">
-                {outbound.type}
-              </Badge>,
-              <div
-                className="min-w-0 text-sm text-muted-foreground"
-                key={`${outbound.id}-summary`}
-              >
-                {outbound.summary}
-              </div>,
-              <OutboundRuntimeCell
-                key={`${outbound.id}-runtime`}
-                outbound={outbound.outbound}
-                runtimeInterface={outbound.runtimeInterface}
-                runtimeInterfaces={runtimeInterfaceByName}
-                runtimeState={outbound.runtimeState}
-                t={t}
-              />,
-              <ActionButtons
-                actions={[
-                  {
-                    disabled: configMutationPending,
-                    icon: <Pencil className="h-4 w-4" />,
-                    label: t("common.edit"),
-                    onClick: () => navigate(`/outbounds/${outbound.id}/edit`),
-                  },
-                ]}
-                key={`${outbound.id}-actions`}
-              />,
-            ])}
-            selection={{
-              rowIds: group.items.map((item) => item.id),
-              selectedIds: outboundSelection.selectedIds,
-              disabled: configMutationPending,
-              onToggle: outboundSelection.toggleOne,
-              onToggleAll: outboundSelection.setAllVisible,
-              selectAllLabel: t("common.selection.selectAll"),
-              getRowLabel: (rowId) =>
-                t("common.selection.selectRow", { rowLabel: rowId }),
-            }}
-          />
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {group.items.map((item) => (
+              <OutboundCard
+                key={item.id}
+                onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
+                onToggleSelected={() => outboundSelection.toggleOne(item.id)}
+                outbound={item.outbound}
+                runtimeState={item.runtimeState}
+                selectLabel={t("common.selection.selectRow", { rowLabel: item.id })}
+                selected={outboundSelection.selectedIds.has(item.id)}
+                selectionDisabled={configMutationPending}
+                usage={usageByOutbound.get(item.id) ?? { lists: 0, rules: 0 }}
+              />
+            ))}
+          </div>
           </div>
           ))}
         </div>
@@ -583,129 +545,3 @@ function getOutboundSummary(
   return t("common.noneShort")
 }
 
-function SummaryChip({ value }: { value: string }) {
-  return (
-    <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-      {value}
-    </code>
-  )
-}
-
-function OutboundRuntimeCell({
-  outbound,
-  runtimeState,
-  runtimeInterface,
-  runtimeInterfaces,
-  t,
-}: {
-  outbound: Outbound
-  runtimeState?: RuntimeOutboundState
-  runtimeInterface?: RuntimeInterfaceInventoryEntry
-  runtimeInterfaces: Map<string, RuntimeInterfaceInventoryEntry>
-  t: (key: string, options?: Record<string, unknown>) => string
-}) {
-  if (outbound.type === "interface") {
-    const runtimeInterfaceState = runtimeState?.interfaces[0]
-
-    return (
-      <RuntimeInterfaceStatusRow
-        item={{
-          name: outbound.interface ?? "-",
-          tone: getInterfaceRuntimeTone(runtimeInterfaceState?.status),
-        }}
-        variant="list"
-      >
-        <InterfaceRowContent
-          afterStatus={
-            runtimeInterfaceState ? (
-              <RuntimeStateBadge
-                active={runtimeInterfaceState.status === "active"}
-                label={t(
-                  `runtime.interfaceStatus.${runtimeInterfaceState.status}`
-                )}
-                tone={getInterfaceRuntimeTone(runtimeInterfaceState.status)}
-              />
-            ) : null
-          }
-          grow={false}
-          interfaceEntry={runtimeInterface}
-          isVirtual={!runtimeInterface}
-          name={outbound.interface ?? "-"}
-        />
-        {typeof runtimeInterfaceState?.latency_ms === "number" ? (
-          <SummaryChip value={`${runtimeInterfaceState.latency_ms} ms`} />
-        ) : null}
-        {outbound.gateway ? (
-          <SummaryChip
-            value={t("pages.outbounds.summary.gateway4", {
-              value: outbound.gateway,
-            })}
-          />
-        ) : null}
-        {outbound.gateway6 ? (
-          <SummaryChip
-            value={t("pages.outbounds.summary.gateway6", {
-              value: outbound.gateway6,
-            })}
-          />
-        ) : null}
-      </RuntimeInterfaceStatusRow>
-    )
-  }
-
-  return (
-    <RuntimeOutboundDetails
-      fallbackLabel={getRuntimeFallbackLabel(outbound, t)}
-      fallbackTone={getRuntimeFallbackTone(outbound)}
-      runtimeState={runtimeState}
-      runtimeInterfaces={runtimeInterfaces}
-      t={t}
-      variant="list"
-    />
-  )
-}
-
-function getInterfaceRuntimeTone(
-  status?: RuntimeOutboundState["interfaces"][number]["status"]
-) {
-  switch (status) {
-    case "active":
-    case "backup":
-      return "healthy"
-    case "degraded":
-    case "unavailable":
-      return "degraded"
-    case "unknown":
-    default:
-      return "unknown"
-  }
-}
-
-function getRuntimeFallbackLabel(
-  outbound: Outbound,
-  t: (key: string, options?: Record<string, unknown>) => string
-): string | undefined {
-  if (outbound.type === "table" && typeof outbound.table === "number") {
-    return t("runtime.fallback.table", { value: outbound.table })
-  }
-
-  if (outbound.type === "blackhole") {
-    return t("runtime.fallback.blackhole")
-  }
-
-  return undefined
-}
-
-function getRuntimeFallbackTone(
-  outbound: Outbound
-): "info" | "unknown" | undefined {
-  if (outbound.type === "table") {
-    return "info"
-  }
-
-  if (outbound.type === "blackhole") {
-    return "unknown"
-  }
-
-  return undefined
-}

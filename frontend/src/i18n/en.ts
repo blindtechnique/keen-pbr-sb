@@ -178,8 +178,8 @@ export const enTranslation = {
       systemMonitor: "Dashboard",
       catalog: "List catalogue",
       settings: "Settings",
-      outbounds: "Where traffic goes",
-      transports: "Transports",
+      outbounds: "Interfaces",
+      transports: "Transports (sing-box)",
       connections: "Connections",
       dnsServers: "DNS Servers",
       lists: "Lists",
@@ -1014,12 +1014,23 @@ export const enTranslation = {
       },
     },
     outbounds: {
+      plain: {
+        interface: "Traffic leaves through {{name}}",
+        urltest: "Failover: if the first exit stops answering, traffic moves to the next",
+        table: "Traffic goes straight through the provider, past the tunnels",
+        blackhole: "Connections are not let out",
+        ignore: "Traffic passes without changing its route",
+      },
+      usage: {
+        none: "Nothing uses this",
+        some: "Lists sent here: {{lists}}, rules: {{rules}}",
+      },
       groups: {
         interfaces: "Tunnels and interfaces",
         failover: "Failover groups",
         system: "System outbounds",
       },
-      title: "Where traffic goes",
+      title: "Interfaces",
       description: "Your configured outbounds and urltest groups.",
       actions: { new: "Add outbound" },
       bulk: {

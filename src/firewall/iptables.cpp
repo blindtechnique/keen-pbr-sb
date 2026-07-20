@@ -275,11 +275,19 @@ static std::string describe_restore_failure(const std::string& tool,
         message += ": " + error_output;
     }
 
-    const auto marker = error_output.find("line: ");
+    // Двоеточие после "line" ставят не все сборки: одни печатают
+    // "Error occurred at line: 113", другие — "line 113 failed". Раньше
+    // разбирался только первый вариант, и в самом частом случае номер строки
+    // оставался известен, а правило — нет.
+    const auto marker = error_output.find("line");
     if (marker != std::string::npos) {
         try {
-            const auto line_number =
-                std::stoul(error_output.substr(marker + 6));
+            auto cursor = marker + 4;
+            while (cursor < error_output.size() &&
+                   (error_output[cursor] == ':' || error_output[cursor] == ' ')) {
+                ++cursor;
+            }
+            const auto line_number = std::stoul(error_output.substr(cursor));
             std::istringstream script_stream(script);
             std::string line;
             for (unsigned long index = 1;

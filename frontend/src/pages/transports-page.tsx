@@ -736,14 +736,24 @@ function describeTransport(
 }
 
 /**
- * Флаг страны. Эмодзи короче любого названия и читается мгновенно; там, где
- * шрифт флагов не рисует, остаётся код страны — тоже коротко и понятно.
+ * Флаг страны.
+ *
+ * Собирается из двухбуквенного кода прямо здесь, а не берётся у сервиса:
+ * флаговые эмодзи — это ровно две «региональные» буквы, сдвинутые в другой
+ * диапазон, так что «DE» превращается в 🇩🇪 четырьмя строками и без единого
+ * байта данных. Заодно это не зависит от того, доехало ли поле с эмодзи
+ * через все слои, — код страны короче и надёжнее.
  */
 function countryMark(location?: ServerLocation): string {
-  if (!location) {
-    return ""
+  const code = location?.country_code?.trim().toUpperCase()
+  if (!code || !/^[A-Z]{2}$/.test(code)) {
+    return location?.emoji ?? ""
   }
-  return location.emoji || location.country_code || ""
+  const base = 0x1f1e6 // 🇦
+  return String.fromCodePoint(
+    base + (code.charCodeAt(0) - 65),
+    base + (code.charCodeAt(1) - 65)
+  )
 }
 
 /**
@@ -768,9 +778,19 @@ function describeConnection(item: TransportStatus): string {
 
 function TransportField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-baseline gap-4">
-      <span className="min-w-0 text-muted-foreground">{label}</span>
-      <span className="min-w-0 break-words text-right font-mono [overflow-wrap:anywhere]">
+    // Подпись занимает столько, сколько ей нужно, значение — весь остаток.
+    // При равных долях длинное значение переносилось на вторую строку, хотя
+    // место рядом пустовало, и соседние карточки переставали совпадать
+    // строками. Однострочная высота задана здесь же, чтобы ряды двух карточек
+    // стояли вровень независимо от длины значения.
+    <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-4">
+      <span className="min-w-0 whitespace-nowrap text-muted-foreground">
+        {label}
+      </span>
+      <span
+        className="min-w-0 truncate text-right font-mono"
+        title={value}
+      >
         {value}
       </span>
     </div>

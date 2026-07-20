@@ -486,3 +486,61 @@
   background: #1B2434;
   color: #C2C2C2;
 }
+
+/* Переключатель, цвета KeeneticOS. Тоже вне слоёв: состояния тут
+ * комбинируются («включён и наведён и доступен»), а слой утилит перебил бы
+ * половину этих правил. Наведение всюду обусловлено :not([data-disabled]) —
+ * подсвечивать то, на что нельзя нажать, значит обманывать.
+ */
+[data-slot="switch-thumb"] {
+  background: #FFFFFF;
+  box-shadow: 0 2px 5px rgb(0 0 0 / 28%);
+}
+
+[data-slot="switch"][data-unchecked] [data-slot="switch-track"] {
+  background: #D2DADD;
+}
+
+[data-slot="switch"][data-checked] [data-slot="switch-track"] {
+  background: #CCE6F5;
+}
+
+[data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
+  background: #0097DC;
+}
+
+/* Ореол вокруг кружка: цвет свой для включённого и для выключенного. */
+[data-slot="switch"][data-checked]:hover:not([data-disabled])
+  [data-slot="switch-thumb"] {
+  box-shadow: 0 2px 5px rgb(0 0 0 / 28%), 0 0 0 8px color-mix(in srgb, #F0F7FC 55%, transparent);
+}
+
+[data-slot="switch"][data-unchecked]:hover:not([data-disabled])
+  [data-slot="switch-thumb"] {
+  box-shadow: 0 2px 5px rgb(0 0 0 / 28%), 0 0 0 8px color-mix(in srgb, #FBFBFB 55%, transparent);
+}
+
+/* В тёмной теме ореола нет вовсе: выключенный кружок вместо него синеет,
+ * а включённый на наведение не отвечает — он уже синий. */
+.dark [data-slot="switch"][data-unchecked] [data-slot="switch-track"] {
+  background: #2E3D57;
+}
+
+.dark [data-slot="switch"][data-unchecked] [data-slot="switch-thumb"] {
+  background: #808B96;
+}
+
+.dark [data-slot="switch"][data-checked] [data-slot="switch-track"] {
+  background: #3D5073;
+}
+
+.dark [data-slot="switch"][data-checked] [data-slot="switch-thumb"],
+.dark
+  [data-slot="switch"][data-unchecked]:hover:not([data-disabled])
+  [data-slot="switch-thumb"] {
+  background: #0086CB;
+}
+
+.dark [data-slot="switch"]:hover:not([data-disabled]) [data-slot="switch-thumb"] {
+  box-shadow: 0 2px 5px rgb(0 0 0 / 28%);
+}
