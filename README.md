@@ -15,7 +15,7 @@
 [![nfqws2](https://img.shields.io/badge/nfqws2-optional-7b61ff)](https://github.com/nfqws/nfqws2-keenetic)
 [![Based on keen-pbr](https://img.shields.io/badge/based%20on-keen--pbr-555)](https://github.com/maksimkurb/keen-pbr)
 
-[Журнал изменений](CHANGELOG.md) · [Подробная инструкция публикации](docs/PUBLISH_GITHUB.ru.md)
+[Журнал изменений](CHANGELOG.md)
 
 Маршруты по доменам и IP, VLESS/VMess/Trojan/Shadowsocks, WireGuard/AmneziaWG, автоматический failover, DNS Override, соединения и управление nfqws2 — без ручной сборки конфигов из нескольких независимых панелей.
 
@@ -199,7 +199,7 @@ keen-pbr-sb загружает `.srs` и вызывает `sing-box rule-set dec
 
 ## Интерфейс
 
-Веб-интерфейс оформлен в синей палитре KeeneticOS/NDMS с основным цветом `#0086cb`. Общая дизайн-система применяется ко всем страницам: боковой навигации, верхней панели, карточкам, таблицам, формам, диалогам, уведомлениям и состояниям ошибок. Поддерживаются светлая и тёмная темы, сворачиваемое меню и мобильная компоновка. Это визуальная интеграция независимого проекта, а не официальный компонент KeeneticOS.
+Веб-интерфейс оформлен похоже на KeeneticOS/NDMS, чтобы не выбиваться из панели роутера. Есть светлая и тёмная темы, сворачиваемое меню и мобильная компоновка. Это независимый проект, а не официальный компонент KeeneticOS.
 
 ## Файлы и данные
 
@@ -256,11 +256,9 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb
 - [nfqws/nfqws-keenetic-web](https://github.com/nfqws/nfqws-keenetic-web) — функции управления, перенесённые в общий интерфейс;
 - [hoaxisr/awg-manager](https://github.com/hoaxisr/awg-manager) — подборка готовых rule-set для списков адресов: каталог шаблонов в интерфейсе собран по её мотивам. Часть ссылок ведёт на репозиторий автора `repo.hoaxisr.ru`, часть — на официальный [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite).
 
-## Публикация и разработка
+## Разработка
 
-Исходники находятся в ветке `main`. Готовый IPK и `SHA256SUMS` публикуются как assets отдельного GitHub Release. Каталоги `.cache`, `build`, `frontend/node_modules` и локальные архивы в Git не добавляются.
-
-Инструкция синхронизации с оригинальным keen-pbr находится в `docs/FORK_MAINTENANCE.ru.md`.
+Исходники находятся в ветке `main`. Инструкция синхронизации с оригинальным keen-pbr — в `docs/FORK_MAINTENANCE.ru.md`.
 
 ## Лицензия
 
