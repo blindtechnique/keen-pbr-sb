@@ -487,7 +487,7 @@ export function TransportsPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         {items.map((item) => (
-          <Card className="min-w-0 overflow-hidden" key={item.tag}>
+          <Card className="flex h-full min-w-0 flex-col overflow-hidden" key={item.tag}>
             <CardHeader className="min-w-0 flex-row items-start justify-between gap-3">
               <div className="min-w-0">
                 <CardTitle className="truncate">{item.tag}</CardTitle>
@@ -558,7 +558,7 @@ export function TransportsPage() {
                 ) : null}
               </div>
             </CardHeader>
-            <CardContent className="grid min-w-0 gap-1.5 text-sm">
+            <CardContent className="flex min-w-0 flex-1 flex-col gap-1.5 text-sm">
               {/* Три строки, всегда одни и те же и в одном порядке: только так
                   соседние карточки стоят вровень. Всё необязательное ушло
                   ниже, в строку значков, где отсутствие ничего не двигает. */}
@@ -621,7 +621,11 @@ export function TransportsPage() {
               {/* Действия иконками и по углам: подписи к карандашу и
                   корзине ничего не добавляли, а забирали две строки высоты
                   на каждой карточке. */}
-              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
+              {/* Подвал прижат к низу: карточки в ряду тянутся до одной
+                  высоты, и без этого кнопки вставали на разных уровнях у
+                  соседей просто потому, что у одного транспорта строкой
+                  значков больше. */}
+              <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
                 {item.server ? (
                   <Button
                     className="h-auto max-w-full whitespace-normal text-left"
