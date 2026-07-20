@@ -29,7 +29,9 @@ export function useInterfaceProtocols() {
     if (!interfaceName) return ""
     const fromTransport = byInterface.get(interfaceName)
     if (fromTransport) return fromTransport
-    return shortenFirmwareType(names[interfaceName]?.type)
+    const fromFirmware = shortenFirmwareType(names[interfaceName]?.type)
+    if (fromFirmware) return fromFirmware
+    return guessFromKernelName(interfaceName)
   }
 
   return {
@@ -48,6 +50,22 @@ export function useInterfaceProtocols() {
 }
 
 /**
+ * Когда прошивка молчит — читаем имя устройства.
+ *
+ * Keenetic поднимает и WireGuard, и AmneziaWG одним драйвером и называет оба
+ * `nwgN`: различить их по имени невозможно в принципе, поэтому честнее
+ * написать «AWG/WG», чем угадывать и ошибаться в половине случаев.
+ */
+function guessFromKernelName(name: string): string {
+  const normalized = name.toLowerCase()
+  if (normalized.startsWith("nwg")) return "AWG/WG"
+  if (normalized.startsWith("wg")) return "WG"
+  if (normalized.startsWith("ppp")) return "PPP"
+  if (normalized.startsWith("tun") || normalized.startsWith("tap")) return "VPN"
+  return ""
+}
+
+/**
  * NDMS пишет типы полными словами. В строке рядом с названием нужен ярлык,
  * а не термин, поэтому длинные приводятся к привычным сокращениям, а
  * незнакомые остаются как есть — лучше показать чужое слово, чем ничего.
@@ -56,7 +74,9 @@ function shortenFirmwareType(type?: string): string {
   if (!type) return ""
   const normalized = type.toLowerCase()
   if (normalized.includes("amnezia")) return "AWG"
-  if (normalized.includes("wireguard")) return "WG"
+  // Прошивка зовёт AmneziaWG вайргардом: под ним он и работает. Показать
+  // одно из двух наугад значило бы врать половине пользователей.
+  if (normalized.includes("wireguard")) return "AWG/WG"
   if (normalized.includes("ikev2")) return "IKEV2"
   if (normalized.includes("openvpn")) return "OPENVPN"
   if (normalized.includes("l2tp")) return "L2TP"

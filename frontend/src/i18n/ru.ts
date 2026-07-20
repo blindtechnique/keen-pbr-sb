@@ -287,7 +287,7 @@ export const ruTranslation = {
     form: {
       createOutbound: "Сразу сделать точкой выхода",
       createOutboundHint: "Туннель появится в списке точек выхода под тем же именем, и его сразу можно будет выбрать в правилах маршрутизации.",
-      outboundExists: "Outbound с тегом {{tag}} уже существует",
+      outboundExists: "Точка выхода с названием {{tag}} уже существует",
       createTitle: "Добавить транспорт",
       editTitle: "Изменить транспорт",
       description:
@@ -1062,17 +1062,17 @@ export const ruTranslation = {
         selected: "Выбрано: {{count}}",
         delete: "Удалить выбранные",
         confirmDelete:
-          "Удалить {{count}} outbound(ов)? Связи проверяются только при сохранении.",
+          "Удалить точек выхода: {{count}}? Связи проверяются только при сохранении.",
       },
       deleteDialog: {
-        title: "Удалить outbound?",
+        title: "Удалить точку выхода?",
         description:
           "При подтверждении операции будут произведены следующие действия:",
         confirm: "Удалить",
         items: {
-          outboundPrefix: "Outbound",
+          outboundPrefix: "Точка выхода",
           outboundSuffix: "будет удалён.",
-          dependentOutboundPrefix: "Зависимый urltest outbound",
+          dependentOutboundPrefix: "Зависимое резервирование",
           dependentOutboundSuffix: "будет удалён.",
           routingRule: "Правило маршрутизации #{{number}} будет удалено.",
           ruleDetail: "{{label}}: {{value}}",
@@ -1087,7 +1087,7 @@ export const ruTranslation = {
       empty: {
         title: "Outbounds пока нет",
         description:
-          "Добавьте outbound, чтобы начать строить поведение маршрутизации.",
+          "Добавьте точку выхода, чтобы начать строить маршрутизацию.",
       },
       headers: {
         tag: "Название",
@@ -1109,28 +1109,28 @@ export const ruTranslation = {
       },
     },
     outboundUpsert: {
-      createTitle: "Создать outbound",
-      editTitle: "Изменить outbound",
+      createTitle: "Создать точку выхода",
+      editTitle: "Изменить точку выхода",
       editCardTitle: "Изменить {{tag}}",
       description:
         "Outbound может быть сетевым интерфейсом, таблицей маршрутизации или группой urltest, которая выбирает самый быстрый вариант.",
-      cardDescription: "Настройте interface или urltest outbound.",
+      cardDescription: "Настройте туннель, интерфейс или резервирование.",
       missing: {
-        cardDescription: "Запрошенный outbound не найден.",
+        cardDescription: "Запрошенная точка выхода не найдена.",
         cardTitle: "Outbound не найден",
         description:
-          "Вернитесь к таблице outbounds и выберите корректную запись.",
-        back: "Назад к outbounds",
+          "Вернитесь к списку точек выхода и выберите существующую запись.",
+        back: "Назад к точкам выхода",
       },
-      actions: { create: "Создать outbound", save: "Сохранить outbound" },
+      actions: { create: "Создать", save: "Сохранить" },
       common: {
         noExtraFields:
-          "Для этого типа не нужны дополнительные поля, кроме тега outbound.",
+          "Для этого типа не нужны дополнительные поля, кроме названия.",
       },
       fields: {
         tag: "Название",
         tagHint:
-          "Уникальное название для этого outbound. Используется в правилах и группах.",
+          "Уникальное название этой точки выхода. Используется в правилах и группах.",
         type: "Тип",
         outboundTypes: "Типы outbound",
         typeOptions: {

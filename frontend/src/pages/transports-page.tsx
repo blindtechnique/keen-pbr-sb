@@ -516,6 +516,26 @@ export function TransportsPage() {
                   </Badge>
                 )}
                 {item.type !== "native" ? (
+                  <Button
+                    aria-label={t("transports.restart")}
+                    className="size-7"
+                    disabled={actionMutation.isPending}
+                    onClick={() =>
+                      actionMutation.mutate({
+                        data: {
+                          tag: item.tag,
+                          action: TransportActionRequestAction.restart,
+                        },
+                      })
+                    }
+                    size="icon"
+                    title={t("transports.restart")}
+                    variant="ghost"
+                  >
+                    <RefreshCwIcon className="size-4" />
+                  </Button>
+                ) : null}
+                {item.type !== "native" ? (
                   <Switch
                     aria-label={
                       item.desired_up
@@ -550,11 +570,9 @@ export function TransportsPage() {
                 label={t("transports.server")}
                 value={
                   item.server
-                    ? describeServer(
-                        item.server,
-                        item.server_port,
-                        locationOf(item.server)
-                      )
+                    ? item.server_port
+                      ? `${item.server}:${item.server_port}`
+                      : item.server
                     : "—"
                 }
               />
@@ -564,6 +582,13 @@ export function TransportsPage() {
               />
 
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                {/* Вид транспорта уехал из подзаголовка, когда его место занял
+                    протокол. Знать, кто держит туннель, всё же полезно —
+                    поэтому он здесь, рядом с остальными необязательными
+                    подробностями. */}
+                <Badge size="xs" variant="outline">
+                  {item.type}
+                </Badge>
                 {dnsServersByInterface.has(item.interface) ? (
                   <Badge size="xs" variant="outline">
                     {t("transports.dnsDetour")}:{" "}
@@ -593,29 +618,10 @@ export function TransportsPage() {
                   {t("transports.nativeManagedExternally")}
                 </p>
               ) : null}
-              {/* Перезапуск слева, редкие действия справа: запуск и
-                  остановка переехали в выключатель наверху, и держать их
-                  ещё и здесь стало нечем оправдать. */}
+              {/* Действия иконками и по углам: подписи к карандашу и
+                  корзине ничего не добавляли, а забирали две строки высоты
+                  на каждой карточке. */}
               <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
-                {item.type !== "native" ? (
-                  <Button
-                    disabled={actionMutation.isPending}
-                    onClick={() =>
-                      actionMutation.mutate({
-                        data: {
-                          tag: item.tag,
-                          action: TransportActionRequestAction.restart,
-                        },
-                      })
-                    }
-                    size="sm"
-                    variant="outline"
-                  >
-                    <RefreshCwIcon />
-                    {t("transports.restart")}
-                  </Button>
-                ) : null}
-                <span className="ml-auto flex flex-wrap items-center gap-2">
                 {item.server ? (
                   <Button
                     className="h-auto max-w-full whitespace-normal text-left"
@@ -630,47 +636,50 @@ export function TransportsPage() {
                 ) : null}
                 <Button
                   className="h-auto max-w-full whitespace-normal text-left"
-                  size="sm"
-                  variant="outline"
                   onClick={() =>
                     navigate(
                       `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
                     )
                   }
+                  size="sm"
+                  variant="outline"
                 >
                   <WorkflowIcon />
                   {t("transports.routing.bindOutbound")}
                 </Button>
-                <Button
-                  className="h-auto max-w-full whitespace-normal"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    const spec = configured.find(
-                      (entry) => entry.tag === item.tag
-                    )
-                    if (spec) {
-                      setEditing(spec)
-                      setDialogOpen(true)
+                <span className="ml-auto flex shrink-0 items-center gap-1">
+                  <Button
+                    aria-label={t("common.edit")}
+                    className="size-8"
+                    onClick={() => {
+                      const spec = configured.find(
+                        (entry) => entry.tag === item.tag
+                      )
+                      if (spec) {
+                        setEditing(spec)
+                        setDialogOpen(true)
+                      }
+                    }}
+                    size="icon"
+                    title={t("common.edit")}
+                    variant="ghost"
+                  >
+                    <PencilIcon className="size-4" />
+                  </Button>
+                  <Button
+                    aria-label={t("common.delete")}
+                    className="size-8 text-destructive hover:text-destructive"
+                    onClick={() =>
+                      setDeleting(
+                        configured.find((entry) => entry.tag === item.tag)
+                      )
                     }
-                  }}
-                >
-                  <PencilIcon />
-                  {t("common.edit")}
-                </Button>
-                <Button
-                  className="h-auto max-w-full whitespace-normal"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() =>
-                    setDeleting(
-                      configured.find((entry) => entry.tag === item.tag)
-                    )
-                  }
-                >
-                  <TrashIcon />
-                  {t("common.delete")}
-                </Button>
+                    size="icon"
+                    title={t("common.delete")}
+                    variant="ghost"
+                  >
+                    <TrashIcon className="size-4" />
+                  </Button>
                 </span>
               </div>
             </CardContent>
@@ -707,21 +716,6 @@ export function TransportsPage() {
       />
     </div>
   )
-}
-
-/**
- * «1.2.3.4:443 · 🇳🇱», либо просто адрес, если страну выяснить не удалось.
- * Отсутствие страны — рядовой случай, а не ошибка: интернета может не быть,
- * сервис может не ответить, имя может не разрешиться.
- */
-function describeServer(
-  server: string,
-  port?: number,
-  location?: ServerLocation
-): string {
-  const endpoint = port ? `${server}:${port}` : server
-  const flag = countryMark(location)
-  return flag ? `${endpoint} · ${flag}` : endpoint
 }
 
 /** «VLESS · 🇳🇱» — протокол туннеля и страна сервера. */
