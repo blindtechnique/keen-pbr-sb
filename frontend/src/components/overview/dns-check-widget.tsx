@@ -63,7 +63,10 @@ export function DnsCheckWidget({
         description={
           // Body text, not a caption: this line explains what the check does
           // and is the first thing read in the card.
-          <span className="text-foreground">
+          // The other cards start their content a card gap below the title.
+          // This one is a description, which sits in the tighter header gap,
+          // so it needs the difference added back to line up with them.
+          <span className="mt-3.5 block text-foreground">
             {isDisabled
               ? t("overview.dnsCheck.card.disabledDescription")
               : t("overview.dnsCheck.card.description")}

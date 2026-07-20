@@ -400,6 +400,7 @@ export const enTranslation = {
       restart: "Restart",
       restartRequested: "Restart requested",
       restartFailed: "Restart failed",
+      switchFailed: "Could not switch the service",
       title: "Services",
       singbox: "sing-box",
       nfqws: "nfqws2",

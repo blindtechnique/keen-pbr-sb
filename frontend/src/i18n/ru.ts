@@ -403,6 +403,7 @@ export const ruTranslation = {
       restart: "Перезапустить",
       restartRequested: "Перезапуск запрошен",
       restartFailed: "Не удалось перезапустить",
+      switchFailed: "Не удалось переключить",
       title: "Службы",
       singbox: "sing-box",
       nfqws: "nfqws2",

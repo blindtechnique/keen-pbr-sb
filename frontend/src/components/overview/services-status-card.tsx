@@ -42,7 +42,7 @@ type ServiceRow = {
   state: "up" | "down" | "absent"
   onRestart?: () => void
   restarting?: boolean
-  // Only the routing service itself can be switched off from here.
+  // Every service on the card can be switched from here.
   toggle?: {
     checked: boolean
     disabled: boolean
@@ -107,6 +107,37 @@ export function ServicesStatusCard() {
     },
     onError: () => toast.error(t("overview.services.restartFailed")),
   })
+
+  const nfqwsServiceMutation = useMutation({
+    mutationFn: async (command: "start" | "stop") => {
+      const response = await fetch("/api/nfqws", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "service", command }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
+    },
+    onError: () => toast.error(t("overview.services.switchFailed")),
+  })
+
+  // There is no sing-box service to switch: sing-box exists only as the
+  // transports it runs, so the switch raises or drops all of them at once.
+  const setSingboxRunning = (running: boolean) => {
+    for (const transport of singboxTransports) {
+      transportActionMutation.mutate({
+        data: {
+          tag: transport.tag,
+          action: running
+            ? TransportActionRequestAction.up
+            : TransportActionRequestAction.down,
+        },
+      })
+    }
+  }
 
   // Restarting sing-box means restarting every managed transport it runs.
   const restartSingbox = () => {
@@ -186,6 +217,16 @@ export function ServicesStatusCard() {
             : "down",
       onRestart: singboxTransports.length > 0 ? restartSingbox : undefined,
       restarting: transportActionMutation.isPending,
+      toggle: {
+        checked: runningSingbox > 0,
+        disabled:
+          singboxTransports.length === 0 || transportActionMutation.isPending,
+        label:
+          runningSingbox > 0
+            ? t("overview.runtime.actions.stop")
+            : t("overview.runtime.actions.start"),
+        onChange: setSingboxRunning,
+      },
     },
     {
       key: "nfqws",
@@ -201,6 +242,15 @@ export function ServicesStatusCard() {
         ? () => nfqwsRestartMutation.mutate()
         : undefined,
       restarting: nfqwsRestartMutation.isPending,
+      toggle: {
+        checked: Boolean(nfqws?.running),
+        disabled: !nfqws?.installed || nfqwsServiceMutation.isPending,
+        label: nfqws?.running
+          ? t("overview.runtime.actions.stop")
+          : t("overview.runtime.actions.start"),
+        onChange: (checked: boolean) =>
+          nfqwsServiceMutation.mutate(checked ? "start" : "stop"),
+      },
     },
   ]
 
