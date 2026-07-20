@@ -192,8 +192,14 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
 
 // Execute a command with arguments, piping input data to its stdin.
 // Returns the process exit code (0-255), or -1 on fork/exec/pipe failure.
+//
+// When stderr_out is given, the child's stderr is captured into it. Without
+// this an "exited with status 1" from iptables-restore said nothing at all:
+// the tool prints which line it choked on, and that message went to a stderr
+// nobody was reading.
 inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
-                                const std::string& input) {
+                                const std::string& input,
+                                std::string* stderr_out = nullptr) {
     if (args.empty()) return -1;
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
@@ -220,10 +226,16 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         return -1;
     }
 
+    int errfd[2] = {-1, -1};
+    if (stderr_out != nullptr && pipe2(errfd, O_CLOEXEC) == -1) {
+        errfd[0] = errfd[1] = -1; // Capture is a nicety; carry on without it.
+    }
+
     const pid_t pid = fork();
     if (pid == -1) {
         close(pipefd[0]);
         close(pipefd[1]);
+        if (errfd[0] != -1) { close(errfd[0]); close(errfd[1]); }
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=fork_failed errno={}",
                                  command,
@@ -239,12 +251,20 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         close(pipefd[1]);
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
+        if (errfd[1] != -1) {
+            close(errfd[0]);
+            dup2(errfd[1], STDERR_FILENO);
+            close(errfd[1]);
+        }
         execvp(argv[0], const_cast<char* const*>(argv.data()));
         _exit(127);
     }
 
     // Parent: write input to pipe, then wait
     close(pipefd[0]);
+    if (errfd[1] != -1) {
+        close(errfd[1]);
+    }
     const char* data = input.data();
     size_t remaining = input.size();
     while (remaining > 0) {
@@ -257,6 +277,25 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         remaining -= static_cast<size_t>(written);
     }
     close(pipefd[1]);
+
+    // Drained before waiting: a child that fills the stderr pipe would block
+    // forever otherwise. iptables-restore reports one line and exits, so the
+    // cap is generous.
+    if (errfd[0] != -1) {
+        constexpr size_t kMaxStderrBytes = 8 * 1024;
+        char buffer[512];
+        ssize_t got = 0;
+        while ((got = read(errfd[0], buffer, sizeof(buffer))) > 0) {
+            if (stderr_out->size() < kMaxStderrBytes) {
+                stderr_out->append(buffer, static_cast<size_t>(got));
+            }
+        }
+        close(errfd[0]);
+        while (!stderr_out->empty() &&
+               (stderr_out->back() == '\n' || stderr_out->back() == '\r')) {
+            stderr_out->pop_back();
+        }
+    }
 
     const ChildWaitResult wait_result = wait_for_child_with_timeout(pid, kDefaultExecTimeout);
     if (wait_result.timed_out) {

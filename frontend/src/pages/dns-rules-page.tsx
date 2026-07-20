@@ -277,7 +277,7 @@ export function DnsRulesPage() {
             />
           ) : (
             <div className="space-y-3">
-              <div className="flex h-11 items-center">
+              <div className="relative h-0">
               {ruleSelection.hasSelection ? (
                 <BulkSelectionToolbar
                   countLabel={t("pages.dnsRules.bulk.selected", {

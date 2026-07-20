@@ -60,7 +60,7 @@ export const ruTranslation = {
     checkDescription:
       "Проверяет HTTP-ответ с маршрутизатора. Это аналог проверки из оригинального nfqws-web.",
     check: "Проверить",
-    reachable: "Сайт вернул читаемый ответ.",
+    reachable: "Сайт доступен.",
     unreachable: "Сайт недоступен или не вернул читаемый ответ.",
   },
   configTransfer: {
@@ -446,6 +446,7 @@ export const ruTranslation = {
       status: {
         healthy: "Исправен",
         degraded: "Не работает",
+        unavailable: "Не отвечает",
         unknown: "Неизвестно",
         misconfigured: "Ошибка настройки",
       },

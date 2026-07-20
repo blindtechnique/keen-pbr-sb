@@ -31,7 +31,8 @@ import {
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
-const SIDEBAR_WIDTH = "17.5rem"
+// NDMS: .menu { max-width: 264px }
+const SIDEBAR_WIDTH = "264px"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "5rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"

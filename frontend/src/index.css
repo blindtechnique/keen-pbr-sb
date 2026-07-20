@@ -224,16 +224,25 @@
   /* KeeneticOS labels the panels on its dashboard in small caps, which reads
      as a section marker rather than as another heading competing with the
      page title. */
-  .keen-canvas-overview [data-slot="card-title"] {
-    text-transform: uppercase;
+  /* .text-card-heading in NDMS is 16/24; the panels set it bold. Applied to
+     every card, not just the dashboard - the previous rule was scoped to the
+     dashboard canvas, which is why nothing changed elsewhere. */
+  [data-slot="card-title"] {
     font-family: Roboto, sans-serif;
     font-size: 16px;
     font-weight: 700;
     font-style: normal;
-    line-height: normal;
-    height: auto;
+    line-height: 24px;
     letter-spacing: normal;
     color: var(--foreground);
+  }
+
+  .keen-canvas-overview [data-slot="card-title"] {
+    text-transform: uppercase;
+  }
+
+  [data-slot="card"] {
+    border-radius: 8px;
   }
 
   /* Header strip on its own tone with a hairline under it: on white the
@@ -266,19 +275,50 @@
     background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
-  /* The tint that gives KeeneticOS its depth: a short gradient right under the
-     header rather than a flat fill. Overview is the darker of the two. */
+  /* There is no gradient in NDMS at all - I had invented one. The depth under
+     the header is a shadow the header casts downward, clipped so it shows only
+     below: .header-shadow { box-shadow: 0 5px 20px rgb(0 0 0/5%);
+     clip-path: inset(0 0 -24px 0) }. The canvases are flat fills:
+     --dashboard-background: #EDEEF0 for the dashboard, --background: #fff
+     everywhere else. */
   .keen-canvas-overview {
-    background: linear-gradient(#E8E9EB, #EDEEF0 140px);
+    background: #EDEEF0;
   }
 
   .keen-canvas-page {
-    background: linear-gradient(#F8F8F8, #FFFFFF 110px);
+    background: #FFFFFF;
+  }
+
+  .keen-header-shadow {
+    box-shadow: 0 5px 20px rgb(0 0 0 / 5%);
+    clip-path: inset(0 0 -24px 0);
   }
 
   .dark .keen-canvas-overview,
   .dark .keen-canvas-page {
     background: var(--background);
+  }
+
+  .dark .keen-header-shadow {
+    box-shadow: 0 0 18px 0 #06080b;
+  }
+
+  /* NDMS type scale, verbatim. */
+  .keen-text-body-small { font-size: 12px; line-height: 20px; }
+  .keen-text-body { font-size: 14px; line-height: 22px; }
+  .keen-text-card-heading { font-size: 16px; line-height: 24px; }
+  .keen-text-h3 { font-size: 20px; line-height: 28px; }
+  .keen-text-h2 { font-size: 24px; line-height: 32px; }
+  .keen-text-h1 { font-size: 28px; line-height: 36px; }
+
+  /* NDMS scrollbars: thumb #d6d8d9 on a #f0f0f0 track. */
+  * {
+    scrollbar-color: #D6D8D9 #F0F0F0;
+    scrollbar-width: thin;
+  }
+
+  .dark * {
+    scrollbar-color: #3D5073 #2E3D57;
   }
 
   .dark [data-slot="card"] {
@@ -337,40 +377,55 @@
   /* Dragging in KeeneticOS lifts the row and marks the gap it would fall into,
      instead of swapping rows under the cursor - the swap is what made ours
      jump about. */
-  /* KeeneticOS lifts the dragged row off the page with a shadow and keeps it
-     white; the grey fill I used before read as "disabled" instead of "held". */
+  /* NDMS does not draw a line between rows at all. The row being dragged
+     becomes a placeholder in its old position - grey, dashed, contents hidden -
+     while the browser carries a picture of the row under the cursor:
+     .cdk-drag-placeholder { opacity:.5; border:3px dashed #fafafa;
+     border-radius:8px; background-color: var(--text-gray) }.
+     Both of my earlier attempts - a grey fill, then a white row with a shadow
+     and a hairline at the gap - were inventions. */
   .keen-row-dragging > td,
   .keen-drag-lifted {
-    background: #FFFFFF;
-    box-shadow:
-      0 1px 4px rgb(38 52 63 / 18%),
-      0 4px 12px rgb(38 52 63 / 10%);
-    opacity: 0.98;
+    background: #6E6E6E;
+    opacity: 0.5;
   }
 
-  .keen-row-dragging > td:first-child,
+  .keen-row-dragging > td > *,
+  .keen-drag-lifted > * {
+    visibility: hidden;
+  }
+
+  .keen-row-dragging > td:first-child {
+    border-top-left-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-left: 3px dashed #FAFAFA;
+  }
+
   .keen-row-dragging > td:last-child {
-    box-shadow:
-      0 1px 4px rgb(38 52 63 / 18%),
-      0 4px 12px rgb(38 52 63 / 10%);
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+    border-right: 3px dashed #FAFAFA;
   }
 
-  /* The gap the row would fall into, drawn as a line in the accent colour
-     between rows rather than inside one of them. */
-  .keen-row-drop-before > td,
-  .keen-drag-target-before {
-    box-shadow: inset 0 2px 0 0 var(--primary);
+  .keen-row-dragging > td {
+    border-top: 3px dashed #FAFAFA;
+    border-bottom: 3px dashed #FAFAFA;
   }
 
-  .keen-row-drop-after > td,
-  .keen-drag-target-after {
-    box-shadow: inset 0 -2px 0 0 var(--primary);
+  .keen-drag-lifted {
+    border: 3px dashed #FAFAFA;
+    border-radius: 8px;
   }
 
-  .keen-drag-lifted,
-  .keen-drag-target-before,
-  .keen-drag-target-after {
-    transition: box-shadow 120ms ease-out;
+  .dark .keen-row-dragging > td,
+  .dark .keen-drag-lifted {
+    background: #949B9F;
+  }
+
+  /* Rows slide out of the way instead of jumping. NDMS uses .05s for this. */
+  [data-slot="table"] tbody tr,
+  .keen-drag-lifted {
+    transition: transform 0.05s cubic-bezier(0, 0, 0.2, 1);
   }
 
   .keen-service-state {

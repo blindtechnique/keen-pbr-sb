@@ -260,6 +260,44 @@ static bool is_restore_tool(const std::string& program) {
     return program == "iptables-restore" || program == "ip6tables-restore";
 }
 
+// Turns "exited with status 1" into something actionable.
+//
+// iptables-restore prints the reason and, usually, "Error occurred at line: N".
+// Quoting that line from the script we just fed it is the difference between a
+// message the user can act on and one that only says something went wrong.
+static std::string describe_restore_failure(const std::string& tool,
+                                            int status,
+                                            const std::string& error_output,
+                                            const std::string& script) {
+    std::string message =
+        keen_pbr3::format("{} exited with status {}", tool, status);
+    if (!error_output.empty()) {
+        message += ": " + error_output;
+    }
+
+    const auto marker = error_output.find("line: ");
+    if (marker != std::string::npos) {
+        try {
+            const auto line_number =
+                std::stoul(error_output.substr(marker + 6));
+            std::istringstream script_stream(script);
+            std::string line;
+            for (unsigned long index = 1;
+                 index <= line_number && std::getline(script_stream, line);
+                 ++index) {
+                if (index == line_number) {
+                    message += keen_pbr3::format(" (rule: {})", line);
+                    break;
+                }
+            }
+        } catch (const std::exception&) {
+            // No line number to quote; the tool's own text still stands.
+        }
+    }
+
+    return message;
+}
+
 static void pipe_to_cmd(const std::vector<std::string>& args, const std::string& input) {
     Logger::instance().verbose("{} script:\n{}", args[0], input);
 
@@ -267,14 +305,14 @@ static void pipe_to_cmd(const std::vector<std::string>& args, const std::string&
     // it brings interfaces up at boot. Without -w our restore call waits on the
     // xtables lock indefinitely and the daemon never reaches its event loop.
     if (is_restore_tool(args[0]) && xtables_wait_supported != 0) {
-        const int status = safe_exec_pipe_stdin(with_wait_option(args), input);
+        std::string error_output;
+        const int status = safe_exec_pipe_stdin(with_wait_option(args), input, &error_output);
         if (status == 0) {
             xtables_wait_supported = 1;
             return;
         }
         if (xtables_wait_supported == 1) {
-            throw FirewallError(
-                keen_pbr3::format("{} exited with status {}", args[0], status));
+            throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
         }
         // First attempt and it failed: the option may simply be unsupported.
         // Fall through to the plain invocation and remember the answer.
@@ -283,9 +321,10 @@ static void pipe_to_cmd(const std::vector<std::string>& args, const std::string&
         xtables_wait_supported = 0;
     }
 
-    int status = safe_exec_pipe_stdin(args, input);
+    std::string error_output;
+    int status = safe_exec_pipe_stdin(args, input, &error_output);
     if (status != 0) {
-        throw FirewallError(keen_pbr3::format("{} exited with status {}", args[0], status));
+        throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
     }
 }
 

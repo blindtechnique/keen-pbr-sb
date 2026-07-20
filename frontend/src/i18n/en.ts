@@ -442,6 +442,7 @@ export const enTranslation = {
       },
       status: {
         healthy: "Healthy",
+        unavailable: "Not responding",
         degraded: "Down",
         unknown: "Unknown",
         misconfigured: "Misconfigured",

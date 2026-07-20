@@ -774,8 +774,17 @@ function UrlCheck() {
           <Button onClick={() => void check()}>{t("nfqws.check")}</Button>
         </div>
         {result !== null ? (
-          <Alert variant={result ? "default" : "destructive"}>
-            <AlertDescription>
+          // Success in grey read like a note rather than an answer; the whole
+          // point of the check is to say yes or no at a glance.
+          <Alert
+            className={
+              result ? "border-success/40 bg-success/10 text-success" : undefined
+            }
+            variant={result ? "default" : "destructive"}
+          >
+            <AlertDescription
+              className={result ? "text-success" : undefined}
+            >
               {result ? t("nfqws.reachable") : t("nfqws.unreachable")}
             </AlertDescription>
           </Alert>

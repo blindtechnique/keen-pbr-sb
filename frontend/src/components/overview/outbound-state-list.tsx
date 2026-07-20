@@ -152,7 +152,7 @@ function StatusBadge({
   t,
 }: {
   status?: string
-  t: (key: string) => string
+  t: (key: string, options?: Record<string, unknown>) => string
 }) {
   if (!status) {
     return null
@@ -169,7 +169,9 @@ function StatusBadge({
             : "warning"
       }
     >
-      {t(`overview.outbounds.status.${status}`)}
+      {/* Falling back to the raw value keeps a status the daemon grew but the
+          translations have not from being printed as a key path. */}
+      {t(`overview.outbounds.status.${status}`, { defaultValue: status })}
     </Badge>
   )
 }

@@ -38,18 +38,25 @@ export function AppShell({ children }: { children: ReactNode }) {
         <SidebarInset className="relative flex h-screen max-h-screen max-w-full min-w-0 flex-col overflow-hidden bg-transparent">
           <MobileSidebarHeader />
           <DesktopSystemBar />
-          <WarningBanner state={warningBannerState} />
           <main
             aria-labelledby="page-title"
             className="min-h-0 min-w-0 flex-1 overflow-y-auto"
             id="main-content"
           >
             {/* No max-width: NDMS lets its panels use the whole window, and a
-                centred column left wide screens half empty. */}
-            <div className="min-w-0 px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
+                centred column left wide screens half empty. The bottom padding
+                leaves room for the fixed save bar. */}
+            <div
+              className="min-w-0 px-4 pt-4 sm:px-6 lg:px-8 lg:pt-5"
+              style={{
+                paddingBottom:
+                  "calc(var(--warning-banner-height, 0px) + 1.25rem)",
+              }}
+            >
               {children}
             </div>
           </main>
+          <WarningBanner state={warningBannerState} />
         </SidebarInset>
       </div>
     </SidebarProvider>
@@ -58,7 +65,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function DesktopSystemBar() {
   return (
-    <div className="sticky top-0 z-20 hidden h-16 items-center justify-between bg-card px-6 md:flex">
+    // NDMS: .header { height: 64px; padding: 0 32px } with the shadow cast by
+    // a sibling, clipped to show only underneath.
+    <div className="keen-header-shadow relative z-30 hidden h-16 shrink-0 items-center justify-between bg-card px-8 md:flex">
       <div className="flex items-center gap-3">
         <span className="size-2.5 rounded-full bg-success shadow-[0_0_0_4px_color-mix(in_srgb,var(--success)_14%,transparent)]" />
         <span className="text-[15px] font-medium text-primary">keen-pbr</span>

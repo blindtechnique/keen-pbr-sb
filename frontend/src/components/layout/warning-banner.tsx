@@ -73,14 +73,15 @@ export function WarningBanner({
   }
 
   return (
-    // Sits between the header and the scrolling content, so it stays put
-    // instead of drifting off the top, and can never move the menu: the menu
-    // is not inside this column.
+    // NDMS pins this to the bottom of the window, not the top:
+    // .ndw-save-pattern--page-container { position: fixed; bottom: 0 }
+    // with min-height 64px and a plain --background fill. Fixed at the bottom
+    // it cannot push the page, cannot scroll away, and cannot move the menu.
     <div
       ref={containerRef}
       className={cn(
-        "z-30 shrink-0 border-b",
-        "bg-[#EDEEF0]/95 backdrop-blur-md",
+        "fixed inset-x-0 bottom-0 z-20 min-h-16 border-t md:left-(--sidebar-width)",
+        "bg-card",
         isError
           ? "border-destructive/40"
           : isConverging
@@ -89,7 +90,7 @@ export function WarningBanner({
         className
       )}
     >
-      <div className="flex flex-col gap-2 px-4 py-2 sm:px-6 lg:px-8">
+      <div className="flex min-h-16 flex-col justify-center gap-2 px-4 py-3 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div className="min-w-0">
             <p className="text-[13px] leading-5 font-medium text-foreground">

@@ -208,7 +208,7 @@ export function RoutingRulesPage() {
         <div className="space-y-3">
           {/* The toolbar shares a fixed-height slot so selecting a rule does not
               push the whole table down. */}
-          <div className="flex h-11 items-center">
+          <div className="relative h-0">
             {ruleSelection.hasSelection ? (
             <BulkSelectionToolbar
               countLabel={t("pages.routingRules.bulk.selected", {

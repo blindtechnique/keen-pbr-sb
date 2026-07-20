@@ -231,7 +231,7 @@ export function OutboundsPage() {
         />
       ) : (
         <div className="space-y-3">
-          <div className="flex h-11 items-center">
+          <div className="relative h-0">
           {outboundSelection.hasSelection ? (
             <BulkSelectionToolbar
               countLabel={t("pages.outbounds.bulk.selected", {
