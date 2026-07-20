@@ -37,8 +37,11 @@ function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-title"
+      // NDMS card headings: Roboto Bold 16/24 with 1px of tracking. Set here
+      // rather than in a stylesheet because these are Tailwind utilities, and
+      // the utilities layer beats anything written in @layer components.
       className={cn(
-        "text-[1.1875rem] leading-snug font-medium tracking-[-0.005em] group-data-[size=sm]/card:text-base",
+        "text-[16px] leading-[24px] font-bold tracking-[1px] group-data-[size=sm]/card:text-base",
         className
       )}
       {...props}

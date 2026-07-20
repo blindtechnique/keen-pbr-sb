@@ -79,7 +79,6 @@ export function MultiSelectList({
   const { t } = useTranslation()
   const [selectValue, setSelectValue] = useState("")
   const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const [dropIndex, setDropIndex] = useState<number | null>(null)
   const selectedSet = new Set(value)
   const unavailableSet = new Set(unavailable)
   const availableOptions = options.filter(
@@ -199,24 +198,15 @@ export function MultiSelectList({
               key={`${item}-${index}`}
               className={cn(
                 "h-auto min-h-8 cursor-default",
-                allowReorder && dragIndex === index && "keen-drag-lifted",
-                allowReorder &&
-                  dropIndex === index &&
-                  dragIndex !== null &&
-                  dragIndex !== index &&
-                  (dragIndex < index
-                    ? "keen-drag-target-after"
-                    : "keen-drag-target-before")
+                // Only the source row is marked. NDMS draws no line at the
+                // gap: the placeholder alone says where the row will land.
+                allowReorder && dragIndex === index && "keen-drag-lifted"
               )}
               draggable={allowReorder && dragIndex === index}
-              onDragEnd={() => {
-                setDragIndex(null)
-                setDropIndex(null)
-              }}
+              onDragEnd={() => setDragIndex(null)}
               onDragOver={(event) => {
                 if (!allowReorder || dragIndex === null) return
                 event.preventDefault()
-                setDropIndex(index)
               }}
               onDrop={(event) => {
                 if (!allowReorder || dragIndex === null) return
@@ -231,7 +221,6 @@ export function MultiSelectList({
                   onChange(nextValue)
                 }
                 setDragIndex(null)
-                setDropIndex(null)
               }}
             >
               {allowReorder ? (

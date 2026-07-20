@@ -1,5 +1,6 @@
 #include "interface_monitor.hpp"
 
+#include "../log/logger.hpp"
 #include "../util/format_compat.hpp"
 
 #include <cerrno>
@@ -118,6 +119,18 @@ struct InterfaceMonitor::Impl {
                 format("Failed to subscribe interface monitor to link group: {}", nl_geterror(err)));
         }
 
+        // libnl defaults to 32 KB each way. The firmware brings interfaces up
+        // and down in bursts - most visibly during our own update - and the
+        // kernel then overruns the socket buffer and answers ENOBUFS, which
+        // libnl reports as "Out of memory". A megabyte absorbs those bursts.
+        err = nl_socket_set_buffer_size(socket, 1024 * 1024, 1024 * 1024);
+        if (err < 0) {
+            // Not fatal: the default size still works, it just overruns sooner.
+            Logger::instance().verbose(
+                "Could not enlarge the interface monitor netlink buffer: {}",
+                nl_geterror(err));
+        }
+
         nl_socket_set_nonblocking(socket);
         nl_socket_disable_seq_check(socket);
         nl_socket_modify_cb(socket,
@@ -158,6 +171,19 @@ void InterfaceMonitor::handle_events() {
         }
 
         if (err == -NLE_AGAIN || errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+
+        // ENOBUFS is not a failure, it is a gap: the kernel dropped events we
+        // were too slow to read. The socket stays usable, so there is nothing
+        // to reopen - and reopening here would invalidate the descriptor the
+        // event loop is polling. Later events still arrive, and the interface
+        // probe re-reads the real state every 20 seconds anyway, so a missed
+        // link change corrects itself without troubling the user.
+        if (err == -NLE_NOMEM || errno == ENOBUFS) {
+            Logger::instance().verbose(
+                "Interface monitor fell behind and lost some link events; "
+                "state will be picked up by the next probe");
             break;
         }
 

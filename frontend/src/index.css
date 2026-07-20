@@ -224,19 +224,9 @@
   /* KeeneticOS labels the panels on its dashboard in small caps, which reads
      as a section marker rather than as another heading competing with the
      page title. */
-  /* .text-card-heading in NDMS is 16/24; the panels set it bold. Applied to
-     every card, not just the dashboard - the previous rule was scoped to the
-     dashboard canvas, which is why nothing changed elsewhere. */
-  [data-slot="card-title"] {
-    font-family: Roboto, sans-serif;
-    font-size: 16px;
-    font-weight: 700;
-    font-style: normal;
-    line-height: 24px;
-    letter-spacing: normal;
-    color: var(--foreground);
-  }
-
+  /* Size, weight and tracking live on the component itself: they are Tailwind
+     utilities there, and the utilities layer wins over this one. Only the
+     things no utility sets belong here. */
   .keen-canvas-overview [data-slot="card-title"] {
     text-transform: uppercase;
   }
@@ -412,8 +402,13 @@
     border-bottom: 3px dashed #FAFAFA;
   }
 
+  /* An outline rather than a border: the list rows already carry a 1px border
+     inside a fixed-height box, and widening it to 3px resized the row and
+     broke the layout mid-drag. */
   .keen-drag-lifted {
-    border: 3px dashed #FAFAFA;
+    outline: 3px dashed #FAFAFA;
+    outline-offset: -3px;
+    border-color: transparent;
     border-radius: 8px;
   }
 
