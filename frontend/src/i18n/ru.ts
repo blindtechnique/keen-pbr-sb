@@ -334,6 +334,7 @@ export const ruTranslation = {
   },
   brand: {
     logoAlt: "логотип keen-pbr-sb",
+    version: "Версия {{version}}",
     tagline: "Пакет для пакетов с пакетами",
     openMenu: "Открыть меню",
   },

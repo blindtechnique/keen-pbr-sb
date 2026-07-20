@@ -333,6 +333,7 @@ export const enTranslation = {
   },
   brand: {
     logoAlt: "keen-pbr-sb logo",
+    version: "Version {{version}}",
     tagline: "Get packets sorted",
     openMenu: "Open menu",
   },

@@ -316,10 +316,17 @@
     scrollbar-color: #3D5073 #2E3D57;
   }
 
-  /* NDMS keeps its dark cards flat and lets the border do the separating -
-     there is no lifted-card shadow in the dark theme at all. */
+  /* Dark KeeneticOS draws a 2px hairline around every card and no shadow at
+     all. The shadow is a hover affordance: it appears under the pointer and
+     the line stays put underneath it. */
   .dark [data-slot="card"] {
-    box-shadow: 0 2px 6px #06080b;
+    border: 2px solid #4D545F;
+    box-shadow: none;
+    transition: box-shadow 0.15s ease;
+  }
+
+  .dark [data-slot="card"]:hover {
+    box-shadow: 0 0 18px 0 #06080b;
   }
 
   [data-slot="input"],

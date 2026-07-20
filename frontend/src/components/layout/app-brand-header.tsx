@@ -33,13 +33,11 @@ export function AppBrandHeader({
         href="/"
         title={t("nav.items.systemMonitor")}
       >
-        <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-md bg-primary">
-          <img
-            alt={t("brand.logoAlt")}
-            className="size-full object-contain"
-            src={logoUrl}
-          />
-        </span>
+        <img
+          alt={t("brand.logoAlt")}
+          className="size-9 shrink-0 rounded-md object-contain"
+          src={logoUrl}
+        />
         <span className="flex min-w-0 items-baseline gap-1.5 text-left group-data-[collapsible=icon]:hidden">
           <span className="truncate text-[19px] leading-6 font-medium tracking-[0.01em] text-primary">
             keen-pbr

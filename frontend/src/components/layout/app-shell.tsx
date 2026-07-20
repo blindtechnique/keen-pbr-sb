@@ -1,6 +1,8 @@
 import type { ReactNode } from "react"
 import { useLocation } from "wouter"
+import { useTranslation } from "react-i18next"
 
+import logoUrl from "@/assets/logo.png"
 import { AppSidebar } from "@/components/app-sidebar"
 import { AppBrandHeader } from "@/components/layout/app-brand-header"
 import { useWarningBannerState } from "@/components/layout/warning-banner-state"
@@ -68,18 +70,46 @@ function DesktopSystemBar() {
     // NDMS: .header { height: 64px; padding: 0 32px } with the shadow cast by
     // a sibling, clipped to show only underneath.
     <div className="keen-header-shadow relative z-30 hidden h-16 shrink-0 items-center justify-between bg-card px-8 md:flex">
-      <div className="flex items-center gap-3">
-        <span className="size-2.5 rounded-full bg-success shadow-[0_0_0_4px_color-mix(in_srgb,var(--success)_14%,transparent)]" />
-        <span className="text-[15px] font-medium text-primary">keen-pbr</span>
-        <span className="text-[15px] font-light tracking-[0.08em] text-foreground/80 uppercase">
-          sb
-        </span>
-        <span className="ml-2 text-[13px] text-muted-foreground">
-          Keenetic / Netcraze
-        </span>
-      </div>
+      <BrandMark />
       <TopBarControls />
     </div>
+  )
+}
+
+/**
+ * Logo, wordmark and version, and nothing else. The green dot claimed to
+ * report health it never actually checked, and "Keenetic / Netcraze" said
+ * something the user already knows - they are looking at their own router.
+ */
+function BrandMark() {
+  const { t } = useTranslation()
+
+  return (
+    <a
+      className="flex items-center gap-3 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      href="/"
+    >
+      <img
+        alt={t("brand.logoAlt")}
+        className="size-9 shrink-0 rounded-md object-contain"
+        src={logoUrl}
+      />
+      {/* The pair sits a hair above centre: the version below it would
+          otherwise drag the whole block visually low in a 64px bar. */}
+      <span className="flex flex-col justify-center -mt-0.5">
+        <span className="flex items-baseline gap-1.5 leading-[18px]">
+          <span className="text-[15px] font-medium text-primary">keen-pbr</span>
+          <span className="text-[15px] font-light tracking-[0.08em] text-foreground/80 uppercase">
+            sb
+          </span>
+        </span>
+        {__APP_VERSION__ ? (
+          <span className="text-[11px] leading-[14px] tracking-[0.02em] text-muted-foreground">
+            {t("brand.version", { version: __APP_VERSION__ })}
+          </span>
+        ) : null}
+      </span>
+    </a>
   )
 }
 
