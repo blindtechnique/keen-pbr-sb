@@ -513,9 +513,23 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) throw ApiError("invalid URL", 400);
             HttpClient client;
             client.set_timeout(std::chrono::seconds(10));
-            client.set_max_response_size(50U * 1024U);
-            try { client.download(url); return R"({"ok":true,"reachable":true})"; }
-            catch (const std::exception&) { return R"({"ok":true,"reachable":false})"; }
+            // 50 KB used to be the cap here, and almost every real page is
+            // larger, so the download threw on the size limit and a perfectly
+            // reachable site was reported unreachable.
+            client.set_max_response_size(4U * 1024U * 1024U);
+            nlohmann::json response;
+            response["ok"] = true;
+            try {
+                client.download(url);
+                response["reachable"] = true;
+            } catch (const std::exception& e) {
+                // The reason matters: a name that does not resolve, a refused
+                // connection and a TLS handshake cut short are three different
+                // problems, and only the last is what nfqws2 exists to fix.
+                response["reachable"] = false;
+                response["error"] = e.what();
+            }
+            return response.dump();
         }
         throw ApiError("unsupported nfqws action", 400);
     });

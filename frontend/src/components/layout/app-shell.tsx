@@ -19,9 +19,12 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <SidebarProvider defaultOpen={true}>
+      {/* KeeneticOS scrolls the content, not the document: the header and the
+          menu are outside the scrolling box rather than pinned on top of it, so
+          there is no page-level scrollbar at all. */}
       <div
         className={cn(
-          "flex min-h-screen w-full max-w-full overflow-x-clip",
+          "flex h-screen max-h-screen w-full max-w-full overflow-hidden",
           isOverview ? "keen-canvas-overview" : "keen-canvas-page"
         )}
       >
@@ -32,18 +35,18 @@ export function AppShell({ children }: { children: ReactNode }) {
           Skip to content
         </a>
         <AppSidebar />
-        <SidebarInset className="relative max-w-full min-w-0 overflow-x-clip bg-transparent">
+        <SidebarInset className="relative flex h-screen max-h-screen max-w-full min-w-0 flex-col overflow-hidden bg-transparent">
           <MobileSidebarHeader />
           <DesktopSystemBar />
           <WarningBanner state={warningBannerState} />
           <main
             aria-labelledby="page-title"
-            className="min-w-0 flex-1"
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto"
             id="main-content"
           >
-            <div
-              className="mx-auto max-w-[92rem] min-w-0 px-4 py-4 sm:px-6 lg:px-8 lg:py-5"
-            >
+            {/* No max-width: NDMS lets its panels use the whole window, and a
+                centred column left wide screens half empty. */}
+            <div className="min-w-0 px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
               {children}
             </div>
           </main>

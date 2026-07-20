@@ -1,8 +1,7 @@
 import { Autocomplete } from "@base-ui/react/autocomplete"
 import {
-  ChevronDown,
-  ChevronUp,
   ChevronsUpDown,
+  GripVertical,
   ListPlus,
   Plus,
   Trash2,
@@ -79,6 +78,8 @@ export function MultiSelectList({
 }) {
   const { t } = useTranslation()
   const [selectValue, setSelectValue] = useState("")
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
   const selectedSet = new Set(value)
   const unavailableSet = new Set(unavailable)
   const availableOptions = options.filter(
@@ -196,8 +197,61 @@ export function MultiSelectList({
           {value.map((item, index) => (
             <InputGroup
               key={`${item}-${index}`}
-              className="h-auto min-h-8 cursor-default"
+              className={cn(
+                "h-auto min-h-8 cursor-default",
+                allowReorder && dragIndex === index && "keen-drag-lifted",
+                allowReorder &&
+                  dropIndex === index &&
+                  dragIndex !== null &&
+                  dragIndex !== index &&
+                  (dragIndex < index
+                    ? "keen-drag-target-after"
+                    : "keen-drag-target-before")
+              )}
+              draggable={allowReorder && dragIndex === index}
+              onDragEnd={() => {
+                setDragIndex(null)
+                setDropIndex(null)
+              }}
+              onDragOver={(event) => {
+                if (!allowReorder || dragIndex === null) return
+                event.preventDefault()
+                setDropIndex(index)
+              }}
+              onDrop={(event) => {
+                if (!allowReorder || dragIndex === null) return
+                event.preventDefault()
+                if (dragIndex !== index) {
+                  // Lift the item out and put it back at the gap that was
+                  // marked, rather than swapping with whatever sits there -
+                  // swapping is what made the list jump under the cursor.
+                  const nextValue = [...value]
+                  const [moved] = nextValue.splice(dragIndex, 1)
+                  nextValue.splice(index, 0, moved)
+                  onChange(nextValue)
+                }
+                setDragIndex(null)
+                setDropIndex(null)
+              }}
             >
+              {allowReorder ? (
+                <InputGroupAddon align="inline-start">
+                  <span
+                    aria-label={t("common.multiSelectList.reorderItem", {
+                      item,
+                      defaultValue: "Переместить {{item}}",
+                    })}
+                    className="cursor-grab px-0.5 text-muted-foreground active:cursor-grabbing"
+                    // The row stays undraggable until the handle is pressed,
+                    // so selecting the label still works.
+                    draggable
+                    onDragStart={() => setDragIndex(index)}
+                    role="button"
+                  >
+                    <GripVertical className="h-4 w-4" />
+                  </span>
+                </InputGroupAddon>
+              ) : null}
               <InputGroupAddon className="w-full flex-col items-stretch gap-0.5 text-left text-foreground">
                 <OptionLabel
                   option={item}
@@ -218,46 +272,6 @@ export function MultiSelectList({
                 >
                   <Trash2 className="h-4 w-4" />
                 </InputGroupButton>
-                {allowReorder ? (
-                  <>
-                    <InputGroupButton
-                      aria-label={t("common.moveUp")}
-                      disabled={index === 0}
-                      onClick={() => {
-                        if (index === 0) {
-                          return
-                        }
-                        const nextValue = [...value]
-                        ;[nextValue[index - 1], nextValue[index]] = [
-                          nextValue[index],
-                          nextValue[index - 1],
-                        ]
-                        onChange(nextValue)
-                      }}
-                      size="icon-xs"
-                    >
-                      <ChevronUp className="h-4 w-4" />
-                    </InputGroupButton>
-                    <InputGroupButton
-                      aria-label={t("common.moveDown")}
-                      disabled={index === value.length - 1}
-                      onClick={() => {
-                        if (index === value.length - 1) {
-                          return
-                        }
-                        const nextValue = [...value]
-                        ;[nextValue[index], nextValue[index + 1]] = [
-                          nextValue[index + 1],
-                          nextValue[index],
-                        ]
-                        onChange(nextValue)
-                      }}
-                      size="icon-xs"
-                    >
-                      <ChevronDown className="h-4 w-4" />
-                    </InputGroupButton>
-                  </>
-                ) : null}
               </InputGroupAddon>
             </InputGroup>
           ))}

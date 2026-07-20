@@ -73,14 +73,14 @@ export function WarningBanner({
   }
 
   return (
-    // Floats over the page rather than taking a row of its own: as a sticky
-    // block it pushed the whole layout down every time a field changed, and
-    // the page jumped back up on save.
+    // Sits between the header and the scrolling content, so it stays put
+    // instead of drifting off the top, and can never move the menu: the menu
+    // is not inside this column.
     <div
       ref={containerRef}
       className={cn(
-        "absolute inset-x-0 top-0 z-30 border-b md:top-16",
-        "bg-[#E6E7E9]/85 backdrop-blur-md",
+        "z-30 shrink-0 border-b",
+        "bg-[#EDEEF0]/95 backdrop-blur-md",
         isError
           ? "border-destructive/40"
           : isConverging
@@ -89,7 +89,7 @@ export function WarningBanner({
         className
       )}
     >
-      <div className="mx-auto flex max-w-[92rem] flex-col gap-2 px-4 py-2 sm:px-6 lg:px-8">
+      <div className="flex flex-col gap-2 px-4 py-2 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div className="min-w-0">
             <p className="text-[13px] leading-5 font-medium text-foreground">
