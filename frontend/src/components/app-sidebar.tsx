@@ -74,6 +74,10 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
         icon: ShieldIcon,
         items: [
           {
+            title: t("nav.items.catalog"),
+            url: "/catalog",
+          },
+          {
             title: t("nav.items.lists"),
             url: "/lists",
           },
@@ -97,10 +101,12 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
       <SidebarContent className="border-r px-0 py-0">
         <NavMain items={data.navMain} />
       </SidebarContent>
-      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t border-r px-3 py-3 group-data-[collapsible=icon]:hidden"}>
-        <div className="space-y-3">
+      {/* The footer is the button: padding here would leave a pale margin
+          around the hover fill instead of letting it reach the edges. */}
+      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t border-r bg-sidebar p-0 group-data-[collapsible=icon]:hidden"}>
+        <div>
           <Button
-            className="w-full justify-start text-primary hover:bg-accent hover:text-primary"
+            className="h-12 w-full justify-start rounded-none bg-sidebar px-4 text-[14px] font-normal text-primary hover:bg-[#EDEDED] hover:text-primary"
             onClick={async () => {
               await fetch("/api/auth/logout", { method: "POST" })
               window.location.assign("/")

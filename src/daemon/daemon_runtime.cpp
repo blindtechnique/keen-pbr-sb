@@ -288,8 +288,19 @@ void Daemon::schedule_catalog_refresh() {
     scheduler_->schedule_oneshot(
         kInterval,
         [this]() {
-            blocking_executor_.try_post("catalog-refresh", []() {
-                refresh_catalog_if_stale();
+            // Resolve the detour on every run rather than caching it: the user
+            // may have added the tunnel that finally reaches GitHub since the
+            // last attempt.
+            uint32_t mark = 0;
+            const auto detour = catalog_detour();
+            if (!detour.empty()) {
+                const auto it = outbound_marks_.find(detour);
+                if (it != outbound_marks_.end()) {
+                    mark = it->second;
+                }
+            }
+            blocking_executor_.try_post("catalog-refresh", [mark]() {
+                refresh_catalog_if_stale(/*force=*/false, mark);
             });
             schedule_catalog_refresh();
         },

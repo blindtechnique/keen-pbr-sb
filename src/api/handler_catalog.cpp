@@ -2,10 +2,13 @@
 
 #include "handler_catalog.hpp"
 
+#include "../config/config.hpp"
 #include "../http/http_client.hpp"
 #include "../log/logger.hpp"
 
 #include <chrono>
+#include <cstdint>
+#include <optional>
 #include <fstream>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -24,7 +27,7 @@ constexpr const char* kCatalogUrl =
     "internal/presets/defaults.json";
 
 constexpr const char* kCachePath = "/opt/var/cache/keen-pbr/catalog.json";
-constexpr const char* kEtagPath = "/opt/var/cache/keen-pbr/catalog.etag";
+constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/catalog-source.json";
 // Shipped with the package so a fresh install without internet still offers
 // something to choose from.
 constexpr const char* kBundledPath = "/opt/usr/share/keen-pbr/catalog.json";
@@ -86,9 +89,38 @@ bool store_if_valid(const std::string& payload) {
     return write_file(kCachePath, payload);
 }
 
+// Resolves an outbound tag to its fwmark using the same allocation the rest of
+// the daemon uses, so "download through vless-nl" means the same thing here as
+// it does for an ordinary list.
+uint32_t mark_for_detour(const Config& config, const std::string& tag) {
+    if (tag.empty() || !config.outbounds) {
+        return 0;
+    }
+    try {
+        const auto marks = allocate_outbound_marks(
+            config.fwmark.value_or(FwmarkConfig{}), *config.outbounds);
+        const auto it = marks.find(tag);
+        return it == marks.end() ? 0U : it->second;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
 } // namespace
 
-bool refresh_catalog_if_stale(bool force) {
+std::string catalog_detour() {
+    try {
+        const auto raw = read_file(kSettingsPath);
+        if (raw.empty()) {
+            return {};
+        }
+        return nlohmann::json::parse(raw).value("detour", std::string{});
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+bool refresh_catalog_if_stale(bool force, uint32_t fwmark) {
     std::lock_guard<std::mutex> lock(catalog_mutex());
 
     if (!force && cache_is_fresh()) {
@@ -100,7 +132,7 @@ bool refresh_catalog_if_stale(bool force) {
         client.set_timeout(std::chrono::seconds(20));
         client.set_max_response_size(4U * 1024U * 1024U);
 
-        const auto payload = client.download(kCatalogUrl);
+        const auto payload = client.download(kCatalogUrl, HttpRequestOptions{fwmark});
         if (!store_if_valid(payload)) {
             Logger::instance().warn(
                 "List catalogue: downloaded file is not a valid catalogue, keeping the previous copy");
@@ -116,7 +148,7 @@ bool refresh_catalog_if_stale(bool force) {
     }
 }
 
-void register_catalog_handler(ApiServer& server, ApiContext& /*ctx*/) {
+void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
     // GET /api/catalog - presets with their source and freshness.
     server.get("/api/catalog", []() -> std::string {
         std::lock_guard<std::mutex> lock(catalog_mutex());
@@ -143,13 +175,40 @@ void register_catalog_handler(ApiServer& server, ApiContext& /*ctx*/) {
             response["error"] = "catalogue is unavailable";
         }
         response["url"] = kCatalogUrl;
+        response["detour"] = catalog_detour();
         return response.dump();
     });
 
-    // POST /api/catalog/refresh - fetch now instead of waiting for the weekly run.
-    server.post("/api/catalog/refresh", []() -> std::string {
+    // POST /api/catalog/refresh - fetch now instead of waiting for the weekly
+    // run. An optional detour is remembered, so the scheduled refresh keeps
+    // using whatever route worked when the user pressed the button.
+    server.post("/api/catalog/refresh", [&ctx](const std::string& body) -> std::string {
         nlohmann::json response;
-        response["updated"] = refresh_catalog_if_stale(/*force=*/true);
+        std::string detour = catalog_detour();
+
+        try {
+            if (!body.empty()) {
+                const auto request = nlohmann::json::parse(body);
+                if (request.contains("detour")) {
+                    detour = request["detour"].is_string()
+                                 ? request["detour"].get<std::string>()
+                                 : std::string{};
+                    nlohmann::json settings;
+                    settings["detour"] = detour;
+                    std::ofstream file(kSettingsPath, std::ios::out | std::ios::trunc);
+                    if (file.is_open()) {
+                        file << settings.dump(2) << "\n";
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            response["error"] = e.what();
+            return response.dump();
+        }
+
+        const auto mark = mark_for_detour(ctx.get_visible_config(), detour);
+        response["updated"] = refresh_catalog_if_stale(/*force=*/true, mark);
+        response["detour"] = detour;
         return response.dump();
     });
 }

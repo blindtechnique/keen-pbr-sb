@@ -3,6 +3,7 @@ import { Redirect, Route, Switch } from "wouter"
 import { AppShell } from "@/components/layout/app-shell"
 import { AuthGate } from "@/components/auth-gate"
 import { ScrollToTopOnRouteChange } from "@/components/layout/scroll-route"
+import { CatalogPage } from "@/pages/catalog-page"
 import { DnsRuleUpsertPage } from "@/pages/dns-rule-upsert-page"
 import { DnsRulesPage } from "@/pages/dns-rules-page"
 import { DnsServersPage } from "@/pages/dns-servers-page"
@@ -33,6 +34,7 @@ function App() {
           <Route path="/lists/:listId/edit">
             {(params) => <ListUpsertPage listId={params.listId} mode="edit" />}
           </Route>
+          <Route component={CatalogPage} path="/catalog" />
           <Route component={ListsPage} path="/lists" />
           <Route path="/outbounds/create">
             <OutboundUpsertPage mode="create" />

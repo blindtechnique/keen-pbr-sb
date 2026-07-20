@@ -5,6 +5,7 @@
 #include "handlers.hpp"
 #include "server.hpp"
 
+#include <cstdint>
 #include <string>
 
 namespace keen_pbr3 {
@@ -19,7 +20,14 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx);
 
 // Downloads the catalogue when the cached copy is older than a week.
 // Returns true when a fresh copy was stored.
-bool refresh_catalog_if_stale(bool force = false);
+//
+// The fwmark routes the download through a tunnel. It matters more here than
+// for ordinary lists: the catalogue lives on GitHub, which is exactly the kind
+// of host a user reaches for this software because they cannot reach directly.
+bool refresh_catalog_if_stale(bool force = false, uint32_t fwmark = 0);
+
+// Outbound tag the catalogue should be downloaded through, empty for direct.
+std::string catalog_detour();
 
 } // namespace keen_pbr3
 

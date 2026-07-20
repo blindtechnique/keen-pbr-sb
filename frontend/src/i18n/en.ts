@@ -96,6 +96,7 @@ export const enTranslation = {
     disabled: "Disabled",
     close: "Close",
     cancel: "Cancel",
+    saving: "Saving…",
     copy: "Copy",
     copied: "Copied",
     clipboardUnavailable: "Clipboard unavailable",
@@ -175,6 +176,7 @@ export const enTranslation = {
     },
     items: {
       systemMonitor: "Dashboard",
+      catalog: "List catalogue",
       settings: "Settings",
       outbounds: "Outbounds",
       transports: "Transports",
@@ -603,6 +605,41 @@ export const enTranslation = {
     },
   },
   pages: {
+    catalog: {
+      title: "List catalogue",
+      description:
+        "Ready-made sets of domains and rules. Pick the ones you want and say where their traffic should go.",
+      source: "Source:",
+      updatedAt: "updated {{date}}",
+      count: "{{count}} lists",
+      downloadVia: "Download via",
+      directly: "Directly",
+      checkNow: "Check now",
+      refreshed: "Catalogue updated",
+      refreshFailed:
+        "Could not refresh; showing the previous catalogue. Try downloading through a tunnel.",
+      searchPlaceholder: "Search by name",
+      empty: "Nothing found",
+      ruleSet: "rule set",
+      domains: "{{count}} domains",
+      actionTunnel: "tunnel",
+      actionBlock: "block",
+      alreadyAdded: "already added",
+      selected: "Selected: {{count}}",
+      routeTo: "Route to",
+      add: "Add",
+      added: "Lists added: {{count}}",
+      categories: {
+        all: "All",
+        ai: "AI",
+        social: "Social",
+        media: "Media",
+        developer: "Development",
+        cloud: "Cloud",
+        gaming: "Gaming",
+        block: "Blocking",
+      },
+    },
     settings: {
       remoteAccess: {
         title: "Access from outside",

@@ -96,6 +96,7 @@ export const ruTranslation = {
     disabled: "Выключено",
     close: "Закрыть",
     cancel: "Отмена",
+    saving: "Сохранение…",
     copy: "Копировать",
     copied: "Скопировано",
     clipboardUnavailable: "Буфер обмена недоступен",
@@ -176,6 +177,7 @@ export const ruTranslation = {
     },
     items: {
       systemMonitor: "Дашборд",
+      catalog: "Каталог списков",
       settings: "Настройки",
       outbounds: "Outbounds (выходы)",
       transports: "Транспорты",
@@ -611,6 +613,41 @@ export const ruTranslation = {
     },
   },
   pages: {
+    catalog: {
+      title: "Каталог списков",
+      description:
+        "Готовые наборы доменов и правил. Выберите нужные и укажите, куда направлять их трафик.",
+      source: "Источник:",
+      updatedAt: "обновлён {{date}}",
+      count: "{{count}} списков",
+      downloadVia: "Скачивать через",
+      directly: "Напрямую",
+      checkNow: "Проверить сейчас",
+      refreshed: "Каталог обновлён",
+      refreshFailed:
+        "Обновить не удалось, показан прежний каталог. Попробуйте скачать через туннель.",
+      searchPlaceholder: "Поиск по названию",
+      empty: "Ничего не найдено",
+      ruleSet: "готовый набор",
+      domains: "{{count}} доменов",
+      actionTunnel: "в туннель",
+      actionBlock: "блокировать",
+      alreadyAdded: "уже добавлен",
+      selected: "Выбрано: {{count}}",
+      routeTo: "Направить в",
+      add: "Добавить",
+      added: "Добавлено списков: {{count}}",
+      categories: {
+        all: "Все",
+        ai: "AI",
+        social: "Соцсети",
+        media: "Медиа",
+        developer: "Разработка",
+        cloud: "Облака",
+        gaming: "Игры",
+        block: "Блокировка",
+      },
+    },
     settings: {
       remoteAccess: {
         title: "Доступ снаружи",

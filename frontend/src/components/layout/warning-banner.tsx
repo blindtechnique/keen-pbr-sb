@@ -73,13 +73,14 @@ export function WarningBanner({
   }
 
   return (
-    // Sits under the system bar instead of floating above the page: the old
-    // fixed footer covered action buttons at the bottom of long forms.
+    // Floats over the page rather than taking a row of its own: as a sticky
+    // block it pushed the whole layout down every time a field changed, and
+    // the page jumped back up on save.
     <div
       ref={containerRef}
       className={cn(
-        "sticky top-0 z-30 border-b md:top-16",
-        "bg-card/95 backdrop-blur-md",
+        "absolute inset-x-0 top-0 z-30 border-b md:top-16",
+        "bg-[#E6E7E9]/85 backdrop-blur-md",
         isError
           ? "border-destructive/40"
           : isConverging

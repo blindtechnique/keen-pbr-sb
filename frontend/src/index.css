@@ -220,6 +220,18 @@
     border-color: transparent;
   }
 
+  /* KeeneticOS labels the panels on its dashboard in small caps, which reads
+     as a section marker rather than as another heading competing with the
+     page title. */
+  .keen-canvas-overview [data-slot="card-title"] {
+    text-transform: uppercase;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 20px;
+    letter-spacing: 0.04em;
+    color: var(--foreground);
+  }
+
   /* Header strip on its own tone with a hairline under it: on white the
      column titles simply dissolved into the page. */
   [data-slot="table"] thead th {

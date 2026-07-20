@@ -32,7 +32,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           Skip to content
         </a>
         <AppSidebar />
-        <SidebarInset className="max-w-full min-w-0 overflow-x-clip bg-transparent">
+        <SidebarInset className="relative max-w-full min-w-0 overflow-x-clip bg-transparent">
           <MobileSidebarHeader />
           <DesktopSystemBar />
           <WarningBanner state={warningBannerState} />
