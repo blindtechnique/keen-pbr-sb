@@ -91,13 +91,16 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
       <SidebarHeader className={isMobile ? "h-16 bg-card px-4 py-2" : "h-16 justify-center bg-card px-4 py-0 group-data-[collapsible=icon]:px-2"}>
         <SidebarMenuHeader isMobile={isMobile} onMenuClick={toggleSidebar} />
       </SidebarHeader>
-      <SidebarContent className="border-r px-2 py-3">
+      {/* No horizontal padding: in KeeneticOS the selected row runs from the
+          screen edge all the way to the hairline, and any padding here leaves
+          it floating in the middle of the column. */}
+      <SidebarContent className="border-r px-0 py-0">
         <NavMain items={data.navMain} />
       </SidebarContent>
-      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t px-3 py-3 group-data-[collapsible=icon]:hidden"}>
+      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t border-r px-3 py-3 group-data-[collapsible=icon]:hidden"}>
         <div className="space-y-3">
           <Button
-            className="w-full justify-start"
+            className="w-full justify-start text-primary hover:bg-accent hover:text-primary"
             onClick={async () => {
               await fetch("/api/auth/logout", { method: "POST" })
               window.location.assign("/")

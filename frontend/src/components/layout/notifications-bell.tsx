@@ -86,7 +86,7 @@ export function NotificationsBell() {
         render={
           <Button
             aria-label={t("notifications.title")}
-            className="relative size-9 text-muted-foreground hover:text-foreground"
+            className="relative size-9 text-primary hover:bg-accent hover:text-primary"
             size="icon"
             title={t("notifications.title")}
             variant="ghost"

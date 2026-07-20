@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react"
 import { GripVerticalIcon } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
+import { cn } from "@/lib/utils"
 import {
   Table,
   TableBody,
@@ -150,11 +151,15 @@ export function DataTable({
 
             return (
               <TableRow
-                className={
-                  isDropTarget
-                    ? "outline outline-2 -outline-offset-2 outline-primary/60"
-                    : undefined
-                }
+                className={cn(
+                  "transition-[background-color,box-shadow,opacity] duration-150",
+                  hasReorder && dragIndex === index &&
+                    "keen-row-dragging relative z-10",
+                  isDropTarget &&
+                    (dragIndex !== null && dragIndex < index
+                      ? "keen-row-drop-after"
+                      : "keen-row-drop-before")
+                )}
                 draggable={hasReorder && dragIndex === index}
                 key={hasSelection ? rowId || index : `${row[0]}-${index}`}
                 onDragEnd={() => {

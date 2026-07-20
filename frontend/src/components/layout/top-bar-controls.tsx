@@ -100,7 +100,7 @@ function IconMenu({
         render={
           <Button
             aria-label={label}
-            className="size-9 text-muted-foreground hover:text-foreground"
+            className="size-9 text-primary hover:bg-accent hover:text-primary"
             size="icon"
             title={label}
             variant="ghost"

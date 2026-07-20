@@ -282,14 +282,52 @@
     letter-spacing: 0.02em;
   }
 
-  [data-slot="sidebar-menu-button"] {
+  [data-slot="sidebar-menu-button"],
+  [data-slot="sidebar-menu-sub-button"] {
     font-size: 14px;
     font-weight: 400;
+    line-height: 20px;
     min-height: 36px;
   }
 
-  [data-slot="sidebar-menu-button"]:hover {
+  [data-slot="sidebar-menu-button"]:hover,
+  [data-slot="sidebar-menu-sub-button"]:hover {
     background: #F0F0F0;
+  }
+
+  .dark [data-slot="sidebar-menu-button"]:hover,
+  .dark [data-slot="sidebar-menu-sub-button"]:hover {
+    background: color-mix(in srgb, var(--sidebar-accent) 55%, transparent);
+  }
+
+  /* The selected row in KeeneticOS spans the whole column - from the screen
+     edge to the hairline - so the padding that centres the label must live on
+     the label, never on the container. */
+  [data-slot="sidebar-menu-sub"],
+  [data-slot="sidebar-content"] > [data-slot="sidebar-group"] {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  [data-slot="sidebar-menu-sub-button"] {
+    width: 100%;
+    border-radius: 0;
+  }
+
+  /* Dragging in KeeneticOS lifts the row and marks the gap it would fall into,
+     instead of swapping rows under the cursor - the swap is what made ours
+     jump about. */
+  .keen-row-dragging > td {
+    background: linear-gradient(#EBEBEB, #F2F2F2);
+    opacity: 0.9;
+  }
+
+  .keen-row-drop-before > td {
+    box-shadow: inset 0 2px 0 0 var(--primary);
+  }
+
+  .keen-row-drop-after > td {
+    box-shadow: inset 0 -2px 0 0 var(--primary);
   }
 
   .keen-service-state {

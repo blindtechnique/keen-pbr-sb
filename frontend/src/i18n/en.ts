@@ -604,6 +604,19 @@ export const enTranslation = {
   },
   pages: {
     settings: {
+      remoteAccess: {
+        title: "Access from outside",
+        description: "Reach the web interface from the internet, not just from the home network.",
+        enabled: "Allow access from the internet",
+        port: "External port",
+        portHint: "The port the panel answers on from outside. Pick something non-obvious.",
+        warning:
+          "The panel becomes reachable by anyone who knows the address and port, with only the password protecting it. Use this only if you accept that risk.",
+        loginDisabled:
+          "Turn on login first. Without it the panel would sit on the internet with no password at all.",
+        save: "Save",
+        saved: "Access settings saved",
+      },
       logging: {
         title: "Log",
         description: "What keen-pbr-sb records about its own work.",

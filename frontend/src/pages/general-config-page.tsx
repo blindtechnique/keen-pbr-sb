@@ -27,6 +27,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { SchedulePicker } from "@/components/shared/schedule-picker"
 import { AuthSettingsCard } from "@/components/settings/auth-settings-card"
 import { LoggingSettingsCard } from "@/components/settings/logging-settings-card"
+import { RemoteAccessCard } from "@/components/settings/remote-access-card"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { Button } from "@/components/ui/button"
 import {
@@ -352,6 +353,8 @@ function LoadedGeneralConfigPage({
       <AuthSettingsCard />
 
       <LoggingSettingsCard />
+
+      <RemoteAccessCard />
 
       <Card>
         <CardHeader>

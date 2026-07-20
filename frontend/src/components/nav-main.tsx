@@ -41,12 +41,12 @@ export function NavMain({
 
             return (
               <SidebarMenuItem key={item.title}>
-                <div className="mt-1 flex h-8 items-center gap-2.5 px-2 text-[11px] font-semibold tracking-[0.04em] text-primary uppercase group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
+                <div className="mt-2 flex h-9 items-center gap-2.5 px-4 text-[12px] leading-[20px] font-bold tracking-[0.02em] text-primary uppercase group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
                   {Icon ? <Icon className="size-4 text-primary" /> : null}
                   <span className="group-data-[collapsible=icon]:hidden">{item.title}</span>
                 </div>
                 {hasChildren ? (
-                  <SidebarMenuSub className="mx-1 border-l-0 px-0">
+                  <SidebarMenuSub className="mx-0 translate-x-0 border-l-0 px-0">
                     {item.items?.map((subItem) => {
                       const navActive = matchesNavHref(location, subItem.url)
 
@@ -56,8 +56,8 @@ export function NavMain({
                             aria-current={navActive ? "page" : undefined}
                             className={
                               navActive
-                                ? "h-8 min-h-8 rounded-none border-0 bg-sidebar-accent px-3 text-[13px] font-medium text-foreground"
-                                : "h-8 min-h-8 rounded-none border-0 px-3 text-[13px] text-foreground hover:bg-sidebar-accent/70"
+                                ? "h-9 min-h-9 translate-x-0 rounded-none border-0 bg-sidebar-accent px-4 text-[14px] font-normal text-sidebar-accent-foreground"
+                                : "h-9 min-h-9 translate-x-0 rounded-none border-0 px-4 text-[14px] font-normal text-foreground hover:bg-[#F0F0F0]"
                             }
                             data-nav-item={subItem.url}
                             href={subItem.url}

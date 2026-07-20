@@ -10,19 +10,24 @@ export function PageHeader({
   actions?: ReactNode
 }) {
   return (
-    <header className="mb-4 flex flex-col gap-3 border-b border-border/80 pb-3 md:flex-row md:items-end md:justify-between">
+    <header className="mb-2 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
       <div className="min-w-0">
+        {/* NDMS sets page titles in 28px Roboto Bold and gives the description
+            its own 72px band in plain black - not the small grey subtitle we
+            had, which read as a caption rather than as part of the page. */}
         <h1
-          className="text-balance text-[1.375rem] leading-7 font-medium tracking-[-0.01em] text-foreground"
+          className="text-balance text-[28px] leading-[36px] font-bold text-foreground"
           id="page-title"
         >
           {title}
         </h1>
-        <p className="mt-1 max-w-[68ch] text-pretty text-[13px] leading-5 text-muted-foreground">
-          {description}
-        </p>
+        <div className="flex min-h-[72px] items-start">
+          <p className="mt-2 max-w-[110ch] text-pretty text-[14px] leading-[20px] text-foreground">
+            {description}
+          </p>
+        </div>
       </div>
-      {actions}
+      {actions ? <div className="md:mt-2 md:shrink-0">{actions}</div> : null}
     </header>
   )
 }

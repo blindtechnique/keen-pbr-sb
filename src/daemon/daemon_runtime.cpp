@@ -10,6 +10,9 @@
 #include "../firewall/firewall_runtime.hpp"
 #include "../log/logger.hpp"
 #include "../routing/urltest_manager.hpp"
+#ifdef WITH_API
+#include "../api/handler_catalog.hpp"
+#endif
 #include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
 #include "../util/cron.hpp"
@@ -273,6 +276,25 @@ void Daemon::probe_interfaces_now() {
     blocking_executor_.try_post("interface-probe", [this, targets]() {
         interface_probe_.probe(targets);
     });
+}
+
+void Daemon::schedule_catalog_refresh() {
+#ifdef WITH_API
+    // Once a day the scheduler asks; the refresh itself only downloads when the
+    // cached copy is older than a week. Checking daily means a router that was
+    // off for a while catches up promptly instead of waiting a full week.
+    constexpr auto kInterval = std::chrono::hours(24);
+
+    scheduler_->schedule_oneshot(
+        kInterval,
+        [this]() {
+            blocking_executor_.try_post("catalog-refresh", []() {
+                refresh_catalog_if_stale();
+            });
+            schedule_catalog_refresh();
+        },
+        "catalog-refresh");
+#endif
 }
 
 void Daemon::schedule_interface_probe() {

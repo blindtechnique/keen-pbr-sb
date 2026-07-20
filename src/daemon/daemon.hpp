@@ -186,6 +186,8 @@ private:
     void schedule_startup_firewall_retry(int attempt = 1);
     // Periodic HTTP probe of every interface outbound.
     void schedule_interface_probe();
+    // Weekly refresh of the ready-made list catalogue.
+    void schedule_catalog_refresh();
     // Runs a probe round immediately, for the manual refresh button.
     void probe_interfaces_now();
     ListsRefreshExecutionResult execute_remote_list_refresh(

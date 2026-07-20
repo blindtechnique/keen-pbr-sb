@@ -22,7 +22,8 @@
 #include "scheduler.hpp"
 
 #ifdef WITH_API
-#include "../api/handlers.hpp" // IWYU pragma: keep
+#include "../api/handlers.hpp"
+#include "../api/handler_remote_access.hpp" // IWYU pragma: keep
 #include "../api/server.hpp"
 #include "../api/sse_broadcaster.hpp"
 #endif
@@ -624,6 +625,10 @@ void Daemon::run() {
 
     schedule_lists_autoupdate();
     schedule_interface_probe();
+    schedule_catalog_refresh();
+#ifdef WITH_API
+    apply_remote_access_rules();
+#endif
 
     if (preload_result.any_relevant_changed()) {
         apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
