@@ -78,6 +78,13 @@ export function MultiSelectList({
 }) {
   const { t } = useTranslation()
   const [selectValue, setSelectValue] = useState("")
+  // Two separate states on purpose. Pressing the handle only *arms* the row -
+  // it makes it draggable, nothing more. The placeholder look arrives later,
+  // when the browser reports that a drag has actually begun. Doing both at
+  // once is what broke this: the placeholder hides the row's contents, the
+  // pointer was over hidden content before the gesture started, and the drag
+  // was cancelled before it could begin.
+  const [armedIndex, setArmedIndex] = useState<number | null>(null)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const selectedSet = new Set(value)
   const unavailableSet = new Set(unavailable)
@@ -202,8 +209,12 @@ export function MultiSelectList({
                 // gap: the placeholder alone says where the row will land.
                 allowReorder && dragIndex === index && "keen-drag-lifted"
               )}
-              draggable={allowReorder && dragIndex === index}
-              onDragEnd={() => setDragIndex(null)}
+              draggable={allowReorder && armedIndex === index}
+              onDragEnd={() => {
+                setDragIndex(null)
+                setArmedIndex(null)
+              }}
+              onDragStart={() => setDragIndex(index)}
               onDragOver={(event) => {
                 if (!allowReorder || dragIndex === null) return
                 event.preventDefault()
@@ -221,6 +232,7 @@ export function MultiSelectList({
                   onChange(nextValue)
                 }
                 setDragIndex(null)
+                setArmedIndex(null)
               }}
             >
               {allowReorder ? (
@@ -231,10 +243,13 @@ export function MultiSelectList({
                       defaultValue: "Переместить {{item}}",
                     })}
                     className="cursor-grab px-0.5 text-muted-foreground active:cursor-grabbing"
-                    // The row stays undraggable until the handle is pressed,
-                    // so selecting the label still works.
-                    draggable
-                    onDragStart={() => setDragIndex(index)}
+                    // The handle is deliberately not draggable itself: a nested
+                    // draggable element steals the gesture from the row, and
+                    // the row is what has to travel. Pressing it only marks the
+                    // row as draggable, which keeps text selection working in
+                    // every other row.
+                    onPointerDown={() => setArmedIndex(index)}
+                    onPointerUp={() => setArmedIndex(null)}
                     role="button"
                   >
                     <GripVertical className="h-4 w-4" />

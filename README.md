@@ -256,10 +256,6 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb
 - [nfqws/nfqws-keenetic-web](https://github.com/nfqws/nfqws-keenetic-web) — функции управления, перенесённые в общий интерфейс;
 - [hoaxisr/awg-manager](https://github.com/hoaxisr/awg-manager) — подборка готовых rule-set для списков адресов: каталог шаблонов в интерфейсе собран по её мотивам. Часть ссылок ведёт на репозиторий автора `repo.hoaxisr.ru`, часть — на официальный [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite).
 
-## Разработка
-
-Исходники находятся в ветке `main`. Инструкция синхронизации с оригинальным keen-pbr — в `docs/FORK_MAINTENANCE.ru.md`.
-
 ## Лицензия
 
 [GPLv3](LICENSE). Исходный код форка, transport-manager, установщик и веб-интерфейс открыты. Сторонние зависимости находятся в `third_party` вместе со своими лицензиями.
