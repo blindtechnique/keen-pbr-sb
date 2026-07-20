@@ -8,7 +8,7 @@ import {
   WorkflowIcon,
 } from "lucide-react"
 import { useState } from "react"
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
@@ -110,6 +110,7 @@ function LatencyPill({
 }
 
 export function TransportsPage() {
+  const queryClient = useQueryClient()
   const { t } = useTranslation()
   const [, navigate] = useLocation()
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -126,6 +127,43 @@ export function TransportsPage() {
   const { locationOf } = useServerLocations(
     items.map((item) => item.server ?? "")
   )
+
+  // libcronet.so — сетевой стек Chromium, без которого sing-box не умеет
+  // naive. Он весит десятки мегабайт, поэтому не ставится вместе с пакетом:
+  // спрашиваем только когда naive-транспорт действительно появился.
+  const naiveComponentQuery = useQuery<{ installed: boolean }>({
+    queryKey: ["naive-component"],
+    queryFn: async () => {
+      const response = await fetch("/api/system/naive-component")
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    },
+    staleTime: 60_000,
+    retry: false,
+  })
+  const naiveInstallMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch("/api/system/naive-component", {
+        method: "POST",
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return (await response.json()) as { installed: boolean; log?: string }
+    },
+    onSuccess: async (body) => {
+      await queryClient.invalidateQueries({ queryKey: ["naive-component"] })
+      if (body.installed) {
+        toast.success(t("transports.naiveComponent.installed"))
+      } else {
+        toast.error(body.log || t("transports.naiveComponent.failed"), {
+          richColors: true,
+        })
+      }
+    },
+    onError: () => toast.error(t("transports.naiveComponent.failed")),
+  })
+  const needsNaiveComponent =
+    items.some((item) => item.protocol === "naive") &&
+    naiveComponentQuery.data?.installed === false
   const error = getApiErrorMessage(query.error as ApiError | null)
   const configQuery = useGetTransportConfig()
   const keenConfigQuery = useGetConfig()
@@ -420,6 +458,25 @@ export function TransportsPage() {
         </Alert>
       ) : null}
 
+      {needsNaiveComponent ? (
+        <Alert className="mb-6" variant="warning">
+          <AlertTitle>{t("transports.naiveComponent.title")}</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <p>{t("transports.naiveComponent.description")}</p>
+            <Button
+              disabled={naiveInstallMutation.isPending}
+              onClick={() => naiveInstallMutation.mutate()}
+              size="sm"
+              variant="outline"
+            >
+              {naiveInstallMutation.isPending
+                ? t("transports.naiveComponent.installing")
+                : t("transports.naiveComponent.install")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {!query.isLoading && !error && items.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
@@ -431,29 +488,20 @@ export function TransportsPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         {items.map((item) => (
           <Card className="min-w-0 overflow-hidden" key={item.tag}>
-            <CardHeader className="min-w-0 flex-col items-start gap-3 sm:flex-row sm:justify-between">
+            <CardHeader className="min-w-0 flex-row items-start justify-between gap-3">
               <div className="min-w-0">
-                <CardTitle className="break-words [overflow-wrap:anywhere]">
-                  {item.tag}
-                </CardTitle>
+                <CardTitle className="truncate">{item.tag}</CardTitle>
                 {/* Что за туннель и куда он ведёт — двумя словами. Тип
                     («sing-box») говорит, кто его запускает, а не что внутри,
                     поэтому впереди стоит протокол. */}
-                <p className="mt-1 text-sm text-muted-foreground">
+                <p className="mt-1 truncate text-sm text-muted-foreground">
                   {describeTransport(item, locationOf(item.server))}
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {item.state === "up" ? (
-                  <Badge size="xs" variant="success">
-                    <span className="mr-1.5 size-1.5 rounded-full bg-current" />
-                    {t("transports.states.connected")}
-                  </Badge>
-                ) : (
-                  <Badge size="xs" variant="secondary">
-                    {t(`transports.states.${item.state}`)}
-                  </Badge>
-                )}
+              {/* Выключатель — в правом верхнем углу: это единственное
+                  действие, которое меняет состояние туннеля, и искать его
+                  среди кнопок внизу незачем. */}
+              <div className="flex shrink-0 items-center gap-2">
                 {item.state === "up" ? (
                   <LatencyPill
                     fallbackMs={transportLatencyByInterface.get(item.interface)}
@@ -462,86 +510,112 @@ export function TransportsPage() {
                     refreshing={runProbeMutation.isPending}
                     t={t}
                   />
+                ) : (
+                  <Badge size="xs" variant="secondary">
+                    {t(`transports.states.${item.state}`)}
+                  </Badge>
+                )}
+                {item.type !== "native" ? (
+                  <Switch
+                    aria-label={
+                      item.desired_up
+                        ? t("transports.stop")
+                        : t("transports.start")
+                    }
+                    checked={item.desired_up}
+                    disabled={actionMutation.isPending}
+                    onCheckedChange={(checked) =>
+                      actionMutation.mutate({
+                        data: {
+                          tag: item.tag,
+                          action: checked
+                            ? TransportActionRequestAction.up
+                            : TransportActionRequestAction.down,
+                        },
+                      })
+                    }
+                  />
                 ) : null}
               </div>
             </CardHeader>
-            <CardContent className="grid min-w-0 gap-2 text-sm">
+            <CardContent className="grid min-w-0 gap-1.5 text-sm">
+              {/* Три строки, всегда одни и те же и в одном порядке: только так
+                  соседние карточки стоят вровень. Всё необязательное ушло
+                  ниже, в строку значков, где отсутствие ничего не двигает. */}
               <TransportField
                 label={t("transports.interface")}
                 value={item.interface}
               />
-              {/* Номер процесса убран: на него нельзя ни нажать, ни что-то
-                  с ним сделать из интерфейса, а место он занимал наравне с
-                  тем, что действительно нужно знать. */}
               <TransportField
-                label={t("transports.updatedAt")}
-                value={new Date(item.updated_at).toLocaleString()}
+                label={t("transports.server")}
+                value={
+                  item.server
+                    ? describeServer(
+                        item.server,
+                        item.server_port,
+                        locationOf(item.server)
+                      )
+                    : "—"
+                }
               />
-              {item.type !== "native" ? (
-                <TransportField
-                  label={t("transports.autoRecovery")}
-                  value={
-                    item.desired_up
-                      ? t("transports.enabled")
-                      : t("transports.paused")
-                  }
-                />
-              ) : null}
-              {dnsServersByInterface.has(item.interface) ? (
-                <TransportField
-                  label={t("transports.dnsDetour")}
-                  value={(dnsServersByInterface.get(item.interface) ?? []).join(
-                    ", "
-                  )}
-                />
-              ) : null}
-              {item.retry_count ? (
-                <TransportField
-                  label={t("transports.retryCount")}
-                  value={String(item.retry_count)}
-                />
-              ) : null}
-              {item.next_retry_at ? (
-                <TransportField
-                  label={t("transports.nextRetryAt")}
-                  value={new Date(item.next_retry_at).toLocaleString()}
-                />
-              ) : null}
+              <TransportField
+                label={t("transports.connection")}
+                value={describeConnection(item) || "—"}
+              />
+
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                {dnsServersByInterface.has(item.interface) ? (
+                  <Badge size="xs" variant="outline">
+                    {t("transports.dnsDetour")}:{" "}
+                    {(dnsServersByInterface.get(item.interface) ?? []).join(", ")}
+                  </Badge>
+                ) : null}
+                {item.type !== "native" && !item.desired_up ? (
+                  <Badge size="xs" variant="secondary">
+                    {t("transports.paused")}
+                  </Badge>
+                ) : null}
+                {item.retry_count ? (
+                  <Badge size="xs" variant="warning">
+                    {t("transports.retryCount")}: {item.retry_count}
+                  </Badge>
+                ) : null}
+              </div>
+
               {item.error ? (
-                <p className="mt-2 rounded-md bg-destructive/10 p-3 text-destructive">
+                <p className="mt-1 rounded-md bg-destructive/10 p-2 text-xs text-destructive">
                   {item.error}
                 </p>
               ) : null}
-              {item.server ? (
-                <TransportField
-                  label={t("transports.server")}
-                  value={describeServer(
-                    item.server,
-                    item.server_port,
-                    locationOf(item.server)
-                  )}
-                />
-              ) : null}
-              {describeConnection(item) ? (
-                <TransportField
-                  label={t("transports.connection")}
-                  value={describeConnection(item)}
-                />
-              ) : null}
+
               {item.type === "native" ? (
-                <p className="mt-2 text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   {t("transports.nativeManagedExternally")}
                 </p>
-              ) : (
-                <TransportActions
-                  item={item}
-                  mutation={actionMutation}
-                  restartLabel={t("transports.restart")}
-                  startLabel={t("transports.start")}
-                  stopLabel={t("transports.stop")}
-                />
-              )}
-              <div className="mt-2 flex min-w-0 flex-wrap items-center justify-start gap-2 border-t pt-4 sm:justify-end">
+              ) : null}
+              {/* Перезапуск слева, редкие действия справа: запуск и
+                  остановка переехали в выключатель наверху, и держать их
+                  ещё и здесь стало нечем оправдать. */}
+              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
+                {item.type !== "native" ? (
+                  <Button
+                    disabled={actionMutation.isPending}
+                    onClick={() =>
+                      actionMutation.mutate({
+                        data: {
+                          tag: item.tag,
+                          action: TransportActionRequestAction.restart,
+                        },
+                      })
+                    }
+                    size="sm"
+                    variant="outline"
+                  >
+                    <RefreshCwIcon />
+                    {t("transports.restart")}
+                  </Button>
+                ) : null}
+                <span className="ml-auto flex flex-wrap items-center gap-2">
                 {item.server ? (
                   <Button
                     className="h-auto max-w-full whitespace-normal text-left"
@@ -597,6 +671,7 @@ export function TransportsPage() {
                   <TrashIcon />
                   {t("common.delete")}
                 </Button>
+                </span>
               </div>
             </CardContent>
           </Card>
@@ -630,79 +705,6 @@ export function TransportsPage() {
         open={Boolean(deleting)}
         title={t("transports.deleteTitle")}
       />
-    </div>
-  )
-}
-
-function TransportActions({
-  item,
-  mutation,
-  restartLabel,
-  startLabel,
-  stopLabel,
-}: {
-  item: TransportStatus
-  mutation: ReturnType<typeof usePostTransportActionMutation>
-  restartLabel: string
-  startLabel: string
-  stopLabel: string
-}) {
-  const isRunning = item.state === "up" || item.state === "starting"
-  // Only the card whose action is in flight reacts: a restart briefly takes the
-  // transport down, so the pending action decides what stays on screen instead
-  // of the live state, and other cards remain operable.
-  const isPendingForItem =
-    mutation.isPending && mutation.variables?.data.tag === item.tag
-  const pendingAction = isPendingForItem
-    ? mutation.variables?.data.action
-    : undefined
-  const isRestarting = pendingAction === TransportActionRequestAction.restart
-  // While a restart is in flight the transport dips to "down"; keep the switch
-  // reading as on so it does not flicker mid-operation.
-  const switchChecked = isRestarting ? true : isRunning
-
-  return (
-    <div className="mt-3 flex min-w-0 flex-wrap items-center justify-between gap-3 border-t pt-4">
-      <label className="flex min-w-0 cursor-pointer items-center gap-2">
-        <Switch
-          aria-label={switchChecked ? stopLabel : startLabel}
-          checked={switchChecked}
-          disabled={isPendingForItem}
-          onCheckedChange={(checked) =>
-            mutation.mutate({
-              data: {
-                tag: item.tag,
-                action: checked
-                  ? TransportActionRequestAction.up
-                  : TransportActionRequestAction.down,
-              },
-            })
-          }
-        />
-        <span className="truncate text-sm text-muted-foreground">
-          {isPendingForItem && !isRestarting
-            ? "…"
-            : switchChecked
-              ? stopLabel
-              : startLabel}
-        </span>
-      </label>
-      <Button
-        className="h-auto max-w-full whitespace-normal"
-        disabled={isPendingForItem || !switchChecked}
-        onClick={() =>
-          mutation.mutate({
-            data: {
-              tag: item.tag,
-              action: TransportActionRequestAction.restart,
-            },
-          })
-        }
-        variant="outline"
-      >
-        <RefreshCwIcon className={isRestarting ? "animate-spin" : undefined} />
-        {restartLabel}
-      </Button>
     </div>
   )
 }

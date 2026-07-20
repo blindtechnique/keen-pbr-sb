@@ -3,7 +3,7 @@ import type { ReactNode } from "react"
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
@@ -26,6 +26,7 @@ import { selectConfig, selectOutbounds } from "@/api/selectors"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { OutboundCard } from "@/components/outbounds/outbound-card"
+import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
@@ -106,6 +107,36 @@ export function OutboundsPage() {
   // Сколько правил ведёт в это направление и сколько списков через них
   // проходит. Это единственное, чего в прежней таблице не было совсем, а
   // именно оно отвечает на вопрос «можно ли это удалить».
+  // Проверка задержки бьёт по всем точкам выхода разом: у демона одна
+  // общая проверка, отдельной «проверь только этот» не существует.
+  const probeMutation = useMutation({
+    mutationFn: async () => {
+      const response = await fetch("/api/system/probes/run", {
+        method: "POST",
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    },
+    onSuccess: () => {
+      // Проверка идёт в фоне; читать результат сразу нечего.
+      setTimeout(
+        () =>
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.runtimeOutbounds(),
+          }),
+        2_000
+      )
+    },
+    onError: () => toast.error(t("transports.latencyRefreshFailed")),
+  })
+
+  const { protocolOf, protocolOfGroup } = useInterfaceProtocols()
+  // Тег группы резервирования складывается из тегов её участников, а те
+  // известны только по их собственным outbound: отсюда поиск интерфейса
+  // по имени участника.
+  const interfaceOfTag = (tag: string) =>
+    selectOutbounds(loadedConfig).find((item) => item.tag === tag)?.interface ?? ""
+
   const usageByOutbound = new Map<string, { lists: number; rules: number }>()
   for (const rule of loadedConfig?.route?.rules ?? []) {
     if (!rule.outbound) continue
@@ -264,9 +295,16 @@ export function OutboundsPage() {
                 onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
                 onToggleSelected={() => outboundSelection.toggleOne(item.id)}
                 outbound={item.outbound}
+                protocol={
+                  item.outbound.type === "urltest"
+                    ? protocolOfGroup(item.outbound, interfaceOfTag)
+                    : protocolOf(item.outbound.interface ?? "")
+                }
                 runtimeState={item.runtimeState}
                 selectLabel={t("common.selection.selectRow", { rowLabel: item.id })}
                 selected={outboundSelection.selectedIds.has(item.id)}
+                onRefreshLatency={() => probeMutation.mutate()}
+                refreshingLatency={probeMutation.isPending}
                 selectionDisabled={configMutationPending}
                 usage={usageByOutbound.get(item.id) ?? { lists: 0, rules: 0 }}
               />

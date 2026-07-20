@@ -70,6 +70,8 @@ func parseShareLink(link string) (map[string]any, error) {
 		return parseTUICLink(u)
 	case "anytls":
 		return parseAnyTLSLink(u)
+	case "naive+https", "naive+quic", "naive":
+		return parseNaiveLink(u)
 	case "socks", "socks5", "http", "https":
 		return parseProxyLink(u)
 	default:
@@ -149,7 +151,12 @@ func parseTUICLink(u *url.URL) (map[string]any, error) {
 		return nil, err
 	}
 	uuid := userName(u)
-	password, _ := u.User.Password()
+	// Ссылка без учётных данных допустима, и u.User тогда nil:
+	// обращение к нему напрямую уронило бы весь процесс.
+	var password string
+	if u.User != nil {
+		password, _ = u.User.Password()
+	}
 	if uuid == "" || password == "" {
 		return nil, fmt.Errorf("tuic link is missing UUID or password")
 	}
@@ -465,4 +472,46 @@ func summariseOutbound(outbound map[string]any) (port int, security, sni, networ
 	}
 
 	return port, security, sni, network
+}
+
+// parseNaiveLink разбирает ссылку вида naive+https://user:password@host:443.
+//
+// Такой формат печатают клиенты NaiveProxy: схема составная, а всё остальное
+// — обычный URL. TLS у naive обязателен и своих настроек почти не имеет:
+// sing-box принимает только имя сервера и сертификаты, поэтому из запроса
+// берётся разве что sni.
+//
+// Схема naive+quic переключает транспорт с HTTP/2 на QUIC.
+func parseNaiveLink(u *url.URL) (map[string]any, error) {
+	server, port, err := endpoint(u)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ссылка без пароля допустима, и u.User тогда nil.
+	var password string
+	if u.User != nil {
+		password, _ = u.User.Password()
+	}
+	out := map[string]any{
+		"type":        "naive",
+		"server":      server,
+		"server_port": port,
+	}
+	setString(out, "username", userName(u))
+	setString(out, "password", password)
+
+	q := u.Query()
+	serverName := first(q, "sni", "serverName", "peer")
+	if serverName == "" {
+		serverName = server
+	}
+	out["tls"] = map[string]any{"enabled": true, "server_name": serverName}
+
+	if strings.EqualFold(u.Scheme, "naive+quic") {
+		out["quic"] = true
+		setString(out, "quic_congestion_control", q.Get("congestion_control"))
+	}
+
+	return out, nil
 }

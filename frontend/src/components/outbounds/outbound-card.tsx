@@ -1,4 +1,4 @@
-import { Pencil } from "lucide-react"
+import { Pencil, RotateCw } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import type {
@@ -6,6 +6,7 @@ import type {
   RuntimeInterfaceState,
   RuntimeOutboundState,
 } from "@/api/generated/model"
+import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
 import { useInterfaceNames } from "@/hooks/use-interface-names"
@@ -29,6 +30,9 @@ export function OutboundCard({
   outbound,
   runtimeState,
   usage,
+  protocol,
+  onRefreshLatency,
+  refreshingLatency,
   selected,
   selectionDisabled,
   onToggleSelected,
@@ -38,6 +42,12 @@ export function OutboundCard({
   outbound: Outbound
   runtimeState?: RuntimeOutboundState
   usage: OutboundUsage
+  /** Короткая метка протокола: VLESS, AWG, WG. Пусто, если выяснить нечем. */
+  protocol?: string
+  /** Проверка задержки. Нативным туннелям прошивки она нужна ровно так же,
+      как туннелям sing-box, а кнопка до сих пор жила только у последних. */
+  onRefreshLatency?: () => void
+  refreshingLatency?: boolean
   selected: boolean
   selectionDisabled?: boolean
   onToggleSelected: () => void
@@ -65,10 +75,15 @@ export function OutboundCard({
           disabled={selectionDisabled}
           onCheckedChange={onToggleSelected}
         />
-        <div className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-foreground">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="truncate text-sm font-medium text-foreground">
             {outbound.tag}
           </span>
+          {protocol ? (
+            <Badge className="font-mono text-[10px]" size="xs" variant="outline">
+              {protocol}
+            </Badge>
+          ) : null}
         </div>
         <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
           <span
@@ -87,6 +102,20 @@ export function OutboundCard({
                 defaultValue: "",
               })}
         </span>
+        {onRefreshLatency ? (
+          <IconButtonWithTooltip
+            className="-mt-1 size-7 shrink-0"
+            disabled={refreshingLatency}
+            label={t("transports.latencyRefresh")}
+            onClick={onRefreshLatency}
+            size="icon"
+            variant="ghost"
+          >
+            <RotateCw
+              className={cn("h-3.5 w-3.5", refreshingLatency && "animate-spin")}
+            />
+          </IconButtonWithTooltip>
+        ) : null}
         <IconButtonWithTooltip
           className="-mt-1 size-7 shrink-0"
           label={t("common.edit")}

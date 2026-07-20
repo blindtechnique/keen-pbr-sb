@@ -80,7 +80,9 @@ function MobileSidebarHeader() {
   const { toggleSidebar } = useSidebar()
 
   return (
-    <div className="sticky top-0 z-30 bg-card md:hidden">
+    // Тень такая же, как у настольной шапки: на телефоне содержимое
+    // подъезжает под неё вплотную, и без тени граница просто исчезает.
+    <div className="keen-header-shadow sticky top-0 z-30 bg-card md:hidden">
       <div className="flex items-center gap-2 px-4 py-2.5">
         <AppBrandHeader
           className="min-w-0 flex-1"

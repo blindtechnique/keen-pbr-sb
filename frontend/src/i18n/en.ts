@@ -178,7 +178,7 @@ export const enTranslation = {
       systemMonitor: "Dashboard",
       catalog: "List catalogue",
       settings: "Settings",
-      outbounds: "Interfaces",
+      outbounds: "Exit points",
       transports: "Transports (sing-box)",
       connections: "Connections",
       dnsServers: "DNS Servers",
@@ -221,9 +221,19 @@ export const enTranslation = {
     route: "Route",
   },
   transports: {
+    naiveComponent: {
+      title: "Naive needs a separate component",
+      description:
+        "NaiveProxy runs on Chromium's network stack, which sing-box keeps in a separate library of several dozen megabytes. It is not installed with the package so it does not take up room on routers that never use naive. It can be fetched now, from the same sing-box release that is installed.",
+      install: "Fetch the component",
+      installing: "Fetching…",
+      installed: "Component installed, the transport can start",
+      failed: "Could not fetch the component",
+    },
     latencyValue: "{{value}} ms",
     latencyAge: "{{seconds}}s ago",
     latencyRefresh: "Measure now",
+    latencyRefreshFailed: "Could not start the check",
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
       title: "sing-box is not installed",
@@ -274,8 +284,8 @@ export const enTranslation = {
       delete: "Transport deleted",
     },
     form: {
-      createOutbound: "Create an outbound right away",
-      createOutboundHint: "Adds an interface outbound with the same tag so the transport can be picked in routing rules immediately.",
+      createOutbound: "Make it an exit point",
+      createOutboundHint: "The tunnel appears among the exit points under the same name and can be picked in routing rules straight away.",
       outboundExists: "An outbound tagged {{tag}} already exists",
       createTitle: "Add transport",
       editTitle: "Edit transport",
@@ -320,9 +330,9 @@ export const enTranslation = {
       title: "A transport is not a route yet",
       description:
         "First bind the transport interface to an Interface outbound. For automatic switching, create a URLTest outbound and add two or more interface outbounds to its groups.",
-      createOutbound: "Create interface outbound",
+      createOutbound: "Make it an exit point",
       createFailover: "Create failover (URLTest)",
-      bindOutbound: "Create outbound for this interface",
+      bindOutbound: "Make it an exit point",
     },
     states: {
       connected: "Connected",
@@ -457,7 +467,7 @@ export const enTranslation = {
         unavailable: "Unavailable",
         unknown: "Unknown",
       },
-      title: "Outbounds health",
+      title: "Exit points",
       loadError: "Unable to load outbound health.",
       emptyTitle: "No outbounds configured",
       emptyDescription: "Add outbounds to see health checks.",
@@ -1030,7 +1040,7 @@ export const enTranslation = {
         failover: "Failover groups",
         system: "System outbounds",
       },
-      title: "Interfaces",
+      title: "Exit points",
       description: "Your configured outbounds and urltest groups.",
       actions: { new: "Add outbound" },
       bulk: {

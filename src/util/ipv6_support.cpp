@@ -73,7 +73,12 @@ void log_ipv6_support_decision_once(const Ipv6SupportDecision& decision) {
 
     if (decision.reason == Ipv6SupportDecision::Reason::DisabledByConfig) {
         if (!logged_user_disabled) {
-            Logger::instance().warn("IPv6 support disabled by config; running IPv4-only");
+            // Не предупреждение: человек сам выключил IPv6 в настройках, и
+            // сообщать ему об исполнении его же решения как о проблеме -
+            // значит поднимать тревогу на пустом месте. В колокольчике
+            // собираются предупреждения и ошибки, и эта строка засоряла его
+            // при каждом запуске.
+            Logger::instance().verbose("IPv6 disabled in the configuration; running IPv4-only");
             logged_user_disabled = true;
         }
         return;

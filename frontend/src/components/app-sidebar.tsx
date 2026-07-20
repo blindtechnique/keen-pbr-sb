@@ -55,12 +55,12 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             url: "/transports",
           },
           {
-            title: t("nav.items.connections"),
-            url: "/connections",
-          },
-          {
             title: "nfqws2",
             url: "/nfqws",
+          },
+          {
+            title: t("nav.items.connections"),
+            url: "/connections",
           },
           {
             title: t("nav.items.dnsServers"),
