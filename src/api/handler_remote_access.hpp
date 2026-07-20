@@ -16,9 +16,17 @@ namespace keen_pbr3 {
 // worth offering behind a single switch.
 void register_remote_access_handler(ApiServer& server, ApiContext& ctx);
 
-// Re-applies the stored rules. Called at startup and after firewall rebuilds,
-// because the firmware wipes rules it does not own on network events.
-void apply_remote_access_rules();
+// Re-applies the stored rules. Called at startup and after every firewall
+// rebuild: the firmware reapplies its own firewall on network events and wipes
+// rules it does not own, so applying once at startup was not enough.
+//
+// listen_address is the panel's own bind address. A panel bound to loopback
+// cannot be published no matter what the firewall says, and that failure is
+// invisible from the outside - it looks exactly like a blocked port.
+void apply_remote_access_rules(const std::string& listen_address = {});
+
+// True when the configured bind address can accept connections from outside.
+bool listen_address_is_reachable(const std::string& listen_address);
 
 } // namespace keen_pbr3
 

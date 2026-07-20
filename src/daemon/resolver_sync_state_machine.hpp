@@ -36,6 +36,17 @@ public:
 
     ResolverSyncSnapshot snapshot(std::int64_t now_ts) const;
 
+    // How many probes in a row have failed. The caller uses this to decide
+    // whether a failure is worth telling the user about: one is noise, several
+    // in a row is a symptom.
+    int consecutive_probe_failures() const {
+        return consecutive_probe_failures_;
+    }
+
+    // A failure only discards what we already knew once it repeats. Clearing on
+    // the first miss made a single lost datagram look like a stale resolver.
+    static constexpr int kFailuresBeforeClearing = 3;
+
 private:
     std::string expected_hash_;
     std::string actual_hash_;
@@ -43,6 +54,7 @@ private:
     std::optional<std::int64_t> last_probe_ts_;
     std::optional<std::int64_t> apply_started_ts_;
     api::ResolverConfigProbeStatus probe_status_{api::ResolverConfigProbeStatus::UNKNOWN};
+    int consecutive_probe_failures_{0};
     bool runtime_active_{true};
     bool resolver_configured_{true};
 };

@@ -40,8 +40,16 @@ ResolverConfigHashTxtValue parse_resolver_config_hash_txt(const std::string& txt
 // Validate whether the parsed payload contains a usable md5 hash.
 bool is_valid_resolver_config_hash_txt_value(const ResolverConfigHashTxtValue& value);
 // Query and classify the resolver config-hash TXT payload in one step.
+//
+// The query is UDP against a dnsmasq that also serves the whole household, so
+// a single lost or late reply says nothing about whether the configuration is
+// live. Retrying a few times before reporting failure is what separates "the
+// resolver is out of sync" from "one datagram went missing".
 ResolverConfigHashProbeResult query_resolver_config_hash_txt(const std::string& dns_server_address,
                                                             const std::string& domain,
-                                                            std::chrono::milliseconds timeout);
+                                                            std::chrono::milliseconds timeout,
+                                                            int attempts = 3,
+                                                            std::chrono::milliseconds retry_delay =
+                                                                std::chrono::milliseconds(300));
 
 } // namespace keen_pbr3

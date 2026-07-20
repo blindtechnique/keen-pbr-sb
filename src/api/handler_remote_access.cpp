@@ -111,7 +111,18 @@ void drop_rules() {
 
 } // namespace
 
-void apply_remote_access_rules() {
+bool listen_address_is_reachable(const std::string& listen_address) {
+    if (listen_address.empty()) {
+        // Nothing to check against; assume the caller knows better than we do.
+        return true;
+    }
+    const auto colon = listen_address.rfind(':');
+    const auto host = colon == std::string::npos ? listen_address
+                                                 : listen_address.substr(0, colon);
+    return host != "127.0.0.1" && host != "localhost" && host != "::1";
+}
+
+void apply_remote_access_rules(const std::string& listen_address) {
     std::lock_guard<std::mutex> lock(settings_mutex());
     const auto settings = load_settings();
 
@@ -123,6 +134,16 @@ void apply_remote_access_rules() {
     if (!login_required()) {
         Logger::instance().warn(
             "Remote access is enabled in settings but login is off; keeping the panel closed");
+        return;
+    }
+    // Opening the firewall in front of a loopback-only listener produces a
+    // port that accepts nothing, which from outside is indistinguishable from
+    // a blocked one - so say it plainly instead of pretending it worked.
+    if (!listen_address_is_reachable(listen_address)) {
+        Logger::instance().error(
+            "Remote access cannot work: the panel is bound to {}, which only accepts "
+            "connections from the router itself. Set api.listen to 0.0.0.0:<port> and restart.",
+            listen_address);
         return;
     }
 
@@ -156,16 +177,23 @@ void apply_remote_access_rules() {
         wan, port);
 }
 
-void register_remote_access_handler(ApiServer& server, ApiContext& /*ctx*/) {
-    server.get("/api/system/remote-access", []() -> std::string {
+void register_remote_access_handler(ApiServer& server, ApiContext& ctx) {
+    server.get("/api/system/remote-access", [&ctx]() -> std::string {
+        const auto config = ctx.get_visible_config();
+        const auto listen = config.api.has_value()
+                                ? config.api->listen.value_or(std::string{})
+                                : std::string{};
+
         std::lock_guard<std::mutex> lock(settings_mutex());
         auto settings = load_settings();
         settings["login_required"] = login_required();
         settings["internal_port"] = kInternalPort;
+        settings["listen"] = listen;
+        settings["listen_reachable"] = listen_address_is_reachable(listen);
         return settings.dump();
     });
 
-    server.post("/api/system/remote-access", [](const std::string& body) -> std::string {
+    server.post("/api/system/remote-access", [&ctx](const std::string& body) -> std::string {
         nlohmann::json response;
         try {
             const auto request = nlohmann::json::parse(body);
@@ -183,6 +211,16 @@ void register_remote_access_handler(ApiServer& server, ApiContext& /*ctx*/) {
                 return response.dump();
             }
 
+            const auto config = ctx.get_visible_config();
+            const auto listen = config.api.has_value()
+                                    ? config.api->listen.value_or(std::string{})
+                                    : std::string{};
+            if (enabled && !listen_address_is_reachable(listen)) {
+                response["error"] = "listen_loopback";
+                response["listen"] = listen;
+                return response.dump();
+            }
+
             nlohmann::json settings;
             settings["enabled"] = enabled;
             settings["port"] = port;
@@ -191,7 +229,7 @@ void register_remote_access_handler(ApiServer& server, ApiContext& /*ctx*/) {
                 return response.dump();
             }
 
-            apply_remote_access_rules();
+            apply_remote_access_rules(listen);
             response["ok"] = true;
             response["settings"] = settings;
         } catch (const std::exception& e) {

@@ -22,6 +22,8 @@ type RemoteAccess = {
   port: number
   login_required: boolean
   internal_port: number
+  listen?: string
+  listen_reachable?: boolean
 }
 
 /**
@@ -60,11 +62,17 @@ export function RemoteAccessCard() {
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok || data.error) {
-        throw new Error(
-          data.error === "login_disabled"
-            ? t("pages.settings.remoteAccess.loginDisabled")
-            : data.error || `HTTP ${response.status}`
-        )
+        if (data.error === "login_disabled") {
+          throw new Error(t("pages.settings.remoteAccess.loginDisabled"))
+        }
+        if (data.error === "listen_loopback") {
+          throw new Error(
+            t("pages.settings.remoteAccess.listenLoopback", {
+              listen: data.listen,
+            })
+          )
+        }
+        throw new Error(data.error || `HTTP ${response.status}`)
       }
       return data
     },
@@ -76,6 +84,10 @@ export function RemoteAccessCard() {
   })
 
   const loginRequired = query.data?.login_required ?? false
+  // A panel bound to loopback cannot be published at all; from outside that
+  // looks exactly like a blocked port, so it has to be said here.
+  const listenReachable = query.data?.listen_reachable ?? true
+  const blocked = !loginRequired || !listenReachable
 
   return (
     <Card>
@@ -95,10 +107,21 @@ export function RemoteAccessCard() {
           </Alert>
         ) : null}
 
+        {!listenReachable ? (
+          <Alert className="border-warning/40 bg-warning/10">
+            <AlertTriangleIcon className="size-4 text-warning" />
+            <AlertDescription>
+              {t("pages.settings.remoteAccess.listenLoopback", {
+                listen: query.data?.listen ?? "",
+              })}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         <div className="flex items-center gap-3">
           <Switch
             checked={enabled}
-            disabled={!loginRequired}
+            disabled={blocked}
             id="remote-access-enabled"
             onCheckedChange={setEnabled}
           />
@@ -135,7 +158,7 @@ export function RemoteAccessCard() {
 
         <div className="flex justify-end">
           <Button
-            disabled={saveMutation.isPending || !loginRequired}
+            disabled={saveMutation.isPending || blocked}
             onClick={() => saveMutation.mutate()}
           >
             {saveMutation.isPending

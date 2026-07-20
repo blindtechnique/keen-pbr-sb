@@ -12,6 +12,7 @@
 #include "../routing/urltest_manager.hpp"
 #ifdef WITH_API
 #include "../api/handler_catalog.hpp"
+#include "../api/handler_remote_access.hpp"
 #endif
 #include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
@@ -167,6 +168,15 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         list_service_.cache_manager(),
         *firewall_,
         mode));
+
+#ifdef WITH_API
+    // The firmware reapplies its own firewall on every network event and drops
+    // rules it does not own, so the remote access hole has to be restored
+    // alongside ours rather than only once at startup.
+    apply_remote_access_rules(config_.api.has_value()
+                                  ? config_.api->listen.value_or(std::string{})
+                                  : std::string{});
+#endif
 }
 
 void Daemon::download_uncached_lists() {

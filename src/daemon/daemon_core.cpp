@@ -627,7 +627,9 @@ void Daemon::run() {
     schedule_interface_probe();
     schedule_catalog_refresh();
 #ifdef WITH_API
-    apply_remote_access_rules();
+    apply_remote_access_rules(config_.api.has_value()
+                                  ? config_.api->listen.value_or(std::string{})
+                                  : std::string{});
 #endif
 
     if (preload_result.any_relevant_changed()) {

@@ -237,17 +237,38 @@ void Daemon::commit_resolver_hash_probe_result(
                 }
             } else if (probe_result.has_value()) {
                 resolver_sync_.probe_failed(probe_result->status, probe_completed_ts);
+                // The probe already retried; a first failure after that is
+                // still ordinary UDP life and does not belong in front of the
+                // user. Only a run of them says the resolver is really out.
+                const bool persistent =
+                    resolver_sync_.consecutive_probe_failures() >=
+                    ResolverSyncStateMachine::kFailuresBeforeClearing;
                 switch (probe_result->status) {
                 case ResolverConfigHashProbeStatus::QUERY_FAILED:
-                    Logger::instance().warn(
-                        "Resolver config hash TXT query failed via {}: {}; clearing actual value",
-                        resolver_addr,
-                        probe_result->error);
+                    if (persistent) {
+                        Logger::instance().warn(
+                            "Resolver does not answer the config hash query via {} ({} attempts): {}",
+                            resolver_addr,
+                            resolver_sync_.consecutive_probe_failures(),
+                            probe_result->error);
+                    } else {
+                        Logger::instance().verbose(
+                            "Resolver config hash query did not answer via {}: {}; will retry",
+                            resolver_addr,
+                            probe_result->error);
+                    }
                     break;
                 case ResolverConfigHashProbeStatus::NO_USABLE_TXT:
-                    Logger::instance().warn(
-                        "Resolver config hash TXT is missing via {}; clearing actual value",
-                        resolver_addr);
+                    if (persistent) {
+                        Logger::instance().warn(
+                            "Resolver config hash TXT is missing via {} ({} attempts); clearing actual value",
+                            resolver_addr,
+                            resolver_sync_.consecutive_probe_failures());
+                    } else {
+                        Logger::instance().verbose(
+                            "Resolver config hash TXT is not there yet via {}; will retry",
+                            resolver_addr);
+                    }
                     break;
                 case ResolverConfigHashProbeStatus::INVALID_TXT:
                     Logger::instance().warn(

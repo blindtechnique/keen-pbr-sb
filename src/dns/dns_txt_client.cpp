@@ -13,6 +13,7 @@
 #include <resolv.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -412,9 +413,20 @@ bool is_valid_resolver_config_hash_txt_value(const ResolverConfigHashTxtValue& v
     });
 }
 
-ResolverConfigHashProbeResult query_resolver_config_hash_txt(const std::string& dns_server_address,
-                                                             const std::string& domain,
-                                                             std::chrono::milliseconds timeout) {
+namespace {
+
+// A dropped datagram and a dnsmasq that is mid-reload both look like this, and
+// neither means the configuration is stale. An answer that parses but carries
+// the wrong payload does mean something, so it is not retried.
+bool is_transient_probe_status(ResolverConfigHashProbeStatus status) {
+    return status == ResolverConfigHashProbeStatus::QUERY_FAILED ||
+           status == ResolverConfigHashProbeStatus::NO_USABLE_TXT;
+}
+
+ResolverConfigHashProbeResult query_resolver_config_hash_txt_once(
+    const std::string& dns_server_address,
+    const std::string& domain,
+    std::chrono::milliseconds timeout) {
     ResolverConfigHashProbeResult result;
     try {
         auto txt = query_dns_txt_record(dns_server_address, domain, timeout, &result.error);
@@ -439,6 +451,34 @@ ResolverConfigHashProbeResult query_resolver_config_hash_txt(const std::string& 
         result.error = e.what();
         return result;
     }
+}
+
+} // namespace
+
+ResolverConfigHashProbeResult query_resolver_config_hash_txt(
+    const std::string& dns_server_address,
+    const std::string& domain,
+    std::chrono::milliseconds timeout,
+    int attempts,
+    std::chrono::milliseconds retry_delay) {
+    ResolverConfigHashProbeResult result;
+
+    for (int attempt = 1; attempt <= std::max(1, attempts); ++attempt) {
+        result = query_resolver_config_hash_txt_once(dns_server_address, domain, timeout);
+        if (!is_transient_probe_status(result.status)) {
+            return result;
+        }
+        if (attempt < attempts) {
+            Logger::instance().trace("resolver_hash_probe_retry",
+                                     "resolver={} domain={} attempt={} status=transient",
+                                     dns_server_address,
+                                     domain,
+                                     attempt);
+            std::this_thread::sleep_for(retry_delay);
+        }
+    }
+
+    return result;
 }
 
 } // namespace keen_pbr3

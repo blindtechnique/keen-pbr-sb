@@ -651,6 +651,8 @@ export const enTranslation = {
           "The panel becomes reachable by anyone who knows the address and port, with only the password protecting it. Use this only if you accept that risk.",
         loginDisabled:
           "Turn on login first. Without it the panel would sit on the internet with no password at all.",
+        listenLoopback:
+          "The panel listens on {{listen}}, an address that only accepts connections from the router itself, so it cannot be published. Set api.listen to 0.0.0.0:12121 in config.json and restart the service.",
         save: "Save",
         saved: "Access settings saved",
       },

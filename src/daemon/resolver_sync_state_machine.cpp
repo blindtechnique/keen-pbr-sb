@@ -43,6 +43,7 @@ void ResolverSyncStateMachine::runtime_stopped() {
     actual_ts_.reset();
     last_probe_ts_.reset();
     probe_status_ = api::ResolverConfigProbeStatus::NOT_CONFIGURED;
+    consecutive_probe_failures_ = 0;
 }
 
 void ResolverSyncStateMachine::resolver_not_configured() {
@@ -52,6 +53,7 @@ void ResolverSyncStateMachine::resolver_not_configured() {
     actual_ts_.reset();
     last_probe_ts_.reset();
     probe_status_ = api::ResolverConfigProbeStatus::NOT_CONFIGURED;
+    consecutive_probe_failures_ = 0;
 }
 
 void ResolverSyncStateMachine::expected_hash_updated(std::string expected_hash) {
@@ -65,6 +67,9 @@ void ResolverSyncStateMachine::apply_started(std::int64_t ts, std::string expect
     resolver_configured_ = true;
     apply_started_ts_ = ts;
     expected_hash_ = std::move(expected_hash);
+    // A fresh apply starts a new observation window: failures from before it
+    // say nothing about the configuration that is being installed now.
+    consecutive_probe_failures_ = 0;
 }
 
 void ResolverSyncStateMachine::probe_succeeded(std::string actual_hash,
@@ -76,13 +81,18 @@ void ResolverSyncStateMachine::probe_succeeded(std::string actual_hash,
     actual_ts_ = actual_ts;
     last_probe_ts_ = probe_ts;
     probe_status_ = api::ResolverConfigProbeStatus::SUCCESS;
+    consecutive_probe_failures_ = 0;
 }
 
 void ResolverSyncStateMachine::probe_failed(ResolverConfigHashProbeStatus status,
                                             std::optional<std::int64_t> probe_ts) {
     runtime_active_ = true;
     resolver_configured_ = true;
-    if (status != ResolverConfigHashProbeStatus::QUERY_FAILED) {
+    ++consecutive_probe_failures_;
+    // A missing TXT during a dnsmasq reload is indistinguishable from a stale
+    // resolver, so both wait for the failure to repeat before we act on it.
+    if (status != ResolverConfigHashProbeStatus::QUERY_FAILED &&
+        consecutive_probe_failures_ >= kFailuresBeforeClearing) {
         actual_hash_.clear();
         actual_ts_.reset();
     }
