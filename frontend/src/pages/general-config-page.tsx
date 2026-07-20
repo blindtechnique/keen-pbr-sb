@@ -203,6 +203,8 @@ function LoadedGeneralConfigPage({
 
   return (
     <>
+      <SoftwareUpdateCard />
+
       <Card>
         <CardHeader>
           <CardTitle>{t("pages.settings.general.title")}</CardTitle>
@@ -531,8 +533,6 @@ function LoadedGeneralConfigPage({
           </FieldGroup>
         </CardContent>
       </Card>
-
-      <SoftwareUpdateCard />
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 

@@ -22,7 +22,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div
         className={cn(
           "flex min-h-screen w-full max-w-full overflow-x-clip",
-          isOverview ? "bg-background" : "bg-[var(--page)]"
+          isOverview ? "keen-canvas-overview" : "keen-canvas-page"
         )}
       >
         <a

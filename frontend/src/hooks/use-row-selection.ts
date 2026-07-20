@@ -52,8 +52,22 @@ export function useRowSelection(rowIds: string[]) {
     toggleOne: (rowId: string) => {
       setSelectedIdsRaw((previous) => toggleSelectedId(previous, rowIds, rowId))
     },
-    setAllVisible: (selected: boolean) => {
-      setSelectedIdsRaw(selectVisibleIds(rowIds, selected))
+    // Scope matters: a page can render several tables over one selection, as
+    // outbounds do with their groups. Without the explicit list, ticking the
+    // header box in one group selected every row on the page.
+    setAllVisible: (selected: boolean, scopedRowIds?: Iterable<string>) => {
+      const scope = scopedRowIds ? [...scopedRowIds] : rowIds
+      setSelectedIdsRaw((previous) => {
+        const next = pruneSelectedIds(previous, rowIds)
+        for (const id of scope) {
+          if (selected) {
+            next.add(id)
+          } else {
+            next.delete(id)
+          }
+        }
+        return next
+      })
     },
     clear: () => {
       setSelectedIdsRaw(new Set())

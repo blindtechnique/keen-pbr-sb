@@ -5,43 +5,43 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: #eff1f2;
+  --background: #EDEEF0;
   --foreground: #26343f;
   --card: #ffffff;
-  --page: #fafbfb;
+  --page: #FFFFFF;
   --card-foreground: #26343f;
   --popover: #ffffff;
   --popover-foreground: #26343f;
-  --primary: #0086cb;
+  --primary: #1B87C8;
   --primary-foreground: #ffffff;
-  --secondary: #f4f7f8;
+  --secondary: #F5FAFC;
   --secondary-foreground: #26343f;
-  --muted: #fafbfc;
-  --muted-foreground: #6f7d87;
-  --accent: #e5f4fa;
-  --accent-foreground: #006da6;
-  --destructive: oklch(0.577 0.245 27.325);
+  --muted: #FAFAFA;
+  --muted-foreground: #949B9F;
+  --accent: #ECF5FA;
+  --accent-foreground: #1B87C8;
+  --destructive: #DB3F3E;
   --destructive-foreground: oklch(1 0 0);
-  --warning: oklch(0.769 0.188 70.08);
+  --warning: #E5952D;
   --warning-foreground: oklch(52.354% 0.12011 59.695);
-  --success: #23974a;
+  --success: #17815C;
   --success-foreground: oklch(0.98 0 0);
-  --border: #e8ecee;
-  --input: #cfd7dc;
-  --ring: #0086cb;
+  --border: #EBEBEB;
+  --input: #BDB7B7;
+  --ring: #7FBCE0;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: #f4f6f7;
+  --sidebar: #FAFAFA;
   --sidebar-foreground: #31404b;
-  --sidebar-primary: #0086cb;
+  --sidebar-primary: #1B87C8;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e6eaec;
+  --sidebar-accent: #EBEBEB;
   --sidebar-accent-foreground: #202020;
-  --sidebar-border: #e4e8ea;
-  --sidebar-ring: #0086cb;
+  --sidebar-border: #EBEBEB;
+  --sidebar-ring: #7FBCE0;
   --font-sans:
     Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif,
@@ -216,17 +216,53 @@
     box-shadow: none;
   }
 
+  .keen-canvas-overview [data-slot="card"] {
+    border-color: transparent;
+  }
+
+  /* Header strip on its own tone with a hairline under it: on white the
+     column titles simply dissolved into the page. */
+  [data-slot="table"] thead th {
+    font-weight: 400;
+    color: var(--muted-foreground);
+    background: #FAFAFA;
+    border-bottom: 1px solid #EBEBEB;
+  }
+
+  .dark [data-slot="table"] thead th {
+    background: color-mix(in srgb, var(--card) 70%, #000);
+    border-bottom-color: var(--border);
+  }
+
   [data-slot="table"] tbody tr {
-    border-color: #f1f4f5;
+    border-color: #EBEBEB;
+  }
+
+  [data-slot="table"] tbody tr:hover {
+    background: #F5FAFC;
   }
 
   .dark [data-slot="table"] tbody tr {
     border-color: color-mix(in srgb, var(--border) 55%, transparent);
   }
 
-  [data-slot="table"] thead th {
-    font-weight: 400;
-    color: var(--muted-foreground);
+  .dark [data-slot="table"] tbody tr:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  /* The tint that gives KeeneticOS its depth: a short gradient right under the
+     header rather than a flat fill. Overview is the darker of the two. */
+  .keen-canvas-overview {
+    background: linear-gradient(#E8E9EB, #EDEEF0 140px);
+  }
+
+  .keen-canvas-page {
+    background: linear-gradient(#F8F8F8, #FFFFFF 110px);
+  }
+
+  .dark .keen-canvas-overview,
+  .dark .keen-canvas-page {
+    background: var(--background);
   }
 
   .dark [data-slot="card"] {
@@ -237,6 +273,23 @@
   [data-slot="textarea"],
   [data-slot="select-trigger"] {
     background-color: var(--card);
+  }
+
+  [data-sidebar="group-label"] {
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 20px;
+    letter-spacing: 0.02em;
+  }
+
+  [data-slot="sidebar-menu-button"] {
+    font-size: 14px;
+    font-weight: 400;
+    min-height: 36px;
+  }
+
+  [data-slot="sidebar-menu-button"]:hover {
+    background: #F0F0F0;
   }
 
   .keen-service-state {

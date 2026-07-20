@@ -16,7 +16,7 @@ export type DataTableSelection = {
   selectedIds: ReadonlySet<string>
   disabled?: boolean
   onToggle: (rowId: string) => void
-  onToggleAll: (checked: boolean) => void
+  onToggleAll: (checked: boolean, rowIds?: string[]) => void
   selectAllLabel?: string
   getRowLabel: (rowId: string) => string
 }
@@ -130,7 +130,7 @@ export function DataTable({
                           selection!.disabled || visibleRowIds.length === 0
                         }
                         onCheckedChange={(checked) => {
-                          selection!.onToggleAll(checked === true)
+                          selection!.onToggleAll(checked === true, selection!.rowIds)
                         }}
                       />
                     </div>
