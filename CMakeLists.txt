@@ -304,6 +304,7 @@ if(WITH_API)
     src/api/handler_logs.cpp
     src/api/handler_router_info.cpp
     src/api/handler_catalog.cpp
+    src/api/handler_ndms_names.cpp
     src/api/handler_remote_access.cpp
   )
 endif()

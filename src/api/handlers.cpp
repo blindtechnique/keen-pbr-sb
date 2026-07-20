@@ -16,6 +16,7 @@
 #include "handler_logs.hpp"
 #include "handler_router_info.hpp"
 #include "handler_catalog.hpp"
+#include "handler_ndms_names.hpp"
 #include "handler_remote_access.hpp"
 
 namespace keen_pbr3 {
@@ -36,6 +37,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_logs_handler(server, ctx);
     register_router_info_handler(server, ctx);
     register_catalog_handler(server, ctx);
+    register_ndms_names_handler(server, ctx);
     register_remote_access_handler(server, ctx);
 }
 
