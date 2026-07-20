@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next"
 
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model"
 import { FieldError } from "@/components/shared/field"
+import { useInterfaceNames } from "@/hooks/use-interface-names"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -368,6 +369,9 @@ export function InterfaceRowContent({
   showAddressesInline?: boolean
 }) {
   const { t } = useTranslation()
+  const { labelFor } = useInterfaceNames()
+  const label = labelFor(name)
+  const hasFirmwareLabel = label !== name
   const addresses = interfaceEntry ? getInterfaceAddresses(interfaceEntry) : []
   const className = cn(
     "flex min-h-5 min-w-0 flex-wrap items-center gap-2",
@@ -376,9 +380,17 @@ export function InterfaceRowContent({
 
   const content = (
     <>
+      {/* Название из NDMS впереди, имя ядра следом и тише. Настраивать
+          маршрутизацию без второго нельзя, а узнать интерфейс по первому
+          куда проще. */}
       <span className="truncate text-sm font-medium text-foreground">
-        {name}
+        {label}
       </span>
+      {hasFirmwareLabel ? (
+        <span className="truncate font-mono text-xs text-muted-foreground">
+          {name}
+        </span>
+      ) : null}
       {interfaceEntry ? (
         <>
           <InterfaceStatusBadge status={interfaceEntry.status} />

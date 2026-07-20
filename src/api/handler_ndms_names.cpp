@@ -7,6 +7,7 @@
 #include <chrono>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 
 namespace keen_pbr3 {
@@ -30,6 +31,22 @@ std::string trim(const std::string& value) {
     }
     const auto end = value.find_last_not_of(" \t\r\n");
     return value.substr(begin, end - begin + 1);
+}
+
+std::optional<bool> boolean_field(const nlohmann::json& entry,
+                                  const char* key,
+                                  const char* truthy_word) {
+    const auto found = entry.find(key);
+    if (found == entry.end()) {
+        return std::nullopt;
+    }
+    if (found->is_boolean()) {
+        return found->get<bool>();
+    }
+    if (found->is_string()) {
+        return found->get<std::string>() == truthy_word;
+    }
+    return std::nullopt;
 }
 
 // NDMS keeps the user's own label in "description"; when it is empty the
@@ -71,15 +88,14 @@ nlohmann::json build_names() {
         info["label"] = description.empty() ? id : description;
         info["id"] = id;
         info["type"] = entry.value("type", std::string{});
-        if (entry.contains("connected")) {
-            info["connected"] = entry["connected"].is_string()
-                                    ? entry["connected"].get<std::string>() == "yes"
-                                    : entry["connected"].get<bool>();
+        // NDMS answers with "yes"/"up" on some firmwares and with a real bool
+        // on others. Anything else is left out rather than forced: a surprise
+        // type here used to throw out of the whole request.
+        if (const auto flag = boolean_field(entry, "connected", "yes")) {
+            info["connected"] = *flag;
         }
-        if (entry.contains("link")) {
-            info["link"] = entry["link"].is_string()
-                               ? entry["link"].get<std::string>() == "up"
-                               : entry["link"].get<bool>();
+        if (const auto flag = boolean_field(entry, "link", "up")) {
+            info["link"] = *flag;
         }
 
         names[kernel_name] = info;
@@ -94,12 +110,18 @@ void register_ndms_names_handler(ApiServer& server, ApiContext& /*ctx*/) {
     server.get("/api/system/interface-names", []() -> std::string {
         static nlohmann::json cached = nlohmann::json::object();
         static std::chrono::steady_clock::time_point fetched_at{};
+        static bool fetched_once = false;
 
         std::lock_guard<std::mutex> lock(cache_mutex());
         const auto now = std::chrono::steady_clock::now();
-        if (cached.empty() || now - fetched_at > kCacheTtl) {
+        // The emptiness of the answer must be cached too. Where there is no
+        // firmware API the map is always empty, and treating that as "not
+        // cached yet" meant a three-second HTTP attempt on every single
+        // request of a page that polls.
+        if (!fetched_once || now - fetched_at > kCacheTtl) {
             cached = build_names();
             fetched_at = now;
+            fetched_once = true;
         }
 
         nlohmann::json response;

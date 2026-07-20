@@ -178,7 +178,7 @@ export const enTranslation = {
       systemMonitor: "Dashboard",
       catalog: "List catalogue",
       settings: "Settings",
-      outbounds: "Outbounds",
+      outbounds: "Where traffic goes",
       transports: "Transports",
       connections: "Connections",
       dnsServers: "DNS Servers",
@@ -239,6 +239,7 @@ export const enTranslation = {
     empty: "No transports configured.",
     interface: "Interface",
     server: "Server",
+    connection: "Connection",
     loopProtection: {
       action: "Exclude server from tunnel",
       confirm:
@@ -1018,7 +1019,7 @@ export const enTranslation = {
         failover: "Failover groups",
         system: "System outbounds",
       },
-      title: "Outbounds",
+      title: "Where traffic goes",
       description: "Your configured outbounds and urltest groups.",
       actions: { new: "Add outbound" },
       bulk: {

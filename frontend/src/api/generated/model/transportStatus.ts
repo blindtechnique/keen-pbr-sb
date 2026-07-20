@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { TransportStatusSecurity } from './transportStatusSecurity';
 import type { TransportStatusState } from './transportStatusState';
 
 export interface TransportStatus {
@@ -13,6 +14,16 @@ export interface TransportStatus {
   interface: string;
   /** Proxy server hostname or IP, exposed without credentials for loop-prevention setup. */
   server?: string;
+  /** Port of the proxy server. Not a secret, and needed to tell one endpoint from another. */
+  server_port?: number;
+  /** Tunnel protocol carried inside the transport - vless, trojan, hysteria2 and so on. */
+  protocol?: string;
+  /** How the connection is protected. Absent for protocols carrying no TLS layer. */
+  security?: TransportStatusSecurity;
+  /** Server name presented during the TLS handshake. */
+  sni?: string;
+  /** Carrier inside the connection - tcp, ws, grpc, http. */
+  network?: string;
   state: TransportStatusState;
   pid?: number;
   error?: string;

@@ -23,6 +23,16 @@ type Status struct {
 	Type        string     `json:"type"`
 	Interface   string     `json:"interface"`
 	Server      string     `json:"server,omitempty"`
+	// Не секреты: порт, вид защиты, SNI и вид транспорта видны любому
+	// наблюдателю на линии, зато без них по карточке невозможно понять,
+	// куда и как именно уходит соединение.
+	ServerPort  int        `json:"server_port,omitempty"`
+	// Протокол самого туннеля - vless, trojan, hysteria2 и прочие. Тип
+	// транспорта ("sing-box") говорит, кто его запускает, а не что внутри.
+	Protocol    string     `json:"protocol,omitempty"`
+	Security    string     `json:"security,omitempty"`
+	SNI         string     `json:"sni,omitempty"`
+	Network     string     `json:"network,omitempty"`
 	State       State      `json:"state"`
 	PID         int        `json:"pid,omitempty"`
 	Error       string     `json:"error,omitempty"`

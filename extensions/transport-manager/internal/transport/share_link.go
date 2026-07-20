@@ -429,3 +429,40 @@ func stringValue(value any) string {
 func integerValue(value any) (int, error) {
 	return strconv.Atoi(stringValue(value))
 }
+
+// summariseOutbound достаёт из готового sing-box outbound то, что можно
+// показать человеку: порт, вид защиты, SNI и вид транспорта. Секретов здесь
+// нет — ни uuid, ни паролей, ни ключей Reality; всё перечисленное и так
+// видно любому, кто смотрит на линию.
+func summariseOutbound(outbound map[string]any) (port int, security, sni, network string) {
+	switch value := outbound["server_port"].(type) {
+	case int:
+		port = value
+	case float64:
+		port = int(value)
+	}
+
+	if tls, ok := outbound["tls"].(map[string]any); ok {
+		if enabled, _ := tls["enabled"].(bool); enabled {
+			security = "tls"
+			if reality, ok := tls["reality"].(map[string]any); ok {
+				if on, _ := reality["enabled"].(bool); on {
+					security = "reality"
+				}
+			}
+		}
+		if name, ok := tls["server_name"].(string); ok {
+			sni = name
+		}
+	}
+
+	// Отсутствие секции transport в sing-box означает обычный TCP.
+	network = "tcp"
+	if transport, ok := outbound["transport"].(map[string]any); ok {
+		if name, ok := transport["type"].(string); ok && name != "" {
+			network = name
+		}
+	}
+
+	return port, security, sni, network
+}

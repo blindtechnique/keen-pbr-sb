@@ -179,7 +179,7 @@ export const ruTranslation = {
       systemMonitor: "Дашборд",
       catalog: "Каталог списков",
       settings: "Настройки",
-      outbounds: "Outbounds (выходы)",
+      outbounds: "Куда направлять трафик",
       transports: "Транспорты",
       connections: "Соединения",
       dnsServers: "DNS-серверы",
@@ -240,6 +240,7 @@ export const ruTranslation = {
     empty: "Транспорты пока не настроены.",
     interface: "Интерфейс",
     server: "Сервер",
+    connection: "Соединение",
     loopProtection: {
       action: "Исключить сервер из туннеля",
       confirm:
@@ -321,7 +322,7 @@ export const ruTranslation = {
       description:
         "Сначала свяжите интерфейс транспорта с outbound типа «Интерфейс». Для автоматического переключения создайте затем outbound типа URLTest и добавьте в его группы два или больше interface-outbound.",
       createOutbound: "Создать интерфейсный outbound",
-      createFailover: "Создать failover (URLTest)",
+      createFailover: "Создать резервирование",
       bindOutbound: "Создать outbound для этого интерфейса",
     },
     states: {
@@ -439,7 +440,7 @@ export const ruTranslation = {
     outbounds: {
       members: "{{count}} в группе",
       kind: {
-        failover: "Failover",
+        failover: "Резервирование",
         table: "Таблица",
         blackhole: "Блокировка",
         ignore: "Без изменений",
@@ -459,12 +460,12 @@ export const ruTranslation = {
         unavailable: "Недоступен",
         unknown: "Неизвестно",
       },
-      title: "Состояние outbounds",
-      loadError: "Не удалось загрузить состояние outbounds.",
-      emptyTitle: "Outbounds не настроены",
-      emptyDescription: "Добавьте outbounds, чтобы увидеть проверки состояния.",
+      title: "Куда идёт трафик",
+      loadError: "Не удалось загрузить состояние направлений.",
+      emptyTitle: "Направления не настроены",
+      emptyDescription: "Добавьте направление, чтобы видеть, работает ли оно.",
       inUse: "Используется",
-      urltestTitle: "urltest",
+      urltestTitle: "Резервирование",
       headers: {
         tag: "Тег",
         destination: "Назначение",
@@ -528,7 +529,7 @@ export const ruTranslation = {
             "Ваш конфигурационный файл целиком (включая используемые списки)",
           serviceHealth: "Состояние сервиса",
           routingHealth: "Состояние маршрутизации",
-          outbounds: "Состояние outbounds",
+          outbounds: "Состояние направлений",
           names: "Наименования списков, outbounds, интерфейсов",
         },
         trustWarning:
@@ -1030,11 +1031,11 @@ export const ruTranslation = {
     outbounds: {
       groups: {
         interfaces: "Туннели и интерфейсы",
-        failover: "Failover-группы",
+        failover: "Резервирование",
         system: "Системные выходы",
       },
-      title: "Outbounds (выходы)",
-      description: "Настроенные outbounds и группы urltest.",
+      title: "Куда направлять трафик",
+      description: "Готовые направления для трафика: туннели, интерфейсы и группы резервирования.",
       actions: { new: "Добавить outbound" },
       bulk: {
         selected: "Выбрано: {{count}}",
@@ -1114,7 +1115,7 @@ export const ruTranslation = {
         typeOptions: {
           interface: "Интерфейс",
           table: "Таблица маршрутизации",
-          urltest: "Автовыбор (urltest)",
+          urltest: "Резервирование (автовыбор)",
           blackhole: "Blackhole",
           ignore: "Ignore",
         },
@@ -1150,7 +1151,7 @@ export const ruTranslation = {
           "Outbounds типа ignore пропускают подходящий трафик без изменения policy-based routing.",
       },
       urltest: {
-        groupsTitle: "Группы outbound (urltest)",
+        groupsTitle: "Группы резервирования",
         groupsDescription:
           "Добавьте outbounds в группу. Самый быстрый outbound (по urltest-проверке) будет выбран автоматически.",
         groupTitle: "Группа {{index}}",

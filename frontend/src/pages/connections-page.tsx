@@ -3,7 +3,9 @@ import { ChevronRightIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { useGetConfig } from "@/api/generated/keen-api"
 import { PageHeader } from "@/components/shared/page-header"
+import { useInterfaceNames } from "@/hooks/use-interface-names"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -275,14 +277,50 @@ function RouteBadge({
   route: string
   t: (key: string) => string
 }) {
+  const interfaceByTag = useInterfaceByOutboundTag()
+  const { labelFor } = useInterfaceNames()
+
   if (!route) {
     return null
   }
 
   const isDirect = route === "direct"
+  // The column carries the outbound tag, which is a name the person typed
+  // themselves - so it stays. Underneath it there may be an interface the
+  // firmware has a better name for, and that is what the tooltip carries.
+  const kernelName = interfaceByTag.get(route)
+  const firmwareLabel = kernelName ? labelFor(kernelName) : undefined
+
   return (
-    <Badge size="xs" variant={isDirect ? "outline" : "default"}>
+    <Badge
+      size="xs"
+      title={
+        firmwareLabel && firmwareLabel !== kernelName
+          ? `${firmwareLabel} (${kernelName})`
+          : kernelName
+      }
+      variant={isDirect ? "outline" : "default"}
+    >
       {isDirect ? t("connections.routeDirect") : route}
     </Badge>
   )
+}
+
+/** Outbound tag to the kernel interface it sends traffic out of. */
+function useInterfaceByOutboundTag() {
+  const configQuery = useGetConfig()
+  const outbounds =
+    configQuery.data?.status === 200
+      ? (configQuery.data.data.config.outbounds ?? [])
+      : []
+
+  return useMemo(() => {
+    const map = new Map<string, string>()
+    for (const outbound of outbounds) {
+      if (outbound.type === "interface" && outbound.interface) {
+        map.set(outbound.tag, outbound.interface)
+      }
+    }
+    return map
+  }, [outbounds])
 }

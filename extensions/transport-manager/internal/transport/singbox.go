@@ -62,6 +62,11 @@ type SingBox struct {
 	healthEndpoint     RoutingHealthEndpoint
 	healthFailures     int
 	server             string
+	serverPort         int
+	protocol           string
+	security           string
+	sni                string
+	network            string
 }
 
 type RoutingHealthEndpoint struct {
@@ -84,6 +89,10 @@ func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...Routing
 	if server, ok := outbound["server"].(string); ok {
 		result.server = server
 	}
+	if protocol, ok := outbound["type"].(string); ok {
+		result.protocol = protocol
+	}
+	result.serverPort, result.security, result.sni, result.network = summariseOutbound(outbound)
 	if len(health) > 0 {
 		result.healthEndpoint = health[0]
 	}
@@ -406,7 +415,9 @@ func (s *SingBox) Status(ctx context.Context) Status {
 			state = StateDegraded
 		}
 	}
-	status := Status{Tag: s.spec.Tag, Type: s.spec.Type, Interface: s.spec.Interface, Server: s.server, State: state, PID: pid, Error: s.lastErr, UpdatedAt: s.updated}
+	status := Status{Tag: s.spec.Tag, Type: s.spec.Type, Interface: s.spec.Interface, Server: s.server,
+		ServerPort: s.serverPort, Protocol: s.protocol, Security: s.security, SNI: s.sni, Network: s.network,
+		State: state, PID: pid, Error: s.lastErr, UpdatedAt: s.updated}
 	s.mu.Unlock()
 	if state == StateUp {
 		s.applyRoutingHealth(ctx, &status)

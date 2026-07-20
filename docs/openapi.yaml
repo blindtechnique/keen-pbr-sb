@@ -416,6 +416,22 @@ components:
         server:
           type: string
           description: Proxy server hostname or IP, exposed without credentials for loop-prevention setup.
+        server_port:
+          type: integer
+          description: Port of the proxy server. Not a secret, and needed to tell one endpoint from another.
+        protocol:
+          type: string
+          description: Tunnel protocol carried inside the transport - vless, trojan, hysteria2 and so on.
+        security:
+          type: string
+          enum: [tls, reality]
+          description: How the connection is protected. Absent for protocols carrying no TLS layer.
+        sni:
+          type: string
+          description: Server name presented during the TLS handshake.
+        network:
+          type: string
+          description: Carrier inside the connection - tcp, ws, grpc, http.
         state:
           type: string
           enum: [down, starting, up, degraded]

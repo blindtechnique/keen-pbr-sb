@@ -7,6 +7,7 @@ import type {
   TransportSpec,
 } from "@/api/generated/model"
 import { useGetTransportConfig } from "@/api/generated/keen-api"
+import { InterfaceLabel } from "@/components/shared/interface-label"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
@@ -40,9 +41,7 @@ export function OutboundStateList({
                 {describeKind(outbound, protocolByInterface, t)}
               </Badge>
               {outbound.type === "interface" && outbound.interface ? (
-                <span className="font-mono text-xs text-muted-foreground">
-                  {outbound.interface}
-                </span>
+                <InterfaceLabel name={outbound.interface} />
               ) : null}
               {isGroup ? (
                 <span className="text-xs text-muted-foreground">
@@ -114,9 +113,7 @@ function MemberRow({
         </span>
       ) : null}
       {child.interface_name ? (
-        <span className="font-mono text-xs text-muted-foreground">
-          {child.interface_name}
-        </span>
+        <InterfaceLabel name={child.interface_name} />
       ) : null}
       <span className="ml-auto flex items-center gap-2">
         {typeof child.latency_ms === "number" ? (

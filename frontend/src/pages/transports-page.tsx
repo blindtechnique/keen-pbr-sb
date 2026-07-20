@@ -41,6 +41,10 @@ import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import {
+  useServerLocations,
+  type ServerLocation,
+} from "@/hooks/use-server-locations"
 import { cn } from "@/lib/utils"
 
 type ProbeEntry = {
@@ -119,6 +123,9 @@ export function TransportsPage() {
   })
   const items: TransportStatus[] =
     query.data?.status === 200 ? query.data.data : []
+  const { locationOf } = useServerLocations(
+    items.map((item) => item.server ?? "")
+  )
   const error = getApiErrorMessage(query.error as ApiError | null)
   const configQuery = useGetTransportConfig()
   const keenConfigQuery = useGetConfig()
@@ -429,8 +436,11 @@ export function TransportsPage() {
                 <CardTitle className="break-words [overflow-wrap:anywhere]">
                   {item.tag}
                 </CardTitle>
+                {/* Что за туннель и куда он ведёт — двумя словами. Тип
+                    («sing-box») говорит, кто его запускает, а не что внутри,
+                    поэтому впереди стоит протокол. */}
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {item.type}
+                  {describeTransport(item, locationOf(item.server))}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -460,10 +470,9 @@ export function TransportsPage() {
                 label={t("transports.interface")}
                 value={item.interface}
               />
-              <TransportField
-                label={t("transports.pid")}
-                value={item.pid ? String(item.pid) : "—"}
-              />
+              {/* Номер процесса убран: на него нельзя ни нажать, ни что-то
+                  с ним сделать из интерфейса, а место он занимал наравне с
+                  тем, что действительно нужно знать. */}
               <TransportField
                 label={t("transports.updatedAt")}
                 value={new Date(item.updated_at).toLocaleString()}
@@ -506,7 +515,17 @@ export function TransportsPage() {
               {item.server ? (
                 <TransportField
                   label={t("transports.server")}
-                  value={item.server}
+                  value={describeServer(
+                    item.server,
+                    item.server_port,
+                    locationOf(item.server)
+                  )}
+                />
+              ) : null}
+              {describeConnection(item) ? (
+                <TransportField
+                  label={t("transports.connection")}
+                  value={describeConnection(item)}
                 />
               ) : null}
               {item.type === "native" ? (
@@ -686,6 +705,65 @@ function TransportActions({
       </Button>
     </div>
   )
+}
+
+/**
+ * «1.2.3.4:443 · 🇳🇱», либо просто адрес, если страну выяснить не удалось.
+ * Отсутствие страны — рядовой случай, а не ошибка: интернета может не быть,
+ * сервис может не ответить, имя может не разрешиться.
+ */
+function describeServer(
+  server: string,
+  port?: number,
+  location?: ServerLocation
+): string {
+  const endpoint = port ? `${server}:${port}` : server
+  const flag = countryMark(location)
+  return flag ? `${endpoint} · ${flag}` : endpoint
+}
+
+/** «VLESS · 🇳🇱» — протокол туннеля и страна сервера. */
+function describeTransport(
+  item: TransportStatus,
+  location?: ServerLocation
+): string {
+  const parts = [item.protocol ? item.protocol.toUpperCase() : item.type]
+  const flag = countryMark(location)
+  if (flag) {
+    parts.push(flag)
+  }
+  return parts.join(" · ")
+}
+
+/**
+ * Флаг страны. Эмодзи короче любого названия и читается мгновенно; там, где
+ * шрифт флагов не рисует, остаётся код страны — тоже коротко и понятно.
+ */
+function countryMark(location?: ServerLocation): string {
+  if (!location) {
+    return ""
+  }
+  return location.emoji || location.country_code || ""
+}
+
+/**
+ * «Reality · ws · SNI example.com» — то, что раньше знала только ссылка.
+ * Ничего из этого не секрет, но без этих трёх вещей по карточке нельзя
+ * понять, чем именно отличаются два внешне одинаковых транспорта.
+ */
+function describeConnection(item: TransportStatus): string {
+  const parts: string[] = []
+  if (item.security) {
+    parts.push(item.security === "reality" ? "Reality" : "TLS")
+  }
+  // tcp — это отсутствие обёртки, показывать его не о чем.
+  if (item.network && item.network !== "tcp") {
+    parts.push(item.network)
+  }
+  if (item.sni && item.sni !== item.server) {
+    parts.push(`SNI ${item.sni}`)
+  }
+  return parts.join(" · ")
 }
 
 function TransportField({ label, value }: { label: string; value: string }) {
