@@ -28,6 +28,28 @@ export default defineConfig(({ mode }) => ({
   build: {
     outDir: process.env.KEEN_PBR_FRONTEND_OUT_DIR || "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // The libraries change only when we upgrade them, while our own code
+        // changes every release. Keeping them apart means an update re-fetches
+        // the small half instead of the whole megabyte.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) {
+            return undefined
+          }
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) {
+            return "vendor-react"
+          }
+          if (id.includes("@tanstack")) {
+            return "vendor-query"
+          }
+          if (id.includes("i18next")) {
+            return "vendor-i18n"
+          }
+          return "vendor"
+        },
+      },
+    },
   },
   server: {
     proxy: {

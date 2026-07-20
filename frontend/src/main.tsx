@@ -1,7 +1,6 @@
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { ReactQueryDevtools } from "@tanstack/react-query-devtools"
 
 import "@fontsource/roboto/400.css"
 import "@fontsource/roboto/500.css"
@@ -55,9 +54,6 @@ createRoot(document.getElementById("root")!).render(
           </ThemeProvider>
         </LanguageProvider>
       </TooltipProvider>
-      {import.meta.env.DEV ? (
-        <ReactQueryDevtools initialIsOpen={false} />
-      ) : null}
     </QueryClientProvider>
   </StrictMode>
 )
