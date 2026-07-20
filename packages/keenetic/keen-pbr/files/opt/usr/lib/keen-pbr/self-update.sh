@@ -47,4 +47,17 @@ INSTALLER_URL="https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/$rel
 fetch_url "$INSTALLER" "$INSTALLER_URL"
 
 /bin/sh "$INSTALLER" --update
+
+# opkg restarts keen-pbr through the package scripts, but dnsmasq only picks up
+# our conf-script on a real restart. Doing it explicitly here - and checking the
+# result - keeps an update from leaving the resolver on the previous config,
+# which silently disables domain-based routing until the router is rebooted.
+printf '[%s] Переподключаю конфигурацию dnsmasq\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+if /opt/usr/lib/keen-pbr/dnsmasq.sh activate; then
+    printf '[%s] dnsmasq перечитал конфигурацию\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+else
+    printf '[%s] ПРЕДУПРЕЖДЕНИЕ: dnsmasq не удалось перезапустить. Доменная маршрутизация будет работать только после перезагрузки роутера.\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')"
+fi
+
 printf '[%s] Обновление завершено успешно\n' "$(date '+%Y-%m-%d %H:%M:%S')"

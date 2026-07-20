@@ -82,12 +82,78 @@ deactivate_dnsmasq() {
     restart_dnsmasq
 }
 
-restart_dnsmasq() {
-    if [ -x /opt/etc/init.d/S56dnsmasq ]; then
-        /opt/etc/init.d/S56dnsmasq restart 2>/dev/null || true
+# Returns the PID of the running dnsmasq, preferring the real process over the
+# PID file: on Keenetic the file routinely goes stale, and then the init script
+# reports "already running" while refusing to stop anything. dnsmasq only
+# re-reads conf-script output on a genuine restart, so a restart that silently
+# does nothing leaves keen-pbr's rules out of the resolver entirely.
+dnsmasq_pid() {
+    pid="$(pgrep -x dnsmasq 2>/dev/null | head -n 1)"
+    if [ -n "$pid" ]; then
+        printf '%s' "$pid"
         return 0
     fi
+    for candidate in /opt/var/run/dnsmasq.pid /var/run/dnsmasq.pid; do
+        [ -s "$candidate" ] || continue
+        pid="$(tr -d '[:space:]' < "$candidate")"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    done
+    return 1
+}
 
+stop_dnsmasq() {
+    pid="$(dnsmasq_pid)" || return 0
+
+    kill "$pid" 2>/dev/null || true
+    waited=0
+    while [ "$waited" -lt 50 ]; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        usleep 100000 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+
+    log_warn "dnsmasq did not stop within 5 s, forcing"
+    kill -9 "$pid" 2>/dev/null || true
+    sleep 1
+    dnsmasq_pid >/dev/null 2>&1 && return 1
+    return 0
+}
+
+# True when dnsmasq answers with the hash record keen-pbr generates, which is
+# the only proof that it actually picked up the current configuration.
+dnsmasq_serves_config() {
+    "$KEEN_PBR_BIN" --config "$CONFIG_PATH" resolver-config-hash >/dev/null 2>&1 || return 1
+    return 0
+}
+
+restart_dnsmasq() {
+    [ -x /opt/etc/init.d/S56dnsmasq ] || return 1
+
+    if ! stop_dnsmasq; then
+        log_warn "could not stop dnsmasq; configuration will stay stale"
+        return 1
+    fi
+
+    # Stale PID files make the init script refuse to start, so clear them once
+    # the process is confirmed gone.
+    rm -f /opt/var/run/dnsmasq.pid /var/run/dnsmasq.pid 2>/dev/null || true
+
+    /opt/etc/init.d/S56dnsmasq start >/dev/null 2>&1 || true
+
+    waited=0
+    while [ "$waited" -lt 30 ]; do
+        if dnsmasq_pid >/dev/null 2>&1; then
+            log_info "dnsmasq restarted"
+            return 0
+        fi
+        usleep 100000 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+
+    log_warn "dnsmasq did not come back after restart"
     return 1
 }
 

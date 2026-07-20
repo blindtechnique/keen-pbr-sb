@@ -91,7 +91,7 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
       <SidebarHeader className={isMobile ? "h-16 bg-card px-4 py-2" : "h-16 justify-center bg-card px-4 py-0 group-data-[collapsible=icon]:px-2"}>
         <SidebarMenuHeader isMobile={isMobile} onMenuClick={toggleSidebar} />
       </SidebarHeader>
-      <SidebarContent className="px-2 py-3">
+      <SidebarContent className="border-r px-2 py-3">
         <NavMain items={data.navMain} />
       </SidebarContent>
       <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t px-3 py-3 group-data-[collapsible=icon]:hidden"}>
