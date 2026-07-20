@@ -61,9 +61,13 @@ export function DnsCheckWidget({
         className={cardClassName}
         contentClassName="flex flex-1 flex-col"
         description={
-          isDisabled
-            ? t("overview.dnsCheck.card.disabledDescription")
-            : t("overview.dnsCheck.card.description")
+          // Body text, not a caption: this line explains what the check does
+          // and is the first thing read in the card.
+          <span className="text-foreground">
+            {isDisabled
+              ? t("overview.dnsCheck.card.disabledDescription")
+              : t("overview.dnsCheck.card.description")}
+          </span>
         }
         title={t("overview.dnsCheck.card.title")}
       >

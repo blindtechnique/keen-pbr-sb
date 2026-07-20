@@ -320,7 +320,7 @@
      all. The shadow is a hover affordance: it appears under the pointer and
      the line stays put underneath it. */
   .dark [data-slot="card"] {
-    border: 2px solid #4D545F;
+    border: 1px solid #4D545F;
     box-shadow: none;
     transition: box-shadow 0.15s ease;
   }
@@ -354,15 +354,6 @@
     line-height: 36px;
   }
 
-  [data-slot="sidebar-menu-button"]:hover,
-  [data-slot="sidebar-menu-sub-button"]:hover {
-    background: #F0F0F0;
-  }
-
-  .dark [data-slot="sidebar-menu-button"]:hover,
-  .dark [data-slot="sidebar-menu-sub-button"]:hover {
-    background: #1B2434;
-  }
 
   /* The selected row in KeeneticOS spans the whole column - from the screen
      edge to the hairline - so the padding that centres the label must live on
@@ -465,4 +456,33 @@
     background: color-mix(in srgb, var(--destructive) 10%, var(--card));
     color: var(--destructive);
   }
+}
+
+/* Deliberately outside every @layer.
+ *
+ * The menu button carries `hover:bg-sidebar-accent` as a Tailwind utility, and
+ * the utilities layer beats @layer components no matter what we write there -
+ * the same trap that kept the dashboard card titles at the wrong size through
+ * four attempts. Unlayered rules sit above all layers, so this is the only
+ * place these two colours can be stated and actually hold.
+ *
+ * Hover and selection are different colours in KeeneticOS - --menu-hover
+ * against --menu-active-item - so the shared `--sidebar-accent` token cannot
+ * express both.
+ */
+[data-slot="sidebar-menu-button"]:hover,
+[data-slot="sidebar-menu-sub-button"]:hover {
+  background: #F0F0F0;
+  color: #202020;
+}
+
+.dark [data-slot="sidebar-menu-button"],
+.dark [data-slot="sidebar-menu-sub-button"] {
+  color: #C2C2C2;
+}
+
+.dark [data-slot="sidebar-menu-button"]:hover,
+.dark [data-slot="sidebar-menu-sub-button"]:hover {
+  background: #1B2434;
+  color: #C2C2C2;
 }
