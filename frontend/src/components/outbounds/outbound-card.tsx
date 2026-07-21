@@ -7,15 +7,12 @@ import type {
   RuntimeOutboundState,
 } from "@/api/generated/model"
 import { Badge } from "@/components/ui/badge"
+import { DependencyList } from "@/components/shared/dependency-list"
+import type { Dependency } from "@/lib/dependencies"
 import { Checkbox } from "@/components/ui/checkbox"
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
 import { useInterfaceNames } from "@/hooks/use-interface-names"
 import { cn } from "@/lib/utils"
-
-export type OutboundUsage = {
-  lists: number
-  rules: number
-}
 
 /**
  * Одна запись раздела «Интерфейсы» — карточкой, а не строкой таблицы.
@@ -29,8 +26,8 @@ export type OutboundUsage = {
 export function OutboundCard({
   outbound,
   runtimeState,
-  usage,
   protocol,
+  dependencies = [],
   onRefreshLatency,
   refreshingLatency,
   selected,
@@ -41,9 +38,10 @@ export function OutboundCard({
 }: {
   outbound: Outbound
   runtimeState?: RuntimeOutboundState
-  usage: OutboundUsage
   /** Короткая метка протокола: VLESS, AWG, WG. Пусто, если выяснить нечем. */
   protocol?: string
+  /** Что держится за это соединение: правила, группы, DNS-серверы. */
+  dependencies?: Dependency[]
   /** Проверка задержки. Нативным туннелям прошивки она нужна ровно так же,
       как туннелям sing-box, а кнопка до сих пор жила только у последних. */
   onRefreshLatency?: () => void
@@ -135,14 +133,12 @@ export function OutboundCard({
         <MemberChain members={runtimeState?.interfaces ?? []} t={t} />
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
-        {usage.lists === 0 && usage.rules === 0
-          ? t("pages.outbounds.usage.none")
-          : t("pages.outbounds.usage.some", {
-              lists: usage.lists,
-              rules: usage.rules,
-            })}
-      </p>
+      {/* Что сломается, если это удалить — видно до удаления, а не из
+          диалога, который перечислял последствия постфактум. */}
+      <DependencyList
+        dependencies={dependencies}
+        emptyHint={t("pages.outbounds.usage.none")}
+      />
     </div>
   )
 }

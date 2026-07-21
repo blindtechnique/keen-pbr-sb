@@ -589,13 +589,15 @@ export function TransportsPage() {
               />
 
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-                {/* Вид транспорта уехал из подзаголовка, когда его место занял
-                    протокол. Знать, кто держит туннель, всё же полезно —
-                    поэтому он здесь, рядом с остальными необязательными
-                    подробностями. */}
-                <Badge size="xs" variant="outline">
-                  {item.type}
-                </Badge>
+                {/* Слово «sing-box» убрано: других держателей туннелей у нас
+                    нет, и значок, одинаковый у всех, не различает ничего.
+                    Вместо него — то, чем соединение действительно отличается
+                    от соседнего: как именно завёрнут трафик. */}
+                {item.network ? (
+                  <Badge size="xs" variant="outline">
+                    {transportName(item.network)}
+                  </Badge>
+                ) : null}
                 {dnsServersByInterface.has(item.interface) ? (
                   <Badge size="xs" variant="outline">
                     {t("transports.dnsDetour")}:{" "}

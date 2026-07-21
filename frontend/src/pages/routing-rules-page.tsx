@@ -17,6 +17,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { SortableCards } from "@/components/shared/sortable-cards"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { RuntimeOutboundEntry } from "@/components/shared/runtime-outbound-state"
@@ -243,6 +244,66 @@ export function RoutingRulesPage() {
             </BulkSelectionToolbar>
             ) : null}
           </div>
+          {/* На телефоне таблица разворачивается в столбик подписей и
+              читается как каша, а строки не перетаскиваются: HTML5-drag
+              на сенсорных экранах не работает. Поэтому там своя раскладка
+              карточками и своё перетаскивание на pointer-событиях. */}
+          <div className="md:hidden">
+            <SortableCards
+              disabled={configMutationPending}
+              getKey={(row) => row.id}
+              handleLabel={t("pages.routingRules.actions.reorder")}
+              items={tableRows}
+              onReorder={handleReorder}
+              renderCard={(row) => (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">#{row.order}</span>
+                    <span className="truncate text-sm text-muted-foreground">
+                      → {row.outbound}
+                    </span>
+                    <span className="ml-auto flex items-center gap-1">
+                      <Switch
+                        aria-label={t(
+                          row.enabled
+                            ? "pages.routingRules.actions.disableRule"
+                            : "pages.routingRules.actions.enableRule"
+                        )}
+                        checked={row.enabled}
+                        disabled={configMutationPending}
+                        onCheckedChange={(checked) =>
+                          handleEnabledChange(row.index, checked)
+                        }
+                      />
+                      <Button
+                        aria-label={t("common.edit")}
+                        className="size-8"
+                        onClick={() =>
+                          navigate(`/routing-rules/${row.index}/edit`)
+                        }
+                        size="icon"
+                        variant="ghost"
+                      >
+                        <Pencil className="size-4" />
+                      </Button>
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {row.conditions.map((condition) => (
+                      <span
+                        className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                        key={`${row.id}-${condition.label}`}
+                      >
+                        {condition.value}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            />
+          </div>
+
+          <div className="hidden md:block">
           <DataTable
             headers={[
               "",
@@ -328,6 +389,7 @@ export function RoutingRulesPage() {
                 }),
             }}
           />
+          </div>
         </div>
       )}
     </div>

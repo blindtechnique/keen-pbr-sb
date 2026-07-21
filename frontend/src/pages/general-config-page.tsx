@@ -26,6 +26,7 @@ import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { SchedulePicker } from "@/components/shared/schedule-picker"
 import { AuthSettingsCard } from "@/components/settings/auth-settings-card"
+import { RemoteAccessCard } from "@/components/settings/remote-access-card"
 import { LoggingSettingsCard } from "@/components/settings/logging-settings-card"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { Button } from "@/components/ui/button"
@@ -353,8 +354,7 @@ function LoadedGeneralConfigPage({
 
       <LoggingSettingsCard />
 
-      {/* Remote access is hidden until it works reliably on every firmware.
-          The card and its endpoints are kept - only the way in is closed. */}
+      <RemoteAccessCard />
 
       <Card>
         <CardHeader>

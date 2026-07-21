@@ -531,7 +531,7 @@ function StrategiesEditor({
           ) : null}
         </div>
         <CodeEditor
-          className="min-h-[30rem]"
+          className="h-[60vh] max-h-[40rem] min-h-[20rem]"
           onChange={setContent}
           syntax={selected.endsWith(".list") ? "list" : "nfqws"}
           value={content}
@@ -732,7 +732,7 @@ function FilesEditor({
           ) : null}
         </div>
         <CodeEditor
-          className="min-h-[30rem]"
+          className="h-[60vh] max-h-[40rem] min-h-[20rem]"
           onChange={setContent}
           readOnly={readonly}
           syntax={readonly ? "log" : "nfqws"}

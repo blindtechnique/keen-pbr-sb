@@ -27,6 +27,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { OutboundCard } from "@/components/outbounds/outbound-card"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
+import { dependenciesOfOutbound } from "@/lib/dependencies"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
@@ -136,15 +137,6 @@ export function OutboundsPage() {
   // по имени участника.
   const interfaceOfTag = (tag: string) =>
     selectOutbounds(loadedConfig).find((item) => item.tag === tag)?.interface ?? ""
-
-  const usageByOutbound = new Map<string, { lists: number; rules: number }>()
-  for (const rule of loadedConfig?.route?.rules ?? []) {
-    if (!rule.outbound) continue
-    const current = usageByOutbound.get(rule.outbound) ?? { lists: 0, rules: 0 }
-    current.rules += 1
-    current.lists += rule.list?.length ?? 0
-    usageByOutbound.set(rule.outbound, current)
-  }
 
   const outboundRowIds = outboundItems.map((outbound) => outbound.id)
   const outboundSelection = useRowSelection(outboundRowIds)
@@ -303,10 +295,10 @@ export function OutboundsPage() {
                 runtimeState={item.runtimeState}
                 selectLabel={t("common.selection.selectRow", { rowLabel: item.id })}
                 selected={outboundSelection.selectedIds.has(item.id)}
+                dependencies={dependenciesOfOutbound(loadedConfig, item.id)}
                 onRefreshLatency={() => probeMutation.mutate()}
                 refreshingLatency={probeMutation.isPending}
                 selectionDisabled={configMutationPending}
-                usage={usageByOutbound.get(item.id) ?? { lists: 0, rules: 0 }}
               />
             ))}
           </div>

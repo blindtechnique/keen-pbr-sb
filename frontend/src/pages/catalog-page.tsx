@@ -312,7 +312,10 @@ export function CatalogPage() {
         </p>
       ) : null}
 
-      <div className="divide-y border-y">
+      {/* Каталог прокручивается внутри себя: восемьдесят семь заготовок
+          уводили нижнюю панель с выбором маршрута далеко за экран, и
+          чтобы нажать «Добавить», приходилось листать обратно. */}
+      <div className="max-h-[55vh] divide-y overflow-y-auto border-y">
         {visible.map((preset) => {
           const url = preset.engines?.singbox?.ruleSets?.[0]?.url
           const domains = preset.engines?.dns?.domains?.length ?? 0
@@ -361,7 +364,7 @@ export function CatalogPage() {
         })}
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
+      <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t bg-card pt-3 pb-1">
         <span className="text-[13px] text-muted-foreground">
           {t("pages.catalog.selected", { count: selected.size })}
         </span>
