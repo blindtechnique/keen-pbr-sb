@@ -44,13 +44,16 @@ export function ConnectionsPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const query = useQuery({
-    queryKey: ["connections"],
+    queryKey: ["connections", activeOnly ? "active" : "all"],
     queryFn: async () => {
-      const response = await fetch("/api/connections")
+      const response = await fetch(
+        activeOnly ? "/api/connections/active" : "/api/connections"
+      )
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return response.json() as Promise<Connection[]>
     },
     refetchInterval: 3_000,
+    refetchIntervalInBackground: false,
   })
 
   const groups = useMemo(() => {
@@ -207,7 +210,7 @@ function SessionRow({
   const [primaryDomain, ...otherDomains] = item.destination_domains
 
   return (
-    <div className="grid grid-cols-1 gap-x-3 gap-y-0.5 py-1 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
+    <div className="connection-session-row grid grid-cols-1 gap-x-3 gap-y-0.5 py-1 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         {primaryDomain ? (
           <div className="truncate">{primaryDomain}</div>

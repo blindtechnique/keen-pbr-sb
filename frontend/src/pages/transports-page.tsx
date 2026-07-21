@@ -146,6 +146,7 @@ export function TransportsPage() {
     },
     staleTime: 60_000,
     retry: false,
+    enabled: items.some((item) => item.protocol === "naive"),
   })
   const naiveInstallMutation = useMutation({
     mutationFn: async () => {
@@ -188,7 +189,7 @@ export function TransportsPage() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return response.json()
     },
-    refetchInterval: 3_000,
+    refetchInterval: 10_000,
     refetchIntervalInBackground: false,
   })
 

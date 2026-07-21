@@ -130,6 +130,18 @@ TEST_CASE("safe_exec_capture: child process does not inherit blocked signal mask
     CHECK(result.stdout_output == "0000000000000000\n");
 }
 
+TEST_CASE("safe_exec_capture: output cap terminates a noisy child") {
+    const auto started_at = std::chrono::steady_clock::now();
+    const auto result = safe_exec_capture(
+        {"/bin/sh", "-c", "while :; do printf 1234567890; done"},
+        true,
+        1024);
+
+    CHECK(result.truncated);
+    CHECK(result.stdout_output.size() == 1024);
+    CHECK(std::chrono::steady_clock::now() - started_at < std::chrono::seconds(5));
+}
+
 TEST_CASE("safe_exec: child process receives devnull stdin") {
     StdinGuard stdin_guard;
     REQUIRE(stdin_guard.saved_stdin >= 0);

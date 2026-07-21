@@ -63,6 +63,7 @@ describe("bulk DNS server delete helpers", () => {
     }
 
     expect(getDnsServerDeleteReferenceInfo(config, ["wan_dns"])).toEqual({
+      matchingRuleIndexes: [0],
       matchingRulesCount: 1,
       usesFallback: true,
     })
@@ -121,5 +122,30 @@ describe("bulk list delete helpers", () => {
     ])
     expect(nextConfig.dns?.rules).toEqual([{ server: "dns", list: ["work"] }])
     expect(listDeletesAltersRoutingOrDnsRefs(config, nextConfig)).toBe(true)
+  })
+
+  test("preserves a route rule that still has non-list match conditions", () => {
+    const config: ConfigObject = {
+      lists: { ads: { domains: ["ads.example"] } },
+      route: {
+        rules: [
+          {
+            list: ["ads"],
+            src_addr: "192.168.1.10",
+            dest_port: "443",
+            outbound: "vpn",
+          },
+        ],
+      },
+    }
+
+    expect(buildUpdatedConfigForListsDelete(config, ["ads"]).route?.rules).toEqual([
+      {
+        list: [],
+        src_addr: "192.168.1.10",
+        dest_port: "443",
+        outbound: "vpn",
+      },
+    ])
   })
 })

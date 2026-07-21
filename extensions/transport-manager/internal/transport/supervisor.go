@@ -8,23 +8,25 @@ import (
 )
 
 type retryState struct {
-	opMu         sync.Mutex
-	desired      bool
-	attempts     int
-	next         time.Time
-	inFlight     bool
-	observedUp   bool
-	healthySince time.Time
+	opMu          sync.Mutex
+	desired       bool
+	attempts      int
+	next          time.Time
+	inFlight      bool
+	observedUp    bool
+	healthySince  time.Time
+	nextRuleCheck time.Time
 }
 
 type Supervisor struct {
-	manager      *Manager
-	mu           sync.Mutex
-	states       map[string]*retryState
-	interval     time.Duration
-	baseBackoff  time.Duration
-	maxBackoff   time.Duration
-	stablePeriod time.Duration
+	manager             *Manager
+	mu                  sync.Mutex
+	states              map[string]*retryState
+	interval            time.Duration
+	baseBackoff         time.Duration
+	maxBackoff          time.Duration
+	stablePeriod        time.Duration
+	runtimeRuleInterval time.Duration
 }
 
 // Implemented by transports that own firewall state which the firmware may
@@ -41,6 +43,7 @@ func newSupervisor(manager *Manager, interval, baseBackoff, maxBackoff time.Dura
 	return &Supervisor{
 		manager: manager, states: make(map[string]*retryState), interval: interval,
 		baseBackoff: baseBackoff, maxBackoff: maxBackoff, stablePeriod: 30 * time.Second,
+		runtimeRuleInterval: 30 * time.Second,
 	}
 }
 
@@ -68,6 +71,7 @@ func (s *Supervisor) Register(spec TransportSpec) {
 	state.next = time.Time{}
 	state.observedUp = false
 	state.healthySince = time.Time{}
+	state.nextRuleCheck = time.Time{}
 }
 
 func (s *Supervisor) Forget(tag string) {
@@ -135,10 +139,12 @@ func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryS
 		// silently breaks routed clients while the router itself keeps
 		// working. Re-assert it while the transport is healthy; the helper
 		// checks with -C first, so a present rule costs one cheap exec.
-		if transport, ok := s.manager.Get(tag); ok {
-			if enforcer, ok := transport.(runtimeRuleEnforcer); ok {
-				if ruleErr := enforcer.EnsureRuntimeRules(); ruleErr != nil {
-					log.Printf("transport %s: restore forwarding rules: %v", tag, ruleErr)
+		if s.runtimeRuleCheckDue(tag, state, time.Now()) {
+			if transport, ok := s.manager.Get(tag); ok {
+				if enforcer, ok := transport.(runtimeRuleEnforcer); ok {
+					if ruleErr := enforcer.EnsureRuntimeRules(); ruleErr != nil {
+						log.Printf("transport %s: restore forwarding rules: %v", tag, ruleErr)
+					}
 				}
 			}
 		}
@@ -157,6 +163,21 @@ func (s *Supervisor) reconcileOne(ctx context.Context, tag string, state *retryS
 		err = s.manager.Up(operationCtx, tag)
 	}
 	s.recordAttempt(tag, state, err)
+}
+
+// Keenetic can rebuild its firewall after a network event, but spawning
+// iptables/ip6tables for every transport on every five-second supervisor tick
+// is unnecessarily expensive. The initial zero value checks immediately;
+// subsequent safety checks are coalesced to once per 30 seconds.
+func (s *Supervisor) runtimeRuleCheckDue(tag string, expected *retryState, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, exists := s.states[tag]
+	if !exists || state != expected || now.Before(state.nextRuleCheck) {
+		return false
+	}
+	state.nextRuleCheck = now.Add(s.runtimeRuleInterval)
+	return true
 }
 
 func (s *Supervisor) release(tag string, expected *retryState) {
@@ -200,6 +221,7 @@ func (s *Supervisor) recordLoss(tag string, expected *retryState) bool {
 	}
 	state.observedUp = false
 	state.healthySince = time.Time{}
+	state.nextRuleCheck = time.Time{}
 	s.scheduleRetry(state)
 	return true
 }

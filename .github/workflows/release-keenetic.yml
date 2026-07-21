@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+    # A push to next produces the test IPK consumed by install-test-build.ps1.
+    # It does not create or modify a GitHub Release.
+    branches:
+      - next
   workflow_dispatch:
 
 permissions:

@@ -4,6 +4,27 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Large connection groups remain cheap to scroll even without another
+   virtualization dependency. The browser skips layout and paint work for
+   rows that are outside the viewport. */
+.connection-session-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 34px;
+}
+
+/* Respect the operating-system accessibility setting. Status remains visible
+   through colour and text, but decorative motion is disabled. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
 :root {
   --background: #EDEEF0;
   --foreground: #26343f;

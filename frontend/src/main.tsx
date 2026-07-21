@@ -2,9 +2,14 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
-import "@fontsource/roboto/400.css"
-import "@fontsource/roboto/500.css"
-import "@fontsource/roboto/700.css"
+// The panel is Russian/English. Loading every Roboto unicode subset emitted
+// dozens of unused font files into the IPK; keep only the two scripts we use.
+import "@fontsource/roboto/cyrillic-400.css"
+import "@fontsource/roboto/cyrillic-500.css"
+import "@fontsource/roboto/cyrillic-700.css"
+import "@fontsource/roboto/latin-400.css"
+import "@fontsource/roboto/latin-500.css"
+import "@fontsource/roboto/latin-700.css"
 import "./index.css"
 import "./i18n"
 import { LanguageProvider } from "@/components/language-provider"

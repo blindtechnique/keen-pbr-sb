@@ -1,10 +1,10 @@
 #ifdef WITH_API
 
 #include "handler_connections.hpp"
+#include "../util/safe_exec.hpp"
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 #include <deque>
 #include <fstream>
 #include <filesystem>
@@ -13,6 +13,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <vector>
 #include <arpa/inet.h>
 
 namespace keen_pbr3 {
@@ -33,8 +34,13 @@ constexpr size_t maximum_history_entries = 1500;
 constexpr size_t maximum_dns_addresses = 3000;
 constexpr size_t maximum_domains_per_address = 4;
 constexpr const char* dns_query_log = "/tmp/dnsmasq-keen-pbr-queries.log";
+constexpr auto snapshot_ttl = std::chrono::seconds(2);
+constexpr auto device_names_ttl = std::chrono::seconds(60);
 std::map<std::string, std::deque<std::string>> domains_by_address;
 std::streamoff dns_log_offset{0};
+std::chrono::steady_clock::time_point snapshot_updated_at{};
+std::chrono::steady_clock::time_point device_names_updated_at{};
+std::map<std::string, std::string> cached_devices;
 
 std::int64_t now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(Clock::now().time_since_epoch()).count();
@@ -102,7 +108,7 @@ std::map<uint32_t, std::string> routes(const Config& config) {
     return result;
 }
 
-std::map<std::string, std::string> device_names() {
+std::map<std::string, std::string> read_device_names() {
     std::map<std::string, std::string> result;
     for (const char* path : {"/var/ndnproxymain.leases", "/opt/var/lib/misc/dnsmasq.leases", "/tmp/dhcp.leases"}) {
         std::ifstream leases(path);
@@ -116,15 +122,16 @@ std::map<std::string, std::string> device_names() {
     // Keenetic keeps the user-visible client name in NDMS, separately from
     // the DHCP hostname. Querying NDMS also covers statically registered and
     // currently connected clients that are absent from dnsmasq lease files.
-    if (FILE* pipe = popen("ndmc -c \"show ip dhcp bindings\" 2>/dev/null", "r")) {
+    const auto bindings = safe_exec_capture(
+        {"ndmc", "-c", "show ip dhcp bindings"}, true, 512U * 1024U);
+    if (bindings.exit_code == 0 && !bindings.truncated) {
         std::string ip, hostname, name;
         const auto flush = [&]() {
             const auto& preferred = name.empty() ? hostname : name;
             if (!ip.empty() && !preferred.empty()) result[ip] = preferred;
         };
-        char buffer[1024];
-        while (std::fgets(buffer, sizeof(buffer), pipe)) {
-            std::string line(buffer);
+        std::istringstream output(bindings.stdout_output);
+        for (std::string line; std::getline(output, line);) {
             const auto first = line.find_first_not_of(" \t\r\n");
             if (first == std::string::npos) continue;
             line.erase(0, first);
@@ -146,9 +153,18 @@ std::map<std::string, std::string> device_names() {
             else if (key == "name") name = value;
         }
         flush();
-        pclose(pipe);
     }
     return result;
+}
+
+const std::map<std::string, std::string>& device_names() {
+    const auto now = std::chrono::steady_clock::now();
+    if (device_names_updated_at.time_since_epoch().count() == 0 ||
+        now - device_names_updated_at >= device_names_ttl) {
+        cached_devices = read_device_names();
+        device_names_updated_at = now;
+    }
+    return cached_devices;
 }
 
 void read_conntrack(const Config& config) {
@@ -161,22 +177,22 @@ void read_conntrack(const Config& config) {
     std::string line;
     while (std::getline(input, line)) {
         std::istringstream stream(line);
-        std::vector<std::string> tokens;
-        for (std::string token; stream >> token;) tokens.push_back(std::move(token));
-        if (tokens.size() < 7) continue;
         Connection current;
-        current.protocol = tokens[2];
-        size_t cursor = 5;
-        if (tokens[cursor].find('=') == std::string::npos) current.state = tokens[cursor++];
-        else current.state = current.protocol == "udp" ? "ACTIVE" : "UNKNOWN";
-        for (; cursor < tokens.size(); ++cursor) {
-            const auto& token = tokens[cursor];
+        std::string family, layer3, layer4, timeout, token;
+        if (!(stream >> family >> layer3 >> current.protocol >> layer4 >> timeout >> token)) continue;
+        if (token.find('=') == std::string::npos) {
+            current.state = token;
+            if (!(stream >> token)) continue;
+        } else {
+            current.state = current.protocol == "udp" ? "ACTIVE" : "UNKNOWN";
+        }
+        do {
             if (current.source.empty()) current.source = value_after(token, "src=");
             else if (current.destination.empty()) current.destination = value_after(token, "dst=");
             else if (current.source_port == 0) current.source_port = static_cast<uint16_t>(number(value_after(token, "sport=")));
             else if (current.destination_port == 0) current.destination_port = static_cast<uint16_t>(number(value_after(token, "dport=")));
             if (const auto mark = value_after(token, "mark="); !mark.empty()) current.mark = number(mark);
-        }
+        } while (stream >> token);
         if (current.source.empty() || current.destination.empty()) continue;
         current.route = "direct";
         const auto masked_mark = current.mark & fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
@@ -193,38 +209,61 @@ void read_conntrack(const Config& config) {
         if (!it->second.active) it->second.state = "CLOSED";
         ++it;
     }
-    while (history.size() > maximum_history_entries) {
-        auto oldest = history.begin();
-        for (auto it = std::next(history.begin()); it != history.end(); ++it) {
-            if (it->second.last_seen < oldest->second.last_seen) oldest = it;
+    if (history.size() > maximum_history_entries) {
+        std::vector<std::pair<std::int64_t, std::string>> by_age;
+        by_age.reserve(history.size());
+        for (const auto& [key, connection] : history) {
+            by_age.emplace_back(connection.last_seen, key);
         }
-        history.erase(oldest);
+        const auto remove_count = history.size() - maximum_history_entries;
+        std::partial_sort(by_age.begin(), by_age.begin() + remove_count, by_age.end());
+        for (size_t index = 0; index < remove_count; ++index) {
+            history.erase(by_age[index].second);
+        }
     }
+}
+
+void refresh_snapshot(const Config& config) {
+    const auto now = std::chrono::steady_clock::now();
+    if (snapshot_updated_at.time_since_epoch().count() != 0 &&
+        now - snapshot_updated_at < snapshot_ttl) {
+        return;
+    }
+    read_dns_query_log();
+    read_conntrack(config);
+    snapshot_updated_at = now;
+}
+
+std::string serialize_connections(const ApiContext& ctx, bool active_only) {
+    std::lock_guard lock(connections_mutex);
+    refresh_snapshot(ctx.get_visible_config());
+    const auto& devices = device_names();
+    nlohmann::json result = nlohmann::json::array();
+    for (const auto& [id, c] : history) {
+        if (active_only && !c.active) continue;
+        const auto device = devices.find(c.source);
+        const auto domains = domains_by_address.find(c.destination);
+        result.push_back({{"id", id}, {"protocol", c.protocol}, {"state", c.state},
+            {"source", c.source}, {"source_port", c.source_port},
+            {"destination", c.destination}, {"destination_port", c.destination_port},
+            {"route", c.route}, {"mark", c.mark}, {"active", c.active},
+            {"device", device == devices.end() ? "" : device->second},
+            {"destination_domains", domains == domains_by_address.end()
+                ? nlohmann::json::array()
+                : nlohmann::json(domains->second)},
+            {"first_seen", c.first_seen}, {"last_seen", c.last_seen}});
+    }
+    return result.dump();
 }
 
 } // namespace
 
 void register_connections_handler(ApiServer& server, ApiContext& ctx) {
     server.get("/api/connections", [&ctx]() -> std::string {
-        std::lock_guard lock(connections_mutex);
-        read_dns_query_log();
-        read_conntrack(ctx.get_visible_config());
-        const auto devices = device_names();
-        nlohmann::json result = nlohmann::json::array();
-        for (const auto& [id, c] : history) {
-            const auto device = devices.find(c.source);
-            const auto domains = domains_by_address.find(c.destination);
-            result.push_back({{"id", id}, {"protocol", c.protocol}, {"state", c.state},
-                {"source", c.source}, {"source_port", c.source_port},
-                {"destination", c.destination}, {"destination_port", c.destination_port},
-                {"route", c.route}, {"mark", c.mark}, {"active", c.active},
-                {"device", device == devices.end() ? "" : device->second},
-                {"destination_domains", domains == domains_by_address.end()
-                    ? nlohmann::json::array()
-                    : nlohmann::json(domains->second)},
-                {"first_seen", c.first_seen}, {"last_seen", c.last_seen}});
-        }
-        return result.dump();
+        return serialize_connections(ctx, false);
+    });
+    server.get("/api/connections/active", [&ctx]() -> std::string {
+        return serialize_connections(ctx, true);
     });
 }
 

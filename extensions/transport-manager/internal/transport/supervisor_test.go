@@ -214,6 +214,7 @@ func TestSupervisorRestoresForwardingRulesWhileHealthy(t *testing.T) {
 		t.Fatal(err)
 	}
 	supervisor := newSupervisor(manager, time.Millisecond, 2*time.Millisecond, 4*time.Millisecond)
+	supervisor.runtimeRuleInterval = 2 * time.Millisecond
 	supervisor.Register(TransportSpec{Tag: fake.tag, Type: "sing-box", AutoStart: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -234,6 +235,7 @@ func TestSupervisorKeepsTransportHealthyWhenRuleRestoreFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	supervisor := newSupervisor(manager, time.Millisecond, 2*time.Millisecond, 4*time.Millisecond)
+	supervisor.runtimeRuleInterval = 2 * time.Millisecond
 	supervisor.Register(TransportSpec{Tag: fake.tag, Type: "sing-box", AutoStart: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

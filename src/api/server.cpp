@@ -66,40 +66,29 @@ std::string get_mime_type_for_path(const std::filesystem::path& path) {
     return "application/octet-stream";
 }
 
-bool read_file(const std::filesystem::path& path, std::string& output) {
-    constexpr std::uintmax_t kMaxStaticFileSize = std::uintmax_t{32} * 1024U * 1024U; // 32 MiB
-
-    std::error_code ec;
-    auto file_size = std::filesystem::file_size(path, ec);
-    if (ec || file_size > kMaxStaticFileSize) {
-        return false;
+bool is_hashed_asset(const std::filesystem::path& path) {
+    for (const auto& part : path) {
+        if (part == "assets") return true;
     }
-
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return false;
-    }
-    output.resize(static_cast<size_t>(file_size));
-    file.read(output.data(), static_cast<std::streamsize>(file_size));
-    return !file.bad();
+    return false;
 }
 
 bool serve_file_response(httplib::Response& res,
                          const std::filesystem::path& path,
-                         const std::filesystem::path& mime_from_path,
-                         bool gzip_encoded) {
+                          const std::filesystem::path& mime_from_path,
+                          bool gzip_encoded) {
+    res.set_file_content(path.string(), get_mime_type_for_path(mime_from_path));
     if (gzip_encoded) {
-        res.set_file_content(path.string(), get_mime_type_for_path(mime_from_path));
         res.set_header("Content-Encoding", "gzip");
         res.set_header("Vary", "Accept-Encoding");
-        return true;
     }
-
-    std::string body;
-    if (!read_file(path, body)) {
-        return false;
+    if (mime_from_path.filename() == "index.html") {
+        res.set_header("Cache-Control", "no-cache");
+    } else if (is_hashed_asset(mime_from_path)) {
+        res.set_header("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+        res.set_header("Cache-Control", "public, max-age=3600");
     }
-    res.set_content(body, get_mime_type_for_path(mime_from_path));
     return true;
 }
 
@@ -423,6 +412,14 @@ struct ApiServer::Impl {
 };
 
 ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) {
+    // The daemon runs on memory-constrained routers. Reject oversized bodies
+    // before cpp-httplib buffers them and bound slow/stalled clients. Backup
+    // restore applies a stricter aggregate limit in its own handler.
+    impl_->server.set_payload_max_length(16U * 1024U * 1024U);
+    impl_->server.set_read_timeout(15);
+    impl_->server.set_write_timeout(30);
+    impl_->server.set_keep_alive_timeout(20);
+
     // Parse "host:port" from config.listen
     const std::string listen = config.listen.value_or("0.0.0.0:12121");
     auto colon = listen.rfind(':');

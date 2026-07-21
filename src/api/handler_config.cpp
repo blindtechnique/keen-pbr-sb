@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <fcntl.h>
 #include <functional>
 #include <stdexcept>
@@ -105,6 +106,14 @@ void write_config_atomically(const std::string& config_path,
         cleanup_tmp_file(tmp_path);
         throw;
     }
+}
+
+std::string read_config_for_rollback(const std::string& config_path) {
+    std::ifstream input(config_path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("Cannot read current config before replacing it");
+    }
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
 nlohmann::json make_validation_error_json(const ConfigValidationError& error) {
@@ -246,17 +255,26 @@ void register_config_handler(ApiServer& server, ApiContext& ctx) {
         }
 
         // Phase 2: write + commit/apply.
+        std::string previous_config;
+        bool config_replaced = false;
         try {
+            // Runtime rollback without a matching on-disk rollback is unsafe:
+            // the rejected configuration would become active after reboot.
+            previous_config = read_config_for_rollback(ctx.config_path);
             write_config_atomically(ctx.config_path, staged_snapshot->second);
+            config_replaced = true;
             ConfigApplyResult apply_result =
                 ctx.enqueue_apply_validated_config(staged_snapshot->first, staged_snapshot->second);
 
             if (!apply_result.error.empty()) {
+                write_config_atomically(ctx.config_path, previous_config);
+                config_replaced = false;
                 nlohmann::json error_payload = {
                     {"error", std::string("Commit/apply failed: ") + apply_result.error},
-                    {"saved", true},
+                    {"saved", false},
                     {"applied", apply_result.applied},
                     {"rolled_back", apply_result.rolled_back},
+                    {"file_rolled_back", true},
                 };
                 throw ApiError("Commit/apply failed", 500, error_payload.dump());
             }
@@ -274,6 +292,14 @@ void register_config_handler(ApiServer& server, ApiContext& ctx) {
             ctx.finish_config_operation();
             return response.dump();
         } catch (...) {
+            if (config_replaced && !previous_config.empty()) {
+                try {
+                    write_config_atomically(ctx.config_path, previous_config);
+                } catch (const std::exception& rollback_error) {
+                    Logger::instance().error("Cannot restore config file after failed apply: {}",
+                                             rollback_error.what());
+                }
+            }
             ctx.finish_config_operation();
             throw;
         }

@@ -2,9 +2,11 @@
 
 #include "../log/logger.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cerrno>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sstream>
 #include <string>
@@ -400,43 +402,75 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         _exit(127);
     }
 
-    // Parent: read captured output, then wait
+    // Parent: read captured output without blocking forever. A service script,
+    // nft or a descendant inheriting stdout can otherwise keep this pipe open
+    // indefinitely and wedge the daemon request thread.
     close(pipefd[1]);
+    const int flags = fcntl(pipefd[0], F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+    }
     char buf[4096];
-    while (true) {
-        const ssize_t n = read(pipefd[0], buf, sizeof(buf));
-        if (n > 0) {
-            result.stdout_output.append(buf, static_cast<size_t>(n));
-            if (max_bytes > 0 && result.stdout_output.size() > max_bytes) {
-                result.truncated = true;
-                close(pipefd[0]);
-                kill(pid, SIGTERM);
-                int status = 0;
-                waitpid(pid, &status, 0);
-                if (WIFEXITED(status)) {
-                    result.exit_code = WEXITSTATUS(status);
+    bool pipe_open = true;
+    bool child_reaped = false;
+    bool child_status_valid = false;
+    bool timed_out = false;
+    int status = 0;
+    const auto deadline = std::chrono::steady_clock::now() + kDefaultExecTimeout;
+    while (pipe_open || !child_reaped) {
+        if (pipe_open) {
+            while (true) {
+                const ssize_t n = read(pipefd[0], buf, sizeof(buf));
+                if (n > 0) {
+                    const size_t received = static_cast<size_t>(n);
+                    const size_t remaining = max_bytes == 0 || result.stdout_output.size() >= max_bytes
+                        ? (max_bytes == 0 ? received : 0)
+                        : max_bytes - result.stdout_output.size();
+                    result.stdout_output.append(buf, std::min(received, remaining));
+                    if (max_bytes > 0 && received > remaining) {
+                        result.truncated = true;
+                    }
+                    continue;
                 }
-                Logger::instance().trace("safe_exec_capture_end",
-                                         "cmd={} exit_code={} duration_ms={} bytes={} truncated=true",
-                                         command,
-                                         result.exit_code,
-                                         std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             std::chrono::steady_clock::now() - started_at).count(),
-                                         result.stdout_output.size());
-                return result;
+                if (n == 0) {
+                    close(pipefd[0]);
+                    pipe_open = false;
+                }
+                if (n < 0 && errno == EINTR) continue;
+                break;
             }
-        } else if (n == 0) {
-            break;
-        } else {
-            if (errno == EINTR) continue;
+        }
+
+        if (!child_reaped) {
+            const pid_t waited = waitpid(pid, &status, WNOHANG);
+            child_status_valid = waited == pid;
+            child_reaped = child_status_valid || waited == -1;
+        }
+        if (result.truncated || std::chrono::steady_clock::now() >= deadline) {
+            timed_out = !result.truncated;
+            if (!child_reaped) {
+                const auto wait_result = wait_for_child_with_timeout(pid, std::chrono::seconds(0));
+                status = wait_result.status;
+                child_reaped = true;
+                child_status_valid = status != -1;
+            }
+            if (pipe_open) close(pipefd[0]);
+            pipe_open = false;
             break;
         }
+        if (pipe_open || !child_reaped) {
+            pollfd descriptor{pipe_open ? pipefd[0] : -1,
+                              static_cast<short>(POLLIN | POLLHUP), 0};
+            (void)poll(&descriptor, 1, 20);
+        }
     }
-    close(pipefd[0]);
 
-    int status = 0;
-    if (waitpid(pid, &status, 0) != -1 && WIFEXITED(status)) {
+    if (!timed_out && child_status_valid && WIFEXITED(status)) {
         result.exit_code = WEXITSTATUS(status);
+    }
+    if (timed_out) {
+        Logger::instance().error("Command '{}' exceeded {} s and was killed",
+                                 command, kDefaultExecTimeout.count());
     }
     Logger::instance().trace("safe_exec_capture_end",
                              "cmd={} exit_code={} duration_ms={} bytes={} truncated={}",

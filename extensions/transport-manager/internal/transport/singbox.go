@@ -24,6 +24,17 @@ var (
 	validInterface = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
+func storeRoutingHealthSnapshot(cacheKey string, values map[string]routingHealthResult) {
+	routingHealthCacheMu.Lock()
+	defer routingHealthCacheMu.Unlock()
+	// A configured daemon normally has one endpoint. Bound the cache anyway so
+	// repeated configuration changes cannot grow a process-lifetime map.
+	if len(routingHealthCache) >= 8 {
+		clear(routingHealthCache)
+	}
+	routingHealthCache[cacheKey] = routingHealthSnapshot{fetchedAt: time.Now(), values: values}
+}
+
 type TransportSpec struct {
 	Tag          string     `json:"tag"`
 	Type         string     `json:"type"`
@@ -73,6 +84,22 @@ type RoutingHealthEndpoint struct {
 	URL    string
 	APIKey string
 }
+
+type routingHealthResult struct {
+	verdict string
+	detail  string
+}
+
+type routingHealthSnapshot struct {
+	fetchedAt time.Time
+	values    map[string]routingHealthResult
+}
+
+var (
+	routingHealthCacheMu sync.Mutex
+	routingHealthCache   = make(map[string]routingHealthSnapshot)
+	routingHealthClient  = &http.Client{Timeout: 2 * time.Second}
+)
 
 func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...RoutingHealthEndpoint) (*SingBox, error) {
 	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
@@ -275,7 +302,19 @@ func (s *SingBox) EnsureRuntimeRules() error {
 	if !running {
 		return nil
 	}
-	return s.ensureForwardingRules()
+	if err := s.ensureForwardingRules(); err != nil {
+		return err
+	}
+	s.truncateRuntimeLog()
+	return nil
+}
+
+func (s *SingBox) truncateRuntimeLog() {
+	const maximumLogBytes = 2 * 1024 * 1024
+	path := filepath.Join(s.runtimeDir, s.spec.Tag+".log")
+	if info, err := os.Stat(path); err == nil && info.Size() > maximumLogBytes {
+		_ = os.Truncate(path, 0)
+	}
 }
 
 func (s *SingBox) removeForwardingRules() {
@@ -448,20 +487,31 @@ func (s *SingBox) routingHealth(ctx context.Context) (string, string, bool) {
 	if s.healthEndpoint.URL == "" {
 		return "", "", false
 	}
+	cacheKey := s.healthEndpoint.URL + "\x00" + s.healthEndpoint.APIKey
+	routingHealthCacheMu.Lock()
+	cached, found := routingHealthCache[cacheKey]
+	routingHealthCacheMu.Unlock()
+	if found && time.Since(cached.fetchedAt) < 2*time.Second {
+		result, known := cached.values[s.spec.Interface]
+		return result.verdict, result.detail, known && result.verdict != "" && result.verdict != "unknown"
+	}
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.healthEndpoint.URL, nil)
 	if err != nil {
+		storeRoutingHealthSnapshot(cacheKey, map[string]routingHealthResult{})
 		return "", "", false
 	}
 	if s.healthEndpoint.APIKey != "" {
 		request.Header.Set("Authorization", "Bearer "+s.healthEndpoint.APIKey)
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	response, err := client.Do(request)
+	response, err := routingHealthClient.Do(request)
 	if err != nil {
+		storeRoutingHealthSnapshot(cacheKey, map[string]routingHealthResult{})
 		return "", "", false
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		storeRoutingHealthSnapshot(cacheKey, map[string]routingHealthResult{})
 		return "", "", false
 	}
 	var body struct {
@@ -474,25 +524,28 @@ func (s *SingBox) routingHealth(ctx context.Context) (string, string, bool) {
 		} `json:"outbounds"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		storeRoutingHealthSnapshot(cacheKey, map[string]routingHealthResult{})
 		return "", "", false
 	}
-	bestVerdict := ""
-	bestDetail := ""
+	values := make(map[string]routingHealthResult)
 	for _, outbound := range body.Outbounds {
 		for _, candidate := range outbound.Interfaces {
-			if candidate.InterfaceName != s.spec.Interface {
+			if candidate.InterfaceName == "" {
 				continue
 			}
-			if candidate.Status == "active" || candidate.Status == "backup" {
-				return candidate.Status, candidate.Detail, true
+			current := values[candidate.InterfaceName]
+			if current.verdict == "active" || current.verdict == "backup" {
+				continue
 			}
-			bestVerdict, bestDetail = candidate.Status, candidate.Detail
+			values[candidate.InterfaceName] = routingHealthResult{
+				verdict: candidate.Status,
+				detail:  candidate.Detail,
+			}
 		}
 	}
-	if bestVerdict == "" || bestVerdict == "unknown" {
-		return bestVerdict, bestDetail, false
-	}
-	return bestVerdict, bestDetail, true
+	storeRoutingHealthSnapshot(cacheKey, values)
+	result, known := values[s.spec.Interface]
+	return result.verdict, result.detail, known && result.verdict != "" && result.verdict != "unknown"
 }
 
 func (s *SingBox) buildConfig() (map[string]any, error) {
