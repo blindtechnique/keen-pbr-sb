@@ -92,7 +92,7 @@ export function AuthSettingsCard() {
   const needsCredentials = provider === "local" && enabled
 
   return (
-    <Card>
+    <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.auth.title")}</CardTitle>
         <CardDescription>

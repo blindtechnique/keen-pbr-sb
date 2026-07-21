@@ -39,6 +39,8 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             title: t("nav.items.settings"),
             url: "/general",
           },
+          { title: t("nav.items.backup"), url: "/backup" },
+          { title: t("nav.items.restore"), url: "/restore" },
         ],
       },
       {

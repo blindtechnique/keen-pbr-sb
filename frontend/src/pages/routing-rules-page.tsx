@@ -20,12 +20,14 @@ import { DataTable } from "@/components/shared/data-table"
 import { SortableCards } from "@/components/shared/sortable-cards"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
+import { PageActionBar } from "@/components/shared/page-action-bar"
 import { RuntimeOutboundEntry } from "@/components/shared/runtime-outbound-state"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   getApiErrorMessage,
   reorderRules,
@@ -167,8 +169,10 @@ export function RoutingRulesPage() {
   return (
     <div className="space-y-3">
       <PageHeader
-        actions={
-          <div className="flex flex-wrap justify-end gap-2">
+        description={t("pages.routingRules.description")}
+        title={t("pages.routingRules.title")}
+      />
+      <PageActionBar>
             <ConfigTransferButtons
               config={loadedConfig}
               disabled={configMutationPending}
@@ -184,11 +188,7 @@ export function RoutingRulesPage() {
               <Plus className="mr-1 h-4 w-4" />
               {t("pages.routingRules.actions.addRule")}
             </Button>
-          </div>
-        }
-        description={t("pages.routingRules.description")}
-        title={t("pages.routingRules.title")}
-      />
+      </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
@@ -212,9 +212,11 @@ export function RoutingRulesPage() {
           <div className="relative h-0">
             {ruleSelection.hasSelection ? (
             <BulkSelectionToolbar
+              cancelLabel={t("common.cancel")}
               countLabel={t("pages.routingRules.bulk.selected", {
                 count: ruleSelection.selectedCount,
               })}
+              onCancel={ruleSelection.clear}
             >
               <Button
                 disabled={configMutationPending}
@@ -258,6 +260,14 @@ export function RoutingRulesPage() {
               renderCard={(row) => (
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2">
+                    <Checkbox
+                      aria-label={t("common.selection.selectRow", {
+                        rowLabel: `${t("pages.routingRules.title")} #${row.order}`,
+                      })}
+                      checked={ruleSelection.selectedIds.has(row.id)}
+                      disabled={configMutationPending}
+                      onCheckedChange={() => ruleSelection.toggleOne(row.id)}
+                    />
                     <span className="text-sm font-medium">#{row.order}</span>
                     <span className="truncate text-sm text-muted-foreground">
                       → {row.outbound}

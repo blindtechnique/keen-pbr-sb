@@ -206,7 +206,7 @@ function LoadedGeneralConfigPage({
     <>
       <SoftwareUpdateCard />
 
-      <Card>
+      <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.general.title")}</CardTitle>
           <CardDescription>
@@ -356,7 +356,7 @@ function LoadedGeneralConfigPage({
 
       <RemoteAccessCard />
 
-      <Card>
+      <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.autoupdate.title")}</CardTitle>
           <CardDescription>
@@ -423,7 +423,7 @@ function LoadedGeneralConfigPage({
         </CardContent>
       </Card>
 
-      <Card>
+      <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.advanced.title")}</CardTitle>
           <CardDescription>
@@ -539,7 +539,7 @@ function LoadedGeneralConfigPage({
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="flex justify-end gap-2">
+      <div className="sticky z-20 -mx-4 flex justify-end gap-2 border-t bg-background px-4 py-3 shadow-[0_-8px_18px_-14px_rgba(0,0,0,0.55)] md:-mx-6 md:px-6" style={{ bottom: "var(--warning-banner-height, 0px)" }}>
         <Button
           disabled={isPending}
           onClick={handleCancel}
@@ -589,6 +589,7 @@ function SoftwareUpdateCard() {
   const [status, setStatus] = useState<SoftwareUpdateStatus | null>(null)
   const [error, setError] = useState("")
   const [showResult, setShowResult] = useState(false)
+  const [downloadBackup, setDownloadBackup] = useState(true)
   const refresh = useCallback(async () => {
     try {
       const response = await fetch("/api/system/update")
@@ -626,6 +627,23 @@ function SoftwareUpdateCard() {
     )
       return
     try {
+      if (downloadBackup) {
+        const backupResponse = await fetch("/api/backup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            groups: { general: true, transports: true, outbounds: true, dns: true, routing: true, nfqws: true },
+          }),
+        })
+        const backup = await backupResponse.json()
+        if (!backupResponse.ok) throw new Error(backup.error ?? `HTTP ${backupResponse.status}`)
+        const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2) + "\n"], { type: "application/json" }))
+        const anchor = document.createElement("a")
+        anchor.href = url
+        anchor.download = `keen-pbr-sb-before-update-${new Date().toISOString().slice(0, 10)}.json`
+        anchor.click()
+        URL.revokeObjectURL(url)
+      }
       const response = await fetch("/api/system/update", { method: "POST" })
       const body = await response.json().catch(() => ({}))
       if (!response.ok)
@@ -646,7 +664,7 @@ function SoftwareUpdateCard() {
   }
 
   return (
-    <Card>
+    <Card className={status?.available ? "border-success/60 bg-success/5 shadow-[0_0_0_1px_color-mix(in_srgb,var(--success)_18%,transparent)]" : undefined} size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.softwareUpdate.title")}</CardTitle>
         <CardDescription>
@@ -732,6 +750,10 @@ function SoftwareUpdateCard() {
           </div>
         ) : null}
         <div className="flex flex-wrap gap-2">
+          <label className="flex w-full cursor-pointer items-center gap-3 rounded-md border p-3 text-sm">
+            <Checkbox checked={downloadBackup} onCheckedChange={(checked) => setDownloadBackup(checked === true)} />
+            Скачать бэкап перед установкой
+          </label>
           <Button
             disabled={!status?.available || status.running}
             onClick={() => void startUpdate()}
@@ -746,6 +768,9 @@ function SoftwareUpdateCard() {
           >
             <RefreshCwIcon className={status?.running ? "animate-spin" : ""} />
             {t("pages.settings.softwareUpdate.check")}
+          </Button>
+          <Button onClick={() => window.location.assign("/restore")} variant="destructive">
+            Откат в один клик
           </Button>
         </div>
         {showResult ? (
@@ -981,4 +1006,3 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return undefined
   }
 }
-

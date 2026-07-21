@@ -188,6 +188,19 @@
   --shadow-2xl: var(--shadow-2xl);
 }
 
+@keyframes status-beacon-success {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+
+.status-beacon-success {
+  animation: status-beacon-success 1.8s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-beacon-success { animation: none; }
+}
+
 @layer base {
   * {
     @apply box-border border-border outline-ring/50;
@@ -512,12 +525,12 @@
 /* Ореол вокруг кружка: цвет свой для включённого и для выключенного. */
 [data-slot="switch"][data-checked]:hover:not([data-disabled])
   [data-slot="switch-thumb"] {
-  box-shadow: 0 2px 5px rgb(0 0 0 / 28%), 0 0 0 8px color-mix(in srgb, #F0F7FC 55%, transparent);
+  box-shadow: 0 3px 7px rgb(0 0 0 / 42%), 0 0 0 7px rgb(0 87 138 / 18%);
 }
 
 [data-slot="switch"][data-unchecked]:hover:not([data-disabled])
   [data-slot="switch-thumb"] {
-  box-shadow: 0 2px 5px rgb(0 0 0 / 28%), 0 0 0 8px color-mix(in srgb, #FBFBFB 55%, transparent);
+  box-shadow: 0 3px 7px rgb(0 0 0 / 42%), 0 0 0 7px rgb(49 64 75 / 18%);
 }
 
 /* В тёмной теме ореола нет вовсе: выключенный кружок вместо него синеет,
@@ -542,5 +555,5 @@
 }
 
 .dark [data-slot="switch"]:hover:not([data-disabled]) [data-slot="switch-thumb"] {
-  box-shadow: 0 2px 5px rgb(0 0 0 / 28%);
+  box-shadow: 0 4px 10px rgb(0 0 0 / 72%), 0 0 0 6px rgb(119 188 228 / 18%);
 }

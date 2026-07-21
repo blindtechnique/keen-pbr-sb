@@ -52,7 +52,7 @@ export function OverviewPage() {
   })
   const runtimeOutboundsQuery = useGetRuntimeOutbounds({
     query: {
-      refetchInterval: 30_000,
+      refetchInterval: 3_000,
       refetchIntervalInBackground: false,
     },
   })
@@ -235,6 +235,5 @@ function getRoutingHealthErrorMessage(
     t("overview.routing.loadError")
   )
 }
-
 
 

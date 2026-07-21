@@ -23,8 +23,9 @@ type RouterInfo = {
   memory_total_mb?: number
   memory_used_mb?: number
   memory_used_percent?: number
-  wifi_24_temperature_c?: number
-  wifi_5_temperature_c?: number
+  disk_total_mb?: number
+  disk_used_mb?: number
+  disk_used_percent?: number
   uptime_seconds?: number
   load_average?: number[]
   internet?: boolean
@@ -96,8 +97,8 @@ export function RouterInfoCard() {
             <Row label={t("overview.router.memory")}>
               {formatMemory(info, t)}
             </Row>
-            {describeWifi(info) ? (
-              <Row label={t("overview.router.wifi")}>{describeWifi(info)}</Row>
+            {typeof info.disk_used_percent === "number" ? (
+              <Row label={t("overview.router.disk")}>{formatDisk(info, t)}</Row>
             ) : null}
             {info.wan_address ? (
               <Row label={t("overview.router.wan")}>
@@ -190,22 +191,15 @@ function formatMemory(
   })
 }
 
-/**
- * Both radios usually sit within a degree of each other, so a single figure is
- * less noise than two nearly identical ones.
- */
-function describeWifi(info: RouterInfo): string | null {
-  const band24 = info.wifi_24_temperature_c
-  const band5 = info.wifi_5_temperature_c
-  if (typeof band24 !== "number" && typeof band5 !== "number") {
-    return null
-  }
-  if (typeof band24 === "number" && typeof band5 === "number") {
-    return Math.abs(band5 - band24) < 3
-      ? `${band5}°C`
-      : `2.4 ГГц ${band24}°C · 5 ГГц ${band5}°C`
-  }
-  return `${band24 ?? band5}°C`
+function formatDisk(
+  info: RouterInfo,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  return t("overview.router.diskValue", {
+    used: info.disk_used_mb ?? 0,
+    total: info.disk_total_mb ?? 0,
+    percent: info.disk_used_percent ?? 0,
+  })
 }
 
 function formatUptime(

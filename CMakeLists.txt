@@ -308,6 +308,7 @@ if(WITH_API)
     src/api/handler_naive.cpp
     src/api/handler_ndms_names.cpp
     src/api/handler_remote_access.cpp
+    src/api/handler_backup.cpp
   )
 endif()
 

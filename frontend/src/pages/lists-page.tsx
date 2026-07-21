@@ -35,18 +35,22 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { DependencyList } from "@/components/shared/dependency-list"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
 } from "@/components/shared/delete-impact-dialog"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
+import { PageActionBar } from "@/components/shared/page-action-bar"
 import { StatsDisplay } from "@/components/shared/stats-display"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { dependenciesOfList } from "@/lib/dependencies"
 import {
   buildUpdatedConfigForListsDelete,
   getListDeleteImpact,
@@ -68,7 +72,6 @@ type ListTableRow = {
   locationLabel: string
   locationIcon?: "external"
   lastUpdated?: string
-  rule: string
   stats?: {
     totalHosts: number
     ipv4Subnets: number
@@ -256,8 +259,10 @@ export function ListsPage() {
   return (
     <div className="space-y-3">
       <PageHeader
-        actions={
-          <div className="flex flex-wrap justify-end gap-2">
+        description={t("pages.lists.description")}
+        title={t("pages.lists.title")}
+      />
+      <PageActionBar>
             {hasRefreshableLists ? (
               <Button
                 disabled={refreshDisabled}
@@ -289,11 +294,7 @@ export function ListsPage() {
               <Plus className="mr-1 h-4 w-4" />
               {t("pages.lists.actions.new")}
             </Button>
-          </div>
-        }
-        description={t("pages.lists.description")}
-        title={t("pages.lists.title")}
-      />
+      </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
@@ -315,9 +316,11 @@ export function ListsPage() {
           <div className="relative h-0">
           {listSelection.hasSelection ? (
             <BulkSelectionToolbar
+              cancelLabel={t("common.cancel")}
               countLabel={t("pages.lists.bulk.selected", {
                 count: listSelection.selectedCount,
               })}
+              onCancel={listSelection.clear}
             >
               {hasRefreshableLists ? (
                 <Button
@@ -348,6 +351,42 @@ export function ListsPage() {
             </BulkSelectionToolbar>
           ) : null}
           </div>
+          <div className="space-y-2 md:hidden">
+            {tableRows.map((list) => (
+              <div className="flex items-start gap-3 rounded-lg border bg-card p-3" key={list.id}>
+                <Checkbox
+                  aria-label={t("common.selection.selectRow", { rowLabel: list.id })}
+                  checked={listSelection.selectedIds.has(list.id)}
+                  disabled={configMutationPending}
+                  onCheckedChange={() => listSelection.toggleOne(list.id)}
+                />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{list.draft.name}</p>
+                      <p className="truncate text-xs text-muted-foreground">{list.locationLabel}</p>
+                    </div>
+                    <Badge size="xs" variant="outline">{getListSourceLabel(list.draft, t)}</Badge>
+                  </div>
+                  {list.stats ? (
+                    <StatsDisplay ipv4Subnets={list.stats.ipv4Subnets} ipv6Subnets={list.stats.ipv6Subnets} totalHosts={list.stats.totalHosts} />
+                  ) : null}
+                  <DependencyList dependencies={dependenciesOfList(loadedConfig, list.id)} emptyHint={t("common.dependencies.none")} />
+                  <div className="flex justify-end gap-1">
+                    {list.canRefresh ? (
+                      <Button disabled={refreshDisabled} onClick={() => handleRefreshOne(list.id)} size="icon-sm" variant="ghost" aria-label={t("pages.lists.actions.update")}>
+                        <RefreshCw className={isRefreshIconActive(activeRefreshTarget, bulkRefreshRunning, listSelection.selectedIds, list.id) ? "animate-spin" : ""} />
+                      </Button>
+                    ) : null}
+                    <Button disabled={configMutationPending} onClick={() => navigate(`/lists/${list.id}/edit`)} size="icon-sm" variant="ghost" aria-label={t("common.edit")}>
+                      <Pencil />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="hidden md:block">
           <DataTable
             headers={[
               t("pages.lists.headers.name"),
@@ -404,9 +443,11 @@ export function ListsPage() {
                   {t("pages.lists.noStats")}
                 </span>
               ),
-              <Badge key={`${list.id}-rule`} variant="outline">
-                {list.rule}
-              </Badge>,
+              <DependencyList
+                dependencies={dependenciesOfList(loadedConfig, list.id)}
+                emptyHint={t("common.dependencies.none")}
+                key={`${list.id}-dependencies`}
+              />,
               <ActionButtons
                 actions={[
                   ...(list.canRefresh
@@ -453,6 +494,7 @@ export function ListsPage() {
                 t("common.selection.selectRow", { rowLabel: rowId }),
             }}
           />
+          </div>
         </div>
       )}
       <DeleteImpactDialog
@@ -727,7 +769,6 @@ function getTableRowsFromListMap(
         listConfig.url || listConfig.file || t("pages.lists.location.inline"),
       locationIcon: listConfig.url ? "external" : undefined,
       lastUpdated: listRefreshState[name]?.last_updated,
-      rule: t("pages.lists.rule.configured"),
       stats: showInlineStats
         ? {
             totalHosts: domains.length + ipCidrs.length,

@@ -127,7 +127,7 @@ export function RuntimeInterfaceStatusRow({
 function getToneDotClass(tone: RuntimeStatusTone) {
   switch (tone) {
     case "healthy":
-      return "bg-success"
+      return "status-beacon-success bg-success"
     case "info":
       return "bg-sky-500"
     case "degraded":

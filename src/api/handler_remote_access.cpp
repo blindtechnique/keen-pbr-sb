@@ -229,7 +229,9 @@ void apply_remote_access_rules(const std::string& listen_address) {
                    port_text, "-j", "ACCEPT"}, true);
     }
 
-    Logger::instance().warn(
+    // This is an explicitly requested, authenticated state, not a fault. Keep
+    // it in diagnostics without raising the global warning banner.
+    Logger::instance().info(
         "Remote access is OPEN: the web interface is reachable from the internet on {}:{}",
         wan, port);
 }

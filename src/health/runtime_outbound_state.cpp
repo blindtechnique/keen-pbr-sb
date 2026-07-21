@@ -250,13 +250,12 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
     interface_state.interface_name = outbound.interface;
     const bool reachable = is_interface_outbound_reachable(outbound, netlink);
     const bool active = primary_route != nullptr && route_matches_outbound(*primary_route, outbound);
-    interface_state.status = active
-        ? api::RuntimeInterfaceStatusEnum::ACTIVE
-        : api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
+    bool probe_succeeded = false;
 
     if (interface_probe_lookup) {
         if (const auto probe = interface_probe_lookup(outbound.tag)) {
             if (probe->success) {
+                probe_succeeded = true;
                 interface_state.latency_ms = static_cast<int64_t>(probe->latency_ms);
             } else if (!probe->error.empty()) {
                 interface_state.detail = probe->error;
@@ -264,8 +263,14 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
         }
     }
 
+    interface_state.status = active
+        ? api::RuntimeInterfaceStatusEnum::ACTIVE
+        : (reachable || probe_succeeded)
+            ? api::RuntimeInterfaceStatusEnum::BACKUP
+            : api::RuntimeInterfaceStatusEnum::UNAVAILABLE;
+
     if (interface_state.detail == std::nullopt) {
-        if (!reachable) {
+        if (!reachable && !probe_succeeded) {
             interface_state.detail = std::string("interface is not reachable from the main routing table");
         } else if (!active && primary_route == nullptr) {
             interface_state.detail = std::string("no active default route is installed in the outbound table");
@@ -273,7 +278,11 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
     }
 
     state.interfaces = std::vector<api::RuntimeInterfaceState>{interface_state};
-    state.status = derive_overall_status(state.interfaces, active, primary_route != nullptr);
+    // A successful outbound-bound probe is stronger liveness evidence than a
+    // transiently incomplete netlink snapshot. Keep route activity separate
+    // in the member status, but do not report a responding transport dead.
+    state.status = derive_overall_status(
+        state.interfaces, active || probe_succeeded, primary_route != nullptr);
     return state;
 }
 

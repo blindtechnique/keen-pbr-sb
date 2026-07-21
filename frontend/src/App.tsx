@@ -46,6 +46,8 @@ const GeneralConfigPage = lazy(() =>
     default: m.GeneralConfigPage,
   }))
 )
+const BackupPage = lazy(() => import("@/pages/backup-page").then((m) => ({ default: m.BackupPage })))
+const RestorePage = lazy(() => import("@/pages/backup-page").then((m) => ({ default: m.RestorePage })))
 const ListUpsertPage = lazy(() =>
   import("@/pages/list-upsert-page").then((m) => ({ default: m.ListUpsertPage }))
 )
@@ -97,6 +99,8 @@ function App() {
           <Switch>
             <Route component={OverviewPage} path="/" />
             <Route component={GeneralConfigPage} path="/general" />
+            <Route component={BackupPage} path="/backup" />
+            <Route component={RestorePage} path="/restore" />
             <Route path="/lists/create">
               <ListUpsertPage mode="create" />
             </Route>

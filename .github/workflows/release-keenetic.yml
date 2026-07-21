@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - "v*"
-    # Тестовые сборки: пуш в next кладёт IPK артефактом, релиз не создаётся.
-    branches:
-      - next
   workflow_dispatch:
 
 permissions:

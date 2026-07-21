@@ -20,6 +20,7 @@
 #include "handler_naive.hpp"
 #include "handler_ndms_names.hpp"
 #include "handler_remote_access.hpp"
+#include "handler_backup.hpp"
 
 namespace keen_pbr3 {
 
@@ -43,6 +44,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_naive_component_handler(server, ctx);
     register_ndms_names_handler(server, ctx);
     register_remote_access_handler(server, ctx);
+    register_backup_handler(server, ctx);
 }
 
 } // namespace keen_pbr3

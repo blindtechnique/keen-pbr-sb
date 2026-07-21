@@ -77,7 +77,7 @@ export function LoggingSettingsCard() {
   })
 
   return (
-    <Card>
+    <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.logging.title")}</CardTitle>
         <CardDescription>

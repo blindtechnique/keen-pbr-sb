@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <sys/statvfs.h>
 
 namespace keen_pbr3 {
 
@@ -125,18 +126,6 @@ std::optional<int> cpu_temperature() {
     return std::nullopt;
 }
 
-std::optional<int> wifi_temperature(const std::string& interface_id) {
-    const auto response = rci_get("/show/interface/" + interface_id);
-    if (!response || !response->is_object()) {
-        return std::nullopt;
-    }
-    const auto it = response->find("temperature");
-    if (it == response->end() || !it->is_number()) {
-        return std::nullopt;
-    }
-    return it->get<int>();
-}
-
 // The WAN address is taken from the interface the firmware itself considers
 // the default gateway. Matching on names like "ISP" only works on one router.
 std::optional<std::string> wan_address(const nlohmann::json& internet_status) {
@@ -235,13 +224,15 @@ nlohmann::json build_router_info() {
         }
     }
 
-    const auto wifi_24 = wifi_temperature("WifiMaster0");
-    const auto wifi_5 = wifi_temperature("WifiMaster1");
-    if (wifi_24) {
-        out["wifi_24_temperature_c"] = *wifi_24;
-    }
-    if (wifi_5) {
-        out["wifi_5_temperature_c"] = *wifi_5;
+    struct statvfs disk{};
+    if (::statvfs("/opt", &disk) == 0 && disk.f_blocks > 0) {
+        const auto block_size = static_cast<unsigned long long>(disk.f_frsize);
+        const auto total = static_cast<unsigned long long>(disk.f_blocks) * block_size;
+        const auto available = static_cast<unsigned long long>(disk.f_bavail) * block_size;
+        const auto used = total - available;
+        out["disk_total_mb"] = total / (1024ULL * 1024ULL);
+        out["disk_used_mb"] = used / (1024ULL * 1024ULL);
+        out["disk_used_percent"] = static_cast<int>(used * 100ULL / total);
     }
 
     const auto uptime_raw = trim(read_text_file("/proc/uptime"));

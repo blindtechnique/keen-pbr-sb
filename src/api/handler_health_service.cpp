@@ -3,6 +3,7 @@
 #include "handler_health_service.hpp"
 #include "generated/api_types.hpp"
 #include "update_version.hpp"
+#include "handler_backup.hpp"
 #include "../http/http_client.hpp"
 
 #include <keen-pbr/version.hpp>
@@ -88,7 +89,7 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
             .dump();
     });
 
-    server.post("/api/system/update", []() -> std::string {
+    server.post("/api/system/update", [&ctx]() -> std::string {
         const std::filesystem::path helper =
             "/opt/usr/lib/keen-pbr/self-update.sh";
         const std::filesystem::path running_file =
@@ -98,6 +99,7 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
             throw ApiError("self-update helper is not installed", 409);
         if (std::filesystem::is_regular_file(running_file, ec))
             throw ApiError("keen-pbr-sb update is already running", 409);
+        create_full_rollback_backup(ctx);
         const int status = std::system(
             "/opt/usr/lib/keen-pbr/self-update.sh >/dev/null 2>&1 &");
         if (status != 0) throw ApiError("failed to start keen-pbr-sb update", 500);

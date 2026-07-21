@@ -17,6 +17,8 @@ export const enTranslation = {
     closeResult: "Close message",
     tabs: {
       settings: "Settings",
+      backup: "Backup",
+      restore: "Restore",
       strategies: "Strategies",
       lists: "Lists",
       lua: "Lua scripts",
@@ -402,7 +404,8 @@ export const enTranslation = {
       memory: "Memory",
       memoryValue: "{{used}} MB / {{total}} MB ({{percent}}%)",
       memoryTotalOnly: "{{total}} MB",
-      wifi: "Wi-Fi",
+      disk: "Entware disk",
+      diskValue: "{{used}} MB / {{total}} MB ({{percent}}%)",
       wan: "WAN address",
       clients: "Clients",
       clientsValue: "{{active}} active / {{total}} total",

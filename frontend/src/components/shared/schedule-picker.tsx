@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { Input } from "@/components/ui/input"
@@ -46,13 +47,29 @@ export function SchedulePicker({
 }) {
   const { t } = useTranslation()
   const parsed = parseSchedule(value)
+  const [frequency, setFrequency] = useState<Frequency>(parsed.frequency)
+  const emittedValue = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (emittedValue.current === value) {
+      emittedValue.current = null
+      return
+    }
+    setFrequency(parseSchedule(value).frequency)
+  }, [value])
+
+  const emit = (nextValue: string) => {
+    emittedValue.current = nextValue
+    onChange(nextValue)
+  }
 
   const update = (next: Partial<ParsedSchedule>) => {
-    const merged = { ...parsed, ...next }
+    const merged = { ...parsed, frequency, ...next }
     if (merged.frequency === CUSTOM_SCHEDULE) {
       return
     }
-    onChange(buildCron(merged))
+    setFrequency(merged.frequency)
+    emit(buildCron(merged))
   }
 
   return (
@@ -60,13 +77,12 @@ export function SchedulePicker({
       <Select
         onValueChange={(next) => {
           if (next === CUSTOM_SCHEDULE) {
-            onChange(value)
-            update({ frequency: CUSTOM_SCHEDULE })
+            setFrequency(CUSTOM_SCHEDULE)
             return
           }
           update({ frequency: next as Frequency })
         }}
-        value={parsed.frequency}
+        value={frequency}
       >
         <SelectTrigger>
           <SelectValue>
@@ -100,7 +116,7 @@ export function SchedulePicker({
         </SelectContent>
       </Select>
 
-      {parsed.frequency === "weekly" ? (
+      {frequency === "weekly" ? (
         <Select
           onValueChange={(next) => update({ weekday: Number(next) })}
           value={String(parsed.weekday)}
@@ -128,7 +144,7 @@ export function SchedulePicker({
         </Select>
       ) : null}
 
-      {parsed.frequency === "monthly" ? (
+      {frequency === "monthly" ? (
         <Select
           onValueChange={(next) => update({ day: Number(next) })}
           value={String(parsed.day)}
@@ -154,7 +170,7 @@ export function SchedulePicker({
         </Select>
       ) : null}
 
-      {parsed.frequency !== "hourly" && parsed.frequency !== CUSTOM_SCHEDULE ? (
+      {frequency !== "hourly" && frequency !== CUSTOM_SCHEDULE ? (
         <Select
           onValueChange={(next) => update({ hour: Number(next) })}
           value={String(parsed.hour)}
@@ -182,9 +198,9 @@ export function SchedulePicker({
         </Select>
       ) : null}
 
-      {parsed.frequency === CUSTOM_SCHEDULE ? (
+      {frequency === CUSTOM_SCHEDULE ? (
         <Input
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => emit(event.target.value)}
           placeholder="0 4 * * 0"
           value={value}
         />

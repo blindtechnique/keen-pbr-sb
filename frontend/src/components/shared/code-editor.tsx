@@ -52,13 +52,13 @@ export function CodeEditor({
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-lg border bg-input/30 focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
+        "relative min-h-0 overflow-hidden rounded-lg border bg-input/30 focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
         className
       )}
     >
       <pre
         aria-hidden="true"
-        className={cn(shared, "pointer-events-none overflow-auto px-3 py-2")}
+        className={cn(shared, "pointer-events-none h-full overflow-auto px-3 py-2")}
         ref={highlightRef}
       >
         {highlight(value, syntax)}
@@ -68,7 +68,7 @@ export function CodeEditor({
       <textarea
         className={cn(
           shared,
-          "absolute inset-0 resize-none overflow-auto bg-transparent px-3 py-2 text-transparent caret-foreground outline-none"
+          "absolute inset-0 resize-none touch-pan-y overflow-auto overscroll-contain bg-transparent px-3 py-2 text-transparent caret-foreground outline-none"
         )}
         onChange={(event) => onChange?.(event.target.value)}
         readOnly={readOnly}

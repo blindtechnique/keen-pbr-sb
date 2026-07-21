@@ -90,7 +90,7 @@ export function RemoteAccessCard() {
   const blocked = !loginRequired || !listenReachable
 
   return (
-    <Card>
+    <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.remoteAccess.title")}</CardTitle>
         <CardDescription>

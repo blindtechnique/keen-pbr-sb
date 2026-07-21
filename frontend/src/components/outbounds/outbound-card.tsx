@@ -88,7 +88,7 @@ export function OutboundCard({
             className={cn(
               "size-2 rounded-full",
               tone === "up"
-                ? "bg-success"
+                ? "status-beacon-success bg-success"
                 : tone === "down"
                   ? "bg-destructive"
                   : "bg-muted-foreground/50"

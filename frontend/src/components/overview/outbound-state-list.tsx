@@ -185,7 +185,7 @@ function HealthDot({ status }: { status?: string }) {
       className={cn(
         "size-2 shrink-0 rounded-full",
         status === "healthy"
-          ? "bg-success"
+          ? "status-beacon-success bg-success"
           : status === "degraded" || status === "unavailable"
             ? "bg-destructive"
             : "bg-muted-foreground/50"
