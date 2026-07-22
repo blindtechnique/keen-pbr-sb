@@ -143,7 +143,10 @@ export const enTranslation = {
         "Can only contain a-z, 0-9 and underscores. Max 24 characters, must start with a letter.",
     },
     selection: {
+      select: "Select",
+      done: "Done",
       selectAll: "Select all visible rows",
+      selectAllShort: "Select all",
       selectRow: "Select {{rowLabel}}",
     },
   },

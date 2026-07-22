@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import { useRef, useState, type ReactNode } from "react"
 import { GripVerticalIcon } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
@@ -45,6 +45,7 @@ export function DataTable({
 }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const armedDragIndex = useRef<number | null>(null)
   const hasSelection = Boolean(
     selection && selection.rowIds.length === rows.length
   )
@@ -160,11 +161,21 @@ export function DataTable({
                       ? "keen-row-drop-after"
                       : "keen-row-drop-before")
                 )}
-                draggable={hasReorder && dragIndex === index}
+                draggable={hasReorder && !reorder?.disabled}
                 key={hasSelection ? rowId || index : `${row[0]}-${index}`}
                 onDragEnd={() => {
+                  armedDragIndex.current = null
                   setDragIndex(null)
                   setDropIndex(null)
+                }}
+                onDragStart={(event) => {
+                  if (!hasReorder || armedDragIndex.current !== index) {
+                    event.preventDefault()
+                    return
+                  }
+                  event.dataTransfer.effectAllowed = "move"
+                  setDragIndex(index)
+                  setDropIndex(index)
                 }}
                 onDragOver={(event) => {
                   if (!hasReorder || dragIndex === null) return
@@ -187,10 +198,15 @@ export function DataTable({
                       disabled={reorder!.disabled}
                       // Rows stay undraggable until the handle is pressed, so
                       // text selection inside cells keeps working.
-                      onDragStart={() => setDragIndex(index)}
-                      onPointerDown={() => setDragIndex(index)}
-                      onPointerUp={() => setDragIndex(null)}
-                      draggable={!reorder!.disabled}
+                      onPointerCancel={() => {
+                        armedDragIndex.current = null
+                      }}
+                      onPointerDown={() => {
+                        armedDragIndex.current = index
+                      }}
+                      onPointerUp={() => {
+                        if (dragIndex === null) armedDragIndex.current = null
+                      }}
                       title={reorder!.handleLabel ?? "Reorder row"}
                       type="button"
                     >

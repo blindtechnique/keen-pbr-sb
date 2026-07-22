@@ -424,6 +424,16 @@
     opacity: 0.5;
   }
 
+  .keen-drag-preview {
+    position: fixed;
+    z-index: 80;
+    margin: 0;
+    pointer-events: none;
+    opacity: 0.98;
+    box-shadow: 0 10px 24px rgb(0 0 0 / 24%);
+    transition: none;
+  }
+
   .keen-row-dragging > td > *,
   .keen-drag-lifted > * {
     visibility: hidden;
@@ -533,7 +543,10 @@
  */
 [data-slot="switch-thumb"] {
   background: #FFFFFF;
-  box-shadow: 0 2px 5px rgb(0 0 0 / 28%);
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 20%),
+    0 1px 2px rgb(0 0 0 / 25%),
+    0 0 2px rgb(0 0 0 / 25%);
 }
 
 [data-slot="switch"][data-unchecked] [data-slot="switch-track"] {
@@ -546,21 +559,32 @@
 
 [data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
   background: #0097DC;
+  box-shadow:
+    0 1px 3px rgb(0 151 220 / 20%),
+    0 1px 2px rgb(0 151 220 / 25%),
+    0 0 2px rgb(0 151 220 / 25%);
 }
 
 /* Ореол вокруг кружка: цвет свой для включённого и для выключенного. */
 [data-slot="switch"][data-checked]:hover:not([data-disabled])
   [data-slot="switch-thumb"] {
-  box-shadow: 0 3px 7px rgb(0 0 0 / 42%), 0 0 0 7px rgb(0 87 138 / 18%);
+  box-shadow:
+    0 0 0 10px rgb(204 230 245 / 30%),
+    0 1px 3px rgb(0 151 220 / 20%),
+    0 1px 2px rgb(0 151 220 / 25%),
+    0 0 2px rgb(0 151 220 / 25%);
 }
 
 [data-slot="switch"][data-unchecked]:hover:not([data-disabled])
   [data-slot="switch-thumb"] {
-  box-shadow: 0 3px 7px rgb(0 0 0 / 42%), 0 0 0 7px rgb(49 64 75 / 18%);
+  box-shadow:
+    0 0 0 10px rgb(210 218 221 / 30%),
+    0 1px 3px rgb(0 0 0 / 20%),
+    0 1px 2px rgb(0 0 0 / 25%),
+    0 0 2px rgb(0 0 0 / 25%);
 }
 
-/* В тёмной теме ореола нет вовсе: выключенный кружок вместо него синеет,
- * а включённый на наведение не отвечает — он уже синий. */
+/* Dark mode keeps the same geometry and uses the darker Keenetic palette. */
 .dark [data-slot="switch"][data-unchecked] [data-slot="switch-track"] {
   background: #2E3D57;
 }
@@ -581,5 +605,8 @@
 }
 
 .dark [data-slot="switch"]:hover:not([data-disabled]) [data-slot="switch-thumb"] {
-  box-shadow: 0 4px 10px rgb(0 0 0 / 72%), 0 0 0 6px rgb(119 188 228 / 18%);
+  box-shadow:
+    0 0 0 10px rgb(61 80 115 / 30%),
+    0 1px 3px rgb(0 0 0 / 35%),
+    0 1px 2px rgb(0 0 0 / 38%);
 }

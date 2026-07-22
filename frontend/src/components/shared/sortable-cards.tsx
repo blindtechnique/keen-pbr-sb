@@ -1,6 +1,6 @@
 import { GripVertical } from "lucide-react"
 import type { ReactNode } from "react"
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -37,22 +37,63 @@ export function SortableCards<T>({
   const [order, setOrder] = useState<number[] | null>(null)
   const [dragging, setDragging] = useState<number | null>(null)
   const rowRefs = useRef<(HTMLDivElement | null)[]>([])
-  const startOrder = useRef<number[]>([])
+  const orderRef = useRef<number[]>([])
+  const draggedItem = useRef<number | null>(null)
+  const dragPreview = useRef<HTMLDivElement | null>(null)
+  const dragOffsetY = useRef(0)
 
   const current = order ?? items.map((_, index) => index)
+
+  const removeDragPreview = () => {
+    dragPreview.current?.remove()
+    dragPreview.current = null
+  }
+
+  useEffect(
+    () => () => {
+      dragPreview.current?.remove()
+    },
+    []
+  )
 
   const beginDrag = (position: number) => (event: React.PointerEvent) => {
     if (disabled) return
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
-    startOrder.current = current
-    setOrder(current)
+    orderRef.current = [...current]
+    draggedItem.current = current[position]
+    setOrder([...current])
     setDragging(position)
+
+    const card = event.currentTarget.closest<HTMLDivElement>(
+      "[data-sortable-card]"
+    )
+    if (card) {
+      const box = card.getBoundingClientRect()
+      const preview = card.cloneNode(true) as HTMLDivElement
+      preview.setAttribute("aria-hidden", "true")
+      preview
+        .querySelectorAll("[id]")
+        .forEach((node) => node.removeAttribute("id"))
+      preview.classList.add("keen-drag-preview")
+      Object.assign(preview.style, {
+        height: `${box.height}px`,
+        left: `${box.left}px`,
+        top: `${box.top}px`,
+        width: `${box.width}px`,
+      })
+      document.body.append(preview)
+      dragPreview.current = preview
+      dragOffsetY.current = event.clientY - box.top
+    }
   }
 
   const moveDrag = (event: React.PointerEvent) => {
     if (dragging === null) return
     const y = event.clientY
+    if (dragPreview.current) {
+      dragPreview.current.style.top = `${y - dragOffsetY.current}px`
+    }
 
     // Куда попал палец: ищем строку, чья середина ближе всего сверху.
     const positions = current.map((_, position) => {
@@ -62,39 +103,30 @@ export function SortableCards<T>({
       return box.top + box.height / 2
     })
 
-    let target = dragging
-    if (y < positions[dragging] && dragging > 0 && y < positions[dragging - 1]) {
-      target = dragging - 1
-    } else if (
-      y > positions[dragging] &&
-      dragging < current.length - 1 &&
-      y > positions[dragging + 1]
-    ) {
-      target = dragging + 1
-    }
+    let target = positions.findIndex((middle) => y < middle)
+    if (target === -1) target = current.length - 1
 
     if (target !== dragging) {
       const next = [...current]
       const [moved] = next.splice(dragging, 1)
       next.splice(target, 0, moved)
+      orderRef.current = next
       setOrder(next)
       setDragging(target)
     }
   }
 
-  const endDrag = () => {
+  const endDrag = (commit: boolean) => {
     if (dragging === null) return
-    const before = startOrder.current
-    const after = current
+    const itemIndex = draggedItem.current
+    const finalPosition =
+      itemIndex === null ? -1 : orderRef.current.indexOf(itemIndex)
     // Наружу отдаём один сдвиг: откуда взяли и куда положили.
-    const from = before.findIndex((value, index) => value !== after[index])
-    if (from !== -1) {
-      const movedValue = after[from]
-      const originalIndex = before.indexOf(movedValue)
-      if (originalIndex !== from) {
-        onReorder(originalIndex, from)
-      }
+    if (commit && itemIndex !== null && finalPosition !== itemIndex) {
+      onReorder(itemIndex, finalPosition)
     }
+    removeDragPreview()
+    draggedItem.current = null
     setDragging(null)
     setOrder(null)
   }
@@ -105,8 +137,9 @@ export function SortableCards<T>({
         <div
           className={cn(
             "flex items-start gap-2 rounded-xl border bg-card p-3 transition-shadow",
-            dragging === position && "border-primary shadow-lg"
+            dragging === position && "keen-drag-lifted"
           )}
+          data-sortable-card
           key={getKey(items[itemIndex], itemIndex)}
           ref={(element) => {
             rowRefs.current[position] = element
@@ -116,10 +149,10 @@ export function SortableCards<T>({
             aria-label={handleLabel}
             className="mt-0.5 shrink-0 cursor-grab touch-none p-1 text-muted-foreground active:cursor-grabbing disabled:opacity-40"
             disabled={disabled}
-            onPointerCancel={endDrag}
+            onPointerCancel={() => endDrag(false)}
             onPointerDown={beginDrag(position)}
             onPointerMove={moveDrag}
-            onPointerUp={endDrag}
+            onPointerUp={() => endDrag(true)}
             title={handleLabel}
             type="button"
           >

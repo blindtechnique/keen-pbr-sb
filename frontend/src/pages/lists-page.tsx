@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import {
   ArrowRight,
   ExternalLink,
+  ListChecks,
   Pencil,
   Plus,
   RefreshCw,
@@ -109,6 +110,7 @@ export function ListsPage() {
     null
   )
   const [bulkRefreshRunning, setBulkRefreshRunning] = useState(false)
+  const [mobileSelectionMode, setMobileSelectionMode] = useState(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     ids: string[]
     impact: ListDeleteImpact
@@ -160,6 +162,8 @@ export function ListsPage() {
   )
   const listRowIds = tableRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)
+  const showMobileSelection =
+    mobileSelectionMode || listSelection.hasSelection
   const hasRefreshableLists = tableRows.some((row) => row.canRefresh)
   const selectedRefreshableLists = tableRows.filter(
     (row) => listSelection.selectedIds.has(row.id) && row.canRefresh
@@ -320,7 +324,10 @@ export function ListsPage() {
               countLabel={t("pages.lists.bulk.selected", {
                 count: listSelection.selectedCount,
               })}
-              onCancel={listSelection.clear}
+              onCancel={() => {
+                listSelection.clear()
+                setMobileSelectionMode(false)
+              }}
             >
               {hasRefreshableLists ? (
                 <Button
@@ -351,15 +358,50 @@ export function ListsPage() {
             </BulkSelectionToolbar>
           ) : null}
           </div>
-          <div className="space-y-2 md:hidden">
+          <div className="flex items-center justify-end gap-1 border-y border-border/70 py-1 md:hidden">
+            {showMobileSelection ? (
+              <Button
+                disabled={configMutationPending}
+                onClick={() => listSelection.setAllVisible(true)}
+                size="sm"
+                variant="ghost"
+              >
+                {t("common.selection.selectAllShort")}
+              </Button>
+            ) : null}
+            <Button
+              aria-pressed={showMobileSelection}
+              disabled={configMutationPending}
+              onClick={() => {
+                if (showMobileSelection) {
+                  listSelection.clear()
+                  setMobileSelectionMode(false)
+                } else {
+                  setMobileSelectionMode(true)
+                }
+              }}
+              size="sm"
+              variant="ghost"
+            >
+              <ListChecks />
+              {t(
+                showMobileSelection
+                  ? "common.selection.done"
+                  : "common.selection.select"
+              )}
+            </Button>
+          </div>
+          <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
             {tableRows.map((list) => (
-              <div className="flex items-start gap-3 rounded-lg border bg-card p-3" key={list.id}>
-                <Checkbox
-                  aria-label={t("common.selection.selectRow", { rowLabel: list.id })}
-                  checked={listSelection.selectedIds.has(list.id)}
-                  disabled={configMutationPending}
-                  onCheckedChange={() => listSelection.toggleOne(list.id)}
-                />
+              <div className="flex items-start gap-3 bg-card px-1 py-3" key={list.id}>
+                {showMobileSelection ? (
+                  <Checkbox
+                    aria-label={t("common.selection.selectRow", { rowLabel: list.id })}
+                    checked={listSelection.selectedIds.has(list.id)}
+                    disabled={configMutationPending}
+                    onCheckedChange={() => listSelection.toggleOne(list.id)}
+                  />
+                ) : null}
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex min-w-0 items-start gap-2">
                     <div className="min-w-0 flex-1">

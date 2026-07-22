@@ -30,12 +30,12 @@ function Switch({
     >
       <span
         aria-hidden="true"
-        className="pointer-events-none absolute left-1/2 top-1/2 h-3 w-[26px] -translate-x-1/2 -translate-y-1/2 rounded-full transition-colors group-data-[size=sm]/switch:h-2.5 group-data-[size=sm]/switch:w-[22px]"
+        className="pointer-events-none absolute top-1/2 left-1/2 h-3.5 w-full -translate-x-1/2 -translate-y-1/2 rounded-full border border-transparent transition-colors group-data-[size=sm]/switch:h-2.5"
         data-slot="switch-track"
       />
       <SwitchPrimitive.Thumb
         data-slot="switch-thumb"
-        className="pointer-events-none relative z-10 block rounded-full ring-0 transition-[transform,background-color,box-shadow] group-data-[size=default]/switch:size-5 group-data-[size=sm]/switch:size-4 group-data-[size=default]/switch:data-checked:translate-x-[14px] group-data-[size=sm]/switch:data-checked:translate-x-3 group-data-unchecked/switch:translate-x-0"
+        className="pointer-events-none relative z-10 block rounded-full ring-0 transition-[transform,background-color,box-shadow] duration-100 group-data-[size=default]/switch:size-5 group-data-[size=sm]/switch:size-4 group-data-unchecked/switch:-translate-x-px group-data-[size=default]/switch:data-checked:translate-x-[14px] group-data-[size=sm]/switch:data-checked:translate-x-3"
       />
     </SwitchPrimitive.Root>
   )

@@ -144,7 +144,10 @@ export const ruTranslation = {
         "Может содержать только a-z, 0-9 и подчёркивание. Максимум 24 символа, должен начинаться с буквы.",
     },
     selection: {
+      select: "Выбрать",
+      done: "Готово",
       selectAll: "Выбрать все видимые строки",
+      selectAllShort: "Выбрать все",
       selectRow: "Выбрать {{rowLabel}}",
     },
   },
