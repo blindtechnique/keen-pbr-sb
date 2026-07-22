@@ -1,11 +1,12 @@
 FROM ubuntu:24.04
 
-RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && \
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates && \
+    sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       bash \
       build-essential \
-      ca-certificates \
       cmake \
       curl \
       debhelper \
