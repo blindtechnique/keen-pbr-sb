@@ -402,12 +402,14 @@ void populate_routing_state(const Config& cfg,
     const uint32_t table_start = static_cast<uint32_t>(
         cfg.iproute.value_or(IprouteConfig{}).table_start.value_or(150));
     const uint32_t fwmark_mask = fwmark_mask_value(cfg.fwmark.value_or(FwmarkConfig{}));
+    std::vector<RouteSpec> planned_routes;
+    std::vector<RuleSpec> planned_rules;
 
     auto add_route_if_enabled = [&](const RouteSpec& route) {
         if (!ipv6_enabled && route.family == AF_INET6) {
             return;
         }
-        routes.add(route);
+        planned_routes.push_back(route);
     };
 
     uint32_t table_offset = 0;
@@ -443,7 +445,7 @@ void populate_routing_state(const Config& cfg,
             if (!ipv6_enabled) {
                 ip_rule.family = AF_INET;
             }
-            rules.add(ip_rule);
+            planned_rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::TABLE) {
             auto mark_it = marks.find(ob.tag);
             if (mark_it == marks.end()) continue;
@@ -457,7 +459,7 @@ void populate_routing_state(const Config& cfg,
                 ip_rule.family = AF_INET;
             }
             ++table_offset;
-            rules.add(ip_rule);
+            planned_rules.push_back(ip_rule);
         } else if (ob.type == OutboundType::URLTEST) {
             auto mark_it = marks.find(ob.tag);
             if (mark_it == marks.end()) continue;
@@ -517,10 +519,26 @@ void populate_routing_state(const Config& cfg,
             if (!ipv6_enabled) {
                 ip_rule.family = AF_INET;
             }
-            rules.add(ip_rule);
+            planned_rules.push_back(ip_rule);
         }
         // BLACKHOLE: no routing table, no ip rule
         // IGNORE: no routing needed
+    }
+
+    // Do not expose a policy rule until every route it can select exists.
+    // If either phase fails, remove only the state tracked by this manager and
+    // leave the caller to report a failed runtime apply instead of a partial one.
+    try {
+        for (const auto& route : planned_routes) {
+            routes.add(route);
+        }
+        for (const auto& rule : planned_rules) {
+            rules.add(rule);
+        }
+    } catch (...) {
+        rules.clear();
+        routes.clear();
+        throw;
     }
 }
 
