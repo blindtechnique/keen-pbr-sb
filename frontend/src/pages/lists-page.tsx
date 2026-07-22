@@ -2,7 +2,6 @@ import { useQueryClient } from "@tanstack/react-query"
 import {
   ArrowRight,
   ExternalLink,
-  ListChecks,
   Pencil,
   Plus,
   RefreshCw,
@@ -110,7 +109,6 @@ export function ListsPage() {
     null
   )
   const [bulkRefreshRunning, setBulkRefreshRunning] = useState(false)
-  const [mobileSelectionMode, setMobileSelectionMode] = useState(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     ids: string[]
     impact: ListDeleteImpact
@@ -172,8 +170,6 @@ export function ListsPage() {
   )
   const listRowIds = tableRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)
-  const showMobileSelection =
-    mobileSelectionMode || listSelection.hasSelection
   const hasRefreshableLists = tableRows.some((row) => row.canRefresh)
   const selectedRefreshableLists = tableRows.filter(
     (row) => listSelection.selectedIds.has(row.id) && row.canRefresh
@@ -277,37 +273,35 @@ export function ListsPage() {
         title={t("pages.lists.title")}
       />
       <PageActionBar>
-            {hasRefreshableLists ? (
-              <Button
-                disabled={refreshDisabled}
-                onClick={handleRefreshAll}
-                variant="outline"
-              >
-                <RefreshCw
-                  className={`mr-1 h-4 w-4 ${
-                    activeRefreshTarget === REFRESH_ALL_TARGET
-                      ? "animate-spin"
-                      : ""
-                  }`}
-                />
-                {t("pages.lists.actions.updateAll")}
-              </Button>
-            ) : null}
-            <ConfigTransferButtons
-              config={loadedConfig}
-              disabled={configMutationPending}
-              kind="lists"
-              onImport={(nextConfig) =>
-                postConfigMutation.mutate({ data: nextConfig })
-              }
+        {hasRefreshableLists ? (
+          <Button
+            disabled={refreshDisabled}
+            onClick={handleRefreshAll}
+            variant="outline"
+          >
+            <RefreshCw
+              className={`mr-1 h-4 w-4 ${
+                activeRefreshTarget === REFRESH_ALL_TARGET ? "animate-spin" : ""
+              }`}
             />
-            <Button
-              disabled={configMutationPending}
-              onClick={() => navigate("/lists/create")}
-            >
-              <Plus className="mr-1 h-4 w-4" />
-              {t("pages.lists.actions.new")}
-            </Button>
+            {t("pages.lists.actions.updateAll")}
+          </Button>
+        ) : null}
+        <ConfigTransferButtons
+          config={loadedConfig}
+          disabled={configMutationPending}
+          kind="lists"
+          onImport={(nextConfig) =>
+            postConfigMutation.mutate({ data: nextConfig })
+          }
+        />
+        <Button
+          disabled={configMutationPending}
+          onClick={() => navigate("/lists/create")}
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          {t("pages.lists.actions.new")}
+        </Button>
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
@@ -327,7 +321,6 @@ export function ListsPage() {
         />
       ) : (
         <div className="space-y-3">
-          <div className="relative h-0">
           {listSelection.hasSelection ? (
             <BulkSelectionToolbar
               cancelLabel={t("common.cancel")}
@@ -336,9 +329,17 @@ export function ListsPage() {
               })}
               onCancel={() => {
                 listSelection.clear()
-                setMobileSelectionMode(false)
               }}
             >
+              <Button
+                className="md:hidden"
+                disabled={configMutationPending}
+                onClick={() => listSelection.setAllVisible(true)}
+                size="sm"
+                variant="outline"
+              >
+                {t("common.selection.selectAllShort")}
+              </Button>
               {hasRefreshableLists ? (
                 <Button
                   disabled={
@@ -367,70 +368,76 @@ export function ListsPage() {
               </Button>
             </BulkSelectionToolbar>
           ) : null}
-          </div>
-          <div className="flex items-center justify-end gap-1 border-y border-border/70 py-1 md:hidden">
-            {showMobileSelection ? (
-              <Button
-                disabled={configMutationPending}
-                onClick={() => listSelection.setAllVisible(true)}
-                size="sm"
-                variant="ghost"
-              >
-                {t("common.selection.selectAllShort")}
-              </Button>
-            ) : null}
-            <Button
-              aria-pressed={showMobileSelection}
-              disabled={configMutationPending}
-              onClick={() => {
-                if (showMobileSelection) {
-                  listSelection.clear()
-                  setMobileSelectionMode(false)
-                } else {
-                  setMobileSelectionMode(true)
-                }
-              }}
-              size="sm"
-              variant="ghost"
-            >
-              <ListChecks />
-              {t(
-                showMobileSelection
-                  ? "common.selection.done"
-                  : "common.selection.select"
-              )}
-            </Button>
-          </div>
           <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
             {tableRows.map((list) => (
-              <div className="flex items-start gap-3 bg-card px-1 py-3" key={list.id}>
-                {showMobileSelection ? (
-                  <Checkbox
-                    aria-label={t("common.selection.selectRow", { rowLabel: list.id })}
-                    checked={listSelection.selectedIds.has(list.id)}
-                    disabled={configMutationPending}
-                    onCheckedChange={() => listSelection.toggleOne(list.id)}
-                  />
-                ) : null}
+              <div
+                className="flex items-start gap-3 bg-card px-1 py-3"
+                key={list.id}
+              >
+                <Checkbox
+                  aria-label={t("common.selection.selectRow", {
+                    rowLabel: list.id,
+                  })}
+                  checked={listSelection.selectedIds.has(list.id)}
+                  className="mt-0.5 shrink-0"
+                  disabled={configMutationPending}
+                  onCheckedChange={() => listSelection.toggleOne(list.id)}
+                />
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex min-w-0 items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{list.draft.name}</p>
-                      <p className="truncate text-xs text-muted-foreground">{list.locationLabel}</p>
+                      <p className="truncate text-sm font-medium">
+                        {list.draft.name}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {list.locationLabel}
+                      </p>
                     </div>
-                    <Badge size="xs" variant="outline">{getListSourceLabel(list.draft, t)}</Badge>
+                    <Badge size="xs" variant="outline">
+                      {getListSourceLabel(list.draft, t)}
+                    </Badge>
                   </div>
                   {list.stats ? (
-                    <StatsDisplay ipv4Subnets={list.stats.ipv4Subnets} ipv6Subnets={list.stats.ipv6Subnets} totalHosts={list.stats.totalHosts} />
+                    <StatsDisplay
+                      ipv4Subnets={list.stats.ipv4Subnets}
+                      ipv6Subnets={list.stats.ipv6Subnets}
+                      totalHosts={list.stats.totalHosts}
+                    />
                   ) : null}
-                  <DependencyList dependencies={dependenciesByList.get(list.id) ?? []} emptyHint={t("common.dependencies.none")} />
+                  <DependencyList
+                    dependencies={dependenciesByList.get(list.id) ?? []}
+                    emptyHint={t("common.dependencies.none")}
+                  />
                   <div className="flex justify-end gap-1">
                     {list.canRefresh ? (
-                      <Button disabled={refreshDisabled} onClick={() => handleRefreshOne(list.id)} size="icon-sm" variant="ghost" aria-label={t("pages.lists.actions.update")}>
-                        <RefreshCw className={isRefreshIconActive(activeRefreshTarget, bulkRefreshRunning, listSelection.selectedIds, list.id) ? "animate-spin" : ""} />
+                      <Button
+                        disabled={refreshDisabled}
+                        onClick={() => handleRefreshOne(list.id)}
+                        size="icon-sm"
+                        variant="ghost"
+                        aria-label={t("pages.lists.actions.update")}
+                      >
+                        <RefreshCw
+                          className={
+                            isRefreshIconActive(
+                              activeRefreshTarget,
+                              bulkRefreshRunning,
+                              listSelection.selectedIds,
+                              list.id
+                            )
+                              ? "animate-spin"
+                              : ""
+                          }
+                        />
                       </Button>
                     ) : null}
-                    <Button disabled={configMutationPending} onClick={() => navigate(`/lists/${list.id}/edit`)} size="icon-sm" variant="ghost" aria-label={t("common.edit")}>
+                    <Button
+                      disabled={configMutationPending}
+                      onClick={() => navigate(`/lists/${list.id}/edit`)}
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={t("common.edit")}
+                    >
                       <Pencil />
                     </Button>
                   </div>
@@ -439,113 +446,113 @@ export function ListsPage() {
             ))}
           </div>
           <div className="hidden md:block">
-          <DataTable
-            headers={[
-              t("pages.lists.headers.name"),
-              t("pages.lists.headers.type"),
-              t("pages.lists.headers.stats"),
-              t("pages.lists.headers.rules"),
-              t("pages.lists.headers.actions"),
-            ]}
-            rows={tableRows.map((list) => [
-              <div className="space-y-1" key={`${list.id}-name`}>
-                <div className="flex items-center gap-2 font-medium">
-                  {list.draft.name}
-                  {list.locationIcon === "external" ? (
-                    <a
-                      aria-label={list.locationLabel}
-                      className="text-muted-foreground transition-colors hover:text-foreground"
-                      href={list.draft.url}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  ) : null}
-                </div>
-                <div className="text-sm text-muted-foreground md:text-xs">
-                  {list.locationLabel}
-                </div>
-                {list.canRefresh ? (
-                  <div className="text-sm text-muted-foreground md:text-xs">
-                    {t("pages.lists.lastUpdated", {
-                      value: formatLastUpdatedLabel(
-                        list.lastUpdated,
-                        t("pages.lists.neverUpdated")
-                      ),
-                    })}
+            <DataTable
+              headers={[
+                t("pages.lists.headers.name"),
+                t("pages.lists.headers.type"),
+                t("pages.lists.headers.stats"),
+                t("pages.lists.headers.rules"),
+                t("pages.lists.headers.actions"),
+              ]}
+              rows={tableRows.map((list) => [
+                <div className="space-y-1" key={`${list.id}-name`}>
+                  <div className="flex items-center gap-2 font-medium">
+                    {list.draft.name}
+                    {list.locationIcon === "external" ? (
+                      <a
+                        aria-label={list.locationLabel}
+                        className="text-muted-foreground transition-colors hover:text-foreground"
+                        href={list.draft.url}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>,
-              <Badge key={`${list.id}-type`} variant="outline">
-                {getListSourceLabel(list.draft, t)}
-              </Badge>,
-              list.stats ? (
-                <StatsDisplay
-                  ipv4Subnets={list.stats.ipv4Subnets}
-                  ipv6Subnets={list.stats.ipv6Subnets}
-                  key={`${list.id}-stats`}
-                  totalHosts={list.stats.totalHosts}
-                />
-              ) : (
-                <span
-                  className="text-sm text-muted-foreground"
-                  key={`${list.id}-stats-empty`}
-                >
-                  {t("pages.lists.noStats")}
-                </span>
-              ),
-              <DependencyList
-                dependencies={dependenciesByList.get(list.id) ?? []}
-                emptyHint={t("common.dependencies.none")}
-                key={`${list.id}-dependencies`}
-              />,
-              <ActionButtons
-                actions={[
-                  ...(list.canRefresh
-                    ? [
-                        {
-                          disabled: refreshDisabled,
-                          icon: (
-                            <RefreshCw
-                              className={`h-4 w-4 ${
-                                isRefreshIconActive(
-                                  activeRefreshTarget,
-                                  bulkRefreshRunning,
-                                  listSelection.selectedIds,
-                                  list.id
-                                )
-                                  ? "animate-spin"
-                                  : ""
-                              }`}
-                            />
-                          ),
-                          label: t("pages.lists.actions.update"),
-                          onClick: () => handleRefreshOne(list.id),
-                        },
-                      ]
-                    : []),
-                  {
-                    disabled: configMutationPending,
-                    icon: <Pencil className="h-4 w-4" />,
-                    label: t("common.edit"),
-                    onClick: () => navigate(`/lists/${list.id}/edit`),
-                  },
-                ]}
-                key={`${list.id}-actions`}
-              />,
-            ])}
-            selection={{
-              rowIds: listRowIds,
-              selectedIds: listSelection.selectedIds,
-              disabled: configMutationPending,
-              onToggle: listSelection.toggleOne,
-              onToggleAll: listSelection.setAllVisible,
-              selectAllLabel: t("common.selection.selectAll"),
-              getRowLabel: (rowId) =>
-                t("common.selection.selectRow", { rowLabel: rowId }),
-            }}
-          />
+                  <div className="text-sm text-muted-foreground md:text-xs">
+                    {list.locationLabel}
+                  </div>
+                  {list.canRefresh ? (
+                    <div className="text-sm text-muted-foreground md:text-xs">
+                      {t("pages.lists.lastUpdated", {
+                        value: formatLastUpdatedLabel(
+                          list.lastUpdated,
+                          t("pages.lists.neverUpdated")
+                        ),
+                      })}
+                    </div>
+                  ) : null}
+                </div>,
+                <Badge key={`${list.id}-type`} variant="outline">
+                  {getListSourceLabel(list.draft, t)}
+                </Badge>,
+                list.stats ? (
+                  <StatsDisplay
+                    ipv4Subnets={list.stats.ipv4Subnets}
+                    ipv6Subnets={list.stats.ipv6Subnets}
+                    key={`${list.id}-stats`}
+                    totalHosts={list.stats.totalHosts}
+                  />
+                ) : (
+                  <span
+                    className="text-sm text-muted-foreground"
+                    key={`${list.id}-stats-empty`}
+                  >
+                    {t("pages.lists.noStats")}
+                  </span>
+                ),
+                <DependencyList
+                  dependencies={dependenciesByList.get(list.id) ?? []}
+                  emptyHint={t("common.dependencies.none")}
+                  key={`${list.id}-dependencies`}
+                />,
+                <ActionButtons
+                  actions={[
+                    ...(list.canRefresh
+                      ? [
+                          {
+                            disabled: refreshDisabled,
+                            icon: (
+                              <RefreshCw
+                                className={`h-4 w-4 ${
+                                  isRefreshIconActive(
+                                    activeRefreshTarget,
+                                    bulkRefreshRunning,
+                                    listSelection.selectedIds,
+                                    list.id
+                                  )
+                                    ? "animate-spin"
+                                    : ""
+                                }`}
+                              />
+                            ),
+                            label: t("pages.lists.actions.update"),
+                            onClick: () => handleRefreshOne(list.id),
+                          },
+                        ]
+                      : []),
+                    {
+                      disabled: configMutationPending,
+                      icon: <Pencil className="h-4 w-4" />,
+                      label: t("common.edit"),
+                      onClick: () => navigate(`/lists/${list.id}/edit`),
+                    },
+                  ]}
+                  key={`${list.id}-actions`}
+                />,
+              ])}
+              selection={{
+                rowIds: listRowIds,
+                selectedIds: listSelection.selectedIds,
+                disabled: configMutationPending,
+                onToggle: listSelection.toggleOne,
+                onToggleAll: listSelection.setAllVisible,
+                selectAllLabel: t("common.selection.selectAll"),
+                getRowLabel: (rowId) =>
+                  t("common.selection.selectRow", { rowLabel: rowId }),
+              }}
+            />
           </div>
         </div>
       )}

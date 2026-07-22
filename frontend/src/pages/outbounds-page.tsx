@@ -40,6 +40,7 @@ import {
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import { PageHeader } from "@/components/shared/page-header"
+import { PageActionBar } from "@/components/shared/page-action-bar"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { toast } from "sonner"
@@ -241,28 +242,26 @@ export function OutboundsPage() {
   return (
     <div className="space-y-3">
       <PageHeader
-        actions={
-          <div className="flex flex-wrap gap-2">
-            <ConfigTransferButtons
-              config={loadedConfig}
-              disabled={configMutationPending}
-              kind="outbounds"
-              onImport={(nextConfig) =>
-                postConfigMutation.mutate({ data: nextConfig })
-              }
-            />
-            <Button
-              disabled={configMutationPending}
-              onClick={() => setCreateOpen(true)}
-            >
-              <Plus className="mr-1 h-4 w-4" />
-              {t("pages.outbounds.actions.new")}
-            </Button>
-          </div>
-        }
         description={t("pages.outbounds.description")}
         title={t("pages.outbounds.title")}
       />
+      <PageActionBar>
+        <ConfigTransferButtons
+          config={loadedConfig}
+          disabled={configMutationPending}
+          kind="outbounds"
+          onImport={(nextConfig) =>
+            postConfigMutation.mutate({ data: nextConfig })
+          }
+        />
+        <Button
+          disabled={configMutationPending}
+          onClick={() => setCreateOpen(true)}
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          {t("pages.outbounds.actions.new")}
+        </Button>
+      </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
