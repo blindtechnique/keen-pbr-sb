@@ -162,7 +162,6 @@ private:
     // lifecycle and runtime apply
     void setup_static_routing();
     void apply_firewall(FirewallApplyMode mode = FirewallApplyMode::Destructive);
-    void download_uncached_lists();
     void register_urltest_outbounds();
     void handle_urltest_selection_change(const std::string& urltest_tag,
                                          const std::string& new_child_tag);
@@ -191,7 +190,8 @@ private:
     // Runs a probe round immediately, for the manual refresh button.
     void probe_interfaces_now();
     ListsRefreshExecutionResult execute_remote_list_refresh(
-        const std::set<std::string>* target_lists = nullptr);
+        const std::set<std::string>* target_lists = nullptr,
+        std::string_view source = "service");
     void refresh_lists_and_maybe_reload();
     void refresh_lists_and_maybe_reload_async();
     void commit_lists_refresh_async_result(Config config_snapshot,

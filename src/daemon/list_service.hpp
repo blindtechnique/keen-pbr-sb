@@ -4,7 +4,11 @@
 #include "../config/config.hpp"
 #include "../util/traced_mutex.hpp"
 
+#include <condition_variable>
+#include <exception>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -14,8 +18,11 @@ namespace keen_pbr3 {
 
 struct RemoteListsRefreshResult {
     std::vector<std::string> refreshed_lists;
+    std::vector<std::string> cached_lists;
     std::vector<std::string> changed_lists;
+    std::vector<std::string> unchanged_lists;
     std::vector<std::string> relevant_changed_lists;
+    std::vector<std::string> dns_relevant_changed_lists;
     std::vector<std::string> failed_lists;
 
     bool any_refreshed() const {
@@ -28,6 +35,10 @@ struct RemoteListsRefreshResult {
 
     bool any_relevant_changed() const {
         return !relevant_changed_lists.empty();
+    }
+
+    bool any_dns_relevant_changed() const {
+        return !dns_relevant_changed_lists.empty();
     }
 
     bool any_failed() const {
@@ -55,6 +66,8 @@ RemoteListTargetSelection select_remote_list_targets(
     const std::optional<std::string>& requested_name);
 
 std::set<std::string> collect_relevant_list_names(const Config& config);
+std::set<std::string> collect_dns_relevant_list_names(const Config& config);
+std::string format_list_names(const std::vector<std::string>& list_names);
 
 bool should_reload_runtime_after_list_refresh(
     bool routing_runtime_active,
@@ -72,25 +85,37 @@ public:
     void ensure_dir();
     const CacheManager& cache_manager() const;
 
-    RemoteListsRefreshResult download_uncached(
-        const Config& config,
-        const OutboundMarkMap& outbound_marks,
-        const std::set<std::string>* relevant_lists = nullptr);
-    RemoteListsRefreshResult refresh_remote_lists(
-        const Config& config,
-        const OutboundMarkMap& outbound_marks,
-        const std::set<std::string>* relevant_lists = nullptr,
-        const std::set<std::string>* target_lists = nullptr);
+    // Startup only: preserve cached lists and download just the missing ones.
+    RemoteListsRefreshResult download_uncached(const Config& config,
+                                               const OutboundMarkMap& outbound_marks,
+                                               const std::set<std::string>* relevant_lists = nullptr,
+                                               const std::set<std::string>* dns_relevant_lists = nullptr);
+    RemoteListsRefreshResult refresh_remote_lists(const Config& config,
+                                                  const OutboundMarkMap& outbound_marks,
+                                                  const std::set<std::string>* relevant_lists = nullptr,
+                                                  const std::set<std::string>* target_lists = nullptr,
+                                                  const std::set<std::string>* dns_relevant_lists = nullptr);
 
 private:
-    RemoteListsRefreshResult download_remote_lists(
-        const Config& config,
-        const OutboundMarkMap& outbound_marks,
-        bool only_uncached,
-        const std::set<std::string>* relevant_lists,
-        const std::set<std::string>* target_lists);
+    struct RefreshFlight {
+        std::string key;
+        bool done{false};
+        RemoteListsRefreshResult result;
+        std::exception_ptr error;
+        std::condition_variable_any completed;
+    };
+
+    RemoteListsRefreshResult download_remote_lists(const Config& config,
+                                                   const OutboundMarkMap& outbound_marks,
+                                                   bool only_uncached,
+                                                   const std::set<std::string>* relevant_lists,
+                                                   const std::set<std::string>* target_lists,
+                                                   const std::set<std::string>* dns_relevant_lists);
 
     mutable TracedMutex mutex_;
+    std::mutex refresh_mutex_;
+    std::condition_variable_any refresh_available_;
+    std::shared_ptr<RefreshFlight> refresh_flight_;
     CacheManager cache_manager_;
 };
 
