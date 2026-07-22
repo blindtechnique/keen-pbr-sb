@@ -203,6 +203,34 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
         }
     });
 
+    server.get("/api/transports/config/export", [&ctx]() -> std::string {
+        const auto endpoint = load_endpoint(ctx.config_path);
+        httplib::Client client(endpoint.host, endpoint.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(5, 0);
+        const httplib::Headers headers{
+            {"Authorization", "Bearer " + endpoint.api_key},
+        };
+        const auto response = client.Get("/v1/config/transports/export", headers);
+        if (!response) {
+            throw ApiError("transport manager is unavailable", 503);
+        }
+        if (response->status < 200 || response->status >= 300) {
+            throw ApiError("transport manager returned HTTP " +
+                               std::to_string(response->status),
+                           502);
+        }
+        try {
+            const auto body = nlohmann::json::parse(response->body);
+            if (!body.is_array()) {
+                throw ApiError("transport manager returned an invalid export response", 502);
+            }
+            return body.dump();
+        } catch (const nlohmann::json::exception&) {
+            throw ApiError("transport manager returned malformed JSON", 502);
+        }
+    });
+
     server.post("/api/transports/config", [&ctx](const std::string& request_body) -> std::string {
         nlohmann::json request;
         try {

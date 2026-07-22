@@ -13,6 +13,7 @@ export const enTranslation = {
     reload: "Reload configuration",
     upgrade: "Upgrade package",
     updateAvailable: "Update {{version}} is available",
+    upToDate: "The latest available nfqws2 version is installed.",
     upgradeConfirmTitle: "Update nfqws2",
     upgradeConfirmDescription:
       "Version {{version}} will be installed from the official nfqws2-keenetic repository.",
@@ -88,6 +89,7 @@ export const enTranslation = {
     exportAll: "Export configuration and lists",
     importAll: "Import configuration and lists",
     imported: "Import completed",
+    exported: "The export was prepared and downloaded.",
     exportFailed: "Failed to create the export file.",
     replaceOutboundConflicts:
       "Replace existing outbounds tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
@@ -351,7 +353,7 @@ export const enTranslation = {
         auto: "Detect automatically (at your own risk)",
         autoWarning:
           "The server host/IP and resolved IP will be sent to ipwho.is over the router's current route. No request is made without this explicit choice.",
-        countryPlaceholder: "Country name (optional)",
+        countryPlaceholder: "Select a country",
       },
       shareLink: "Connection link",
       shareLinkHint:
@@ -864,6 +866,8 @@ export const enTranslation = {
         current: "Installed",
         latest: "Latest release",
         check: "Check for updates",
+        checking: "Checking…",
+        availableToast: "Update {{version}} is available.",
         install: "Install update",
         running:
           "The update is running. The web UI may be unavailable for a few seconds and will reconnect automatically.",
@@ -1291,8 +1295,15 @@ export const enTranslation = {
       },
       strictEnforcement: {
         label: "Kill-switch override",
-        hint: "Override the global kill-switch setting for this outbound.",
+        hint: "Override the global kill-switch setting for this outbound connection.",
         default: "Default (as in global config)",
+        explanations: {
+          default: "Use the global kill-switch setting.",
+          enabled:
+            "Enabled: if the interface goes down, traffic for this connection is blocked instead of leaking directly through the WAN.",
+          disabled:
+            "Disabled: if the interface goes down, traffic may use another matching route, including the regular WAN.",
+        },
       },
       validation: {
         tagRequired: "Tag is required.",

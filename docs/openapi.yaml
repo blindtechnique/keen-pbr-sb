@@ -372,6 +372,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
     post:
       summary: Create, update, or delete a transport definition
       operationId: postTransportConfig
@@ -396,6 +397,30 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "503":
           description: Transport manager is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/transports/config/export:
+    get:
+      summary: Export complete transport configuration
+      description: >
+        Returns all configured transports including connection credentials.
+        Unlike the regular editor endpoint, this response is not redacted and
+        must only be used for an explicit authenticated backup export.
+      operationId: getTransportConfigExport
+      responses:
+        "200":
+          description: Complete transport configuration
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TransportSpec"
+        "503":
+          description: Transport manager unavailable
           content:
             application/json:
               schema:

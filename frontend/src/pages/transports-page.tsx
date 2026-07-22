@@ -16,7 +16,10 @@ import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
-import { postTransportConfig } from "@/api/generated/keen-api"
+import {
+  getTransportConfigExport,
+  postTransportConfig,
+} from "@/api/generated/keen-api"
 import {
   TransportActionRequestAction,
   TransportConfigOperationOperation,
@@ -58,6 +61,7 @@ import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
 import { cn } from "@/lib/utils"
 import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
 import { queryKeys } from "@/api/query-keys"
+import { countryFlag } from "@/data/countries"
 
 type ProbeEntry = {
   success: boolean
@@ -128,6 +132,7 @@ export function TransportsPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<TransportSpec | undefined>()
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
+  const [transportExportPending, setTransportExportPending] = useState(false)
   const transportImportRef = useRef<HTMLInputElement>(null)
   const query = useGetTransports({
     query: {
@@ -389,14 +394,31 @@ export function TransportsPage() {
     },
   })
 
-  const exportTransports = () => {
+  const exportTransports = async () => {
     if (!window.confirm(t("configTransfer.transportSecretsWarning"))) return
-    downloadJson(`keen-pbr-sb-transports-${formatDownloadTimestamp()}.json`, {
-      format: "keen-pbr-sb",
-      version: 1,
-      kind: "transports",
-      transports: configured,
-    })
+    setTransportExportPending(true)
+    try {
+      const response = await getTransportConfigExport({
+        cache: "no-store",
+      })
+      if (response.status !== 200) throw new Error(response.data.error)
+      downloadJson(`keen-pbr-sb-transports-${formatDownloadTimestamp()}.json`, {
+        format: "keen-pbr-sb",
+        version: 1,
+        kind: "transports",
+        transports: response.data,
+      })
+      toast.success(t("configTransfer.exported"))
+    } catch (exportError) {
+      toast.error(
+        exportError instanceof Error
+          ? exportError.message
+          : t("configTransfer.exportFailed"),
+        { richColors: true }
+      )
+    } finally {
+      setTransportExportPending(false)
+    }
   }
   const bypassMutation = usePostConfigMutation({
     mutation: {
@@ -513,8 +535,12 @@ export function TransportsPage() {
         actions={
           <div className="flex flex-wrap gap-2">
             <Button
-              disabled={transferMutation.isPending || configured.length === 0}
-              onClick={exportTransports}
+              disabled={
+                transferMutation.isPending ||
+                transportExportPending ||
+                configured.length === 0
+              }
+              onClick={() => void exportTransports()}
               variant="outline"
             >
               <DownloadIcon />
@@ -892,22 +918,13 @@ function transportLocation(
 /**
  * Флаг страны.
  *
- * Собирается из двухбуквенного кода прямо здесь, а не берётся у сервиса:
- * флаговые эмодзи — это ровно две «региональные» буквы, сдвинутые в другой
- * диапазон, так что «DE» превращается в 🇩🇪 четырьмя строками и без единого
- * байта данных. Заодно это не зависит от того, доехало ли поле с эмодзи
- * через все слои, — код страны короче и надёжнее.
+ * Собирается общим локальным helper из двухбуквенного кода, а не берётся у
+ * сервиса. Это не зависит от того, доехало ли поле с эмодзи через все слои:
+ * код страны короче и надёжнее.
  */
 function countryMark(location?: ServerLocation): string {
   const code = location?.country_code?.trim().toUpperCase()
-  if (!code || !/^[A-Z]{2}$/.test(code)) {
-    return location?.emoji ?? ""
-  }
-  const base = 0x1f1e6 // 🇦
-  return String.fromCodePoint(
-    base + (code.charCodeAt(0) - 65),
-    base + (code.charCodeAt(1) - 65)
-  )
+  return code ? countryFlag(code) || location?.emoji || "" : location?.emoji ?? ""
 }
 
 /**

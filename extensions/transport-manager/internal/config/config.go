@@ -97,6 +97,23 @@ func (a *Admin) Specs() []transport.TransportSpec {
 	return result
 }
 
+// ExportSpecs returns a deep copy including connection credentials. The
+// regular Specs method stays redacted because it feeds everyday UI reads.
+func (a *Admin) ExportSpecs() []transport.TransportSpec {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	result := make([]transport.TransportSpec, len(a.config.Transports))
+	for i, spec := range a.config.Transports {
+		result[i] = spec
+		result[i].BootstrapDNS = append([]string(nil), spec.BootstrapDNS...)
+		if spec.VLESS != nil {
+			copyVLESS := *spec.VLESS
+			result[i].VLESS = &copyVLESS
+		}
+	}
+	return result
+}
+
 func (a *Admin) Create(ctx context.Context, spec transport.TransportSpec) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

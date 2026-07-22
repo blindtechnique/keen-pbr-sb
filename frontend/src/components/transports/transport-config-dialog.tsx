@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react"
+import { useMemo, useState, type FormEvent, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 import { TransportSpecType, type TransportSpec } from "@/api/generated/model"
@@ -16,6 +16,7 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { countryOptions } from "@/data/countries"
 
 type Props = {
   initial?: TransportSpec
@@ -44,7 +45,7 @@ export function TransportConfigDialog({
   open,
   singBoxAvailable = true,
 }: Props) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [spec, setSpec] = useState<TransportSpec>(() =>
     initial ? structuredClone(initial) : emptySpec()
   )
@@ -52,6 +53,10 @@ export function TransportConfigDialog({
   // A transport only becomes a route once an interface outbound points at it,
   // so offer that step right here instead of sending people to another page.
   const [createOutbound, setCreateOutbound] = useState(!initial)
+  const countries = useMemo(
+    () => countryOptions(i18n.resolvedLanguage ?? i18n.language ?? "ru"),
+    [i18n.language, i18n.resolvedLanguage]
+  )
 
   const isSingBox = spec.type !== TransportSpecType.native
   const submit = (event: FormEvent) => {
@@ -63,8 +68,7 @@ export function TransportConfigDialog({
         spec.geo_mode === "manual"
           ? spec.country_code?.trim().toUpperCase()
           : undefined,
-      country:
-        spec.geo_mode === "manual" ? spec.country?.trim() : undefined,
+      country: spec.geo_mode === "manual" ? spec.country?.trim() : undefined,
     }
     if (!isSingBox) {
       onSubmit(
@@ -202,26 +206,30 @@ export function TransportConfigDialog({
                 </label>
               ))}
               {spec.geo_mode === "manual" ? (
-                <div className="grid gap-2 sm:grid-cols-[7rem_1fr]">
-                  <Input
-                    maxLength={2}
-                    onChange={(event) =>
-                      setSpec({ ...spec, country_code: event.target.value })
-                    }
-                    pattern="[A-Za-z]{2}"
-                    placeholder="DE"
-                    required
-                    value={spec.country_code ?? ""}
-                  />
-                  <Input
-                    maxLength={64}
-                    onChange={(event) =>
-                      setSpec({ ...spec, country: event.target.value })
-                    }
-                    placeholder={t("transports.form.geo.countryPlaceholder")}
-                    value={spec.country ?? ""}
-                  />
-                </div>
+                <select
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  onChange={(event) => {
+                    const selected = countries.find(
+                      (country) => country.code === event.target.value
+                    )
+                    setSpec({
+                      ...spec,
+                      country_code: selected?.code,
+                      country: selected?.name,
+                    })
+                  }}
+                  required
+                  value={spec.country_code?.toUpperCase() ?? ""}
+                >
+                  <option disabled value="">
+                    {t("transports.form.geo.countryPlaceholder")}
+                  </option>
+                  {countries.map((country) => (
+                    <option key={country.code} value={country.code}>
+                      {country.flag} {country.name} ({country.code})
+                    </option>
+                  ))}
+                </select>
               ) : null}
             </div>
           </Field>

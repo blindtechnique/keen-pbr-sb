@@ -146,6 +146,7 @@ export function NfqwsPage() {
   const status = query.data
   const bundleImportRef = useRef<HTMLInputElement>(null)
   const [bundleExportPending, setBundleExportPending] = useState(false)
+  const [refreshPending, setRefreshPending] = useState(false)
   const [tab, setTab] = useState<Tab>("settings")
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
@@ -268,16 +269,31 @@ export function NfqwsPage() {
   }
 
   const refreshAll = async () => {
-    await query.refetch()
-    if (!status?.installed) return
+    setRefreshPending(true)
     try {
+      const refreshed = await query.refetch()
+      if (!refreshed.data?.installed) {
+        toast.info(t("nfqws.notInstalled.title"))
+        return
+      }
       const latest = await nfqwsAction<NfqwsUpdateStatus>({
         action: "check_update",
         force: true,
       })
       queryClient.setQueryData(["nfqws", "update"], latest)
-    } catch {
+      if (latest.available) {
+        toast.success(t("nfqws.updateAvailable", { version: latest.latest }))
+      } else {
+        toast.success(t("nfqws.upToDate"))
+      }
+    } catch (error) {
       await queryClient.invalidateQueries({ queryKey: ["nfqws", "update"] })
+      toast.error(
+        error instanceof Error ? error.message : t("nfqws.operationFailed"),
+        { richColors: true }
+      )
+    } finally {
+      setRefreshPending(false)
     }
   }
 
@@ -395,13 +411,15 @@ export function NfqwsPage() {
               type="file"
             />
             <Button
-              disabled={query.isFetching || updateQuery.isFetching}
+              disabled={
+                query.isFetching || updateQuery.isFetching || refreshPending
+              }
               onClick={() => void refreshAll()}
               variant="outline"
             >
               <RefreshCwIcon
                 className={
-                  query.isFetching || updateQuery.isFetching
+                  query.isFetching || updateQuery.isFetching || refreshPending
                     ? "animate-spin"
                     : ""
                 }

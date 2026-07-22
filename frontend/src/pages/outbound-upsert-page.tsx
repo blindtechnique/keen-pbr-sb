@@ -52,6 +52,7 @@ import {
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { getInterfaceSearchText } from "@/lib/runtime-interfaces"
+import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import {
   Select,
   SelectContent,
@@ -309,6 +310,7 @@ function OutboundForm({
     runtimeInterfacesQuery.data?.status === 200
       ? runtimeInterfacesQuery.data.data.interfaces
       : []
+  const { protocolOf } = useInterfaceProtocols()
   const runtimeInterfaceByName = new Map(
     runtimeInterfaces.map((runtimeInterface) => [
       runtimeInterface.name,
@@ -590,6 +592,7 @@ function OutboundForm({
                         placeholder={t(
                           "pages.outboundUpsert.interface.interfacePlaceholder"
                         )}
+                        protocolOf={protocolOf}
                         renderSelectedInline
                         showDetails={false}
                         value={field.state.value}
@@ -1188,6 +1191,11 @@ function OutboundForm({
                     )}
                     error={error ?? null}
                   />
+                  <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                    {t(
+                      `pages.outboundUpsert.strictEnforcement.explanations.${field.state.value}`
+                    )}
+                  </p>
                 </FieldContent>
               </Field>
             )

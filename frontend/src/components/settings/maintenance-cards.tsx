@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 import {
   DownloadIcon,
   ExternalLinkIcon,
@@ -97,26 +98,48 @@ export function SoftwareUpdateCard() {
   const [restoreOpen, setRestoreOpen] = useState(false)
   const [showResult, setShowResult] = useState(false)
   const [confirmInstall, setConfirmInstall] = useState(false)
+  const [checking, setChecking] = useState(false)
   const [downloadBackupBeforeUpdate, setDownloadBackupBeforeUpdate] =
     useState(true)
 
-  const refresh = useCallback(async () => {
-    try {
-      const response = await fetch("/api/system/update")
-      const body = (await response.json().catch(() => ({}))) as Partial<
-        SoftwareUpdateStatus & { error: string }
-      >
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
-      setStatus(body as SoftwareUpdateStatus)
-      setError("")
-    } catch (refreshError) {
-      setError(
-        refreshError instanceof Error
-          ? refreshError.message
-          : t("pages.settings.softwareUpdate.checkFailed")
-      )
-    }
-  }, [t])
+  const refresh = useCallback(
+    async (showFeedback = false) => {
+      if (showFeedback) setChecking(true)
+      try {
+        const response = await fetch("/api/system/update")
+        const body = (await response.json().catch(() => ({}))) as Partial<
+          SoftwareUpdateStatus & { error: string }
+        >
+        if (!response.ok)
+          throw new Error(body.error ?? `HTTP ${response.status}`)
+        setStatus(body as SoftwareUpdateStatus)
+        setError("")
+        if (showFeedback) {
+          if (body.available) {
+            toast.success(
+              t("pages.settings.softwareUpdate.availableToast", {
+                version: body.latest,
+              })
+            )
+          } else if (body.current_ahead) {
+            toast.info(t("pages.settings.softwareUpdate.newerThanPublished"))
+          } else {
+            toast.success(t("pages.settings.softwareUpdate.upToDate"))
+          }
+        }
+      } catch (refreshError) {
+        const message =
+          refreshError instanceof Error
+            ? refreshError.message
+            : t("pages.settings.softwareUpdate.checkFailed")
+        setError(message)
+        if (showFeedback) toast.error(message, { richColors: true })
+      } finally {
+        if (showFeedback) setChecking(false)
+      }
+    },
+    [t]
+  )
 
   const refreshProgress = useCallback(async () => {
     try {
@@ -213,14 +236,18 @@ export function SoftwareUpdateCard() {
           <UpdateVersionSummary status={status} />
           <div className="flex flex-wrap gap-2">
             <Button
-              disabled={status?.running}
-              onClick={() => void refresh()}
+              disabled={status?.running || checking}
+              onClick={() => void refresh(true)}
               variant="outline"
             >
               <RefreshCwIcon
-                className={status?.running ? "animate-spin" : ""}
+                className={status?.running || checking ? "animate-spin" : ""}
               />
-              {t("pages.settings.softwareUpdate.check")}
+              {t(
+                checking
+                  ? "pages.settings.softwareUpdate.checking"
+                  : "pages.settings.softwareUpdate.check"
+              )}
             </Button>
             <Button onClick={() => setOpen(true)}>
               <DownloadIcon />

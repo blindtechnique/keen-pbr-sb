@@ -87,3 +87,32 @@ func TestLoadRejectsEmptyAPIKey(t *testing.T) {
 		t.Fatal("expected empty api_key to be rejected")
 	}
 }
+
+func TestAdminRedactsUIConfigButExportsSecrets(t *testing.T) {
+	spec := transport.TransportSpec{
+		Tag:          "proxy_one",
+		Type:         "sing-box",
+		Interface:    "proxy1",
+		Link:         "vless://secret",
+		OutboundJSON: `{"type":"vless","uuid":"secret"}`,
+		BootstrapDNS: []string{"1.1.1.1"},
+		VLESS:        &transport.VLESSSpec{UUID: "secret-uuid"},
+	}
+	admin := NewAdmin("unused", Config{Transports: []transport.TransportSpec{spec}}, nil, nil)
+
+	redacted := admin.Specs()
+	if redacted[0].Link != "" || redacted[0].OutboundJSON != "" || redacted[0].VLESS.UUID != "" {
+		t.Fatalf("regular config response leaked secrets: %#v", redacted[0])
+	}
+
+	exported := admin.ExportSpecs()
+	if exported[0].Link != spec.Link || exported[0].OutboundJSON != spec.OutboundJSON || exported[0].VLESS.UUID != spec.VLESS.UUID {
+		t.Fatalf("export omitted transport secrets: %#v", exported[0])
+	}
+	exported[0].BootstrapDNS[0] = "9.9.9.9"
+	exported[0].VLESS.UUID = "changed"
+	secondExport := admin.ExportSpecs()
+	if secondExport[0].BootstrapDNS[0] != "1.1.1.1" || secondExport[0].VLESS.UUID != "secret-uuid" {
+		t.Fatal("export returned references to live configuration")
+	}
+}

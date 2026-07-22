@@ -31,6 +31,10 @@ type TransportAdmin interface {
 	Delete(context.Context, string) error
 }
 
+type TransportConfigExporter interface {
+	ExportSpecs() []transport.TransportSpec
+}
+
 func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Handler {
 	var admin TransportAdmin
 	if len(admins) > 0 {
@@ -43,10 +47,21 @@ func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Ha
 	mux.HandleFunc("GET /v1/transports/{tag}", a.status)
 	mux.HandleFunc("POST /v1/transports/{tag}/{action}", a.action)
 	mux.HandleFunc("GET /v1/config/transports", a.listConfig)
+	mux.HandleFunc("GET /v1/config/transports/export", a.exportConfig)
 	mux.HandleFunc("POST /v1/config/transports", a.createConfig)
 	mux.HandleFunc("PUT /v1/config/transports/{tag}", a.updateConfig)
 	mux.HandleFunc("DELETE /v1/config/transports/{tag}", a.deleteConfig)
 	return a.auth(mux)
+}
+
+func (a *API) exportConfig(w http.ResponseWriter, _ *http.Request) {
+	exporter, ok := a.admin.(TransportConfigExporter)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport export unavailable"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	write(w, http.StatusOK, exporter.ExportSpecs())
 }
 
 func (a *API) listConfig(w http.ResponseWriter, _ *http.Request) {

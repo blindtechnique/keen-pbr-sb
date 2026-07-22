@@ -1813,3 +1813,123 @@ export const usePostTransportConfig = <TError = ErrorResponse,
       return useMutation(getPostTransportConfigMutationOptions(options), queryClient);
     }
 
+/**
+ * Returns all configured transports including connection credentials. Unlike the regular editor endpoint, this response is not redacted and must only be used for an explicit authenticated backup export.
+
+ * @summary Export complete transport configuration
+ */
+export type getTransportConfigExportResponse200 = {
+  data: TransportSpec[]
+  status: 200
+}
+
+export type getTransportConfigExportResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type getTransportConfigExportResponseSuccess = (getTransportConfigExportResponse200) & {
+  headers: Headers;
+};
+export type getTransportConfigExportResponseError = (getTransportConfigExportResponse503) & {
+  headers: Headers;
+};
+
+export type getTransportConfigExportResponse = (getTransportConfigExportResponseSuccess | getTransportConfigExportResponseError)
+
+export const getGetTransportConfigExportUrl = () => {
+
+
+
+
+  return `/api/transports/config/export`
+}
+
+export const getTransportConfigExport = async ( options?: RequestInit): Promise<getTransportConfigExportResponse> => {
+
+  return apiFetch<getTransportConfigExportResponse>(getGetTransportConfigExportUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTransportConfigExportQueryKey = () => {
+    return [
+    `/api/transports/config/export`
+    ] as const;
+    }
+
+
+export const getGetTransportConfigExportQueryOptions = <TData = Awaited<ReturnType<typeof getTransportConfigExport>>, TError = ErrorResponse>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportConfigExport>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTransportConfigExportQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTransportConfigExport>>> = ({ signal }) => getTransportConfigExport({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTransportConfigExport>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetTransportConfigExportQueryResult = NonNullable<Awaited<ReturnType<typeof getTransportConfigExport>>>
+export type GetTransportConfigExportQueryError = ErrorResponse
+
+
+export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof getTransportConfigExport>>, TError = ErrorResponse>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportConfigExport>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTransportConfigExport>>,
+          TError,
+          Awaited<ReturnType<typeof getTransportConfigExport>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof getTransportConfigExport>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportConfigExport>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTransportConfigExport>>,
+          TError,
+          Awaited<ReturnType<typeof getTransportConfigExport>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof getTransportConfigExport>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportConfigExport>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Export complete transport configuration
+ */
+
+export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof getTransportConfigExport>>, TError = ErrorResponse>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTransportConfigExport>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetTransportConfigExportQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+

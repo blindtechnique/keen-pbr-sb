@@ -30,6 +30,7 @@ type InterfacePickerProps = {
   showDetails?: boolean
   allowCustomOption?: boolean
   renderSelectedInline?: boolean
+  protocolOf?: (interfaceName: string) => string
   className?: string
 }
 
@@ -56,6 +57,7 @@ export function InterfacePicker({
   showDetails = true,
   allowCustomOption = false,
   renderSelectedInline = false,
+  protocolOf,
   className,
 }: InterfacePickerProps) {
   const { t } = useTranslation()
@@ -124,6 +126,7 @@ export function InterfacePicker({
                 }
                 isVirtual={inlineItem.isVirtual}
                 name={inlineItem.item.name}
+                protocol={protocolOf?.(inlineItem.item.name)}
                 showAddressesInline
               />
             </div>
@@ -154,7 +157,7 @@ export function InterfacePicker({
                         }
                         value={item}
                       >
-                        <InterfaceOption item={item} />
+                        <InterfaceOption item={item} protocolOf={protocolOf} />
                       </Autocomplete.Item>
                     )}
                   </Autocomplete.List>
@@ -174,6 +177,7 @@ export function InterfacePicker({
           <InterfaceRowContent
             interfaceEntry={selectedInterface}
             name={selectedInterface.name}
+            protocol={protocolOf?.(selectedInterface.name)}
           />
         </div>
       ) : showDetails &&
@@ -181,7 +185,11 @@ export function InterfacePicker({
         trimmedValue &&
         !selectedInterface ? (
         <div className="rounded-lg border border-border bg-background px-2.5 py-2">
-          <InterfaceRowContent isVirtual name={trimmedValue} />
+          <InterfaceRowContent
+            isVirtual
+            name={trimmedValue}
+            protocol={protocolOf?.(trimmedValue)}
+          />
         </div>
       ) : null}
     </div>
@@ -310,12 +318,19 @@ export function InterfaceMultiSelectList({
   )
 }
 
-function InterfaceOption({ item }: { item: InterfacePickerItem }) {
+function InterfaceOption({
+  item,
+  protocolOf,
+}: {
+  item: InterfacePickerItem
+  protocolOf?: (interfaceName: string) => string
+}) {
   return (
     <InterfaceRowContent
       interfaceEntry={isVirtualInterface(item) ? undefined : item}
       isVirtual={isVirtualInterface(item)}
       name={item.name}
+      protocol={protocolOf?.(item.name)}
       showAddressesInline
     />
   )
@@ -359,6 +374,7 @@ export function InterfaceRowContent({
   isVirtual = false,
   grow = true,
   afterStatus,
+  protocol,
   showAddressesInline = false,
 }: {
   name: string
@@ -366,6 +382,7 @@ export function InterfaceRowContent({
   isVirtual?: boolean
   grow?: boolean
   afterStatus?: ReactNode
+  protocol?: string
   showAddressesInline?: boolean
 }) {
   const { t } = useTranslation()
@@ -390,6 +407,11 @@ export function InterfaceRowContent({
         <span className="truncate font-mono text-xs text-muted-foreground">
           {name}
         </span>
+      ) : null}
+      {protocol ? (
+        <Badge size="xs" variant="outline">
+          {protocol}
+        </Badge>
       ) : null}
       {interfaceEntry ? (
         <>
