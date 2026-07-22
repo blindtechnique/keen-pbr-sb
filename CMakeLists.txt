@@ -225,6 +225,7 @@ set(SOURCES
   src/http/curl_runtime.cpp
   src/crash/crash_diagnostics.cpp
   src/config/config.cpp
+  src/config/config_writer.cpp
   src/config/routing_state.cpp
   src/config/list_parser.cpp
   src/lists/ipset.cpp
