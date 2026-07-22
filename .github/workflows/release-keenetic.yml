@@ -4,9 +4,10 @@ on:
   push:
     tags:
       - "v*"
-    # A push to next produces only the aarch64 test IPK consumed by
-    # install-test-build.ps1. Release tags build every published architecture.
+    # Alpha and next produce only an aarch64 test IPK. Release tags build every
+    # published architecture. Main is published only through a version tag.
     branches:
+      - alpha
       - next
   workflow_dispatch:
     inputs:
@@ -34,6 +35,8 @@ jobs:
         run: |
           cd frontend
           bun install --frozen-lockfile
+          bun test
+          bun run typecheck
           bun run build
 
       - name: Upload frontend bundle
@@ -44,12 +47,14 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: frontend
+    needs:
+      - frontend
+      - transport-manager
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.ref == 'refs/heads/next' && '[{"config":"aarch64-3.10","arch":"aarch64"}]' || '[{"config":"aarch64-3.10","arch":"aarch64"},{"config":"mips-3.4","arch":"mips"},{"config":"mipsel-3.4","arch":"mipsel"}]') }}
+        include: ${{ fromJSON((github.ref == 'refs/heads/alpha' || github.ref == 'refs/heads/next') && '[{"config":"aarch64-3.10","arch":"aarch64"}]' || '[{"config":"aarch64-3.10","arch":"aarch64"},{"config":"mips-3.4","arch":"mips"},{"config":"mipsel-3.4","arch":"mipsel"}]') }}
     env:
       KEENETIC_VERSION: "3.10"
     steps:
@@ -101,6 +106,26 @@ jobs:
           name: keenetic-ipk-${{ matrix.config }}
           path: keen-pbr_*.ipk
           if-no-files-found: error
+
+  transport-manager:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: extensions/transport-manager/go.sum
+
+      - name: Test transport manager
+        working-directory: extensions/transport-manager
+        run: go test ./...
+
+      - name: Vet transport manager
+        working-directory: extensions/transport-manager
+        run: go vet ./...
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
@@ -180,6 +205,31 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: keen-pbr-ipk
+          path: |
+            release-assets/keen-pbr_*.ipk
+            release-assets/SHA256SUMS
+          if-no-files-found: error
+
+  upload-alpha-artifact:
+    if: github.ref == 'refs/heads/alpha'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download aarch64 alpha IPK
+        uses: actions/download-artifact@v4
+        with:
+          name: keenetic-ipk-aarch64-3.10
+          path: release-assets
+
+      - name: Create checksum
+        run: |
+          cd release-assets
+          sha256sum keen-pbr_*.ipk > SHA256SUMS
+
+      - name: Upload alpha workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keen-pbr-alpha-ipk
           path: |
             release-assets/keen-pbr_*.ipk
             release-assets/SHA256SUMS
