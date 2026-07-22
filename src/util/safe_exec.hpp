@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <atomic>
+#include <cstdint>
 #include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
@@ -20,6 +22,7 @@ struct ExecCaptureResult {
     std::string stdout_output;
     int exit_code{-1};
     bool truncated{false};
+    bool timed_out{false};
 };
 
 inline void reset_child_signal_mask() {
@@ -44,59 +47,108 @@ inline bool redirect_child_stdin_to_devnull() {
 }
 
 
-// Verdict of waiting for a child process.
-struct ChildWaitResult {
-    bool timed_out{false};
-    int status{0};
+struct SafeExecTimeouts {
+    std::chrono::milliseconds timeout{std::chrono::seconds{30}};
+    std::chrono::milliseconds kill_grace{std::chrono::seconds{2}};
 };
 
-// Default budget for firewall tooling. iptables-restore and ipset serialise on
-// the xtables lock, which the Keenetic firmware grabs dozens of times a second
-// while it brings interfaces up at boot. Waiting forever there used to wedge
-// the daemon before it ever reached its event loop, leaving the router with no
-// policy routing at all and no hint of why.
-inline constexpr std::chrono::seconds kDefaultExecTimeout{30};
+inline std::atomic<std::int64_t>& safe_exec_timeout_ms_storage() {
+    static std::atomic<std::int64_t> value{30000};
+    return value;
+}
 
-// waitpid with a deadline: polls, then escalates TERM to KILL so a stuck child
-// cannot hold the daemon hostage.
+inline std::atomic<std::int64_t>& safe_exec_kill_grace_ms_storage() {
+    static std::atomic<std::int64_t> value{2000};
+    return value;
+}
+
+inline void set_safe_exec_timeouts(std::chrono::milliseconds timeout,
+                                   std::chrono::milliseconds kill_grace) {
+    safe_exec_timeout_ms_storage().store(std::max<std::int64_t>(1, timeout.count()),
+                                         std::memory_order_release);
+    safe_exec_kill_grace_ms_storage().store(std::max<std::int64_t>(0, kill_grace.count()),
+                                            std::memory_order_release);
+}
+
+inline SafeExecTimeouts safe_exec_timeouts() {
+    return {
+        std::chrono::milliseconds{safe_exec_timeout_ms_storage().load(std::memory_order_acquire)},
+        std::chrono::milliseconds{safe_exec_kill_grace_ms_storage().load(std::memory_order_acquire)},
+    };
+}
+
+struct ChildWaitResult {
+    int status{0};
+    bool reaped{false};
+    bool timed_out{false};
+};
+
+inline void prepare_child_process_group() {
+    (void)setpgid(0, 0);
+}
+
+inline void prepare_parent_process_group(pid_t pid) {
+    (void)setpgid(pid, pid);
+}
+
+inline void signal_child_process_group(pid_t pid, int signal_number) {
+    if (kill(-pid, signal_number) != 0 && errno == ESRCH) {
+        (void)kill(pid, signal_number);
+    }
+}
+
+inline ChildWaitResult wait_for_child_until(
+    pid_t pid,
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds kill_grace) {
+    using clock = std::chrono::steady_clock;
+    ChildWaitResult result;
+    auto wait_until = [&](clock::time_point until) {
+        while (true) {
+            const pid_t waited = waitpid(pid, &result.status, WNOHANG);
+            if (waited == pid) {
+                result.reaped = true;
+                return true;
+            }
+            if (waited < 0 && errno != EINTR) {
+                return true;
+            }
+            const auto now = clock::now();
+            if (now >= until) {
+                return false;
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(until - now);
+            const int delay = static_cast<int>(std::max<std::int64_t>(1,
+                std::min<std::int64_t>(20, remaining.count())));
+            (void)poll(nullptr, 0, delay);
+        }
+    };
+
+    if (wait_until(deadline)) {
+        return result;
+    }
+    result.timed_out = true;
+    signal_child_process_group(pid, SIGTERM);
+    if (wait_until(clock::now() + kill_grace)) {
+        signal_child_process_group(pid, SIGKILL);
+        return result;
+    }
+    signal_child_process_group(pid, SIGKILL);
+    while (waitpid(pid, &result.status, 0) < 0) {
+        if (errno != EINTR) {
+            return result;
+        }
+    }
+    result.reaped = true;
+    return result;
+}
+
+// Compatibility helper used by the existing test suite and small callers.
 inline ChildWaitResult wait_for_child_with_timeout(pid_t pid,
                                                    std::chrono::seconds timeout) {
-    using clock = std::chrono::steady_clock;
-    const auto deadline = clock::now() + timeout;
-    constexpr auto poll_interval = std::chrono::milliseconds(20);
-
-    ChildWaitResult result;
-    while (true) {
-        const pid_t reaped = waitpid(pid, &result.status, WNOHANG);
-        if (reaped == pid) {
-            return result;
-        }
-        if (reaped == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            result.status = -1;
-            return result;
-        }
-        if (clock::now() >= deadline) {
-            break;
-        }
-        usleep(static_cast<useconds_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(poll_interval).count()));
-    }
-
-    result.timed_out = true;
-    kill(pid, SIGTERM);
-    const auto kill_deadline = clock::now() + std::chrono::seconds(2);
-    while (clock::now() < kill_deadline) {
-        if (waitpid(pid, &result.status, WNOHANG) == pid) {
-            return result;
-        }
-        usleep(20000);
-    }
-    kill(pid, SIGKILL);
-    waitpid(pid, &result.status, 0);
-    return result;
+    return wait_for_child_until(pid,
+                                std::chrono::steady_clock::now() + timeout,
+                                std::chrono::seconds{2});
 }
 
 inline std::string safe_exec_command_string(const std::vector<std::string>& args) {
@@ -140,6 +192,7 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
 
     if (pid == 0) {
         // Child process
+        prepare_child_process_group();
         reset_child_signal_mask();
         if (!redirect_child_stdin_to_devnull()) {
             _exit(127);
@@ -156,17 +209,20 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
         _exit(127); // execvp failed
     }
 
-    const ChildWaitResult wait_result = wait_for_child_with_timeout(pid, kDefaultExecTimeout);
+    prepare_parent_process_group(pid);
+    const SafeExecTimeouts timeouts = safe_exec_timeouts();
+    const ChildWaitResult wait_result = wait_for_child_until(
+        pid, started_at + timeouts.timeout, timeouts.kill_grace);
     if (wait_result.timed_out) {
         Logger::instance().error(
-            "Command '{}' exceeded {} s and was killed. On Keenetic this usually "
+            "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
             "means the firmware is holding the xtables lock; the operation will "
             "be retried.",
-            command, kDefaultExecTimeout.count());
+            command, timeouts.timeout.count());
         return -1;
     }
     int status = wait_result.status;
-    if (status == -1) {
+    if (!wait_result.reaped) {
         Logger::instance().verbose("safe_exec_error cmd={} duration_ms={} reason=waitpid_failed errno={}",
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -249,6 +305,7 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
 
     if (pid == 0) {
         // Child: read end becomes stdin
+        prepare_child_process_group();
         reset_child_signal_mask();
         close(pipefd[1]);
         dup2(pipefd[0], STDIN_FILENO);
@@ -262,54 +319,136 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         _exit(127);
     }
 
-    // Parent: write input to pipe, then wait
+    prepare_parent_process_group(pid);
+    const SafeExecTimeouts timeouts = safe_exec_timeouts();
+    const auto deadline = started_at + timeouts.timeout;
+
+    // Write input and collect stderr concurrently. Both descriptors are
+    // non-blocking so a helper that neither reads stdin nor closes stderr
+    // cannot prevent the deadline from being enforced.
     close(pipefd[0]);
     if (errfd[1] != -1) {
         close(errfd[1]);
     }
+    const int input_flags = fcntl(pipefd[1], F_GETFL, 0);
+    if (input_flags >= 0) {
+        (void)fcntl(pipefd[1], F_SETFL, input_flags | O_NONBLOCK);
+    }
+    if (errfd[0] != -1) {
+        const int error_flags = fcntl(errfd[0], F_GETFL, 0);
+        if (error_flags >= 0) {
+            (void)fcntl(errfd[0], F_SETFL, error_flags | O_NONBLOCK);
+        }
+    }
+
     const char* data = input.data();
     size_t remaining = input.size();
-    while (remaining > 0) {
-        const ssize_t written = write(pipefd[1], data, remaining);
-        if (written < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        data += written;
-        remaining -= static_cast<size_t>(written);
-    }
-    close(pipefd[1]);
+    bool input_open = true;
+    bool error_open = errfd[0] != -1;
+    bool child_reaped = false;
+    int status = 0;
+    bool deadline_exceeded = false;
+    constexpr size_t kMaxStderrBytes = 8 * 1024;
+    char buffer[512];
 
-    // Drained before waiting: a child that fills the stderr pipe would block
-    // forever otherwise. iptables-restore reports one line and exits, so the
-    // cap is generous.
-    if (errfd[0] != -1) {
-        constexpr size_t kMaxStderrBytes = 8 * 1024;
-        char buffer[512];
-        ssize_t got = 0;
-        while ((got = read(errfd[0], buffer, sizeof(buffer))) > 0) {
-            if (stderr_out->size() < kMaxStderrBytes) {
-                stderr_out->append(buffer, static_cast<size_t>(got));
+    while ((!child_reaped || input_open || error_open) && !deadline_exceeded) {
+        if (error_open) {
+            while (true) {
+                const ssize_t got = read(errfd[0], buffer, sizeof(buffer));
+                if (got > 0) {
+                    const size_t available = stderr_out->size() < kMaxStderrBytes
+                        ? kMaxStderrBytes - stderr_out->size()
+                        : 0;
+                    stderr_out->append(buffer, std::min(available, static_cast<size_t>(got)));
+                    continue;
+                }
+                if (got == 0) {
+                    close(errfd[0]);
+                    error_open = false;
+                }
+                if (got < 0 && errno == EINTR) {
+                    continue;
+                }
+                break;
             }
         }
+
+        if (input_open && remaining > 0) {
+            const ssize_t written = write(pipefd[1], data, remaining);
+            if (written > 0) {
+                data += written;
+                remaining -= static_cast<size_t>(written);
+            } else if (written < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                close(pipefd[1]);
+                input_open = false;
+            }
+        }
+
+        if (input_open && remaining == 0) {
+            close(pipefd[1]);
+            input_open = false;
+        }
+
+        if (!child_reaped) {
+            const pid_t waited = waitpid(pid, &status, WNOHANG);
+            child_reaped = waited == pid || (waited < 0 && errno != EINTR);
+        }
+        if (child_reaped && !input_open && !error_open) {
+            break;
+        }
+        deadline_exceeded = std::chrono::steady_clock::now() >= deadline;
+        if (deadline_exceeded) {
+            break;
+        }
+
+        pollfd descriptors[2]{};
+        nfds_t count = 0;
+        if (input_open) {
+            descriptors[count++] = {pipefd[1], POLLOUT, 0};
+        }
+        if (error_open) {
+            descriptors[count++] = {errfd[0], static_cast<short>(POLLIN | POLLHUP), 0};
+        }
+        (void)poll(descriptors, count, 20);
+    }
+
+    if (input_open) {
+        close(pipefd[1]);
+    }
+    if (error_open) {
         close(errfd[0]);
+    }
+    if (stderr_out != nullptr) {
         while (!stderr_out->empty() &&
                (stderr_out->back() == '\n' || stderr_out->back() == '\r')) {
             stderr_out->pop_back();
         }
     }
 
-    const ChildWaitResult wait_result = wait_for_child_with_timeout(pid, kDefaultExecTimeout);
+    ChildWaitResult wait_result;
+    if (child_reaped) {
+        wait_result.status = status;
+        wait_result.reaped = true;
+        if (deadline_exceeded) {
+            // The direct child is gone, but a descendant may still hold a
+            // descriptor. Terminate the process group as well.
+            signal_child_process_group(pid, SIGTERM);
+            signal_child_process_group(pid, SIGKILL);
+            wait_result.timed_out = true;
+        }
+    } else {
+        wait_result = wait_for_child_until(pid, deadline, timeouts.kill_grace);
+    }
     if (wait_result.timed_out) {
         Logger::instance().error(
-            "Command '{}' exceeded {} s and was killed. On Keenetic this usually "
+            "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
             "means the firmware is holding the xtables lock; the operation will "
             "be retried.",
-            command, kDefaultExecTimeout.count());
+            command, timeouts.timeout.count());
         return -1;
     }
-    int status = wait_result.status;
-    if (status == -1) {
+    status = wait_result.status;
+    if (!wait_result.reaped) {
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=waitpid_failed errno={}",
                                  command,
@@ -384,6 +523,7 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
 
     if (pid == 0) {
         // Child: write end becomes stdout
+        prepare_child_process_group();
         reset_child_signal_mask();
         if (!redirect_child_stdin_to_devnull()) {
             _exit(127);
@@ -402,6 +542,8 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         _exit(127);
     }
 
+    prepare_parent_process_group(pid);
+    const SafeExecTimeouts timeouts = safe_exec_timeouts();
     // Parent: read captured output without blocking forever. A service script,
     // nft or a descendant inheriting stdout can otherwise keep this pipe open
     // indefinitely and wedge the daemon request thread.
@@ -416,7 +558,7 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
     bool child_status_valid = false;
     bool timed_out = false;
     int status = 0;
-    const auto deadline = std::chrono::steady_clock::now() + kDefaultExecTimeout;
+    const auto deadline = started_at + timeouts.timeout;
     while (pipe_open || !child_reaped) {
         if (pipe_open) {
             while (true) {
@@ -449,7 +591,8 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         if (result.truncated || std::chrono::steady_clock::now() >= deadline) {
             timed_out = !result.truncated;
             if (!child_reaped) {
-                const auto wait_result = wait_for_child_with_timeout(pid, std::chrono::seconds(0));
+                const auto wait_result = wait_for_child_until(
+                    pid, std::chrono::steady_clock::now(), timeouts.kill_grace);
                 status = wait_result.status;
                 child_reaped = true;
                 child_status_valid = status != -1;
@@ -469,8 +612,10 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         result.exit_code = WEXITSTATUS(status);
     }
     if (timed_out) {
-        Logger::instance().error("Command '{}' exceeded {} s and was killed",
-                                 command, kDefaultExecTimeout.count());
+        Logger::instance().error("Command '{}' exceeded {} ms and was killed",
+                                 command,
+                                 timeouts.timeout.count());
+        result.timed_out = true;
     }
     Logger::instance().trace("safe_exec_capture_end",
                              "cmd={} exit_code={} duration_ms={} bytes={} truncated={}",
