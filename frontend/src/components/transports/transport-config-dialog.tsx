@@ -31,7 +31,7 @@ type SourceMode = "link" | "json"
 
 const emptySpec = (): TransportSpec => ({
   tag: "",
-  type: TransportSpecType.native,
+  type: TransportSpecType["sing-box"],
   interface: "",
   auto_start: false,
   geo_mode: "disabled",
@@ -142,9 +142,11 @@ export function TransportConfigDialog({
               }
               value={spec.type}
             >
-              <option value={TransportSpecType.native}>
-                {t("transports.form.native")}
-              </option>
+              {initial?.type === TransportSpecType.native ? (
+                <option value={TransportSpecType.native}>
+                  {t("transports.form.native")}
+                </option>
+              ) : null}
               <option value={TransportSpecType["sing-box"]}>
                 {t("transports.form.singBox")}
               </option>
