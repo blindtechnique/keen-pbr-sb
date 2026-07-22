@@ -4,21 +4,23 @@ on:
   push:
     tags:
       - "v*"
-    # A push to next produces the test IPK consumed by install-test-build.ps1.
-    # It does not create or modify a GitHub Release.
+    # A push to next produces only the aarch64 test IPK consumed by
+    # install-test-build.ps1. Release tags build every published architecture.
     branches:
       - next
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag to rebuild and publish (for example v3.0.7-sb.11)"
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  frontend:
     runs-on: ubuntu-latest
-    env:
-      KEENETIC_CONFIG: aarch64-3.10
-      KEENETIC_VERSION: "3.10"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,82 +36,151 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
+  build:
+    needs: frontend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.ref == 'refs/heads/next' && '[{"config":"aarch64-3.10","arch":"aarch64"}]' || '[{"config":"aarch64-3.10","arch":"aarch64"},{"config":"mips-3.4","arch":"mips"},{"config":"mipsel-3.4","arch":"mipsel"}]') }}
+    env:
+      KEENETIC_VERSION: "3.10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Stage frontend bundle
+        run: |
+          rm -rf frontend/dist
+          mkdir -p frontend/dist
+          cp -a frontend-dist/. frontend/dist/
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
           cache-dependency-path: extensions/transport-manager/go.sum
 
-      - name: Build IPK in entware-builder
+      - name: Build ${{ matrix.config }} IPK
+        env:
+          KEENETIC_CONFIG: ${{ matrix.config }}
         run: |
-          # resolve-version.sh derives the release number from the last commit
-          # date whenever it runs inside a git tree, which would produce
-          # keen-pbr_3.0.7-20260719075511_*.ipk instead of the released
-          # keen-pbr_3.0.7-5_*.ipk. Pin it to version.mk for reproducible names.
           KEEN_PBR_RELEASE_OVERRIDE="$(sed -n 's/^KEEN_PBR_RELEASE=//p' version.mk)"
           export KEEN_PBR_RELEASE_OVERRIDE
-          echo "Building release $KEEN_PBR_RELEASE_OVERRIDE"
+          echo "Building release $KEEN_PBR_RELEASE_OVERRIDE for $KEENETIC_CONFIG"
           make keenetic-packages \
             KEENETIC_CONFIG="$KEENETIC_CONFIG" \
             KEENETIC_VERSION="$KEENETIC_VERSION" \
             KEENETIC_BUILD_JOBS=4
 
-      - name: Collect artifacts and checksums
-        id: artifacts
+      - name: Collect and validate ${{ matrix.config }} IPK
         run: |
           set -e
-          ls -R build/packages
           IPK=$(find build/packages -name 'keen-pbr_*.ipk' | head -1)
           test -n "$IPK"
           cp "$IPK" .
           IPK_NAME=$(basename "$IPK")
-          sha256sum "$IPK_NAME" > SHA256SUMS
-          echo "ipk=$IPK_NAME" >> "$GITHUB_OUTPUT"
+          python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" --arch "${{ matrix.arch }}"
+
+      - name: Upload ${{ matrix.config }} IPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: keenetic-ipk-${{ matrix.config }}
+          path: keen-pbr_*.ipk
+          if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all Keenetic IPKs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: keenetic-ipk-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd release-assets
+          test "$(find . -maxdepth 1 -name 'keen-pbr_*.ipk' | wc -l)" -eq 3
+          sha256sum keen-pbr_*.ipk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Extract release notes from CHANGELOG
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE_TAG#v}"
           awk -v ver="$TAG" '
             $0 ~ "^## \\[" ver "\\]" {flag=1; next}
             /^## \[/ {flag=0}
             flag {print}
           ' CHANGELOG.md > RELEASE_BODY.md
           if ! [ -s RELEASE_BODY.md ]; then
-            echo "Автоматическая сборка $GITHUB_REF_NAME. Подробности в CHANGELOG.md." > RELEASE_BODY.md
+            echo "Автоматическая сборка $RELEASE_TAG. Подробности в CHANGELOG.md." > RELEASE_BODY.md
           fi
           cat RELEASE_BODY.md
 
-      - name: Drop stale assets from an existing release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Drop stale assets from existing release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # install.sh picks the first matching asset, so a re-run must not
-          # leave an older IPK next to the new one (its checksum is no longer
-          # in SHA256SUMS and the install would abort).
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            for asset in $(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name'); do
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            for asset in $(gh release view "$RELEASE_TAG" --json assets -q '.assets[].name'); do
               echo "Removing stale asset: $asset"
-              gh release delete-asset "$GITHUB_REF_NAME" "$asset" -y || true
+              gh release delete-asset "$RELEASE_TAG" "$asset" -y || true
             done
           fi
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: "keen-pbr-sb ${{ github.ref_name }}"
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "keen-pbr-sb ${{ env.RELEASE_TAG }}"
           body_path: RELEASE_BODY.md
           files: |
-            ${{ steps.artifacts.outputs.ipk }}
-            SHA256SUMS
+            release-assets/keen-pbr_*.ipk
+            release-assets/SHA256SUMS
 
-      - name: Upload workflow artifacts (non-tag runs)
-        if: "!startsWith(github.ref, 'refs/tags/')"
+  upload-next-artifact:
+    if: github.ref == 'refs/heads/next'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download aarch64 test IPK
+        uses: actions/download-artifact@v4
+        with:
+          name: keenetic-ipk-aarch64-3.10
+          path: release-assets
+
+      - name: Create checksum
+        run: |
+          cd release-assets
+          sha256sum keen-pbr_*.ipk > SHA256SUMS
+
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: keen-pbr-ipk
           path: |
-            ${{ steps.artifacts.outputs.ipk }}
-            SHA256SUMS
+            release-assets/keen-pbr_*.ipk
+            release-assets/SHA256SUMS
+          if-no-files-found: error
