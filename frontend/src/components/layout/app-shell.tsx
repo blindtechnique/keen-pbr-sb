@@ -80,16 +80,19 @@ function MobileSidebarHeader() {
   const { toggleSidebar } = useSidebar()
 
   return (
-    // Тень такая же, как у настольной шапки: на телефоне содержимое
-    // подъезжает под неё вплотную, и без тени граница просто исчезает.
-    <div className="keen-header-shadow sticky top-0 z-30 bg-card md:hidden">
-      <div className="flex items-center gap-2 px-4 py-2.5">
-        <AppBrandHeader
-          className="min-w-0 flex-1"
-          onMenuClick={toggleSidebar}
-          variant="topbar"
-        />
-        <TopBarControls />
+    // Fixed positioning keeps the system bar visible even if a page moves
+    // scrolling from the main container to the document. The wrapper reserves
+    // its height so page content never slips underneath it.
+    <div className="h-14 shrink-0 md:hidden">
+      <div className="keen-header-shadow fixed inset-x-0 top-0 z-40 bg-card">
+        <div className="flex h-14 items-center gap-2 px-4">
+          <AppBrandHeader
+            className="min-w-0 flex-1"
+            onMenuClick={toggleSidebar}
+            variant="topbar"
+          />
+          <TopBarControls />
+        </div>
       </div>
     </div>
   )
