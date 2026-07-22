@@ -17,6 +17,7 @@
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
 #include "../health/interface_probe.hpp"
+#include "pid_file.hpp"
 #include "../health/url_tester.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
@@ -283,7 +284,7 @@ private:
     mutable TracedMutex fd_entries_mutex_;
     std::vector<FdEntry> fd_entries_ GUARDED_BY(fd_entries_mutex_);
 
-    int pid_file_fd_{-1};
+    PidFile pid_file_;
     int control_fd_{-1};
     struct ControlTask {
         std::function<void()> callback;
