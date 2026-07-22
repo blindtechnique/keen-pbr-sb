@@ -19,8 +19,6 @@ export const enTranslation = {
     closeResult: "Close message",
     tabs: {
       settings: "Settings",
-      backup: "Backup",
-      restore: "Restore",
       strategies: "Strategies",
       lists: "Lists",
       lua: "Lua scripts",
@@ -300,7 +298,8 @@ export const enTranslation = {
     },
     form: {
       createOutbound: "Make it an exit point",
-      createOutboundHint: "The tunnel appears among the exit points under the same name and can be picked in routing rules straight away.",
+      createOutboundHint:
+        "The tunnel appears among the exit points under the same name and can be picked in routing rules straight away.",
       outboundExists: "An outbound tagged {{tag}} already exists",
       createTitle: "Add transport",
       editTitle: "Edit transport",
@@ -401,7 +400,8 @@ export const enTranslation = {
   overview: {
     router: {
       title: "Router",
-      unavailable: "Router details are unavailable: the firmware is not answering service requests.",
+      unavailable:
+        "Router details are unavailable: the firmware is not answering service requests.",
       cpu: "CPU",
       memory: "Memory",
       memoryValue: "{{used}} MB / {{total}} MB ({{percent}}%)",
@@ -686,12 +686,21 @@ export const enTranslation = {
       },
     },
     settings: {
+      backup: {
+        title: "Backup and restore",
+        description:
+          "Create a selective backup or restore keen-pbr-sb settings from a previously saved file.",
+        create: "Create backup",
+        restore: "Restore from backup",
+      },
       remoteAccess: {
         title: "Access from outside",
-        description: "Reach the web interface from the internet, not just from the home network.",
+        description:
+          "Reach the web interface from the internet, not just from the home network.",
         enabled: "Allow access from the internet",
         port: "External port",
-        portHint: "The port the panel answers on from outside. Pick something non-obvious.",
+        portHint:
+          "The port the panel answers on from outside. Pick something non-obvious.",
         warning:
           "The panel becomes reachable by anyone who knows the address and port, with only the password protecting it. Use this only if you accept that risk.",
         loginDisabled:
@@ -727,13 +736,17 @@ export const enTranslation = {
         provider: "Verification method",
         providerRouter: "Router account",
         providerLocal: "Separate keen-pbr-sb password",
-        providerRouterHint: "The Keenetic firmware checks the credentials; keen-pbr-sb never stores the password.",
-        providerLocalHint: "Login and password are stored in auth.json on the router.",
+        providerRouterHint:
+          "The Keenetic firmware checks the credentials; keen-pbr-sb never stores the password.",
+        providerLocalHint:
+          "Login and password are stored in auth.json on the router.",
         endpoint: "Router web interface address",
         username: "Username",
         password: "Password",
-        verifyHint: "Enter the router credentials: they are verified before saving so you cannot lock yourself out.",
-        localStoreHint: "Set the login and password you will use for keen-pbr-sb.",
+        verifyHint:
+          "Enter the router credentials: they are verified before saving so you cannot lock yourself out.",
+        localStoreHint:
+          "Set the login and password you will use for keen-pbr-sb.",
         save: "Save login method",
         saved: "Login settings saved, sign in again",
       },
@@ -889,6 +902,10 @@ export const enTranslation = {
       bulk: {
         selected: "{{count}} selected",
         delete: "Delete selected",
+        enableAction: "Enable",
+        disableAction: "Disable",
+        confirmSetEnabled:
+          "{{action}} the selected rules ({{count}})? The draft will change only after confirmation.",
         confirmDelete:
           "Delete DNS servers {{tags}}?\nAutomatically remove stale references?",
       },
@@ -1057,7 +1074,8 @@ export const enTranslation = {
     outbounds: {
       plain: {
         interface: "Traffic leaves through {{name}}",
-        urltest: "Failover: if the first exit stops answering, traffic moves to the next",
+        urltest:
+          "Failover: if the first exit stops answering, traffic moves to the next",
         table: "Traffic goes straight through the provider, past the tunnels",
         blackhole: "Connections are not let out",
         ignore: "Traffic passes without changing its route",
@@ -1418,7 +1436,8 @@ export const enTranslation = {
       templates: {
         button: "Pick a ready-made list",
         title: "Ready-made lists",
-        description: "Curated sing-box rule sets: choose a service and its URL fills the field.",
+        description:
+          "Curated sing-box rule sets: choose a service and its URL fills the field.",
         search: "Search by name or address",
         add: "Select",
         empty: "Nothing found",
@@ -1487,7 +1506,8 @@ export const enTranslation = {
       },
       dnsRule: {
         title: "DNS server for this list",
-        description: "Domains from this list resolve through the selected server. Without one the list uses the primary servers.",
+        description:
+          "Domains from this list resolve through the selected server. Without one the list uses the primary servers.",
         none: "Not set",
       },
       quickSetup: {

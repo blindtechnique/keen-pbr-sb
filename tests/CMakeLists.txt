@@ -5,6 +5,7 @@ add_executable(keen-pbr-tests
   test_iptables_builder.cpp
   test_cron.cpp
   test_addr_spec.cpp
+  test_base64.cpp
   test_dnsmasq_gen.cpp
   test_dns_txt_client.cpp
   test_dns_server.cpp
@@ -69,6 +70,7 @@ add_executable(keen-pbr-tests
   ../src/routing/netlink.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
+  ../src/util/base64.cpp
   ../src/util/firewall_backend_utils.cpp
   ../src/util/ipv6_support.cpp
   ../src/util/network_routes.cpp

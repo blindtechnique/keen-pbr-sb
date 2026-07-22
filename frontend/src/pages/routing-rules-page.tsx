@@ -30,6 +30,7 @@ import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   getApiErrorMessage,
+  getRoutingRuleRowId,
   reorderRules,
   setRouteRuleEnabled,
 } from "@/pages/routing-rules-utils"
@@ -42,7 +43,9 @@ export function RoutingRulesPage() {
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
   const routeRules = loadedConfig?.route?.rules ?? []
-  const ruleRowIds = routeRules.map((_rule, index) => String(index))
+  const ruleRowIds = routeRules.map((_rule, index) =>
+    getRoutingRuleRowId(index)
+  )
   const ruleSelection = useRowSelection(ruleRowIds)
   const runtimeOutboundsQuery = useGetRuntimeOutbounds({
     query: {
@@ -114,11 +117,7 @@ export function RoutingRulesPage() {
     if (!loadedConfig) {
       return
     }
-    if (
-      fromIndex === toIndex ||
-      toIndex < 0 ||
-      toIndex >= routeRules.length
-    ) {
+    if (fromIndex === toIndex || toIndex < 0 || toIndex >= routeRules.length) {
       return
     }
 
@@ -150,7 +149,8 @@ export function RoutingRulesPage() {
     }
 
     const nextRules = routeRules.filter(
-      (_rule, index) => !ruleSelection.selectedIds.has(String(index))
+      (_rule, index) =>
+        !ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
     )
     persistRules(loadedConfig, nextRules, { clearSelection: true })
   }
@@ -160,8 +160,25 @@ export function RoutingRulesPage() {
       return
     }
 
+    if (
+      !window.confirm(
+        t("pages.routingRules.bulk.confirmSetEnabled", {
+          count: ruleSelection.selectedCount,
+          action: t(
+            enabled
+              ? "pages.routingRules.bulk.enableAction"
+              : "pages.routingRules.bulk.disableAction"
+          ),
+        })
+      )
+    ) {
+      return
+    }
+
     const nextRules = routeRules.map((rule, index) =>
-      ruleSelection.selectedIds.has(String(index)) ? { ...rule, enabled } : rule
+      ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
+        ? { ...rule, enabled }
+        : rule
     )
     persistRules(loadedConfig, nextRules)
   }
@@ -173,21 +190,21 @@ export function RoutingRulesPage() {
         title={t("pages.routingRules.title")}
       />
       <PageActionBar>
-            <ConfigTransferButtons
-              config={loadedConfig}
-              disabled={configMutationPending}
-              kind="routing-rules"
-              onImport={(nextConfig) =>
-                postConfigMutation.mutate({ data: nextConfig })
-              }
-            />
-            <Button
-              disabled={configMutationPending}
-              onClick={() => navigate("/routing-rules/create")}
-            >
-              <Plus className="mr-1 h-4 w-4" />
-              {t("pages.routingRules.actions.addRule")}
-            </Button>
+        <ConfigTransferButtons
+          config={loadedConfig}
+          disabled={configMutationPending}
+          kind="routing-rules"
+          onImport={(nextConfig) =>
+            postConfigMutation.mutate({ data: nextConfig })
+          }
+        />
+        <Button
+          disabled={configMutationPending}
+          onClick={() => navigate("/routing-rules/create")}
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          {t("pages.routingRules.actions.addRule")}
+        </Button>
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
@@ -211,39 +228,39 @@ export function RoutingRulesPage() {
               push the whole table down. */}
           <div className="relative h-0">
             {ruleSelection.hasSelection ? (
-            <BulkSelectionToolbar
-              cancelLabel={t("common.cancel")}
-              countLabel={t("pages.routingRules.bulk.selected", {
-                count: ruleSelection.selectedCount,
-              })}
-              onCancel={ruleSelection.clear}
-            >
-              <Button
-                disabled={configMutationPending}
-                onClick={() => handleBulkSetEnabled(true)}
-                size="sm"
-                variant="outline"
+              <BulkSelectionToolbar
+                cancelLabel={t("common.cancel")}
+                countLabel={t("pages.routingRules.bulk.selected", {
+                  count: ruleSelection.selectedCount,
+                })}
+                onCancel={ruleSelection.clear}
               >
-                {t("pages.routingRules.bulk.enable")}
-              </Button>
-              <Button
-                disabled={configMutationPending}
-                onClick={() => handleBulkSetEnabled(false)}
-                size="sm"
-                variant="outline"
-              >
-                {t("pages.routingRules.bulk.disable")}
-              </Button>
-              <Button
-                disabled={configMutationPending}
-                onClick={handleBulkDelete}
-                size="sm"
-                variant="destructive"
-              >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("pages.routingRules.bulk.delete")}
-              </Button>
-            </BulkSelectionToolbar>
+                <Button
+                  disabled={configMutationPending}
+                  onClick={() => handleBulkSetEnabled(true)}
+                  size="sm"
+                  variant="outline"
+                >
+                  {t("pages.routingRules.bulk.enable")}
+                </Button>
+                <Button
+                  disabled={configMutationPending}
+                  onClick={() => handleBulkSetEnabled(false)}
+                  size="sm"
+                  variant="outline"
+                >
+                  {t("pages.routingRules.bulk.disable")}
+                </Button>
+                <Button
+                  disabled={configMutationPending}
+                  onClick={handleBulkDelete}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <Trash2 className="mr-1 h-4 w-4" />
+                  {t("pages.routingRules.bulk.delete")}
+                </Button>
+              </BulkSelectionToolbar>
             ) : null}
           </div>
           {/* На телефоне таблица разворачивается в столбик подписей и
@@ -314,91 +331,92 @@ export function RoutingRulesPage() {
           </div>
 
           <div className="hidden md:block">
-          <DataTable
-            headers={[
-              "",
-              t("pages.routingRules.headers.order"),
-              t("pages.routingRules.headers.criteria"),
-              t("pages.routingRules.headers.outbound"),
-              t("pages.routingRules.headers.actions"),
-            ]}
-            narrowColumns={[0, 1]}
-            reorder={{
-              disabled: configMutationPending,
-              handleLabel: t("pages.routingRules.actions.reorder"),
-              onReorder: handleReorder,
-            }}
-            rows={tableRows.map((row: ReturnType<typeof getRouteRuleRow>) => [
-              <div className="flex items-center" key={`${row.id}-enabled`}>
-                <Switch
-                  aria-label={t(
-                    row.enabled
-                      ? "pages.routingRules.actions.disableRule"
-                      : "pages.routingRules.actions.enableRule"
-                  )}
-                  checked={row.enabled}
-                  disabled={configMutationPending}
-                  onCheckedChange={(checked) =>
-                    handleEnabledChange(row.index, checked)
-                  }
-                  title={t(
-                    row.enabled
-                      ? "pages.routingRules.actions.disableRule"
-                      : "pages.routingRules.actions.enableRule"
-                  )}
-                />
-              </div>,
-              <span className="font-medium" key={`${row.id}-order`}>
-                #{row.order}
-              </span>,
-              <ul
-                className="list-disc space-y-1 pl-5 text-sm"
-                key={`${row.id}-conditions`}
-              >
-                {row.conditions.map((condition) => (
-                  <li
-                    className="text-muted-foreground"
-                    key={`${row.id}-${condition.label}`}
-                  >
-                    <span className="font-medium text-foreground">
-                      {condition.label}:
-                    </span>{" "}
-                    {condition.value}
-                  </li>
-                ))}
-              </ul>,
-              <div key={`${row.id}-outbound`}>
-                <RuntimeOutboundEntry
-                  runtimeState={row.runtimeState}
-                  title={row.outbound}
-                  t={t}
-                />
-              </div>,
-              <ActionButtons
-                actions={[
-                  {
-                    disabled: configMutationPending,
-                    icon: <Pencil className="h-4 w-4" />,
-                    label: t("common.edit"),
-                    onClick: () => navigate(`/routing-rules/${row.index}/edit`),
-                  },
-                ]}
-                key={`${row.id}-actions`}
-              />,
-            ])}
-            selection={{
-              rowIds: ruleRowIds,
-              selectedIds: ruleSelection.selectedIds,
-              disabled: configMutationPending,
-              onToggle: ruleSelection.toggleOne,
-              onToggleAll: ruleSelection.setAllVisible,
-              selectAllLabel: t("common.selection.selectAll"),
-              getRowLabel: (rowId) =>
-                t("common.selection.selectRow", {
-                  rowLabel: `${t("pages.routingRules.title")} #${Number(rowId) + 1}`,
-                }),
-            }}
-          />
+            <DataTable
+              headers={[
+                "",
+                t("pages.routingRules.headers.order"),
+                t("pages.routingRules.headers.criteria"),
+                t("pages.routingRules.headers.outbound"),
+                t("pages.routingRules.headers.actions"),
+              ]}
+              narrowColumns={[0, 1]}
+              reorder={{
+                disabled: configMutationPending,
+                handleLabel: t("pages.routingRules.actions.reorder"),
+                onReorder: handleReorder,
+              }}
+              rows={tableRows.map((row: ReturnType<typeof getRouteRuleRow>) => [
+                <div className="flex items-center" key={`${row.id}-enabled`}>
+                  <Switch
+                    aria-label={t(
+                      row.enabled
+                        ? "pages.routingRules.actions.disableRule"
+                        : "pages.routingRules.actions.enableRule"
+                    )}
+                    checked={row.enabled}
+                    disabled={configMutationPending}
+                    onCheckedChange={(checked) =>
+                      handleEnabledChange(row.index, checked)
+                    }
+                    title={t(
+                      row.enabled
+                        ? "pages.routingRules.actions.disableRule"
+                        : "pages.routingRules.actions.enableRule"
+                    )}
+                  />
+                </div>,
+                <span className="font-medium" key={`${row.id}-order`}>
+                  #{row.order}
+                </span>,
+                <ul
+                  className="list-disc space-y-1 pl-5 text-sm"
+                  key={`${row.id}-conditions`}
+                >
+                  {row.conditions.map((condition) => (
+                    <li
+                      className="text-muted-foreground"
+                      key={`${row.id}-${condition.label}`}
+                    >
+                      <span className="font-medium text-foreground">
+                        {condition.label}:
+                      </span>{" "}
+                      {condition.value}
+                    </li>
+                  ))}
+                </ul>,
+                <div key={`${row.id}-outbound`}>
+                  <RuntimeOutboundEntry
+                    runtimeState={row.runtimeState}
+                    title={row.outbound}
+                    t={t}
+                  />
+                </div>,
+                <ActionButtons
+                  actions={[
+                    {
+                      disabled: configMutationPending,
+                      icon: <Pencil className="h-4 w-4" />,
+                      label: t("common.edit"),
+                      onClick: () =>
+                        navigate(`/routing-rules/${row.index}/edit`),
+                    },
+                  ]}
+                  key={`${row.id}-actions`}
+                />,
+              ])}
+              selection={{
+                rowIds: ruleRowIds,
+                selectedIds: ruleSelection.selectedIds,
+                disabled: configMutationPending,
+                onToggle: ruleSelection.toggleOne,
+                onToggleAll: ruleSelection.setAllVisible,
+                selectAllLabel: t("common.selection.selectAll"),
+                getRowLabel: (rowId) =>
+                  t("common.selection.selectRow", {
+                    rowLabel: `${t("pages.routingRules.title")} #${Number(rowId) + 1}`,
+                  }),
+              }}
+            />
           </div>
         </div>
       )}
@@ -452,7 +470,7 @@ function getRouteRuleRow(
   )
 
   return {
-    id: `routing-rule-${index}`,
+    id: getRoutingRuleRowId(index),
     enabled: rule.enabled ?? true,
     index,
     order: index + 1,

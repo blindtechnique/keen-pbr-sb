@@ -5,6 +5,7 @@
 #include "generated/api_types.hpp"
 #include "../config/config.hpp"
 #include "../log/logger.hpp"
+#include "../util/base64.hpp"
 #include "../util/safe_exec.hpp"
 
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -26,6 +28,7 @@ constexpr std::size_t kMaxBackupBytes = 16U * 1024U * 1024U;
 constexpr std::size_t kMaxBackupFileBytes = 2U * 1024U * 1024U;
 constexpr std::size_t kMaxBackupFiles = 512U;
 constexpr const char* kRollbackPath = "/opt/etc/keen-pbr/rollback-backup.json";
+constexpr const char* kBase64Encoding = "base64";
 
 std::string read_text(const fs::path& path) {
     std::error_code ec;
@@ -102,7 +105,30 @@ void add_tree(nlohmann::json& files, const fs::path& root, const std::string& pr
         if (ec || relative.empty()) continue;
         const auto value = read_text(entry.path());
         total_bytes += value.size();
-        files[prefix + "/" + relative.generic_string()] = value;
+        files[prefix + "/" + relative.generic_string()] = {
+            {"encoding", kBase64Encoding},
+            {"data", base64_encode(value)},
+        };
+    }
+}
+
+std::string decode_backup_file(const nlohmann::json& value) {
+    if (value.is_string()) return value.get<std::string>();
+    if (!value.is_object() || !value.contains("encoding") ||
+        !value.at("encoding").is_string() ||
+        value.at("encoding").get_ref<const std::string&>() != kBase64Encoding ||
+        !value.contains("data") || !value.at("data").is_string()) {
+        throw ApiError("invalid nfqws backup file", 400);
+    }
+
+    const auto& encoded = value.at("data").get_ref<const std::string&>();
+    constexpr std::size_t kMaxEncodedFileBytes = ((kMaxBackupFileBytes + 2U) / 3U) * 4U;
+    if (encoded.size() > kMaxEncodedFileBytes)
+        throw ApiError("invalid nfqws backup file", 400);
+    try {
+        return base64_decode(encoded);
+    } catch (const std::invalid_argument&) {
+        throw ApiError("invalid nfqws backup file", 400);
     }
 }
 
@@ -171,9 +197,10 @@ void validate_bundle(const nlohmann::json& backup) {
             throw ApiError("invalid nfqws backup section", 400);
         std::size_t total_bytes = 0;
         for (const auto& item : data.at("nfqws").items()) {
-            if (!item.value().is_string() || item.value().get_ref<const std::string&>().size() > kMaxBackupFileBytes)
+            const auto content = decode_backup_file(item.value());
+            if (content.size() > kMaxBackupFileBytes)
                 throw ApiError("invalid nfqws backup file", 400);
-            total_bytes += item.value().get_ref<const std::string&>().size();
+            total_bytes += content.size();
             const fs::path relative(item.key());
             if (relative.is_absolute() || relative.empty() ||
                 std::any_of(relative.begin(), relative.end(), [](const fs::path& part) {
@@ -228,7 +255,7 @@ void restore_bundle(const ApiContext& ctx, const nlohmann::json& backup) {
             if (root.empty()) throw ApiError("invalid nfqws path in backup", 400);
             auto tail = relative;
             tail = tail.lexically_relative(first);
-            write_atomic(root / tail, item.value().get<std::string>(), true);
+            write_atomic(root / tail, decode_backup_file(item.value()), true);
         }
     }
 

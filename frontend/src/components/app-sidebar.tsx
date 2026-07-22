@@ -39,8 +39,6 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             title: t("nav.items.settings"),
             url: "/general",
           },
-          { title: t("nav.items.backup"), url: "/backup" },
-          { title: t("nav.items.restore"), url: "/restore" },
         ],
       },
       {
@@ -94,7 +92,13 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
 
   return (
     <Sidebar collapsible="icon" {...props}>
-      <SidebarHeader className={isMobile ? "h-16 bg-card px-4 py-2" : "h-16 justify-center bg-card px-4 py-0 group-data-[collapsible=icon]:px-2"}>
+      <SidebarHeader
+        className={
+          isMobile
+            ? "h-16 bg-card px-4 py-2"
+            : "h-16 justify-center bg-card px-4 py-0 group-data-[collapsible=icon]:px-2"
+        }
+      >
         <SidebarMenuHeader isMobile={isMobile} onMenuClick={toggleSidebar} />
       </SidebarHeader>
       {/* No horizontal padding: in KeeneticOS the selected row runs from the
@@ -105,7 +109,13 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
       </SidebarContent>
       {/* The footer is the button: padding here would leave a pale margin
           around the hover fill instead of letting it reach the edges. */}
-      <SidebarFooter className={isMobile ? "border-t px-4 py-3" : "border-t border-r bg-sidebar p-0 group-data-[collapsible=icon]:hidden"}>
+      <SidebarFooter
+        className={
+          isMobile
+            ? "border-t px-4 py-3"
+            : "border-t border-r bg-sidebar p-0 group-data-[collapsible=icon]:hidden"
+        }
+      >
         <div>
           <Button
             className="h-12 w-full justify-start rounded-none bg-sidebar px-4 text-[14px] font-normal text-primary hover:bg-[#EDEDED] hover:text-primary"

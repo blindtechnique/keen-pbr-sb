@@ -16,6 +16,10 @@ export type RouteRuleDraft = {
 
 export const protoOptions = ["", "tcp", "udp", "tcp/udp"] as const
 
+export function getRoutingRuleRowId(index: number) {
+  return String(index)
+}
+
 export const emptyRouteRuleDraft: RouteRuleDraft = {
   enabled: true,
   list: [],

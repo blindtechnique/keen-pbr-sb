@@ -1,5 +1,10 @@
 import { useTranslation } from "react-i18next"
-import { DownloadIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react"
+import {
+  DownloadIcon,
+  ExternalLinkIcon,
+  RefreshCwIcon,
+  UploadIcon,
+} from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
 
 import { useForm } from "@tanstack/react-form"
@@ -205,6 +210,7 @@ function LoadedGeneralConfigPage({
   return (
     <>
       <SoftwareUpdateCard />
+      <BackupAndRestoreCard />
 
       <Card size="sm">
         <CardHeader>
@@ -291,9 +297,7 @@ function LoadedGeneralConfigPage({
                         className="cursor-pointer flex-col items-start gap-0"
                         htmlFor="client-dns-enforcement"
                       >
-                        {t(
-                          "pages.settings.general.clientDnsEnforcementLabel"
-                        )}
+                        {t("pages.settings.general.clientDnsEnforcementLabel")}
                       </FieldLabel>
                     </div>
                     <FieldHint
@@ -539,7 +543,10 @@ function LoadedGeneralConfigPage({
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="sticky z-20 -mx-4 flex justify-end gap-2 border-t bg-background px-4 py-3 shadow-[0_-8px_18px_-14px_rgba(0,0,0,0.55)] md:-mx-6 md:px-6" style={{ bottom: "var(--warning-banner-height, 0px)" }}>
+      <div
+        className="sticky z-20 -mx-4 flex justify-end gap-2 border-t bg-background px-4 py-3 shadow-[0_-8px_18px_-14px_rgba(0,0,0,0.55)] md:-mx-6 md:px-6"
+        style={{ bottom: "var(--warning-banner-height, 0px)" }}
+      >
         <Button
           disabled={isPending}
           onClick={handleCancel}
@@ -571,6 +578,37 @@ function LoadedGeneralConfigPage({
   )
 }
 
+function BackupAndRestoreCard() {
+  const { t } = useTranslation()
+
+  return (
+    <Card size="sm">
+      <CardHeader>
+        <CardTitle>{t("pages.settings.backup.title")}</CardTitle>
+        <CardDescription>
+          {t("pages.settings.backup.description")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-wrap gap-2">
+        <Button
+          onClick={() => window.location.assign("/backup")}
+          variant="outline"
+        >
+          <DownloadIcon />
+          {t("pages.settings.backup.create")}
+        </Button>
+        <Button
+          onClick={() => window.location.assign("/restore")}
+          variant="outline"
+        >
+          <UploadIcon />
+          {t("pages.settings.backup.restore")}
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
+
 type SoftwareUpdateStatus = {
   current: string
   latest: string
@@ -594,8 +632,7 @@ function SoftwareUpdateCard() {
     try {
       const response = await fetch("/api/system/update")
       const body = await response.json().catch(() => ({}))
-      if (!response.ok)
-        throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
       setStatus(body as SoftwareUpdateStatus)
       setError("")
     } catch (refreshError) {
@@ -632,12 +669,24 @@ function SoftwareUpdateCard() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            groups: { general: true, transports: true, outbounds: true, dns: true, routing: true, nfqws: true },
+            groups: {
+              general: true,
+              transports: true,
+              outbounds: true,
+              dns: true,
+              routing: true,
+              nfqws: true,
+            },
           }),
         })
         const backup = await backupResponse.json()
-        if (!backupResponse.ok) throw new Error(backup.error ?? `HTTP ${backupResponse.status}`)
-        const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2) + "\n"], { type: "application/json" }))
+        if (!backupResponse.ok)
+          throw new Error(backup.error ?? `HTTP ${backupResponse.status}`)
+        const url = URL.createObjectURL(
+          new Blob([JSON.stringify(backup, null, 2) + "\n"], {
+            type: "application/json",
+          })
+        )
         const anchor = document.createElement("a")
         anchor.href = url
         anchor.download = `keen-pbr-sb-before-update-${new Date().toISOString().slice(0, 10)}.json`
@@ -646,8 +695,7 @@ function SoftwareUpdateCard() {
       }
       const response = await fetch("/api/system/update", { method: "POST" })
       const body = await response.json().catch(() => ({}))
-      if (!response.ok)
-        throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
       setStatus((previous) =>
         previous ? { ...previous, running: true } : previous
       )
@@ -664,7 +712,14 @@ function SoftwareUpdateCard() {
   }
 
   return (
-    <Card className={status?.available ? "border-success/60 bg-success/5 shadow-[0_0_0_1px_color-mix(in_srgb,var(--success)_18%,transparent)]" : undefined} size="sm">
+    <Card
+      className={
+        status?.available
+          ? "border-success/60 bg-success/5 shadow-[0_0_0_1px_color-mix(in_srgb,var(--success)_18%,transparent)]"
+          : undefined
+      }
+      size="sm"
+    >
       <CardHeader>
         <CardTitle>{t("pages.settings.softwareUpdate.title")}</CardTitle>
         <CardDescription>
@@ -675,13 +730,13 @@ function SoftwareUpdateCard() {
         <div className="grid gap-2 text-sm sm:grid-cols-2">
           <div>
             <span className="text-muted-foreground">
-              {t("pages.settings.softwareUpdate.current")}: {" "}
+              {t("pages.settings.softwareUpdate.current")}:{" "}
             </span>
             <code>{status?.current ?? "—"}</code>
           </div>
           <div>
             <span className="text-muted-foreground">
-              {t("pages.settings.softwareUpdate.latest")}: {" "}
+              {t("pages.settings.softwareUpdate.latest")}:{" "}
             </span>
             <code>{status?.latest ?? "—"}</code>
           </div>
@@ -715,7 +770,7 @@ function SoftwareUpdateCard() {
               ) : null}
             </div>
             {status.release_notes ? (
-              <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-muted p-3 text-sm">
+              <div className="max-h-80 overflow-auto rounded bg-muted p-3 text-sm whitespace-pre-wrap">
                 {status.release_notes}
               </div>
             ) : (
@@ -751,7 +806,10 @@ function SoftwareUpdateCard() {
         ) : null}
         <div className="flex flex-wrap gap-2">
           <label className="flex w-full cursor-pointer items-center gap-3 rounded-md border p-3 text-sm">
-            <Checkbox checked={downloadBackup} onCheckedChange={(checked) => setDownloadBackup(checked === true)} />
+            <Checkbox
+              checked={downloadBackup}
+              onCheckedChange={(checked) => setDownloadBackup(checked === true)}
+            />
             Скачать бэкап перед установкой
           </label>
           <Button
@@ -769,7 +827,10 @@ function SoftwareUpdateCard() {
             <RefreshCwIcon className={status?.running ? "animate-spin" : ""} />
             {t("pages.settings.softwareUpdate.check")}
           </Button>
-          <Button onClick={() => window.location.assign("/restore")} variant="destructive">
+          <Button
+            onClick={() => window.location.assign("/restore")}
+            variant="destructive"
+          >
             Откат в один клик
           </Button>
         </div>
@@ -778,7 +839,7 @@ function SoftwareUpdateCard() {
             <p className="font-medium">
               {t("pages.settings.softwareUpdate.result")}
             </p>
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-muted p-3 text-xs">
+            <pre className="max-h-72 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap">
               {status?.log || t("pages.settings.softwareUpdate.waitingForLog")}
             </pre>
             <Button

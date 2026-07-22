@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import type { ConfigObject } from "../src/api/generated/model/configObject"
 import {
   emptyRouteRuleDraft,
+  getRoutingRuleRowId,
   normalizeRouteRuleDraft,
   setRouteRuleEnabled,
   toRouteRuleDraft,
@@ -35,6 +36,11 @@ function loadDnsRuleUtils() {
 }
 
 describe("routing rule enabled helpers", () => {
+  test("mobile and desktop selection use the same row id", () => {
+    expect(getRoutingRuleRowId(0)).toBe("0")
+    expect(getRoutingRuleRowId(12)).toBe("12")
+  })
+
   test("new route rule drafts default to enabled", () => {
     expect(emptyRouteRuleDraft.enabled).toBe(true)
     expect(normalizeRouteRuleDraft(emptyRouteRuleDraft).enabled).toBe(true)

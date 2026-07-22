@@ -275,6 +275,7 @@ set(SOURCES
   src/daemon/system_resolver_hook.cpp
   src/daemon/scheduler.cpp
   src/util/blocking_executor.cpp
+  src/util/base64.cpp
   src/util/firewall_backend_utils.cpp
   src/util/ipv6_support.cpp
   src/util/network_routes.cpp
