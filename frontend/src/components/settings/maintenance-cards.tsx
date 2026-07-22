@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
@@ -13,6 +13,7 @@ import {
   BackupDialog,
   RestoreDialog,
 } from "@/components/settings/backup-dialogs"
+import { getSoftwareUpdateDialogContent } from "@/components/settings/software-update-view"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -99,8 +100,12 @@ export function SoftwareUpdateCard() {
   const [showResult, setShowResult] = useState(false)
   const [confirmInstall, setConfirmInstall] = useState(false)
   const [checking, setChecking] = useState(false)
+  const [starting, setStarting] = useState(false)
   const [downloadBackupBeforeUpdate, setDownloadBackupBeforeUpdate] =
     useState(true)
+  const logRef = useRef<HTMLPreElement>(null)
+  const dialogContent = getSoftwareUpdateDialogContent(status, showResult)
+  const showUpdateLog = dialogContent === "update-log"
 
   const refresh = useCallback(
     async (showFeedback = false) => {
@@ -180,8 +185,28 @@ export function SoftwareUpdateCard() {
     void refresh()
   }, [refresh, showResult, status?.phase])
 
+  useEffect(() => {
+    if (!showUpdateLog || !logRef.current) return
+    logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [showUpdateLog, status?.log])
+
   const startUpdate = async () => {
     setConfirmInstall(false)
+    setShowResult(true)
+    setStarting(true)
+    setError("")
+    setStatus((previous) =>
+      previous
+        ? {
+            ...previous,
+            log: "",
+            message: t("pages.settings.softwareUpdate.running"),
+            percent: 0,
+            phase: "preparing",
+            success: null,
+          }
+        : previous
+    )
     try {
       if (downloadBackupBeforeUpdate) {
         const backup = await createBackup(createDefaultBackupSelection())
@@ -199,15 +224,20 @@ export function SoftwareUpdateCard() {
       setStatus((previous) =>
         previous ? { ...previous, running: true } : previous
       )
-      setShowResult(true)
-      setError("")
       window.setTimeout(() => void refreshProgress(), 1200)
     } catch (updateError) {
+      setStatus((previous) =>
+        previous
+          ? { ...previous, phase: "failed", running: false, success: false }
+          : previous
+      )
       setError(
         updateError instanceof Error
           ? updateError.message
           : t("pages.settings.softwareUpdate.startFailed")
       )
+    } finally {
+      setStarting(false)
     }
   }
 
@@ -236,12 +266,14 @@ export function SoftwareUpdateCard() {
           <UpdateVersionSummary status={status} />
           <div className="flex flex-wrap gap-2">
             <Button
-              disabled={status?.running || checking}
+              disabled={status?.running || starting || checking}
               onClick={() => void refresh(true)}
               variant="outline"
             >
               <RefreshCwIcon
-                className={status?.running || checking ? "animate-spin" : ""}
+                className={
+                  status?.running || starting || checking ? "animate-spin" : ""
+                }
               />
               {t(
                 checking
@@ -261,16 +293,19 @@ export function SoftwareUpdateCard() {
 
       <Dialog
         onOpenChange={(nextOpen) => {
-          if (!nextOpen && status?.running) return
+          if (!nextOpen && (status?.running || starting)) return
           setOpen(nextOpen)
           if (!nextOpen) setConfirmInstall(false)
-          if (nextOpen) void refresh()
+          if (nextOpen) {
+            if (!status?.running) setShowResult(false)
+            void refresh()
+          }
         }}
         open={open}
       >
         <DialogContent
           className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-3xl"
-          showCloseButton={!status?.running}
+          showCloseButton={!status?.running && !starting}
         >
           <DialogHeader>
             <DialogTitle>
@@ -285,16 +320,22 @@ export function SoftwareUpdateCard() {
             <UpdateVersionSummary status={status} />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
             <UpdateStateMessage status={status} />
-            {status && (status.running || showResult) ? (
+            {status && showUpdateLog ? (
               <UpdateProgress status={status} />
             ) : null}
-            {status?.available ? <ReleaseNotes status={status} /> : null}
-            {showResult ? (
+            {status?.available && !showUpdateLog ? (
+              <ReleaseNotes status={status} />
+            ) : null}
+            {showUpdateLog ? (
               <div className="space-y-2 rounded-md border p-3">
                 <p className="font-medium">
                   {t("pages.settings.softwareUpdate.result")}
                 </p>
-                <pre className="max-h-72 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap">
+                <pre
+                  aria-live="polite"
+                  className="max-h-72 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap"
+                  ref={logRef}
+                >
                   {status?.log ||
                     t("pages.settings.softwareUpdate.waitingForLog")}
                 </pre>
@@ -337,7 +378,12 @@ export function SoftwareUpdateCard() {
               Скачать бэкап перед установкой
             </label>
             <Button
-              disabled={!status?.available || status.running || confirmInstall}
+              disabled={
+                !status?.available ||
+                status.running ||
+                starting ||
+                confirmInstall
+              }
               onClick={() => setConfirmInstall(true)}
             >
               <DownloadIcon />
