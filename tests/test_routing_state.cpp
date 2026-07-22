@@ -1104,3 +1104,35 @@ TEST_CASE("populate_routing_state: mutually referencing urltests terminate") {
         CHECK(route.unreachable);
     }
 }
+
+TEST_CASE("routing state managers reconcile without destructive clear") {
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    RouteSpec old_route;
+    old_route.destination = "default";
+    old_route.table = 150;
+    old_route.interface = "wg-old";
+    RouteSpec new_route = old_route;
+    new_route.interface = "wg-new";
+
+    RuleSpec old_rule;
+    old_rule.fwmark = 0x10000;
+    old_rule.fwmask = 0xFF0000;
+    old_rule.table = 150;
+    old_rule.priority = 150;
+    RuleSpec new_rule = old_rule;
+    new_rule.table = 151;
+    new_rule.priority = 151;
+
+    routes.add(old_route);
+    rules.add(old_rule);
+    routes.reconcile({new_route});
+    rules.reconcile({new_rule});
+
+    REQUIRE(routes.get_routes().size() == 1);
+    CHECK(routes.get_routes().front().interface == std::optional<std::string>{"wg-new"});
+    REQUIRE(rules.get_rules().size() == 1);
+    CHECK(rules.get_rules().front().table == 151);
+}

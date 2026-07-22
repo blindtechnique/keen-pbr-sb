@@ -24,6 +24,13 @@ public:
     // Remove a specific route. If not tracked, this is a no-op.
     void remove(const RouteSpec& spec);
 
+    // Install missing routes before removing obsolete routes tracked by this
+    // process. This keeps the old forwarding path available while a new one
+    // is being installed.
+    void reconcile(const std::vector<RouteSpec>& desired);
+    void add_missing(const std::vector<RouteSpec>& desired);
+    void remove_obsolete(const std::vector<RouteSpec>& desired);
+
     // Remove all installed routes (shutdown cleanup).
     void clear();
 

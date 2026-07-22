@@ -141,6 +141,31 @@ void Daemon::setup_static_routing() {
         ipv6_decision.enabled);
 }
 
+void Daemon::reconcile_static_routing() {
+    const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
+    log_ipv6_support_decision_once(ipv6_decision);
+    RouteTable desired_routes(netlink_, true);
+    PolicyRuleManager desired_rules(netlink_, true);
+    populate_routing_state(
+        config_,
+        outbound_marks_,
+        desired_routes,
+        desired_rules,
+        [this](const Outbound& outbound) {
+            return is_interface_outbound_reachable(outbound, netlink_);
+        },
+        &firewall_state_.get_urltest_selections(),
+        ipv6_decision.enabled);
+
+    // The URLTest policy rule does not change on a selected-child switch, but
+    // its route does. Add all desired routes first so marked traffic never
+    // observes an empty table, then retire only obsolete owned state.
+    route_table_.add_missing(desired_routes.get_routes());
+    policy_rules_.add_missing(desired_rules.get_rules());
+    policy_rules_.remove_obsolete(desired_rules.get_rules());
+    route_table_.remove_obsolete(desired_routes.get_routes());
+}
+
 void Daemon::apply_firewall(FirewallApplyMode mode) {
     firewall_state_.set_rules(apply_runtime_firewall(
         config_,
@@ -167,9 +192,7 @@ void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
         log.info("Urltest '{}' selected outbound: '{}'", urltest_tag, new_child_tag);
         firewall_state_.set_urltest_selection(urltest_tag, new_child_tag);
         try {
-            policy_rules_.clear();
-            route_table_.clear();
-            setup_static_routing();
+            reconcile_static_routing();
             apply_firewall(FirewallApplyMode::PreserveSets);
             publish_runtime_state();
             log.info("Routing and firewall rebuilt after urltest change.");

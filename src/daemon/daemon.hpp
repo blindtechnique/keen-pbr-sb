@@ -162,6 +162,7 @@ private:
 
     // lifecycle and runtime apply
     void setup_static_routing();
+    void reconcile_static_routing();
     void apply_firewall(FirewallApplyMode mode = FirewallApplyMode::Destructive);
     void register_urltest_outbounds();
     void handle_urltest_selection_change(const std::string& urltest_tag,

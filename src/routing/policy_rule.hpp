@@ -24,6 +24,13 @@ public:
     // Remove a specific policy rule. If not tracked, this is a no-op.
     void remove(const RuleSpec& spec);
 
+    // Install missing rules before removing obsolete rules tracked by this
+    // process. Callers can therefore keep an existing valid lookup path live
+    // until its replacement exists.
+    void reconcile(const std::vector<RuleSpec>& desired);
+    void add_missing(const std::vector<RuleSpec>& desired);
+    void remove_obsolete(const std::vector<RuleSpec>& desired);
+
     // Remove all installed policy rules (shutdown cleanup).
     void clear();
 
