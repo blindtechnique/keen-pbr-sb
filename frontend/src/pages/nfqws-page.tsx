@@ -59,7 +59,13 @@ type Status = {
 }
 type Tab = "settings" | "strategies" | "lists" | "lua" | "logs" | "check"
 
-async function nfqwsAction<T = { ok: boolean; output?: string }>(
+type NfqwsActionResult = {
+  ok: boolean
+  output?: string
+  strategy_created?: string
+}
+
+async function nfqwsAction<T = NfqwsActionResult>(
   payload: Record<string, unknown>
 ): Promise<T> {
   const response = await fetch("/api/nfqws", {
@@ -97,7 +103,14 @@ export function NfqwsPage() {
     mutationFn: (payload: Record<string, unknown>) => nfqwsAction(payload),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      setOperationResult(result.output?.trim() || t("nfqws.operationCompleted"))
+      const output = result.output?.trim() || t("nfqws.operationCompleted")
+      setOperationResult(
+        result.strategy_created
+          ? `${output}\n\n${t("nfqws.defaultStrategyCreated", {
+              name: result.strategy_created,
+            })}`
+          : output
+      )
     },
     onError: (error) => {
       setOperationResult(error.message)

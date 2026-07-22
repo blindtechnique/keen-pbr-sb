@@ -277,6 +277,8 @@ set(SOURCES
   src/util/blocking_executor.cpp
   src/util/firewall_backend_utils.cpp
   src/util/ipv6_support.cpp
+  src/util/network_routes.cpp
+  src/util/nfqws_config.cpp
   src/util/system_info.cpp
   src/util/traced_mutex.cpp
   src/main.cpp

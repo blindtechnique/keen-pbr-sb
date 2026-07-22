@@ -22,7 +22,7 @@ export function PageHeader({
           {title}
         </h1>
         <div className="flex min-h-[72px] items-start">
-          <p className="mt-2 max-w-[110ch] text-pretty text-[14px] leading-[20px] text-foreground">
+          <p className="mt-2 max-w-[110ch] text-pretty text-[14px] leading-[22px] text-foreground">
             {description}
           </p>
         </div>

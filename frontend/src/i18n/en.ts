@@ -14,6 +14,8 @@ export const enTranslation = {
     upgrade: "Upgrade package",
     operationResult: "nfqws2 operation result",
     operationCompleted: "The operation completed successfully.",
+    defaultStrategyCreated:
+      "The package's new configuration was saved as strategy “{{name}}”.",
     closeResult: "Close message",
     tabs: {
       settings: "Settings",

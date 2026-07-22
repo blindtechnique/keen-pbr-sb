@@ -25,6 +25,8 @@ add_executable(keen-pbr-tests
   test_resolver_health.cpp
   test_system_resolver_hook.cpp
   test_system_info.cpp
+  test_network_routes.cpp
+  test_nfqws_config.cpp
   test_safe_exec.cpp
   test_trace_logging.cpp
   test_interface_monitor.cpp
@@ -69,6 +71,8 @@ add_executable(keen-pbr-tests
   ../src/util/blocking_executor.cpp
   ../src/util/firewall_backend_utils.cpp
   ../src/util/ipv6_support.cpp
+  ../src/util/network_routes.cpp
+  ../src/util/nfqws_config.cpp
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
   ../src/routing/policy_rule.cpp

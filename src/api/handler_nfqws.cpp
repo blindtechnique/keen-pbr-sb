@@ -3,15 +3,19 @@
 #include "handler_nfqws.hpp"
 
 #include "../http/http_client.hpp"
+#include "../util/network_routes.hpp"
+#include "../util/nfqws_config.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <httplib.h>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <signal.h>
@@ -38,6 +42,91 @@ constexpr const char* kLogDir = "/opt/var/log";
 constexpr const char* kBuiltinStrategies = "/opt/usr/share/keen-pbr/nfqws-strategies";
 constexpr const char* kUserStrategies = "/opt/etc/keen-pbr/nfqws-strategies";
 
+std::string read_file(const fs::path& path, std::size_t limit = 2U * 1024U * 1024U);
+void write_file_atomic(const fs::path& path, const std::string& content);
+
+std::string render_wan_interfaces(const std::string& content) {
+    return nfqws_config_with_isp_interfaces(content, default_route_interfaces());
+}
+
+bool builtin_strategy(const std::string& name) {
+    std::error_code ec;
+    return fs::is_regular_file(fs::path(kBuiltinStrategies) / name / "nfqws2.conf", ec);
+}
+
+bool generated_default_strategy(const std::string& name) {
+    return name.rfind("default (", 0) == 0;
+}
+
+bool automatic_wan_strategy(const std::string& name) {
+    std::error_code ec;
+    const bool overridden =
+        fs::is_regular_file(fs::path(kUserStrategies) / (name + ".conf"), ec);
+    return generated_default_strategy(name) || (builtin_strategy(name) && !overridden);
+}
+
+std::string dated_default_name() {
+    const auto now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+    char date[16]{};
+    std::strftime(date, sizeof(date), "%Y.%m.%d", &local);
+    return std::string("default (") + date + ')';
+}
+
+std::array<fs::path, 5> nfqws_config_candidates() {
+    return {
+        fs::path(kConfigDir) / "nfqws2.conf",
+        fs::path(kConfigDir) / "nfqws2.conf-opkg",
+        fs::path(kConfigDir) / "nfqws2.conf.opkg",
+        fs::path(kConfigDir) / "nfqws2.conf-opkg-new",
+        fs::path(kConfigDir) / "nfqws2.conf.opkg-dist",
+    };
+}
+
+std::map<std::string, std::string> read_candidate_configs() {
+    std::map<std::string, std::string> result;
+    std::error_code ec;
+    for (const auto& candidate : nfqws_config_candidates()) {
+        if (fs::is_regular_file(candidate, ec)) result[candidate.string()] = read_file(candidate);
+    }
+    return result;
+}
+
+std::string save_updated_default_strategy(
+    const std::string& previous,
+    const std::map<std::string, std::string>& candidates_before_upgrade) {
+    const auto old_semantics = nfqws_config_without_ipv6_toggle(previous);
+    std::error_code ec;
+    for (const auto& candidate : nfqws_config_candidates()) {
+        if (!fs::is_regular_file(candidate, ec)) continue;
+        const auto updated = read_file(candidate);
+        const auto previous_candidate = candidates_before_upgrade.find(candidate.string());
+        if (previous_candidate != candidates_before_upgrade.end() &&
+            previous_candidate->second == updated) {
+            continue;
+        }
+        if (nfqws_config_without_ipv6_toggle(updated) == old_semantics) continue;
+
+        const auto base = dated_default_name();
+        for (unsigned int suffix = 1; suffix < 100; ++suffix) {
+            const auto name = suffix == 1 ? base : base + " " + std::to_string(suffix);
+            const auto destination = fs::path(kUserStrategies) / (name + ".conf");
+            if (fs::is_regular_file(destination, ec)) {
+                if (nfqws_config_without_ipv6_toggle(read_file(destination)) ==
+                    nfqws_config_without_ipv6_toggle(updated)) {
+                    return name;
+                }
+                continue;
+            }
+            write_file_atomic(destination, updated);
+            return name;
+        }
+        throw ApiError("too many nfqws default strategies for this date", 409);
+    }
+    return {};
+}
+
 bool valid_name(const std::string& value, bool allow_spaces = false) {
     if (value.empty() || value.size() > 80 || value == "." || value == "..") return false;
     return std::all_of(value.begin(), value.end(), [allow_spaces](unsigned char ch) {
@@ -46,7 +135,7 @@ bool valid_name(const std::string& value, bool allow_spaces = false) {
     });
 }
 
-std::string read_file(const fs::path& path, std::size_t limit = 2U * 1024U * 1024U) {
+std::string read_file(const fs::path& path, std::size_t limit) {
     std::error_code ec;
     const auto size = fs::file_size(path, ec);
     if (ec || size > limit) throw ApiError("nfqws file is missing or too large", 400);
@@ -402,7 +491,10 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
         if (fs::is_regular_file(active_config, ec)) {
             const auto active_content = read_file(active_config);
             for (const auto& strategy : strategies) {
-                if (strategy.value("content", std::string{}) == active_content) {
+                const auto name = strategy.value("name", std::string{});
+                auto expected = strategy.value("content", std::string{});
+                if (automatic_wan_strategy(name)) expected = render_wan_interfaces(expected);
+                if (expected == active_content) {
                     active_strategy = strategy.value("name", std::string{});
                     break;
                 }
@@ -467,9 +559,19 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
         }
         if (action == "upgrade") {
+            std::error_code ec2;
+            const auto active_config = fs::path(kConfigDir) / "nfqws2.conf";
+            const auto previous = fs::is_regular_file(active_config, ec2)
+                                      ? read_file(active_config)
+                                      : std::string{};
+            const auto candidates_before_upgrade = read_candidate_configs();
             int status = 0;
             const auto output = run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
-            return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
+            const auto created = status == 0
+                                     ? save_updated_default_strategy(previous, candidates_before_upgrade)
+                                     : std::string{};
+            return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
+                                  {"strategy_created", created}}.dump();
         }
         if (action == "save_strategy") {
             const auto name = request.value("name", std::string{});
@@ -482,9 +584,10 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
         if (action == "apply_strategy") {
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
-            const auto content = request.contains("content") && request["content"].is_string()
-                                     ? request["content"].get<std::string>()
-                                     : read_file(strategy_source(name));
+            auto content = request.contains("content") && request["content"].is_string()
+                               ? request["content"].get<std::string>()
+                               : read_file(strategy_source(name));
+            if (automatic_wan_strategy(name)) content = render_wan_interfaces(content);
             write_file_atomic(fs::path(kConfigDir) / "nfqws2.conf", content);
             if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
             int status = 0;

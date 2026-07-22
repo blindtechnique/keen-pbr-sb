@@ -33,14 +33,15 @@
   --card-foreground: #26343f;
   --popover: #ffffff;
   --popover-foreground: #26343f;
-  --primary: #1B87C8;
+  /* Measured on the current KeeneticOS primary action and switch thumb. */
+  --primary: #0086CB;
   --primary-foreground: #ffffff;
   --secondary: #F5FAFC;
   --secondary-foreground: #26343f;
   --muted: #FAFAFA;
   --muted-foreground: #949B9F;
   --accent: #ECF5FA;
-  --accent-foreground: #1B87C8;
+  --accent-foreground: #0086CB;
   --destructive: #DB3F3E;
   --destructive-foreground: oklch(1 0 0);
   --warning: #E5952D;
@@ -48,7 +49,7 @@
   --success: #17815C;
   --success-foreground: oklch(0.98 0 0);
   --border: #EBEBEB;
-  --input: #BDB7B7;
+  --input: #949B9F;
   --ring: #7FBCE0;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
@@ -57,7 +58,7 @@
   --chart-5: oklch(0.769 0.188 70.08);
   --sidebar: #FAFAFA;
   --sidebar-foreground: #31404b;
-  --sidebar-primary: #1B87C8;
+  --sidebar-primary: #0086CB;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #EBEBEB;
   --sidebar-accent-foreground: #202020;
@@ -229,6 +230,7 @@
 
   html {
     @apply font-sans;
+    font-synthesis: none;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     overflow-x: clip;
@@ -238,8 +240,11 @@
      the browser keeps a page-level scrollbar next to the inner one. */
   body {
     @apply bg-background text-foreground antialiased;
-    font-size: 0.9375rem;
-    line-height: 1.55;
+    font-size: 14px;
+    font-weight: 400;
+    font-stretch: normal;
+    line-height: 22px;
+    letter-spacing: normal;
     overflow: hidden;
     min-width: 320px;
     background-image: none;

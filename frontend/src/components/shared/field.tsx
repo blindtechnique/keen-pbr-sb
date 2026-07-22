@@ -52,7 +52,7 @@ function FieldLabel({
   return (
     <Label
       className={cn(
-        "flex w-fit items-center gap-2 text-sm font-semibold text-foreground",
+        "flex w-fit items-center gap-2 text-sm leading-[22px] font-normal text-foreground",
         className
       )}
       data-slot="field-label"
@@ -139,7 +139,7 @@ function FieldError({
   return (
     <div
       className={cn(
-        "rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1.5 text-xs font-medium text-destructive",
+        "text-xs leading-5 font-normal text-destructive",
         className
       )}
       data-slot="field-error"

@@ -3,10 +3,10 @@
 #include "handler_remote_access.hpp"
 
 #include "../log/logger.hpp"
+#include "../util/network_routes.hpp"
 #include "../util/safe_exec.hpp"
 
 #include <fstream>
-#include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -105,49 +105,6 @@ bool kernel_interface_exists(const std::string& name) {
     return false;
 }
 
-// The device carrying the default route in the main table.
-//
-// Asking the firmware was the mistake: RCI answers in its own vocabulary -
-// "ISP", "GigabitEthernet1" - and those are roles and configuration ids, not
-// kernel device names. The routing table is where the two worlds already
-// agree, and keen-pbr keeps tunnel defaults in tables of their own, so the
-// main table's default is the uplink by construction.
-std::string wan_interface() {
-    std::ifstream routes("/proc/net/route");
-    if (!routes.is_open()) {
-        return {};
-    }
-
-    std::string line;
-    std::getline(routes, line); // header
-
-    std::string best_iface;
-    long best_metric = std::numeric_limits<long>::max();
-
-    while (std::getline(routes, line)) {
-        std::istringstream fields(line);
-        std::string iface, destination, gateway, flags, refcnt, use, metric;
-        if (!(fields >> iface >> destination >> gateway >> flags >> refcnt >> use >> metric)) {
-            continue;
-        }
-        if (destination != "00000000" || iface == "lo") {
-            continue;
-        }
-        long metric_value = 0;
-        try {
-            metric_value = std::stol(metric);
-        } catch (const std::exception&) {
-            metric_value = 0;
-        }
-        if (metric_value < best_metric) {
-            best_metric = metric_value;
-            best_iface = iface;
-        }
-    }
-
-    return best_iface;
-}
-
 void drop_rules() {
     safe_exec({"iptables", "-D", "INPUT", "-j", kChain}, true);
     safe_exec({"iptables", "-F", kChain}, true);
@@ -195,7 +152,7 @@ void apply_remote_access_rules(const std::string& listen_address) {
         return;
     }
 
-    const auto wan = wan_interface();
+    const auto wan = primary_default_route_interface();
     if (wan.empty()) {
         Logger::instance().error(
             "Remote access: no default route to hang the rule on, keeping the panel closed");

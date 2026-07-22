@@ -14,6 +14,8 @@ export const ruTranslation = {
     upgrade: "Обновить пакет",
     operationResult: "Результат операции nfqws2",
     operationCompleted: "Операция успешно выполнена.",
+    defaultStrategyCreated:
+      "Новая конфигурация пакета сохранена как стратегия «{{name}}».",
     closeResult: "Закрыть сообщение",
     tabs: {
       settings: "Настройки",
