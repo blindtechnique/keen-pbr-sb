@@ -41,9 +41,11 @@ export function NavMain({
 
             return (
               <SidebarMenuItem key={item.title}>
-                <div className="mt-2 flex h-9 items-center gap-2.5 px-4 text-[12px] leading-[20px] font-bold tracking-[0.02em] text-primary uppercase group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
-                  {Icon ? <Icon className="size-4 text-primary" /> : null}
-                  <span className="group-data-[collapsible=icon]:hidden">{item.title}</span>
+                <div className="flex h-12 items-center gap-2.5 px-[22px] text-[12px] leading-[18px] font-bold text-primary group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
+                  {Icon ? <Icon className="size-6 text-primary" /> : null}
+                  <span className="group-data-[collapsible=icon]:hidden">
+                    {item.title}
+                  </span>
                 </div>
                 {hasChildren ? (
                   <SidebarMenuSub className="mx-0 translate-x-0 border-l-0 px-0">
@@ -56,8 +58,8 @@ export function NavMain({
                             aria-current={navActive ? "page" : undefined}
                             className={
                               navActive
-                                ? "h-9 min-h-9 translate-x-0 rounded-none border-0 bg-sidebar-accent px-4 text-[14px] font-normal text-sidebar-accent-foreground"
-                                : "h-9 min-h-9 translate-x-0 rounded-none border-0 px-4 text-[14px] font-normal text-foreground hover:bg-[#F0F0F0]"
+                                ? "h-9 min-h-9 translate-x-0 rounded-none border-0 bg-sidebar-accent px-6 text-[14px] leading-6 font-normal text-sidebar-accent-foreground"
+                                : "h-9 min-h-9 translate-x-0 rounded-none border-0 px-6 text-[14px] leading-6 font-normal text-foreground hover:bg-[#F0F0F0]"
                             }
                             data-nav-item={subItem.url}
                             href={subItem.url}

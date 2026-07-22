@@ -46,7 +46,16 @@ type SoftwareUpdateStatus = {
   changelog_url: string
   running: boolean
   log: string
+  phase?: string
+  percent?: number
+  message?: string
+  success?: boolean | null
 }
+
+type SoftwareUpdateProgress = Pick<
+  SoftwareUpdateStatus,
+  "running" | "log" | "phase" | "percent" | "message" | "success"
+>
 
 export function BackupAndRestoreCard() {
   const { t } = useTranslation()
@@ -108,15 +117,44 @@ export function SoftwareUpdateCard() {
     }
   }, [t])
 
+  const refreshProgress = useCallback(async () => {
+    try {
+      const response = await fetch("/api/system/update/status")
+      const body = (await response.json().catch(() => ({}))) as Partial<
+        SoftwareUpdateProgress & { error: string }
+      >
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      setStatus((previous) =>
+        previous
+          ? { ...previous, ...(body as SoftwareUpdateProgress) }
+          : previous
+      )
+      setError("")
+    } catch (refreshError) {
+      // The daemon is restarted while its package is replaced. Keep the last
+      // known running state so polling resumes as soon as it is reachable.
+      setError(
+        refreshError instanceof Error
+          ? refreshError.message
+          : t("pages.settings.softwareUpdate.checkFailed")
+      )
+    }
+  }, [t])
+
   useEffect(() => {
     void refresh()
   }, [refresh])
 
   useEffect(() => {
     if (!status?.running) return
-    const timer = window.setInterval(() => void refresh(), 3000)
+    const timer = window.setInterval(() => void refreshProgress(), 3000)
     return () => window.clearInterval(timer)
-  }, [refresh, status?.running])
+  }, [refreshProgress, status?.running])
+
+  useEffect(() => {
+    if (!showResult || status?.phase !== "completed") return
+    void refresh()
+  }, [refresh, showResult, status?.phase])
 
   const startUpdate = async () => {
     setConfirmInstall(false)
@@ -139,7 +177,7 @@ export function SoftwareUpdateCard() {
       )
       setShowResult(true)
       setError("")
-      window.setTimeout(() => void refresh(), 1200)
+      window.setTimeout(() => void refreshProgress(), 1200)
     } catch (updateError) {
       setError(
         updateError instanceof Error
@@ -219,6 +257,9 @@ export function SoftwareUpdateCard() {
             <UpdateVersionSummary status={status} />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
             <UpdateStateMessage status={status} />
+            {status && (status.running || showResult) ? (
+              <UpdateProgress status={status} />
+            ) : null}
             {status?.available ? <ReleaseNotes status={status} /> : null}
             {showResult ? (
               <div className="space-y-2 rounded-md border p-3">
@@ -336,6 +377,34 @@ function UpdateStateMessage({
     )
   }
   return null
+}
+
+function UpdateProgress({ status }: { status: SoftwareUpdateStatus }) {
+  const percent = Math.min(100, Math.max(0, status.percent ?? 0))
+
+  return (
+    <div className="space-y-2" aria-live="polite">
+      <div className="flex items-center justify-between gap-4 text-sm">
+        <span>{status.message ?? "Выполняется обновление"}</span>
+        <span className="shrink-0 text-muted-foreground tabular-nums">
+          {percent}%
+        </span>
+      </div>
+      <div
+        aria-label="Прогресс обновления"
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={percent}
+        className="h-1.5 overflow-hidden rounded-full bg-muted"
+        role="progressbar"
+      >
+        <div
+          className="h-full rounded-full bg-primary transition-[width] duration-300"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  )
 }
 
 function ReleaseNotes({ status }: { status: SoftwareUpdateStatus }) {

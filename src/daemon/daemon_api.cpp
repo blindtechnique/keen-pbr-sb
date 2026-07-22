@@ -2,7 +2,9 @@
 
 #ifdef WITH_API
 
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 #include "../api/handlers.hpp"
 #include "../api/server.hpp"
@@ -323,14 +325,28 @@ void Daemon::setup_api() {
             return service_health;
         },
         [this]() {
-            const auto runtime_snapshot = runtime_state_store_.snapshot();
+            const auto check_once = [this]() {
+                const auto runtime_snapshot = runtime_state_store_.snapshot();
+                return build_routing_health_report(
+                    firewall_->backend(),
+                    runtime_snapshot.firewall_state,
+                    runtime_snapshot.route_specs,
+                    runtime_snapshot.policy_rule_specs,
+                    netlink_);
+            };
 
-            return build_routing_health_report(
-                firewall_->backend(),
-                runtime_snapshot.firewall_state,
-                runtime_snapshot.route_specs,
-                runtime_snapshot.policy_rule_specs,
-                netlink_);
+            auto report = check_once();
+            if (!report.overall_ok) {
+                // A route transaction and its published runtime snapshot are
+                // observed through different kernel/userspace interfaces. A
+                // reader can therefore catch the tiny convergence window and
+                // compare the new route against the previous snapshot. Require
+                // the mismatch to survive a second complete read before
+                // exposing it as a fault; persistent faults are unchanged.
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                report = check_once();
+            }
+            return report;
         },
         [this]() {
             const Config config_snapshot = config_store_.active_config();

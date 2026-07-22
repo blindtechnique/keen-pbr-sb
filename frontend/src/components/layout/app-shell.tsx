@@ -47,7 +47,12 @@ export function AppShell({ children }: { children: ReactNode }) {
                 centred column left wide screens half empty. The bottom padding
                 leaves room for the fixed save bar. */}
             <div
-              className="min-w-0 px-4 pt-4 sm:px-6 lg:px-8 lg:pt-5"
+              className={cn(
+                "min-w-0 px-4 pt-4 sm:px-6",
+                isOverview
+                  ? "lg:px-8 lg:pt-5"
+                  : "lg:pt-[33px] lg:pr-8 lg:pl-[41px]"
+              )}
               style={{
                 paddingBottom:
                   "calc(var(--warning-banner-height, 0px) + 1.25rem)",
