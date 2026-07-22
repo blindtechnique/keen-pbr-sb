@@ -252,7 +252,7 @@ export const enTranslation = {
     title: "Connections",
     description:
       "Active connections and up to 1,500 recent records. DNS traffic observed by keen-pbr adds the last known domain next to the exact IP. Data refreshes every 3 seconds.",
-    filter: "Filter by device, domain, address, state, or route",
+    filter: "Filter by device, domain, address, or state",
     activeOnly: "Active only",
     sort: "Sort",
     sortRecent: "Newest first",

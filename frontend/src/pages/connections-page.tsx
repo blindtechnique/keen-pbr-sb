@@ -3,9 +3,7 @@ import { ChevronRightIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { useGetConfig } from "@/api/generated/keen-api"
 import { PageHeader } from "@/components/shared/page-header"
-import { useInterfaceNames } from "@/hooks/use-interface-names"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -20,7 +18,6 @@ type Connection = {
   source_port: number
   destination: string
   destination_port: number
-  route: string
   device: string
   active: boolean
   last_seen: number
@@ -33,7 +30,6 @@ type DeviceGroup = {
   address: string
   connections: Connection[]
   activeCount: number
-  routes: string[]
   lastSeen: number
 }
 
@@ -65,7 +61,7 @@ export function ConnectionsPage() {
           !needle ||
           `${item.source} ${item.destination} ${item.destination_domains.join(
             " "
-          )} ${item.device} ${item.route} ${item.state} ${item.protocol}`
+          )} ${item.device} ${item.state} ${item.protocol}`
             .toLowerCase()
             .includes(needle)
       )
@@ -81,14 +77,10 @@ export function ConnectionsPage() {
         address: item.source,
         connections: [],
         activeCount: 0,
-        routes: [],
         lastSeen: 0,
       }
       group.connections.push(item)
       if (item.active) group.activeCount += 1
-      if (item.route && !group.routes.includes(item.route)) {
-        group.routes.push(item.route)
-      }
       group.lastSeen = Math.max(group.lastSeen, item.last_seen)
       byDevice.set(key, group)
     }
@@ -170,9 +162,6 @@ export function ConnectionsPage() {
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                  {group.routes.map((route) => (
-                    <RouteBadge key={route} route={route} t={t} />
-                  ))}
                   <Badge size="xs" variant="secondary">
                     {group.connections.length}
                   </Badge>
@@ -239,7 +228,6 @@ function SessionRow({
         <span className="text-xs text-muted-foreground">
           {item.protocol.toUpperCase()}
         </span>
-        <RouteBadge route={item.route} t={t} />
         <Badge size="xs" variant={item.active ? "success" : "secondary"}>
           {item.state}
         </Badge>
@@ -270,60 +258,4 @@ function formatLastSeen(
     return t("connections.age.minutes", { count: Math.floor(seconds / 60) })
   }
   return t("connections.age.hours", { count: Math.floor(seconds / 3600) })
-}
-
-/** Direct traffic stays neutral; anything routed into a tunnel is highlighted. */
-function RouteBadge({
-  route,
-  t,
-}: {
-  route: string
-  t: (key: string) => string
-}) {
-  const interfaceByTag = useInterfaceByOutboundTag()
-  const { labelFor } = useInterfaceNames()
-
-  if (!route) {
-    return null
-  }
-
-  const isDirect = route === "direct"
-  // The column carries the outbound tag, which is a name the person typed
-  // themselves - so it stays. Underneath it there may be an interface the
-  // firmware has a better name for, and that is what the tooltip carries.
-  const kernelName = interfaceByTag.get(route)
-  const firmwareLabel = kernelName ? labelFor(kernelName) : undefined
-
-  return (
-    <Badge
-      size="xs"
-      title={
-        firmwareLabel && firmwareLabel !== kernelName
-          ? `${firmwareLabel} (${kernelName})`
-          : kernelName
-      }
-      variant={isDirect ? "outline" : "default"}
-    >
-      {isDirect ? t("connections.routeDirect") : route}
-    </Badge>
-  )
-}
-
-/** Outbound tag to the kernel interface it sends traffic out of. */
-function useInterfaceByOutboundTag() {
-  const configQuery = useGetConfig()
-  const outbounds =
-    configQuery.data?.status === 200
-      ? (configQuery.data.data.config.outbounds ?? [])
-      : []
-
-  return useMemo(() => {
-    const map = new Map<string, string>()
-    for (const outbound of outbounds) {
-      if (outbound.type === "interface" && outbound.interface) {
-        map.set(outbound.tag, outbound.interface)
-      }
-    }
-    return map
-  }, [outbounds])
 }

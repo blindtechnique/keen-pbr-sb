@@ -90,7 +90,7 @@ export function RouterInfoCard() {
             ) : null}
           </div>
 
-          <dl className="space-y-1.5 text-sm">
+          <dl className="space-y-1.5 text-xs">
             <Row label={t("overview.router.cpu")}>
               <span className="truncate">{describeCpu(info)}</span>
             </Row>
