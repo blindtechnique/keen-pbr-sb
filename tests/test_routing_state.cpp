@@ -1136,3 +1136,21 @@ TEST_CASE("routing state managers reconcile without destructive clear") {
     REQUIRE(rules.get_rules().size() == 1);
     CHECK(rules.get_rules().front().table == 151);
 }
+
+TEST_CASE("route table clear only releases tracked routes") {
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+
+    RouteSpec first;
+    first.destination = "default";
+    first.table = 150;
+    first.interface = "wg0";
+    RouteSpec second = first;
+    second.table = 151;
+
+    routes.add(first);
+    routes.add(second);
+    routes.clear();
+
+    CHECK(routes.get_routes().empty());
+}

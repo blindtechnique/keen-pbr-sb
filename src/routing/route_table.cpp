@@ -3,7 +3,6 @@
 #include "../log/logger.hpp"
 
 #include <algorithm>
-#include <set>
 
 namespace keen_pbr3 {
 
@@ -104,28 +103,13 @@ void RouteTable::remove_obsolete(const std::vector<RouteSpec>& desired) {
 }
 
 void RouteTable::clear() {
-    if (!dry_run_) {
-        std::set<uint32_t> managed_tables;
-        for (const auto& route : routes_) {
-            managed_tables.insert(route.table);
-        }
-
-        for (uint32_t table_id : managed_tables) {
-            try {
-                netlink_.flush_routes_in_table(table_id);
-            } catch (const std::exception& e) {
-                Logger::instance().error(
-                    "Failed to flush routes in table {} during clear(): {}",
-                    table_id,
-                    e.what());
-            } catch (...) {
-                Logger::instance().error(
-                    "Failed to flush routes in table {} during clear(): unknown error",
-                    table_id);
-            }
-        }
+    // Never flush a whole numeric table: Keenetic or another package may own
+    // unrelated routes there. Only delete objects created and tracked by this
+    // RouteTable instance, in reverse order like policy-rule cleanup.
+    const std::vector<RouteSpec> tracked = routes_;
+    for (auto it = tracked.rbegin(); it != tracked.rend(); ++it) {
+        remove(*it);
     }
-    routes_.clear();
 }
 
 } // namespace keen_pbr3
