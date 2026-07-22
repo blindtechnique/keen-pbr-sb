@@ -67,6 +67,9 @@ add_executable(keen-pbr-tests
   ../src/daemon/resolver_sync_state_machine.cpp
   ../src/http/http_client.cpp
   ../src/api/update_version.cpp
+  ../src/http/http_transport.cpp
+  ../src/http/curl_runtime.cpp
+  ../src/health/url_tester.cpp
   ../src/routing/netlink.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
@@ -149,6 +152,7 @@ if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
     ../src/api/server.cpp
+    ../src/api/keenetic_auth.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_transports.cpp
@@ -188,6 +192,8 @@ add_executable(keen-pbr-firewall-it
   ../src/health/routing_health_checker.cpp
   ../src/health/url_tester.cpp
   ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+  ../src/http/curl_runtime.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_set_usage.cpp
   ../src/lists/list_streamer.cpp

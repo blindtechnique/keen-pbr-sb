@@ -3,6 +3,7 @@
 #include "routing_state.hpp"
 #include "../util/system_info.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
 #include <iomanip>
@@ -29,6 +30,17 @@ bool is_valid_ipv4_address(const std::string& ip) {
 bool is_valid_ipv6_address(const std::string& ip) {
     in6_addr addr{};
     return inet_pton(AF_INET6, ip.c_str(), &addr) == 1;
+}
+
+bool is_http_url(const std::string& url) {
+    const auto separator = url.find("://");
+    if (separator == std::string::npos || separator + 3 >= url.size()) return false;
+
+    std::string scheme = url.substr(0, separator);
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return scheme == "http" || scheme == "https";
 }
 
 void add_issue(std::vector<ConfigValidationIssue>& issues,
@@ -771,6 +783,14 @@ void validate_config(const Config& cfg) {
         }
 
         if (ob.type != OutboundType::URLTEST) continue;
+
+        if (!ob.url.has_value() || ob.url->empty()) {
+            add_issue(issues, "outbounds." + ob.tag + ".url",
+                      "Urltest outbound '" + ob.tag + "' requires a URL");
+        } else if (!is_http_url(*ob.url)) {
+            add_issue(issues, "outbounds." + ob.tag + ".url",
+                      "Urltest URL must use the http or https scheme");
+        }
 
         if (!ob.outbound_groups.has_value() || ob.outbound_groups->empty()) {
             add_issue(issues, "outbounds." + ob.tag + ".outbound_groups",

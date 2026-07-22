@@ -2,12 +2,12 @@
 
 #include "../src/daemon/list_service.hpp"
 #include "../src/log/logger.hpp"
+#include "../src/http/curl_runtime.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <curl/curl.h>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -65,10 +65,7 @@ private:
     std::vector<std::string> lines_;
 };
 
-struct CurlGlobalGuard {
-    CurlGlobalGuard() { curl_global_init(CURL_GLOBAL_DEFAULT); }
-    ~CurlGlobalGuard() { curl_global_cleanup(); }
-};
+using CurlGlobalGuard = CurlRuntime;
 
 struct HttpResponse {
     int status{200};
