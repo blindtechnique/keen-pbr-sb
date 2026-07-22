@@ -33,6 +33,7 @@ const emptySpec = (): TransportSpec => ({
   type: TransportSpecType.native,
   interface: "",
   auto_start: false,
+  geo_mode: "disabled",
 })
 
 export function TransportConfigDialog({
@@ -55,10 +56,20 @@ export function TransportConfigDialog({
   const isSingBox = spec.type !== TransportSpecType.native
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    const normalizedSpec: TransportSpec = {
+      ...spec,
+      geo_mode: spec.geo_mode ?? "disabled",
+      country_code:
+        spec.geo_mode === "manual"
+          ? spec.country_code?.trim().toUpperCase()
+          : undefined,
+      country:
+        spec.geo_mode === "manual" ? spec.country?.trim() : undefined,
+    }
     if (!isSingBox) {
       onSubmit(
         {
-          ...spec,
+          ...normalizedSpec,
           link: undefined,
           outbound_json: undefined,
           mtu: undefined,
@@ -70,7 +81,7 @@ export function TransportConfigDialog({
     }
     onSubmit(
       {
-        ...spec,
+        ...normalizedSpec,
         link: sourceMode === "link" ? spec.link : undefined,
         outbound_json: sourceMode === "json" ? spec.outbound_json : undefined,
         bootstrap_dns: spec.bootstrap_dns?.filter(Boolean),
@@ -164,6 +175,56 @@ export function TransportConfigDialog({
               }
             />
           </div>
+          <Field label={t("transports.form.countryDisplay")}>
+            <div className="grid gap-2 rounded-md border p-3">
+              {(["disabled", "manual", "auto"] as const).map((mode) => (
+                <label
+                  className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
+                  key={mode}
+                >
+                  <input
+                    checked={(spec.geo_mode ?? "disabled") === mode}
+                    className="mt-1 accent-primary"
+                    name="transport-geo-mode"
+                    onChange={() => setSpec({ ...spec, geo_mode: mode })}
+                    type="radio"
+                  />
+                  <span className="grid gap-0.5">
+                    <span className="text-sm font-medium">
+                      {t(`transports.form.geo.${mode}`)}
+                    </span>
+                    {mode === "auto" ? (
+                      <span className="text-xs text-amber-700 dark:text-amber-300">
+                        {t("transports.form.geo.autoWarning")}
+                      </span>
+                    ) : null}
+                  </span>
+                </label>
+              ))}
+              {spec.geo_mode === "manual" ? (
+                <div className="grid gap-2 sm:grid-cols-[7rem_1fr]">
+                  <Input
+                    maxLength={2}
+                    onChange={(event) =>
+                      setSpec({ ...spec, country_code: event.target.value })
+                    }
+                    pattern="[A-Za-z]{2}"
+                    placeholder="DE"
+                    required
+                    value={spec.country_code ?? ""}
+                  />
+                  <Input
+                    maxLength={64}
+                    onChange={(event) =>
+                      setSpec({ ...spec, country: event.target.value })
+                    }
+                    placeholder={t("transports.form.geo.countryPlaceholder")}
+                    value={spec.country ?? ""}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </Field>
           {!initial ? (
             <div className="flex items-center justify-between rounded-md border p-3">
               <div className="min-w-0 pr-3">

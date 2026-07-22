@@ -16,29 +16,42 @@ export type ServerLocation = {
  * Ответ всегда необязательный: нет интернета, сервис недоступен, адрес не
  * разрешается — страна просто не показывается, и ничего больше не меняется.
  */
+type LocationsResponse = {
+  locations: Record<string, ServerLocation>
+  pending: boolean
+}
+
 export function useServerLocations(hosts: string[]) {
   const unique = Array.from(new Set(hosts.filter(Boolean))).sort()
 
-  const query = useQuery<Record<string, ServerLocation>>({
+  const query = useQuery<LocationsResponse>({
     queryKey: ["server-locations", unique],
     enabled: unique.length > 0,
     queryFn: async () => {
       const response = await fetch("/api/system/geo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hosts: unique }),
+        body: JSON.stringify({
+          hosts: unique,
+          allow_external_lookup: true,
+        }),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const body = (await response.json()) as {
         locations?: Record<string, ServerLocation>
+        pending?: boolean
       }
-      return body.locations ?? {}
+      return {
+        locations: body.locations ?? {},
+        pending: Boolean(body.pending),
+      }
     },
-    staleTime: 60 * 60 * 1000,
+    refetchInterval: (query) => (query.state.data?.pending ? 2_000 : false),
+    staleTime: 30 * 24 * 60 * 60 * 1000,
     retry: false,
   })
 
-  const locations = query.data ?? {}
+  const locations = query.data?.locations ?? {}
 
   return {
     locations,

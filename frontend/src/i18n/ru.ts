@@ -12,11 +12,25 @@ export const ruTranslation = {
     restart: "Перезапустить",
     reload: "Перечитать конфигурацию",
     upgrade: "Обновить пакет",
+    updateAvailable: "Доступно обновление {{version}}",
+    upgradeConfirmTitle: "Обновление nfqws2",
+    upgradeConfirmDescription:
+      "Будет установлена версия {{version}} из официального репозитория nfqws2-keenetic.",
+    automaticBackupTitle: "Автоматическая резервная копия",
+    automaticBackupDescription:
+      "Перед обновлением панель обязательно сохранит локальную копию конфигурации, списков, Lua-скриптов и стратегий. Её можно восстановить кнопкой отката в журнале операции.",
+    downloadBackupBeforeUpgrade:
+      "Дополнительно скачать копию оригинальных файлов nfqws2 на этот компьютер",
     operationResult: "Результат операции nfqws2",
+    operationRunning: "Операция выполняется. Не закрывайте страницу.",
+    operationSucceeded: "Операция выполнена успешно",
+    operationFailed: "Операция завершилась с ошибкой",
     operationCompleted: "Операция успешно выполнена.",
     defaultStrategyCreated:
       "Новая конфигурация пакета сохранена как стратегия «{{name}}».",
     closeResult: "Закрыть сообщение",
+    rollback: "Откатить конфигурацию",
+    rollbackCompleted: "Конфигурация восстановлена из резервной копии.",
     tabs: {
       settings: "Настройки",
       strategies: "Стратегии",
@@ -53,6 +67,9 @@ export const ruTranslation = {
     fileName: "Имя нового файла без расширения",
     newFile: "Новый файл",
     save: "Сохранить",
+    saveDrafts: "Сохранить черновики",
+    saveAndRestart: "Сохранить и применить",
+    draftCount: "Изменено файлов: {{count}}",
     saved: "Изменения сохранены",
     clearLog: "Очистить журнал",
     confirmClearLog: "Очистить выбранный журнал nfqws2?",
@@ -68,6 +85,16 @@ export const ruTranslation = {
   configTransfer: {
     export: "Экспорт",
     import: "Импорт",
+    exportAll: "Экспорт конфигурации и списков",
+    importAll: "Импорт конфигурации и списков",
+    imported: "Импорт завершён",
+    exportFailed: "Не удалось сформировать файл экспорта.",
+    replaceOutboundConflicts:
+      "Заменить существующие исходящие соединения с тегами: {{tags}}? Если отменить, конфликтующие записи будут пропущены.",
+    replaceTransportConflicts:
+      "Заменить существующие транспорты с тегами: {{tags}}? Если отменить, конфликтующие записи будут пропущены.",
+    transportSecretsWarning:
+      "Файл экспорта содержит ссылки подключения, пароли и другие секреты транспортов. Сохранить его на этот компьютер?",
     invalidFormat: "Файл не является совместимым экспортом keen-pbr-sb.",
     replaceLists:
       "Заменить все существующие списки? Нажмите «Отмена», чтобы объединить списки.",
@@ -259,7 +286,7 @@ export const ruTranslation = {
     },
     title: "Транспорты",
     description:
-      "Нативные и управляемые туннельные интерфейсы для outbounds keen-pbr.",
+      "Нативные и управляемые туннельные интерфейсы для исходящих соединений keen-pbr.",
     refresh: "Обновить",
     add: "Добавить транспорт",
     unavailable: "Менеджер транспортов недоступен",
@@ -318,6 +345,15 @@ export const ruTranslation = {
       singBoxLegacy: "sing-box (старый формат VLESS)",
       interface: "Имя интерфейса",
       autoStart: "Запускать автоматически",
+      countryDisplay: "Страна сервера",
+      geo: {
+        disabled: "Не определять и не показывать страну",
+        manual: "Указать страну самостоятельно",
+        auto: "Определить автоматически (на свой страх и риск)",
+        autoWarning:
+          "Имя/IP сервера и разрешённый IP будут переданы сервису ipwho.is через текущий маршрут роутера. Запрос выполняется только после вашего явного выбора.",
+        countryPlaceholder: "Название страны (необязательно)",
+      },
       shareLink: "Ссылка подключения",
       shareLinkHint:
         "Поддерживаются ссылки VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP-прокси.",
@@ -1161,13 +1197,16 @@ export const ruTranslation = {
         missingReference:
           'Outbound "{{outbound}}" ссылается на отсутствующий тег "{{referenced}}".',
       },
+      brokenReferences: {
+        title: "В конфигурации найдены отсутствующие ссылки",
+      },
     },
     outboundUpsert: {
       createTitle: "Создать исходящее соединение",
       editTitle: "Изменить исходящее соединение",
       editCardTitle: "Изменить {{tag}}",
       description:
-        "Outbound может быть сетевым интерфейсом, таблицей маршрутизации или группой urltest, которая выбирает самый быстрый вариант.",
+        "Исходящее соединение может быть сетевым интерфейсом, таблицей маршрутизации или группой urltest, которая выбирает самый быстрый вариант.",
       cardDescription: "Настройте туннель, интерфейс или резервирование.",
       missing: {
         cardDescription: "Запрошенное исходящее соединение не найдено.",

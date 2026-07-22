@@ -34,6 +34,7 @@ import {
   createDefaultBackupSelection,
   downloadBackup,
 } from "@/lib/backup"
+import { formatDownloadTimestamp } from "@/lib/download"
 
 type SoftwareUpdateStatus = {
   current: string
@@ -163,7 +164,7 @@ export function SoftwareUpdateCard() {
         const backup = await createBackup(createDefaultBackupSelection())
         downloadBackup(
           backup,
-          `keen-pbr-sb-before-update-${new Date().toISOString().slice(0, 10)}.json`
+          `keen-pbr-sb-before-update-${formatDownloadTimestamp()}.json`
         )
       }
 

@@ -328,6 +328,10 @@ private:
     std::atomic<std::uint64_t> runtime_generation_{1};
     std::atomic<bool> remote_list_refresh_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
+    // Multiple open pages can request the same manual probe at once. Keep at
+    // most one queued/running round so a weak router never forks duplicate
+    // health checks for a single click or refresh cycle.
+    std::atomic<bool> manual_probe_inflight_{false};
 
 #ifdef WITH_API
     std::unique_ptr<ApiServer> api_server_;

@@ -12,11 +12,25 @@ export const enTranslation = {
     restart: "Restart",
     reload: "Reload configuration",
     upgrade: "Upgrade package",
+    updateAvailable: "Update {{version}} is available",
+    upgradeConfirmTitle: "Update nfqws2",
+    upgradeConfirmDescription:
+      "Version {{version}} will be installed from the official nfqws2-keenetic repository.",
+    automaticBackupTitle: "Automatic backup",
+    automaticBackupDescription:
+      "Before updating, the panel always stores a local copy of the configuration, lists, Lua scripts and strategies. It can be restored from the operation log.",
+    downloadBackupBeforeUpgrade:
+      "Also download a copy of the original nfqws2 files to this computer",
     operationResult: "nfqws2 operation result",
+    operationRunning: "The operation is running. Do not close this page.",
+    operationSucceeded: "The operation completed successfully",
+    operationFailed: "The operation failed",
     operationCompleted: "The operation completed successfully.",
     defaultStrategyCreated:
       "The package's new configuration was saved as strategy “{{name}}”.",
     closeResult: "Close message",
+    rollback: "Roll back configuration",
+    rollbackCompleted: "The configuration was restored from backup.",
     tabs: {
       settings: "Settings",
       strategies: "Strategies",
@@ -53,6 +67,9 @@ export const enTranslation = {
     fileName: "New filename without extension",
     newFile: "New file",
     save: "Save",
+    saveDrafts: "Save drafts",
+    saveAndRestart: "Save and apply",
+    draftCount: "Modified files: {{count}}",
     saved: "Changes saved",
     clearLog: "Clear log",
     confirmClearLog: "Clear the selected nfqws2 log?",
@@ -68,6 +85,16 @@ export const enTranslation = {
   configTransfer: {
     export: "Export",
     import: "Import",
+    exportAll: "Export configuration and lists",
+    importAll: "Import configuration and lists",
+    imported: "Import completed",
+    exportFailed: "Failed to create the export file.",
+    replaceOutboundConflicts:
+      "Replace existing outbounds tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
+    replaceTransportConflicts:
+      "Replace existing transports tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
+    transportSecretsWarning:
+      "The export contains connection links, passwords, and other transport secrets. Save it to this computer?",
     invalidFormat: "The file is not a compatible keen-pbr-sb export.",
     replaceLists:
       "Replace all existing lists? Choose Cancel to merge them instead.",
@@ -317,6 +344,15 @@ export const enTranslation = {
       singBoxLegacy: "sing-box (legacy VLESS configuration)",
       interface: "Interface name",
       autoStart: "Start automatically",
+      countryDisplay: "Server country",
+      geo: {
+        disabled: "Do not detect or show a country",
+        manual: "Set the country manually",
+        auto: "Detect automatically (at your own risk)",
+        autoWarning:
+          "The server host/IP and resolved IP will be sent to ipwho.is over the router's current route. No request is made without this explicit choice.",
+        countryPlaceholder: "Country name (optional)",
+      },
       shareLink: "Connection link",
       shareLinkHint:
         "Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS and HTTP proxy links.",
@@ -1142,6 +1178,9 @@ export const enTranslation = {
       messages: {
         missingReference:
           'Outbound "{{outbound}}" references missing outbound tag "{{referenced}}".',
+      },
+      brokenReferences: {
+        title: "The configuration contains broken references",
       },
     },
     outboundUpsert: {

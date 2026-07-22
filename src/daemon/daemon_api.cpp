@@ -464,9 +464,22 @@ void Daemon::setup_api() {
     // Manual "measure now": the scheduled round is deliberately unhurried, so
     // there has to be a way to ask for a fresh figure on the spot.
     api_server_->post("/api/system/probes/run", [this]() -> std::string {
-        post_control_task([this]() { probe_interfaces_now(); });
+        bool expected = false;
+        const bool scheduled = manual_probe_inflight_.compare_exchange_strong(expected, true);
+        if (scheduled) {
+            post_control_task([this]() {
+                try {
+                    probe_interfaces_now();
+                } catch (...) {
+                    manual_probe_inflight_.store(false);
+                    throw;
+                }
+                manual_probe_inflight_.store(false);
+            });
+        }
         nlohmann::json response;
         response["ok"] = true;
+        response["scheduled"] = scheduled;
         return response.dump();
     });
 

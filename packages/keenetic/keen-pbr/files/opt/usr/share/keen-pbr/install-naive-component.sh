@@ -47,6 +47,42 @@ trap 'rm -rf "$tmp"' EXIT
 log "Скачиваю $asset"
 curl -fsSL --connect-timeout 15 -o "$tmp/$asset" "$url" || die "не удалось скачать архив sing-box"
 
+# GitHub publishes a SHA-256 digest for every release asset in its API.  Fail
+# closed: unpacking an unverified native library as root is worse than leaving
+# the optional Naive component unavailable.
+metadata="$tmp/release.json"
+curl -fsSL --connect-timeout 15 \
+    -H "Accept: application/vnd.github+json" \
+    -H "User-Agent: keen-pbr-sb" \
+    -o "$metadata" \
+    "$GITHUB_API/repos/SagerNet/sing-box/releases/tags/v${version}" \
+    || die "не удалось получить контрольную сумму релиза sing-box"
+expected="$(awk -v wanted="$asset" '
+    index($0, "\"name\": \"" wanted "\"") { found = 1 }
+    found && /"digest": "sha256:/ {
+        sub(/^.*"digest": "sha256:/, "")
+        sub(/".*$/, "")
+        print
+        exit
+    }
+' "$metadata")"
+case "$expected" in
+    [0-9a-fA-F][0-9a-fA-F]*) ;;
+    *) die "GitHub не вернул SHA-256 для $asset" ;;
+esac
+[ "${#expected}" -eq 64 ] || die "GitHub вернул некорректный SHA-256 для $asset"
+
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+elif command -v openssl >/dev/null 2>&1; then
+    actual="$(openssl dgst -sha256 "$tmp/$asset" | awk '{print $NF}')"
+else
+    die "для проверки архива нужен sha256sum или openssl"
+fi
+[ "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" = "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" ] \
+    || die "SHA-256 архива sing-box не совпадает; установка остановлена"
+log "SHA-256 архива проверен"
+
 log "Распаковываю libcronet.so"
 tar -xzf "$tmp/$asset" -C "$tmp" || die "архив sing-box не распаковывается"
 

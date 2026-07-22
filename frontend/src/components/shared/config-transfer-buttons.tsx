@@ -4,13 +4,15 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { Outbound } from "@/api/generated/model/outbound"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import { Button } from "@/components/ui/button"
+import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
 
 type Props = {
   config?: ConfigObject
   disabled?: boolean
-  kind: "lists" | "routing-rules"
+  kind: "lists" | "routing-rules" | "outbounds"
   onImport: (config: ConfigObject) => void
 }
 
@@ -25,31 +27,45 @@ export function ConfigTransferButtons({
 
   const exportData = () => {
     if (!config) return
-    const payload =
-      kind === "lists"
-        ? { format: "keen-pbr-sb", version: 1, kind, lists: config.lists ?? {} }
-        : {
-            format: "keen-pbr-sb",
-            version: 1,
-            kind,
-            rules: config.route?.rules ?? [],
-          }
-    const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], {
-      type: "application/json",
-    })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = `keen-pbr-sb-${kind}-${new Date().toISOString().slice(0, 10)}.json`
-    anchor.click()
-    URL.revokeObjectURL(url)
+    const payload = (() => {
+      if (kind === "lists") {
+        return {
+          format: "keen-pbr-sb",
+          version: 1,
+          kind,
+          lists: config.lists ?? {},
+        }
+      }
+      if (kind === "outbounds") {
+        return {
+          format: "keen-pbr-sb",
+          version: 1,
+          kind,
+          outbounds: config.outbounds ?? [],
+        }
+      }
+      return {
+        format: "keen-pbr-sb",
+        version: 1,
+        kind,
+        rules: config.route?.rules ?? [],
+      }
+    })()
+    downloadJson(
+      `keen-pbr-sb-${kind}-${formatDownloadTimestamp()}.json`,
+      payload
+    )
   }
 
   const importData = async (file?: File) => {
     if (!file || !config) return
     try {
       const parsed = JSON.parse(await file.text()) as Record<string, unknown>
-      if (parsed.format !== "keen-pbr-sb" || parsed.kind !== kind)
+      if (
+        parsed.format !== "keen-pbr-sb" ||
+        parsed.version !== 1 ||
+        parsed.kind !== kind
+      )
         throw new Error(t("configTransfer.invalidFormat"))
       if (kind === "lists") {
         if (
@@ -68,7 +84,7 @@ export function ConfigTransferButtons({
                 ...(parsed.lists as ConfigObject["lists"]),
               },
         })
-      } else {
+      } else if (kind === "routing-rules") {
         if (!Array.isArray(parsed.rules))
           throw new Error(t("configTransfer.invalidFormat"))
         const available = (config.outbounds ?? []).map((item) => item.tag)
@@ -101,6 +117,42 @@ export function ConfigTransferButtons({
               : [...(config.route?.rules ?? []), ...imported],
           },
         })
+      } else {
+        if (!Array.isArray(parsed.outbounds))
+          throw new Error(t("configTransfer.invalidFormat"))
+        const imported = parsed.outbounds as Outbound[]
+        if (
+          imported.some(
+            (item) =>
+              !item ||
+              typeof item !== "object" ||
+              typeof item.tag !== "string" ||
+              typeof item.type !== "string"
+          ) ||
+          new Set(imported.map((item) => item.tag)).size !== imported.length
+        ) {
+          throw new Error(t("configTransfer.invalidFormat"))
+        }
+
+        const current = config.outbounds ?? []
+        const currentTags = new Set(current.map((item) => item.tag))
+        const conflicts = imported.filter((item) => currentTags.has(item.tag))
+        const replaceConflicts =
+          conflicts.length === 0 ||
+          window.confirm(
+            t("configTransfer.replaceOutboundConflicts", {
+              tags: conflicts.map((item) => item.tag).join(", "),
+            })
+          )
+        const importedByTag = new Map(imported.map((item) => [item.tag, item]))
+        const merged = current.map((item) =>
+          replaceConflicts ? (importedByTag.get(item.tag) ?? item) : item
+        )
+        const existingTags = new Set(merged.map((item) => item.tag))
+        for (const item of imported) {
+          if (!existingTags.has(item.tag)) merged.push(item)
+        }
+        onImport({ ...config, outbounds: merged })
       }
     } catch (error) {
       toast.error(

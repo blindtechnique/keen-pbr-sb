@@ -27,17 +27,17 @@
 
 :root {
   --background: #EDEEF0;
-  --foreground: #26343f;
+  --foreground: #202020;
   --card: #ffffff;
   --page: #FFFFFF;
-  --card-foreground: #26343f;
+  --card-foreground: #202020;
   --popover: #ffffff;
-  --popover-foreground: #26343f;
+  --popover-foreground: #202020;
   /* Measured on the current KeeneticOS primary action and switch thumb. */
   --primary: #0086CB;
   --primary-foreground: #ffffff;
   --secondary: #F5FAFC;
-  --secondary-foreground: #26343f;
+  --secondary-foreground: #202020;
   --muted: #FAFAFA;
   --muted-foreground: #949B9F;
   --accent: #ECF5FA;
@@ -57,7 +57,7 @@
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
   --sidebar: #FAFAFA;
-  --sidebar-foreground: #31404b;
+  --sidebar-foreground: #202020;
   --sidebar-primary: #0086CB;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #EBEBEB;

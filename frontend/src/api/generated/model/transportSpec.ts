@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { TransportSpecGeoMode } from './transportSpecGeoMode';
 import type { TransportSpecType } from './transportSpecType';
 import type { VlessRealitySpec } from './vlessRealitySpec';
 
@@ -30,6 +31,18 @@ export interface TransportSpec {
   bootstrap_dns?: string[];
   /** Optional manual IPv4 /30 host address for the sing-box TUN. By default a stable unique subnet from 172.19.0.0/16 is derived from the transport tag. */
   tun_address?: string;
+  /** Controls optional country badge lookup. Auto mode explicitly permits an external GeoIP request. */
+  geo_mode?: TransportSpecGeoMode;
+  /**
+     * ISO 3166-1 alpha-2 code used in manual mode.
+     * @pattern ^[A-Za-z]{2}$
+     */
+  country_code?: string;
+  /**
+     * Human-readable country name used in manual mode.
+     * @maxLength 64
+     */
+  country?: string;
   /** @deprecated */
   vless?: VlessRealitySpec;
 }

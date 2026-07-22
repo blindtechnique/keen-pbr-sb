@@ -32,7 +32,7 @@ export function NavMain({
   const { isMobile, setOpenMobile } = useSidebar()
 
   return (
-    <SidebarGroup>
+    <SidebarGroup className="p-0">
       <SidebarGroupContent>
         <SidebarMenu>
           {items.map((item) => {
@@ -41,7 +41,7 @@ export function NavMain({
 
             return (
               <SidebarMenuItem key={item.title}>
-                <div className="flex h-12 items-center gap-2.5 px-[22px] text-[12px] leading-[18px] font-bold text-primary group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
+                <div className="flex h-12 items-center gap-2.5 px-[22px] text-[12px] leading-[18px] font-bold uppercase text-primary group-data-[collapsible=icon]:h-[4.5rem] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:border-b group-data-[collapsible=icon]:px-0">
                   {Icon ? <Icon className="size-6 text-primary" /> : null}
                   <span className="group-data-[collapsible=icon]:hidden">
                     {item.title}

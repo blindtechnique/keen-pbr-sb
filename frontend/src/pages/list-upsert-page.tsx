@@ -504,7 +504,7 @@ function ListForm({
                   className={cn(
                     isMobile && "h-auto min-h-11 py-2.5",
                     active &&
-                      "border-border bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                      "z-10 border-primary bg-primary/[0.12] text-foreground ring-1 ring-inset ring-primary/40 hover:bg-primary/[0.18]"
                   )}
                   key={group}
                   onClick={() => handleSourceGroupSelect(group)}

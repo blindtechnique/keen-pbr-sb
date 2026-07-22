@@ -1,19 +1,22 @@
 import {
   PencilIcon,
   PlusIcon,
+  DownloadIcon,
   RefreshCwIcon,
   RotateCw,
   ShieldCheckIcon,
   TrashIcon,
+  UploadIcon,
   WorkflowIcon,
 } from "lucide-react"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
+import { postTransportConfig } from "@/api/generated/keen-api"
 import {
   TransportActionRequestAction,
   TransportConfigOperationOperation,
@@ -51,7 +54,10 @@ import {
   useServerLocations,
   type ServerLocation,
 } from "@/hooks/use-server-locations"
+import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
 import { cn } from "@/lib/utils"
+import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
+import { queryKeys } from "@/api/query-keys"
 
 type ProbeEntry = {
   success: boolean
@@ -122,6 +128,7 @@ export function TransportsPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<TransportSpec | undefined>()
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
+  const transportImportRef = useRef<HTMLInputElement>(null)
   const query = useGetTransports({
     query: {
       refetchInterval: 3_000,
@@ -130,8 +137,14 @@ export function TransportsPage() {
   })
   const items: TransportStatus[] =
     query.data?.status === 200 ? query.data.data : []
+  const configQuery = useGetTransportConfig()
+  const configured: TransportSpec[] =
+    configQuery.data?.status === 200 ? configQuery.data.data : []
+  const configuredByTag = new Map(configured.map((spec) => [spec.tag, spec]))
   const { locationOf } = useServerLocations(
-    items.map((item) => item.server ?? "")
+    items
+      .filter((item) => configuredByTag.get(item.tag)?.geo_mode === "auto")
+      .map((item) => item.server ?? "")
   )
 
   // libcronet.so — сетевой стек Chromium, без которого sing-box не умеет
@@ -172,7 +185,6 @@ export function TransportsPage() {
     items.some((item) => item.protocol === "naive") &&
     naiveComponentQuery.data?.installed === false
   const error = getApiErrorMessage(query.error as ApiError | null)
-  const configQuery = useGetTransportConfig()
   const keenConfigQuery = useGetConfig()
   const runtimeOutboundsQuery = useGetRuntimeOutbounds({
     query: {
@@ -193,17 +205,7 @@ export function TransportsPage() {
     refetchIntervalInBackground: false,
   })
 
-  const runProbeMutation = useMutation({
-    mutationFn: async () => {
-      const response = await fetch("/api/system/probes/run", { method: "POST" })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
-    },
-    onSuccess: () => {
-      // The probe runs in the background; give it a moment before re-reading.
-      setTimeout(() => probesQuery.refetch(), 2_000)
-    },
-  })
+  const runProbeMutation = useRunSystemProbes()
 
   // Probe results are keyed by outbound tag but shown per interface.
   const probeByInterface = new Map<string, ProbeEntry>()
@@ -272,8 +274,6 @@ export function TransportsPage() {
       }
     },
   })
-  const configured: TransportSpec[] =
-    configQuery.data?.status === 200 ? configQuery.data.data : []
   const actionMutation = usePostTransportActionMutation({
     mutation: {
       onSuccess: (_data, variables) => {
@@ -309,6 +309,95 @@ export function TransportsPage() {
       },
     },
   })
+  const transferMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const parsed = JSON.parse(await file.text()) as {
+        format?: string
+        version?: number
+        kind?: string
+        transports?: TransportSpec[]
+      }
+      if (
+        parsed.format !== "keen-pbr-sb" ||
+        parsed.version !== 1 ||
+        parsed.kind !== "transports" ||
+        !Array.isArray(parsed.transports)
+      ) {
+        throw new Error(t("configTransfer.invalidFormat"))
+      }
+      const imported = parsed.transports
+      if (
+        imported.some(
+          (item) =>
+            !item ||
+            typeof item.tag !== "string" ||
+            typeof item.type !== "string" ||
+            typeof item.interface !== "string"
+        ) ||
+        new Set(imported.map((item) => item.tag)).size !== imported.length
+      ) {
+        throw new Error(t("configTransfer.invalidFormat"))
+      }
+
+      const existingTags = new Set(configured.map((item) => item.tag))
+      const conflicts = imported.filter((item) => existingTags.has(item.tag))
+      const replaceConflicts =
+        conflicts.length === 0 ||
+        window.confirm(
+          t("configTransfer.replaceTransportConflicts", {
+            tags: conflicts.map((item) => item.tag).join(", "),
+          })
+        )
+
+      for (const transport of imported) {
+        const exists = existingTags.has(transport.tag)
+        if (exists && !replaceConflicts) continue
+        const response = await postTransportConfig({
+          operation: exists
+            ? TransportConfigOperationOperation.update
+            : TransportConfigOperationOperation.create,
+          tag: exists ? transport.tag : undefined,
+          transport,
+        })
+        if (response.status !== 200) {
+          throw new Error(
+            "error" in response.data
+              ? response.data.error
+              : `HTTP ${response.status}`
+          )
+        }
+      }
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.transports() }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.transportConfig(),
+        }),
+      ])
+      toast.success(t("configTransfer.imported"))
+    },
+    onError: (transferError) =>
+      toast.error(
+        transferError instanceof Error
+          ? transferError.message
+          : t("configTransfer.invalidFormat"),
+        { richColors: true }
+      ),
+    onSettled: () => {
+      if (transportImportRef.current) transportImportRef.current.value = ""
+    },
+  })
+
+  const exportTransports = () => {
+    if (!window.confirm(t("configTransfer.transportSecretsWarning"))) return
+    downloadJson(`keen-pbr-sb-transports-${formatDownloadTimestamp()}.json`, {
+      format: "keen-pbr-sb",
+      version: 1,
+      kind: "transports",
+      transports: configured,
+    })
+  }
   const bypassMutation = usePostConfigMutation({
     mutation: {
       onSuccess: () => toast.success(t("transports.loopProtection.saved")),
@@ -327,14 +416,17 @@ export function TransportsPage() {
       (outbound) => outbound.tag === bypassTag
     )
     if (existingBypass && existingBypass.type !== "ignore") {
-      toast.error(t("transports.loopProtection.tagConflict", { tag: bypassTag }))
+      toast.error(
+        t("transports.loopProtection.tagConflict", { tag: bypassTag })
+      )
       return
     }
     if (!window.confirm(t("transports.loopProtection.confirm", { server }))) {
       return
     }
     const existingList = keenConfig.lists?.[listName] ?? {}
-    const isIp = server.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(server)
+    const isIp =
+      server.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(server)
     const domains = new Set(existingList.domains ?? [])
     const ipCidrs = new Set(existingList.ip_cidrs ?? [])
     if (isIp) ipCidrs.add(server)
@@ -348,7 +440,10 @@ export function TransportsPage() {
         ...keenConfig,
         outbounds: existingBypass
           ? keenConfig.outbounds
-          : [{ type: "ignore", tag: bypassTag }, ...(keenConfig.outbounds ?? [])],
+          : [
+              { type: "ignore", tag: bypassTag },
+              ...(keenConfig.outbounds ?? []),
+            ],
         lists: {
           ...keenConfig.lists,
           [listName]: {
@@ -416,7 +511,33 @@ export function TransportsPage() {
     <div>
       <PageHeader
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={transferMutation.isPending || configured.length === 0}
+              onClick={exportTransports}
+              variant="outline"
+            >
+              <DownloadIcon />
+              {t("configTransfer.export")}
+            </Button>
+            <Button
+              disabled={transferMutation.isPending}
+              onClick={() => transportImportRef.current?.click()}
+              variant="outline"
+            >
+              <UploadIcon />
+              {t("configTransfer.import")}
+            </Button>
+            <input
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) transferMutation.mutate(file)
+              }}
+              ref={transportImportRef}
+              type="file"
+            />
             <Button
               onClick={() => {
                 setEditing(undefined)
@@ -494,7 +615,10 @@ export function TransportsPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         {items.map((item) => (
-          <Card className="flex h-full min-w-0 flex-col overflow-hidden" key={item.tag}>
+          <Card
+            className="flex h-full min-w-0 flex-col overflow-hidden"
+            key={item.tag}
+          >
             <CardHeader className="min-w-0">
               <div className="min-w-0">
                 <CardTitle className="truncate">{item.tag}</CardTitle>
@@ -502,7 +626,13 @@ export function TransportsPage() {
                     («sing-box») говорит, кто его запускает, а не что внутри,
                     поэтому впереди стоит протокол. */}
                 <p className="mt-1 truncate text-sm text-muted-foreground">
-                  {describeTransport(item, locationOf(item.server))}
+                  {describeTransport(
+                    item,
+                    transportLocation(
+                      configuredByTag.get(item.tag),
+                      locationOf(item.server)
+                    )
+                  )}
                 </p>
               </div>
               {/* Правый верхний угол — штатный слот карточки: CardHeader это
@@ -602,7 +732,9 @@ export function TransportsPage() {
                 {dnsServersByInterface.has(item.interface) ? (
                   <Badge size="xs" variant="outline">
                     {t("transports.dnsDetour")}:{" "}
-                    {(dnsServersByInterface.get(item.interface) ?? []).join(", ")}
+                    {(dnsServersByInterface.get(item.interface) ?? []).join(
+                      ", "
+                    )}
                   </Badge>
                 ) : null}
                 {item.type !== "native" && !item.desired_up ? (
@@ -638,7 +770,7 @@ export function TransportsPage() {
               <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
                 {item.server ? (
                   <Button
-                    className="h-auto max-w-full whitespace-normal text-left"
+                    className="h-auto max-w-full text-left whitespace-normal"
                     disabled={bypassMutation.isPending || !keenConfig}
                     onClick={() => addLoopProtection(item.server!)}
                     size="sm"
@@ -649,7 +781,7 @@ export function TransportsPage() {
                   </Button>
                 ) : null}
                 <Button
-                  className="h-auto max-w-full whitespace-normal text-left"
+                  className="h-auto max-w-full text-left whitespace-normal"
                   onClick={() =>
                     navigate(
                       `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
@@ -745,6 +877,18 @@ function describeTransport(
   return parts.join(" · ")
 }
 
+function transportLocation(
+  spec: TransportSpec | undefined,
+  automatic: ServerLocation | undefined
+): ServerLocation | undefined {
+  if (spec?.geo_mode === "auto") return automatic
+  if (spec?.geo_mode !== "manual" || !spec.country_code) return undefined
+  return {
+    country: spec.country ?? spec.country_code.toUpperCase(),
+    country_code: spec.country_code,
+  }
+}
+
 /**
  * Флаг страны.
  *
@@ -817,10 +961,7 @@ function TransportField({ label, value }: { label: string; value: string }) {
       <span className="min-w-0 whitespace-nowrap text-muted-foreground">
         {label}
       </span>
-      <span
-        className="min-w-0 truncate text-right font-mono"
-        title={value}
-      >
+      <span className="min-w-0 truncate text-right font-mono" title={value}>
         {value}
       </span>
     </div>

@@ -1,4 +1,5 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import { getOutboundDeleteImpact } from "@/pages/outbounds-utils"
 
 export type DependencyKind =
   | "routingRule"
@@ -13,6 +14,86 @@ export type Dependency = {
   label: string
   /** Куда вести, если человек захочет посмотреть. */
   href?: string
+}
+
+export type BrokenReference = {
+  id: string
+  label: string
+  href: string
+}
+
+/** Finds references that can be left behind by a manual edit or import. */
+export function findBrokenReferences(
+  config: ConfigObject | undefined
+): BrokenReference[] {
+  if (!config) return []
+  const found = new Map<string, BrokenReference>()
+  const outbounds = new Set((config.outbounds ?? []).map((item) => item.tag))
+  const lists = new Set(Object.keys(config.lists ?? {}))
+  const dnsServers = new Set(
+    (config.dns?.servers ?? []).map((item) => item.tag).filter(Boolean)
+  )
+  const add = (item: BrokenReference) => found.set(item.id, item)
+
+  ;(config.route?.rules ?? []).forEach((rule, index) => {
+    if (!outbounds.has(rule.outbound)) {
+      add({
+        id: `route:${index}:outbound:${rule.outbound}`,
+        label: `Правило #${index + 1} → ${rule.outbound}`,
+        href: `/routing-rules/${index}/edit`,
+      })
+    }
+    for (const list of rule.list ?? []) {
+      if (!lists.has(list)) {
+        add({
+          id: `route:${index}:list:${list}`,
+          label: `Правило #${index + 1} → список ${list}`,
+          href: `/routing-rules/${index}/edit`,
+        })
+      }
+    }
+  })
+  ;(config.dns?.rules ?? []).forEach((rule, index) => {
+    if (!dnsServers.has(rule.server)) {
+      add({
+        id: `dns:${index}:server:${rule.server}`,
+        label: `DNS-правило #${index + 1} → ${rule.server}`,
+        href: `/dns-rules/${index}/edit`,
+      })
+    }
+    for (const list of rule.list ?? []) {
+      if (!lists.has(list)) {
+        add({
+          id: `dns:${index}:list:${list}`,
+          label: `DNS-правило #${index + 1} → список ${list}`,
+          href: `/dns-rules/${index}/edit`,
+        })
+      }
+    }
+  })
+  for (const outbound of config.outbounds ?? []) {
+    for (const member of (outbound.outbound_groups ?? []).flatMap(
+      (group) => group.outbounds
+    )) {
+      if (!outbounds.has(member)) {
+        add({
+          id: `outbound:${outbound.tag}:member:${member}`,
+          label: `${outbound.tag} → ${member}`,
+          href: `/outbounds/${outbound.tag}/edit`,
+        })
+      }
+    }
+  }
+  for (const [name, list] of Object.entries(config.lists ?? {})) {
+    if (list.detour && !outbounds.has(list.detour)) {
+      add({
+        id: `list:${name}:detour:${list.detour}`,
+        label: `Список ${name} → ${list.detour}`,
+        href: `/lists/${name}/edit`,
+      })
+    }
+  }
+  return [...found.values()]
 }
 
 /**
@@ -61,13 +142,14 @@ export function dependenciesOfOutbound(
 ): Dependency[] {
   if (!config) return []
   const found: Dependency[] = []
+  const impact = getOutboundDeleteImpact(config, [tag])
 
-  ;(config.route?.rules ?? []).forEach((rule, index) => {
-    if (rule.outbound !== tag) return
+  impact.routeRuleIndexes.forEach((index) => {
+    const rule = config.route?.rules?.[index]
     found.push({
       kind: "routingRule",
       label:
-        rule.list && rule.list.length > 0
+        rule?.list && rule.list.length > 0
           ? `#${index + 1}: ${rule.list.join(", ")}`
           : `#${index + 1}`,
       href: `/routing-rules/${index}/edit`,
@@ -76,28 +158,20 @@ export function dependenciesOfOutbound(
 
   // Группа резервирования, у которой это единственный участник, исчезнет
   // вместе с ним — про такое важно знать до, а не после.
-  for (const outbound of config.outbounds ?? []) {
-    if (outbound.type !== "urltest") continue
-    const members = (outbound.outbound_groups ?? []).flatMap(
-      (group) => group.outbounds ?? []
-    )
-    if (members.includes(tag)) {
-      found.push({
-        kind: "failoverGroup",
-        label: outbound.tag,
-        href: `/outbounds/${outbound.tag}/edit`,
-      })
-    }
+  for (const membership of impact.urltestMemberships) {
+    found.push({
+      kind: "failoverGroup",
+      label: membership.outboundTag,
+      href: `/outbounds/${membership.outboundTag}/edit`,
+    })
   }
 
-  for (const server of config.dns?.servers ?? []) {
-    if (server.detour === tag && server.tag) {
-      found.push({
-        kind: "dnsServer",
-        label: server.tag,
-        href: `/dns-servers/${encodeURIComponent(server.tag)}/edit`,
-      })
-    }
+  for (const serverTag of impact.dnsServerDetours) {
+    found.push({
+      kind: "dnsServer",
+      label: serverTag,
+      href: `/dns-servers/${encodeURIComponent(serverTag)}/edit`,
+    })
   }
 
   return found

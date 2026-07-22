@@ -77,11 +77,16 @@ function shortenFirmwareType(type?: string): string {
   // Прошивка зовёт AmneziaWG вайргардом: под ним он и работает. Показать
   // одно из двух наугад значило бы врать половине пользователей.
   if (normalized.includes("wireguard")) return "AWG/WG"
+  if (normalized.includes("ikev1")) return "IKEV1"
   if (normalized.includes("ikev2")) return "IKEV2"
   if (normalized.includes("openvpn")) return "OPENVPN"
   if (normalized.includes("l2tp")) return "L2TP"
   if (normalized.includes("pptp")) return "PPTP"
   if (normalized.includes("sstp")) return "SSTP"
+  if (normalized.includes("openconnect")) return "OPENCONNECT"
+  if (normalized.includes("socks5") || normalized.includes("socks")) return "SOCKS5"
+  if (normalized.includes("https")) return "HTTPS"
+  if (normalized.includes("http")) return "HTTP"
   if (normalized.includes("proxy")) return "PROXY"
   return type.toUpperCase()
 }

@@ -79,6 +79,7 @@ export * from './transportConfigOperationOperation';
 export * from './transportConfigResponse';
 export * from './transportConfigResponseStatus';
 export * from './transportSpec';
+export * from './transportSpecGeoMode';
 export * from './transportSpecType';
 export * from './transportStatus';
 export * from './transportStatusSecurity';

@@ -1,3 +1,5 @@
+import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
+
 export const BACKUP_GROUPS = [
   "general",
   "transports",
@@ -64,18 +66,9 @@ export async function readBackupFile(file: File): Promise<BackupBundle> {
 
 export function downloadBackup(
   bundle: BackupBundle,
-  filename = `keen-pbr-sb-backup-${new Date().toISOString().slice(0, 10)}.json`
+  filename = `keen-pbr-sb-backup-${formatDownloadTimestamp()}.json`
 ): void {
-  const url = URL.createObjectURL(
-    new Blob([`${JSON.stringify(bundle, null, 2)}\n`], {
-      type: "application/json",
-    })
-  )
-  const anchor = document.createElement("a")
-  anchor.href = url
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(url)
+  downloadJson(filename, bundle)
 }
 
 function isBackupBundle(value: unknown): value is BackupBundle {

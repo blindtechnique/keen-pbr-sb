@@ -37,6 +37,13 @@ import { ServerValidationAlert } from "@/components/shared/server-validation-ale
 import { UpsertPage } from "@/components/shared/upsert-page"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
   clearFormServerErrors,
@@ -218,6 +225,42 @@ export function OutboundUpsertPage({
   )
 }
 
+export function OutboundCreateDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const { t } = useTranslation()
+  const configQuery = useGetConfig()
+  const loadedConfig = selectConfig(configQuery.data)
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{t("pages.outboundUpsert.createTitle")}</DialogTitle>
+          <DialogDescription>
+            {t("pages.outboundUpsert.description")}
+          </DialogDescription>
+        </DialogHeader>
+        {loadedConfig ? (
+          <OutboundForm
+            draft={{ ...sampleNewOutbound, outbounds: [[]] }}
+            loadedConfig={loadedConfig}
+            mode="create"
+            onCancel={() => onOpenChange(false)}
+            onSaved={() => onOpenChange(false)}
+          />
+        ) : (
+          <div className="h-48 animate-pulse rounded-lg bg-muted" />
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function getCreateDraftFromLocation(): OutboundDraft {
   if (typeof window === "undefined") {
     return sampleNewOutbound
@@ -242,12 +285,14 @@ function OutboundForm({
   draft,
   loadedConfig,
   onCancel,
+  onSaved,
   outboundId,
 }: {
   mode: "create" | "edit"
   draft: OutboundDraft
   loadedConfig: ConfigObject
   onCancel: () => void
+  onSaved?: () => void
   outboundId?: string
 }) {
   const { t } = useTranslation()
@@ -354,7 +399,8 @@ function OutboundForm({
               queryKey: queryKeys.healthRouting(),
             }),
           ])
-          navigate("/outbounds")
+          if (onSaved) onSaved()
+          else navigate("/outbounds")
           return undefined
         } catch (error) {
           const result = splitFormApiErrors({

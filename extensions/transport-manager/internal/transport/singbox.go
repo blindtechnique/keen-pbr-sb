@@ -22,6 +22,7 @@ import (
 var (
 	validTag       = regexp.MustCompile(`^[a-z][a-z0-9_]{0,23}$`)
 	validInterface = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	validCountry   = regexp.MustCompile(`^[A-Za-z]{2}$`)
 )
 
 func storeRoutingHealthSnapshot(cacheKey string, values map[string]routingHealthResult) {
@@ -45,6 +46,9 @@ type TransportSpec struct {
 	MTU          uint32     `json:"mtu,omitempty"`
 	BootstrapDNS []string   `json:"bootstrap_dns,omitempty"`
 	TunAddress   string     `json:"tun_address,omitempty"`
+	GeoMode      string     `json:"geo_mode,omitempty"`
+	CountryCode  string     `json:"country_code,omitempty"`
+	Country      string     `json:"country,omitempty"`
 	VLESS        *VLESSSpec `json:"vless,omitempty"` // Legacy configuration compatibility.
 }
 
@@ -130,6 +134,9 @@ func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...Routin
 	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
 		return nil, fmt.Errorf("invalid tag or interface")
 	}
+	if err := validateGeoSpec(spec); err != nil {
+		return nil, err
+	}
 	switch spec.Type {
 	case "native":
 		return NewNative(spec.Tag, spec.Interface), nil
@@ -137,6 +144,23 @@ func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...Routin
 		return NewSingBox(spec, binary, runtimeDir, health...)
 	default:
 		return nil, fmt.Errorf("unsupported type %q", spec.Type)
+	}
+}
+
+func validateGeoSpec(spec TransportSpec) error {
+	switch spec.GeoMode {
+	case "", "disabled", "auto":
+		return nil
+	case "manual":
+		if !validCountry.MatchString(spec.CountryCode) {
+			return fmt.Errorf("manual country requires a two-letter ISO country_code")
+		}
+		if len([]rune(spec.Country)) > 64 {
+			return fmt.Errorf("country must be at most 64 characters")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported geo_mode %q", spec.GeoMode)
 	}
 }
 

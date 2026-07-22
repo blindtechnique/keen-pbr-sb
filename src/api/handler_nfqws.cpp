@@ -1,6 +1,7 @@
 #ifdef WITH_API
 
 #include "handler_nfqws.hpp"
+#include "handler_backup.hpp"
 
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <httplib.h>
 #include <map>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <signal.h>
@@ -274,6 +276,59 @@ std::string installed_version() {
     return output;
 }
 
+std::array<unsigned long, 3> semantic_version(const std::string& value) {
+    std::array<unsigned long, 3> result{};
+    auto cursor = value.find_first_of("0123456789");
+    for (std::size_t index = 0; index < result.size() && cursor != std::string::npos; ++index) {
+        const auto end = value.find_first_not_of("0123456789", cursor);
+        try {
+            result[index] = std::stoul(value.substr(cursor, end - cursor));
+        } catch (const std::exception&) {
+            return {};
+        }
+        if (index + 1 == result.size() || end == std::string::npos || value[end] != '.') break;
+        cursor = end + 1;
+    }
+    return result;
+}
+
+bool newer_version(const std::string& latest, const std::string& current) {
+    return semantic_version(latest) > semantic_version(current);
+}
+
+nlohmann::json nfqws_update_status(bool force = false) {
+    static std::mutex mutex;
+    static nlohmann::json cached;
+    static std::chrono::steady_clock::time_point checked_at{};
+    constexpr auto kCacheLifetime = std::chrono::minutes(30);
+
+    const std::lock_guard lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && !cached.empty() && now - checked_at < kCacheLifetime) return cached;
+
+    HttpClient client;
+    client.set_timeout(std::chrono::seconds(10));
+    client.set_max_response_size(256U * 1024U);
+    const auto release = nlohmann::json::parse(client.download(
+        "https://api.github.com/repos/nfqws/nfqws2-keenetic/releases/latest"));
+    const auto current = installed_version();
+    const auto latest = release.value("tag_name", std::string{});
+    if (latest.empty()) throw ApiError("nfqws2 release does not contain a version", 502);
+
+    cached = nlohmann::json{{"ok", true},
+                            {"current", current},
+                            {"latest", latest},
+                            {"available", newer_version(latest, current)},
+                            {"release_url", release.value("html_url", std::string{})}};
+    checked_at = now;
+    return cached;
+}
+
+std::mutex& nfqws_operation_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
 std::vector<pid_t> nfqws_processes() {
     std::vector<pid_t> result;
     std::error_code ec;
@@ -472,7 +527,7 @@ fs::path strategy_source(const std::string& name) {
 
 } // namespace
 
-void register_nfqws_handler(ApiServer& server, ApiContext&) {
+void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
     server.get("/api/nfqws", []() -> std::string {
         std::error_code ec;
         const bool installed = fs::is_regular_file(kBinary, ec);
@@ -509,11 +564,15 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             .dump();
     });
 
-    server.post("/api/nfqws", [](const std::string& body) -> std::string {
+    server.post("/api/nfqws", [&ctx](const std::string& body) -> std::string {
         nlohmann::json request;
         try { request = nlohmann::json::parse(body); }
         catch (const nlohmann::json::exception&) { throw ApiError("invalid nfqws request", 400); }
         const auto action = request.value("action", std::string{});
+
+        if (action == "check_update") {
+            return nfqws_update_status(request.value("force", false)).dump();
+        }
 
         if (action == "read_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
@@ -533,12 +592,14 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
             if (action == "create_file" && fs::exists(path)) throw ApiError("nfqws file already exists", 409);
             if (category == "log" && action == "create_file") throw ApiError("cannot create a log", 400);
+            const std::lock_guard lock(nfqws_operation_mutex());
             write_file_atomic(path, request.value("content", std::string{}));
             return R"({"ok":true})";
         }
         if (action == "delete_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
             if (category == "config" || category == "log") throw ApiError("this nfqws file cannot be deleted", 400);
+            const std::lock_guard lock(nfqws_operation_mutex());
             std::error_code ec2;
             if (!fs::remove(path, ec2)) throw ApiError("failed to delete nfqws file", 500);
             return R"({"ok":true})";
@@ -546,6 +607,7 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
         if (action == "clear_log") {
             const auto [path, category] = file_path("log", request.value("name", ""));
             if (category != "log") throw ApiError("only nfqws logs can be cleared", 400);
+            const std::lock_guard lock(nfqws_operation_mutex());
             write_file_atomic(path, "");
             return R"({"ok":true})";
         }
@@ -554,34 +616,46 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             if (command != "start" && command != "stop" && command != "restart" && command != "reload")
                 throw ApiError("unsupported nfqws service command", 400);
             if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
+            const std::lock_guard lock(nfqws_operation_mutex());
             int status = 0;
             const auto output = run_nfqws_service_command(command, status);
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
         }
         if (action == "upgrade") {
+            const std::lock_guard lock(nfqws_operation_mutex());
             std::error_code ec2;
             const auto active_config = fs::path(kConfigDir) / "nfqws2.conf";
             const auto previous = fs::is_regular_file(active_config, ec2)
                                       ? read_file(active_config)
                                       : std::string{};
             const auto candidates_before_upgrade = read_candidate_configs();
+            // This is the same validated rollback bundle used by the main
+            // keen-pbr-sb updater. It includes all nfqws2 configuration,
+            // lists, Lua files and user strategies before opkg touches them.
+            create_full_rollback_backup(ctx);
             int status = 0;
-            const auto output = run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
+            auto output = std::string("Rollback backup created.\n") +
+                          run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
             const auto created = status == 0
                                      ? save_updated_default_strategy(previous, candidates_before_upgrade)
                                      : std::string{};
+            if (status == 0) {
+                output += "\nInstalled nfqws2 version: " + installed_version() + "\n";
+            }
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
                                   {"strategy_created", created}}.dump();
         }
         if (action == "save_strategy") {
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
+            const std::lock_guard lock(nfqws_operation_mutex());
             write_file_atomic(fs::path(kUserStrategies) / (name + ".conf"), request.value("content", std::string{}));
             std::error_code ec2;
             fs::remove(fs::path(kUserStrategies) / ".deleted" / name, ec2);
             return R"({"ok":true})";
         }
         if (action == "apply_strategy") {
+            const std::lock_guard lock(nfqws_operation_mutex());
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
             auto content = request.contains("content") && request["content"].is_string()
@@ -594,9 +668,50 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
             const auto output = run_nfqws_service_command("restart", status);
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
         }
+        if (action == "save_files") {
+            if (!request.contains("files") || !request["files"].is_array())
+                throw ApiError("nfqws files payload is invalid", 400);
+            if (request["files"].empty() || request["files"].size() > 256)
+                throw ApiError("nfqws files payload is empty or too large", 400);
+
+            struct PendingFile {
+                fs::path path;
+                std::string content;
+            };
+            std::vector<PendingFile> pending;
+            std::set<std::string> unique;
+            std::size_t total_size = 0;
+            for (const auto& item : request["files"]) {
+                if (!item.is_object() || !item.contains("content") || !item["content"].is_string())
+                    throw ApiError("nfqws file entry is invalid", 400);
+                const auto category = item.value("category", std::string{});
+                const auto name = item.value("name", std::string{});
+                if (category != "list" && category != "lua")
+                    throw ApiError("only nfqws lists and Lua files can be batch-saved", 400);
+                const auto [path, resolved_category] = file_path(category, name);
+                if (resolved_category != category || !unique.insert(category + '/' + name).second)
+                    throw ApiError("duplicate or mismatched nfqws file", 400);
+                auto content = item["content"].get<std::string>();
+                total_size += content.size();
+                if (content.size() > 2U * 1024U * 1024U || total_size > 8U * 1024U * 1024U)
+                    throw ApiError("nfqws files payload is too large", 413);
+                pending.push_back({path, std::move(content)});
+            }
+
+            const std::lock_guard lock(nfqws_operation_mutex());
+            for (const auto& item : pending) write_file_atomic(item.path, item.content);
+            std::string output = "Saved " + std::to_string(pending.size()) + " nfqws file(s).\n";
+            int status = 0;
+            if (request.value("restart", false)) {
+                output += run_nfqws_service_command("restart", status);
+            }
+            return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
+                                  {"saved", pending.size()}}.dump();
+        }
         if (action == "delete_strategy") {
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
+            const std::lock_guard lock(nfqws_operation_mutex());
             std::error_code ec2;
             fs::remove(fs::path(kUserStrategies) / (name + ".conf"), ec2);
             write_file_atomic(fs::path(kUserStrategies) / ".deleted" / name, "deleted\n");
@@ -604,11 +719,46 @@ void register_nfqws_handler(ApiServer& server, ApiContext&) {
         }
         if (action == "import_lists") {
             if (!request.contains("files") || !request["files"].is_object()) throw ApiError("nfqws list bundle is invalid", 400);
+            const std::lock_guard lock(nfqws_operation_mutex());
             for (const auto& item : request["files"].items()) {
                 const auto [path, category] = file_path("list", item.key());
                 if (!item.value().is_string()) throw ApiError("nfqws list content must be text", 400);
                 write_file_atomic(path, item.value().get<std::string>());
             }
+            return R"({"ok":true})";
+        }
+        if (action == "import_bundle") {
+            if (!request.contains("files") || !request["files"].is_object())
+                throw ApiError("nfqws bundle is invalid", 400);
+
+            struct PendingFile {
+                fs::path path;
+                std::string content;
+            };
+            std::vector<PendingFile> pending;
+            std::size_t total_size = 0;
+            for (const auto& category : {"config", "list"}) {
+                const auto category_it = request["files"].find(category);
+                if (category_it == request["files"].end()) continue;
+                if (!category_it->is_object()) throw ApiError("nfqws bundle category is invalid", 400);
+                for (const auto& item : category_it->items()) {
+                    if (!item.value().is_string()) throw ApiError("nfqws bundle content must be text", 400);
+                    const auto [path, resolved_category] = file_path(category, item.key());
+                    if (resolved_category != category) throw ApiError("nfqws bundle category mismatch", 400);
+                    auto content = item.value().get<std::string>();
+                    if (content.size() > 2U * 1024U * 1024U)
+                        throw ApiError("nfqws bundle file is too large", 413);
+                    total_size += content.size();
+                    if (total_size > 8U * 1024U * 1024U || pending.size() >= 256)
+                        throw ApiError("nfqws bundle is too large", 413);
+                    pending.push_back({path, std::move(content)});
+                }
+            }
+            if (pending.empty()) throw ApiError("nfqws bundle is empty", 400);
+            // Validate the entire bundle before the first write. Each file is
+            // then replaced atomically by write_file_atomic().
+            const std::lock_guard lock(nfqws_operation_mutex());
+            for (const auto& item : pending) write_file_atomic(item.path, item.content);
             return R"({"ok":true})";
         }
         if (action == "check_url") {

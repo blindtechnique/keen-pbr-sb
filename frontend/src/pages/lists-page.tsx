@@ -160,6 +160,16 @@ export function ListsPage() {
     () => getTableRowsFromListMap(loadedConfig?.lists, listRefreshState, t),
     [loadedConfig?.lists, listRefreshState, t]
   )
+  const dependenciesByList = useMemo(
+    () =>
+      new Map(
+        tableRows.map((row) => [
+          row.id,
+          dependenciesOfList(loadedConfig, row.id),
+        ])
+      ),
+    [loadedConfig, tableRows]
+  )
   const listRowIds = tableRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)
   const showMobileSelection =
@@ -413,7 +423,7 @@ export function ListsPage() {
                   {list.stats ? (
                     <StatsDisplay ipv4Subnets={list.stats.ipv4Subnets} ipv6Subnets={list.stats.ipv6Subnets} totalHosts={list.stats.totalHosts} />
                   ) : null}
-                  <DependencyList dependencies={dependenciesOfList(loadedConfig, list.id)} emptyHint={t("common.dependencies.none")} />
+                  <DependencyList dependencies={dependenciesByList.get(list.id) ?? []} emptyHint={t("common.dependencies.none")} />
                   <div className="flex justify-end gap-1">
                     {list.canRefresh ? (
                       <Button disabled={refreshDisabled} onClick={() => handleRefreshOne(list.id)} size="icon-sm" variant="ghost" aria-label={t("pages.lists.actions.update")}>
@@ -486,7 +496,7 @@ export function ListsPage() {
                 </span>
               ),
               <DependencyList
-                dependencies={dependenciesOfList(loadedConfig, list.id)}
+                dependencies={dependenciesByList.get(list.id) ?? []}
                 emptyHint={t("common.dependencies.none")}
                 key={`${list.id}-dependencies`}
               />,

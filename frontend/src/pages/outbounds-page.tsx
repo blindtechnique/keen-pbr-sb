@@ -1,9 +1,9 @@
 import { ArrowRight, Plus, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useQueryClient } from "@tanstack/react-query"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
@@ -25,9 +25,14 @@ import {
 import { selectConfig, selectOutbounds } from "@/api/selectors"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
+import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { OutboundCard } from "@/components/outbounds/outbound-card"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
-import { dependenciesOfOutbound } from "@/lib/dependencies"
+import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
+import {
+  dependenciesOfOutbound,
+  findBrokenReferences,
+} from "@/lib/dependencies"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
@@ -39,12 +44,14 @@ import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
   buildUpdatedConfigForOutboundsDelete,
   getOutboundDeleteImpact,
   type OutboundDeleteImpact,
 } from "@/pages/outbounds-utils"
+import { OutboundCreateDialog } from "@/pages/outbound-upsert-page"
 
 type OutboundItem = {
   id: string
@@ -60,6 +67,7 @@ export function OutboundsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
+  const [createOpen, setCreateOpen] = useState(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     tags: string[]
     impact: OutboundDeleteImpact
@@ -85,58 +93,65 @@ export function OutboundsPage() {
   const visibleDeleteRequest = deleteRequest ?? deletePreview
   // using toasts for mutation errors
 
-  const runtimeOutboundByTag = new Map(
-    (runtimeOutboundsQuery.data?.status === 200
-      ? runtimeOutboundsQuery.data.data.outbounds
-      : []
-    ).map((runtimeOutbound) => [runtimeOutbound.tag, runtimeOutbound])
+  const runtimeOutboundByTag = useMemo(
+    () =>
+      new Map(
+        (runtimeOutboundsQuery.data?.status === 200
+          ? runtimeOutboundsQuery.data.data.outbounds
+          : []
+        ).map((runtimeOutbound) => [runtimeOutbound.tag, runtimeOutbound])
+      ),
+    [runtimeOutboundsQuery.data]
   )
-  const runtimeInterfaceByName = new Map(
-    (runtimeInterfacesQuery.data?.status === 200
-      ? runtimeInterfacesQuery.data.data.interfaces
-      : []
-    ).map((runtimeInterface) => [runtimeInterface.name, runtimeInterface])
+  const runtimeInterfaceByName = useMemo(
+    () =>
+      new Map(
+        (runtimeInterfacesQuery.data?.status === 200
+          ? runtimeInterfacesQuery.data.data.interfaces
+          : []
+        ).map((runtimeInterface) => [runtimeInterface.name, runtimeInterface])
+      ),
+    [runtimeInterfacesQuery.data]
   )
-  const outboundItems = selectOutbounds(loadedConfig).map((outbound) =>
-    mapOutboundToItem(
-      outbound,
-      runtimeOutboundByTag.get(outbound.tag),
-      runtimeInterfaceByName.get(outbound.interface ?? ""),
-      t
-    )
+  const outboundItems = useMemo(
+    () =>
+      selectOutbounds(loadedConfig).map((outbound) =>
+        mapOutboundToItem(
+          outbound,
+          runtimeOutboundByTag.get(outbound.tag),
+          runtimeInterfaceByName.get(outbound.interface ?? ""),
+          t
+        )
+      ),
+    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, t]
+  )
+  const dependenciesByTag = useMemo(
+    () =>
+      new Map(
+        outboundItems.map((item) => [
+          item.id,
+          dependenciesOfOutbound(loadedConfig, item.id),
+        ])
+      ),
+    [loadedConfig, outboundItems]
+  )
+  const brokenReferences = useMemo(
+    () => findBrokenReferences(loadedConfig),
+    [loadedConfig]
   )
   // Сколько правил ведёт в это направление и сколько списков через них
   // проходит. Это единственное, чего в прежней таблице не было совсем, а
   // именно оно отвечает на вопрос «можно ли это удалить».
   // Проверка задержки бьёт по всем точкам выхода разом: у демона одна
   // общая проверка, отдельной «проверь только этот» не существует.
-  const probeMutation = useMutation({
-    mutationFn: async () => {
-      const response = await fetch("/api/system/probes/run", {
-        method: "POST",
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
-    },
-    onSuccess: () => {
-      // Проверка идёт в фоне; читать результат сразу нечего.
-      setTimeout(
-        () =>
-          queryClient.invalidateQueries({
-            queryKey: queryKeys.runtimeOutbounds(),
-          }),
-        2_000
-      )
-    },
-    onError: () => toast.error(t("transports.latencyRefreshFailed")),
-  })
-
+  const probeMutation = useRunSystemProbes()
   const { protocolOf, protocolOfGroup } = useInterfaceProtocols()
   // Тег группы резервирования складывается из тегов её участников, а те
   // известны только по их собственным outbound: отсюда поиск интерфейса
   // по имени участника.
   const interfaceOfTag = (tag: string) =>
-    selectOutbounds(loadedConfig).find((item) => item.tag === tag)?.interface ?? ""
+    selectOutbounds(loadedConfig).find((item) => item.tag === tag)?.interface ??
+    ""
 
   const outboundRowIds = outboundItems.map((outbound) => outbound.id)
   const outboundSelection = useRowSelection(outboundRowIds)
@@ -227,19 +242,46 @@ export function OutboundsPage() {
     <div className="space-y-3">
       <PageHeader
         actions={
-          <Button
-            disabled={configMutationPending}
-            onClick={() => navigate("/outbounds/create")}
-          >
-            <Plus className="mr-1 h-4 w-4" />
-            {t("pages.outbounds.actions.new")}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <ConfigTransferButtons
+              config={loadedConfig}
+              disabled={configMutationPending}
+              kind="outbounds"
+              onImport={(nextConfig) =>
+                postConfigMutation.mutate({ data: nextConfig })
+              }
+            />
+            <Button
+              disabled={configMutationPending}
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus className="mr-1 h-4 w-4" />
+              {t("pages.outbounds.actions.new")}
+            </Button>
+          </div>
         }
         description={t("pages.outbounds.description")}
         title={t("pages.outbounds.title")}
       />
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
+
+      {brokenReferences.length > 0 ? (
+        <Alert variant="warning">
+          <AlertTitle>{t("pages.outbounds.brokenReferences.title")}</AlertTitle>
+          <AlertDescription className="flex flex-wrap gap-x-3 gap-y-1">
+            {brokenReferences.map((reference) => (
+              <a
+                className="underline underline-offset-2"
+                href={reference.href}
+                key={reference.id}
+              >
+                {reference.label}
+              </a>
+            ))}
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {configQuery.isLoading ? (
         <TableSkeleton />
@@ -257,52 +299,56 @@ export function OutboundsPage() {
       ) : (
         <div className="space-y-3">
           <div className="relative h-0">
-          {outboundSelection.hasSelection ? (
-            <BulkSelectionToolbar
-              countLabel={t("pages.outbounds.bulk.selected", {
-                count: outboundSelection.selectedCount,
-              })}
-            >
-              <Button
-                disabled={configMutationPending}
-                onClick={handleBulkDelete}
-                size="sm"
-                variant="destructive"
+            {outboundSelection.hasSelection ? (
+              <BulkSelectionToolbar
+                countLabel={t("pages.outbounds.bulk.selected", {
+                  count: outboundSelection.selectedCount,
+                })}
               >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("pages.outbounds.bulk.delete")}
-              </Button>
-            </BulkSelectionToolbar>
-          ) : null}
+                <Button
+                  disabled={configMutationPending}
+                  onClick={handleBulkDelete}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <Trash2 className="mr-1 h-4 w-4" />
+                  {t("pages.outbounds.bulk.delete")}
+                </Button>
+              </BulkSelectionToolbar>
+            ) : null}
           </div>
           {outboundGroups.map((group) => (
-          <div className="space-y-2" key={group.key}>
-            <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-              {t(`pages.outbounds.groups.${group.key}`)}
-            </h2>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {group.items.map((item) => (
-              <OutboundCard
-                key={item.id}
-                onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
-                onToggleSelected={() => outboundSelection.toggleOne(item.id)}
-                outbound={item.outbound}
-                protocol={
-                  item.outbound.type === "urltest"
-                    ? protocolOfGroup(item.outbound, interfaceOfTag)
-                    : protocolOf(item.outbound.interface ?? "")
-                }
-                runtimeState={item.runtimeState}
-                selectLabel={t("common.selection.selectRow", { rowLabel: item.id })}
-                selected={outboundSelection.selectedIds.has(item.id)}
-                dependencies={dependenciesOfOutbound(loadedConfig, item.id)}
-                onRefreshLatency={() => probeMutation.mutate()}
-                refreshingLatency={probeMutation.isPending}
-                selectionDisabled={configMutationPending}
-              />
-            ))}
-          </div>
-          </div>
+            <div className="space-y-2" key={group.key}>
+              <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                {t(`pages.outbounds.groups.${group.key}`)}
+              </h2>
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {group.items.map((item) => (
+                  <OutboundCard
+                    key={item.id}
+                    onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
+                    onToggleSelected={() =>
+                      outboundSelection.toggleOne(item.id)
+                    }
+                    outbound={item.outbound}
+                    protocol={
+                      item.outbound.type === "urltest"
+                        ? protocolOfGroup(item.outbound, interfaceOfTag)
+                        : protocolOf(item.outbound.interface ?? "")
+                    }
+                    runtimeState={item.runtimeState}
+                    selectLabel={t("common.selection.selectRow", {
+                      rowLabel: item.id,
+                    })}
+                    selected={outboundSelection.selectedIds.has(item.id)}
+                    dependencies={dependenciesByTag.get(item.id) ?? []}
+                    onRefreshLatency={() => probeMutation.mutate()}
+                    refreshingLatency={probeMutation.isPending}
+                    selectionDisabled={configMutationPending}
+                  />
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       )}
@@ -331,6 +377,7 @@ export function OutboundsPage() {
         open={deleteRequest !== null}
         title={t("pages.outbounds.deleteDialog.title")}
       />
+      <OutboundCreateDialog onOpenChange={setCreateOpen} open={createOpen} />
     </div>
   )
 }
@@ -574,4 +621,3 @@ function getOutboundSummary(
 
   return t("common.noneShort")
 }
-

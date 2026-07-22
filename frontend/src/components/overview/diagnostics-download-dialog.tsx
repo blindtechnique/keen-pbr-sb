@@ -18,6 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
+import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
 
 export function DiagnosticsDownloadDialog({
   open,
@@ -141,18 +142,8 @@ function redactConfigLists(config: ConfigObject): ConfigObject {
 }
 
 function downloadDiagnosticsFile(payload: Record<string, unknown>) {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
-  const filename = `keen-pbr-diagnostics-${timestamp}.json`
-  const content = `${JSON.stringify(payload, null, 2)}\n`
-  const blob = new Blob([content], { type: "application/json;charset=utf-8" })
-  const url = URL.createObjectURL(blob)
-
-  const anchor = document.createElement("a")
-  anchor.href = url
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  document.body.removeChild(anchor)
-
-  URL.revokeObjectURL(url)
+  downloadJson(
+    `keen-pbr-diagnostics-${formatDownloadTimestamp()}.json`,
+    payload
+  )
 }

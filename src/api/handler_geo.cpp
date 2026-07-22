@@ -8,12 +8,15 @@
 #include <arpa/inet.h>
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <netdb.h>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <thread>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -35,12 +38,19 @@ constexpr auto kMaxAge = std::chrono::hours(24 * 30);
 // адресов там обычно единицы; ограничение защищает от того, чтобы конфиг на
 // три десятка транспортов подвесил ответ на полторы минуты.
 constexpr size_t kLookupsPerRequest = 6;
+constexpr size_t kMaxCacheEntries = 256;
+constexpr size_t kMaxConcurrentLookups = 12;
 
 constexpr auto kLookupTimeout = std::chrono::seconds(4);
 
 std::mutex& geo_mutex() {
     static std::mutex mutex;
     return mutex;
+}
+
+std::set<std::string>& in_flight() {
+    static std::set<std::string> hosts;
+    return hosts;
 }
 
 int64_t now_seconds() {
@@ -78,6 +88,29 @@ void save_cache() {
         file << cache().dump();
     }
     ::rename(temporary.c_str(), kCachePath);
+}
+
+bool cache_entry_is_fresh(const nlohmann::json& entry) {
+    if (!entry.is_object()) return false;
+    const auto age = now_seconds() - entry.value("checked_at", int64_t{0});
+    return age >= 0 &&
+           age < std::chrono::duration_cast<std::chrono::seconds>(kMaxAge).count();
+}
+
+void prune_cache() {
+    while (cache().size() > kMaxCacheEntries) {
+        auto oldest = cache().end();
+        int64_t oldest_time = std::numeric_limits<int64_t>::max();
+        for (auto it = cache().begin(); it != cache().end(); ++it) {
+            const auto checked_at = it->value("checked_at", int64_t{0});
+            if (checked_at < oldest_time) {
+                oldest = it;
+                oldest_time = checked_at;
+            }
+        }
+        if (oldest == cache().end()) break;
+        cache().erase(oldest);
+    }
 }
 
 bool looks_like_address(const std::string& host) {
@@ -153,17 +186,47 @@ nlohmann::json look_up(const std::string& host) {
     }
 }
 
+void look_up_in_background(std::vector<std::string> hosts) {
+    std::thread([hosts = std::move(hosts)]() {
+        std::vector<std::pair<std::string, nlohmann::json>> results;
+        results.reserve(hosts.size());
+        for (const auto& host : hosts) {
+            auto entry = look_up(host);
+            // Cache failures too. Otherwise a missing DNS record or an offline
+            // GeoIP service is contacted on every page opening.
+            if (entry.is_null() || entry.empty()) {
+                entry = nlohmann::json{{"checked_at", now_seconds()}};
+            }
+            results.emplace_back(host, std::move(entry));
+        }
+
+        std::lock_guard<std::mutex> lock(geo_mutex());
+        for (auto& [host, entry] : results) {
+            cache()[host] = std::move(entry);
+            in_flight().erase(host);
+        }
+        prune_cache();
+        save_cache();
+    }).detach();
+}
+
 } // namespace
 
 void register_geo_handler(ApiServer& server, ApiContext& /*ctx*/) {
     server.post("/api/system/geo", [](const std::string& body) -> std::string {
         std::vector<std::string> hosts;
+        bool allow_external_lookup = false;
         try {
             const auto request = nlohmann::json::parse(body);
+            allow_external_lookup = request.value("allow_external_lookup", false);
             if (request.contains("hosts") && request["hosts"].is_array()) {
                 for (const auto& host : request["hosts"]) {
-                    if (host.is_string() && !host.get<std::string>().empty()) {
-                        hosts.push_back(host.get<std::string>());
+                    if (host.is_string()) {
+                        const auto value = host.get<std::string>();
+                        if (!value.empty() && value.size() <= 253 &&
+                            hosts.size() < kMaxCacheEntries) {
+                            hosts.push_back(value);
+                        }
                     }
                 }
             }
@@ -171,44 +234,33 @@ void register_geo_handler(ApiServer& server, ApiContext& /*ctx*/) {
             return nlohmann::json{{"error", "invalid_request"}}.dump();
         }
 
-        std::lock_guard<std::mutex> lock(geo_mutex());
         nlohmann::json found = nlohmann::json::object();
-        size_t looked_up = 0;
-        bool changed = false;
-
-        for (const auto& host : hosts) {
-            if (found.contains(host)) {
-                continue;
-            }
-
-            const auto cached = cache().find(host);
-            if (cached != cache().end() && cached->is_object()) {
-                const auto age = now_seconds() - cached->value("checked_at", int64_t{0});
-                if (age < std::chrono::duration_cast<std::chrono::seconds>(kMaxAge).count()) {
-                    found[host] = *cached;
+        std::vector<std::string> scheduled;
+        bool pending = false;
+        {
+            std::lock_guard<std::mutex> lock(geo_mutex());
+            for (const auto& host : hosts) {
+                if (found.contains(host)) continue;
+                const auto cached = cache().find(host);
+                if (cached != cache().end() && cache_entry_is_fresh(*cached)) {
+                    if (!cached->value("country", std::string{}).empty()) {
+                        found[host] = *cached;
+                    }
                     continue;
                 }
+                if (!allow_external_lookup) continue;
+                pending = true;
+                if (scheduled.size() < kLookupsPerRequest &&
+                    in_flight().size() < kMaxConcurrentLookups &&
+                    in_flight().insert(host).second) {
+                    scheduled.push_back(host);
+                }
             }
-
-            if (looked_up >= kLookupsPerRequest) {
-                continue;
-            }
-            ++looked_up;
-
-            auto entry = look_up(host);
-            if (entry.is_null() || entry.empty()) {
-                continue;
-            }
-            cache()[host] = entry;
-            found[host] = entry;
-            changed = true;
         }
 
-        if (changed) {
-            save_cache();
-        }
+        if (!scheduled.empty()) look_up_in_background(std::move(scheduled));
 
-        return nlohmann::json{{"locations", found}}.dump();
+        return nlohmann::json{{"locations", found}, {"pending", pending}}.dump();
     });
 }
 

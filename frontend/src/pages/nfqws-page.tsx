@@ -2,8 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   DownloadIcon,
   FilePlusIcon,
+  LoaderCircleIcon,
   PlayIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
   SaveIcon,
   TrashIcon,
   UploadIcon,
@@ -30,10 +32,25 @@ import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { CodeEditor } from "@/components/shared/code-editor"
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
   formatNfqwsConfig,
   parseNfqwsConfig,
   type NfqwsConfigForm,
 } from "@/lib/nfqws-config"
+import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
+import {
+  createBackup,
+  downloadBackup,
+  rollbackBackup,
+  type BackupSelection,
+} from "@/lib/backup"
 
 type NfqwsFile = {
   name: string
@@ -64,6 +81,36 @@ type NfqwsActionResult = {
   output?: string
   strategy_created?: string
 }
+
+type NfqwsUpdateStatus = {
+  ok: boolean
+  current: string
+  latest: string
+  available: boolean
+  release_url?: string
+}
+
+type OperationState = {
+  open: boolean
+  pending: boolean
+  success?: boolean
+  title: string
+  output: string
+  rollbackAvailable: boolean
+}
+
+type DraftFile = {
+  category: "list" | "lua"
+  name: string
+  content: string
+}
+
+type RunOperation = (
+  title: string,
+  operation: () => Promise<NfqwsActionResult>,
+  successMessage: string,
+  rollbackAvailable?: boolean
+) => Promise<boolean>
 
 async function nfqwsAction<T = NfqwsActionResult>(
   payload: Record<string, unknown>
@@ -97,39 +144,271 @@ export function NfqwsPage() {
     refetchInterval: 10_000,
   })
   const status = query.data
+  const bundleImportRef = useRef<HTMLInputElement>(null)
+  const [bundleExportPending, setBundleExportPending] = useState(false)
   const [tab, setTab] = useState<Tab>("settings")
-  const [operationResult, setOperationResult] = useState("")
-  const mutation = useMutation({
+  const [upgradeOpen, setUpgradeOpen] = useState(false)
+  const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
+  const [drafts, setDrafts] = useState<Record<string, DraftFile>>({})
+  const [operation, setOperation] = useState<OperationState>({
+    open: false,
+    pending: false,
+    title: "",
+    output: "",
+    rollbackAvailable: false,
+  })
+  const serviceToggleMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => nfqwsAction(payload),
-    onSuccess: async (result) => {
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      const output = result.output?.trim() || t("nfqws.operationCompleted")
-      setOperationResult(
-        result.strategy_created
+    },
+    onError: (error) => toast.error(error.message, { richColors: true }),
+  })
+  const updateQuery = useQuery<NfqwsUpdateStatus>({
+    queryKey: ["nfqws", "update"],
+    queryFn: () => nfqwsAction({ action: "check_update" }),
+    enabled: status?.installed === true,
+    retry: false,
+    staleTime: 30 * 60 * 1_000,
+    refetchInterval: 30 * 60 * 1_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+  })
+
+  const runOperation: RunOperation = async (
+    title,
+    execute,
+    successMessage,
+    rollbackAvailable = false
+  ) => {
+    setOperation({
+      open: true,
+      pending: true,
+      title,
+      output: t("nfqws.operationRunning"),
+      rollbackAvailable: false,
+    })
+    try {
+      const result = await execute()
+      await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
+      const output = result.output?.trim() || successMessage
+      setOperation({
+        open: true,
+        pending: false,
+        success: true,
+        title,
+        output: result.strategy_created
           ? `${output}\n\n${t("nfqws.defaultStrategyCreated", {
               name: result.strategy_created,
             })}`
-          : output
-      )
+          : output,
+        rollbackAvailable,
+      })
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setOperation({
+        open: true,
+        pending: false,
+        success: false,
+        title,
+        output: message,
+        rollbackAvailable,
+      })
+      return false
+    }
+  }
+
+  const runUpgrade = async () => {
+    setUpgradeOpen(false)
+    if (downloadUpgradeBackup) {
+      const groups: BackupSelection = {
+        general: false,
+        transports: false,
+        outbounds: false,
+        dns: false,
+        routing: false,
+        nfqws: true,
+      }
+      try {
+        const backup = await createBackup(groups)
+        downloadBackup(
+          backup,
+          `keen-pbr-sb-nfqws-before-update-${formatDownloadTimestamp()}.json`
+        )
+      } catch (error) {
+        setOperation({
+          open: true,
+          pending: false,
+          success: false,
+          title: t("nfqws.upgrade"),
+          output: error instanceof Error ? error.message : String(error),
+          rollbackAvailable: false,
+        })
+        return
+      }
+    }
+    const completed = await runOperation(
+      t("nfqws.upgrade"),
+      () => nfqwsAction({ action: "upgrade" }),
+      t("nfqws.operationCompleted"),
+      true
+    )
+    if (completed) {
+      try {
+        const latest = await nfqwsAction<NfqwsUpdateStatus>({
+          action: "check_update",
+          force: true,
+        })
+        queryClient.setQueryData(["nfqws", "update"], latest)
+      } catch {
+        await queryClient.invalidateQueries({ queryKey: ["nfqws", "update"] })
+      }
+    }
+  }
+
+  const refreshAll = async () => {
+    await query.refetch()
+    if (!status?.installed) return
+    try {
+      const latest = await nfqwsAction<NfqwsUpdateStatus>({
+        action: "check_update",
+        force: true,
+      })
+      queryClient.setQueryData(["nfqws", "update"], latest)
+    } catch {
+      await queryClient.invalidateQueries({ queryKey: ["nfqws", "update"] })
+    }
+  }
+
+  const saveDrafts = async (restart: boolean) => {
+    const files = Object.values(drafts)
+    if (files.length === 0) return
+    const completed = await runOperation(
+      restart ? t("nfqws.saveAndRestart") : t("nfqws.saveDrafts"),
+      () => nfqwsAction({ action: "save_files", files, restart }),
+      t("nfqws.saved")
+    )
+    if (completed) {
+      setDrafts({})
+      await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
+    }
+  }
+  const bundleMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const parsed = JSON.parse(await file.text()) as {
+        format?: string
+        version?: number
+        files?: Record<string, unknown>
+      }
+      if (
+        parsed.format !== "keen-pbr-sb-nfqws" ||
+        parsed.version !== 1 ||
+        !parsed.files
+      ) {
+        throw new Error(t("configTransfer.invalidFormat"))
+      }
+      await nfqwsAction({ action: "import_bundle", files: parsed.files })
     },
-    onError: (error) => {
-      setOperationResult(error.message)
-      toast.error(error.message, { richColors: true })
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
+      toast.success(t("configTransfer.imported"))
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("configTransfer.invalidFormat"),
+        { richColors: true }
+      ),
+    onSettled: () => {
+      if (bundleImportRef.current) bundleImportRef.current.value = ""
     },
   })
+
+  const exportBundle = async () => {
+    if (!status) return
+    setBundleExportPending(true)
+    try {
+      const files: Record<"config" | "list", Record<string, string>> = {
+        config: {},
+        list: {},
+      }
+      for (const file of status.files) {
+        if (file.category !== "config" && file.category !== "list") continue
+        files[file.category][file.name] = (await readFile(file)).content
+      }
+      downloadJson(`keen-pbr-sb-nfqws-${formatDownloadTimestamp()}.json`, {
+        format: "keen-pbr-sb-nfqws",
+        version: 1,
+        files,
+      })
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t("configTransfer.exportFailed"),
+        { richColors: true }
+      )
+    } finally {
+      setBundleExportPending(false)
+    }
+  }
 
   return (
     <div className="space-y-3">
       <PageHeader
         actions={
-          <Button
-            disabled={query.isFetching}
-            onClick={() => void query.refetch()}
-            variant="outline"
-          >
-            <RefreshCwIcon className={query.isFetching ? "animate-spin" : ""} />
-            {t("nfqws.refresh")}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={
+                !status?.installed ||
+                bundleMutation.isPending ||
+                bundleExportPending
+              }
+              onClick={() => void exportBundle()}
+              variant="outline"
+            >
+              <DownloadIcon />
+              {t("configTransfer.exportAll")}
+            </Button>
+            <Button
+              disabled={
+                !status?.installed ||
+                bundleMutation.isPending ||
+                bundleExportPending
+              }
+              onClick={() => bundleImportRef.current?.click()}
+              variant="outline"
+            >
+              <UploadIcon />
+              {t("configTransfer.importAll")}
+            </Button>
+            <input
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) bundleMutation.mutate(file)
+              }}
+              ref={bundleImportRef}
+              type="file"
+            />
+            <Button
+              disabled={query.isFetching || updateQuery.isFetching}
+              onClick={() => void refreshAll()}
+              variant="outline"
+            >
+              <RefreshCwIcon
+                className={
+                  query.isFetching || updateQuery.isFetching
+                    ? "animate-spin"
+                    : ""
+                }
+              />
+              {t("nfqws.refresh")}
+            </Button>
+          </div>
         }
         description={t("nfqws.description")}
         title="nfqws2"
@@ -139,11 +418,24 @@ export function NfqwsPage() {
 
       {status?.installed ? (
         <>
-          <Card>
+          <Card
+            className={
+              updateQuery.data?.available
+                ? "border-emerald-500/70 bg-emerald-500/[0.06] shadow-[0_0_0_1px_rgb(16_185_129/0.12)]"
+                : undefined
+            }
+          >
             <CardHeader>
               <CardTitle>{t("nfqws.service")}</CardTitle>
               <CardDescription>
                 {t("nfqws.version", { version: status.version || "—" })}
+                {updateQuery.data?.available ? (
+                  <span className="mt-1 block font-medium text-emerald-700 dark:text-emerald-400">
+                    {t("nfqws.updateAvailable", {
+                      version: updateQuery.data.latest,
+                    })}
+                  </span>
+                ) : null}
               </CardDescription>
               <CardAction>
                 <Badge
@@ -158,11 +450,15 @@ export function NfqwsPage() {
             <CardContent className="flex flex-wrap items-center justify-between gap-2">
               <label className="flex cursor-pointer items-center gap-2">
                 <Switch
-                  aria-label={status.running ? t("nfqws.stop") : t("nfqws.start")}
+                  aria-label={
+                    status.running ? t("nfqws.stop") : t("nfqws.start")
+                  }
                   checked={status.running}
-                  disabled={mutation.isPending}
+                  disabled={
+                    serviceToggleMutation.isPending || operation.pending
+                  }
                   onCheckedChange={(checked) =>
-                    mutation.mutate({
+                    serviceToggleMutation.mutate({
                       action: "service",
                       command: checked ? "start" : "stop",
                     })
@@ -173,54 +469,49 @@ export function NfqwsPage() {
                 </span>
               </label>
               <div className="flex flex-wrap items-center gap-2">
-              <Button
-                disabled={mutation.isPending}
-                onClick={() =>
-                  mutation.mutate({ action: "service", command: "restart" })
-                }
-                variant="outline"
-              >
-                <RefreshCwIcon />
-                {t("nfqws.restart")}
-              </Button>
-              <Button
-                disabled={mutation.isPending}
-                onClick={() =>
-                  mutation.mutate({ action: "service", command: "reload" })
-                }
-                variant="outline"
-              >
-                {t("nfqws.reload")}
-              </Button>
-              <Button
-                disabled={mutation.isPending}
-                onClick={() => mutation.mutate({ action: "upgrade" })}
-                variant="outline"
-              >
-                <DownloadIcon />
-                {t("nfqws.upgrade")}
-              </Button>
+                <Button
+                  disabled={operation.pending}
+                  onClick={() =>
+                    void runOperation(
+                      t("nfqws.restart"),
+                      () =>
+                        nfqwsAction({
+                          action: "service",
+                          command: "restart",
+                        }),
+                      t("nfqws.operationCompleted")
+                    )
+                  }
+                  variant="outline"
+                >
+                  <RefreshCwIcon />
+                  {t("nfqws.restart")}
+                </Button>
+                <Button
+                  disabled={operation.pending}
+                  onClick={() =>
+                    void runOperation(
+                      t("nfqws.reload"),
+                      () =>
+                        nfqwsAction({ action: "service", command: "reload" }),
+                      t("nfqws.operationCompleted")
+                    )
+                  }
+                  variant="outline"
+                >
+                  {t("nfqws.reload")}
+                </Button>
+                <Button
+                  disabled={operation.pending || updateQuery.isFetching}
+                  onClick={() => setUpgradeOpen(true)}
+                  variant="outline"
+                >
+                  <DownloadIcon />
+                  {t("nfqws.upgrade")}
+                </Button>
               </div>
             </CardContent>
           </Card>
-
-          {operationResult ? (
-            <Alert>
-              <AlertTitle>{t("nfqws.operationResult")}</AlertTitle>
-              <AlertDescription className="space-y-3">
-                <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-foreground">
-                  {operationResult}
-                </pre>
-                <Button
-                  onClick={() => setOperationResult("")}
-                  size="sm"
-                  variant="outline"
-                >
-                  {t("nfqws.closeResult")}
-                </Button>
-              </AlertDescription>
-            </Alert>
-          ) : null}
 
           <div className="flex flex-wrap gap-x-1 border-b">
             {(
@@ -257,37 +548,217 @@ export function NfqwsPage() {
           ) : null}
           {tab === "strategies" ? (
             <StrategiesEditor
-              onOperationResult={setOperationResult}
-              status={status}
               refresh={() => void query.refetch()}
+              runOperation={runOperation}
+              status={status}
             />
           ) : null}
           {tab === "lists" ? (
             <FilesEditor
               category="list"
+              drafts={drafts}
               files={status.files}
+              onDraftChange={(draft) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [`${draft.category}/${draft.name}`]: draft,
+                }))
+              }
+              onDraftRemove={(category, name) =>
+                setDrafts((current) => {
+                  const next = { ...current }
+                  delete next[`${category}/${name}`]
+                  return next
+                })
+              }
+              onSaveDrafts={saveDrafts}
               refresh={() => void query.refetch()}
             />
           ) : null}
           {tab === "lua" ? (
             <FilesEditor
               category="lua"
+              drafts={drafts}
               files={status.files}
+              onDraftChange={(draft) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [`${draft.category}/${draft.name}`]: draft,
+                }))
+              }
+              onDraftRemove={(category, name) =>
+                setDrafts((current) => {
+                  const next = { ...current }
+                  delete next[`${category}/${name}`]
+                  return next
+                })
+              }
+              onSaveDrafts={saveDrafts}
               refresh={() => void query.refetch()}
             />
           ) : null}
           {tab === "logs" ? (
             <FilesEditor
               category="log"
+              drafts={drafts}
               files={status.files}
+              onDraftChange={() => undefined}
+              onDraftRemove={() => undefined}
+              onSaveDrafts={saveDrafts}
               refresh={() => void query.refetch()}
               readonly
             />
           ) : null}
           {tab === "check" ? <UrlCheck /> : null}
+
+          <NfqwsOperationDialog
+            onClose={() =>
+              setOperation((current) => ({ ...current, open: false }))
+            }
+            onRollback={() =>
+              void runOperation(
+                t("nfqws.rollback"),
+                async () => {
+                  await rollbackBackup()
+                  return { ok: true, output: t("nfqws.rollbackCompleted") }
+                },
+                t("nfqws.rollbackCompleted")
+              )
+            }
+            operation={operation}
+          />
+          <NfqwsUpgradeDialog
+            downloadBackup={downloadUpgradeBackup}
+            latest={updateQuery.data?.latest}
+            onDownloadBackupChange={setDownloadUpgradeBackup}
+            onOpenChange={setUpgradeOpen}
+            onUpgrade={() => void runUpgrade()}
+            open={upgradeOpen}
+          />
         </>
       ) : null}
     </div>
+  )
+}
+
+function NfqwsOperationDialog({
+  onClose,
+  onRollback,
+  operation,
+}: {
+  onClose: () => void
+  onRollback: () => void
+  operation: OperationState
+}) {
+  const { t } = useTranslation()
+  return (
+    <Dialog
+      onOpenChange={(open) => {
+        if (!open && !operation.pending) onClose()
+      }}
+      open={operation.open}
+    >
+      <DialogContent
+        className="overflow-hidden sm:max-w-2xl"
+        showCloseButton={false}
+      >
+        <DialogHeader>
+          <DialogTitle>{operation.title}</DialogTitle>
+          <DialogDescription
+            className={
+              operation.pending
+                ? undefined
+                : operation.success
+                  ? "text-emerald-700 dark:text-emerald-400"
+                  : "text-destructive"
+            }
+          >
+            {operation.pending
+              ? t("nfqws.operationRunning")
+              : operation.success
+                ? t("nfqws.operationSucceeded")
+                : t("nfqws.operationFailed")}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="relative h-[min(22rem,55dvh)] overflow-y-auto rounded-md border bg-muted/60 p-3 font-mono text-xs whitespace-pre-wrap text-foreground">
+          {operation.pending ? (
+            <LoaderCircleIcon className="mr-2 inline size-4 animate-spin" />
+          ) : null}
+          {operation.output}
+        </div>
+        <DialogFooter>
+          {operation.rollbackAvailable && !operation.pending ? (
+            <Button onClick={onRollback} variant="destructive">
+              <RotateCcwIcon />
+              {t("nfqws.rollback")}
+            </Button>
+          ) : null}
+          <Button
+            disabled={operation.pending}
+            onClick={onClose}
+            variant="outline"
+          >
+            {t("nfqws.closeResult")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function NfqwsUpgradeDialog({
+  downloadBackup,
+  latest,
+  onDownloadBackupChange,
+  onOpenChange,
+  onUpgrade,
+  open,
+}: {
+  downloadBackup: boolean
+  latest?: string
+  onDownloadBackupChange: (checked: boolean) => void
+  onOpenChange: (open: boolean) => void
+  onUpgrade: () => void
+  open: boolean
+}) {
+  const { t } = useTranslation()
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{t("nfqws.upgradeConfirmTitle")}</DialogTitle>
+          <DialogDescription>
+            {t("nfqws.upgradeConfirmDescription", { version: latest ?? "—" })}
+          </DialogDescription>
+        </DialogHeader>
+        <Alert>
+          <AlertTitle>{t("nfqws.automaticBackupTitle")}</AlertTitle>
+          <AlertDescription>
+            {t("nfqws.automaticBackupDescription")}
+          </AlertDescription>
+        </Alert>
+        <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3">
+          <Checkbox
+            checked={downloadBackup}
+            onCheckedChange={(checked) =>
+              onDownloadBackupChange(checked === true)
+            }
+          />
+          <span className="text-sm">
+            {t("nfqws.downloadBackupBeforeUpgrade")}
+          </span>
+        </label>
+        <DialogFooter>
+          <Button onClick={() => onOpenChange(false)} variant="outline">
+            {t("common.cancel")}
+          </Button>
+          <Button onClick={onUpgrade}>
+            <DownloadIcon />
+            {t("nfqws.upgrade")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -340,15 +811,20 @@ function SettingsEditor({
   const file = status.files.find(
     (item) => item.category === "config" && item.name === "nfqws2.conf"
   )
+  const fileName = file?.name
   const [source, setSource] = useState("")
   const [form, setForm] = useState<NfqwsConfigForm | null>(null)
   useEffect(() => {
-    if (file)
-      void readFile(file).then(({ content }) => {
+    if (fileName)
+      void nfqwsAction<{ content: string }>({
+        action: "read_file",
+        category: "config",
+        name: fileName,
+      }).then(({ content }) => {
         setSource(content)
         setForm(parseNfqwsConfig(content))
       })
-  }, [file?.name])
+  }, [fileName])
   const save = async () => {
     if (!file || !form) return
     await nfqwsAction({
@@ -452,51 +928,60 @@ function SettingsEditor({
 }
 
 function StrategiesEditor({
-  onOperationResult,
-  status,
   refresh,
+  runOperation,
+  status,
 }: {
-  onOperationResult: (output: string) => void
-  status: Status
   refresh: () => void
+  runOperation: RunOperation
+  status: Status
 }) {
   const { t } = useTranslation()
   const preferredStrategy =
     status.active_strategy || status.strategies[0]?.name || ""
   const [selected, setSelected] = useState(preferredStrategy)
-  const strategy = status.strategies.find((item) => item.name === selected)
-  const [content, setContent] = useState(strategy?.content ?? "")
-  useEffect(() => {
-    if (!status.strategies.some((item) => item.name === selected))
-      setSelected(preferredStrategy)
-  }, [preferredStrategy, selected, status.strategies])
-  useEffect(
-    () => setContent(strategy?.content ?? ""),
-    [strategy?.name, strategy?.content]
+  const [draftContent, setDraftContent] = useState<Record<string, string>>({})
+  const effectiveSelected =
+    status.strategies.some((item) => item.name === selected) ||
+    Object.hasOwn(draftContent, selected)
+      ? selected
+      : preferredStrategy
+  const strategy = status.strategies.find(
+    (item) => item.name === effectiveSelected
   )
+  const content = draftContent[effectiveSelected] ?? strategy?.content ?? ""
   const add = () => {
     const name = window.prompt(t("nfqws.strategyName"))
     if (name) {
       setSelected(name)
-      setContent("")
+      setDraftContent((current) => ({ ...current, [name]: "" }))
     }
   }
   const run = async (action: string) => {
+    if (action === "apply_strategy") {
+      const completed = await runOperation(
+        t("nfqws.applyStrategy"),
+        () =>
+          nfqwsAction({
+            action,
+            name: effectiveSelected,
+            content,
+          }),
+        t("nfqws.strategyAppliedAndRestarted")
+      )
+      if (completed) refresh()
+      return
+    }
     try {
-      const result = await nfqwsAction<{ ok: boolean; output?: string }>({
+      await nfqwsAction<{ ok: boolean; output?: string }>({
         action,
-        name: selected,
+        name: effectiveSelected,
         content,
       })
-      if (action === "apply_strategy")
-        onOperationResult(
-          result.output?.trim() || t("nfqws.strategyAppliedAndRestarted")
-        )
-      else toast.success(t("nfqws.saved"))
+      toast.success(t("nfqws.saved"))
       refresh()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      onOperationResult(message)
       toast.error(message, { richColors: true })
     }
   }
@@ -511,7 +996,7 @@ function StrategiesEditor({
           <select
             className="h-9 min-w-60 rounded-md border bg-background px-3"
             onChange={(event) => setSelected(event.target.value)}
-            value={selected}
+            value={effectiveSelected}
           >
             {status.strategies.map((item) => (
               <option key={item.name} value={item.name}>
@@ -537,28 +1022,33 @@ function StrategiesEditor({
           ) : (
             <Badge variant="secondary">{t("nfqws.activeStrategyCustom")}</Badge>
           )}
-          {selected && selected !== status.active_strategy ? (
+          {effectiveSelected && effectiveSelected !== status.active_strategy ? (
             <span className="text-muted-foreground">
-              {t("nfqws.selectedForEditing", { name: selected })}
+              {t("nfqws.selectedForEditing", { name: effectiveSelected })}
             </span>
           ) : null}
         </div>
         <CodeEditor
           className="h-[60vh] max-h-[40rem] min-h-[20rem]"
-          onChange={setContent}
-          syntax={selected.endsWith(".list") ? "list" : "nfqws"}
+          onChange={(next) =>
+            setDraftContent((current) => ({
+              ...current,
+              [effectiveSelected]: next,
+            }))
+          }
+          syntax={effectiveSelected.endsWith(".list") ? "list" : "nfqws"}
           value={content}
         />
         <div className="flex flex-wrap justify-end gap-2">
           <Button
-            disabled={!selected}
+            disabled={!effectiveSelected}
             onClick={() => void run("apply_strategy")}
           >
             <PlayIcon />
             {t("nfqws.applyStrategy")}
           </Button>
           <Button
-            disabled={!selected}
+            disabled={!effectiveSelected}
             onClick={() => void run("save_strategy")}
             variant="outline"
           >
@@ -566,7 +1056,7 @@ function StrategiesEditor({
             {t("nfqws.saveStrategy")}
           </Button>
           <Button
-            disabled={!selected}
+            disabled={!effectiveSelected}
             onClick={() => {
               if (window.confirm(t("nfqws.confirmDelete")))
                 void run("delete_strategy")
@@ -584,43 +1074,47 @@ function StrategiesEditor({
 
 function FilesEditor({
   category,
+  drafts,
   files,
+  onDraftChange,
+  onDraftRemove,
+  onSaveDrafts,
   refresh,
   readonly = false,
 }: {
   category: NfqwsFile["category"]
+  drafts: Record<string, DraftFile>
   files: NfqwsFile[]
+  onDraftChange: (draft: DraftFile) => void
+  onDraftRemove: (category: "list" | "lua", name: string) => void
+  onSaveDrafts: (restart: boolean) => Promise<void>
   refresh: () => void
   readonly?: boolean
 }) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const available = useMemo(
     () => files.filter((item) => item.category === category),
     [files, category]
   )
   const [selected, setSelected] = useState(available[0]?.name ?? "")
-  const [content, setContent] = useState("")
-  const importRef = useRef<HTMLInputElement>(null)
-  const current = available.find((item) => item.name === selected)
-  useEffect(() => {
-    const file =
-      available.find((item) => item.name === selected) ?? available[0]
-    if (file) {
-      setSelected(file.name)
-      void readFile(file).then((value) => setContent(value.content))
-    }
-  }, [selected, available.map((item) => item.name).join("|")])
-  const save = async () => {
-    if (!current) return
-    await nfqwsAction({
-      action: "save_file",
-      category,
-      name: current.name,
-      content,
-    })
-    toast.success(t("nfqws.saved"))
-    refresh()
-  }
+  const current =
+    available.find((item) => item.name === selected) ?? available[0]
+  const currentKey = current ? `${current.category}/${current.name}` : ""
+  const fileQuery = useQuery({
+    queryKey: [
+      "nfqws",
+      "file",
+      current?.category,
+      current?.name,
+      current?.size,
+    ],
+    queryFn: () => readFile(current!),
+    enabled: current !== undefined,
+  })
+  const content = drafts[currentKey]?.content ?? fileQuery.data?.content ?? ""
+  const editableCategory = category === "list" || category === "lua"
+  const draftCount = Object.keys(drafts).length
   const create = async () => {
     const stem = window.prompt(t("nfqws.fileName"))
     if (!stem) return
@@ -633,53 +1127,16 @@ function FilesEditor({
   const remove = async () => {
     if (!current || !window.confirm(t("nfqws.confirmDelete"))) return
     await nfqwsAction({ action: "delete_file", category, name: current.name })
+    if (editableCategory) onDraftRemove(category, current.name)
     setSelected("")
     refresh()
   }
   const clearLog = async () => {
     if (!current || !window.confirm(t("nfqws.confirmClearLog"))) return
     await nfqwsAction({ action: "clear_log", name: current.name })
-    setContent("")
+    await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
     toast.success(t("nfqws.logCleared"))
     refresh()
-  }
-  const exportAll = async () => {
-    const bundle: Record<string, string> = {}
-    for (const file of available)
-      bundle[file.name] = (await readFile(file)).content
-    const blob = new Blob(
-      [
-        JSON.stringify(
-          { format: "keen-pbr-sb-nfqws-lists", version: 1, files: bundle },
-          null,
-          2
-        ),
-      ],
-      { type: "application/json" }
-    )
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement("a")
-    link.href = url
-    link.download = "nfqws2-lists.json"
-    link.click()
-    URL.revokeObjectURL(url)
-  }
-  const importAll = async (file?: File) => {
-    if (!file) return
-    try {
-      const parsed = JSON.parse(await file.text())
-      if (parsed.format !== "keen-pbr-sb-nfqws-lists" || !parsed.files)
-        throw new Error(t("configTransfer.invalidFormat"))
-      await nfqwsAction({ action: "import_lists", files: parsed.files })
-      toast.success(t("nfqws.saved"))
-      refresh()
-    } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : t("configTransfer.invalidFormat")
-      )
-    }
   }
   return (
     <Card>
@@ -695,7 +1152,7 @@ function FilesEditor({
           <select
             className="h-9 min-w-60 rounded-md border bg-background px-3"
             onChange={(event) => setSelected(event.target.value)}
-            value={selected}
+            value={current?.name ?? ""}
           >
             {available.map((file) => (
               <option key={file.name}>{file.name}</option>
@@ -715,28 +1172,6 @@ function FilesEditor({
               ) : null}
             </>
           ) : null}
-          {category === "list" ? (
-            <>
-              <Button onClick={() => void exportAll()} variant="outline">
-                <DownloadIcon />
-                {t("configTransfer.export")}
-              </Button>
-              <Button
-                onClick={() => importRef.current?.click()}
-                variant="outline"
-              >
-                <UploadIcon />
-                {t("configTransfer.import")}
-              </Button>
-              <input
-                accept=".json,application/json"
-                className="hidden"
-                onChange={(event) => void importAll(event.target.files?.[0])}
-                ref={importRef}
-                type="file"
-              />
-            </>
-          ) : null}
           {category === "log" ? (
             <Button onClick={() => void clearLog()} variant="outline">
               <TrashIcon />
@@ -746,16 +1181,35 @@ function FilesEditor({
         </div>
         <CodeEditor
           className="h-[60vh] max-h-[40rem] min-h-[20rem]"
-          onChange={setContent}
+          onChange={(next) => {
+            if (current && (category === "list" || category === "lua"))
+              onDraftChange({ category, name: current.name, content: next })
+          }}
           readOnly={readonly}
           syntax={readonly ? "log" : "nfqws"}
           value={content}
         />
         {!readonly ? (
-          <div className="flex justify-end">
-            <Button disabled={!current} onClick={() => void save()}>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {draftCount > 0 ? (
+              <span className="mr-auto text-sm text-muted-foreground">
+                {t("nfqws.draftCount", { count: draftCount })}
+              </span>
+            ) : null}
+            <Button
+              disabled={draftCount === 0}
+              onClick={() => void onSaveDrafts(false)}
+              variant="outline"
+            >
               <SaveIcon />
-              {t("nfqws.save")}
+              {t("nfqws.saveDrafts")}
+            </Button>
+            <Button
+              disabled={draftCount === 0}
+              onClick={() => void onSaveDrafts(true)}
+            >
+              <RefreshCwIcon />
+              {t("nfqws.saveAndRestart")}
             </Button>
           </div>
         ) : null}
@@ -791,13 +1245,13 @@ function UrlCheck() {
           // point of the check is to say yes or no at a glance.
           <Alert
             className={
-              result ? "border-success/40 bg-success/10 text-success" : undefined
+              result
+                ? "border-success/40 bg-success/10 text-success"
+                : undefined
             }
             variant={result ? "default" : "destructive"}
           >
-            <AlertDescription
-              className={result ? "text-success" : undefined}
-            >
+            <AlertDescription className={result ? "text-success" : undefined}>
               {result ? t("nfqws.reachable") : t("nfqws.unreachable")}
             </AlertDescription>
           </Alert>

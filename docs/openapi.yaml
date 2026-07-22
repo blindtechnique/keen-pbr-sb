@@ -515,6 +515,19 @@ components:
           type: string
           description: Optional manual IPv4 /30 host address for the sing-box TUN. By default a stable unique subnet from 172.19.0.0/16 is derived from the transport tag.
           example: "10.77.0.1/30"
+        geo_mode:
+          type: string
+          enum: [disabled, auto, manual]
+          default: disabled
+          description: Controls optional country badge lookup. Auto mode explicitly permits an external GeoIP request.
+        country_code:
+          type: string
+          pattern: "^[A-Za-z]{2}$"
+          description: ISO 3166-1 alpha-2 code used in manual mode.
+        country:
+          type: string
+          maxLength: 64
+          description: Human-readable country name used in manual mode.
         vless:
           $ref: "#/components/schemas/VlessRealitySpec"
           deprecated: true

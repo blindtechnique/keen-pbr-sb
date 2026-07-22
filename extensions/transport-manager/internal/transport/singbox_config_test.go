@@ -64,6 +64,32 @@ func TestSingBoxConfigRejectsHostnameAsBootstrapDNS(t *testing.T) {
 	}
 }
 
+func TestTransportGeoModeRequiresExplicitValidManualCountry(t *testing.T) {
+	base := TransportSpec{Tag: "proxy", Type: "native", Interface: "nwg0"}
+	for _, mode := range []string{"", "disabled", "auto"} {
+		spec := base
+		spec.GeoMode = mode
+		if _, err := NewFromSpec(spec, "sing-box", t.TempDir()); err != nil {
+			t.Fatalf("geo mode %q should be valid: %v", mode, err)
+		}
+	}
+
+	invalid := base
+	invalid.GeoMode = "manual"
+	invalid.CountryCode = "DEU"
+	if _, err := NewFromSpec(invalid, "sing-box", t.TempDir()); err == nil {
+		t.Fatal("manual geo mode accepted an invalid country code")
+	}
+
+	valid := base
+	valid.GeoMode = "manual"
+	valid.CountryCode = "DE"
+	valid.Country = "Germany"
+	if _, err := NewFromSpec(valid, "sing-box", t.TempDir()); err != nil {
+		t.Fatalf("valid manual geo mode was rejected: %v", err)
+	}
+}
+
 func TestSingBoxConfigAssignsUniqueDeterministicTunAddresses(t *testing.T) {
 	address := func(tag string) string {
 		s := &SingBox{spec: TransportSpec{Tag: tag, Type: "sing-box", Interface: tag, OutboundJSON: `{"type":"direct"}`}}

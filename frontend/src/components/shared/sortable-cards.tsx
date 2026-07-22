@@ -132,7 +132,12 @@ export function SortableCards<T>({
   }
 
   return (
-    <div className="space-y-2">
+    <div
+      className={cn(
+        "space-y-2 overscroll-contain",
+        dragging !== null && "select-none"
+      )}
+    >
       {current.map((itemIndex, position) => (
         <div
           className={cn(
