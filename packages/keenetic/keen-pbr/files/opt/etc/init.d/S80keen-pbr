@@ -176,6 +176,22 @@ signal_service() {
     return 0
 }
 
+# rc.func calls pidof with PROCS. The daemon is authoritative about its PID
+# file, so use it instead of a name-only lookup that can miss an already
+# running service after an Entware restart.
+pidof() {
+    local pid
+
+    [ "$1" = "$PROCS" ] || { command pidof "$@"; return $?; }
+    [ -s "$PIDFILE" ] || return 1
+    pid=$(cat "$PIDFILE") || return 1
+    case "$pid" in
+        *[!0-9]*|'') return 1 ;;
+    esac
+    [ -d "/proc/$pid" ] || return 1
+    printf '%s\n' "$pid"
+}
+
 prepare_start() {
     check_runtime_dependencies
     disable_hwnat
