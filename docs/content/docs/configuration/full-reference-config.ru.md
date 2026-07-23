@@ -33,6 +33,10 @@ weight: 6
     // По умолчанию: (показано ниже)
     "skip_marked_packets": true,
 
+    // Очищать динамические адреса, изученные dnsmasq, при полном применении.
+    // Reconcile с сохранением наборов их не очищает.
+    "clear_dynamic_sets_on_apply": true,
+
     // Глобальное поведение strict routing для outbounds типа interface.
     // По умолчанию: (показано ниже)
     "strict_enforcement": false,

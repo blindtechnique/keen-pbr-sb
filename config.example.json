@@ -4,6 +4,7 @@
     "cache_dir": "/var/cache/keen-pbr",
     "firewall_backend": "auto",
     "skip_marked_packets": true,
+    "clear_dynamic_sets_on_apply": true,
     "ipv6_enabled": true,
     "strict_enforcement": false
   },

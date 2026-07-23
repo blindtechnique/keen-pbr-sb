@@ -59,7 +59,8 @@ public:
     return NftablesFirewall::build_delete_chain_json();
   }
 
-  static nlohmann::json build_refresh_document(bool clear_dynamic_sets) {
+  static nlohmann::json build_refresh_document(bool destructive_apply,
+                                                bool clear_dynamic_sets) {
     NftablesFirewall fw;
     fw.pending_sets_.push_back(
         NftablesFirewall::PendingSet{"kpbr4_static", "ipv4_addr", 0});
@@ -72,11 +73,17 @@ public:
     live.table_exists = true;
     live.chain_exists = true;
     live.output_chain_exists = true;
-    live.set_names = {"kpbr4_static", "kpbr4d_dynamic"};
+    live.set_names = {
+        "kpbr4_static",
+        "kpbr4d_dynamic",
+        "kpbr4s_orphan",
+        "kpbr4d_orphan",
+    };
     live.set_schemas["kpbr4_static"] = "ipv4_addr:0";
     live.set_schemas["kpbr4d_dynamic"] = "ipv4_addr:300";
     return fw.build_apply_document(
-        live, /*emit_full_table=*/false, clear_dynamic_sets);
+        live, /*emit_full_table=*/false,
+        destructive_apply, clear_dynamic_sets);
   }
 
   struct RuleDesc {
@@ -219,7 +226,8 @@ public:
 } // namespace keen_pbr3
 
 TEST_CASE("nft live refresh flushes static set but preserves dynamic entries") {
-  const auto doc = keen_pbr3::NftablesBuilderTest::build_refresh_document(false);
+  const auto doc =
+      keen_pbr3::NftablesBuilderTest::build_refresh_document(false, false);
   const std::string serialized = doc.dump();
   CHECK(serialized.find("\"flush\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4_static\"") !=
         std::string::npos);
@@ -228,9 +236,23 @@ TEST_CASE("nft live refresh flushes static set but preserves dynamic entries") {
 }
 
 TEST_CASE("nft destructive refresh also flushes dynamic entries atomically") {
-  const auto doc = keen_pbr3::NftablesBuilderTest::build_refresh_document(true);
+  const auto doc =
+      keen_pbr3::NftablesBuilderTest::build_refresh_document(true, true);
   const std::string serialized = doc.dump();
   CHECK(serialized.find("\"flush\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4d_dynamic\"") !=
+        std::string::npos);
+  CHECK(serialized.find("\"delete\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4d_orphan\"") !=
+        std::string::npos);
+}
+
+TEST_CASE("nft destructive refresh can preserve dnsmasq dynamic sets") {
+  const auto doc =
+      keen_pbr3::NftablesBuilderTest::build_refresh_document(true, false);
+  const std::string serialized = doc.dump();
+  CHECK(serialized.find("\"flush\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4d_dynamic\"") ==
+        std::string::npos);
+  CHECK(serialized.find("\"name\":\"kpbr4d_orphan\"") == std::string::npos);
+  CHECK(serialized.find("\"delete\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4s_orphan\"") !=
         std::string::npos);
 }
 

@@ -730,7 +730,9 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     }
 
     if (mode == FirewallApplyMode::Destructive) {
-        cleanup_live_impl(/*sweep_live_state=*/true);
+        cleanup_live_impl(
+            /*preserve_dynamic_sets=*/!clear_dynamic_sets_on_apply(),
+            /*sweep_live_state=*/true);
     } else {
         // Routing chains stay live until their A/B dispatcher is switched.
         // NAT chains are rebuilt separately because they do not reference the
@@ -747,10 +749,19 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
                 disabled_ipv6_sets.insert(ps.name);
                 continue;
             }
-            ipset_script += build_ipset_create_line(ps);
-            if (ps.timeout == 0) {
-                ipset_script += keen_pbr3::format("flush {}\n", ps.name);
+            if (is_dynamic_set_name(ps.name)) {
+                // dnsmasq owns these entries. Preserve-set applies never touch
+                // their contents, but still re-create a missing set so an
+                // out-of-band deletion cannot make the rule transaction fail.
+                ipset_script += build_ipset_create_line(ps);
+                if (mode == FirewallApplyMode::Destructive &&
+                    clear_dynamic_sets_on_apply()) {
+                    ipset_script += keen_pbr3::format("flush {}\n", ps.name);
+                }
+                continue;
             }
+            ipset_script += build_ipset_create_line(ps);
+            ipset_script += keen_pbr3::format("flush {}\n", ps.name);
         }
         for (auto& [set_name, buf] : pending_elements_) {
             if (disabled_ipv6_sets.find(set_name) != disabled_ipv6_sets.end()) {
@@ -937,7 +948,12 @@ void IptablesFirewall::cleanup_legacy_generation_chains(const char* command) {
     }
 }
 
-void IptablesFirewall::cleanup_saved_sets() {
+bool IptablesFirewall::is_dynamic_set_name(const std::string& set_name) {
+    return set_name.rfind("kpbr4d_", 0) == 0 ||
+           set_name.rfind("kpbr6d_", 0) == 0;
+}
+
+void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets) {
     const auto result = safe_exec_capture({"ipset", "save"}, /*suppress_stderr=*/true);
     if (result.exit_code != 0) {
         return;
@@ -960,12 +976,16 @@ void IptablesFirewall::cleanup_saved_sets() {
         if (!managed) {
             continue;
         }
+        if (preserve_dynamic_sets && is_dynamic_set_name(name)) {
+            continue;
+        }
         safe_exec({"ipset", "flush", name}, /*suppress_output=*/true);
         safe_exec({"ipset", "destroy", name}, /*suppress_output=*/true);
     }
 }
 
-void IptablesFirewall::cleanup_live_impl(bool sweep_live_state) {
+void IptablesFirewall::cleanup_live_impl(bool preserve_dynamic_sets,
+                                         bool sweep_live_state) {
     auto& log = Logger::instance();
 
     cleanup_rules_impl(sweep_live_state);
@@ -973,17 +993,20 @@ void IptablesFirewall::cleanup_live_impl(bool sweep_live_state) {
 
     // Destroy all created ipsets
     for (const auto& [name, _] : created_sets_) {
+        if (preserve_dynamic_sets && is_dynamic_set_name(name)) {
+            continue;
+        }
         log.verbose("iptables cleanup: destroying ipset {}", name);
         safe_exec({"ipset", "flush", name}, /*suppress_output=*/true);
         safe_exec({"ipset", "destroy", name}, /*suppress_output=*/true);
     }
     if (sweep_live_state) {
-        cleanup_saved_sets();
+        cleanup_saved_sets(preserve_dynamic_sets);
     }
 }
 
 void IptablesFirewall::cleanup_impl() {
-    cleanup_live_impl();
+    cleanup_live_impl(/*preserve_dynamic_sets=*/false);
 
     created_sets_.clear();
 

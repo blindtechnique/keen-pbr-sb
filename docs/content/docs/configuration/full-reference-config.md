@@ -33,6 +33,10 @@ List names, outbound tags, and DNS server tags must match `^[a-z][a-z0-9_]*$` an
     // Default: (shown below)
     "skip_marked_packets": true,
 
+    // Clear dnsmasq-learned dynamic addresses on a full config apply.
+    // Preserve-set reconciles never clear them.
+    "clear_dynamic_sets_on_apply": true,
+
     // Default strict routing behavior for interface outbounds.
     // Default: (shown below)
     "strict_enforcement": false,

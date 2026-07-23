@@ -44,6 +44,8 @@ std::vector<RuleState> apply_runtime_firewall(
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
     log_ipv6_support_decision_once(ipv6_decision);
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
+    firewall.set_clear_dynamic_sets_on_apply(
+        config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
     firewall.set_global_prefilter(build_firewall_global_prefilter(config));
     firewall.set_fwmark_mask(fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
     firewall.prepare_apply(mode);

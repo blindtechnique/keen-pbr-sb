@@ -51,6 +51,7 @@ import { toast } from "sonner"
 
 type SettingsDraft = {
   skipMarkedPackets: boolean
+  clearDynamicSetsOnApply: boolean
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
@@ -63,6 +64,7 @@ type SettingsDraft = {
 
 const fallbackDraft: SettingsDraft = {
   skipMarkedPackets: true,
+  clearDynamicSetsOnApply: true,
   ipv6Enabled: true,
   clientDnsEnforcement: false,
   inboundInterfaces: [],
@@ -75,6 +77,7 @@ const fallbackDraft: SettingsDraft = {
 
 const SETTINGS_FIELD_NAMES = {
   skipMarkedPackets: "skipMarkedPackets",
+  clearDynamicSetsOnApply: "clearDynamicSetsOnApply",
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
@@ -235,6 +238,39 @@ function LoadedGeneralConfigPage({
                     <FieldHint
                       description={t(
                         "pages.settings.general.skipMarkedPacketsHint"
+                      )}
+                    />
+                  </FieldContent>
+                </Field>
+              )}
+            </form.Field>
+
+            <FieldSeparator />
+
+            <form.Field name={SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply}>
+              {(field) => (
+                <Field>
+                  <FieldContent>
+                    <div className="flex items-center space-x-3">
+                      <Checkbox
+                        checked={field.state.value}
+                        id="clear-dynamic-sets-on-apply"
+                        onCheckedChange={(checked) =>
+                          field.handleChange(checked === true)
+                        }
+                      />
+                      <FieldLabel
+                        className="cursor-pointer flex-col items-start gap-0"
+                        htmlFor="clear-dynamic-sets-on-apply"
+                      >
+                        {t(
+                          "pages.settings.general.clearDynamicSetsOnApplyLabel"
+                        )}
+                      </FieldLabel>
+                    </div>
+                    <FieldHint
+                      description={t(
+                        "pages.settings.general.clearDynamicSetsOnApplyHint"
                       )}
                     />
                   </FieldContent>
@@ -654,6 +690,9 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
   return {
     skipMarkedPackets:
       config.daemon?.skip_marked_packets ?? fallbackDraft.skipMarkedPackets,
+    clearDynamicSetsOnApply:
+      config.daemon?.clear_dynamic_sets_on_apply ??
+      fallbackDraft.clearDynamicSetsOnApply,
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
@@ -683,6 +722,7 @@ function buildUpdatedConfig(
     daemon: {
       ...config.daemon,
       skip_marked_packets: draft.skipMarkedPackets,
+      clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
       ipv6_enabled: draft.ipv6Enabled,
     },
     route: {
@@ -763,6 +803,8 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
   switch (path) {
     case "daemon.skip_marked_packets":
       return SETTINGS_FIELD_NAMES.skipMarkedPackets
+    case "daemon.clear_dynamic_sets_on_apply":
+      return SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply
     case "daemon.ipv6_enabled":
       return SETTINGS_FIELD_NAMES.ipv6Enabled
     case "dns.client_dns_enforcement.enabled":

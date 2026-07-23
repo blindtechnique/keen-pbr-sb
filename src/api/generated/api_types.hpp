@@ -123,6 +123,7 @@ namespace api {
 
     struct Daemon {
         std::optional<std::string> cache_dir;
+        std::optional<bool> clear_dynamic_sets_on_apply;
         std::optional<DaemonConfigFirewallBackend> firewall_backend;
         std::optional<int64_t> firewall_verify_max_bytes;
         std::optional<bool> ipv6_enabled;
@@ -1013,6 +1014,7 @@ namespace api {
 
     inline void from_json(const json & j, Daemon& x) {
         x.cache_dir = get_stack_optional<std::string>(j, "cache_dir");
+        x.clear_dynamic_sets_on_apply = get_stack_optional<bool>(j, "clear_dynamic_sets_on_apply");
         x.firewall_backend = get_stack_optional<DaemonConfigFirewallBackend>(j, "firewall_backend");
         x.firewall_verify_max_bytes = get_stack_optional<int64_t>(j, "firewall_verify_max_bytes");
         x.ipv6_enabled = get_stack_optional<bool>(j, "ipv6_enabled");
@@ -1025,6 +1027,7 @@ namespace api {
     inline void to_json(json & j, const Daemon & x) {
         j = json::object();
         j["cache_dir"] = x.cache_dir;
+        j["clear_dynamic_sets_on_apply"] = x.clear_dynamic_sets_on_apply;
         j["firewall_backend"] = x.firewall_backend;
         j["firewall_verify_max_bytes"] = x.firewall_verify_max_bytes;
         j["ipv6_enabled"] = x.ipv6_enabled;

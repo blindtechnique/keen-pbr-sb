@@ -77,6 +77,7 @@ private:
     LiveTableState read_live_table_state() const;
     nlohmann::json build_apply_document(const LiveTableState& live_state,
                                         bool emit_full_table,
+                                        bool destructive_apply,
                                         bool clear_dynamic_sets);
 
     // Describes an nftables named set to be created.

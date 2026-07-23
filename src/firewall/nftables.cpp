@@ -877,6 +877,7 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
 
 nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live_state,
                                                       bool emit_full_table,
+                                                      bool destructive_apply,
                                                       bool clear_dynamic_sets) {
     nlohmann::json doc;
     auto& arr = doc["nftables"];
@@ -910,10 +911,11 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         pending_set_names.insert(ps.name);
     }
 
-    if (clear_dynamic_sets && !emit_full_table) {
+    if (destructive_apply && !emit_full_table) {
         for (const auto& live_name : live_state.set_names) {
             if (is_managed_set_name(live_name) &&
-                pending_set_names.find(live_name) == pending_set_names.end()) {
+                pending_set_names.find(live_name) == pending_set_names.end() &&
+                (clear_dynamic_sets || !is_dynamic_set_name(live_name))) {
                 arr.push_back(build_delete_set_json(live_name));
             }
         }
@@ -1001,9 +1003,12 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 void NftablesFirewall::apply(FirewallApplyMode mode) {
     const LiveTableState live_state = read_live_table_state();
     const bool emit_full_table = !live_state.table_exists;
-    const bool clear_dynamic_sets = mode == FirewallApplyMode::Destructive;
+    const bool destructive_apply = mode == FirewallApplyMode::Destructive;
+    const bool clear_dynamic_sets =
+        destructive_apply && clear_dynamic_sets_on_apply();
     nlohmann::json doc =
-        build_apply_document(live_state, emit_full_table, clear_dynamic_sets);
+        build_apply_document(
+            live_state, emit_full_table, destructive_apply, clear_dynamic_sets);
 
     std::string json_str = doc.dump();
     Logger::instance().verbose("nft json:\n{}", json_str);
@@ -1018,6 +1023,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
         cleanup_live_impl();
         doc = build_apply_document(
             LiveTableState{}, /*emit_full_table=*/true,
+            /*destructive_apply=*/false,
             /*clear_dynamic_sets=*/false);
         json_str = doc.dump();
         Logger::instance().verbose("nft recovery json:\n{}", json_str);

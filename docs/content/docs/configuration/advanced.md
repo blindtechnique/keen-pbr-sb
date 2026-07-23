@@ -16,6 +16,7 @@ Controls the PID file path, cache directory, and global routing behaviour.
 | `pid_file` | string | — | Path to write the PID file |
 | `cache_dir` | string | `/var/cache/keen-pbr` | Directory for cached list data |
 | `firewall_backend` | string | `"auto"` | Firewall backend selection: `auto`, `iptables`, or `nftables` |
+| `clear_dynamic_sets_on_apply` | boolean | `true` | Clear dnsmasq-managed dynamic sets during a full config apply or runtime restart. Preserve-set reconciles never clear them. |
 | `strict_enforcement` | boolean | tunnel-aware | Default strict routing enforcement for interface outbounds. When enabled, an unreachable default route is installed if the outbound gateway/interface cannot be confirmed reachable. Since 3.0.7-sb.5 the built-in default is `true` for tunnel-style interface outbounds without a gateway (sing-box TUN, WireGuard/AmneziaWG) and `false` for gateway-based outbounds; an explicit value here or per-outbound always wins. |
 | `max_file_size_bytes` | integer | `8388608` (8 MiB) | Maximum allowed size in bytes for downloaded remote list content |
 | `firewall_verify_max_bytes` | integer | `262144` | Maximum stdout bytes captured per firewall verification command (`0` = unlimited) |
@@ -26,6 +27,7 @@ Controls the PID file path, cache directory, and global routing behaviour.
     "pid_file": "/var/run/keen-pbr.pid",
     "cache_dir": "/var/cache/keen-pbr",
     "firewall_backend": "auto",
+    "clear_dynamic_sets_on_apply": true,
     "strict_enforcement": false,
     "max_file_size_bytes": 8388608,
     "firewall_verify_max_bytes": 262144

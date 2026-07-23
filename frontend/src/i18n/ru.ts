@@ -831,6 +831,10 @@ export const ruTranslation = {
         skipMarkedPacketsLabel: "Не обрабатывать маркированные пакеты",
         skipMarkedPacketsHint:
           "Игнорировать пакеты, у которых уже есть fwmark проставленный другими правилами firewall, чтобы policy routing не обрабатывал их повторно.",
+        clearDynamicSetsOnApplyLabel:
+          "Очищать изученные адреса доменов при полном применении",
+        clearDynamicSetsOnApplyHint:
+          "При полном применении конфигурации очищать динамические адреса, которые dnsmasq получил из DNS. Отключите, чтобы сохранить их до окончания TTL и избежать холодного старта маршрутизации.",
         ipv6EnabledLabel: "Включить поддержку IPv6",
         ipv6EnabledHint:
           "Создавать IPv6-наборы firewall и IPv6-цели dnsmasq. Отключите на старых прошивках без поддержки IPv6 netfilter.",

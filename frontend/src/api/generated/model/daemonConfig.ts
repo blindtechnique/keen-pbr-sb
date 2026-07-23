@@ -22,6 +22,9 @@ export interface DaemonConfig {
   /** Whether firewall prefilter rules should bypass packets that already carry a fwmark. Defaults to `true` when omitted or set to `null`.
    */
   skip_marked_packets?: boolean | null;
+  /** Whether a full config apply or runtime restart should clear dynamic dnsmasq-managed firewall sets. Defaults to `true` when omitted or set to `null`. Preserve-set reconciles never clear learned entries.
+   */
+  clear_dynamic_sets_on_apply?: boolean | null;
   /** Whether keen-pbr should install IPv6 firewall sets/rules and emit IPv6 resolver set targets. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
    */
   ipv6_enabled?: boolean | null;

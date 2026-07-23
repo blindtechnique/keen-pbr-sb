@@ -63,11 +63,12 @@ private:
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
-    void cleanup_live_impl(bool sweep_live_state = false);
+    void cleanup_live_impl(bool preserve_dynamic_sets = false,
+                           bool sweep_live_state = false);
     void cleanup_impl();
     void cleanup_rules_impl(bool sweep_live_state = false);
     void cleanup_nat_rules_impl(bool sweep_live_state = false);
-    void cleanup_saved_sets();
+    void cleanup_saved_sets(bool preserve_dynamic_sets);
     static void cleanup_legacy_generation_chains(const char* command);
 
     // Describes a set to be created via 'ipset restore'.
@@ -90,6 +91,7 @@ private:
 
     // Build the 'create <name> hash:net family <f> [timeout <t>]' line.
     static std::string build_ipset_create_line(const PendingSet& ps);
+    static bool is_dynamic_set_name(const std::string& set_name);
     // Build a complete iptables-restore script for the given protocol and rules.
     static std::string build_ipt_script(bool ipv6,
                                         const std::vector<PendingRule>& rules,
