@@ -47,12 +47,7 @@ export function RoutingRulesPage() {
     getRoutingRuleRowId(index)
   )
   const ruleSelection = useRowSelection(ruleRowIds)
-  const runtimeOutboundsQuery = useGetRuntimeOutbounds({
-    query: {
-      refetchInterval: 10_000,
-      refetchIntervalInBackground: false,
-    },
-  })
+  const runtimeOutboundsQuery = useGetRuntimeOutbounds()
   const runtimeOutbounds = useMemo(
     () =>
       runtimeOutboundsQuery.data?.status === 200

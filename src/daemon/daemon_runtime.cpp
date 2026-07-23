@@ -13,6 +13,7 @@
 #ifdef WITH_API
 #include "../api/handler_catalog.hpp"
 #include "../api/handler_remote_access.hpp"
+#include "../api/status_stream.hpp"
 #endif
 #include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
@@ -336,6 +337,15 @@ void Daemon::probe_interfaces_now() {
     // Probing blocks on the network, so it must not run on the event loop.
     blocking_executor_.try_post("interface-probe", [this, targets]() {
         interface_probe_.probe(targets);
+#ifdef WITH_API
+        post_control_task(
+            [this]() {
+                if (status_stream_) {
+                    status_stream_->reconcile();
+                }
+            },
+            "interface-probe-status");
+#endif
     });
 }
 

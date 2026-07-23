@@ -4,6 +4,7 @@
 #include "../util/format_compat.hpp"
 
 #include <cerrno>
+#include <ifaddrs.h>
 #include <cstring>
 #include <net/if.h>
 #include <linux/rtnetlink.h>
@@ -38,11 +39,11 @@ struct InterfaceMonitor::Impl {
             return NL_OK;
         }
 
-        impl->handle_link_message(msg);
+        impl->handle_message(msg);
         return NL_OK;
     }
 
-    void handle_link_message(struct nl_msg* msg) {
+    void handle_message(struct nl_msg* msg) {
         if (!msg || !callback) {
             return;
         }
@@ -52,7 +53,21 @@ struct InterfaceMonitor::Impl {
             return;
         }
 
-        if (hdr->nlmsg_type != RTM_NEWLINK && hdr->nlmsg_type != RTM_DELLINK) {
+        if (hdr->nlmsg_type == RTM_NEWADDR || hdr->nlmsg_type == RTM_DELADDR) {
+            auto* addr = static_cast<ifaddrmsg*>(nlmsg_data(hdr));
+            if (!addr ||
+                (addr->ifa_family != AF_INET && addr->ifa_family != AF_INET6)) {
+                return;
+            }
+            char name[IF_NAMESIZE] = {};
+            if (if_indextoname(addr->ifa_index, name) != nullptr) {
+                callback(Event{std::string(name), false, false});
+            }
+            return;
+        }
+
+        if (hdr->nlmsg_type != RTM_NEWLINK &&
+            hdr->nlmsg_type != RTM_DELLINK) {
             return;
         }
 
@@ -80,12 +95,15 @@ struct InterfaceMonitor::Impl {
         const bool is_up = (hdr->nlmsg_type == RTM_NEWLINK) && ((if_info->ifi_flags & IFF_UP) != 0);
 
         const auto previous = interface_state.find(interface_name);
-        if (previous != interface_state.end() && previous->second == is_up) {
-            return;
+        const bool administrative_state_changed =
+            hdr->nlmsg_type == RTM_NEWLINK &&
+            previous != interface_state.end() && previous->second != is_up;
+        if (hdr->nlmsg_type == RTM_DELLINK) {
+            interface_state.erase(interface_name);
+        } else {
+            interface_state[interface_name] = is_up;
         }
-
-        interface_state[interface_name] = is_up;
-        callback(interface_name, is_up);
+        callback(Event{interface_name, administrative_state_changed, is_up});
     }
 
     void close_socket() {
@@ -112,7 +130,11 @@ struct InterfaceMonitor::Impl {
                 format("Failed to connect interface monitor netlink socket: {}", nl_geterror(err)));
         }
 
-        err = nl_socket_add_memberships(socket, RTNLGRP_LINK, 0);
+        err = nl_socket_add_memberships(socket,
+                                        RTNLGRP_LINK,
+                                        RTNLGRP_IPV4_IFADDR,
+                                        RTNLGRP_IPV6_IFADDR,
+                                        0);
         if (err < 0) {
             close_socket();
             throw InterfaceMonitorError(
@@ -138,6 +160,19 @@ struct InterfaceMonitor::Impl {
                             NL_CB_CUSTOM,
                             &InterfaceMonitor::Impl::on_nl_message,
                             this);
+
+        interface_state.clear();
+        struct ifaddrs* interfaces = nullptr;
+        if (getifaddrs(&interfaces) == 0) {
+            for (auto* current = interfaces; current != nullptr;
+                 current = current->ifa_next) {
+                if (current->ifa_name != nullptr) {
+                    interface_state[current->ifa_name] =
+                        (current->ifa_flags & IFF_UP) != 0;
+                }
+            }
+            freeifaddrs(interfaces);
+        }
     }
 
     InterfaceStateCallback callback;

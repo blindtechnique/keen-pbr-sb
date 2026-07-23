@@ -191,14 +191,7 @@ export function TransportsPage() {
     naiveComponentQuery.data?.installed === false
   const error = getApiErrorMessage(query.error as ApiError | null)
   const keenConfigQuery = useGetConfig()
-  const runtimeOutboundsQuery = useGetRuntimeOutbounds({
-    query: {
-      // The latency pill doubles as a liveness indicator, so it refreshes
-      // noticeably faster than the rest of the runtime data.
-      refetchInterval: 3_000,
-      refetchIntervalInBackground: false,
-    },
-  })
+  const runtimeOutboundsQuery = useGetRuntimeOutbounds()
   const probesQuery = useQuery<ProbesResponse>({
     queryKey: ["system-probes"],
     queryFn: async () => {

@@ -83,9 +83,7 @@ export function ServicesStatusCard() {
   ).length
 
   const queryClient = useQueryClient()
-  const serviceHealthQuery = useGetHealthService({
-    query: { refetchInterval: 10_000 },
-  })
+  const serviceHealthQuery = useGetHealthService()
   const serviceRestartMutation = usePostServiceActionMutation("restart")
   const serviceStartMutation = usePostServiceActionMutation("start")
   const serviceStopMutation = usePostServiceActionMutation("stop")

@@ -295,6 +295,8 @@ if(WITH_API)
     src/api/keenetic_auth.cpp
     src/api/handlers.cpp
     src/api/sse_broadcaster.cpp
+    src/api/status_stream.cpp
+    src/api/handler_status_events.cpp
     src/api/handler_health_service.cpp
     src/api/update_version.cpp
     src/api/handler_reload.cpp
