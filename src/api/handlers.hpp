@@ -183,6 +183,7 @@ struct ApiContext {
 //   POST /api/lists/refresh   - refresh one or all URL-backed lists
 //   GET  /api/config          - return current config and draft status
 //   POST /api/config          - validate + stage config in memory
+//   POST /api/config/dependencies - analyze references before mutation
 //   POST /api/config/save     - persist staged config and apply it
 //   GET  /api/health/routing  - routing and firewall health verification
 //   GET  /api/runtime/outbounds - live outbound/interface runtime state

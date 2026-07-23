@@ -166,6 +166,34 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/config/dependencies:
+    post:
+      summary: Analyze configuration dependencies before a mutation
+      description: >
+        Computes references and cascade effects from the daemon's visible
+        configuration. The result is authoritative for previews; callers still
+        submit the actual configuration mutation separately.
+      operationId: analyzeConfigDependencies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DependencyAnalysisRequest"
+      responses:
+        "200":
+          description: Dependency analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyAnalysisResponse"
+        "400":
+          description: Invalid target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/config/save:
     post:
       summary: Apply staged config
@@ -1893,6 +1921,119 @@ components:
             Present for `POST /api/config/save`: server-authoritative Unix
             timestamp (seconds) when apply started.
           example: 1712345680
+
+    DependencyEntityKind:
+      title: DependencyEntityKind
+      type: string
+      enum: [list, outbound, dns_server]
+
+    DependencyAnalysisTargetRequest:
+      title: DependencyAnalysisTargetRequest
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          $ref: "#/components/schemas/DependencyEntityKind"
+        id:
+          type: string
+
+    DependencyTarget:
+      title: DependencyTarget
+      type: object
+      required: [kind, id, cascaded]
+      properties:
+        kind:
+          $ref: "#/components/schemas/DependencyEntityKind"
+        id:
+          type: string
+        cascaded:
+          type: boolean
+          description: True when deletion follows from another requested target.
+
+    DependencyRelation:
+      title: DependencyRelation
+      type: string
+      enum:
+        - uses_list
+        - routes_to
+        - detours_via
+        - contains_member
+        - uses_dns_server
+        - fallback_to
+
+    DependencyConsequence:
+      title: DependencyConsequence
+      type: string
+      enum: [modify, delete, disconnect]
+
+    DependencyDependentKind:
+      title: DependencyDependentKind
+      type: string
+      enum: [routing_rule, dns_rule, dns_server, outbound_group, list, dns_fallback]
+
+    DependencyReference:
+      title: DependencyReference
+      type: object
+      required:
+        - target
+        - dependent_kind
+        - dependent_id
+        - relation
+        - consequence
+        - path
+      properties:
+        target:
+          $ref: "#/components/schemas/DependencyTarget"
+        dependent_kind:
+          $ref: "#/components/schemas/DependencyDependentKind"
+        dependent_id:
+          type: string
+        relation:
+          $ref: "#/components/schemas/DependencyRelation"
+        consequence:
+          $ref: "#/components/schemas/DependencyConsequence"
+        path:
+          type: string
+          description: Stable JSON-style path inside the configuration.
+        href:
+          type: string
+          description: Optional WebUI deep link for inspecting the dependent.
+
+    DependencyAnalysisRequest:
+      title: DependencyAnalysisRequest
+      type: object
+      required: [targets]
+      properties:
+        independent:
+          type: boolean
+          default: false
+          description: >
+            Analyze every target as an independent deletion. This is intended
+            for dependency badges on inventory pages; false analyzes the whole
+            target set as one batch mutation.
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/DependencyAnalysisTargetRequest"
+
+    DependencyAnalysisResponse:
+      title: DependencyAnalysisResponse
+      type: object
+      required: [targets, references, safe_to_delete]
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencyTarget"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencyReference"
+        safe_to_delete:
+          type: boolean
+          description: True when no other configuration object is affected.
 
     ErrorResponse:
       type: object

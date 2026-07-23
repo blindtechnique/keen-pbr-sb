@@ -46,11 +46,11 @@ import { PageActionBar } from "@/components/shared/page-action-bar"
 import { StatsDisplay } from "@/components/shared/stats-display"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getApiErrorMessage } from "@/lib/api-errors"
-import { dependenciesOfList } from "@/lib/dependencies"
 import {
   buildUpdatedConfigForListsDelete,
   getListDeleteImpact,
@@ -158,15 +158,23 @@ export function ListsPage() {
     () => getTableRowsFromListMap(loadedConfig?.lists, listRefreshState, t),
     [loadedConfig?.lists, listRefreshState, t]
   )
+  const dependencyTargets = useMemo(
+    () => tableRows.map((row) => ({ kind: "list" as const, id: row.id })),
+    [tableRows]
+  )
+  const dependencyAnalysis = useConfigDependencies(
+    loadedConfig,
+    dependencyTargets
+  )
   const dependenciesByList = useMemo(
     () =>
       new Map(
         tableRows.map((row) => [
           row.id,
-          dependenciesOfList(loadedConfig, row.id),
+          dependencyAnalysis.dependenciesByTarget.get(`list:${row.id}`) ?? [],
         ])
       ),
-    [loadedConfig, tableRows]
+    [dependencyAnalysis.dependenciesByTarget, tableRows]
   )
   const listRowIds = tableRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)

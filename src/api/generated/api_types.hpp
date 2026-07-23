@@ -266,6 +266,46 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    enum class DependencyEntityKind : int { DNS_SERVER, LIST, OUTBOUND };
+
+    struct DependencyAnalysisTargetRequest {
+        std::string id;
+        DependencyEntityKind kind;
+    };
+
+    struct DependencyAnalysisRequest {
+        std::optional<bool> independent;
+        std::vector<DependencyAnalysisTargetRequest> targets;
+    };
+
+    enum class DependencyConsequence : int { DELETE, DISCONNECT, MODIFY };
+
+    enum class DependencyDependentKind : int { DNS_FALLBACK, DNS_RULE, DNS_SERVER, LIST, OUTBOUND_GROUP, ROUTING_RULE };
+
+    enum class DependencyRelation : int { CONTAINS_MEMBER, DETOURS_VIA, FALLBACK_TO, ROUTES_TO, USES_DNS_SERVER, USES_LIST };
+
+    struct DependencyTarget {
+        bool cascaded;
+        std::string id;
+        DependencyEntityKind kind;
+    };
+
+    struct DependencyReference {
+        DependencyConsequence consequence;
+        std::string dependent_id;
+        DependencyDependentKind dependent_kind;
+        std::optional<std::string> href;
+        std::string path;
+        DependencyRelation relation;
+        DependencyTarget target;
+    };
+
+    struct DependencyAnalysisResponse {
+        std::vector<DependencyReference> references;
+        bool safe_to_delete;
+        std::vector<DependencyTarget> targets;
+    };
+
     struct ValidationErrorElement {
         std::string message;
         std::optional<std::string> path;
@@ -619,6 +659,15 @@ namespace api {
         std::optional<ConfigStateResponse> config_state_response;
         std::optional<ConfigUpdateResponse> config_update_response;
         std::optional<Daemon> daemon_config;
+        std::optional<DependencyAnalysisRequest> dependency_analysis_request;
+        std::optional<DependencyAnalysisResponse> dependency_analysis_response;
+        std::optional<DependencyAnalysisTargetRequest> dependency_analysis_target_request;
+        std::optional<DependencyConsequence> dependency_consequence;
+        std::optional<DependencyDependentKind> dependency_dependent_kind;
+        std::optional<DependencyEntityKind> dependency_entity_kind;
+        std::optional<DependencyReference> dependency_reference;
+        std::optional<DependencyRelation> dependency_relation;
+        std::optional<DependencyTarget> dependency_target;
         std::optional<Dns> dns_config;
         std::optional<DnsRuleElement> dns_rule;
         std::optional<DnsServerElement> dns_server;
@@ -751,6 +800,21 @@ namespace api {
     void from_json(const json & j, ConfigUpdateResponse & x);
     void to_json(json & j, const ConfigUpdateResponse & x);
 
+    void from_json(const json & j, DependencyAnalysisTargetRequest & x);
+    void to_json(json & j, const DependencyAnalysisTargetRequest & x);
+
+    void from_json(const json & j, DependencyAnalysisRequest & x);
+    void to_json(json & j, const DependencyAnalysisRequest & x);
+
+    void from_json(const json & j, DependencyTarget & x);
+    void to_json(json & j, const DependencyTarget & x);
+
+    void from_json(const json & j, DependencyReference & x);
+    void to_json(json & j, const DependencyReference & x);
+
+    void from_json(const json & j, DependencyAnalysisResponse & x);
+    void to_json(json & j, const DependencyAnalysisResponse & x);
+
     void from_json(const json & j, ValidationErrorElement & x);
     void to_json(json & j, const ValidationErrorElement & x);
 
@@ -879,6 +943,18 @@ namespace api {
 
     void from_json(const json & j, ConfigUpdateResponseStatus & x);
     void to_json(json & j, const ConfigUpdateResponseStatus & x);
+
+    void from_json(const json & j, DependencyEntityKind & x);
+    void to_json(json & j, const DependencyEntityKind & x);
+
+    void from_json(const json & j, DependencyConsequence & x);
+    void to_json(json & j, const DependencyConsequence & x);
+
+    void from_json(const json & j, DependencyDependentKind & x);
+    void to_json(json & j, const DependencyDependentKind & x);
+
+    void from_json(const json & j, DependencyRelation & x);
+    void to_json(json & j, const DependencyRelation & x);
 
     void from_json(const json & j, LifecycleOperationStageStatus & x);
     void to_json(json & j, const LifecycleOperationStageStatus & x);
@@ -1308,6 +1384,75 @@ namespace api {
         j["apply_started_ts"] = x.apply_started_ts;
         j["message"] = x.message;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, DependencyAnalysisTargetRequest& x) {
+        x.id = j.at("id").get<std::string>();
+        x.kind = j.at("kind").get<DependencyEntityKind>();
+    }
+
+    inline void to_json(json & j, const DependencyAnalysisTargetRequest & x) {
+        j = json::object();
+        j["id"] = x.id;
+        j["kind"] = x.kind;
+    }
+
+    inline void from_json(const json & j, DependencyAnalysisRequest& x) {
+        x.independent = get_stack_optional<bool>(j, "independent");
+        x.targets = j.at("targets").get<std::vector<DependencyAnalysisTargetRequest>>();
+    }
+
+    inline void to_json(json & j, const DependencyAnalysisRequest & x) {
+        j = json::object();
+        j["independent"] = x.independent;
+        j["targets"] = x.targets;
+    }
+
+    inline void from_json(const json & j, DependencyTarget& x) {
+        x.cascaded = j.at("cascaded").get<bool>();
+        x.id = j.at("id").get<std::string>();
+        x.kind = j.at("kind").get<DependencyEntityKind>();
+    }
+
+    inline void to_json(json & j, const DependencyTarget & x) {
+        j = json::object();
+        j["cascaded"] = x.cascaded;
+        j["id"] = x.id;
+        j["kind"] = x.kind;
+    }
+
+    inline void from_json(const json & j, DependencyReference& x) {
+        x.consequence = j.at("consequence").get<DependencyConsequence>();
+        x.dependent_id = j.at("dependent_id").get<std::string>();
+        x.dependent_kind = j.at("dependent_kind").get<DependencyDependentKind>();
+        x.href = get_stack_optional<std::string>(j, "href");
+        x.path = j.at("path").get<std::string>();
+        x.relation = j.at("relation").get<DependencyRelation>();
+        x.target = j.at("target").get<DependencyTarget>();
+    }
+
+    inline void to_json(json & j, const DependencyReference & x) {
+        j = json::object();
+        j["consequence"] = x.consequence;
+        j["dependent_id"] = x.dependent_id;
+        j["dependent_kind"] = x.dependent_kind;
+        j["href"] = x.href;
+        j["path"] = x.path;
+        j["relation"] = x.relation;
+        j["target"] = x.target;
+    }
+
+    inline void from_json(const json & j, DependencyAnalysisResponse& x) {
+        x.references = j.at("references").get<std::vector<DependencyReference>>();
+        x.safe_to_delete = j.at("safe_to_delete").get<bool>();
+        x.targets = j.at("targets").get<std::vector<DependencyTarget>>();
+    }
+
+    inline void to_json(json & j, const DependencyAnalysisResponse & x) {
+        j = json::object();
+        j["references"] = x.references;
+        j["safe_to_delete"] = x.safe_to_delete;
+        j["targets"] = x.targets;
     }
 
     inline void from_json(const json & j, ValidationErrorElement& x) {
@@ -1943,6 +2088,15 @@ namespace api {
         x.config_state_response = get_stack_optional<ConfigStateResponse>(j, "ConfigStateResponse");
         x.config_update_response = get_stack_optional<ConfigUpdateResponse>(j, "ConfigUpdateResponse");
         x.daemon_config = get_stack_optional<Daemon>(j, "DaemonConfig");
+        x.dependency_analysis_request = get_stack_optional<DependencyAnalysisRequest>(j, "DependencyAnalysisRequest");
+        x.dependency_analysis_response = get_stack_optional<DependencyAnalysisResponse>(j, "DependencyAnalysisResponse");
+        x.dependency_analysis_target_request = get_stack_optional<DependencyAnalysisTargetRequest>(j, "DependencyAnalysisTargetRequest");
+        x.dependency_consequence = get_stack_optional<DependencyConsequence>(j, "DependencyConsequence");
+        x.dependency_dependent_kind = get_stack_optional<DependencyDependentKind>(j, "DependencyDependentKind");
+        x.dependency_entity_kind = get_stack_optional<DependencyEntityKind>(j, "DependencyEntityKind");
+        x.dependency_reference = get_stack_optional<DependencyReference>(j, "DependencyReference");
+        x.dependency_relation = get_stack_optional<DependencyRelation>(j, "DependencyRelation");
+        x.dependency_target = get_stack_optional<DependencyTarget>(j, "DependencyTarget");
         x.dns_config = get_stack_optional<Dns>(j, "DnsConfig");
         x.dns_rule = get_stack_optional<DnsRuleElement>(j, "DnsRule");
         x.dns_server = get_stack_optional<DnsServerElement>(j, "DnsServer");
@@ -2013,6 +2167,15 @@ namespace api {
         j["ConfigStateResponse"] = x.config_state_response;
         j["ConfigUpdateResponse"] = x.config_update_response;
         j["DaemonConfig"] = x.daemon_config;
+        j["DependencyAnalysisRequest"] = x.dependency_analysis_request;
+        j["DependencyAnalysisResponse"] = x.dependency_analysis_response;
+        j["DependencyAnalysisTargetRequest"] = x.dependency_analysis_target_request;
+        j["DependencyConsequence"] = x.dependency_consequence;
+        j["DependencyDependentKind"] = x.dependency_dependent_kind;
+        j["DependencyEntityKind"] = x.dependency_entity_kind;
+        j["DependencyReference"] = x.dependency_reference;
+        j["DependencyRelation"] = x.dependency_relation;
+        j["DependencyTarget"] = x.dependency_target;
         j["DnsConfig"] = x.dns_config;
         j["DnsRule"] = x.dns_rule;
         j["DnsServer"] = x.dns_server;
@@ -2147,6 +2310,82 @@ namespace api {
         switch (x) {
             case ConfigUpdateResponseStatus::OK: j = "ok"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"ConfigUpdateResponseStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, DependencyEntityKind & x) {
+        if (j == "dns_server") x = DependencyEntityKind::DNS_SERVER;
+        else if (j == "list") x = DependencyEntityKind::LIST;
+        else if (j == "outbound") x = DependencyEntityKind::OUTBOUND;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DependencyEntityKind\""); }
+    }
+
+    inline void to_json(json & j, const DependencyEntityKind & x) {
+        switch (x) {
+            case DependencyEntityKind::DNS_SERVER: j = "dns_server"; break;
+            case DependencyEntityKind::LIST: j = "list"; break;
+            case DependencyEntityKind::OUTBOUND: j = "outbound"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DependencyEntityKind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, DependencyConsequence & x) {
+        if (j == "delete") x = DependencyConsequence::DELETE;
+        else if (j == "disconnect") x = DependencyConsequence::DISCONNECT;
+        else if (j == "modify") x = DependencyConsequence::MODIFY;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DependencyConsequence\""); }
+    }
+
+    inline void to_json(json & j, const DependencyConsequence & x) {
+        switch (x) {
+            case DependencyConsequence::DELETE: j = "delete"; break;
+            case DependencyConsequence::DISCONNECT: j = "disconnect"; break;
+            case DependencyConsequence::MODIFY: j = "modify"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DependencyConsequence\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, DependencyDependentKind & x) {
+        if (j == "dns_fallback") x = DependencyDependentKind::DNS_FALLBACK;
+        else if (j == "dns_rule") x = DependencyDependentKind::DNS_RULE;
+        else if (j == "dns_server") x = DependencyDependentKind::DNS_SERVER;
+        else if (j == "list") x = DependencyDependentKind::LIST;
+        else if (j == "outbound_group") x = DependencyDependentKind::OUTBOUND_GROUP;
+        else if (j == "routing_rule") x = DependencyDependentKind::ROUTING_RULE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DependencyDependentKind\""); }
+    }
+
+    inline void to_json(json & j, const DependencyDependentKind & x) {
+        switch (x) {
+            case DependencyDependentKind::DNS_FALLBACK: j = "dns_fallback"; break;
+            case DependencyDependentKind::DNS_RULE: j = "dns_rule"; break;
+            case DependencyDependentKind::DNS_SERVER: j = "dns_server"; break;
+            case DependencyDependentKind::LIST: j = "list"; break;
+            case DependencyDependentKind::OUTBOUND_GROUP: j = "outbound_group"; break;
+            case DependencyDependentKind::ROUTING_RULE: j = "routing_rule"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DependencyDependentKind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, DependencyRelation & x) {
+        if (j == "contains_member") x = DependencyRelation::CONTAINS_MEMBER;
+        else if (j == "detours_via") x = DependencyRelation::DETOURS_VIA;
+        else if (j == "fallback_to") x = DependencyRelation::FALLBACK_TO;
+        else if (j == "routes_to") x = DependencyRelation::ROUTES_TO;
+        else if (j == "uses_dns_server") x = DependencyRelation::USES_DNS_SERVER;
+        else if (j == "uses_list") x = DependencyRelation::USES_LIST;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DependencyRelation\""); }
+    }
+
+    inline void to_json(json & j, const DependencyRelation & x) {
+        switch (x) {
+            case DependencyRelation::CONTAINS_MEMBER: j = "contains_member"; break;
+            case DependencyRelation::DETOURS_VIA: j = "detours_via"; break;
+            case DependencyRelation::FALLBACK_TO: j = "fallback_to"; break;
+            case DependencyRelation::ROUTES_TO: j = "routes_to"; break;
+            case DependencyRelation::USES_DNS_SERVER: j = "uses_dns_server"; break;
+            case DependencyRelation::USES_LIST: j = "uses_list"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DependencyRelation\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

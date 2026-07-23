@@ -17,10 +17,12 @@ add_executable(keen-pbr-tests
   test_http_client.cpp
   test_config_validation.cpp
   test_config_writer.cpp
+  test_dependency_analysis.cpp
   test_routing_state.cpp
   test_runtime_interface_inventory.cpp
   test_api_runtime_interfaces.cpp
   test_api_runtime_inventory.cpp
+  test_api_dependency_analysis.cpp
   test_api_status_events.cpp
   test_api_transports.cpp
   test_update_version.cpp
@@ -43,6 +45,7 @@ add_executable(keen-pbr-tests
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
   ../src/config/config_writer.cpp
+  ../src/config/dependency_analysis.cpp
   ../src/crash/crash_diagnostics.cpp
   ../src/config/routing_state.cpp
   ../src/firewall/iptables_verifier.cpp
@@ -171,6 +174,7 @@ if(WITH_API)
     ../src/api/handler_status_events.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
+    ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
     ../src/health/runtime_interface_inventory.cpp

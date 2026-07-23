@@ -1,5 +1,4 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import { getOutboundDeleteImpact } from "@/pages/outbounds-utils"
 
 export type DependencyKind =
   | "routingRule"
@@ -94,87 +93,6 @@ export function findBrokenReferences(
     }
   }
   return [...found.values()]
-}
-
-/**
- * Кто пострадает, если это удалить.
- *
- * Связи в конфигурации существуют давно, но человек узнавал о них в момент
- * удаления — из диалога, который перечислял последствия постфактум. Здесь то
- * же знание считается заранее, чтобы показать его рядом с записью: удаление
- * не должно быть способом выяснить, что от чего зависит.
- *
- * Считается по конфигурации, которая и так лежит на клиенте: ни запросов, ни
- * нового состояния.
- */
-export function dependenciesOfList(
-  config: ConfigObject | undefined,
-  listName: string
-): Dependency[] {
-  if (!config) return []
-  const found: Dependency[] = []
-
-  ;(config.route?.rules ?? []).forEach((rule, index) => {
-    if (rule.list?.includes(listName)) {
-      found.push({
-        kind: "routingRule",
-        label: `#${index + 1} → ${rule.outbound}`,
-        href: `/routing-rules/${index}/edit`,
-      })
-    }
-  })
-  ;(config.dns?.rules ?? []).forEach((rule, index) => {
-    if (rule.list?.includes(listName)) {
-      found.push({
-        kind: "dnsRule",
-        label: `#${index + 1} → ${rule.server}`,
-        href: `/dns-rules/${index}/edit`,
-      })
-    }
-  })
-
-  return found
-}
-
-export function dependenciesOfOutbound(
-  config: ConfigObject | undefined,
-  tag: string
-): Dependency[] {
-  if (!config) return []
-  const found: Dependency[] = []
-  const impact = getOutboundDeleteImpact(config, [tag])
-
-  impact.routeRuleIndexes.forEach((index) => {
-    const rule = config.route?.rules?.[index]
-    found.push({
-      kind: "routingRule",
-      label:
-        rule?.list && rule.list.length > 0
-          ? `#${index + 1}: ${rule.list.join(", ")}`
-          : `#${index + 1}`,
-      href: `/routing-rules/${index}/edit`,
-    })
-  })
-
-  // Группа резервирования, у которой это единственный участник, исчезнет
-  // вместе с ним — про такое важно знать до, а не после.
-  for (const membership of impact.urltestMemberships) {
-    found.push({
-      kind: "failoverGroup",
-      label: membership.outboundTag,
-      href: `/outbounds/${membership.outboundTag}/edit`,
-    })
-  }
-
-  for (const serverTag of impact.dnsServerDetours) {
-    found.push({
-      kind: "dnsServer",
-      label: serverTag,
-      href: `/dns-servers/${encodeURIComponent(serverTag)}/edit`,
-    })
-  }
-
-  return found
 }
 
 /** Списки, которые перестанут куда-либо направляться вместе с соединением. */

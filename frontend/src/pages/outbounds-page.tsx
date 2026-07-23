@@ -29,10 +29,8 @@ import { ConfigTransferButtons } from "@/components/shared/config-transfer-butto
 import { OutboundCard } from "@/components/outbounds/outbound-card"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
-import {
-  dependenciesOfOutbound,
-  findBrokenReferences,
-} from "@/lib/dependencies"
+import { useConfigDependencies } from "@/hooks/use-config-dependencies"
+import { findBrokenReferences } from "@/lib/dependencies"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
@@ -116,15 +114,28 @@ export function OutboundsPage() {
       ),
     [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, t]
   )
+  const dependencyTargets = useMemo(
+    () =>
+      outboundItems.map((item) => ({
+        kind: "outbound" as const,
+        id: item.id,
+      })),
+    [outboundItems]
+  )
+  const dependencyAnalysis = useConfigDependencies(
+    loadedConfig,
+    dependencyTargets
+  )
   const dependenciesByTag = useMemo(
     () =>
       new Map(
         outboundItems.map((item) => [
           item.id,
-          dependenciesOfOutbound(loadedConfig, item.id),
+          dependencyAnalysis.dependenciesByTarget.get(`outbound:${item.id}`) ??
+            [],
         ])
       ),
-    [loadedConfig, outboundItems]
+    [dependencyAnalysis.dependenciesByTarget, outboundItems]
   )
   const brokenReferences = useMemo(
     () => findBrokenReferences(loadedConfig),

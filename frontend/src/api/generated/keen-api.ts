@@ -28,6 +28,8 @@ import type {
   ConfigObject,
   ConfigStateResponse,
   ConfigUpdateResponse,
+  DependencyAnalysisRequest,
+  DependencyAnalysisResponse,
   ErrorResponse,
   HealthResponse,
   ListRefreshRequest,
@@ -737,6 +739,98 @@ export const usePostConfig = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostConfigMutationOptions(options), queryClient);
+    }
+
+/**
+ * Computes references and cascade effects from the daemon's visible configuration. The result is authoritative for previews; callers still submit the actual configuration mutation separately.
+
+ * @summary Analyze configuration dependencies before a mutation
+ */
+export type analyzeConfigDependenciesResponse200 = {
+  data: DependencyAnalysisResponse
+  status: 200
+}
+
+export type analyzeConfigDependenciesResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type analyzeConfigDependenciesResponseSuccess = (analyzeConfigDependenciesResponse200) & {
+  headers: Headers;
+};
+export type analyzeConfigDependenciesResponseError = (analyzeConfigDependenciesResponse400) & {
+  headers: Headers;
+};
+
+export type analyzeConfigDependenciesResponse = (analyzeConfigDependenciesResponseSuccess | analyzeConfigDependenciesResponseError)
+
+export const getAnalyzeConfigDependenciesUrl = () => {
+
+
+
+
+  return `/api/config/dependencies`
+}
+
+export const analyzeConfigDependencies = async (dependencyAnalysisRequest: DependencyAnalysisRequest, options?: RequestInit): Promise<analyzeConfigDependenciesResponse> => {
+
+  return apiFetch<analyzeConfigDependenciesResponse>(getAnalyzeConfigDependenciesUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      dependencyAnalysisRequest,)
+  }
+);}
+
+
+
+
+export const getAnalyzeConfigDependenciesMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeConfigDependencies>>, TError,{data: DependencyAnalysisRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof analyzeConfigDependencies>>, TError,{data: DependencyAnalysisRequest}, TContext> => {
+
+const mutationKey = ['analyzeConfigDependencies'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof analyzeConfigDependencies>>, {data: DependencyAnalysisRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  analyzeConfigDependencies(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AnalyzeConfigDependenciesMutationResult = NonNullable<Awaited<ReturnType<typeof analyzeConfigDependencies>>>
+    export type AnalyzeConfigDependenciesMutationBody = DependencyAnalysisRequest
+    export type AnalyzeConfigDependenciesMutationError = ErrorResponse
+
+    /**
+ * @summary Analyze configuration dependencies before a mutation
+ */
+export const useAnalyzeConfigDependencies = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeConfigDependencies>>, TError,{data: DependencyAnalysisRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof analyzeConfigDependencies>>,
+        TError,
+        {data: DependencyAnalysisRequest},
+        TContext
+      > => {
+      return useMutation(getAnalyzeConfigDependenciesMutationOptions(options), queryClient);
     }
 
 /**
