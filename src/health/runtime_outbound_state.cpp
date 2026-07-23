@@ -6,6 +6,7 @@
 #include "../health/circuit_breaker.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <netinet/in.h>
 #include <limits>
 #include <map>
@@ -89,6 +90,16 @@ const DumpedRoute* find_primary_default_route(const std::vector<DumpedRoute>& ro
     }
 
     return primary;
+}
+
+std::vector<DumpedRoute> routes_for_table(const std::vector<DumpedRoute>& routes,
+                                          uint32_t table_id) {
+    std::vector<DumpedRoute> result;
+    std::copy_if(routes.begin(), routes.end(), std::back_inserter(result),
+                 [table_id](const DumpedRoute& route) {
+                     return route.table == table_id;
+                 });
+    return result;
 }
 
 bool route_matches_outbound(const DumpedRoute& route, const Outbound& outbound) {
@@ -232,7 +243,8 @@ std::optional<uint32_t> outbound_table_id(const Config& config,
 api::RuntimeOutboundStateElement build_interface_outbound_state(
     const Config& config,
     const Outbound& outbound,
-    NetlinkManager& netlink,
+    const std::vector<DumpedRoute>& all_routes,
+    const std::vector<DumpedRoute>& main_table_routes,
     const InterfaceProbeLookupFn& interface_probe_lookup) {
     api::RuntimeOutboundStateElement state;
     state.tag = outbound.tag;
@@ -241,14 +253,15 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
     const auto table_id = outbound_table_id(config, config.outbounds.value_or(std::vector<Outbound>{}), outbound.tag);
     std::vector<DumpedRoute> routes;
     if (table_id.has_value()) {
-        routes = netlink.dump_routes_in_table(*table_id);
+        routes = routes_for_table(all_routes, *table_id);
     }
     const DumpedRoute* primary_route = find_primary_default_route(routes);
 
     api::RuntimeInterfaceState interface_state;
     interface_state.outbound_tag = outbound.tag;
     interface_state.interface_name = outbound.interface;
-    const bool reachable = is_interface_outbound_reachable(outbound, netlink);
+    const bool reachable =
+        is_interface_outbound_reachable(outbound, main_table_routes);
     const bool active = primary_route != nullptr && route_matches_outbound(*primary_route, outbound);
     bool probe_succeeded = false;
 
@@ -288,7 +301,7 @@ api::RuntimeOutboundStateElement build_interface_outbound_state(
 
 api::RuntimeOutboundStateElement build_table_outbound_state(const Config& config,
                                                             const Outbound& outbound,
-                                                            NetlinkManager& netlink) {
+                                                            const std::vector<DumpedRoute>& all_routes) {
     api::RuntimeOutboundStateElement state;
     state.tag = outbound.tag;
     state.type = outbound.type;
@@ -296,7 +309,7 @@ api::RuntimeOutboundStateElement build_table_outbound_state(const Config& config
     const auto table_id = outbound_table_id(config, config.outbounds.value_or(std::vector<Outbound>{}), outbound.tag);
     std::vector<DumpedRoute> routes;
     if (table_id.has_value()) {
-        routes = netlink.dump_routes_in_table(*table_id);
+        routes = routes_for_table(all_routes, *table_id);
     }
     const DumpedRoute* primary_route = find_primary_default_route(routes);
 
@@ -308,7 +321,8 @@ api::RuntimeOutboundStateElement build_table_outbound_state(const Config& config
 
 api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& config,
                                                               const Outbound& outbound,
-                                                              NetlinkManager& netlink,
+                                                              const std::vector<DumpedRoute>& all_routes,
+                                                              const std::vector<DumpedRoute>& main_table_routes,
                                                               const UrltestStateLookupFn& urltest_state_lookup,
                                                               const InterfaceProbeLookupFn& interface_probe_lookup) {
     api::RuntimeOutboundStateElement state;
@@ -321,7 +335,7 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
 
     std::vector<DumpedRoute> routes;
     if (table_id.has_value()) {
-        routes = netlink.dump_routes_in_table(*table_id);
+        routes = routes_for_table(all_routes, *table_id);
     }
     const DumpedRoute* primary_route = find_primary_default_route(routes);
 
@@ -350,7 +364,7 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
         interface_state.interface_name = child->interface;
         const bool reachable =
             child->type == OutboundType::INTERFACE
-                ? is_interface_outbound_reachable(*child, netlink)
+                ? is_interface_outbound_reachable(*child, main_table_routes)
                 : false;
         const bool is_active = !live_active_child_tag.empty() && live_active_child_tag == child->tag;
         interface_state.status = map_urltest_child_status(*child, reachable, is_active, urltest_state);
@@ -408,21 +422,25 @@ api::RuntimeOutboundsResponse build_runtime_outbounds_response(
     const InterfaceProbeLookupFn& interface_probe_lookup) {
     api::RuntimeOutboundsResponse response;
     const auto outbounds = config.outbounds.value_or(std::vector<Outbound>{});
+    const auto all_routes = netlink.dump_routes();
+    const auto main_table_routes = routes_for_table(all_routes, 254);
     response.outbounds.reserve(outbounds.size());
 
     for (const auto& outbound : outbounds) {
         switch (outbound.type) {
             case OutboundType::INTERFACE:
                 response.outbounds.push_back(build_interface_outbound_state(
-                    config, outbound, netlink, interface_probe_lookup));
+                    config, outbound, all_routes, main_table_routes,
+                    interface_probe_lookup));
                 break;
             case OutboundType::TABLE:
                 response.outbounds.push_back(
-                    build_table_outbound_state(config, outbound, netlink));
+                    build_table_outbound_state(config, outbound, all_routes));
                 break;
             case OutboundType::URLTEST:
                 response.outbounds.push_back(
-                    build_urltest_outbound_state(config, outbound, netlink,
+                    build_urltest_outbound_state(config, outbound,
+                                                 all_routes, main_table_routes,
                                                  urltest_state_lookup,
                                                  interface_probe_lookup));
                 break;

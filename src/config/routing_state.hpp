@@ -39,6 +39,9 @@ void populate_routing_state(const Config& cfg,
                             bool ipv6_enabled = true);
 
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink);
+bool is_interface_outbound_reachable(
+    const Outbound& outbound,
+    const std::vector<DumpedRoute>& main_table_routes);
 
 // Build the global firewall prefilter derived from route-level config.
 // Missing or empty inbound_interfaces leaves interface restriction disabled.

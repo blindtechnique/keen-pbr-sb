@@ -11,6 +11,15 @@
 
 namespace keen_pbr3 {
 
+namespace netlink_detail {
+
+// libnl reports removal of an object that the kernel already discarded as an
+// error. Route deletion is idempotent, so these codes mean the requested
+// postcondition has already been reached.
+bool route_delete_target_absent(int error_code) noexcept;
+
+} // namespace netlink_detail
+
 class NetlinkError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -106,6 +115,7 @@ public:
 
     // Dump all routes in a specific routing table from the kernel.
     // family: 0 (AF_UNSPEC) to get both IPv4 and IPv6 routes.
+    std::vector<DumpedRoute> dump_routes(int family = 0);
     std::vector<DumpedRoute> dump_routes_in_table(uint32_t table_id,
                                                    int family = 0);
 

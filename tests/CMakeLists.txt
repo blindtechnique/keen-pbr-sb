@@ -28,6 +28,7 @@ add_executable(keen-pbr-tests
   test_system_resolver_hook.cpp
   test_system_info.cpp
   test_network_routes.cpp
+  test_netlink_errors.cpp
   test_nfqws_config.cpp
   test_safe_exec.cpp
   test_trace_logging.cpp
