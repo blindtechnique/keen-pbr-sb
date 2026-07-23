@@ -77,19 +77,12 @@ write_state installer 30 "Установщик загружен" null true
 
 write_state installing 40 "Устанавливаю пакет keen-pbr-sb" null true
 /bin/sh "$INSTALLER" --update
-write_state installed 85 "Пакет установлен, переподключаю DNS" null true
+write_state installed 90 "Пакет установлен, службы перезапущены" null true
 
-# opkg restarts keen-pbr through the package scripts, but dnsmasq only picks up
-# our conf-script on a real restart. Doing it explicitly here - and checking the
-# result - keeps an update from leaving the resolver on the previous config,
-# which silently disables domain-based routing until the router is rebooted.
-printf '[%s] Переподключаю конфигурацию dnsmasq\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-if /opt/usr/lib/keen-pbr/dnsmasq.sh activate; then
-    printf '[%s] dnsmasq перечитал конфигурацию\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-else
-    printf '[%s] ПРЕДУПРЕЖДЕНИЕ: dnsmasq не удалось перезапустить. Доменная маршрутизация будет работать только после перезагрузки роутера.\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')"
-fi
+# postinst starts keen-pbr through S80keen-pbr. That init script activates the
+# managed resolver entry and performs the required dnsmasq restart. Repeating
+# the activation here caused a second DNS interruption and opened a race with
+# the freshly started daemon.
 
 printf '[%s] Обновление завершено успешно\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 finished=1

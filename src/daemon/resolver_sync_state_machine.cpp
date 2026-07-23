@@ -11,14 +11,6 @@ bool within_converging_window(std::optional<std::int64_t> apply_started_ts,
                ResolverSyncStateMachine::kConvergingWindowSeconds;
 }
 
-bool actual_is_current(const ResolverSyncSnapshot& snapshot) {
-    if (!snapshot.apply_started_ts.has_value()) {
-        return snapshot.probe_status == api::ResolverConfigProbeStatus::SUCCESS;
-    }
-    return snapshot.actual_ts.has_value() &&
-           *snapshot.actual_ts >= *snapshot.apply_started_ts;
-}
-
 } // namespace
 
 api::ResolverConfigProbeStatus resolver_probe_status_from_hash_probe_status(
@@ -125,7 +117,7 @@ ResolverSyncSnapshot ResolverSyncStateMachine::snapshot(std::int64_t now_ts) con
          probe_status_ == api::ResolverConfigProbeStatus::QUERY_FAILED ||
          probe_status_ == api::ResolverConfigProbeStatus::MISSING_TXT ||
          probe_status_ == api::ResolverConfigProbeStatus::INVALID_TXT ||
-         (actual_ts_.has_value() && apply_started_ts_.has_value() &&
+         (expected_hash_ != actual_hash_ && actual_ts_.has_value() && apply_started_ts_.has_value() &&
           *actual_ts_ < *apply_started_ts_));
 
     if (converging) {
@@ -142,7 +134,9 @@ ResolverSyncSnapshot ResolverSyncStateMachine::snapshot(std::int64_t now_ts) con
     }
 
     if (probe_status_ == api::ResolverConfigProbeStatus::SUCCESS) {
-        result.sync_state = (actual_is_current(result) && expected_hash_ == actual_hash_)
+        // A non-DNS apply deliberately leaves dnsmasq untouched. An older TXT
+        // timestamp is therefore valid when its hash already matches.
+        result.sync_state = expected_hash_ == actual_hash_
             ? api::ResolverConfigSyncState::CONVERGED
             : api::ResolverConfigSyncState::STALE;
         result.live_status = api::ResolverLiveStatus::HEALTHY;
