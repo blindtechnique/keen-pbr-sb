@@ -17,14 +17,14 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -40,11 +40,44 @@ jobs:
           bun run build
 
       - name: Upload frontend bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist
           if-no-files-found: error
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libnl-3-dev \
+            libnl-route-3-dev \
+            libunwind-dev \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Configure backend tests
+        run: |
+          cmake -S . -B build-ci \
+            -DBUILD_TESTS=ON \
+            -DWITH_API=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build backend tests
+        # The cross-build job compiles the production binary with Keenetic's
+        # GCC 8.4. Building only the native test target here avoids compiling
+        # the same source set twice on the GitHub runner.
+        run: cmake --build build-ci --target keen-pbr-tests --parallel 4
+
+      - name: Run backend tests
+        run: ./build-ci/tests/keen-pbr-tests
 
   build:
     needs:
@@ -59,10 +92,10 @@ jobs:
       KEENETIC_VERSION: "3.10"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend-dist
@@ -74,10 +107,12 @@ jobs:
           cp -a frontend-dist/. frontend/dist/
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.22"
-          cache-dependency-path: extensions/transport-manager/go.sum
+          # This module currently uses only the Go standard library, so there
+          # is no go.sum to cache.
+          cache: false
 
       - name: Build ${{ matrix.config }} IPK
         env:
@@ -101,7 +136,7 @@ jobs:
           python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" --arch "${{ matrix.arch }}"
 
       - name: Upload ${{ matrix.config }} IPK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keenetic-ipk-${{ matrix.config }}
           path: keen-pbr_*.ipk
@@ -111,13 +146,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.22"
-          cache-dependency-path: extensions/transport-manager/go.sum
+          cache: false
 
       - name: Test transport manager
         working-directory: extensions/transport-manager
@@ -129,16 +164,20 @@ jobs:
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
-    needs: build
+    needs:
+      - build
+      - backend
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all Keenetic IPKs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: keenetic-ipk-*
           path: release-assets
@@ -187,11 +226,13 @@ jobs:
 
   upload-next-artifact:
     if: github.ref == 'refs/heads/next'
-    needs: build
+    needs:
+      - build
+      - backend
     runs-on: ubuntu-latest
     steps:
       - name: Download aarch64 test IPK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: keenetic-ipk-aarch64-3.10
           path: release-assets
@@ -202,7 +243,7 @@ jobs:
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keen-pbr-ipk
           path: |
@@ -212,11 +253,13 @@ jobs:
 
   upload-alpha-artifact:
     if: github.ref == 'refs/heads/alpha'
-    needs: build
+    needs:
+      - build
+      - backend
     runs-on: ubuntu-latest
     steps:
       - name: Download aarch64 alpha IPK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: keenetic-ipk-aarch64-3.10
           path: release-assets
@@ -227,7 +270,7 @@ jobs:
           sha256sum keen-pbr_*.ipk > SHA256SUMS
 
       - name: Upload alpha workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: keen-pbr-alpha-ipk
           path: |

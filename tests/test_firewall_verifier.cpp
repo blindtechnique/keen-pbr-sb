@@ -1025,7 +1025,7 @@ TEST_CASE("safe_exec_capture: max_bytes overflow sets truncated") {
                                           /*suppress_stderr=*/true,
                                           /*max_bytes=*/64);
     CHECK(result.truncated);
-    CHECK(result.stdout_output.size() > 64);
+    CHECK(result.stdout_output.size() == 64);
 }
 
 TEST_CASE("safe_exec_capture: nonzero exit code is preserved") {

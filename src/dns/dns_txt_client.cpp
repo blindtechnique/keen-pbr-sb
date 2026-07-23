@@ -509,11 +509,19 @@ ResolverConfigHashProbeResult query_resolver_config_hash_txt(
     int attempts,
     std::chrono::milliseconds retry_delay) {
     ResolverConfigHashProbeResult result;
+    std::optional<ResolverConfigHashProbeResult> last_negative_response;
 
     for (int attempt = 1; attempt <= std::max(1, attempts); ++attempt) {
         result = query_resolver_config_hash_txt_once(dns_server_address, domain, timeout);
         if (!is_transient_probe_status(result.status)) {
             return result;
+        }
+        // A syntactically valid DNS response without a usable TXT record is
+        // stronger evidence than a later dropped datagram. Keep retrying in
+        // case dnsmasq is mid-reload, but do not replace the valid negative
+        // response with QUERY_FAILED merely because a retry timed out.
+        if (result.status == ResolverConfigHashProbeStatus::NO_USABLE_TXT) {
+            last_negative_response = result;
         }
         if (attempt < attempts) {
             Logger::instance().trace("resolver_hash_probe_retry",
@@ -525,7 +533,7 @@ ResolverConfigHashProbeResult query_resolver_config_hash_txt(
         }
     }
 
-    return result;
+    return last_negative_response.value_or(result);
 }
 
 } // namespace keen_pbr3

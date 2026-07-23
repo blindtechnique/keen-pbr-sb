@@ -264,6 +264,11 @@ TEST_CASE("wait_for_child_with_timeout: kills a child that overstays") {
   const pid_t pid = fork();
   REQUIRE(pid >= 0);
   if (pid == 0) {
+    // Doctest installs a SIGTERM handler in the parent process. The child is
+    // deliberately terminated by the function under test, so restore the
+    // normal disposition to avoid reporting that expected termination as a
+    // nested doctest crash.
+    signal(SIGTERM, SIG_DFL);
     pause();
     _exit(0);
   }
