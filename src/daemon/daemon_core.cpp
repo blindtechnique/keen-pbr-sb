@@ -27,6 +27,7 @@
 #include "../api/server.hpp"
 #include "../api/sse_broadcaster.hpp"
 #include "../api/status_stream.hpp"
+#include "../connections/conntrack_event_monitor.hpp"
 #endif
 
 namespace keen_pbr3 {
@@ -430,6 +431,7 @@ bool Daemon::is_interface_outbound_in_use(const std::string& interface_name) con
 void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     auto& log = Logger::instance();
 #ifdef WITH_API
+    teardown_conntrack_events();
     if (status_stream_) {
         status_stream_->reconcile();
     }

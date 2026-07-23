@@ -64,8 +64,14 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
             nlohmann::json{{"service", snapshot.service},
                            {"outbounds", snapshot.outbounds},
                            {"interfaces", snapshot.interfaces}});
-        subscription = broadcaster_.subscribe(
-            {make_named_sse_frame("snapshot", payload)});
+        std::vector<std::string> initial_frames{
+            make_named_sse_frame("snapshot", payload)};
+        if (connections_initialized_) {
+            initial_frames.push_back(make_named_sse_frame(
+                "connections",
+                make_event_payload("connections", connections_state_)));
+        }
+        subscription = broadcaster_.subscribe(std::move(initial_frames));
     }
 
     // Never publish while holding StatusStream::mutex_: a slow subscriber
@@ -118,6 +124,22 @@ void StatusStream::reconcile() {
     for (const auto& frame : frames) {
         broadcaster_.publish(frame);
     }
+}
+
+void StatusStream::publish_connections(api::ConnectionEventState state) {
+    std::string frame;
+    {
+        KPBR_LOCK_GUARD(mutex_);
+        const auto serialized = serialize(state);
+        if (connections_initialized_ && serialized == connections_) return;
+        connections_state_ = std::move(state);
+        connections_ = serialized;
+        connections_initialized_ = true;
+        frame = make_named_sse_frame(
+            "connections",
+            make_event_payload("connections", connections_state_));
+    }
+    broadcaster_.publish(frame);
 }
 
 void StatusStream::close_all() {

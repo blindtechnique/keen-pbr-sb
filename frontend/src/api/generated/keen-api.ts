@@ -1580,7 +1580,7 @@ export const useQueryConnections = <TError = ErrorResponse,
     }
 
 /**
- * Streams named Server-Sent Events for service health, runtime outbounds, and system interfaces. Every connection receives a snapshot first. Later events contain the complete dataset that changed. Heartbeat comments are sent every 15 seconds; reconnecting starts with a fresh snapshot and no event replay is performed.
+ * Streams named Server-Sent Events for service health, runtime outbounds, system interfaces, and conntrack change notifications. Every connection receives a runtime snapshot first, followed by the current conntrack event-source state when available. Later events contain the complete dataset that changed or a revision which invalidates connection pages. Heartbeat comments are sent every 15 seconds; reconnecting starts with fresh state and no event replay is performed.
 
  * @summary Stream live WebUI status
  */

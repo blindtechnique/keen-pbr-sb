@@ -98,4 +98,30 @@ TEST_CASE("status stream closes slow and shutdown subscribers") {
     }
 }
 
+TEST_CASE("status stream replays and publishes conntrack revisions") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+
+    api::ConnectionEventState initial;
+    initial.revision = 0;
+    initial.changed_at = 0;
+    initial.available = true;
+    stream.publish_connections(initial);
+
+    auto subscription = stream.subscribe();
+    CHECK(pop(subscription).rfind("event: snapshot\n", 0) == 0);
+    CHECK(pop(subscription).rfind("event: connections\n", 0) == 0);
+
+    auto changed = initial;
+    changed.revision = 3;
+    changed.changed_at = 100;
+    stream.publish_connections(changed);
+    const auto frame = pop(subscription);
+    CHECK(frame.rfind("event: connections\n", 0) == 0);
+    CHECK(frame.find("\"revision\":3") != std::string::npos);
+
+    stream.publish_connections(changed);
+    CHECK(queued(subscription) == 0);
+}
+
 #endif

@@ -78,4 +78,24 @@ describe("status event cache bridge", () => {
     )
     expect(applyStatusEvent(client, "not json")).toBe(false)
   })
+
+  test("connection revisions invalidate only connection queries", () => {
+    const client = new QueryClient()
+    const connectionKey = ["connections", "active", ""]
+    const unrelatedKey = ["catalog"]
+    client.setQueryData(connectionKey, { pages: [] })
+    client.setQueryData(unrelatedKey, { items: [] })
+
+    expect(
+      applyStatusEvent(
+        client,
+        JSON.stringify({
+          type: "connections",
+          data: { revision: 42, changed_at: 1234, available: true },
+        })
+      )
+    ).toBe(true)
+    expect(client.getQueryState(connectionKey)?.isInvalidated).toBe(true)
+    expect(client.getQueryState(unrelatedKey)?.isInvalidated).toBe(false)
+  })
 })

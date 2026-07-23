@@ -9,6 +9,7 @@ const STATUS_EVENT_NAMES = [
   "service",
   "outbounds",
   "interfaces",
+  "connections",
 ] as const
 
 export function StatusEventBridge() {

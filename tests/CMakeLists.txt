@@ -24,6 +24,7 @@ add_executable(keen-pbr-tests
   test_api_runtime_inventory.cpp
   test_api_dependency_analysis.cpp
   test_connection_query.cpp
+  test_conntrack_event_monitor.cpp
   test_api_status_events.cpp
   test_api_transports.cpp
   test_update_version.cpp
@@ -69,6 +70,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/system_resolver_hook.cpp
   ../src/dns/dns_probe_server.cpp
   ../src/cache/cache_manager.cpp
+  ../src/connections/conntrack_event_monitor.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_streamer.cpp

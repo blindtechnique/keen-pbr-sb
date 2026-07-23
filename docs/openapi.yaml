@@ -365,10 +365,12 @@ paths:
       summary: Stream live WebUI status
       description: >
         Streams named Server-Sent Events for service health, runtime outbounds,
-        and system interfaces. Every connection receives a snapshot first.
-        Later events contain the complete dataset that changed. Heartbeat
-        comments are sent every 15 seconds; reconnecting starts with a fresh
-        snapshot and no event replay is performed.
+        system interfaces, and conntrack change notifications. Every connection
+        receives a runtime snapshot first, followed by the current conntrack
+        event-source state when available. Later events contain the complete
+        dataset that changed or a revision which invalidates connection pages.
+        Heartbeat comments are sent every 15 seconds; reconnecting starts with
+        fresh state and no event replay is performed.
       operationId: getStatusEvents
       responses:
         "200":
@@ -568,6 +570,32 @@ components:
           enum: [interfaces]
         data:
           $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+    ConnectionEventState:
+      type: object
+      required: [revision, changed_at, available]
+      properties:
+        revision:
+          type: integer
+          format: int64
+          description: Monotonic conntrack event revision for this daemon process.
+        changed_at:
+          type: integer
+          format: int64
+          description: Unix timestamp of the latest coalesced kernel event.
+        available:
+          type: boolean
+          description: Whether kernel conntrack multicast events are available.
+
+    StatusEventConnections:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [connections]
+        data:
+          $ref: "#/components/schemas/ConnectionEventState"
 
     TransportStatus:
       type: object

@@ -266,6 +266,12 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    struct ConnectionEventState {
+        bool available;
+        int64_t changed_at;
+        int64_t revision;
+    };
+
     struct ConnectionRecord {
         bool active;
         std::string destination;
@@ -577,6 +583,13 @@ namespace api {
         HealthResponse service;
     };
 
+    enum class StatusEventConnectionsType : int { CONNECTIONS };
+
+    struct StatusEventConnections {
+        ConnectionEventState data;
+        StatusEventConnectionsType type;
+    };
+
     enum class StatusEventInterfacesType : int { INTERFACES };
 
     struct StatusEventInterfaces {
@@ -698,6 +711,7 @@ namespace api {
         std::optional<ConfigObject> config_object;
         std::optional<ConfigStateResponse> config_state_response;
         std::optional<ConfigUpdateResponse> config_update_response;
+        std::optional<ConnectionEventState> connection_event_state;
         std::optional<ConnectionPage> connection_page;
         std::optional<ConnectionQueryRequest> connection_query_request;
         std::optional<ConnectionRecord> connection_record;
@@ -758,6 +772,7 @@ namespace api {
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
         std::optional<SortOrder> sort_order;
+        std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
         std::optional<StatusEventOutbounds> status_event_outbounds;
         std::optional<StatusEventService> status_event_service;
@@ -844,6 +859,9 @@ namespace api {
 
     void from_json(const json & j, ConfigUpdateResponse & x);
     void to_json(json & j, const ConfigUpdateResponse & x);
+
+    void from_json(const json & j, ConnectionEventState & x);
+    void to_json(json & j, const ConnectionEventState & x);
 
     void from_json(const json & j, ConnectionRecord & x);
     void to_json(json & j, const ConnectionRecord & x);
@@ -946,6 +964,9 @@ namespace api {
 
     void from_json(const json & j, RuntimeInventoryResponse & x);
     void to_json(json & j, const RuntimeInventoryResponse & x);
+
+    void from_json(const json & j, StatusEventConnections & x);
+    void to_json(json & j, const StatusEventConnections & x);
 
     void from_json(const json & j, StatusEventInterfaces & x);
     void to_json(json & j, const StatusEventInterfaces & x);
@@ -1054,6 +1075,9 @@ namespace api {
 
     void from_json(const json & j, RuntimeInterfaceStatusEnum & x);
     void to_json(json & j, const RuntimeInterfaceStatusEnum & x);
+
+    void from_json(const json & j, StatusEventConnectionsType & x);
+    void to_json(json & j, const StatusEventConnectionsType & x);
 
     void from_json(const json & j, StatusEventInterfacesType & x);
     void to_json(json & j, const StatusEventInterfacesType & x);
@@ -1444,6 +1468,19 @@ namespace api {
         j["apply_started_ts"] = x.apply_started_ts;
         j["message"] = x.message;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, ConnectionEventState& x) {
+        x.available = j.at("available").get<bool>();
+        x.changed_at = j.at("changed_at").get<int64_t>();
+        x.revision = j.at("revision").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const ConnectionEventState & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["changed_at"] = x.changed_at;
+        j["revision"] = x.revision;
     }
 
     inline void from_json(const json & j, ConnectionRecord& x) {
@@ -2026,6 +2063,17 @@ namespace api {
         j["service"] = x.service;
     }
 
+    inline void from_json(const json & j, StatusEventConnections& x) {
+        x.data = j.at("data").get<ConnectionEventState>();
+        x.type = j.at("type").get<StatusEventConnectionsType>();
+    }
+
+    inline void to_json(json & j, const StatusEventConnections & x) {
+        j = json::object();
+        j["data"] = x.data;
+        j["type"] = x.type;
+    }
+
     inline void from_json(const json & j, StatusEventInterfaces& x) {
         x.data = j.at("data").get<RuntimeInterfaceInventoryResponse>();
         x.type = j.at("type").get<StatusEventInterfacesType>();
@@ -2222,6 +2270,7 @@ namespace api {
         x.config_object = get_stack_optional<ConfigObject>(j, "ConfigObject");
         x.config_state_response = get_stack_optional<ConfigStateResponse>(j, "ConfigStateResponse");
         x.config_update_response = get_stack_optional<ConfigUpdateResponse>(j, "ConfigUpdateResponse");
+        x.connection_event_state = get_stack_optional<ConnectionEventState>(j, "ConnectionEventState");
         x.connection_page = get_stack_optional<ConnectionPage>(j, "ConnectionPage");
         x.connection_query_request = get_stack_optional<ConnectionQueryRequest>(j, "ConnectionQueryRequest");
         x.connection_record = get_stack_optional<ConnectionRecord>(j, "ConnectionRecord");
@@ -2282,6 +2331,7 @@ namespace api {
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
+        x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
         x.status_event_outbounds = get_stack_optional<StatusEventOutbounds>(j, "StatusEventOutbounds");
         x.status_event_service = get_stack_optional<StatusEventService>(j, "StatusEventService");
@@ -2306,6 +2356,7 @@ namespace api {
         j["ConfigObject"] = x.config_object;
         j["ConfigStateResponse"] = x.config_state_response;
         j["ConfigUpdateResponse"] = x.config_update_response;
+        j["ConnectionEventState"] = x.connection_event_state;
         j["ConnectionPage"] = x.connection_page;
         j["ConnectionQueryRequest"] = x.connection_query_request;
         j["ConnectionRecord"] = x.connection_record;
@@ -2366,6 +2417,7 @@ namespace api {
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;
         j["SortOrder"] = x.sort_order;
+        j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
         j["StatusEventOutbounds"] = x.status_event_outbounds;
         j["StatusEventService"] = x.status_event_service;
@@ -2787,6 +2839,18 @@ namespace api {
             case RuntimeInterfaceStatusEnum::UNAVAILABLE: j = "unavailable"; break;
             case RuntimeInterfaceStatusEnum::UNKNOWN: j = "unknown"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RuntimeInterfaceStatusEnum\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, StatusEventConnectionsType & x) {
+        if (j == "connections") x = StatusEventConnectionsType::CONNECTIONS;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventConnectionsType\""); }
+    }
+
+    inline void to_json(json & j, const StatusEventConnectionsType & x) {
+        switch (x) {
+            case StatusEventConnectionsType::CONNECTIONS: j = "connections"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventConnectionsType\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

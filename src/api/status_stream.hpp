@@ -23,6 +23,7 @@ public:
     SseBroadcaster::SubscriptionPtr subscribe();
     void unsubscribe(const SseBroadcaster::SubscriptionPtr& subscription);
     void reconcile();
+    void publish_connections(api::ConnectionEventState state);
     void close_all();
 
 private:
@@ -32,6 +33,9 @@ private:
     std::string service_ GUARDED_BY(mutex_);
     std::string outbounds_ GUARDED_BY(mutex_);
     std::string interfaces_ GUARDED_BY(mutex_);
+    api::ConnectionEventState connections_state_ GUARDED_BY(mutex_);
+    std::string connections_ GUARDED_BY(mutex_);
+    bool connections_initialized_ GUARDED_BY(mutex_){false};
     bool initialized_ GUARDED_BY(mutex_){false};
 };
 

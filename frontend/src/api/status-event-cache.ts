@@ -13,6 +13,7 @@ import type {
   RuntimeInterfaceInventoryResponse,
   RuntimeOutboundsResponse,
   StatusEventInterfaces,
+  StatusEventConnections,
   StatusEventOutbounds,
   StatusEventService,
   StatusEventSnapshot,
@@ -23,6 +24,7 @@ type StatusEvent =
   | StatusEventService
   | StatusEventOutbounds
   | StatusEventInterfaces
+  | StatusEventConnections
 
 function response<T>(data: T) {
   return { data, status: 200 as const, headers: new Headers() }
@@ -69,6 +71,9 @@ export function applyStatusEvent(
       break
     case "interfaces":
       setInterfaces(event.data)
+      break
+    case "connections":
+      void queryClient.invalidateQueries({ queryKey: ["connections"] })
       break
     default:
       return false

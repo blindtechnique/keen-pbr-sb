@@ -41,6 +41,7 @@ class Scheduler;
 class UrltestManager;
 class DnsProbeServer;
 struct DnsProbeEvent;
+class ConntrackEventMonitor;
 
 #ifdef WITH_API
 enum class ConfigOperationState : uint8_t;
@@ -238,6 +239,10 @@ private:
                                                 const char* operation_name,
                                                 std::function<void()> task);
     ListRefreshOperationResult refresh_lists_via_api(std::optional<std::string> requested_name);
+    void setup_conntrack_events();
+    void handle_conntrack_events(uint32_t events);
+    void publish_conntrack_revision();
+    void teardown_conntrack_events();
 #endif
 
     // DNS probe integration
@@ -347,6 +352,9 @@ private:
     std::unique_ptr<ApiContext> api_ctx_;
     std::unique_ptr<SseBroadcaster> dns_test_broadcaster_;
     std::unique_ptr<StatusStream> status_stream_;
+    std::unique_ptr<ConntrackEventMonitor> conntrack_event_monitor_;
+    std::uint64_t conntrack_revision_{0};
+    int conntrack_publish_task_id_{-1};
 #endif
 
     std::unique_ptr<DnsProbeServer> dns_probe_server_;

@@ -450,6 +450,11 @@ std::string serialize_connections(const ApiContext& ctx, bool active_only) {
 
 } // namespace
 
+void invalidate_connections_snapshot() {
+    std::lock_guard lock(connections_mutex);
+    snapshot_updated_at = {};
+}
+
 void register_connections_handler(ApiServer& server, ApiContext& ctx) {
     server.get("/api/connections", [&ctx]() -> std::string {
         return serialize_connections(ctx, false);

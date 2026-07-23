@@ -234,6 +234,7 @@ set(SOURCES
   src/lists/list_streamer.cpp
   src/lists/list_set_usage.cpp
   src/cache/cache_manager.cpp
+  src/connections/conntrack_event_monitor.cpp
   src/cmd/status.cpp
   src/cmd/test_routing.cpp
   src/routing/target.cpp

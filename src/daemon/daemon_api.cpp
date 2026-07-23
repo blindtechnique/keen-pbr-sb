@@ -4,12 +4,15 @@
 
 #include <chrono>
 #include <filesystem>
+#include <sys/epoll.h>
 #include <thread>
 
 #include "../api/handlers.hpp"
+#include "../api/handler_connections.hpp"
 #include "../api/handler_health_service.hpp"
 #include "../api/server.hpp"
 #include "../api/status_stream.hpp"
+#include "../connections/conntrack_event_monitor.hpp"
 #include "../config/routing_state.hpp"
 #include "../dns/dns_router.hpp"
 #include "../dns/dnsmasq_gen.hpp"
@@ -22,6 +25,7 @@
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
 #include "../util/time_utils.hpp"
+#include "scheduler.hpp"
 
 #ifndef KEEN_PBR_FRONTEND_ROOT
 #define KEEN_PBR_FRONTEND_ROOT "/usr/share/keen-pbr/frontend"
@@ -30,6 +34,8 @@
 namespace keen_pbr3 {
 
 namespace {
+
+constexpr auto conntrack_publish_delay = std::chrono::milliseconds{500};
 
 const char* config_operation_state_name(ConfigOperationState state) {
     switch (state) {
@@ -44,6 +50,103 @@ const char* config_operation_state_name(ConfigOperationState state) {
 }
 
 } // namespace
+
+void Daemon::setup_conntrack_events() {
+    conntrack_event_monitor_ = std::make_unique<ConntrackEventMonitor>();
+
+    api::ConnectionEventState state;
+    state.revision = static_cast<std::int64_t>(conntrack_revision_);
+    state.changed_at = 0;
+    state.available = conntrack_event_monitor_->available();
+    status_stream_->publish_connections(state);
+
+    if (!conntrack_event_monitor_->available()) {
+        Logger::instance().warn(
+            "Conntrack event stream unavailable; WebUI will use slow fallback polling: {}",
+            conntrack_event_monitor_->error());
+        conntrack_event_monitor_.reset();
+        return;
+    }
+
+    const int fd = conntrack_event_monitor_->fd();
+    try {
+        add_fd(
+            fd,
+            EPOLLIN | EPOLLERR | EPOLLHUP,
+            [this](std::uint32_t events) { handle_conntrack_events(events); },
+            true,
+            "conntrack-events");
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Could not register conntrack event stream; WebUI will use slow fallback polling: {}",
+            error.what());
+        conntrack_event_monitor_.reset();
+        state.available = false;
+        status_stream_->publish_connections(std::move(state));
+        return;
+    }
+    Logger::instance().info(
+        "Conntrack event stream enabled for real-time connection updates");
+}
+
+void Daemon::handle_conntrack_events(std::uint32_t events) {
+    if (!conntrack_event_monitor_) return;
+
+    try {
+        if ((events & EPOLLIN) != 0) {
+            const auto count = conntrack_event_monitor_->drain();
+            if (count > 0) {
+                conntrack_revision_ += count;
+                invalidate_connections_snapshot();
+                if (conntrack_publish_task_id_ < 0) {
+                    conntrack_publish_task_id_ = scheduler_->schedule_oneshot(
+                        conntrack_publish_delay,
+                        [this]() {
+                            conntrack_publish_task_id_ = -1;
+                            publish_conntrack_revision();
+                        },
+                        "conntrack-sse-coalesce");
+                }
+            }
+        }
+        if ((events & (EPOLLERR | EPOLLHUP)) != 0) {
+            throw std::runtime_error(
+                "conntrack netlink socket reported an error");
+        }
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Conntrack event stream stopped; WebUI will use slow fallback polling: {}",
+            error.what());
+        api::ConnectionEventState state;
+        state.revision = static_cast<std::int64_t>(conntrack_revision_);
+        state.changed_at = unix_timestamp_now_seconds();
+        state.available = false;
+        status_stream_->publish_connections(std::move(state));
+        teardown_conntrack_events();
+    }
+}
+
+void Daemon::publish_conntrack_revision() {
+    if (!status_stream_ || !conntrack_event_monitor_) return;
+    api::ConnectionEventState state;
+    state.revision = static_cast<std::int64_t>(conntrack_revision_);
+    state.changed_at = unix_timestamp_now_seconds();
+    state.available = true;
+    status_stream_->publish_connections(std::move(state));
+}
+
+void Daemon::teardown_conntrack_events() {
+    if (conntrack_publish_task_id_ >= 0) {
+        scheduler_->cancel(conntrack_publish_task_id_);
+        conntrack_publish_task_id_ = -1;
+    }
+    if (!conntrack_event_monitor_) return;
+    remove_fd(
+        conntrack_event_monitor_->fd(),
+        true,
+        "conntrack-events");
+    conntrack_event_monitor_.reset();
+}
 
 void Daemon::finish_config_operation() {
     KPBR_LOCK_GUARD(config_op_mutex_);
@@ -471,6 +574,7 @@ void Daemon::setup_api() {
     lifecycle_operation_store_.set_publish_callback([this]() {
         if (status_stream_) status_stream_->reconcile();
     });
+    setup_conntrack_events();
     register_api_handlers(*api_server_, *api_ctx_);
 
     // Latency with its measurement age. Kept out of the generated runtime

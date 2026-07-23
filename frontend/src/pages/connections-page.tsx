@@ -51,8 +51,11 @@ export function ConnectionsPage() {
       return response.data
     },
     getNextPageParam: (lastPage) => lastPage.next_cursor,
+    // Kernel conntrack events invalidate this query in real time. This slow
+    // fallback covers kernels where NETLINK_NETFILTER multicast is unavailable
+    // and reconnect windows in the browser's EventSource implementation.
     refetchInterval: (currentQuery) =>
-      currentQuery.state.data?.pages.length === 1 ? 3_000 : false,
+      currentQuery.state.data?.pages.length === 1 ? 15_000 : false,
     refetchIntervalInBackground: false,
   })
 
