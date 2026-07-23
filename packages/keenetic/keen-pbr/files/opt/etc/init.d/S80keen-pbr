@@ -181,13 +181,21 @@ signal_service() {
 pid_is_keen_pbr() {
     local pid="$1"
     local executable
+    local cmdline
 
     case "$pid" in
         *[!0-9]*|'') return 1 ;;
     esac
     [ -r "/proc/$pid/cmdline" ] || return 1
-    executable="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -n 1)"
-    [ "$(basename "$executable")" = "$PROCS" ]
+    cmdline="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+    executable="$(printf '%s\n' "$cmdline" | head -n 1)"
+    [ "$(basename "$executable")" = "$PROCS" ] || return 1
+
+    # dnsmasq's conf-script briefly invokes the same binary with
+    # generate-resolver-config during activation. Matching only argv[0] makes
+    # rc.func report "already running" in that window and skip the real daemon
+    # start. The service subcommand uniquely identifies the long-lived daemon.
+    printf '%s\n' "$cmdline" | grep -Fxq 'service'
 }
 
 # rc.func calls pidof with PROCS. Prefer the daemon's locked PID file, but fall
