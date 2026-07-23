@@ -36,6 +36,7 @@ import type {
   HealthResponse,
   ListRefreshRequest,
   ListRefreshResponse,
+  NdmsInterfaceInventoryResponse,
   ReloadResponse,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
@@ -1578,6 +1579,119 @@ export const useQueryConnections = <TError = ErrorResponse,
       > => {
       return useMutation(getQueryConnectionsMutationOptions(options), queryClient);
     }
+
+/**
+ * Returns a strictly filtered, read-only inventory from NDMS RCI. Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded. Mutation remains disabled until typed RCI commands, ownership checks, optimistic revision checks and an automatic backup are all available.
+
+ * @summary List native Keenetic tunnel and proxy interfaces
+ */
+export type getNdmsInterfaceInventoryResponse200 = {
+  data: NdmsInterfaceInventoryResponse
+  status: 200
+}
+
+export type getNdmsInterfaceInventoryResponseSuccess = (getNdmsInterfaceInventoryResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getNdmsInterfaceInventoryResponse = (getNdmsInterfaceInventoryResponseSuccess)
+
+export const getGetNdmsInterfaceInventoryUrl = () => {
+
+
+
+
+  return `/api/system/ndms/interfaces`
+}
+
+export const getNdmsInterfaceInventory = async ( options?: RequestInit): Promise<getNdmsInterfaceInventoryResponse> => {
+
+  return apiFetch<getNdmsInterfaceInventoryResponse>(getGetNdmsInterfaceInventoryUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNdmsInterfaceInventoryQueryKey = () => {
+    return [
+    `/api/system/ndms/interfaces`
+    ] as const;
+    }
+
+
+export const getGetNdmsInterfaceInventoryQueryOptions = <TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNdmsInterfaceInventoryQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>> = ({ signal }) => getNdmsInterfaceInventory({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetNdmsInterfaceInventoryQueryResult = NonNullable<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>>
+export type GetNdmsInterfaceInventoryQueryError = unknown
+
+
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsInterfaceInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List native Keenetic tunnel and proxy interfaces
+ */
+
+export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsInterfaceInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetNdmsInterfaceInventoryQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
 
 /**
  * Streams named Server-Sent Events for service health, runtime outbounds, system interfaces, and conntrack change notifications. Every connection receives a runtime snapshot first, followed by the current conntrack event-source state when available. Later events contain the complete dataset that changed or a revision which invalidates connection pages. Heartbeat comments are sent every 15 seconds; reconnecting starts with fresh state and no event replay is performed.

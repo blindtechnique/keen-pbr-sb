@@ -360,6 +360,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/system/ndms/interfaces:
+    get:
+      summary: List native Keenetic tunnel and proxy interfaces
+      description: >
+        Returns a strictly filtered, read-only inventory from NDMS RCI.
+        Bridges, switch ports, VLANs and Wi-Fi interfaces are excluded.
+        Mutation remains disabled until typed RCI commands, ownership checks,
+        optimistic revision checks and an automatic backup are all available.
+      operationId: getNdmsInterfaceInventory
+      responses:
+        "200":
+          description: Native interface capabilities and safety contract
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsInterfaceInventoryResponse"
+
   /api/status/events:
     get:
       summary: Stream live WebUI status
@@ -1869,6 +1886,95 @@ components:
           $ref: "#/components/schemas/RuntimeOutboundsResponse"
         interfaces:
           $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+    NdmsTunnelKind:
+      type: string
+      enum:
+        - amnezia_wireguard
+        - wireguard
+        - openvpn
+        - ike
+        - l2tp
+        - sstp
+        - openconnect
+        - http_proxy
+        - https_proxy
+        - socks5_proxy
+
+    NdmsInterfaceCapabilities:
+      type: object
+      required: [can_edit, can_delete, can_hide, backup_required]
+      properties:
+        can_edit:
+          type: boolean
+        can_delete:
+          type: boolean
+        can_hide:
+          type: boolean
+        backup_required:
+          type: boolean
+
+    NdmsTunnelInterface:
+      type: object
+      required:
+        - id
+        - kernel_name
+        - label
+        - firmware_type
+        - kind
+        - owner
+        - capabilities
+      properties:
+        id:
+          type: string
+        kernel_name:
+          type: string
+        label:
+          type: string
+        firmware_type:
+          type: string
+        kind:
+          $ref: "#/components/schemas/NdmsTunnelKind"
+        owner:
+          type: string
+          enum: [keenetic]
+        connected:
+          type: boolean
+        link:
+          type: boolean
+        capabilities:
+          $ref: "#/components/schemas/NdmsInterfaceCapabilities"
+
+    NdmsInterfaceInventoryResponse:
+      type: object
+      required:
+        - available
+        - read_only
+        - mutation_mode
+        - required_guards
+        - interfaces
+      properties:
+        available:
+          type: boolean
+        read_only:
+          type: boolean
+          enum: [true]
+        mutation_mode:
+          type: string
+          enum: [disabled]
+        required_guards:
+          type: array
+          items:
+            type: string
+            enum:
+              - typed_rci
+              - automatic_backup
+              - ownership_check
+              - optimistic_revision
+        interfaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsTunnelInterface"
 
     ConnectionSort:
       title: ConnectionSort

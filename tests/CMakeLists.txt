@@ -11,6 +11,7 @@ add_executable(keen-pbr-tests
   test_dns_server.cpp
   test_test_routing.cpp
   test_keenetic_dns.cpp
+  test_ndms_interface_inventory.cpp
   test_dns_probe_server.cpp
   test_list_set_usage.cpp
   test_list_service.cpp
@@ -85,6 +86,7 @@ add_executable(keen-pbr-tests
   ../src/api/update_version.cpp
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
+  ../src/keenetic/ndms_interface_inventory.cpp
   ../src/health/url_tester.cpp
   ../src/routing/netlink.cpp
   ../src/routing/interface_monitor.cpp

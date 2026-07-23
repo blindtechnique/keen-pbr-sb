@@ -444,6 +444,41 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    struct NdmsInterfaceCapabilities {
+        bool backup_required;
+        bool can_delete;
+        bool can_edit;
+        bool can_hide;
+    };
+
+    enum class Kind : int { AMNEZIA_WIREGUARD, HTTPS_PROXY, HTTP_PROXY, IKE, L2_TP, OPENCONNECT, OPENVPN, SOCKS5_PROXY, SSTP, WIREGUARD };
+
+    enum class Owner : int { KEENETIC };
+
+    struct NdmsTunnelInterfaceElement {
+        NdmsInterfaceCapabilities capabilities;
+        std::optional<bool> connected;
+        std::string firmware_type;
+        std::string id;
+        std::string kernel_name;
+        Kind kind;
+        std::string label;
+        std::optional<bool> link;
+        Owner owner;
+    };
+
+    enum class MutationMode : int { DISABLED };
+
+    enum class RequiredGuard : int { AUTOMATIC_BACKUP, OPTIMISTIC_REVISION, OWNERSHIP_CHECK, TYPED_RCI };
+
+    struct NdmsInterfaceInventoryResponse {
+        bool available;
+        std::vector<NdmsTunnelInterfaceElement> interfaces;
+        MutationMode mutation_mode;
+        bool read_only;
+        std::vector<RequiredGuard> required_guards;
+    };
+
     struct PolicyRuleCheck {
         std::optional<std::string> detail;
         int64_t expected_table;
@@ -744,6 +779,10 @@ namespace api {
         std::optional<ListRefreshResponse> list_refresh_response;
         std::optional<ListRefreshStateValue> list_refresh_state;
         std::optional<ListsAutoupdate> lists_autoupdate_config;
+        std::optional<NdmsInterfaceCapabilities> ndms_interface_capabilities;
+        std::optional<NdmsInterfaceInventoryResponse> ndms_interface_inventory_response;
+        std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
+        std::optional<Kind> ndms_tunnel_kind;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
         std::optional<PolicyRuleCheck> policy_rule_check;
@@ -914,6 +953,15 @@ namespace api {
     void from_json(const json & j, ListRefreshResponse & x);
     void to_json(json & j, const ListRefreshResponse & x);
 
+    void from_json(const json & j, NdmsInterfaceCapabilities & x);
+    void to_json(json & j, const NdmsInterfaceCapabilities & x);
+
+    void from_json(const json & j, NdmsTunnelInterfaceElement & x);
+    void to_json(json & j, const NdmsTunnelInterfaceElement & x);
+
+    void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
+    void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
+
     void from_json(const json & j, PolicyRuleCheck & x);
     void to_json(json & j, const PolicyRuleCheck & x);
 
@@ -1060,6 +1108,18 @@ namespace api {
 
     void from_json(const json & j, HealthResponseStatus & x);
     void to_json(json & j, const HealthResponseStatus & x);
+
+    void from_json(const json & j, Kind & x);
+    void to_json(json & j, const Kind & x);
+
+    void from_json(const json & j, Owner & x);
+    void to_json(json & j, const Owner & x);
+
+    void from_json(const json & j, MutationMode & x);
+    void to_json(json & j, const MutationMode & x);
+
+    void from_json(const json & j, RequiredGuard & x);
+    void to_json(json & j, const RequiredGuard & x);
 
     void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
     void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
@@ -1788,6 +1848,63 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, NdmsInterfaceCapabilities& x) {
+        x.backup_required = j.at("backup_required").get<bool>();
+        x.can_delete = j.at("can_delete").get<bool>();
+        x.can_edit = j.at("can_edit").get<bool>();
+        x.can_hide = j.at("can_hide").get<bool>();
+    }
+
+    inline void to_json(json & j, const NdmsInterfaceCapabilities & x) {
+        j = json::object();
+        j["backup_required"] = x.backup_required;
+        j["can_delete"] = x.can_delete;
+        j["can_edit"] = x.can_edit;
+        j["can_hide"] = x.can_hide;
+    }
+
+    inline void from_json(const json & j, NdmsTunnelInterfaceElement& x) {
+        x.capabilities = j.at("capabilities").get<NdmsInterfaceCapabilities>();
+        x.connected = get_stack_optional<bool>(j, "connected");
+        x.firmware_type = j.at("firmware_type").get<std::string>();
+        x.id = j.at("id").get<std::string>();
+        x.kernel_name = j.at("kernel_name").get<std::string>();
+        x.kind = j.at("kind").get<Kind>();
+        x.label = j.at("label").get<std::string>();
+        x.link = get_stack_optional<bool>(j, "link");
+        x.owner = j.at("owner").get<Owner>();
+    }
+
+    inline void to_json(json & j, const NdmsTunnelInterfaceElement & x) {
+        j = json::object();
+        j["capabilities"] = x.capabilities;
+        j["connected"] = x.connected;
+        j["firmware_type"] = x.firmware_type;
+        j["id"] = x.id;
+        j["kernel_name"] = x.kernel_name;
+        j["kind"] = x.kind;
+        j["label"] = x.label;
+        j["link"] = x.link;
+        j["owner"] = x.owner;
+    }
+
+    inline void from_json(const json & j, NdmsInterfaceInventoryResponse& x) {
+        x.available = j.at("available").get<bool>();
+        x.interfaces = j.at("interfaces").get<std::vector<NdmsTunnelInterfaceElement>>();
+        x.mutation_mode = j.at("mutation_mode").get<MutationMode>();
+        x.read_only = j.at("read_only").get<bool>();
+        x.required_guards = j.at("required_guards").get<std::vector<RequiredGuard>>();
+    }
+
+    inline void to_json(json & j, const NdmsInterfaceInventoryResponse & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["interfaces"] = x.interfaces;
+        j["mutation_mode"] = x.mutation_mode;
+        j["read_only"] = x.read_only;
+        j["required_guards"] = x.required_guards;
+    }
+
     inline void from_json(const json & j, PolicyRuleCheck& x) {
         x.detail = get_stack_optional<std::string>(j, "detail");
         x.expected_table = j.at("expected_table").get<int64_t>();
@@ -2303,6 +2420,10 @@ namespace api {
         x.list_refresh_response = get_stack_optional<ListRefreshResponse>(j, "ListRefreshResponse");
         x.list_refresh_state = get_stack_optional<ListRefreshStateValue>(j, "ListRefreshState");
         x.lists_autoupdate_config = get_stack_optional<ListsAutoupdate>(j, "ListsAutoupdateConfig");
+        x.ndms_interface_capabilities = get_stack_optional<NdmsInterfaceCapabilities>(j, "NdmsInterfaceCapabilities");
+        x.ndms_interface_inventory_response = get_stack_optional<NdmsInterfaceInventoryResponse>(j, "NdmsInterfaceInventoryResponse");
+        x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
+        x.ndms_tunnel_kind = get_stack_optional<Kind>(j, "NdmsTunnelKind");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
         x.policy_rule_check = get_stack_optional<PolicyRuleCheck>(j, "PolicyRuleCheck");
@@ -2389,6 +2510,10 @@ namespace api {
         j["ListRefreshResponse"] = x.list_refresh_response;
         j["ListRefreshState"] = x.list_refresh_state;
         j["ListsAutoupdateConfig"] = x.lists_autoupdate_config;
+        j["NdmsInterfaceCapabilities"] = x.ndms_interface_capabilities;
+        j["NdmsInterfaceInventoryResponse"] = x.ndms_interface_inventory_response;
+        j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
+        j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
         j["PolicyRuleCheck"] = x.policy_rule_check;
@@ -2763,6 +2888,78 @@ namespace api {
             case HealthResponseStatus::RUNNING: j = "running"; break;
             case HealthResponseStatus::STOPPED: j = "stopped"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"HealthResponseStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Kind & x) {
+        if (j == "amnezia_wireguard") x = Kind::AMNEZIA_WIREGUARD;
+        else if (j == "https_proxy") x = Kind::HTTPS_PROXY;
+        else if (j == "http_proxy") x = Kind::HTTP_PROXY;
+        else if (j == "ike") x = Kind::IKE;
+        else if (j == "l2tp") x = Kind::L2_TP;
+        else if (j == "openconnect") x = Kind::OPENCONNECT;
+        else if (j == "openvpn") x = Kind::OPENVPN;
+        else if (j == "socks5_proxy") x = Kind::SOCKS5_PROXY;
+        else if (j == "sstp") x = Kind::SSTP;
+        else if (j == "wireguard") x = Kind::WIREGUARD;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Kind\""); }
+    }
+
+    inline void to_json(json & j, const Kind & x) {
+        switch (x) {
+            case Kind::AMNEZIA_WIREGUARD: j = "amnezia_wireguard"; break;
+            case Kind::HTTPS_PROXY: j = "https_proxy"; break;
+            case Kind::HTTP_PROXY: j = "http_proxy"; break;
+            case Kind::IKE: j = "ike"; break;
+            case Kind::L2_TP: j = "l2tp"; break;
+            case Kind::OPENCONNECT: j = "openconnect"; break;
+            case Kind::OPENVPN: j = "openvpn"; break;
+            case Kind::SOCKS5_PROXY: j = "socks5_proxy"; break;
+            case Kind::SSTP: j = "sstp"; break;
+            case Kind::WIREGUARD: j = "wireguard"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Kind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Owner & x) {
+        if (j == "keenetic") x = Owner::KEENETIC;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Owner\""); }
+    }
+
+    inline void to_json(json & j, const Owner & x) {
+        switch (x) {
+            case Owner::KEENETIC: j = "keenetic"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Owner\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, MutationMode & x) {
+        if (j == "disabled") x = MutationMode::DISABLED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"MutationMode\""); }
+    }
+
+    inline void to_json(json & j, const MutationMode & x) {
+        switch (x) {
+            case MutationMode::DISABLED: j = "disabled"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"MutationMode\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RequiredGuard & x) {
+        if (j == "automatic_backup") x = RequiredGuard::AUTOMATIC_BACKUP;
+        else if (j == "optimistic_revision") x = RequiredGuard::OPTIMISTIC_REVISION;
+        else if (j == "ownership_check") x = RequiredGuard::OWNERSHIP_CHECK;
+        else if (j == "typed_rci") x = RequiredGuard::TYPED_RCI;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RequiredGuard\""); }
+    }
+
+    inline void to_json(json & j, const RequiredGuard & x) {
+        switch (x) {
+            case RequiredGuard::AUTOMATIC_BACKUP: j = "automatic_backup"; break;
+            case RequiredGuard::OPTIMISTIC_REVISION: j = "optimistic_revision"; break;
+            case RequiredGuard::OWNERSHIP_CHECK: j = "ownership_check"; break;
+            case RequiredGuard::TYPED_RCI: j = "typed_rci"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RequiredGuard\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
