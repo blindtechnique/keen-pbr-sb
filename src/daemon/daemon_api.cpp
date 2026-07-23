@@ -62,7 +62,12 @@ void Daemon::begin_config_operation_or_throw(ConfigOperationState state,
         throw ApiError("Another config operation is already in progress", 409);
     }
 
-    const bool runtime_running = runtime_state_store_.snapshot().routing_runtime_active;
+    const auto runtime_snapshot = runtime_state_store_.snapshot();
+    if (runtime_snapshot.runtime_state == RuntimeState::starting ||
+        runtime_snapshot.runtime_state == RuntimeState::shutting_down) {
+        throw ApiError("Routing runtime initialization or shutdown is in progress", 409);
+    }
+    const bool runtime_running = runtime_snapshot.routing_runtime_active;
     if (require_runtime_running && !runtime_running) {
         throw ApiError("Routing runtime is stopped; start it first", 409);
     }
