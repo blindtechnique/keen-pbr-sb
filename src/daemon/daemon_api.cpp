@@ -17,6 +17,7 @@
 #include "../health/routing_health_checker.hpp"
 #include "../health/runtime_interface_inventory.hpp"
 #include "../health/runtime_outbound_state.hpp"
+#include "../api/handler_runtime_inventory.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
@@ -464,11 +465,7 @@ void Daemon::setup_api() {
         &lifecycle_operations_,
     });
     status_stream_ = std::make_unique<StatusStream>([this]() {
-        return StatusSnapshot{
-            build_health_response(api_ctx_->get_service_health()),
-            api_ctx_->get_runtime_outbounds(),
-            api_ctx_->get_runtime_interfaces(),
-        };
+        return build_runtime_inventory(*api_ctx_);
     });
     api_ctx_->status_stream = status_stream_.get();
     lifecycle_operation_store_.set_publish_callback([this]() {

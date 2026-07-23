@@ -20,6 +20,7 @@ add_executable(keen-pbr-tests
   test_routing_state.cpp
   test_runtime_interface_inventory.cpp
   test_api_runtime_interfaces.cpp
+  test_api_runtime_inventory.cpp
   test_api_status_events.cpp
   test_api_transports.cpp
   test_update_version.cpp
@@ -166,8 +167,10 @@ if(WITH_API)
     ../src/api/keenetic_auth.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/api/status_stream.cpp
+    ../src/api/health_response.cpp
     ../src/api/handler_status_events.cpp
     ../src/api/handler_runtime_interfaces.cpp
+    ../src/api/handler_runtime_inventory.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
     ../src/health/runtime_interface_inventory.cpp

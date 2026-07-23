@@ -12,11 +12,7 @@
 
 namespace keen_pbr3 {
 
-struct StatusSnapshot {
-    api::HealthResponse service;
-    api::RuntimeOutboundsResponse outbounds;
-    api::RuntimeInterfaceInventoryResponse interfaces;
-};
+using StatusSnapshot = api::RuntimeInventoryResponse;
 
 class StatusStream {
 public:

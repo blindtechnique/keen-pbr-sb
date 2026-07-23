@@ -5,10 +5,10 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
-import type { StatusEventSnapshotData } from './statusEventSnapshotData';
+import type { RuntimeInventoryResponse } from './runtimeInventoryResponse';
 import type { StatusEventSnapshotType } from './statusEventSnapshotType';
 
 export interface StatusEventSnapshot {
   type: StatusEventSnapshotType;
-  data: StatusEventSnapshotData;
+  data: RuntimeInventoryResponse;
 }

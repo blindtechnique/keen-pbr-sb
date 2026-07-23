@@ -280,6 +280,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
 
+  /api/runtime/inventory:
+    get:
+      summary: Unified live runtime inventory
+      description: >
+        Returns one coherent WebUI snapshot assembled from the existing service,
+        outbound, and kernel-interface runtime providers. The component endpoints
+        remain available for narrow consumers; this endpoint is the canonical
+        bootstrap payload for clients that need the complete runtime picture.
+      operationId: getRuntimeInventory
+      responses:
+        "200":
+          description: Unified runtime inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeInventoryResponse"
+
   /api/status/events:
     get:
       summary: Stream live WebUI status
@@ -457,15 +474,7 @@ components:
           type: string
           enum: [snapshot]
         data:
-          type: object
-          required: [service, outbounds, interfaces]
-          properties:
-            service:
-              $ref: "#/components/schemas/HealthResponse"
-            outbounds:
-              $ref: "#/components/schemas/RuntimeOutboundsResponse"
-            interfaces:
-              $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+          $ref: "#/components/schemas/RuntimeInventoryResponse"
 
     StatusEventService:
       type: object
@@ -750,6 +759,7 @@ components:
           example: 8388608
 
     ApiConfig:
+      title: ApiConfig
       type: object
       properties:
         enabled:
@@ -1694,6 +1704,7 @@ components:
             $ref: "#/components/schemas/RuntimeInterfaceState"
 
     RuntimeOutboundsResponse:
+      title: RuntimeOutboundsResponse
       type: object
       required: [outbounds]
       properties:
@@ -1756,6 +1767,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RuntimeInterfaceInventoryEntry"
+
+    RuntimeInventoryResponse:
+      type: object
+      required: [service, outbounds, interfaces]
+      properties:
+        service:
+          $ref: "#/components/schemas/HealthResponse"
+        outbounds:
+          $ref: "#/components/schemas/RuntimeOutboundsResponse"
+        interfaces:
+          $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
 
     # -------------------------------------------------------------------------
     # /api/service/*

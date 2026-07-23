@@ -38,6 +38,7 @@ import type {
   RoutingTestRequest,
   RoutingTestResponse,
   RuntimeInterfaceInventoryResponse,
+  RuntimeInventoryResponse,
   RuntimeOutboundsResponse,
   TransportActionRequest,
   TransportActionResponse,
@@ -1262,6 +1263,119 @@ export function useGetRuntimeInterfaces<TData = Awaited<ReturnType<typeof getRun
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetRuntimeInterfacesQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns one coherent WebUI snapshot assembled from the existing service, outbound, and kernel-interface runtime providers. The component endpoints remain available for narrow consumers; this endpoint is the canonical bootstrap payload for clients that need the complete runtime picture.
+
+ * @summary Unified live runtime inventory
+ */
+export type getRuntimeInventoryResponse200 = {
+  data: RuntimeInventoryResponse
+  status: 200
+}
+
+export type getRuntimeInventoryResponseSuccess = (getRuntimeInventoryResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getRuntimeInventoryResponse = (getRuntimeInventoryResponseSuccess)
+
+export const getGetRuntimeInventoryUrl = () => {
+
+
+
+
+  return `/api/runtime/inventory`
+}
+
+export const getRuntimeInventory = async ( options?: RequestInit): Promise<getRuntimeInventoryResponse> => {
+
+  return apiFetch<getRuntimeInventoryResponse>(getGetRuntimeInventoryUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetRuntimeInventoryQueryKey = () => {
+    return [
+    `/api/runtime/inventory`
+    ] as const;
+    }
+
+
+export const getGetRuntimeInventoryQueryOptions = <TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetRuntimeInventoryQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getRuntimeInventory>>> = ({ signal }) => getRuntimeInventory({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetRuntimeInventoryQueryResult = NonNullable<Awaited<ReturnType<typeof getRuntimeInventory>>>
+export type GetRuntimeInventoryQueryError = unknown
+
+
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRuntimeInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getRuntimeInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getRuntimeInventory>>,
+          TError,
+          Awaited<ReturnType<typeof getRuntimeInventory>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Unified live runtime inventory
+ */
+
+export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRuntimeInventory>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getRuntimeInventory>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetRuntimeInventoryQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

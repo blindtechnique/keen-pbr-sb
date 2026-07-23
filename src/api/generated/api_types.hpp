@@ -491,6 +491,12 @@ namespace api {
         std::vector<RuntimeOutboundStateElement> outbounds;
     };
 
+    struct RuntimeInventoryResponse {
+        RuntimeInterfaceInventoryResponse interfaces;
+        RuntimeOutboundsResponse outbounds;
+        HealthResponse service;
+    };
+
     enum class StatusEventInterfacesType : int { INTERFACES };
 
     struct StatusEventInterfaces {
@@ -512,16 +518,10 @@ namespace api {
         StatusEventServiceType type;
     };
 
-    struct Data {
-        RuntimeInterfaceInventoryResponse interfaces;
-        RuntimeOutboundsResponse outbounds;
-        HealthResponse service;
-    };
-
     enum class StatusEventSnapshotType : int { SNAPSHOT };
 
     struct StatusEventSnapshot {
-        Data data;
+        RuntimeInventoryResponse data;
         StatusEventSnapshotType type;
     };
 
@@ -660,6 +660,7 @@ namespace api {
         std::optional<RuntimeInterfaceInventoryStatusEnum> runtime_interface_inventory_status;
         std::optional<RuntimeInterfaceState> runtime_interface_state;
         std::optional<RuntimeInterfaceStatusEnum> runtime_interface_status;
+        std::optional<RuntimeInventoryResponse> runtime_inventory_response;
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
@@ -825,6 +826,9 @@ namespace api {
     void from_json(const json & j, RuntimeOutboundsResponse & x);
     void to_json(json & j, const RuntimeOutboundsResponse & x);
 
+    void from_json(const json & j, RuntimeInventoryResponse & x);
+    void to_json(json & j, const RuntimeInventoryResponse & x);
+
     void from_json(const json & j, StatusEventInterfaces & x);
     void to_json(json & j, const StatusEventInterfaces & x);
 
@@ -833,9 +837,6 @@ namespace api {
 
     void from_json(const json & j, StatusEventService & x);
     void to_json(json & j, const StatusEventService & x);
-
-    void from_json(const json & j, Data & x);
-    void to_json(json & j, const Data & x);
 
     void from_json(const json & j, StatusEventSnapshot & x);
     void to_json(json & j, const StatusEventSnapshot & x);
@@ -1732,6 +1733,19 @@ namespace api {
         j["outbounds"] = x.outbounds;
     }
 
+    inline void from_json(const json & j, RuntimeInventoryResponse& x) {
+        x.interfaces = j.at("interfaces").get<RuntimeInterfaceInventoryResponse>();
+        x.outbounds = j.at("outbounds").get<RuntimeOutboundsResponse>();
+        x.service = j.at("service").get<HealthResponse>();
+    }
+
+    inline void to_json(json & j, const RuntimeInventoryResponse & x) {
+        j = json::object();
+        j["interfaces"] = x.interfaces;
+        j["outbounds"] = x.outbounds;
+        j["service"] = x.service;
+    }
+
     inline void from_json(const json & j, StatusEventInterfaces& x) {
         x.data = j.at("data").get<RuntimeInterfaceInventoryResponse>();
         x.type = j.at("type").get<StatusEventInterfacesType>();
@@ -1765,21 +1779,8 @@ namespace api {
         j["type"] = x.type;
     }
 
-    inline void from_json(const json & j, Data& x) {
-        x.interfaces = j.at("interfaces").get<RuntimeInterfaceInventoryResponse>();
-        x.outbounds = j.at("outbounds").get<RuntimeOutboundsResponse>();
-        x.service = j.at("service").get<HealthResponse>();
-    }
-
-    inline void to_json(json & j, const Data & x) {
-        j = json::object();
-        j["interfaces"] = x.interfaces;
-        j["outbounds"] = x.outbounds;
-        j["service"] = x.service;
-    }
-
     inline void from_json(const json & j, StatusEventSnapshot& x) {
-        x.data = j.at("data").get<Data>();
+        x.data = j.at("data").get<RuntimeInventoryResponse>();
         x.type = j.at("type").get<StatusEventSnapshotType>();
     }
 
@@ -1983,6 +1984,7 @@ namespace api {
         x.runtime_interface_inventory_status = get_stack_optional<RuntimeInterfaceInventoryStatusEnum>(j, "RuntimeInterfaceInventoryStatus");
         x.runtime_interface_state = get_stack_optional<RuntimeInterfaceState>(j, "RuntimeInterfaceState");
         x.runtime_interface_status = get_stack_optional<RuntimeInterfaceStatusEnum>(j, "RuntimeInterfaceStatus");
+        x.runtime_inventory_response = get_stack_optional<RuntimeInventoryResponse>(j, "RuntimeInventoryResponse");
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
@@ -2052,6 +2054,7 @@ namespace api {
         j["RuntimeInterfaceInventoryStatus"] = x.runtime_interface_inventory_status;
         j["RuntimeInterfaceState"] = x.runtime_interface_state;
         j["RuntimeInterfaceStatus"] = x.runtime_interface_status;
+        j["RuntimeInventoryResponse"] = x.runtime_inventory_response;
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;

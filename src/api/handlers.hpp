@@ -187,6 +187,7 @@ struct ApiContext {
 //   GET  /api/health/routing  - routing and firewall health verification
 //   GET  /api/runtime/outbounds - live outbound/interface runtime state
 //   GET  /api/runtime/interfaces - live system interface inventory
+//   GET  /api/runtime/inventory - unified service/outbound/interface snapshot
 //   GET  /api/transports       - transport manager runtime state
 //   POST /api/transports       - start or stop a managed transport
 //   GET  /api/transports/config - editable transport definitions
