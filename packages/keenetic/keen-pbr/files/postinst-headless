@@ -53,7 +53,10 @@ case "$answer" in
 esac
 
 echo ""
-/opt/etc/init.d/S80keen-pbr start || echo "Failed to start keen-pbr service"
+if ! /opt/etc/init.d/S80keen-pbr start; then
+    echo "Failed to start keen-pbr service" >&2
+    exit 1
+fi
 echo ""
 
 echo "Installation complete!"

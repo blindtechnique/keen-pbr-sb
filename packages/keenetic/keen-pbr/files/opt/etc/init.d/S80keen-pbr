@@ -176,20 +176,99 @@ signal_service() {
     return 0
 }
 
-# rc.func calls pidof with PROCS. The daemon is authoritative about its PID
-# file, so use it instead of a name-only lookup that can miss an already
-# running service after an Entware restart.
-pidof() {
-    local pid
+# Verify that a PID still belongs to keen-pbr. A live but reused stale PID must
+# never make rc.func signal an unrelated process.
+pid_is_keen_pbr() {
+    local pid="$1"
+    local executable
 
-    [ "$1" = "$PROCS" ] || { command pidof "$@"; return $?; }
-    [ -s "$PIDFILE" ] || return 1
-    pid=$(cat "$PIDFILE") || return 1
     case "$pid" in
         *[!0-9]*|'') return 1 ;;
     esac
-    [ -d "/proc/$pid" ] || return 1
-    printf '%s\n' "$pid"
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    executable="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -n 1)"
+    [ "$(basename "$executable")" = "$PROCS" ]
+}
+
+# rc.func calls pidof with PROCS. Prefer the daemon's locked PID file, but fall
+# back to the process table when an interrupted upgrade left the file missing.
+pidof() {
+    local pid
+    local found=1
+
+    [ "$1" = "$PROCS" ] || { command pidof "$@"; return $?; }
+    if [ -s "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE") || pid=""
+        if pid_is_keen_pbr "$pid"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    # BusyBox pidof can briefly return a zombie after shutdown. Its cmdline is
+    # empty, so filter every fallback PID instead of making start believe that
+    # the old daemon is still usable.
+    for pid in $(command pidof "$PROCS" 2>/dev/null || true); do
+        if pid_is_keen_pbr "$pid"; then
+            printf '%s\n' "$pid"
+            found=0
+        fi
+    done
+    return "$found"
+}
+
+stop_keen_pbr() {
+    local mode="${1:-stop}"
+    local pids
+    local counter=0
+    local limit=15
+
+    printf ' Shutting down %s... ' "$DESC"
+    pids="$(pidof "$PROCS" 2>/dev/null || true)"
+    if [ -z "$pids" ]; then
+        rm -f "$PIDFILE"
+        echo "             already stopped."
+        return 0
+    fi
+
+    if [ "$mode" = "kill" ]; then
+        kill -KILL $pids 2>/dev/null || true
+    else
+        kill -TERM $pids 2>/dev/null || true
+    fi
+
+    while [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ] &&
+          [ "$counter" -lt "$limit" ]; do
+        sleep 1
+        counter=$((counter + 1))
+    done
+
+    pids="$(pidof "$PROCS" 2>/dev/null || true)"
+    if [ -n "$pids" ] && [ "$mode" != "kill" ]; then
+        log_error "Graceful shutdown timed out after ${limit}s; forcing keen-pbr to stop"
+        kill -KILL $pids 2>/dev/null || true
+        sleep 1
+    fi
+
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        echo "             failed."
+        return 1
+    fi
+
+    # Do not race rc.func's immediate start after a restart. BusyBox pidof may
+    # still expose the terminated task until its parent reaps it, and rc.func
+    # would otherwise report "already running" without launching a new daemon.
+    counter=0
+    while [ -n "$(command pidof "$PROCS" 2>/dev/null || true)" ] &&
+          [ "$counter" -lt 5 ]; do
+        sleep 1
+        counter=$((counter + 1))
+    done
+
+    rm -f "$PIDFILE"
+    echo "             done."
+    return 0
 }
 
 prepare_start() {
@@ -224,12 +303,20 @@ case "$1" in
         reapply_dnsmasq_config
         exit $?
         ;;
-    start|restart|restartall)
+    start)
         prepare_start
         reapply_dnsmasq_config || exit 1
         ;;
+    restart|restartall)
+        stop_keen_pbr stop || exit 1
+        prepare_start
+        reapply_dnsmasq_config || exit 1
+        set -- start "$2"
+        ;;
     stop|kill)
         prepare_stop
+        stop_keen_pbr "$1"
+        exit $?
         ;;
 esac
 

@@ -74,8 +74,14 @@ if [ -d /opt/etc/nfqws2 ]; then
     done
     chmod 0644 /opt/etc/nfqws2/nfqws2.conf 2>/dev/null || true
 fi
-/opt/etc/init.d/S79transport-manager start || echo "Failed to start transport-manager service"
-/opt/etc/init.d/S80keen-pbr start || echo "Failed to start keen-pbr service"
+if ! /opt/etc/init.d/S79transport-manager start; then
+    echo "Failed to start transport-manager service" >&2
+    exit 1
+fi
+if ! /opt/etc/init.d/S80keen-pbr start; then
+    echo "Failed to start keen-pbr service" >&2
+    exit 1
+fi
 echo ""
 
 echo "Installation complete!"
