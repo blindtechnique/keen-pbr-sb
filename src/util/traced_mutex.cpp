@@ -8,7 +8,9 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr auto kLockWaitLogInterval = std::chrono::milliseconds(250);
+constexpr auto kSlowLockWait = std::chrono::milliseconds(25);
+constexpr auto kSlowLockHold = std::chrono::milliseconds(25);
+constexpr auto kWaitProgressInterval = std::chrono::milliseconds(250);
 
 std::uint64_t mono_ms_now() {
     return static_cast<std::uint64_t>(
@@ -45,23 +47,28 @@ void log_lock_event(std::string_view event,
               duration_ms);
 }
 
-template<typename LockFn, typename TryLockFn>
+template<typename LockFn, typename TryLockFn, typename TimedTryLockFn>
 void lock_with_trace(LockFn lock_fn,
                      TryLockFn try_lock_fn,
+                     TimedTryLockFn timed_try_lock_fn,
                      const char* mutex_name,
                      const char* mode,
                      const char* file,
                      int line,
                      const char* function) {
-    auto& log = Logger::instance();
-    if (!log.is_enabled(LogLevel::debug)) {
+    if (!Logger::instance().is_enabled(LogLevel::debug)) {
         lock_fn();
         return;
     }
 
+    // Keep uncontended locks out of the trace and keep their hot path close
+    // to a plain mutex acquisition.
+    if (try_lock_fn()) {
+        return;
+    }
+
     const auto started_at = mono_ms_now();
-    log_lock_event("lock_wait_start", mutex_name, mode, file, line, function);
-    while (!try_lock_fn()) {
+    do {
         log_lock_event("lock_waiting",
                        mutex_name,
                        mode,
@@ -69,14 +76,17 @@ void lock_with_trace(LockFn lock_fn,
                        line,
                        function,
                        mono_ms_now() - started_at);
+    } while (!timed_try_lock_fn());
+    const auto waited_ms = mono_ms_now() - started_at;
+    if (waited_ms >= static_cast<std::uint64_t>(kSlowLockWait.count())) {
+        log_lock_event("lock_acquired_slow",
+                       mutex_name,
+                       mode,
+                       file,
+                       line,
+                       function,
+                       waited_ms);
     }
-    log_lock_event("lock_acquired",
-                   mutex_name,
-                   mode,
-                   file,
-                   line,
-                   function,
-                   mono_ms_now() - started_at);
 }
 
 void log_lock_release(const char* mutex_name,
@@ -85,16 +95,20 @@ void log_lock_release(const char* mutex_name,
                       int line,
                       const char* function,
                       std::uint64_t acquired_at_ms) {
-    if (acquired_at_ms == 0) {
+    if (acquired_at_ms == 0 ||
+        !Logger::instance().is_enabled(LogLevel::debug)) {
         return;
     }
-    log_lock_event("lock_released",
-                   mutex_name,
-                   mode,
-                   file,
-                   line,
-                   function,
-                   mono_ms_now() - acquired_at_ms);
+    const auto held_ms = mono_ms_now() - acquired_at_ms;
+    if (held_ms >= static_cast<std::uint64_t>(kSlowLockHold.count())) {
+        log_lock_event("lock_held_slow",
+                       mutex_name,
+                       mode,
+                       file,
+                       line,
+                       function,
+                       held_ms);
+    }
 }
 
 } // namespace
@@ -105,7 +119,8 @@ void TracedMutex::lock(const char* mutex_name,
                        const char* function) {
     lock_with_trace(
         [this]() { mutex_.lock(); },
-        [this]() { return mutex_.try_lock_for(kLockWaitLogInterval); },
+        [this]() { return mutex_.try_lock(); },
+        [this]() { return mutex_.try_lock_for(kWaitProgressInterval); },
         mutex_name,
         "exclusive",
         file,
@@ -123,7 +138,8 @@ void TracedSharedMutex::lock(const char* mutex_name,
                              const char* function) {
     lock_with_trace(
         [this]() { mutex_.lock(); },
-        [this]() { return mutex_.try_lock_for(kLockWaitLogInterval); },
+        [this]() { return mutex_.try_lock(); },
+        [this]() { return mutex_.try_lock_for(kWaitProgressInterval); },
         mutex_name,
         "exclusive",
         file,
@@ -141,7 +157,8 @@ void TracedSharedMutex::lock_shared(const char* mutex_name,
                                     const char* function) {
     lock_with_trace(
         [this]() { mutex_.lock_shared(); },
-        [this]() { return mutex_.try_lock_shared_for(kLockWaitLogInterval); },
+        [this]() { return mutex_.try_lock_shared(); },
+        [this]() { return mutex_.try_lock_shared_for(kWaitProgressInterval); },
         mutex_name,
         "shared",
         file,
@@ -168,8 +185,8 @@ TracedLockGuard::TracedLockGuard(TracedMutex& mutex,
 }
 
 TracedLockGuard::~TracedLockGuard() {
-    log_lock_release(mutex_name_, "exclusive", file_, line_, function_, acquired_at_ms_);
     mutex_->unlock();
+    log_lock_release(mutex_name_, "exclusive", file_, line_, function_, acquired_at_ms_);
 }
 
 TracedUniqueLock::TracedUniqueLock(TracedMutex& mutex,
@@ -201,8 +218,8 @@ void TracedUniqueLock::unlock() {
     if (!owns_lock_) {
         return;
     }
-    log_lock_release(mutex_name_, "exclusive", file_, line_, function_, acquired_at_ms_);
     mutex_->unlock();
+    log_lock_release(mutex_name_, "exclusive", file_, line_, function_, acquired_at_ms_);
     owns_lock_ = false;
     acquired_at_ms_ = 0;
 }
@@ -226,8 +243,8 @@ TracedSharedLock::TracedSharedLock(TracedSharedMutex& mutex,
 }
 
 TracedSharedLock::~TracedSharedLock() {
-    log_lock_release(mutex_name_, "shared", file_, line_, function_, acquired_at_ms_);
     mutex_->unlock_shared();
+    log_lock_release(mutex_name_, "shared", file_, line_, function_, acquired_at_ms_);
 }
 
 TracedSharedUniqueLock::TracedSharedUniqueLock(TracedSharedMutex& mutex,
@@ -259,8 +276,8 @@ void TracedSharedUniqueLock::unlock() {
     if (!owns_lock_) {
         return;
     }
-    log_lock_release(mutex_name_, "exclusive", file_, line_, function_, acquired_at_ms_);
     mutex_->unlock();
+    log_lock_release(mutex_name_, "exclusive", file_, line_, function_, acquired_at_ms_);
     owns_lock_ = false;
     acquired_at_ms_ = 0;
 }
