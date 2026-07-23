@@ -1,7 +1,9 @@
 #include "list_parser.hpp"
+#include "../log/logger.hpp"
 
 #include <arpa/inet.h>
 
+#include <algorithm>
 #include <charconv>
 
 namespace keen_pbr3 {
@@ -14,6 +16,36 @@ static std::string_view trim(std::string_view sv) {
         sv.remove_suffix(1);
     }
     return sv;
+}
+
+static std::string format_entry_for_log(std::string_view entry) {
+    constexpr std::size_t kMaxLoggedBytes = 256;
+    std::string result;
+    result.reserve(std::min(entry.size(), kMaxLoggedBytes) + 2);
+    result.push_back('\'');
+    const std::size_t length = std::min(entry.size(), kMaxLoggedBytes);
+    for (std::size_t index = 0; index < length; ++index) {
+        const unsigned char ch = static_cast<unsigned char>(entry[index]);
+        switch (ch) {
+            case '\\': result += "\\\\"; break;
+            case '\'': result += "\\'"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (ch < 0x20 || ch == 0x7f) {
+                    constexpr char hex[] = "0123456789abcdef";
+                    result += "\\x";
+                    result.push_back(hex[ch >> 4]);
+                    result.push_back(hex[ch & 0x0f]);
+                } else {
+                    result.push_back(static_cast<char>(ch));
+                }
+        }
+    }
+    if (entry.size() > length) result += "...";
+    result.push_back('\'');
+    return result;
 }
 
 bool ListParser::is_ipv4(std::string_view s) {
@@ -72,30 +104,40 @@ bool ListParser::is_cidr_v6(std::string_view s) {
     return prefix >= 0 && prefix <= 128;
 }
 
-bool ListParser::is_domain(std::string_view s) {
-    if (s.empty()) return false;
-    // Strip leading wildcard prefix
-    if (s.size() >= 2 && s[0] == '*' && s[1] == '.') {
-        s.remove_prefix(2);
-    }
-    if (s.empty()) return false;
-    // Domain: labels separated by dots, each label is alphanumeric or hyphen
+std::optional<std::string> ListParser::normalize_domain(std::string_view s) {
+    if (s.empty()) return std::nullopt;
+    if (s.size() >= 2 && s.substr(0, 2) == "*.") s.remove_prefix(2);
+    if (!s.empty() && s.back() == '.') s.remove_suffix(1);
+    if (s.empty() || s.back() == '.' || s.size() > 253) return std::nullopt;
+
     bool has_alpha = false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = s[i];
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-            has_alpha = true;
-        } else if ((c >= '0' && c <= '9') || c == '-' || c == '_') {
-            // ok (hyphen/underscore allowed in labels)
-        } else if (c == '.') {
-            // dot separating labels
-            if (i == 0 || s[i - 1] == '.') return false; // no empty labels
-        } else {
-            return false;
+    std::size_t label_start = 0;
+    while (label_start < s.size()) {
+        const std::size_t dot = s.find('.', label_start);
+        const std::size_t label_end =
+            dot == std::string_view::npos ? s.size() : dot;
+        const std::size_t label_size = label_end - label_start;
+        if (label_size == 0 || label_size > 63) return std::nullopt;
+        if (s[label_start] == '-' || s[label_end - 1] == '-') {
+            return std::nullopt;
         }
+
+        for (std::size_t index = label_start; index < label_end; ++index) {
+            const char c = s[index];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                has_alpha = true;
+            } else if ((c >= '0' && c <= '9') || c == '-' || c == '_') {
+                // DNS-compatible service labels may contain underscores.
+            } else {
+                return std::nullopt;
+            }
+        }
+        if (dot == std::string_view::npos) break;
+        label_start = dot + 1;
     }
-    // Must contain at least one alpha character to distinguish from IPv4
-    return has_alpha;
+
+    if (!has_alpha) return std::nullopt;
+    return std::string(s);
 }
 
 bool ListParser::classify_entry(std::string_view entry, ListEntryVisitor& visitor) {
@@ -107,20 +149,37 @@ bool ListParser::classify_entry(std::string_view entry, ListEntryVisitor& visito
         visitor.on_entry(EntryType::Ip, entry);
         return true;
     }
-    if (is_domain(entry)) {
-        visitor.on_entry(EntryType::Domain, entry);
+    if (auto domain = normalize_domain(entry)) {
+        visitor.on_entry(EntryType::Domain, *domain);
         return true;
     }
     return false;
 }
 
-void ListParser::stream_parse(std::istream& input, ListEntryVisitor& visitor) {
+void ListParser::stream_parse(std::istream& input,
+                              ListEntryVisitor& visitor,
+                              std::string_view source_name) {
     std::string line;
+    std::size_t line_number = 0;
     while (std::getline(input, line)) {
-        auto sv = trim(std::string_view(line));
-        if (sv.empty()) continue;
-        if (sv.front() == '#') continue;
-        classify_entry(sv, visitor);
+        ++line_number;
+        parse_line(line, visitor, source_name, line_number);
+    }
+}
+
+void ListParser::parse_line(std::string_view line,
+                            ListEntryVisitor& visitor,
+                            std::string_view source_name,
+                            std::size_t line_number) {
+    const auto value = trim(line);
+    if (value.empty() || value.front() == '#') return;
+    if (!classify_entry(value, visitor)) {
+        Logger::instance().warn(
+            "Skipping invalid list entry {} in {} at line {}",
+            format_entry_for_log(value),
+            source_name.empty() ? std::string("list source")
+                                : std::string(source_name),
+            line_number);
     }
 }
 
