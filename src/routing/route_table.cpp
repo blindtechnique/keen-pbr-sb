@@ -73,6 +73,7 @@ void RouteTable::remove(const RouteSpec& spec) {
                 spec.blackhole,
                 spec.unreachable,
                 e.what());
+            return;
         }
     }
     routes_.erase(it);
