@@ -36,6 +36,19 @@ TEST_CASE("resolver health: matching live TXT yields healthy converged state") {
           std::optional<api::ResolverConfigSyncState>{api::ResolverConfigSyncState::CONVERGED});
 }
 
+TEST_CASE("resolver reload is skipped only for a confirmed identical config") {
+    constexpr std::string_view hash = "0123456789abcdef0123456789abcdef";
+    CHECK_FALSE(resolver_reload_required(
+        hash, hash, api::ResolverLiveStatus::HEALTHY));
+    CHECK(resolver_reload_required(
+        hash, "fedcba9876543210fedcba9876543210",
+        api::ResolverLiveStatus::HEALTHY));
+    CHECK(resolver_reload_required(
+        hash, hash, api::ResolverLiveStatus::DEGRADED));
+    CHECK(resolver_reload_required(
+        "", hash, api::ResolverLiveStatus::HEALTHY));
+}
+
 TEST_CASE("resolver health: older live TXT during apply stays healthy and converging") {
     const auto probe = make_probe_result(
         ResolverConfigHashProbeStatus::SUCCESS,

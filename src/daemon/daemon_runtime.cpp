@@ -19,6 +19,7 @@
 #include "../util/time_utils.hpp"
 #include "../util/cron.hpp"
 #include "scheduler.hpp"
+#include "resolver_health.hpp"
 #include "system_resolver_hook.hpp"
 
 namespace keen_pbr3 {
@@ -710,7 +711,16 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     schedule_lists_autoupdate();
     update_resolver_config_hash();
     setup_dns_probe();
-    run_system_resolver_hook_reload();
+    const auto resolver_snapshot =
+        resolver_sync_.snapshot(unix_timestamp_now_seconds());
+    if (resolver_reload_required(resolver_snapshot.expected_hash,
+                                 resolver_snapshot.actual_hash,
+                                 resolver_snapshot.live_status)) {
+        run_system_resolver_hook_reload();
+    } else {
+        Logger::instance().info(
+            "Skipping dnsmasq reload: resolver configuration is unchanged and healthy");
+    }
     refresh_resolver_config_hash_actual_async();
     schedule_resolver_config_hash_actual_refresh();
 
