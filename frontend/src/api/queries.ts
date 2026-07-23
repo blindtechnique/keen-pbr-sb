@@ -35,7 +35,13 @@ export function useGetHealthService() {
   return useGeneratedHealthService<
     Awaited<ReturnType<typeof getHealthService>>
   >({
-    query: { enabled: false },
+    // Fetch one baseline immediately. SSE remains the steady-state transport,
+    // but a delayed or rejected stream must not leave the UI at "unknown".
+    query: {
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
   })
 }
 
@@ -43,7 +49,11 @@ export function useGetRuntimeOutbounds() {
   return useGeneratedRuntimeOutbounds<
     Awaited<ReturnType<typeof getRuntimeOutbounds>>
   >({
-    query: { enabled: false },
+    query: {
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
   })
 }
 
@@ -51,6 +61,10 @@ export function useGetRuntimeInterfaces() {
   return useGeneratedRuntimeInterfaces<
     Awaited<ReturnType<typeof getRuntimeInterfaces>>
   >({
-    query: { enabled: false },
+    query: {
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
   })
 }

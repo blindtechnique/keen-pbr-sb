@@ -62,6 +62,59 @@ struct RuntimeCleanup {
     }
 };
 
+void verify_metric_scoped_route_delete(NetlinkManager& netlink) {
+    constexpr uint32_t kTable = 249;
+
+    RouteSpec primary;
+    primary.destination = "default";
+    primary.table = kTable;
+    primary.interface = "lo";
+    primary.family = AF_INET;
+
+    RouteSpec fallback = primary;
+    fallback.metric = 1;
+
+    auto cleanup = [&]() {
+        try {
+            netlink.delete_route(primary);
+        } catch (...) {
+        }
+        try {
+            netlink.delete_route(fallback);
+        } catch (...) {
+        }
+    };
+
+    try {
+        netlink.add_route(primary);
+        netlink.add_route(fallback);
+        netlink.delete_route(primary);
+
+        const auto routes = netlink.dump_routes_in_table(kTable, AF_INET);
+        const bool primary_present = std::any_of(
+            routes.begin(), routes.end(), [](const DumpedRoute& route) {
+                return route.destination == "default" &&
+                       route.interface == std::optional<std::string>{"lo"} &&
+                       route.metric == 0;
+            });
+        const bool fallback_present = std::any_of(
+            routes.begin(), routes.end(), [](const DumpedRoute& route) {
+                return route.destination == "default" &&
+                       route.interface == std::optional<std::string>{"lo"} &&
+                       route.metric == 1;
+            });
+        if (primary_present || !fallback_present) {
+            throw std::runtime_error(
+                "Deleting a metric-zero route removed or damaged its weighted fallback");
+        }
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    cleanup();
+}
+
 std::string read_file(const std::string& path) {
     std::ifstream input(path);
     if (!input.is_open()) {
@@ -447,6 +500,7 @@ int run_firewall_integration(int argc, char* argv[]) {
         options.run_urltest_probes ? probe_urltests(config, marks) : std::map<std::string, std::string>{};
 
     NetlinkManager netlink;
+    verify_metric_scoped_route_delete(netlink);
     RouteTable route_table(netlink);
     PolicyRuleManager policy_rules(netlink);
     auto firewall = create_firewall(

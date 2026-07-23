@@ -251,9 +251,10 @@ void NetlinkManager::delete_route(const RouteSpec& spec) {
         rtnl_route_set_table(route.get(), spec.table);
     }
 
-    if (spec.metric != 0) {
-        rtnl_route_set_priority(route.get(), spec.metric);
-    }
+    // Priority zero is still part of a route's identity. Omitting it from a
+    // delete request lets the kernel match every otherwise identical route,
+    // including weighted urltest fallbacks on the same interface.
+    rtnl_route_set_priority(route.get(), spec.metric);
     rtnl_route_set_protocol(route.get(), spec.protocol);
 
     if (spec.destination == "default") {

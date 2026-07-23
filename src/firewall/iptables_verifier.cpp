@@ -174,6 +174,24 @@ struct ExpectedIptablesRule {
     FirewallRuleCriteria criteria;
 };
 
+bool set_name_matches(const std::string& expected,
+                      const std::string& actual) {
+    if (expected == actual) return true;
+
+    const auto matches_generation = [&](const char* logical_prefix,
+                                        const char* generation_a_prefix,
+                                        const char* generation_b_prefix) {
+        const std::string logical(logical_prefix);
+        if (expected.rfind(logical, 0) != 0) return false;
+        const auto suffix = expected.substr(logical.size());
+        return actual == std::string(generation_a_prefix) + suffix ||
+               actual == std::string(generation_b_prefix) + suffix;
+    };
+
+    return matches_generation("kpbr4_", "kpbr4s_", "kpbr4S_") ||
+           matches_generation("kpbr6_", "kpbr6s_", "kpbr6S_");
+}
+
 std::vector<ExpectedIptablesRule> expand_expected_rule_states(
     const std::vector<RuleState>& expected) {
     std::vector<ExpectedIptablesRule> expanded;
@@ -252,7 +270,7 @@ bool rule_matches(const ParsedIptablesRule& actual,
                   const ExpectedIptablesRule& expected,
                   uint32_t expected_fwmark_mask) {
     return actual.ipv6 == expected.ipv6 &&
-           actual.set_name == expected.set_name &&
+           set_name_matches(expected.set_name, actual.set_name) &&
            action_matches(actual, expected, expected_fwmark_mask) &&
            criteria_equal(actual.criteria, expected.criteria);
 }
@@ -548,7 +566,8 @@ std::vector<FirewallRuleCheck> IptablesFirewallVerifier::verify_rules(
                                                static_cast<size_t>(&actual - actual_rules.data());
                                            return !used[index] &&
                                                   actual.ipv6 == exp.ipv6 &&
-                                                  actual.set_name == exp.set_name &&
+                                                  set_name_matches(exp.set_name,
+                                                                   actual.set_name) &&
                                                   criteria_equal(actual.criteria, exp.criteria);
                                        });
 

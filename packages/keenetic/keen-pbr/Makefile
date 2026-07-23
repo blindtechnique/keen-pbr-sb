@@ -109,6 +109,7 @@ define Package/keen-pbr/install
 	$(INSTALL_DIR) $(1)/opt/usr/bin
 	$(INSTALL_DIR) $(1)/opt/usr/lib/keen-pbr
 	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/frontend
+	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/nfqws-blobs
 	$(INSTALL_DIR) $(1)/opt/usr/share/keen-pbr/nfqws-strategies
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/$(KEEN_PBR_STAGED_BINDIR)/keen-pbr $(1)/opt/usr/bin/keen-pbr
 	@test -f "$(KEEN_PBR_TRANSPORT_MANAGER_BIN)" || (echo "Missing transport-manager binary: $(KEEN_PBR_TRANSPORT_MANAGER_BIN)"; false)
@@ -127,6 +128,8 @@ define Package/keen-pbr/install
 	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/frontend
 	$(CP) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies/. $(1)/opt/usr/share/keen-pbr/nfqws-strategies/
 	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/nfqws-strategies
+	$(CP) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-blobs/. $(1)/opt/usr/share/keen-pbr/nfqws-blobs/
+	chmod -R a=rX,u+w $(1)/opt/usr/share/keen-pbr/nfqws-blobs
 	$(INSTALL_CONF) $(KEEN_PBR_FULL_CONFIG) $(1)/opt/etc/keen-pbr/config.json
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/keen-pbr/transports.example.json $(1)/opt/etc/keen-pbr/transports.json
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/packages/common/local.lst $(1)/opt/etc/keen-pbr/local.lst

@@ -32,6 +32,15 @@ REQUIRED_FILES = REQUIRED_EXECUTABLES | {
     "opt/etc/keen-pbr/config.json",
     "opt/etc/keen-pbr/transports.json",
     "opt/usr/share/keen-pbr/frontend/index.html",
+    "opt/usr/share/keen-pbr/nfqws-blobs/ACTIVE_DISCORD_UDP.bin",
+    "opt/usr/share/keen-pbr/nfqws-blobs/quic_initial_steamcommunity_com.bin",
+    "opt/usr/share/keen-pbr/nfqws-blobs/stun.bin",
+    "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_4pda_to.bin",
+    "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_max_ru.bin",
+    "opt/usr/share/keen-pbr/nfqws-strategies/ver9 E max plus/nfqws2.conf",
+    "opt/usr/share/keen-pbr/nfqws-strategies/ver9 E max plus/required-blobs.txt",
+    "opt/usr/share/keen-pbr/nfqws-strategies/ver10 H2 hybrid plus/nfqws2.conf",
+    "opt/usr/share/keen-pbr/nfqws-strategies/ver10 H2 hybrid plus/required-blobs.txt",
 }
 REQUIRED_CONFFILES = {
     "/opt/etc/keen-pbr/config.json",

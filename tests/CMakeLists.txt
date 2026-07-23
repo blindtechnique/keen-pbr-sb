@@ -42,6 +42,7 @@ add_executable(keen-pbr-tests
   test_network_routes.cpp
   test_netlink_errors.cpp
   test_nfqws_config.cpp
+  test_nfqws_strategy_assets.cpp
   test_safe_exec.cpp
   test_trace_logging.cpp
   test_interface_monitor.cpp
@@ -104,6 +105,7 @@ add_executable(keen-pbr-tests
   ../src/util/ipv6_support.cpp
   ../src/util/network_routes.cpp
   ../src/util/nfqws_config.cpp
+  ../src/util/nfqws_strategy_assets.cpp
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
   ../src/runtime/lifecycle_operation.cpp

@@ -294,6 +294,7 @@ set(SOURCES
   src/util/ipv6_support.cpp
   src/util/network_routes.cpp
   src/util/nfqws_config.cpp
+  src/util/nfqws_strategy_assets.cpp
   src/util/system_info.cpp
   src/util/traced_mutex.cpp
   src/main.cpp

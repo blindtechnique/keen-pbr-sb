@@ -1314,6 +1314,13 @@ void Daemon::run() {
     event_loop_active_.store(true, std::memory_order_release);
     accept_posted_control_tasks_.store(true, std::memory_order_release);
 
+    // Populate latency and interface liveness immediately. The periodic probe
+    // intentionally runs every 20 seconds, but using that interval as the
+    // initial delay leaves a freshly opened dashboard at "unknown". Queue it
+    // only after control-task delivery is active so its SSE reconciliation
+    // cannot be lost when a local probe completes unusually quickly.
+    probe_interfaces_now();
+
     run_event_loop();
 
     event_loop_active_.store(false, std::memory_order_release);

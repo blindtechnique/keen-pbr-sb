@@ -6,6 +6,7 @@
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
 #include "../util/nfqws_config.hpp"
+#include "../util/nfqws_strategy_assets.hpp"
 
 #include <algorithm>
 #include <array>
@@ -42,6 +43,7 @@ constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
 constexpr const char* kBuiltinStrategies = "/opt/usr/share/keen-pbr/nfqws-strategies";
+constexpr const char* kBuiltinBlobs = "/opt/usr/share/keen-pbr/nfqws-blobs";
 constexpr const char* kUserStrategies = "/opt/etc/keen-pbr/nfqws-strategies";
 
 std::string read_file(const fs::path& path, std::size_t limit = 2U * 1024U * 1024U);
@@ -525,6 +527,22 @@ fs::path strategy_source(const std::string& name) {
     throw ApiError("nfqws strategy not found", 404);
 }
 
+NfqwsStrategyAssetSync provision_strategy_assets(const std::string& name) {
+    if (!builtin_strategy(name)) return {};
+    const auto strategy_directory = fs::path(kBuiltinStrategies) / name;
+    try {
+        return sync_nfqws_strategy_assets(
+            strategy_directory / "required-blobs.txt",
+            kBuiltinBlobs,
+            fs::path(kConfigDir) / "blobs");
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("failed to provision nfqws strategy blobs: ") +
+                error.what(),
+            500);
+    }
+}
+
 } // namespace
 
 void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
@@ -658,15 +676,29 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             const std::lock_guard lock(nfqws_operation_mutex());
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
+            if (!fs::exists(kBinary) || !fs::exists(kInit))
+                throw ApiError("nfqws2 is not installed", 409);
             auto content = request.contains("content") && request["content"].is_string()
                                ? request["content"].get<std::string>()
                                : read_file(strategy_source(name));
             if (automatic_wan_strategy(name)) content = render_wan_interfaces(content);
+            const auto assets = provision_strategy_assets(name);
             write_file_atomic(fs::path(kConfigDir) / "nfqws2.conf", content);
-            if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
             int status = 0;
-            const auto output = run_nfqws_service_command("restart", status);
-            return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
+            auto output = run_nfqws_service_command("restart", status);
+            if (!assets.installed.empty()) {
+                std::ostringstream details;
+                details << "Installed missing strategy blobs:";
+                for (const auto& item : assets.installed) details << ' ' << item;
+                details << "\n";
+                output = details.str() + output;
+            }
+            return nlohmann::json{{"ok", status == 0},
+                                  {"output", output},
+                                  {"status", status},
+                                  {"installed_blobs", assets.installed},
+                                  {"preserved_blobs", assets.preserved}}
+                .dump();
         }
         if (action == "save_files") {
             if (!request.contains("files") || !request["files"].is_array())
