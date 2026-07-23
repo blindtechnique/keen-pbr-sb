@@ -46,7 +46,7 @@ export function AppBrandHeader({
               keen-pbr
             </span>
             <span className="truncate text-[19px] font-light tracking-[0.08em] text-foreground/80 uppercase">
-              sb
+              sb-alpha
             </span>
           </span>
           {__APP_VERSION__ ? (
