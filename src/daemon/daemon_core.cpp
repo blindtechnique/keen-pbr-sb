@@ -565,29 +565,42 @@ void Daemon::handle_ipc_control_socket() {
                                 CacheManager cache(
                                     cache_dir,
                                     max_file_size_bytes(active_config));
+                                const RouteConfig empty_route_config;
+                                const std::map<std::string, ListConfig>
+                                    empty_lists;
+                                const std::vector<RouteRule>
+                                    empty_route_rules;
+                                const std::vector<DnsRule> empty_dns_rules;
+                                const RouteConfig& route_config =
+                                    active_config.route.has_value()
+                                        ? *active_config.route
+                                        : empty_route_config;
+                                const auto& lists =
+                                    active_config.lists.has_value()
+                                        ? *active_config.lists
+                                        : empty_lists;
+                                const auto& route_rules =
+                                    route_config.rules.has_value()
+                                        ? *route_config.rules
+                                        : empty_route_rules;
+                                const auto& dns_rules =
+                                    dns_config.rules.has_value()
+                                        ? *dns_config.rules
+                                        : empty_dns_rules;
                                 std::set<std::string> referenced_lists;
-                                for (const auto& rule :
-                                     active_config.route
-                                         .value_or(RouteConfig{})
-                                         .rules.value_or(
-                                             std::vector<RouteRule>{})) {
+                                for (const auto& rule : route_rules) {
                                     if (!route_rule_enabled(rule)) continue;
                                     for (const auto& list_name :
                                          route_rule_lists(rule)) {
                                         referenced_lists.insert(list_name);
                                     }
                                 }
-                                for (const auto& rule :
-                                     dns_config.rules.value_or(
-                                         std::vector<DnsRule>{})) {
+                                for (const auto& rule : dns_rules) {
                                     if (!dns_rule_enabled(rule)) continue;
                                     for (const auto& list_name : rule.list) {
                                         referenced_lists.insert(list_name);
                                     }
                                 }
-                                const auto lists =
-                                    active_config.lists.value_or(
-                                        std::map<std::string, ListConfig>{});
                                 for (const auto& list_name :
                                      referenced_lists) {
                                     const auto list =
@@ -627,11 +640,9 @@ void Daemon::handle_ipc_control_socket() {
                                 DnsmasqGenerator generator(
                                     registry,
                                     streamer,
-                                    active_config.route.value_or(
-                                        RouteConfig{}),
+                                    route_config,
                                     dns_config,
-                                    active_config.lists.value_or(
-                                        std::map<std::string, ListConfig>{}),
+                                    lists,
                                     type,
                                     KEEN_PBR3_VERSION_FULL_STRING,
                                     ipv6.enabled);
@@ -1289,15 +1300,23 @@ void Daemon::run() {
     if (refresh_result.any_dns_relevant_changed()) {
         log.info("Startup lists: DNS-relevant list(s) changed ({}); reloading system resolver.",
                  format_list_names(refresh_result.dns_relevant_changed_lists));
-        apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-        run_system_resolver_hook_reload();
+    } else {
+        log.info(
+            "Startup resolver: reloading managed configuration after the control socket became available.");
     }
+    // The Keenetic init script starts dnsmasq before the daemon so startup can
+    // still resolve remote list hosts. At that point the control socket is not
+    // available and dnsmasq intentionally loads the fallback configuration.
+    // Always reload once more from the live daemon; otherwise a cache-complete
+    // startup can remain on fallback DNS indefinitely.
+    apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
+    run_system_resolver_hook_reload();
     update_resolver_config_hash();
-    refresh_resolver_config_hash_actual_async();
-    schedule_resolver_config_hash_actual_refresh();
     routing_runtime_active_ = true;
     transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
+    refresh_resolver_config_hash_actual_async();
+    schedule_resolver_config_hash_actual_refresh();
 
     setup_dns_probe();
 

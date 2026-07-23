@@ -359,6 +359,33 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
                     resolver_addr,
                     "config-hash.keen.pbr",
                     std::chrono::milliseconds(2000));
+                if (probe_result->status ==
+                    ResolverConfigHashProbeStatus::SUCCESS) {
+                    std::string resolver_state_error;
+                    const auto resolver_state_txt = query_dns_txt_record(
+                        resolver_addr,
+                        "resolver-state.keen.pbr",
+                        std::chrono::milliseconds(500),
+                        &resolver_state_error);
+                    if (resolver_state_txt.has_value()) {
+                        const auto resolver_state =
+                            parse_resolver_state_txt(*resolver_state_txt);
+                        if (resolver_state.mode ==
+                            ResolverRuntimeMode::FALLBACK) {
+                            probe_result->status =
+                                ResolverConfigHashProbeStatus::INVALID_TXT;
+                            probe_result->raw_txt = *resolver_state_txt;
+                            probe_result->error =
+                                "Resolver is serving fallback configuration";
+                            Logger::instance().warn(
+                                "Resolver is serving fallback configuration via {}: {}",
+                                resolver_addr,
+                                resolver_state.reason.empty()
+                                    ? "unknown reason"
+                                    : resolver_state.reason);
+                        }
+                    }
+                }
                 probe_completed_ts = unix_timestamp_now_seconds();
             } catch (const std::exception& e) {
                 ResolverConfigHashProbeResult failed_result;

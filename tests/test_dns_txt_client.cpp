@@ -200,6 +200,25 @@ TEST_CASE("parse_resolver_config_hash_txt parses md5-prefixed hash payload") {
     CHECK(parsed.hash == "0123456789abcdef0123456789abcdef");
 }
 
+TEST_CASE("parse_resolver_state_txt distinguishes active and fallback modes") {
+    const auto active =
+        parse_resolver_state_txt("1744060800|active|runtime_active");
+    CHECK(active.ts == std::optional<std::int64_t>{1744060800});
+    CHECK(active.mode == ResolverRuntimeMode::ACTIVE);
+    CHECK(active.reason == "runtime_active");
+
+    const auto fallback = parse_resolver_state_txt(
+        "\"1744060801|fallback|socket_unavailable\"");
+    CHECK(fallback.ts == std::optional<std::int64_t>{1744060801});
+    CHECK(fallback.mode == ResolverRuntimeMode::FALLBACK);
+    CHECK(fallback.reason == "socket_unavailable");
+
+    const auto unknown = parse_resolver_state_txt("legacy");
+    CHECK_FALSE(unknown.ts.has_value());
+    CHECK(unknown.mode == ResolverRuntimeMode::UNKNOWN);
+    CHECK(unknown.reason.empty());
+}
+
 TEST_CASE("query_resolver_config_hash_txt selects TXT answer with latest timestamp") {
     SingleResponseDnsServer server({
         "1744060800|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -451,6 +451,49 @@ ResolverConfigHashTxtValue parse_resolver_config_hash_txt(const std::string& txt
     return value;
 }
 
+ResolverStateTxtValue parse_resolver_state_txt(const std::string& txt_payload) {
+    ResolverStateTxtValue value;
+    const std::string normalized = strip_balanced_quotes(txt_payload);
+
+    const size_t timestamp_delimiter = normalized.find('|');
+    if (timestamp_delimiter == std::string::npos) {
+        return value;
+    }
+    const size_t mode_delimiter =
+        normalized.find('|', timestamp_delimiter + 1);
+
+    const std::string ts_part =
+        trim_copy(normalized.substr(0, timestamp_delimiter));
+    const std::string mode_part = trim_copy(normalized.substr(
+        timestamp_delimiter + 1,
+        mode_delimiter == std::string::npos
+            ? std::string::npos
+            : mode_delimiter - timestamp_delimiter - 1));
+
+    if (!ts_part.empty() &&
+        std::all_of(ts_part.begin(), ts_part.end(), [](unsigned char c) {
+            return std::isdigit(c) != 0;
+        })) {
+        try {
+            value.ts = std::stoll(ts_part);
+        } catch (...) {
+            value.ts = std::nullopt;
+        }
+    }
+
+    if (mode_part == "active") {
+        value.mode = ResolverRuntimeMode::ACTIVE;
+    } else if (mode_part == "fallback") {
+        value.mode = ResolverRuntimeMode::FALLBACK;
+    }
+
+    if (mode_delimiter != std::string::npos) {
+        value.reason = trim_copy(normalized.substr(mode_delimiter + 1));
+    }
+
+    return value;
+}
+
 bool is_valid_resolver_config_hash_txt_value(const ResolverConfigHashTxtValue& value) {
     if (value.hash.size() != 32) {
         return false;
