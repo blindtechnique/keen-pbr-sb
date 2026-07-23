@@ -37,6 +37,7 @@ struct CliOptions {
     std::string log_level{"info"};
     bool run_urltest_probes{false};
     bool repeat_preserve_apply{false};
+    bool drop_iptables_dispatchers_before_repeat{false};
 };
 
 struct RuntimeCleanup {
@@ -75,7 +76,8 @@ void print_usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0 << " --config <path> --backend <iptables|nftables> "
         << "--mode <destructive|preserve-sets> [--run-urltest-probes] "
-        << "[--repeat-preserve-apply] [--log-level <lvl>]\n";
+        << "[--repeat-preserve-apply] "
+        << "[--drop-iptables-dispatchers-before-repeat] [--log-level <lvl>]\n";
 }
 
 CliOptions parse_args(int argc, char* argv[]) {
@@ -107,6 +109,8 @@ CliOptions parse_args(int argc, char* argv[]) {
             options.run_urltest_probes = true;
         } else if (arg == "--repeat-preserve-apply") {
             options.repeat_preserve_apply = true;
+        } else if (arg == "--drop-iptables-dispatchers-before-repeat") {
+            options.drop_iptables_dispatchers_before_repeat = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
@@ -468,6 +472,27 @@ int run_firewall_integration(int argc, char* argv[]) {
         *firewall,
         mode));
     if (options.repeat_preserve_apply) {
+        if (options.drop_iptables_dispatchers_before_repeat) {
+            if (firewall->backend() != FirewallBackend::iptables) {
+                throw std::runtime_error(
+                    "--drop-iptables-dispatchers-before-repeat requires the iptables backend");
+            }
+            for (const auto& command : std::vector<std::vector<std::string>>{
+                     {"iptables", "-t", "mangle", "-D", "PREROUTING", "-j",
+                      "KeenPbrTable"},
+                     {"iptables", "-t", "mangle", "-D", "OUTPUT", "-j",
+                      "KeenPbrOutput"},
+                     {"iptables", "-t", "mangle", "-F", "KeenPbrTable"},
+                     {"iptables", "-t", "mangle", "-X", "KeenPbrTable"},
+                     {"iptables", "-t", "mangle", "-F", "KeenPbrOutput"},
+                     {"iptables", "-t", "mangle", "-X", "KeenPbrOutput"},
+                 }) {
+                if (safe_exec(command, /*suppress_output=*/true) != 0) {
+                    throw std::runtime_error(
+                        "Failed to simulate externally removed iptables dispatchers");
+                }
+            }
+        }
         firewall_state.set_rules(apply_runtime_firewall(
             config,
             marks,

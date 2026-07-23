@@ -192,9 +192,11 @@ TEST_CASE("generation script dispatches prerouting and output independently") {
   CHECK(first.find("-A KeenPbrOutput_A -p udp --dport 53") != std::string::npos);
 
   const auto replacement = T::build_generation_script(true);
-  CHECK(replacement.find("-R KeenPbrTable 1 -j KeenPbrTable_A") != std::string::npos);
-  CHECK(replacement.find("-R KeenPbrOutput 1 -j KeenPbrOutput_A") != std::string::npos);
+  CHECK(replacement.find("-F KeenPbrTable\n-F KeenPbrOutput") != std::string::npos);
+  CHECK(replacement.find("-A KeenPbrTable -j KeenPbrTable_A") != std::string::npos);
+  CHECK(replacement.find("-A KeenPbrOutput -j KeenPbrOutput_A") != std::string::npos);
   CHECK(replacement.find("-A PREROUTING -j KeenPbrTable") == std::string::npos);
+  CHECK(replacement.find("-R KeenPbrTable") == std::string::npos);
 }
 
 namespace {
@@ -486,7 +488,7 @@ TEST_CASE("build_ipt_script: global prefilter RETURN lines are emitted before ro
   const std::string iface =
       "-A KeenPbrTable ! -i br0 -j RETURN\n";
   const std::string mark =
-      "[0:0] -A KeenPbrTable -m set --match-set myset dst -j MARK --set-xmark 0x100/0xffffffff\n";
+      "-A KeenPbrTable -m set --match-set myset dst -j MARK --set-xmark 0x100/0xffffffff\n";
 
   const auto dnat_pos = s.find(dnat);
   const auto marked_pos = s.find(marked);
@@ -544,7 +546,7 @@ TEST_CASE("build_ipt_script: config-derived prefilter keeps route rule body unch
 
   const std::string iface = "-A KeenPbrTable ! -i br0 -j RETURN\n";
   const std::string mark =
-      "[0:0] -A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK --set-xmark 0x100/0xffffffff\n";
+      "-A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK --set-xmark 0x100/0xffffffff\n";
   const auto iface_pos = s.find(iface);
   const auto mark_pos = s.find(mark);
   REQUIRE(iface_pos != std::string::npos);
@@ -558,12 +560,13 @@ TEST_CASE("build_ipt_script: config rejects interface restore injection before s
       "\"rules\":[]}}"));
 }
 
-TEST_CASE("build_ipt_script_for_rule: masked mark rule uses set-xmark and rule counters") {
+TEST_CASE("build_ipt_script_for_rule: masked mark rule uses set-xmark") {
   FirewallRuleCriteria criteria;
   auto s = T::build_ipt_script_for_rule(false, Rule::Mark, 0x00010000, criteria,
                                         true, 0x00FF0000);
-  CHECK(s.find("[0:0] -A KeenPbrTable -m set --match-set pairwise_set dst -j MARK --set-xmark 0x10000/0xff0000\n") !=
+  CHECK(s.find("-A KeenPbrTable -m set --match-set pairwise_set dst -j MARK --set-xmark 0x10000/0xff0000\n") !=
         std::string::npos);
+  CHECK(s.find("[0:0] -A") == std::string::npos);
 }
 
 TEST_CASE("build_ipt_script: config-derived prefilter omits interface guard when inbound list is empty") {

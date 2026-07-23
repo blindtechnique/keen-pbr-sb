@@ -70,8 +70,14 @@ for backend in iptables nftables; do
     --privileged \
     "${images[$backend]}" >/dev/null
 
-  run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
-    --repeat-preserve-apply
+  if [[ "$backend" == "iptables" ]]; then
+    run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
+      --repeat-preserve-apply \
+      --drop-iptables-dispatchers-before-repeat
+  else
+    run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
+      --repeat-preserve-apply
+  fi
 
   run_case "$container" "$backend" "urltest-reachable.json" "urltest-reachable.setup.sh" \
     --run-urltest-probes

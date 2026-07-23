@@ -415,6 +415,16 @@ bool IptablesFirewall::ipv6_backend_available() const {
     return iptables_ipv6_supported();
 }
 
+bool IptablesFirewall::dispatcher_chains_exist(bool ipv6) const {
+    const char* command = ipv6 ? "ip6tables" : "iptables";
+    return safe_exec(
+               {command, "-t", "mangle", "-S", CHAIN_NAME},
+               /*suppress_output=*/true) == 0 &&
+           safe_exec(
+               {command, "-t", "mangle", "-S", OUTPUT_CHAIN_NAME},
+               /*suppress_output=*/true) == 0;
+}
+
 std::string IptablesFirewall::build_proto_port_fragment(L4Proto proto,
                                                          const PortSpec& src_port,
                                                          const PortSpec& dst_port,
@@ -537,7 +547,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         pr.fwmark,
                         pr.fwmark_mask);
                     lines.push_back(keen_pbr3::format(
-                        "[0:0] -A {}{}{}{}{} {}\n",
+                        "-A {}{}{}{}{} {}\n",
                         chain,
                         iface_frag,
                         addr_frag,
@@ -575,7 +585,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         pr.fwmark,
                         pr.fwmark_mask);
                     lines.push_back(keen_pbr3::format(
-                        "[0:0] -A {} -m set --match-set {} dst{}{}{}{} {}\n",
+                        "-A {} -m set --match-set {} dst{}{}{}{} {}\n",
                         chain,
                         *pr.criteria.dst_set_name,
                         iface_frag,
@@ -663,9 +673,17 @@ std::string IptablesFirewall::build_generation_ipt_script(
         prerouting_chain, prerouting_chain, output_chain, output_chain);
 
     if (replace_active_chains) {
+        // Rebuild both daemon-owned dispatchers instead of assuming their jump
+        // is still at position 1. The complete restore remains atomic.
         script += keen_pbr3::format(
-            "-R {} 1 -j {}\n-R {} 1 -j {}\n",
-            CHAIN_NAME, prerouting_chain, OUTPUT_CHAIN_NAME, output_chain);
+            "-F {}\n-F {}\n"
+            "-A {} -j {}\n-A {} -j {}\n",
+            CHAIN_NAME,
+            OUTPUT_CHAIN_NAME,
+            CHAIN_NAME,
+            prerouting_chain,
+            OUTPUT_CHAIN_NAME,
+            output_chain);
     } else {
         script += keen_pbr3::format(
             ":{} - [0:0]\n:{} - [0:0]\n"
@@ -775,6 +793,21 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         if (!ipset_script.empty()) {
             pipe_to_cmd({"ipset", "restore", "-exist"}, ipset_script);
         }
+    }
+
+    // The daemon can outlive externally flushed firewall state. Do not use the
+    // incremental A/B switch unless both stable dispatchers still exist.
+    const bool v4_dispatchers_missing =
+        active_v4_generation_.has_value() &&
+        !dispatcher_chains_exist(false);
+    const bool v6_dispatchers_missing =
+        effective_ipv6 &&
+        active_v6_generation_.has_value() &&
+        !dispatcher_chains_exist(true);
+    if (v4_dispatchers_missing || v6_dispatchers_missing) {
+        Logger::instance().warn(
+            "iptables dispatcher chains are missing; recreating the firewall scaffold");
+        cleanup_rules_impl(/*sweep_live_state=*/true);
     }
 
     // Phase 2: iptables rules via iptables-restore / ip6tables-restore.
