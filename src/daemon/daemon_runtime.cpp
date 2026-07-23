@@ -70,19 +70,27 @@ void Daemon::stop_routing_runtime() {
         keenetic_dns_refresh_task_id_ = -1;
     }
 
+    std::optional<int> resolver_exit_code;
     if (config_.dns.has_value() && config_.dns->system_resolver.has_value()) {
         const auto args = build_system_resolver_hook_args(config_, "deactivate");
         const int exit_code = hook_command_executor_(args);
         if (exit_code != 0) {
-            throw DaemonError("System resolver deactivate hook failed with exit code " +
-                              std::to_string(exit_code));
+            resolver_exit_code = exit_code;
         }
     }
 
+    // Routing and firewall teardown has already happened. Publish the real
+    // state even when dnsmasq fallback activation fails; reporting "running"
+    // here would leave restart callers and the UI with a false liveness state.
     routing_runtime_active_ = false;
     refresh_resolver_config_hash_actual_async();
     publish_runtime_state();
     log.info("Routing runtime stopped.");
+
+    if (resolver_exit_code.has_value()) {
+        throw DaemonError("System resolver deactivate hook failed with exit code " +
+                          std::to_string(*resolver_exit_code));
+    }
 }
 
 void Daemon::start_routing_runtime() {
@@ -102,6 +110,49 @@ void Daemon::start_routing_runtime() {
         auto args = build_system_resolver_hook_args(config_, "activate");
         const int exit_code = hook_command_executor_(args);
         if (exit_code != 0) {
+            // setup_static_routing/apply_firewall already mutated the live
+            // system. Undo those effects before returning an error so a
+            // failed start cannot leave routes active while health says
+            // "stopped". Deactivate also restores the dnsmasq fallback marker
+            // even if dnsmasq itself cannot currently restart.
+            if (urltest_manager_) {
+                try {
+                    urltest_manager_->clear();
+                } catch (const std::exception& cleanup_error) {
+                    log.error("Failed to clear urltest state after resolver activation error: {}",
+                              cleanup_error.what());
+                }
+            }
+            try {
+                policy_rules_.clear();
+            } catch (const std::exception& cleanup_error) {
+                log.error("Failed to clean policy rules after resolver activation error: {}",
+                          cleanup_error.what());
+            }
+            try {
+                route_table_.clear();
+            } catch (const std::exception& cleanup_error) {
+                log.error("Failed to clean routes after resolver activation error: {}",
+                          cleanup_error.what());
+            }
+            try {
+                firewall_->cleanup();
+            } catch (const std::exception& cleanup_error) {
+                log.error("Failed to clean firewall after resolver activation error: {}",
+                          cleanup_error.what());
+            }
+            const auto deactivate_args =
+                build_system_resolver_hook_args(config_, "deactivate");
+            if (!deactivate_args.empty()) {
+                const int deactivate_exit_code = hook_command_executor_(deactivate_args);
+                if (deactivate_exit_code != 0) {
+                    log.warn("System resolver fallback recovery failed with exit code {}",
+                             deactivate_exit_code);
+                }
+            }
+            routing_runtime_active_ = false;
+            refresh_resolver_config_hash_actual_async();
+            publish_runtime_state();
             throw DaemonError("System resolver activate hook failed with exit code " +
                               std::to_string(exit_code));
         }
