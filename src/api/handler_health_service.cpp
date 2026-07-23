@@ -26,6 +26,12 @@ namespace {
 constexpr const char* kUpdatePidFile = "/opt/var/run/keen-pbr-self-update.pid";
 constexpr const char* kUpdateLogFile = "/opt/var/log/keen-pbr-self-update.log";
 constexpr const char* kUpdateStateFile = "/opt/var/run/keen-pbr-self-update.json";
+constexpr const char* kRescueHelper =
+    "/opt/var/lib/keen-pbr/rescue/rescue-update.sh";
+constexpr const char* kCurrentPackage =
+    "/opt/var/lib/keen-pbr/rescue/current.ipk";
+constexpr const char* kPreviousPackage =
+    "/opt/var/lib/keen-pbr/rescue/previous.ipk";
 
 std::string read_file_tail(const std::filesystem::path& path,
                            std::streamoff limit) {
@@ -56,7 +62,8 @@ bool is_update_process(pid_t pid) {
         std::filesystem::path("/proc") / std::to_string(pid) / "cmdline",
         16 * 1024);
     return cmdline.find("keen-pbr/self-update.sh") != std::string::npos ||
-           cmdline.find("keen-pbr-self-update") != std::string::npos;
+           cmdline.find("keen-pbr-self-update") != std::string::npos ||
+           cmdline.find("rescue-update.sh") != std::string::npos;
 }
 
 bool update_is_running() {
@@ -82,6 +89,13 @@ nlohmann::json local_update_status() {
 
     status["running"] = update_is_running();
     status["log"] = read_file_tail(kUpdateLogFile, 24 * 1024);
+    std::error_code ec;
+    status["package_rescue_ready"] =
+        std::filesystem::is_regular_file(kRescueHelper, ec) &&
+        std::filesystem::is_regular_file(kCurrentPackage, ec);
+    ec.clear();
+    status["package_rollback_available"] =
+        std::filesystem::is_regular_file(kPreviousPackage, ec);
     return status;
 }
 
@@ -153,6 +167,27 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
         const int status = std::system(
             "/opt/usr/lib/keen-pbr/self-update.sh >/dev/null 2>&1 &");
         if (status != 0) throw ApiError("failed to start keen-pbr-sb update", 500);
+        return R"({"ok":true,"started":true})";
+    });
+
+    server.post("/api/system/update/rollback", [&ctx]() -> std::string {
+        const std::lock_guard lock(update_start_mutex());
+        if (update_is_running())
+            throw ApiError("keen-pbr-sb update or rollback is already running", 409);
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(kRescueHelper, ec) ||
+            !std::filesystem::is_regular_file(kPreviousPackage, ec)) {
+            throw ApiError(
+                "previous IPK is not available; complete one managed update first",
+                409);
+        }
+
+        create_full_rollback_backup(ctx);
+        const int status = std::system(
+            "(sleep 1; /opt/var/lib/keen-pbr/rescue/rescue-update.sh "
+            "rollback-previous) >/dev/null 2>&1 &");
+        if (status != 0)
+            throw ApiError("failed to start keen-pbr-sb package rollback", 500);
         return R"({"ok":true,"started":true})";
     });
 }

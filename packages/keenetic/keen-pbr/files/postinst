@@ -8,6 +8,14 @@ echo "keen-pbr installation"
 echo "------------------------"
 
 mkdir -p /opt/usr/lib/keen-pbr
+mkdir -p /opt/var/lib/keen-pbr/rescue
+if [ -x /opt/usr/lib/keen-pbr/rescue-update.sh ]; then
+    rescue_helper_tmp="/opt/var/lib/keen-pbr/rescue/rescue-update.sh.tmp.$$"
+    cp /opt/usr/lib/keen-pbr/rescue-update.sh "$rescue_helper_tmp"
+    chmod 0755 "$rescue_helper_tmp"
+    mv -f "$rescue_helper_tmp" \
+        /opt/var/lib/keen-pbr/rescue/rescue-update.sh
+fi
 
 answer=""
 if [ -f "$DNSMASQ_TEMPLATE" ]; then

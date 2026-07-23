@@ -7,6 +7,8 @@ GITHUB_API="https://api.github.com/repos"
 SING_BOX_TESTED_VERSION="1.13.14"
 TMP_DIR="${TMPDIR:-/tmp}/mykeenpbr-install.$$"
 TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
+RESCUE_DIR="/opt/var/lib/keen-pbr/rescue"
+RESCUE_HELPER="$RESCUE_DIR/rescue-update.sh"
 UPDATE_ONLY=0
 
 case "${1:-}" in
@@ -370,6 +372,45 @@ configure_nfqws2() {
     say "nfqws2 установлен. Управление доступно в разделе «nfqws2» веб-интерфейса keen-pbr-sb."
 }
 
+install_package_transactionally() {
+    mkdir -p "$RESCUE_DIR"
+    if [ -x "$RESCUE_HELPER" ]; then
+        "$RESCUE_HELPER" stage "$PACKAGE_FILE"
+    else
+        # The first rescue-capable install has no archived baseline yet. Keep
+        # the candidate and pre-update configuration; successful validation
+        # promotes it for every subsequent package rollback.
+        candidate_tmp="$RESCUE_DIR/candidate.ipk.tmp.$$"
+        cp -p "$PACKAGE_FILE" "$candidate_tmp"
+        mv -f "$candidate_tmp" "$RESCUE_DIR/candidate.ipk"
+        rm -rf "$RESCUE_DIR/pre-update-config"
+        mkdir -p "$RESCUE_DIR/pre-update-config"
+        for name in config.json transports.json auth.json local.lst; do
+            [ ! -f "/opt/etc/keen-pbr/$name" ] ||
+                cp -p "/opt/etc/keen-pbr/$name" \
+                    "$RESCUE_DIR/pre-update-config/$name"
+        done
+        sync
+    fi
+
+    if KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
+           /opt/bin/opkg install "$PACKAGE_FILE" &&
+       [ -x "$RESCUE_HELPER" ] &&
+       "$RESCUE_HELPER" verify; then
+        "$RESCUE_HELPER" promote
+        return 0
+    fi
+
+    say "ОШИБКА: новый пакет не прошёл проверку после установки."
+    if [ -x "$RESCUE_HELPER" ] &&
+       "$RESCUE_HELPER" rollback-candidate; then
+        say "Предыдущий IPK автоматически восстановлен."
+    else
+        say "Автоматический IPK-откат пока недоступен; сохранён бэкап конфигурации."
+    fi
+    return 1
+}
+
 repair_interrupted_nfqws_bootstrap() {
     feed=/opt/etc/opkg/nfqws2-keenetic.conf
     [ -f "$feed" ] || return 0
@@ -392,14 +433,14 @@ say "Установка keen-pbr-sb для ${KEEN_ARCH}-${KEEN_ABI} из $PROJEC
 download_package
 if [ "$UPDATE_ONLY" = "1" ]; then
     say "Устанавливаю обновление keen-pbr-sb без изменения пользовательских настроек..."
-    KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N /opt/bin/opkg install "$PACKAGE_FILE"
+    install_package_transactionally
     say "Обновление keen-pbr-sb установлено. Веб-интерфейс перезапускается."
     exit 0
 fi
 choose_sing_box
 repair_interrupted_nfqws_bootstrap
 /opt/bin/opkg update
-KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N /opt/bin/opkg install "$PACKAGE_FILE"
+install_package_transactionally
 set_sing_box_path
 configure_web_auth
 configure_dns

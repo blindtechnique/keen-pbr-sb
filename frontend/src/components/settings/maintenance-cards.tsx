@@ -53,6 +53,8 @@ type SoftwareUpdateStatus = {
   percent?: number
   message?: string
   success?: boolean | null
+  package_rescue_ready?: boolean
+  package_rollback_available?: boolean
 }
 
 type SoftwareUpdateProgress = Pick<
@@ -96,9 +98,9 @@ export function SoftwareUpdateCard() {
   const [status, setStatus] = useState<SoftwareUpdateStatus | null>(null)
   const [error, setError] = useState("")
   const [open, setOpen] = useState(false)
-  const [restoreOpen, setRestoreOpen] = useState(false)
   const [showResult, setShowResult] = useState(false)
   const [confirmInstall, setConfirmInstall] = useState(false)
+  const [confirmRollback, setConfirmRollback] = useState(false)
   const [checking, setChecking] = useState(false)
   const [starting, setStarting] = useState(false)
   const [downloadBackupBeforeUpdate, setDownloadBackupBeforeUpdate] =
@@ -241,9 +243,49 @@ export function SoftwareUpdateCard() {
     }
   }
 
-  const openRollback = () => {
-    setOpen(false)
-    setRestoreOpen(true)
+  const startPackageRollback = async () => {
+    setConfirmRollback(false)
+    setShowResult(true)
+    setStarting(true)
+    setError("")
+    setStatus((previous) =>
+      previous
+        ? {
+            ...previous,
+            log: "",
+            message: "Восстанавливаю предыдущий пакет",
+            percent: 0,
+            phase: "rollback",
+            success: null,
+          }
+        : previous
+    )
+    try {
+      const response = await fetch("/api/system/update/rollback", {
+        method: "POST",
+      })
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string
+      }
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      setStatus((previous) =>
+        previous ? { ...previous, running: true } : previous
+      )
+      window.setTimeout(() => void refreshProgress(), 1200)
+    } catch (rollbackError) {
+      setStatus((previous) =>
+        previous
+          ? { ...previous, phase: "failed", running: false, success: false }
+          : previous
+      )
+      setError(
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : "Не удалось запустить откат пакета"
+      )
+    } finally {
+      setStarting(false)
+    }
   }
 
   return (
@@ -361,10 +403,52 @@ export function SoftwareUpdateCard() {
                 </div>
               </div>
             ) : null}
+            {confirmRollback ? (
+              <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">
+                <div>
+                  <p className="font-medium">
+                    Восстановить предыдущую версию keen-pbr-sb?
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Будут установлены сохранённый IPK и соответствующая ему
+                    конфигурация. Текущий пакет останется доступен для обратного
+                    отката.
+                  </p>
+                </div>
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                  <Button
+                    onClick={() => setConfirmRollback(false)}
+                    variant="outline"
+                  >
+                    Отмена
+                  </Button>
+                  <Button
+                    onClick={() => void startPackageRollback()}
+                    variant="destructive"
+                  >
+                    Восстановить предыдущий IPK
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <DialogFooter className="max-sm:items-stretch">
-            <Button onClick={openRollback} variant="destructive">
+            <Button
+              disabled={
+                !status?.package_rollback_available ||
+                status.running ||
+                starting ||
+                confirmRollback
+              }
+              onClick={() => setConfirmRollback(true)}
+              title={
+                status?.package_rollback_available
+                  ? undefined
+                  : "Появится после успешного управляемого обновления"
+              }
+              variant="destructive"
+            >
               <RotateCcwIcon />
               Откат в один клик
             </Button>
@@ -392,7 +476,6 @@ export function SoftwareUpdateCard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <RestoreDialog onOpenChange={setRestoreOpen} open={restoreOpen} />
     </>
   )
 }
