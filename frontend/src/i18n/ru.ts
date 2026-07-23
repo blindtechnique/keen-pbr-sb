@@ -441,6 +441,22 @@ export const ruTranslation = {
         "Ожидаемый хеш резолвера ({{expected}}…) не совпадает с активным хешем dnsmasq ({{actual}}…).",
     },
   },
+  lifecycle: {
+    running: "Применение изменений",
+    runningDescription: "keen-pbr выполняет операцию по этапам.",
+    success: "Операция завершена",
+    successDescription: "Все этапы выполнены успешно.",
+    error: "Операция завершилась с ошибкой",
+    errorDescription: "Не выполненные этапы пропущены. Проверьте отмеченный этап.",
+    dismiss: "Закрыть",
+    stages: {
+      validate_config: "Проверка конфигурации",
+      commit_and_apply: "Сохранение и применение",
+      start_routing: "Запуск маршрутизации",
+      stop_routing: "Остановка маршрутизации",
+      restart_routing: "Перезапуск маршрутизации",
+    },
+  },
   overview: {
     router: {
       title: "Роутер",

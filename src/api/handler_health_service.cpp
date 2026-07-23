@@ -90,6 +90,28 @@ std::mutex& update_start_mutex() {
     return mutex;
 }
 
+nlohmann::json lifecycle_operation_json(const LifecycleOperationSnapshot& operation) {
+    nlohmann::json stages = nlohmann::json::array();
+    for (const auto& stage : operation.stages) {
+        stages.push_back({
+            {"id", stage.id},
+            {"title", stage.title},
+            {"status", lifecycle_operation_status_name(stage.status)},
+            {"detail", stage.detail},
+        });
+    }
+    nlohmann::json result{
+        {"id", operation.id},
+        {"type", lifecycle_operation_type_name(operation.type)},
+        {"status", lifecycle_operation_result_name(operation.result)},
+        {"started_at", operation.started_at},
+        {"stages", std::move(stages)},
+    };
+    if (operation.finished_at) result["finished_at"] = *operation.finished_at;
+    if (!operation.error.empty()) result["error"] = operation.error;
+    return result;
+}
+
 } // namespace
 
 api::HealthResponse build_health_response(
@@ -113,6 +135,11 @@ api::HealthResponse build_health_response(
     resp.resolver_config_sync_state =
         service_health.resolver_config_sync_state;
     resp.config_is_draft = service_health.config_is_draft;
+    if (service_health.lifecycle_operation) {
+        resp.lifecycle_operation =
+            lifecycle_operation_json(*service_health.lifecycle_operation)
+                .get<api::LifecycleOperation>();
+    }
     return resp;
 }
 

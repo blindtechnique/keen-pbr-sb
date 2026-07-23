@@ -141,10 +141,34 @@ void register_config_handler(ApiServer& server, ApiContext& ctx) {
             throw ApiError("No staged config to save", 400);
         }
 
+        LifecycleOperationSnapshot lifecycle;
+        if (ctx.lifecycle_operations) {
+            if (const auto active = ctx.lifecycle_operations->begin(
+                    LifecycleOperationType::ApplyConfig,
+                    {{"validate_config", "Validate configuration"},
+                     {"commit_and_apply", "Commit and apply configuration"}},
+                    lifecycle)) {
+                ctx.finish_config_operation();
+                throw ApiError(
+                    "A lifecycle operation is already active", 409,
+                    nlohmann::json{{"error", "A lifecycle operation is already active"},
+                                   {"active_operation_id", *active}}.dump());
+            }
+            ctx.lifecycle_operations->start_stage(lifecycle.id, "validate_config");
+        }
+
         // Phase 1: validation + dry-run apply check.
         try {
             ctx.validate_candidate_config(staged_snapshot->first);
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->succeed_stage(lifecycle.id, "validate_config");
+                ctx.lifecycle_operations->start_stage(lifecycle.id, "commit_and_apply");
+            }
         } catch (const ConfigValidationError& e) {
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->fail_stage(lifecycle.id, "validate_config", e.what());
+                ctx.lifecycle_operations->finish(lifecycle.id, e.what());
+            }
             ctx.finish_config_operation();
             nlohmann::json error_payload = make_validation_error_json(e);
             error_payload["saved"] = false;
@@ -152,6 +176,10 @@ void register_config_handler(ApiServer& server, ApiContext& ctx) {
             error_payload["rolled_back"] = false;
             throw ApiError("Dry-run apply check failed", 400, error_payload.dump());
         } catch (const std::exception& e) {
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->fail_stage(lifecycle.id, "validate_config", e.what());
+                ctx.lifecycle_operations->finish(lifecycle.id, e.what());
+            }
             ctx.finish_config_operation();
             nlohmann::json error_payload = {
                 {"error", std::string("Dry-run apply check failed: ") + e.what()},
@@ -197,6 +225,10 @@ void register_config_handler(ApiServer& server, ApiContext& ctx) {
             if (apply_result.apply_started_ts.has_value()) {
                 response["apply_started_ts"] = *apply_result.apply_started_ts;
             }
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->succeed_stage(lifecycle.id, "commit_and_apply");
+                ctx.lifecycle_operations->finish(lifecycle.id);
+            }
             ctx.finish_config_operation();
             return response.dump();
         } catch (...) {
@@ -207,6 +239,11 @@ void register_config_handler(ApiServer& server, ApiContext& ctx) {
                     Logger::instance().error("Cannot restore config file after failed apply: {}",
                                              rollback_error.what());
                 }
+            }
+            if (ctx.lifecycle_operations) {
+                const std::string error = "Configuration commit or apply failed";
+                ctx.lifecycle_operations->fail_stage(lifecycle.id, "commit_and_apply", error);
+                ctx.lifecycle_operations->finish(lifecycle.id, error);
             }
             ctx.finish_config_operation();
             throw;

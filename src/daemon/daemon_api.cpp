@@ -353,6 +353,7 @@ void Daemon::setup_api() {
             service_health.resolver_config_sync_state =
                 runtime_snapshot.resolver_config_sync_state;
             service_health.config_is_draft = config_store_.config_is_draft();
+            service_health.lifecycle_operation = lifecycle_operation_store_.snapshot();
             return service_health;
         },
         [this]() {
@@ -451,6 +452,7 @@ void Daemon::setup_api() {
             return refresh_lists_via_api(requested_name);
         },
         nullptr,
+        &lifecycle_operations_,
     });
     status_stream_ = std::make_unique<StatusStream>([this]() {
         return StatusSnapshot{
@@ -460,6 +462,9 @@ void Daemon::setup_api() {
         };
     });
     api_ctx_->status_stream = status_stream_.get();
+    lifecycle_operation_store_.set_publish_callback([this]() {
+        if (status_stream_) status_stream_->reconcile();
+    });
     register_api_handlers(*api_server_, *api_ctx_);
 
     // Latency with its measurement age. Kept out of the generated runtime

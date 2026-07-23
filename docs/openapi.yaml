@@ -1543,6 +1543,47 @@ components:
             Whether a newer configuration has been staged in memory but not yet
             persisted and applied.
           example: false
+        lifecycle_operation:
+          $ref: "#/components/schemas/LifecycleOperation"
+
+    LifecycleOperation:
+      type: object
+      required: [id, type, status, started_at, stages]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [apply_config, start, stop, restart]
+        status:
+          type: string
+          enum: [running, succeeded, failed]
+        started_at:
+          type: integer
+          format: int64
+        finished_at:
+          type: integer
+          format: int64
+        error:
+          type: string
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/LifecycleOperationStage"
+
+    LifecycleOperationStage:
+      type: object
+      required: [id, title, status, detail]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, skipped]
+        detail:
+          type: string
 
     ResolverConfigSyncState:
       type: string

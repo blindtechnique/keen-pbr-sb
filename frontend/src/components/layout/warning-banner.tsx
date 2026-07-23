@@ -62,7 +62,9 @@ export function WarningBanner({
   }
 
   const isConverging = state.mode === "dnsmasq-converging"
-  const isError = state.mode === "dnsmasq-error"
+  const isLifecycle = state.mode.startsWith("lifecycle-")
+  const isError =
+    state.mode === "dnsmasq-error" || state.mode === "lifecycle-error"
   const handleApplyAndReload = () => {
     if (state.hasDraftConfig) {
       applyConfigMutation.mutate()
@@ -101,7 +103,7 @@ export function WarningBanner({
             </p>
           </div>
 
-          {!isConverging ? (
+          {!isConverging && !isLifecycle ? (
             <Button
               disabled={state.isActionDisabled}
               onClick={handleApplyAndReload}
@@ -114,7 +116,45 @@ export function WarningBanner({
                 : t("warning.actions.applyAndRestart")}
             </Button>
           ) : null}
+          {state.mode === "lifecycle-error" ? (
+            <Button
+              onClick={state.dismissFailure}
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+            >
+              {t("lifecycle.dismiss")}
+            </Button>
+          ) : null}
         </div>
+
+        {isLifecycle && state.operationSteps.length > 0 ? (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[12px] leading-4">
+            {state.operationSteps.map((step) => (
+              <span
+                key={step.id}
+                className={cn(
+                  "inline-flex items-center gap-1.5",
+                  step.status === "failed"
+                    ? "text-destructive"
+                    : step.status === "succeeded"
+                      ? "text-success"
+                      : step.status === "running"
+                        ? "text-primary"
+                        : "text-muted-foreground"
+                )}
+              >
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full bg-current",
+                    step.status === "running" && "animate-pulse"
+                  )}
+                />
+                {step.title}
+              </span>
+            ))}
+          </div>
+        ) : null}
 
         {isConverging ? (
           <div className="h-1.5 rounded bg-muted">
@@ -141,6 +181,12 @@ function getWarningBannerTitleKey(mode: WarningBannerMode) {
       return "warning.compact.dnsmasqRestarting"
     case "dnsmasq-error":
       return "warning.compact.dnsmasqUnavailable"
+    case "lifecycle-running":
+      return "lifecycle.running"
+    case "lifecycle-success":
+      return "lifecycle.success"
+    case "lifecycle-error":
+      return "lifecycle.error"
     case "hidden":
       return "warning.compact.keenRestartRequired"
   }
@@ -158,6 +204,12 @@ function getWarningBannerDescriptionKey(mode: WarningBannerMode) {
       return "warning.compact.dnsmasqRestartingDescription"
     case "dnsmasq-error":
       return "warning.compact.dnsmasqUnavailableDescription"
+    case "lifecycle-running":
+      return "lifecycle.runningDescription"
+    case "lifecycle-success":
+      return "lifecycle.successDescription"
+    case "lifecycle-error":
+      return "lifecycle.errorDescription"
     case "hidden":
       return "warning.compact.keenRestartRequiredDescription"
   }

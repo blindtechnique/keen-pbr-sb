@@ -438,6 +438,22 @@ export const enTranslation = {
         "The expected resolver hash ({{expected}}…) doesn't match dnsmasq's active hash ({{actual}}…).",
     },
   },
+  lifecycle: {
+    running: "Applying changes",
+    runningDescription: "keen-pbr is executing the operation step by step.",
+    success: "Operation completed",
+    successDescription: "All stages completed successfully.",
+    error: "Operation failed",
+    errorDescription: "Remaining stages were skipped. Check the failed stage.",
+    dismiss: "Dismiss",
+    stages: {
+      validate_config: "Validate configuration",
+      commit_and_apply: "Commit and apply",
+      start_routing: "Start routing",
+      stop_routing: "Stop routing",
+      restart_routing: "Restart routing",
+    },
+  },
   overview: {
     router: {
       title: "Router",

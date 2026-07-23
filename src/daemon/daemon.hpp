@@ -24,6 +24,7 @@
 #include "../routing/netlink.hpp"
 #include "../routing/policy_rule.hpp"
 #include "../routing/route_table.hpp"
+#include "../runtime/lifecycle_operation.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
 #include "../util/traced_mutex.hpp"
@@ -306,6 +307,8 @@ private:
     ConfigStore config_store_;
     ListService list_service_;
     RuntimeStateStore runtime_state_store_;
+    LifecycleOperationStore lifecycle_operation_store_;
+    LifecycleOperationCoordinator lifecycle_operations_{lifecycle_operation_store_};
 
     // Event-loop-owned controller state
     Config config_;

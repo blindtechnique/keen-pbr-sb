@@ -7,6 +7,7 @@
 #include "../cmd/test_routing.hpp"
 #include "../config/config.hpp"
 #include "../health/routing_health.hpp"
+#include "../runtime/lifecycle_operation.hpp"
 #include "sse_broadcaster.hpp"
 #include "status_stream.hpp"
 #include "server.hpp"
@@ -47,6 +48,7 @@ struct ServiceHealthState {
     std::optional<std::int64_t> apply_started_ts;
     std::optional<api::ResolverConfigSyncState> resolver_config_sync_state;
     bool config_is_draft{false};
+    std::optional<LifecycleOperationSnapshot> lifecycle_operation;
 };
 
 struct ListRefreshOperationResult {
@@ -86,6 +88,7 @@ struct ApiContext {
     std::function<void()> restart_runtime_fn;
     std::function<ListRefreshOperationResult(std::optional<std::string>)> refresh_lists_fn;
     StatusStream* status_stream{nullptr};
+    LifecycleOperationCoordinator* lifecycle_operations{nullptr};
 
     Config get_visible_config() const {
         return get_visible_config_fn();
