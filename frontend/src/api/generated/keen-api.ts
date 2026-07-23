@@ -28,6 +28,8 @@ import type {
   ConfigObject,
   ConfigStateResponse,
   ConfigUpdateResponse,
+  ConnectionPage,
+  ConnectionQueryRequest,
   DependencyAnalysisRequest,
   DependencyAnalysisResponse,
   ErrorResponse,
@@ -1479,6 +1481,103 @@ export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRunt
 
 
 
+
+/**
+ * Creates a short-lived immutable snapshot on the first request and returns an opaque cursor for following pages. Filtering and sorting are performed on the router so the WebUI does not download the complete bounded conntrack history.
+
+ * @summary Query a stable page of observed connections
+ */
+export type queryConnectionsResponse200 = {
+  data: ConnectionPage
+  status: 200
+}
+
+export type queryConnectionsResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type queryConnectionsResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type queryConnectionsResponseSuccess = (queryConnectionsResponse200) & {
+  headers: Headers;
+};
+export type queryConnectionsResponseError = (queryConnectionsResponse400 | queryConnectionsResponse409) & {
+  headers: Headers;
+};
+
+export type queryConnectionsResponse = (queryConnectionsResponseSuccess | queryConnectionsResponseError)
+
+export const getQueryConnectionsUrl = () => {
+
+
+
+
+  return `/api/connections/query`
+}
+
+export const queryConnections = async (connectionQueryRequest: ConnectionQueryRequest, options?: RequestInit): Promise<queryConnectionsResponse> => {
+
+  return apiFetch<queryConnectionsResponse>(getQueryConnectionsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      connectionQueryRequest,)
+  }
+);}
+
+
+
+
+export const getQueryConnectionsMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queryConnections>>, TError,{data: ConnectionQueryRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof queryConnections>>, TError,{data: ConnectionQueryRequest}, TContext> => {
+
+const mutationKey = ['queryConnections'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof queryConnections>>, {data: ConnectionQueryRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  queryConnections(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type QueryConnectionsMutationResult = NonNullable<Awaited<ReturnType<typeof queryConnections>>>
+    export type QueryConnectionsMutationBody = ConnectionQueryRequest
+    export type QueryConnectionsMutationError = ErrorResponse
+
+    /**
+ * @summary Query a stable page of observed connections
+ */
+export const useQueryConnections = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof queryConnections>>, TError,{data: ConnectionQueryRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof queryConnections>>,
+        TError,
+        {data: ConnectionQueryRequest},
+        TContext
+      > => {
+      return useMutation(getQueryConnectionsMutationOptions(options), queryClient);
+    }
 
 /**
  * Streams named Server-Sent Events for service health, runtime outbounds, and system interfaces. Every connection receives a snapshot first. Later events contain the complete dataset that changed. Heartbeat comments are sent every 15 seconds; reconnecting starts with a fresh snapshot and no event replay is performed.

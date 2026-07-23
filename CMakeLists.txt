@@ -294,6 +294,7 @@ if(WITH_API)
   list(APPEND SOURCES
     src/api/server.cpp
     src/api/keenetic_auth.cpp
+    src/api/connection_query.cpp
     src/api/handlers.cpp
     src/api/health_response.cpp
     src/api/sse_broadcaster.cpp

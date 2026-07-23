@@ -1,34 +1,23 @@
-import { useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery } from "@tanstack/react-query"
 import { ChevronRightIcon } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useDeferredValue, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { queryConnections } from "@/api/generated/keen-api"
+import type { ConnectionRecord } from "@/api/generated/model/connectionRecord"
 import { PageHeader } from "@/components/shared/page-header"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
-type Connection = {
-  id: string
-  protocol: string
-  state: string
-  source: string
-  source_port: number
-  destination: string
-  destination_port: number
-  device: string
-  active: boolean
-  last_seen: number
-  destination_domains: string[]
-}
-
 type DeviceGroup = {
   key: string
   name: string
   address: string
-  connections: Connection[]
+  connections: ConnectionRecord[]
   activeCount: number
   lastSeen: number
 }
@@ -36,40 +25,46 @@ type DeviceGroup = {
 export function ConnectionsPage() {
   const { t } = useTranslation()
   const [filter, setFilter] = useState("")
+  const deferredFilter = useDeferredValue(filter.trim())
   const [activeOnly, setActiveOnly] = useState(true)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-  const query = useQuery({
-    queryKey: ["connections", activeOnly ? "active" : "all"],
-    queryFn: async () => {
-      const response = await fetch(
-        activeOnly ? "/api/connections/active" : "/api/connections"
-      )
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json() as Promise<Connection[]>
+  const query = useInfiniteQuery({
+    queryKey: [
+      "connections",
+      activeOnly ? "active" : "all",
+      deferredFilter,
+    ],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) => {
+      const response = await queryConnections({
+        active_only: activeOnly,
+        cursor: pageParam,
+        limit: 100,
+        search: deferredFilter || undefined,
+        sort: "last_seen",
+        order: "desc",
+      })
+      if (response.status !== 200) {
+        throw new Error(response.data.error)
+      }
+      return response.data
     },
-    refetchInterval: 3_000,
+    getNextPageParam: (lastPage) => lastPage.next_cursor,
+    refetchInterval: (currentQuery) =>
+      currentQuery.state.data?.pages.length === 1 ? 3_000 : false,
     refetchIntervalInBackground: false,
   })
 
+  const connections = useMemo(
+    () => query.data?.pages.flatMap((page) => page.items) ?? [],
+    [query.data]
+  )
   const groups = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
-    const matching = (query.data ?? [])
-      .filter((item) => !activeOnly || item.active)
-      .filter(
-        (item) =>
-          !needle ||
-          `${item.source} ${item.destination} ${item.destination_domains.join(
-            " "
-          )} ${item.device} ${item.state} ${item.protocol}`
-            .toLowerCase()
-            .includes(needle)
-      )
-
     // One row per device, like the firmware does, so a busy host does not bury
     // everything else under hundreds of sessions.
     const byDevice = new Map<string, DeviceGroup>()
-    for (const item of matching) {
+    for (const item of connections) {
       const key = item.source
       const group = byDevice.get(key) ?? {
         key,
@@ -91,12 +86,9 @@ export function ConnectionsPage() {
         connections: group.connections.sort((a, b) => b.last_seen - a.last_seen),
       }))
       .sort((a, b) => b.connections.length - a.connections.length)
-  }, [activeOnly, filter, query.data])
+  }, [connections])
 
-  const totalConnections = groups.reduce(
-    (sum, group) => sum + group.connections.length,
-    0
-  )
+  const totalConnections = query.data?.pages[0]?.total ?? connections.length
 
   const toggle = (key: string) => {
     setExpanded((current) => {
@@ -185,6 +177,23 @@ export function ConnectionsPage() {
           </p>
         ) : null}
       </div>
+
+      {query.hasNextPage ? (
+        <div className="flex justify-center">
+          <Button
+            disabled={query.isFetchingNextPage}
+            onClick={() => void query.fetchNextPage()}
+            variant="outline"
+          >
+            {query.isFetchingNextPage
+              ? t("connections.loadingMore")
+              : t("connections.loadMore", {
+                  loaded: connections.length,
+                  total: totalConnections,
+                })}
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -193,7 +202,7 @@ function SessionRow({
   item,
   t,
 }: {
-  item: Connection
+  item: ConnectionRecord
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const [primaryDomain, ...otherDomains] = item.destination_domains

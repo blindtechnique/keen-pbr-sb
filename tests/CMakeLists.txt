@@ -23,6 +23,7 @@ add_executable(keen-pbr-tests
   test_api_runtime_interfaces.cpp
   test_api_runtime_inventory.cpp
   test_api_dependency_analysis.cpp
+  test_connection_query.cpp
   test_api_status_events.cpp
   test_api_transports.cpp
   test_update_version.cpp
@@ -167,6 +168,7 @@ if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
     ../src/api/server.cpp
+    ../src/api/connection_query.cpp
     ../src/api/keenetic_auth.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/api/status_stream.cpp

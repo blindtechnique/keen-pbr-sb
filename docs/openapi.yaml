@@ -325,6 +325,41 @@ paths:
               schema:
                 $ref: "#/components/schemas/RuntimeInventoryResponse"
 
+  /api/connections/query:
+    post:
+      summary: Query a stable page of observed connections
+      description: >
+        Creates a short-lived immutable snapshot on the first request and
+        returns an opaque cursor for following pages. Filtering and sorting are
+        performed on the router so the WebUI does not download the complete
+        bounded conntrack history.
+      operationId: queryConnections
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectionQueryRequest"
+      responses:
+        "200":
+          description: Stable connection page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionPage"
+        "400":
+          description: Invalid query or cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Cursor snapshot expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/status/events:
     get:
       summary: Stream live WebUI status
@@ -1806,6 +1841,119 @@ components:
           $ref: "#/components/schemas/RuntimeOutboundsResponse"
         interfaces:
           $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+    ConnectionSort:
+      title: ConnectionSort
+      type: string
+      enum: [last_seen, first_seen, source, destination]
+
+    SortOrder:
+      title: SortOrder
+      type: string
+      enum: [asc, desc]
+
+    ConnectionQueryRequest:
+      title: ConnectionQueryRequest
+      type: object
+      properties:
+        cursor:
+          type: string
+          maxLength: 256
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 250
+          default: 100
+        active_only:
+          type: boolean
+          default: true
+        search:
+          type: string
+          maxLength: 128
+        state:
+          type: string
+          maxLength: 32
+        route:
+          type: string
+          maxLength: 64
+        device:
+          type: string
+          maxLength: 128
+        sort:
+          $ref: "#/components/schemas/ConnectionSort"
+        order:
+          $ref: "#/components/schemas/SortOrder"
+
+    ConnectionRecord:
+      title: ConnectionRecord
+      type: object
+      required:
+        - id
+        - protocol
+        - state
+        - source
+        - source_port
+        - destination
+        - destination_port
+        - route
+        - mark
+        - active
+        - device
+        - destination_domains
+        - first_seen
+        - last_seen
+      properties:
+        id:
+          type: string
+        protocol:
+          type: string
+        state:
+          type: string
+        source:
+          type: string
+        source_port:
+          type: integer
+        destination:
+          type: string
+        destination_port:
+          type: integer
+        route:
+          type: string
+        mark:
+          type: integer
+          format: int64
+        active:
+          type: boolean
+        device:
+          type: string
+        destination_domains:
+          type: array
+          items:
+            type: string
+        first_seen:
+          type: integer
+          format: int64
+        last_seen:
+          type: integer
+          format: int64
+
+    ConnectionPage:
+      title: ConnectionPage
+      type: object
+      required: [items, total, snapshot_at]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionRecord"
+        total:
+          type: integer
+          format: int64
+        snapshot_at:
+          type: integer
+          format: int64
+        next_cursor:
+          type: string
 
     # -------------------------------------------------------------------------
     # /api/service/*

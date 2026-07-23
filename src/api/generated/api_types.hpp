@@ -266,6 +266,46 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    struct ConnectionRecord {
+        bool active;
+        std::string destination;
+        std::vector<std::string> destination_domains;
+        int64_t destination_port;
+        std::string device;
+        int64_t first_seen;
+        std::string id;
+        int64_t last_seen;
+        int64_t mark;
+        std::string protocol;
+        std::string route;
+        std::string source;
+        int64_t source_port;
+        std::string state;
+    };
+
+    struct ConnectionPage {
+        std::vector<ConnectionRecord> items;
+        std::optional<std::string> next_cursor;
+        int64_t snapshot_at;
+        int64_t total;
+    };
+
+    enum class SortOrder : int { ASC, DESC };
+
+    enum class ConnectionSort : int { DESTINATION, FIRST_SEEN, LAST_SEEN, SOURCE };
+
+    struct ConnectionQueryRequest {
+        std::optional<bool> active_only;
+        std::optional<std::string> cursor;
+        std::optional<std::string> device;
+        std::optional<int64_t> limit;
+        std::optional<SortOrder> order;
+        std::optional<std::string> route;
+        std::optional<std::string> search;
+        std::optional<ConnectionSort> sort;
+        std::optional<std::string> state;
+    };
+
     enum class DependencyEntityKind : int { DNS_SERVER, LIST, OUTBOUND };
 
     struct DependencyAnalysisTargetRequest {
@@ -658,6 +698,10 @@ namespace api {
         std::optional<ConfigObject> config_object;
         std::optional<ConfigStateResponse> config_state_response;
         std::optional<ConfigUpdateResponse> config_update_response;
+        std::optional<ConnectionPage> connection_page;
+        std::optional<ConnectionQueryRequest> connection_query_request;
+        std::optional<ConnectionRecord> connection_record;
+        std::optional<ConnectionSort> connection_sort;
         std::optional<Daemon> daemon_config;
         std::optional<DependencyAnalysisRequest> dependency_analysis_request;
         std::optional<DependencyAnalysisResponse> dependency_analysis_response;
@@ -713,6 +757,7 @@ namespace api {
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
         std::optional<ResolverLiveStatus> runtime_outbound_status;
+        std::optional<SortOrder> sort_order;
         std::optional<StatusEventInterfaces> status_event_interfaces;
         std::optional<StatusEventOutbounds> status_event_outbounds;
         std::optional<StatusEventService> status_event_service;
@@ -799,6 +844,15 @@ namespace api {
 
     void from_json(const json & j, ConfigUpdateResponse & x);
     void to_json(json & j, const ConfigUpdateResponse & x);
+
+    void from_json(const json & j, ConnectionRecord & x);
+    void to_json(json & j, const ConnectionRecord & x);
+
+    void from_json(const json & j, ConnectionPage & x);
+    void to_json(json & j, const ConnectionPage & x);
+
+    void from_json(const json & j, ConnectionQueryRequest & x);
+    void to_json(json & j, const ConnectionQueryRequest & x);
 
     void from_json(const json & j, DependencyAnalysisTargetRequest & x);
     void to_json(json & j, const DependencyAnalysisTargetRequest & x);
@@ -943,6 +997,12 @@ namespace api {
 
     void from_json(const json & j, ConfigUpdateResponseStatus & x);
     void to_json(json & j, const ConfigUpdateResponseStatus & x);
+
+    void from_json(const json & j, SortOrder & x);
+    void to_json(json & j, const SortOrder & x);
+
+    void from_json(const json & j, ConnectionSort & x);
+    void to_json(json & j, const ConnectionSort & x);
 
     void from_json(const json & j, DependencyEntityKind & x);
     void to_json(json & j, const DependencyEntityKind & x);
@@ -1384,6 +1444,81 @@ namespace api {
         j["apply_started_ts"] = x.apply_started_ts;
         j["message"] = x.message;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, ConnectionRecord& x) {
+        x.active = j.at("active").get<bool>();
+        x.destination = j.at("destination").get<std::string>();
+        x.destination_domains = j.at("destination_domains").get<std::vector<std::string>>();
+        x.destination_port = j.at("destination_port").get<int64_t>();
+        x.device = j.at("device").get<std::string>();
+        x.first_seen = j.at("first_seen").get<int64_t>();
+        x.id = j.at("id").get<std::string>();
+        x.last_seen = j.at("last_seen").get<int64_t>();
+        x.mark = j.at("mark").get<int64_t>();
+        x.protocol = j.at("protocol").get<std::string>();
+        x.route = j.at("route").get<std::string>();
+        x.source = j.at("source").get<std::string>();
+        x.source_port = j.at("source_port").get<int64_t>();
+        x.state = j.at("state").get<std::string>();
+    }
+
+    inline void to_json(json & j, const ConnectionRecord & x) {
+        j = json::object();
+        j["active"] = x.active;
+        j["destination"] = x.destination;
+        j["destination_domains"] = x.destination_domains;
+        j["destination_port"] = x.destination_port;
+        j["device"] = x.device;
+        j["first_seen"] = x.first_seen;
+        j["id"] = x.id;
+        j["last_seen"] = x.last_seen;
+        j["mark"] = x.mark;
+        j["protocol"] = x.protocol;
+        j["route"] = x.route;
+        j["source"] = x.source;
+        j["source_port"] = x.source_port;
+        j["state"] = x.state;
+    }
+
+    inline void from_json(const json & j, ConnectionPage& x) {
+        x.items = j.at("items").get<std::vector<ConnectionRecord>>();
+        x.next_cursor = get_stack_optional<std::string>(j, "next_cursor");
+        x.snapshot_at = j.at("snapshot_at").get<int64_t>();
+        x.total = j.at("total").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const ConnectionPage & x) {
+        j = json::object();
+        j["items"] = x.items;
+        j["next_cursor"] = x.next_cursor;
+        j["snapshot_at"] = x.snapshot_at;
+        j["total"] = x.total;
+    }
+
+    inline void from_json(const json & j, ConnectionQueryRequest& x) {
+        x.active_only = get_stack_optional<bool>(j, "active_only");
+        x.cursor = get_stack_optional<std::string>(j, "cursor");
+        x.device = get_stack_optional<std::string>(j, "device");
+        x.limit = get_stack_optional<int64_t>(j, "limit");
+        x.order = get_stack_optional<SortOrder>(j, "order");
+        x.route = get_stack_optional<std::string>(j, "route");
+        x.search = get_stack_optional<std::string>(j, "search");
+        x.sort = get_stack_optional<ConnectionSort>(j, "sort");
+        x.state = get_stack_optional<std::string>(j, "state");
+    }
+
+    inline void to_json(json & j, const ConnectionQueryRequest & x) {
+        j = json::object();
+        j["active_only"] = x.active_only;
+        j["cursor"] = x.cursor;
+        j["device"] = x.device;
+        j["limit"] = x.limit;
+        j["order"] = x.order;
+        j["route"] = x.route;
+        j["search"] = x.search;
+        j["sort"] = x.sort;
+        j["state"] = x.state;
     }
 
     inline void from_json(const json & j, DependencyAnalysisTargetRequest& x) {
@@ -2087,6 +2222,10 @@ namespace api {
         x.config_object = get_stack_optional<ConfigObject>(j, "ConfigObject");
         x.config_state_response = get_stack_optional<ConfigStateResponse>(j, "ConfigStateResponse");
         x.config_update_response = get_stack_optional<ConfigUpdateResponse>(j, "ConfigUpdateResponse");
+        x.connection_page = get_stack_optional<ConnectionPage>(j, "ConnectionPage");
+        x.connection_query_request = get_stack_optional<ConnectionQueryRequest>(j, "ConnectionQueryRequest");
+        x.connection_record = get_stack_optional<ConnectionRecord>(j, "ConnectionRecord");
+        x.connection_sort = get_stack_optional<ConnectionSort>(j, "ConnectionSort");
         x.daemon_config = get_stack_optional<Daemon>(j, "DaemonConfig");
         x.dependency_analysis_request = get_stack_optional<DependencyAnalysisRequest>(j, "DependencyAnalysisRequest");
         x.dependency_analysis_response = get_stack_optional<DependencyAnalysisResponse>(j, "DependencyAnalysisResponse");
@@ -2142,6 +2281,7 @@ namespace api {
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
         x.runtime_outbound_status = get_stack_optional<ResolverLiveStatus>(j, "RuntimeOutboundStatus");
+        x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
         x.status_event_outbounds = get_stack_optional<StatusEventOutbounds>(j, "StatusEventOutbounds");
         x.status_event_service = get_stack_optional<StatusEventService>(j, "StatusEventService");
@@ -2166,6 +2306,10 @@ namespace api {
         j["ConfigObject"] = x.config_object;
         j["ConfigStateResponse"] = x.config_state_response;
         j["ConfigUpdateResponse"] = x.config_update_response;
+        j["ConnectionPage"] = x.connection_page;
+        j["ConnectionQueryRequest"] = x.connection_query_request;
+        j["ConnectionRecord"] = x.connection_record;
+        j["ConnectionSort"] = x.connection_sort;
         j["DaemonConfig"] = x.daemon_config;
         j["DependencyAnalysisRequest"] = x.dependency_analysis_request;
         j["DependencyAnalysisResponse"] = x.dependency_analysis_response;
@@ -2221,6 +2365,7 @@ namespace api {
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
         j["RuntimeOutboundStatus"] = x.runtime_outbound_status;
+        j["SortOrder"] = x.sort_order;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
         j["StatusEventOutbounds"] = x.status_event_outbounds;
         j["StatusEventService"] = x.status_event_service;
@@ -2310,6 +2455,38 @@ namespace api {
         switch (x) {
             case ConfigUpdateResponseStatus::OK: j = "ok"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"ConfigUpdateResponseStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, SortOrder & x) {
+        if (j == "asc") x = SortOrder::ASC;
+        else if (j == "desc") x = SortOrder::DESC;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SortOrder\""); }
+    }
+
+    inline void to_json(json & j, const SortOrder & x) {
+        switch (x) {
+            case SortOrder::ASC: j = "asc"; break;
+            case SortOrder::DESC: j = "desc"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SortOrder\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ConnectionSort & x) {
+        if (j == "destination") x = ConnectionSort::DESTINATION;
+        else if (j == "first_seen") x = ConnectionSort::FIRST_SEEN;
+        else if (j == "last_seen") x = ConnectionSort::LAST_SEEN;
+        else if (j == "source") x = ConnectionSort::SOURCE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ConnectionSort\""); }
+    }
+
+    inline void to_json(json & j, const ConnectionSort & x) {
+        switch (x) {
+            case ConnectionSort::DESTINATION: j = "destination"; break;
+            case ConnectionSort::FIRST_SEEN: j = "first_seen"; break;
+            case ConnectionSort::LAST_SEEN: j = "last_seen"; break;
+            case ConnectionSort::SOURCE: j = "source"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ConnectionSort\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

@@ -194,6 +194,7 @@ struct ApiContext {
 //   GET  /api/transports/config - editable transport definitions
 //   POST /api/transports/config - create, update, or delete a transport
 //   POST /api/routing/test    - test expected/actual routing for an IP or domain
+//   POST /api/connections/query - filtered cursor page of conntrack history
 void register_api_handlers(ApiServer& server, ApiContext& ctx);
 
 } // namespace keen_pbr3

@@ -1,6 +1,8 @@
 #ifdef WITH_API
 
 #include "handler_connections.hpp"
+#include "connection_query.hpp"
+#include "../util/base64.hpp"
 #include "../util/safe_exec.hpp"
 
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 #include <arpa/inet.h>
 
@@ -41,6 +44,17 @@ std::streamoff dns_log_offset{0};
 std::chrono::steady_clock::time_point snapshot_updated_at{};
 std::chrono::steady_clock::time_point device_names_updated_at{};
 std::map<std::string, std::string> cached_devices;
+
+struct ConnectionQuerySnapshot {
+    std::vector<std::string> ids;
+    std::int64_t snapshot_at{0};
+    std::chrono::steady_clock::time_point created_at;
+};
+
+std::map<std::string, ConnectionQuerySnapshot> query_snapshots;
+std::uint64_t next_query_snapshot_id{0};
+constexpr std::size_t maximum_query_snapshots = 8;
+constexpr auto query_snapshot_ttl = std::chrono::seconds(60);
 
 std::int64_t now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(Clock::now().time_since_epoch()).count();
@@ -234,6 +248,184 @@ void refresh_snapshot(const Config& config) {
     snapshot_updated_at = now;
 }
 
+api::ConnectionRecord connection_record(
+    const std::string& id,
+    const Connection& connection,
+    const std::map<std::string, std::string>& devices) {
+    api::ConnectionRecord record;
+    record.id = id;
+    record.protocol = connection.protocol;
+    record.state = connection.state;
+    record.source = connection.source;
+    record.source_port = connection.source_port;
+    record.destination = connection.destination;
+    record.destination_port = connection.destination_port;
+    record.route = connection.route;
+    record.mark = connection.mark;
+    record.active = connection.active;
+    const auto device = devices.find(connection.source);
+    record.device = device == devices.end() ? "" : device->second;
+    const auto domains = domains_by_address.find(connection.destination);
+    if (domains != domains_by_address.end()) {
+        record.destination_domains.assign(
+            domains->second.begin(),
+            domains->second.end());
+    }
+    record.first_seen = connection.first_seen;
+    record.last_seen = connection.last_seen;
+    return record;
+}
+
+void validate_connection_query(const api::ConnectionQueryRequest& request) {
+    const auto validate_length = [](const std::optional<std::string>& value,
+                                    std::size_t maximum,
+                                    const char* field) {
+        if (value && value->size() > maximum) {
+            throw ApiError(
+                std::string(field) + " exceeds maximum length",
+                400);
+        }
+    };
+    validate_length(request.cursor, 256, "cursor");
+    validate_length(request.search, 128, "search");
+    validate_length(request.state, 32, "state");
+    validate_length(request.route, 64, "route");
+    validate_length(request.device, 128, "device");
+    if (request.limit &&
+        (*request.limit < 1 || *request.limit > 250)) {
+        throw ApiError("limit must be between 1 and 250", 400);
+    }
+}
+
+void purge_query_snapshots() {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto iterator = query_snapshots.begin();
+         iterator != query_snapshots.end();) {
+        if (now - iterator->second.created_at >= query_snapshot_ttl) {
+            iterator = query_snapshots.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+std::pair<std::string, std::size_t> decode_query_cursor(
+    const std::string& cursor) {
+    try {
+        const auto decoded = base64_decode(cursor);
+        const auto separator = decoded.find('|');
+        if (separator == std::string::npos || separator == 0 ||
+            separator + 1 >= decoded.size()) {
+            throw std::invalid_argument("invalid cursor shape");
+        }
+        std::size_t parsed = 0;
+        const auto offset = std::stoull(
+            decoded.substr(separator + 1),
+            &parsed,
+            10);
+        if (parsed != decoded.size() - separator - 1) {
+            throw std::invalid_argument("invalid cursor offset");
+        }
+        return {decoded.substr(0, separator),
+                static_cast<std::size_t>(offset)};
+    } catch (const std::exception&) {
+        throw ApiError("Invalid connection cursor", 400);
+    }
+}
+
+std::string encode_query_cursor(const std::string& snapshot_id,
+                                std::size_t offset) {
+    return base64_encode(snapshot_id + "|" + std::to_string(offset));
+}
+
+api::ConnectionPage connection_page(
+    const ConnectionQuerySnapshot& snapshot,
+    const std::string& snapshot_id,
+    std::size_t offset,
+    std::size_t limit) {
+    if (offset > snapshot.ids.size()) {
+        throw ApiError("Invalid connection cursor offset", 400);
+    }
+
+    api::ConnectionPage page;
+    page.total = static_cast<std::int64_t>(snapshot.ids.size());
+    page.snapshot_at = snapshot.snapshot_at;
+    const auto& devices = device_names();
+    const auto end = std::min(snapshot.ids.size(), offset + limit);
+    page.items.reserve(end - offset);
+    for (std::size_t index = offset; index < end; ++index) {
+        const auto connection = history.find(snapshot.ids[index]);
+        if (connection == history.end()) continue;
+        page.items.push_back(connection_record(
+            connection->first,
+            connection->second,
+            devices));
+    }
+    if (end < snapshot.ids.size()) {
+        page.next_cursor = encode_query_cursor(snapshot_id, end);
+    }
+    return page;
+}
+
+api::ConnectionPage query_connections(
+    const ApiContext& ctx,
+    const api::ConnectionQueryRequest& request) {
+    validate_connection_query(request);
+    std::lock_guard lock(connections_mutex);
+    purge_query_snapshots();
+    const auto limit =
+        static_cast<std::size_t>(request.limit.value_or(100));
+
+    if (request.cursor) {
+        const auto [snapshot_id, offset] =
+            decode_query_cursor(*request.cursor);
+        const auto snapshot = query_snapshots.find(snapshot_id);
+        if (snapshot == query_snapshots.end()) {
+            throw ApiError(
+                "Connection cursor expired; restart from the first page",
+                409);
+        }
+        return connection_page(
+            snapshot->second,
+            snapshot_id,
+            offset,
+            limit);
+    }
+
+    refresh_snapshot(ctx.get_visible_config());
+    const auto& devices = device_names();
+    std::vector<api::ConnectionRecord> records;
+    records.reserve(history.size());
+    for (const auto& [id, connection] : history) {
+        records.push_back(connection_record(id, connection, devices));
+    }
+    records = filter_and_sort_connections(std::move(records), request);
+
+    ConnectionQuerySnapshot snapshot;
+    snapshot.snapshot_at = now_seconds();
+    snapshot.created_at = std::chrono::steady_clock::now();
+    snapshot.ids.reserve(records.size());
+    for (const auto& record : records) snapshot.ids.push_back(record.id);
+
+    const std::string snapshot_id =
+        std::to_string(snapshot.snapshot_at) + "-" +
+        std::to_string(++next_query_snapshot_id);
+    if (snapshot.ids.size() > limit) {
+        while (query_snapshots.size() >= maximum_query_snapshots) {
+            const auto oldest = std::min_element(
+                query_snapshots.begin(),
+                query_snapshots.end(),
+                [](const auto& left, const auto& right) {
+                    return left.second.created_at < right.second.created_at;
+                });
+            if (oldest == query_snapshots.end()) break;
+            query_snapshots.erase(oldest);
+        }
+        query_snapshots.emplace(snapshot_id, snapshot);
+    }
+    return connection_page(snapshot, snapshot_id, 0, limit);
+}
+
 std::string serialize_connections(const ApiContext& ctx, bool active_only) {
     std::lock_guard lock(connections_mutex);
     refresh_snapshot(ctx.get_visible_config());
@@ -265,6 +457,20 @@ void register_connections_handler(ApiServer& server, ApiContext& ctx) {
     server.get("/api/connections/active", [&ctx]() -> std::string {
         return serialize_connections(ctx, true);
     });
+    server.post(
+        "/api/connections/query",
+        [&ctx](const std::string& body) -> std::string {
+            try {
+                const auto request =
+                    nlohmann::json::parse(body)
+                        .get<api::ConnectionQueryRequest>();
+                return nlohmann::json(query_connections(ctx, request)).dump();
+            } catch (const nlohmann::json::exception& error) {
+                throw ApiError(
+                    std::string("Invalid connection query: ") + error.what(),
+                    400);
+            }
+        });
 }
 
 } // namespace keen_pbr3
