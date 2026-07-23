@@ -481,6 +481,7 @@ export const enTranslation = {
       },
       version: "Version {{version}}, build {{build}}",
       unknown: "State unknown",
+      badgeTransitioning: "In progress",
       restart: "Restart",
       restartRequested: "Restart requested",
       restartFailed: "Restart failed",

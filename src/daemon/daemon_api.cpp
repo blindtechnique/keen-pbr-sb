@@ -339,6 +339,10 @@ void Daemon::setup_api() {
             service_health.status = runtime_snapshot.routing_runtime_active
                 ? api::HealthResponseStatus::RUNNING
                 : api::HealthResponseStatus::STOPPED;
+            service_health.runtime_state =
+                runtime_state_name(runtime_snapshot.runtime_state);
+            service_health.runtime_state_reason =
+                runtime_snapshot.runtime_state_reason;
             service_health.os_type = system_info.os_type;
             service_health.os_version = system_info.os_version;
             service_health.build_variant = system_info.build_variant;

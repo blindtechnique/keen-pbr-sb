@@ -666,6 +666,8 @@ void Daemon::run() {
     update_resolver_config_hash();
     refresh_resolver_config_hash_actual_async();
     schedule_resolver_config_hash_actual_refresh();
+    routing_runtime_active_ = true;
+    transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
 
     setup_dns_probe();
@@ -691,6 +693,8 @@ void Daemon::run() {
     blocking_executor_.shutdown();
 
     log.info("Shutting down...");
+    transition_runtime_or_throw(RuntimeState::shutting_down, "daemon shutdown requested");
+    publish_runtime_state();
 
 #ifdef WITH_API
     if (status_stream_) {
@@ -713,6 +717,8 @@ void Daemon::run() {
     policy_rules_.clear();
     route_table_.clear();
     firewall_->cleanup();
+    routing_runtime_active_ = false;
+    transition_runtime_or_throw(RuntimeState::stopped, "daemon shutdown complete");
     remove_pid_file();
 }
 

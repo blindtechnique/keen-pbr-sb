@@ -56,6 +56,10 @@ bool Daemon::routing_runtime_active() const {
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
     if (!routing_runtime_active_) {
+        if (runtime_state_machine_.state() != RuntimeState::stopped) {
+            transition_runtime_or_throw(RuntimeState::stopped, "inactive runtime stopped");
+            publish_runtime_state();
+        }
         return;
     }
 
@@ -85,6 +89,7 @@ void Daemon::stop_routing_runtime() {
     // state even when dnsmasq fallback activation fails; reporting "running"
     // here would leave restart callers and the UI with a false liveness state.
     routing_runtime_active_ = false;
+    transition_runtime_or_throw(RuntimeState::stopped, "runtime stopped");
     refresh_resolver_config_hash_actual_async();
     publish_runtime_state();
     log.info("Routing runtime stopped.");
@@ -101,72 +106,83 @@ void Daemon::start_routing_runtime() {
         return;
     }
 
-    runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
-
-    setup_static_routing();
-    register_urltest_outbounds();
-    (void)refresh_keenetic_dns_cache(true);
-    apply_firewall(FirewallApplyMode::Destructive);
-
-    if (config_.dns.has_value() && config_.dns->system_resolver.has_value()) {
-        auto args = build_system_resolver_hook_args(config_, "activate");
-        const int exit_code = hook_command_executor_(args);
-        if (exit_code != 0) {
-            // setup_static_routing/apply_firewall already mutated the live
-            // system. Undo those effects before returning an error so a
-            // failed start cannot leave routes active while health says
-            // "stopped". Deactivate also restores the dnsmasq fallback marker
-            // even if dnsmasq itself cannot currently restart.
-            if (urltest_manager_) {
-                try {
-                    urltest_manager_->clear();
-                } catch (const std::exception& cleanup_error) {
-                    log.error("Failed to clear urltest state after resolver activation error: {}",
-                              cleanup_error.what());
-                }
-            }
-            try {
-                policy_rules_.clear();
-            } catch (const std::exception& cleanup_error) {
-                log.error("Failed to clean policy rules after resolver activation error: {}",
-                          cleanup_error.what());
-            }
-            try {
-                route_table_.clear();
-            } catch (const std::exception& cleanup_error) {
-                log.error("Failed to clean routes after resolver activation error: {}",
-                          cleanup_error.what());
-            }
-            try {
-                firewall_->cleanup();
-            } catch (const std::exception& cleanup_error) {
-                log.error("Failed to clean firewall after resolver activation error: {}",
-                          cleanup_error.what());
-            }
-            const auto deactivate_args =
-                build_system_resolver_hook_args(config_, "deactivate");
-            if (!deactivate_args.empty()) {
-                const int deactivate_exit_code = hook_command_executor_(deactivate_args);
-                if (deactivate_exit_code != 0) {
-                    log.warn("System resolver fallback recovery failed with exit code {}",
-                             deactivate_exit_code);
-                }
-            }
-            routing_runtime_active_ = false;
-            refresh_resolver_config_hash_actual_async();
-            publish_runtime_state();
-            throw DaemonError("System resolver activate hook failed with exit code " +
-                              std::to_string(exit_code));
-        }
-    }
-
-    routing_runtime_active_ = true;
-    apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-    update_resolver_config_hash();
-    schedule_keenetic_dns_refresh();
-    refresh_resolver_config_hash_actual_async();
+    transition_runtime_or_throw(RuntimeState::starting, "runtime start requested");
     publish_runtime_state();
-    log.info("Routing runtime started.");
+
+    try {
+        runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
+
+        setup_static_routing();
+        register_urltest_outbounds();
+        (void)refresh_keenetic_dns_cache(true);
+        apply_firewall(FirewallApplyMode::Destructive);
+
+        if (config_.dns.has_value() && config_.dns->system_resolver.has_value()) {
+            const auto args = build_system_resolver_hook_args(config_, "activate");
+            const int exit_code = hook_command_executor_(args);
+            if (exit_code != 0) {
+                throw DaemonError("System resolver activate hook failed with exit code " +
+                                  std::to_string(exit_code));
+            }
+        }
+
+        routing_runtime_active_ = true;
+        transition_runtime_or_throw(RuntimeState::running, "runtime start complete");
+        apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
+        update_resolver_config_hash();
+        schedule_keenetic_dns_refresh();
+        refresh_resolver_config_hash_actual_async();
+        publish_runtime_state();
+        log.info("Routing runtime started.");
+    } catch (...) {
+        // A start failure may happen at any point after routes or firewall
+        // state were installed. Roll every owned subsystem back, not only the
+        // resolver hook, so health and the kernel cannot disagree.
+        if (urltest_manager_) {
+            try {
+                urltest_manager_->clear();
+            } catch (const std::exception& cleanup_error) {
+                log.error("Failed to clear urltest state after start failure: {}",
+                          cleanup_error.what());
+            }
+        }
+        try {
+            policy_rules_.clear();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Failed to clean policy rules after start failure: {}",
+                      cleanup_error.what());
+        }
+        try {
+            route_table_.clear();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Failed to clean routes after start failure: {}",
+                      cleanup_error.what());
+        }
+        try {
+            firewall_->cleanup();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Failed to clean firewall after start failure: {}",
+                      cleanup_error.what());
+        }
+        const auto deactivate_args =
+            build_system_resolver_hook_args(config_, "deactivate");
+        if (!deactivate_args.empty()) {
+            const int exit_code = hook_command_executor_(deactivate_args);
+            if (exit_code != 0) {
+                log.warn("System resolver fallback recovery failed with exit code {}",
+                         exit_code);
+            }
+        }
+        routing_runtime_active_ = false;
+        refresh_resolver_config_hash_actual_async();
+        try {
+            transition_runtime_or_throw(RuntimeState::broken, "runtime start failed");
+            publish_runtime_state();
+        } catch (const std::exception& state_error) {
+            log.error("Failed to publish broken runtime state: {}", state_error.what());
+        }
+        throw;
+    }
 }
 
 void Daemon::restart_routing_runtime() {
@@ -672,6 +688,10 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         throw DaemonError("apply_prepared_runtime_inputs must run on the control/event-loop thread");
     }
 
+    transition_runtime_or_throw(RuntimeState::applying, "configuration apply started");
+    publish_runtime_state();
+
+    try {
     runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     if (lists_autoupdate_task_id_ >= 0) {
@@ -725,7 +745,21 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     schedule_resolver_config_hash_actual_refresh();
 
     config_store_.replace_active(config_, outbound_marks_);
+    routing_runtime_active_ = true;
+    transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
     publish_runtime_state();
+    } catch (...) {
+        routing_runtime_active_ = false;
+        try {
+            transition_runtime_or_throw(RuntimeState::broken, "configuration apply failed");
+            publish_runtime_state();
+        } catch (const std::exception& state_error) {
+            Logger::instance().error(
+                "Failed to publish broken runtime state after config apply: {}",
+                state_error.what());
+        }
+        throw;
+    }
 }
 
 void Daemon::apply_config(Config config, bool refresh_remote_lists) {

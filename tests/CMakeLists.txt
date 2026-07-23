@@ -36,6 +36,7 @@ add_executable(keen-pbr-tests
   test_interface_monitor.cpp
   test_status_stream.cpp
   test_lifecycle_operation.cpp
+  test_runtime_state_machine.cpp
   test_port_spec_util.cpp
   test_pid_file.cpp
   test_crash_diagnostics.cpp
@@ -89,6 +90,7 @@ add_executable(keen-pbr-tests
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
   ../src/runtime/lifecycle_operation.cpp
+  ../src/runtime/runtime_state_machine.cpp
   ../src/routing/policy_rule.cpp
   ../src/routing/route_table.cpp
   ../src/routing/target.cpp

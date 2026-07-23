@@ -25,6 +25,7 @@
 #include "../routing/policy_rule.hpp"
 #include "../routing/route_table.hpp"
 #include "../runtime/lifecycle_operation.hpp"
+#include "../runtime/runtime_state_machine.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
 #include "../util/traced_mutex.hpp"
@@ -258,6 +259,7 @@ private:
     void schedule_resolver_config_hash_actual_refresh();
     RuntimeStateSnapshot build_runtime_state_snapshot() const;
     void publish_runtime_state();
+    void transition_runtime_or_throw(RuntimeState next, const char* reason);
 
     // Lists autoupdate state
     int lists_autoupdate_task_id_{-1};
@@ -309,6 +311,7 @@ private:
     RuntimeStateStore runtime_state_store_;
     LifecycleOperationStore lifecycle_operation_store_;
     LifecycleOperationCoordinator lifecycle_operations_{lifecycle_operation_store_};
+    RuntimeStateMachine runtime_state_machine_;
 
     // Event-loop-owned controller state
     Config config_;

@@ -39,7 +39,7 @@ type ServiceRow = {
   // names alone mean nothing to someone who did not set this up.
   summary: string
   detail: string
-  state: "up" | "down" | "absent"
+  state: "up" | "down" | "pending" | "absent"
   onRestart?: () => void
   restarting?: boolean
   // Every service on the card can be switched from here.
@@ -153,6 +153,10 @@ export function ServicesStatusCard() {
   const serviceHealth =
     serviceHealthQuery.data?.status === 200 ? serviceHealthQuery.data.data : undefined
   const serviceRunning = serviceHealth?.status === "running"
+  const serviceTransitioning =
+    serviceHealth?.runtime_state === "starting" ||
+    serviceHealth?.runtime_state === "applying" ||
+    serviceHealth?.runtime_state === "shutting_down"
 
   const dnsmasqBadge = getDnsmasqBadgeState(
     serviceHealth?.resolver_live_status,
@@ -171,14 +175,20 @@ export function ServicesStatusCard() {
             build: serviceHealth.build,
           })
         : t("overview.services.unknown"),
-      state: !serviceHealth ? "absent" : serviceRunning ? "up" : "down",
+      state: !serviceHealth
+        ? "absent"
+        : serviceTransitioning
+          ? "pending"
+          : serviceRunning
+            ? "up"
+            : "down",
       onRestart: serviceHealth
         ? () => serviceRestartMutation.mutate()
         : undefined,
-      restarting: serviceRestartMutation.isPending,
+      restarting: serviceRestartMutation.isPending || serviceTransitioning,
       toggle: {
         checked: serviceRunning,
-        disabled: routingActionPending || !serviceHealth,
+        disabled: routingActionPending || serviceTransitioning || !serviceHealth,
         label: serviceRunning
           ? t("overview.runtime.actions.stop")
           : t("overview.runtime.actions.start"),
@@ -306,6 +316,8 @@ export function ServicesStatusCard() {
               variant={
                 row.state === "up"
                   ? "success"
+                  : row.state === "pending"
+                    ? "warning"
                   : row.state === "down"
                     ? "destructive"
                     : "secondary"
@@ -313,6 +325,8 @@ export function ServicesStatusCard() {
             >
               {row.state === "up"
                 ? t("overview.services.badgeUp")
+                : row.state === "pending"
+                  ? t("overview.services.badgeTransitioning")
                 : row.state === "down"
                   ? t("overview.services.badgeDown")
                   : t("overview.services.badgeAbsent")}

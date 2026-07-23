@@ -75,6 +75,8 @@ RuntimeStateSnapshot Daemon::build_runtime_state_snapshot() const {
     snapshot.resolver_last_probe_ts = resolver_snapshot.last_probe_ts;
     snapshot.apply_started_ts = resolver_snapshot.apply_started_ts;
     snapshot.routing_runtime_active = routing_runtime_active_;
+    snapshot.runtime_state = runtime_state_machine_.state();
+    snapshot.runtime_state_reason = runtime_state_machine_.reason();
 
     if (urltest_manager_) {
         for (const auto& outbound : config_.outbounds.value_or(std::vector<Outbound>{})) {
@@ -91,9 +93,21 @@ RuntimeStateSnapshot Daemon::build_runtime_state_snapshot() const {
     return snapshot;
 }
 
+void Daemon::transition_runtime_or_throw(RuntimeState next, const char* reason) {
+    if (runtime_state_machine_.state() == next) return;
+    std::string error;
+    if (!runtime_state_machine_.transition(next, reason, error)) {
+        throw DaemonError(error);
+    }
+}
+
 void Daemon::publish_runtime_state() {
-    Logger::instance().trace("runtime_state_publish", "routing_runtime_active={}",
-                             routing_runtime_active_ ? "true" : "false");
+    Logger::instance().trace(
+        "runtime_state_publish",
+        "routing_runtime_active={} runtime_state={} reason={}",
+        routing_runtime_active_ ? "true" : "false",
+        runtime_state_name(runtime_state_machine_.state()),
+        runtime_state_machine_.reason());
     runtime_state_store_.publish(build_runtime_state_snapshot());
 #ifdef WITH_API
     if (status_stream_) {

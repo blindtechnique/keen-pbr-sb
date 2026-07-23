@@ -1467,7 +1467,7 @@ components:
     HealthResponse:
       type: object
       required:
-        [version, build, status, os_type, os_version, build_variant, resolver_live_status, config_is_draft]
+        [version, build, status, runtime_state, runtime_state_reason, os_type, os_version, build_variant, resolver_live_status, config_is_draft]
       properties:
         version:
           type: string
@@ -1481,6 +1481,13 @@ components:
           type: string
           enum: [running, stopped]
           example: "running"
+        runtime_state:
+          type: string
+          enum: [starting, running, restart_required, applying, stopped, broken, shutting_down]
+          description: Detailed lifecycle state of the routing runtime.
+        runtime_state_reason:
+          type: string
+          description: Reason for the most recent lifecycle transition.
         os_type:
           type: string
           description: Normalized host OS family used by the running daemon.

@@ -112,6 +112,16 @@ nlohmann::json lifecycle_operation_json(const LifecycleOperationSnapshot& operat
     return result;
 }
 
+api::RuntimeState to_api_runtime_state(const std::string& state) {
+    if (state == "running") return api::RuntimeState::RUNNING;
+    if (state == "restart_required") return api::RuntimeState::RESTART_REQUIRED;
+    if (state == "applying") return api::RuntimeState::APPLYING;
+    if (state == "stopped") return api::RuntimeState::STOPPED;
+    if (state == "broken") return api::RuntimeState::BROKEN;
+    if (state == "shutting_down") return api::RuntimeState::SHUTTING_DOWN;
+    return api::RuntimeState::STARTING;
+}
+
 } // namespace
 
 api::HealthResponse build_health_response(
@@ -120,6 +130,8 @@ api::HealthResponse build_health_response(
     resp.version = KEEN_PBR3_VERSION_STRING;
     resp.build = KEEN_PBR3_VERSION_RELEASE_STRING;
     resp.status = service_health.status;
+    resp.runtime_state = to_api_runtime_state(service_health.runtime_state);
+    resp.runtime_state_reason = service_health.runtime_state_reason;
     resp.os_type = service_health.os_type;
     resp.os_version = service_health.os_version;
     resp.build_variant = service_health.build_variant;

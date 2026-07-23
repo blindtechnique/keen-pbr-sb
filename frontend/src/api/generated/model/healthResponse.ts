@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { HealthResponseRuntimeState } from './healthResponseRuntimeState';
 import type { HealthResponseStatus } from './healthResponseStatus';
 import type { LifecycleOperation } from './lifecycleOperation';
 import type { ResolverConfigProbeStatus } from './resolverConfigProbeStatus';
@@ -17,6 +18,10 @@ export interface HealthResponse {
   /** Daemon build string (git commit UTC timestamp). */
   build: string;
   status: HealthResponseStatus;
+  /** Detailed lifecycle state of the routing runtime. */
+  runtime_state: HealthResponseRuntimeState;
+  /** Reason for the most recent lifecycle transition. */
+  runtime_state_reason: string;
   /** Normalized host OS family used by the running daemon. */
   os_type: string;
   /** Host OS version string reported by the system. */

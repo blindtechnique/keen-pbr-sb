@@ -53,6 +53,8 @@ StatusSnapshot api_snapshot() {
     snapshot.service.version = "test";
     snapshot.service.build = "test";
     snapshot.service.status = api::HealthResponseStatus::RUNNING;
+    snapshot.service.runtime_state = api::RuntimeState::RUNNING;
+    snapshot.service.runtime_state_reason = "test";
     snapshot.service.os_type = "linux";
     snapshot.service.os_version = "test";
     snapshot.service.build_variant = "test";

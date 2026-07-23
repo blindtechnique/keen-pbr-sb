@@ -484,6 +484,7 @@ export const ruTranslation = {
       },
       version: "Версия {{version}}, сборка {{build}}",
       unknown: "Состояние неизвестно",
+      badgeTransitioning: "Выполняется",
       restart: "Перезапустить",
       restartRequested: "Перезапуск запрошен",
       restartFailed: "Не удалось перезапустить",

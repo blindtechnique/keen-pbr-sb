@@ -30,6 +30,7 @@ export * from './firewallChain';
 export * from './firewallRuleCheck';
 export * from './fwmarkConfig';
 export * from './healthResponse';
+export * from './healthResponseRuntimeState';
 export * from './healthResponseStatus';
 export * from './iprouteConfig';
 export * from './lifecycleOperation';
