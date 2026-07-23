@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -17,6 +18,9 @@ public:
     IptablesFirewall();
     // Destructor performs best-effort cleanup without virtual dispatch.
     ~IptablesFirewall() override;
+
+    void prepare_apply(FirewallApplyMode mode) override;
+    std::string static_set_name(const std::string& list_name, int family) const override;
 
     // Buffer an ipset create command (hash:net family, optional timeout).
     void create_ipset(const std::string& set_name, int family,
@@ -59,9 +63,12 @@ private:
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
-    void cleanup_live_impl();
+    void cleanup_live_impl(bool sweep_live_state = false);
     void cleanup_impl();
-    void cleanup_rules_impl();
+    void cleanup_rules_impl(bool sweep_live_state = false);
+    void cleanup_nat_rules_impl(bool sweep_live_state = false);
+    void cleanup_saved_sets();
+    static void cleanup_legacy_generation_chains(const char* command);
 
     // Describes a set to be created via 'ipset restore'.
     struct PendingSet {
@@ -87,6 +94,13 @@ private:
     static std::string build_ipt_script(bool ipv6,
                                         const std::vector<PendingRule>& rules,
                                         const FirewallGlobalPrefilter& prefilter = {});
+    static std::string build_generation_ipt_script(
+        bool ipv6,
+        const std::string& prerouting_chain,
+        const std::string& output_chain,
+        bool replace_active_chains,
+        const std::vector<PendingRule>& rules,
+        const FirewallGlobalPrefilter& prefilter = {});
     // Build early RETURN lines for the global prefilter.
     static std::string build_prefilter_lines(
         const FirewallGlobalPrefilter& prefilter);
@@ -123,6 +137,14 @@ private:
     // Track whether chain + jump rule exist for each protocol
     bool chain_v4_created_ = false;
     bool chain_v6_created_ = false;
+    static const char* generation_prerouting_chain(FirewallSetGeneration generation);
+    static const char* generation_output_chain(FirewallSetGeneration generation);
+    static FirewallSetGeneration opposite_generation(FirewallSetGeneration generation);
+    std::optional<FirewallSetGeneration> active_v4_generation_;
+    std::optional<FirewallSetGeneration> active_v6_generation_;
+    FirewallSetGeneration target_v4_generation_{FirewallSetGeneration::A};
+    FirewallSetGeneration target_v6_generation_{FirewallSetGeneration::A};
+    bool apply_prepared_{false};
 
     // DNS redirect (client DNS enforcement) state
     bool dns_redirect_requested_ = false;

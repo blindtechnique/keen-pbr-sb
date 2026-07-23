@@ -48,6 +48,15 @@ bool needs_family_specific_rule(const FirewallRuleCriteria& criteria) {
 
 NftablesFirewall::NftablesFirewall() = default;
 
+void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
+    pending_sets_.clear();
+    pending_elements_.clear();
+    pending_rules_.clear();
+    dns_redirect_requested_ = false;
+    router_origin_snat_requested_ = false;
+    snat_interfaces_.clear();
+}
+
 NftablesFirewall::~NftablesFirewall() {
     try {
         cleanup_impl();
@@ -70,7 +79,14 @@ void NftablesFirewall::create_ipset(const std::string& set_name, int family,
     ps.name = set_name;
     ps.type = (family == AF_INET6) ? "ipv6_addr" : "ipv4_addr";
     ps.timeout = timeout;
-    pending_sets_.push_back(std::move(ps));
+    const auto existing = std::find_if(
+        pending_sets_.begin(), pending_sets_.end(),
+        [&set_name](const PendingSet& pending) { return pending.name == set_name; });
+    if (existing == pending_sets_.end()) {
+        pending_sets_.push_back(std::move(ps));
+    } else if (existing->type != ps.type || existing->timeout != ps.timeout) {
+        throw FirewallError("conflicting nft set declaration for " + set_name);
+    }
     created_sets_[set_name] = family;
 }
 
@@ -295,6 +311,43 @@ nlohmann::json NftablesFirewall::build_delete_output_chain_json() {
         {"table", TABLE_NAME},
         {"name", OUTPUT_CHAIN_NAME}
     }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_flush_set_json(
+    const std::string& set_name) {
+    return {{"flush", {{"set", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", set_name}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_delete_set_json(
+    const std::string& set_name) {
+    return {{"delete", {{"set", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", set_name}
+    }}}}};
+}
+
+bool NftablesFirewall::is_dynamic_set_name(const std::string& set_name) {
+    return set_name.rfind("kpbr4d_", 0) == 0 ||
+           set_name.rfind("kpbr6d_", 0) == 0;
+}
+
+bool NftablesFirewall::is_managed_set_name(const std::string& set_name) {
+    return set_name.rfind("kpbr4_", 0) == 0 ||
+           set_name.rfind("kpbr6_", 0) == 0 ||
+           set_name.rfind("kpbr4s_", 0) == 0 ||
+           set_name.rfind("kpbr6s_", 0) == 0 ||
+           set_name.rfind("kpbr4S_", 0) == 0 ||
+           set_name.rfind("kpbr6S_", 0) == 0 ||
+           is_dynamic_set_name(set_name);
+}
+
+std::string NftablesFirewall::set_schema_key(const PendingSet& set) {
+    return set.type + ":" + std::to_string(set.timeout);
 }
 
 nlohmann::json NftablesFirewall::build_dns_nat_chain_json() {
@@ -811,6 +864,9 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
                 const std::string name = set.value("name", "");
                 if (!name.empty()) {
                     state.set_names.insert(name);
+                    const std::string type = set.value("type", "");
+                    const uint32_t timeout = set.value("timeout", 0U);
+                    state.set_schemas[name] = type + ":" + std::to_string(timeout);
                 }
             }
         }
@@ -820,7 +876,8 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
 }
 
 nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live_state,
-                                                      bool emit_full_table) {
+                                                      bool emit_full_table,
+                                                      bool clear_dynamic_sets) {
     nlohmann::json doc;
     auto& arr = doc["nftables"];
     arr = nlohmann::json::array();
@@ -832,30 +889,65 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         arr.push_back(build_table_json());
     }
 
-    // Sets
+    // Remove rule chains first. The complete JSON document is one nft
+    // transaction, so the live rules remain active until the replacement is
+    // valid and committed.
+    if (!emit_full_table && live_state.chain_exists) {
+        arr.push_back(build_delete_chain_json());
+    }
+    if (!emit_full_table && live_state.output_chain_exists) {
+        arr.push_back(build_delete_output_chain_json());
+    }
+    if (!emit_full_table && live_state.dns_nat_chain_exists) {
+        arr.push_back(build_delete_dns_nat_chain_json());
+    }
+    if (!emit_full_table && live_state.snat_chain_exists) {
+        arr.push_back(build_delete_snat_chain_json());
+    }
+
+    std::set<std::string> pending_set_names;
     for (const auto& ps : pending_sets_) {
-        if (!emit_full_table && live_state.set_names.find(ps.name) != live_state.set_names.end()) {
+        pending_set_names.insert(ps.name);
+    }
+
+    if (clear_dynamic_sets && !emit_full_table) {
+        for (const auto& live_name : live_state.set_names) {
+            if (is_managed_set_name(live_name) &&
+                pending_set_names.find(live_name) == pending_set_names.end()) {
+                arr.push_back(build_delete_set_json(live_name));
+            }
+        }
+    }
+
+    // Dynamic dnsmasq sets retain learned elements during a live refresh.
+    // Static sets are refreshed in this same transaction.
+    for (const auto& ps : pending_sets_) {
+        const bool existing = !emit_full_table &&
+            live_state.set_names.find(ps.name) != live_state.set_names.end();
+        if (existing && is_dynamic_set_name(ps.name)) {
+            if (clear_dynamic_sets) {
+                arr.push_back(build_flush_set_json(ps.name));
+            }
             continue;
+        }
+        const auto schema_it = live_state.set_schemas.find(ps.name);
+        if (existing && schema_it != live_state.set_schemas.end() &&
+            schema_it->second == set_schema_key(ps)) {
+            continue;
+        }
+        if (existing) {
+            arr.push_back(build_delete_set_json(ps.name));
         }
         arr.push_back(build_set_json(ps));
     }
 
     // Chain with prerouting hook
-    if (!emit_full_table && live_state.chain_exists) {
-        arr.push_back(build_delete_chain_json());
-    }
     arr.push_back(build_chain_json());
 
     // Chain with output hook (router-originated traffic, e.g. DNS detour)
-    if (!emit_full_table && live_state.output_chain_exists) {
-        arr.push_back(build_delete_output_chain_json());
-    }
     arr.push_back(build_output_chain_json());
 
     // DNS redirect nat chain (client DNS enforcement)
-    if (!emit_full_table && live_state.dns_nat_chain_exists) {
-        arr.push_back(build_delete_dns_nat_chain_json());
-    }
     if (dns_redirect_requested_) {
         arr.push_back(build_dns_nat_chain_json());
         for (const auto& cmd : build_dns_redirect_rules_json(global_prefilter_)) {
@@ -865,9 +957,6 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 
     // Masquerade for router-originated detour traffic: its source address was
     // chosen before the mark existed, so without this the tunnel peer drops it.
-    if (!emit_full_table && live_state.snat_chain_exists) {
-        arr.push_back(build_delete_snat_chain_json());
-    }
     if (router_origin_snat_requested_) {
         arr.push_back(build_snat_chain_json());
         arr.push_back(build_snat_rule_json());
@@ -886,7 +975,20 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     // Elements
     for (const auto& [set_name, elems] : pending_elements_) {
         if (!emit_full_table && live_state.set_names.find(set_name) != live_state.set_names.end()) {
-            continue;
+            if (is_dynamic_set_name(set_name)) {
+                continue;
+            }
+            const auto pending_it = std::find_if(
+                pending_sets_.begin(), pending_sets_.end(),
+                [&set_name](const PendingSet& set) { return set.name == set_name; });
+            const auto schema_it = live_state.set_schemas.find(set_name);
+            const bool recreated =
+                pending_it != pending_sets_.end() &&
+                (schema_it == live_state.set_schemas.end() ||
+                 schema_it->second != set_schema_key(*pending_it));
+            if (!recreated) {
+                arr.push_back(build_flush_set_json(set_name));
+            }
         }
         if (!elems.empty()) {
             arr.push_back(build_elements_json(set_name, elems));
@@ -897,15 +999,11 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 }
 
 void NftablesFirewall::apply(FirewallApplyMode mode) {
-    const bool preserve_sets = mode == FirewallApplyMode::PreserveSets;
-    const LiveTableState live_state = preserve_sets ? read_live_table_state() : LiveTableState{};
-
-    if (mode == FirewallApplyMode::Destructive) {
-        cleanup_live_impl();
-    }
-
-    const bool emit_full_table = !preserve_sets || !live_state.table_exists;
-    nlohmann::json doc = build_apply_document(live_state, emit_full_table);
+    const LiveTableState live_state = read_live_table_state();
+    const bool emit_full_table = !live_state.table_exists;
+    const bool clear_dynamic_sets = mode == FirewallApplyMode::Destructive;
+    nlohmann::json doc =
+        build_apply_document(live_state, emit_full_table, clear_dynamic_sets);
 
     std::string json_str = doc.dump();
     Logger::instance().verbose("nft json:\n{}", json_str);
@@ -913,11 +1011,14 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     // Apply atomically via nft -j -f -
     std::string error_output;
     int status = safe_exec_pipe_stdin({"nft", "-j", "-f", "-"}, json_str, &error_output);
-    if (status != 0 && preserve_sets && !emit_full_table && !table_exists()) {
+    if (status != 0 && mode == FirewallApplyMode::PreserveSets &&
+        !emit_full_table && !table_exists()) {
         Logger::instance().warn(
             "nft preserve apply failed after KeenPbrTable disappeared; retrying full table restore");
         cleanup_live_impl();
-        doc = build_apply_document(LiveTableState{}, /*emit_full_table=*/true);
+        doc = build_apply_document(
+            LiveTableState{}, /*emit_full_table=*/true,
+            /*clear_dynamic_sets=*/false);
         json_str = doc.dump();
         Logger::instance().verbose("nft recovery json:\n{}", json_str);
         error_output.clear();

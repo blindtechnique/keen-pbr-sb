@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -111,6 +112,8 @@ enum class FirewallApplyMode : uint8_t {
     PreserveSets
 };
 
+enum class FirewallSetGeneration : uint8_t { A, B };
+
 // Abstract firewall interface for managing IP sets and packet marking rules.
 // Both iptables and nftables backends implement this interface.
 //
@@ -121,6 +124,18 @@ enum class FirewallApplyMode : uint8_t {
 class Firewall {
 public:
     virtual ~Firewall() = default;
+
+    // Start a new buffered apply attempt. Backends may select attempt-scoped
+    // physical names before sets and rules are queued.
+    virtual void prepare_apply(FirewallApplyMode mode) { (void)mode; }
+
+    virtual std::string static_set_name(const std::string& list_name, int family) const {
+        return std::string(family == AF_INET6 ? "kpbr6_" : "kpbr4_") + list_name;
+    }
+
+    virtual std::string dynamic_set_name(const std::string& list_name, int family) const {
+        return std::string(family == AF_INET6 ? "kpbr6d_" : "kpbr4d_") + list_name;
+    }
 
     // Create a named IP set for storing IP addresses and/or CIDR subnets.
     // set_name: unique name for the set

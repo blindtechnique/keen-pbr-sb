@@ -46,6 +46,7 @@ std::vector<RuleState> apply_runtime_firewall(
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
     firewall.set_global_prefilter(build_firewall_global_prefilter(config));
     firewall.set_fwmark_mask(fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
+    firewall.prepare_apply(mode);
 
     const auto& all_outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     static const std::map<std::string, ListConfig> empty_lists;
@@ -100,10 +101,10 @@ std::vector<RuleState> apply_runtime_firewall(
                 }
                 const auto& usage = usage_it->second;
 
-                const std::string set4 = "kpbr4_" + list_name;
-                const std::string set6 = "kpbr6_" + list_name;
-                const std::string set4d = "kpbr4d_" + list_name;
-                const std::string set6d = "kpbr6d_" + list_name;
+                const std::string set4 = firewall.static_set_name(list_name, AF_INET);
+                const std::string set6 = firewall.static_set_name(list_name, AF_INET6);
+                const std::string set4d = firewall.dynamic_set_name(list_name, AF_INET);
+                const std::string set6d = firewall.dynamic_set_name(list_name, AF_INET6);
 
                 if (usage.has_static_entries) {
                     firewall.create_ipset(set4, AF_INET, 0);

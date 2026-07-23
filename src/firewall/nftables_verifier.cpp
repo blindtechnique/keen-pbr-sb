@@ -282,10 +282,16 @@ std::vector<L4Proto> expand_l4_protos(const FirewallRuleCriteria& criteria) {
 }
 
 std::optional<bool> ipv6_from_set_name(const std::string& set_name) {
-    if (set_name.rfind("kpbr6_", 0) == 0 || set_name.rfind("kpbr6d_", 0) == 0) {
+    if (set_name.rfind("kpbr6_", 0) == 0 ||
+        set_name.rfind("kpbr6s_", 0) == 0 ||
+        set_name.rfind("kpbr6S_", 0) == 0 ||
+        set_name.rfind("kpbr6d_", 0) == 0) {
         return true;
     }
-    if (set_name.rfind("kpbr4_", 0) == 0 || set_name.rfind("kpbr4d_", 0) == 0) {
+    if (set_name.rfind("kpbr4_", 0) == 0 ||
+        set_name.rfind("kpbr4s_", 0) == 0 ||
+        set_name.rfind("kpbr4S_", 0) == 0 ||
+        set_name.rfind("kpbr4d_", 0) == 0) {
         return false;
     }
     return std::nullopt;

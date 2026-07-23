@@ -19,6 +19,8 @@ public:
     // Destructor performs best-effort cleanup without virtual dispatch.
     ~NftablesFirewall() override;
 
+    void prepare_apply(FirewallApplyMode mode) override;
+
     // Buffer an nftables named set (ipv4_addr/ipv6_addr, optional timeout).
     void create_ipset(const std::string& set_name, int family,
                       uint32_t timeout = 0) override;
@@ -69,11 +71,13 @@ private:
         bool dns_nat_chain_exists{false};
         bool snat_chain_exists{false};
         std::set<std::string> set_names;
+        std::map<std::string, std::string> set_schemas;
     };
 
     LiveTableState read_live_table_state() const;
     nlohmann::json build_apply_document(const LiveTableState& live_state,
-                                        bool emit_full_table);
+                                        bool emit_full_table,
+                                        bool clear_dynamic_sets);
 
     // Describes an nftables named set to be created.
     struct PendingSet {
@@ -104,6 +108,11 @@ private:
     static nlohmann::json build_delete_chain_json();
     // Build the JSON object for deleting the output chain.
     static nlohmann::json build_delete_output_chain_json();
+    static nlohmann::json build_flush_set_json(const std::string& set_name);
+    static nlohmann::json build_delete_set_json(const std::string& set_name);
+    static bool is_dynamic_set_name(const std::string& set_name);
+    static bool is_managed_set_name(const std::string& set_name);
+    static std::string set_schema_key(const PendingSet& set);
     // Build the JSON objects for the DNS redirect nat chain and its rules.
     static nlohmann::json build_dns_nat_chain_json();
     static nlohmann::json build_delete_dns_nat_chain_json();

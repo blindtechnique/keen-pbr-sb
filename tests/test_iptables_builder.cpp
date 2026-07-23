@@ -146,6 +146,29 @@ public:
     fw.create_output_mark_rule(fwmark, criteria);
     return IptablesFirewall::build_ipt_script(false, fw.pending_rules_, {});
   }
+
+  static std::string build_generation_script(
+      bool replace_active,
+      const FirewallGlobalPrefilter &prefilter = {}) {
+    IptablesFirewall fw;
+    FirewallRuleCriteria output_criteria;
+    output_criteria.proto = L4Proto::Udp;
+    output_criteria.dst_port = "53";
+    fw.create_output_mark_rule(0x10000, output_criteria);
+    return IptablesFirewall::build_generation_ipt_script(
+        false, "KeenPbrTable_A", "KeenPbrOutput_A",
+        replace_active, fw.pending_rules_, prefilter);
+  }
+
+  static std::pair<std::string, std::string> generation_set_names() {
+    IptablesFirewall fw;
+    fw.prepare_apply(FirewallApplyMode::Destructive);
+    const std::string first = fw.static_set_name("abcdefghijklmnopqrstuvwx", AF_INET);
+    fw.active_v4_generation_ = FirewallSetGeneration::A;
+    fw.prepare_apply(FirewallApplyMode::PreserveSets);
+    const std::string second = fw.static_set_name("abcdefghijklmnopqrstuvwx", AF_INET);
+    return {first, second};
+  }
 };
 
 } // namespace keen_pbr3
@@ -153,6 +176,26 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("generation ipset names alternate and stay within the kernel limit") {
+  const auto [first, second] = T::generation_set_names();
+  CHECK(first == "kpbr4s_abcdefghijklmnopqrstuvwx");
+  CHECK(second == "kpbr4S_abcdefghijklmnopqrstuvwx");
+  CHECK(first.size() == 31);
+  CHECK(second.size() == 31);
+}
+
+TEST_CASE("generation script dispatches prerouting and output independently") {
+  const auto first = T::build_generation_script(false);
+  CHECK(first.find("-A KeenPbrTable -j KeenPbrTable_A") != std::string::npos);
+  CHECK(first.find("-A KeenPbrOutput -j KeenPbrOutput_A") != std::string::npos);
+  CHECK(first.find("-A KeenPbrOutput_A -p udp --dport 53") != std::string::npos);
+
+  const auto replacement = T::build_generation_script(true);
+  CHECK(replacement.find("-R KeenPbrTable 1 -j KeenPbrTable_A") != std::string::npos);
+  CHECK(replacement.find("-R KeenPbrOutput 1 -j KeenPbrOutput_A") != std::string::npos);
+  CHECK(replacement.find("-A PREROUTING -j KeenPbrTable") == std::string::npos);
+}
 
 namespace {
 

@@ -6,6 +6,7 @@ config=""
 mode="destructive"
 setup_script=""
 run_urltest="0"
+repeat_preserve_apply="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,6 +28,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --run-urltest-probes)
       run_urltest="1"
+      shift
+      ;;
+    --repeat-preserve-apply)
+      repeat_preserve_apply="1"
       shift
       ;;
     *)
@@ -76,6 +81,9 @@ cmd=(
 
 if [[ "$run_urltest" == "1" ]]; then
   cmd+=(--run-urltest-probes)
+fi
+if [[ "$repeat_preserve_apply" == "1" ]]; then
+  cmd+=(--repeat-preserve-apply)
 fi
 
 "${cmd[@]}"

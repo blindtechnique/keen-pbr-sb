@@ -151,10 +151,16 @@ std::string criteria_summary(const FirewallRuleCriteria& criteria) {
 }
 
 std::optional<bool> ipv6_from_set_name(const std::string& set_name) {
-    if (set_name.rfind("kpbr6_", 0) == 0 || set_name.rfind("kpbr6d_", 0) == 0) {
+    if (set_name.rfind("kpbr6_", 0) == 0 ||
+        set_name.rfind("kpbr6s_", 0) == 0 ||
+        set_name.rfind("kpbr6S_", 0) == 0 ||
+        set_name.rfind("kpbr6d_", 0) == 0) {
         return true;
     }
-    if (set_name.rfind("kpbr4_", 0) == 0 || set_name.rfind("kpbr4d_", 0) == 0) {
+    if (set_name.rfind("kpbr4_", 0) == 0 ||
+        set_name.rfind("kpbr4s_", 0) == 0 ||
+        set_name.rfind("kpbr4S_", 0) == 0 ||
+        set_name.rfind("kpbr4d_", 0) == 0) {
         return false;
     }
     return std::nullopt;
@@ -261,6 +267,10 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
         std::string("-A PREROUTING -j ") + CHAIN_NAME;
     const std::string chain_rule_prefix =
         std::string("-A ") + CHAIN_NAME + " ";
+    const std::string generation_a_rule_prefix =
+        std::string("-A ") + CHAIN_NAME + "_A ";
+    const std::string generation_b_rule_prefix =
+        std::string("-A ") + CHAIN_NAME + "_B ";
 
     std::istringstream stream(output);
     std::string line;
@@ -274,7 +284,9 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
             state.has_prerouting_jump = true;
             continue;
         }
-        if (line.rfind(chain_rule_prefix, 0) != 0) {
+        if (line.rfind(chain_rule_prefix, 0) != 0 &&
+            line.rfind(generation_a_rule_prefix, 0) != 0 &&
+            line.rfind(generation_b_rule_prefix, 0) != 0) {
             continue;
         }
 
@@ -401,20 +413,48 @@ const IptablesFirewallVerifier::CachedState& IptablesFirewallVerifier::get_state
     if (!cached_state_.has_value()) {
         CachedState state;
 
-        auto read_state = [this](const std::vector<std::string>& chain_args,
-                                 const std::vector<std::string>& prerouting_args,
-                                 bool ipv6) {
+        auto read_state = [this](const std::string& command, bool ipv6) {
             std::string combined;
 
-            const auto chain_result = runner_(chain_args);
+            const auto chain_result =
+                runner_({command, "-t", "mangle", "-S", CHAIN_NAME});
             if (chain_result.exit_code == 0) {
                 combined += chain_result.stdout_output;
                 if (!combined.empty() && combined.back() != '\n') {
                     combined.push_back('\n');
                 }
+
+                // Newer iptables applies keep a stable dispatcher and publish
+                // rules in one of two generation chains. Query only the active
+                // child so diagnostics do not mistake the inactive generation
+                // for live state.
+                std::istringstream chain_lines(chain_result.stdout_output);
+                std::string line;
+                const std::string jump_prefix =
+                    std::string("-A ") + CHAIN_NAME + " -j ";
+                while (std::getline(chain_lines, line)) {
+                    if (line.rfind(jump_prefix, 0) != 0) {
+                        continue;
+                    }
+                    const std::string child = line.substr(jump_prefix.size());
+                    if (child != std::string(CHAIN_NAME) + "_A" &&
+                        child != std::string(CHAIN_NAME) + "_B") {
+                        continue;
+                    }
+                    const auto child_result =
+                        runner_({command, "-t", "mangle", "-S", child});
+                    if (child_result.exit_code == 0) {
+                        combined += child_result.stdout_output;
+                        if (!combined.empty() && combined.back() != '\n') {
+                            combined.push_back('\n');
+                        }
+                    }
+                    break;
+                }
             }
 
-            const auto prerouting_result = runner_(prerouting_args);
+            const auto prerouting_result =
+                runner_({command, "-t", "mangle", "-S", "PREROUTING"});
             if (prerouting_result.exit_code == 0) {
                 combined += prerouting_result.stdout_output;
             }
@@ -422,14 +462,8 @@ const IptablesFirewallVerifier::CachedState& IptablesFirewallVerifier::get_state
             return parse_iptables_s_for_family(combined, ipv6);
         };
 
-        state.v4 = read_state(
-            {"iptables", "-t", "mangle", "-S", CHAIN_NAME},
-            {"iptables", "-t", "mangle", "-S", "PREROUTING"},
-            false);
-        state.v6 = read_state(
-            {"ip6tables", "-t", "mangle", "-S", CHAIN_NAME},
-            {"ip6tables", "-t", "mangle", "-S", "PREROUTING"},
-            true);
+        state.v4 = read_state("iptables", false);
+        state.v6 = read_state("ip6tables", true);
         cached_state_ = std::move(state);
     }
     return *cached_state_;

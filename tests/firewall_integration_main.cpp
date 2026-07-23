@@ -36,6 +36,7 @@ struct CliOptions {
     std::string mode{"destructive"};
     std::string log_level{"info"};
     bool run_urltest_probes{false};
+    bool repeat_preserve_apply{false};
 };
 
 struct RuntimeCleanup {
@@ -73,7 +74,8 @@ std::string read_file(const std::string& path) {
 void print_usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0 << " --config <path> --backend <iptables|nftables> "
-        << "--mode <destructive|preserve-sets> [--run-urltest-probes] [--log-level <lvl>]\n";
+        << "--mode <destructive|preserve-sets> [--run-urltest-probes] "
+        << "[--repeat-preserve-apply] [--log-level <lvl>]\n";
 }
 
 CliOptions parse_args(int argc, char* argv[]) {
@@ -103,6 +105,8 @@ CliOptions parse_args(int argc, char* argv[]) {
             options.log_level = argv[++i];
         } else if (arg == "--run-urltest-probes") {
             options.run_urltest_probes = true;
+        } else if (arg == "--repeat-preserve-apply") {
+            options.repeat_preserve_apply = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
@@ -463,6 +467,15 @@ int run_firewall_integration(int argc, char* argv[]) {
         cache_manager,
         *firewall,
         mode));
+    if (options.repeat_preserve_apply) {
+        firewall_state.set_rules(apply_runtime_firewall(
+            config,
+            marks,
+            urltest_selections,
+            cache_manager,
+            *firewall,
+            FirewallApplyMode::PreserveSets));
+    }
 
     const RoutingHealthReport report = build_routing_health_report(
         firewall->backend(),

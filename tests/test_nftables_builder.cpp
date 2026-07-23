@@ -59,6 +59,26 @@ public:
     return NftablesFirewall::build_delete_chain_json();
   }
 
+  static nlohmann::json build_refresh_document(bool clear_dynamic_sets) {
+    NftablesFirewall fw;
+    fw.pending_sets_.push_back(
+        NftablesFirewall::PendingSet{"kpbr4_static", "ipv4_addr", 0});
+    fw.pending_sets_.push_back(
+        NftablesFirewall::PendingSet{"kpbr4d_dynamic", "ipv4_addr", 300});
+    fw.pending_elements_["kpbr4_static"] =
+        nlohmann::json::array({"203.0.113.10"});
+
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = true;
+    live.chain_exists = true;
+    live.output_chain_exists = true;
+    live.set_names = {"kpbr4_static", "kpbr4d_dynamic"};
+    live.set_schemas["kpbr4_static"] = "ipv4_addr:0";
+    live.set_schemas["kpbr4d_dynamic"] = "ipv4_addr:300";
+    return fw.build_apply_document(
+        live, /*emit_full_table=*/false, clear_dynamic_sets);
+  }
+
   struct RuleDesc {
     std::string set_name;
     int family;
@@ -197,6 +217,22 @@ public:
 };
 
 } // namespace keen_pbr3
+
+TEST_CASE("nft live refresh flushes static set but preserves dynamic entries") {
+  const auto doc = keen_pbr3::NftablesBuilderTest::build_refresh_document(false);
+  const std::string serialized = doc.dump();
+  CHECK(serialized.find("\"flush\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4_static\"") !=
+        std::string::npos);
+  CHECK(serialized.find("\"name\":\"kpbr4d_dynamic\"") == std::string::npos);
+  CHECK(serialized.find("203.0.113.10") != std::string::npos);
+}
+
+TEST_CASE("nft destructive refresh also flushes dynamic entries atomically") {
+  const auto doc = keen_pbr3::NftablesBuilderTest::build_refresh_document(true);
+  const std::string serialized = doc.dump();
+  CHECK(serialized.find("\"flush\":{\"set\":{\"family\":\"inet\",\"name\":\"kpbr4d_dynamic\"") !=
+        std::string::npos);
+}
 
 using namespace keen_pbr3;
 using T = NftablesBuilderTest;

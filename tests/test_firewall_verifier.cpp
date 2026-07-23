@@ -1028,6 +1028,23 @@ TEST_CASE("safe_exec_capture: max_bytes overflow sets truncated") {
     CHECK(result.stdout_output.size() == 64);
 }
 
+TEST_CASE("parse_iptables_s: parses rules from active A/B generation") {
+    const std::string input =
+        "-N KeenPbrTable\n"
+        "-N KeenPbrTable_A\n"
+        "-A PREROUTING -j KeenPbrTable\n"
+        "-A KeenPbrTable -j KeenPbrTable_A\n"
+        "-A KeenPbrTable_A -m set --match-set kpbr4s_local dst "
+        "-j MARK --set-xmark 0x10000/0xff0000\n";
+    const auto state = parse_iptables_s(input);
+    REQUIRE(state.rules.size() == 1);
+    const auto& generated_rule = state.rules.front();
+    CHECK(generated_rule.set_name == "kpbr4s_local");
+    CHECK(generated_rule.is_mark);
+    CHECK(generated_rule.fwmark == 0x10000);
+    CHECK(generated_rule.xmark_mask == 0xff0000);
+}
+
 TEST_CASE("safe_exec_capture: nonzero exit code is preserved") {
     const auto result = safe_exec_capture({"false"});
     CHECK_FALSE(result.truncated);

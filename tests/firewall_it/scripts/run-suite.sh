@@ -25,6 +25,7 @@ run_case() {
   local setup_name="$4"
   shift 4
 
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
   docker exec "$container" /opt/keen-pbr/firewall-it/scripts/run-in-netns.sh \
     --backend "$backend" \
     --config "$fixtures_dir/$config_name" \
@@ -69,7 +70,8 @@ for backend in iptables nftables; do
     --privileged \
     "${images[$backend]}" >/dev/null
 
-  run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh"
+  run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
+    --repeat-preserve-apply
 
   run_case "$container" "$backend" "urltest-reachable.json" "urltest-reachable.setup.sh" \
     --run-urltest-probes

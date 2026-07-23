@@ -9,3 +9,8 @@ dist/
 .git/
 subprojects/*/
 !subprojects/packagefiles/
+frontend/node_modules/
+frontend/dist/
+.codegraph/
+.idea/
+.vscode/
