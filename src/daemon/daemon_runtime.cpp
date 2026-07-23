@@ -721,12 +721,13 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     if (urltest_manager_) {
         urltest_manager_->clear();
     }
-    policy_rules_.clear();
-    route_table_.clear();
-    setup_static_routing();
+    // Reconcile in place: install replacement routes/rules before removing
+    // obsolete owned state. Clearing first creates a visible traffic gap on
+    // every configuration save and makes failover briefly lose its path.
+    reconcile_static_routing();
     register_urltest_outbounds();
     (void)refresh_keenetic_dns_cache(true);
-    apply_firewall(FirewallApplyMode::Destructive);
+    apply_firewall(FirewallApplyMode::PreserveSets);
     schedule_keenetic_dns_refresh();
     schedule_lists_autoupdate();
     update_resolver_config_hash();
