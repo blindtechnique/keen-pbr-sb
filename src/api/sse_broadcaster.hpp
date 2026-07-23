@@ -23,7 +23,8 @@ public:
 
     using SubscriptionPtr = std::shared_ptr<Subscription>;
 
-    explicit SseBroadcaster(size_t max_queue_size = 128);
+    explicit SseBroadcaster(size_t max_queue_size = 128,
+                            size_t max_subscriptions = 4);
 
     SubscriptionPtr subscribe();
     SubscriptionPtr subscribe(std::vector<std::string> initial_messages);
@@ -35,6 +36,7 @@ private:
     void compact_locked() REQUIRES(mutex_);
 
     size_t max_queue_size_;
+    size_t max_subscriptions_;
     TracedMutex mutex_;
     std::vector<std::weak_ptr<Subscription>> subscriptions_ GUARDED_BY(mutex_);
 };

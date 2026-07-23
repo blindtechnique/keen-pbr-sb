@@ -60,6 +60,8 @@ endef
 CMAKE_OPTIONS += \
 	-DKEEN_PBR_RELEASE:STRING=$(KEEN_PBR_RELEASE) \
 	-DKEEN_PBR_DEFAULT_CONFIG_PATH:STRING=/opt/etc/keen-pbr/config.json \
+	-DKEEN_PBR_CONTROL_SOCKET:STRING=/opt/var/run/keen-pbr/control.sock \
+	-DKEEN_PBR_RESOLVER_FALLBACK_CONFIG:STRING=/opt/etc/keen-pbr/dnsmasq-fallback.conf \
 	-DKEEN_PBR_SYSTEM_RESOLVER_HOOK:STRING=/opt/usr/lib/keen-pbr/dnsmasq.sh \
 	-DKEEN_PBR_TARGET_OS:STRING=keenetic \
 	-DCMAKE_INSTALL_BINDIR:PATH=$(KEEN_PBR_CMAKE_INSTALL_BINDIR) \
@@ -94,6 +96,7 @@ endef
 
 define Package/keen-pbr/conffiles
 /opt/etc/keen-pbr/config.json
+/opt/etc/keen-pbr/defaults
 /opt/etc/keen-pbr/local.lst
 /opt/etc/keen-pbr/dnsmasq-fallback.conf
 /opt/etc/keen-pbr/transports.json
@@ -161,6 +164,7 @@ endef
 
 define Package/keen-pbr-headless/conffiles
 /opt/etc/keen-pbr/config.json
+/opt/etc/keen-pbr/defaults
 /opt/etc/keen-pbr/local.lst
 /opt/etc/keen-pbr/dnsmasq-fallback.conf
 endef

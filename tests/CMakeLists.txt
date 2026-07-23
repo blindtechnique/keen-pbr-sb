@@ -15,6 +15,8 @@ add_executable(keen-pbr-tests
   test_dns_probe_server.cpp
   test_list_set_usage.cpp
   test_list_service.cpp
+  test_control_protocol.cpp
+  test_resolver_fallback.cpp
   test_list_parser.cpp
   test_list_streamer.cpp
   test_http_client.cpp
@@ -32,6 +34,7 @@ add_executable(keen-pbr-tests
   test_api_transports.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
+  test_backup_restore.cpp
   test_api_static.cpp
   test_resolver_health.cpp
   test_system_resolver_hook.cpp
@@ -73,6 +76,9 @@ add_executable(keen-pbr-tests
   ../src/daemon/system_resolver_hook.cpp
   ../src/dns/dns_probe_server.cpp
   ../src/cache/cache_manager.cpp
+  ../src/ipc/control_protocol.cpp
+  ../src/ipc/control_client.cpp
+  ../src/ipc/resolver_fallback.cpp
   ../src/connections/conntrack_event_monitor.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
@@ -185,6 +191,7 @@ if(WITH_API)
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
+    ../src/api/handler_backup.cpp
     ../src/health/runtime_interface_inventory.cpp
   )
   target_link_libraries(keen-pbr-tests PRIVATE

@@ -160,6 +160,25 @@ public:
         replace_active, fw.pending_rules_, prefilter);
   }
 
+  static std::pair<std::string, std::string> build_raw_generation_scripts(
+      bool replace_active,
+      const FirewallGlobalPrefilter &prefilter = {}) {
+    IptablesFirewall fw;
+    FirewallRuleCriteria route_criteria;
+    route_criteria.dst_set_name = "kpbr4s_test";
+    fw.create_mark_rule(0x10000, route_criteria);
+    FirewallRuleCriteria output_criteria;
+    output_criteria.proto = L4Proto::Udp;
+    output_criteria.dst_port = "53";
+    fw.create_output_mark_rule(0x20000, output_criteria);
+    return {
+        IptablesFirewall::build_raw_prerouting_script(
+            "KeenPbrRaw_A", replace_active, fw.pending_rules_, prefilter),
+        IptablesFirewall::build_output_generation_script(
+            "KeenPbrOutput_A", replace_active, fw.pending_rules_, prefilter),
+    };
+  }
+
   static std::pair<std::string, std::string> generation_set_names() {
     IptablesFirewall fw;
     fw.prepare_apply(FirewallApplyMode::Destructive);
@@ -197,6 +216,28 @@ TEST_CASE("generation script dispatches prerouting and output independently") {
   CHECK(replacement.find("-A KeenPbrOutput -j KeenPbrOutput_A") != std::string::npos);
   CHECK(replacement.find("-A PREROUTING -j KeenPbrTable") == std::string::npos);
   CHECK(replacement.find("-R KeenPbrTable") == std::string::npos);
+}
+
+TEST_CASE("raw prerouting is isolated and omits unavailable conntrack matching") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.skip_established_or_dnat = true;
+  prefilter.skip_marked_packets = true;
+  const auto [raw, output] =
+      T::build_raw_generation_scripts(false, prefilter);
+
+  CHECK(raw.find("*raw\n") != std::string::npos);
+  CHECK(raw.find("-A PREROUTING -j KeenPbrRaw") != std::string::npos);
+  CHECK(raw.find("-A KeenPbrRaw -j KeenPbrRaw_A") != std::string::npos);
+  CHECK(raw.find("--match-set kpbr4s_test dst") != std::string::npos);
+  CHECK(raw.find("-m conntrack") == std::string::npos);
+  CHECK(raw.find("--ctstate") == std::string::npos);
+  CHECK(raw.find("KeenPbrOutput") == std::string::npos);
+
+  CHECK(output.find("*mangle\n") != std::string::npos);
+  CHECK(output.find("-A OUTPUT -j KeenPbrOutput") != std::string::npos);
+  CHECK(output.find("-A KeenPbrOutput_A -p udp --dport 53") !=
+        std::string::npos);
+  CHECK(output.find("KeenPbrRaw") == std::string::npos);
 }
 
 namespace {

@@ -98,6 +98,20 @@ TEST_CASE("status stream closes slow and shutdown subscribers") {
     }
 }
 
+TEST_CASE("status stream reserves API capacity by limiting long-lived clients") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; }, 128, 2);
+
+    auto first = stream.subscribe();
+    auto second = stream.subscribe();
+    REQUIRE(first);
+    REQUIRE(second);
+    CHECK_FALSE(stream.subscribe());
+
+    stream.unsubscribe(first);
+    CHECK(stream.subscribe());
+}
+
 TEST_CASE("status stream replays and publishes conntrack revisions") {
     auto current = make_snapshot();
     StatusStream stream([&] { return current; });

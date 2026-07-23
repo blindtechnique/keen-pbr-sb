@@ -37,26 +37,27 @@ void ListStreamer::stream_all_sources(const std::string& name,
                                       bool include_cache) {
     // 1. Cached URL file
     if (include_cache) {
-        stream_file(cache_.cache_path(name), visitor);
+        stream_file(cache_.cache_path(name), visitor, false);
     }
 
     // 2. Local file (if configured)
     if (config.file.has_value()) {
-        stream_file(config.file.value(), visitor);
+        stream_file(config.file.value(), visitor, true);
     }
 
     // Inline values follow the same normalization and validation path as file
     // and URL sources.
     const std::string inline_source = "inline list '" + name + "'";
     std::size_t inline_line_number = 1;
+    ListParser::ParseContext inline_context;
     for (const auto& entry : config.ip_cidrs.value_or(std::vector<std::string>{})) {
         ListParser::parse_line(
-            entry, visitor, inline_source, inline_line_number++);
+            entry, visitor, inline_source, inline_line_number++, &inline_context);
     }
 
     for (const auto& domain : config.domains.value_or(std::vector<std::string>{})) {
         ListParser::parse_line(
-            domain, visitor, inline_source, inline_line_number++);
+            domain, visitor, inline_source, inline_line_number++, &inline_context);
     }
 
     // Signal that all sources for this list have been processed
@@ -65,11 +66,13 @@ void ListStreamer::stream_all_sources(const std::string& name,
 
 void ListStreamer::stream_cache(const std::string& name, ListEntryVisitor& visitor) {
     if (cache_.has_cache(name)) {
-        stream_file(cache_.cache_path(name), visitor);
+        stream_file(cache_.cache_path(name), visitor, false);
     }
 }
 
-void ListStreamer::stream_file(const std::filesystem::path& path, ListEntryVisitor& visitor) {
+void ListStreamer::stream_file(const std::filesystem::path& path,
+                               ListEntryVisitor& visitor,
+                               bool log_invalid_entries) {
     const int fd =
         ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
@@ -103,6 +106,7 @@ void ListStreamer::stream_file(const std::filesystem::path& path, ListEntryVisit
     line.reserve(256);
     std::size_t total_bytes = 0;
     std::size_t line_number = 1;
+    ListParser::ParseContext context{log_invalid_entries};
     while (true) {
         const ssize_t count = ::read(fd, buffer.data(), buffer.size());
         if (count < 0) {
@@ -123,7 +127,7 @@ void ListStreamer::stream_file(const std::filesystem::path& path, ListEntryVisit
             const char ch = buffer[static_cast<std::size_t>(index)];
             if (ch == '\n') {
                 ListParser::parse_line(
-                    line, visitor, path.string(), line_number++);
+                    line, visitor, path.string(), line_number++, &context);
                 line.clear();
                 continue;
             }
@@ -138,7 +142,8 @@ void ListStreamer::stream_file(const std::filesystem::path& path, ListEntryVisit
     }
     close_fd();
     if (!line.empty()) {
-        ListParser::parse_line(line, visitor, path.string(), line_number);
+        ListParser::parse_line(
+            line, visitor, path.string(), line_number, &context);
     }
 }
 

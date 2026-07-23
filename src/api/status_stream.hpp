@@ -18,7 +18,9 @@ class StatusStream {
 public:
     using SnapshotBuilder = std::function<StatusSnapshot()>;
 
-    explicit StatusStream(SnapshotBuilder builder, size_t max_queue_size = 128);
+    explicit StatusStream(SnapshotBuilder builder,
+                          size_t max_queue_size = 128,
+                          size_t max_subscriptions = 4);
 
     SseBroadcaster::SubscriptionPtr subscribe();
     void unsubscribe(const SseBroadcaster::SubscriptionPtr& subscription);

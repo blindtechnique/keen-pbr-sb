@@ -13,6 +13,14 @@ void register_status_events_handler(ApiServer& server, ApiContext& ctx) {
     server.get_stream("/api/status/events",
                       [&ctx](const httplib::Request&, httplib::Response& res) {
         auto subscription = ctx.status_stream->subscribe();
+        if (!subscription) {
+            res.status = 503;
+            res.set_header("Retry-After", "5");
+            res.set_content(
+                R"({"error":"too many active status streams"})",
+                "application/json");
+            return;
+        }
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
         res.set_header("X-Accel-Buffering", "no");

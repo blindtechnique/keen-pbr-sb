@@ -669,7 +669,8 @@ TEST_CASE("IptablesFirewallVerifier::verify_chain: missing chain with prerouting
     const auto check = verifier.verify_chain();
     CHECK_FALSE(check.chain_present);
     CHECK(check.prerouting_hook_present);
-    CHECK(check.detail == "KeenPbrTable chain not found in iptables or ip6tables mangle table");
+    CHECK(check.detail ==
+          "KeenPbrTable chain not found in iptables or ip6tables mangle table");
 }
 
 TEST_CASE("IptablesFirewallVerifier::verify_chain: chain without prerouting jump is degraded") {
@@ -1026,6 +1027,46 @@ TEST_CASE("safe_exec_capture: max_bytes overflow sets truncated") {
                                           /*max_bytes=*/64);
     CHECK(result.truncated);
     CHECK(result.stdout_output.size() == 64);
+}
+
+TEST_CASE("IptablesFirewallVerifier::verify_chain: raw IPv4 scaffold is healthy") {
+    auto runner = [](const std::vector<std::string>& args) -> CommandResult {
+        if (matches_args(
+                args,
+                {"iptables", "-t", "raw", "-S", "KeenPbrRaw"})) {
+            return command_result(
+                "-N KeenPbrRaw\n-A KeenPbrRaw -j KeenPbrRaw_A\n");
+        }
+        if (matches_args(
+                args,
+                {"iptables", "-t", "raw", "-S", "KeenPbrRaw_A"})) {
+            return command_result(
+                "-N KeenPbrRaw_A\n"
+                "-A KeenPbrRaw_A -m set --match-set kpbr4s_test dst "
+                "-j MARK --set-xmark 0x10000/0xffffffff\n");
+        }
+        if (matches_args(
+                args,
+                {"iptables", "-t", "raw", "-S", "PREROUTING"})) {
+            return command_result("-A PREROUTING -j KeenPbrRaw\n");
+        }
+        return command_result({}, 1);
+    };
+    IptablesFirewallVerifier verifier(runner, true);
+
+    const auto chain = verifier.verify_chain();
+    CHECK(chain.chain_present);
+    CHECK(chain.prerouting_hook_present);
+    CHECK(chain.detail == "ok");
+
+    RuleState expected;
+    expected.rule_index = 0;
+    expected.set_names = {"kpbr4s_test"};
+    expected.action_type = RuleActionType::Mark;
+    expected.fwmark = 0x10000;
+    const auto rules = verifier.verify_rules({expected});
+    REQUIRE(rules.size() == 1);
+    CHECK(rules.front().status == CheckStatus::ok);
 }
 
 TEST_CASE("parse_iptables_s: parses rules from active A/B generation") {

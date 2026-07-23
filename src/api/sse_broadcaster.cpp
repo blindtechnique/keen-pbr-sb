@@ -6,8 +6,10 @@
 
 namespace keen_pbr3 {
 
-SseBroadcaster::SseBroadcaster(size_t max_queue_size)
-    : max_queue_size_(max_queue_size) {}
+SseBroadcaster::SseBroadcaster(size_t max_queue_size,
+                               size_t max_subscriptions)
+    : max_queue_size_(max_queue_size)
+    , max_subscriptions_(max_subscriptions) {}
 
 SseBroadcaster::SubscriptionPtr SseBroadcaster::subscribe() {
     return subscribe({});
@@ -24,6 +26,14 @@ SseBroadcaster::SubscriptionPtr SseBroadcaster::subscribe(
             std::make_move_iterator(initial_messages.end()));
     }
     KPBR_LOCK_GUARD(mutex_);
+    compact_locked();
+    if (subscriptions_.size() >= max_subscriptions_) {
+        Logger::instance().warn(
+            "Rejecting SSE subscription: active={} limit={}",
+            subscriptions_.size(),
+            max_subscriptions_);
+        return nullptr;
+    }
     subscriptions_.push_back(subscription);
     Logger::instance().trace("sse_subscribe", "subscriptions={}", subscriptions_.size());
     return subscription;

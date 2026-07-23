@@ -14,8 +14,10 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <set>
 #include <stdexcept>
+#include <vector>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -40,7 +42,10 @@ std::string read_text(const fs::path& path) {
 }
 
 void write_atomic(const fs::path& path, const std::string& content,
-                  bool ensure_world_readable = false) {
+                  bool ensure_world_readable = false,
+                  std::optional<mode_t> mode_override = std::nullopt,
+                  std::optional<uid_t> owner_override = std::nullopt,
+                  std::optional<gid_t> group_override = std::nullopt) {
     if (content.size() > kMaxBackupFileBytes && path != kRollbackPath &&
         path.filename() != "config.json" && path.filename() != "transports.json")
         throw ApiError("backup file is too large", 413);
@@ -55,10 +60,15 @@ void write_atomic(const fs::path& path, const std::string& content,
     if (!output || !(output << content)) throw ApiError("cannot write backup file", 500);
     output.close();
     if (!output) throw ApiError("cannot flush backup file", 500);
-    mode_t mode = had_previous ? (previous.st_mode & 0777) : 0644;
+    mode_t mode = mode_override.value_or(
+        had_previous ? (previous.st_mode & 0777) : 0644);
     if (ensure_world_readable) mode |= 0444;
+    const uid_t owner = owner_override.value_or(
+        had_previous ? previous.st_uid : geteuid());
+    const gid_t group = group_override.value_or(
+        had_previous ? previous.st_gid : getegid());
     if (::chmod(temporary.c_str(), mode) != 0 ||
-        (had_previous && ::chown(temporary.c_str(), previous.st_uid, previous.st_gid) != 0)) {
+        ::chown(temporary.c_str(), owner, group) != 0) {
         fs::remove(temporary, ec);
         throw ApiError("cannot preserve backup file metadata", 500);
     }
@@ -77,6 +87,85 @@ void write_atomic(const fs::path& path, const std::string& content,
     if (directory_fd >= 0) {
         (void)::fsync(directory_fd);
         ::close(directory_fd);
+    }
+}
+
+struct FileReplacement {
+    fs::path path;
+    std::string content;
+    bool ensure_world_readable{false};
+};
+
+struct FileSnapshot {
+    fs::path path;
+    bool existed{false};
+    std::string content;
+    mode_t mode{0600};
+    uid_t owner{0};
+    gid_t group{0};
+};
+
+FileSnapshot capture_file(const fs::path& path) {
+    FileSnapshot snapshot;
+    snapshot.path = path;
+
+    struct stat metadata {};
+    if (::lstat(path.c_str(), &metadata) != 0) {
+        if (errno == ENOENT) return snapshot;
+        throw ApiError("cannot inspect restore target " + path.string(), 500);
+    }
+    if (!S_ISREG(metadata.st_mode)) {
+        throw ApiError("restore target is not a regular file: " + path.string(),
+                       500);
+    }
+
+    snapshot.existed = true;
+    snapshot.content = read_text(path);
+    snapshot.mode = metadata.st_mode & 0777;
+    snapshot.owner = metadata.st_uid;
+    snapshot.group = metadata.st_gid;
+    return snapshot;
+}
+
+void sync_parent_directory(const fs::path& path) {
+    const int directory_fd =
+        ::open(path.parent_path().c_str(),
+               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory_fd >= 0) {
+        (void)::fsync(directory_fd);
+        ::close(directory_fd);
+    }
+}
+
+void restore_snapshot(const FileSnapshot& snapshot) {
+    if (snapshot.existed) {
+        write_atomic(snapshot.path,
+                     snapshot.content,
+                     false,
+                     snapshot.mode,
+                     snapshot.owner,
+                     snapshot.group);
+        return;
+    }
+
+    std::error_code ec;
+    const bool removed = fs::remove(snapshot.path, ec);
+    if (ec) {
+        throw ApiError("cannot remove newly restored file " +
+                           snapshot.path.string(),
+                       500);
+    }
+    if (removed) sync_parent_directory(snapshot.path);
+}
+
+std::string exception_message(std::exception_ptr error) {
+    if (!error) return "unknown restore failure";
+    try {
+        std::rethrow_exception(error);
+    } catch (const std::exception& exception) {
+        return exception.what();
+    } catch (...) {
+        return "unknown restore failure";
     }
 }
 
@@ -225,26 +314,43 @@ void restore_bundle(const ApiContext& ctx, const nlohmann::json& backup) {
     validate_bundle(backup);
     const auto& data = backup.at("data");
     nlohmann::json merged = ctx.get_visible_config();
+    bool config_changed = false;
     if (data.contains("general")) {
         for (const auto& item : data.at("general").items()) merged[item.key()] = item.value();
+        config_changed = true;
     }
-    for (const char* key : {"outbounds", "dns", "lists", "route"})
-        if (data.contains(key)) merged[key] = data.at(key);
+    for (const char* key : {"outbounds", "dns", "lists", "route"}) {
+        if (data.contains(key)) {
+            merged[key] = data.at(key);
+            config_changed = true;
+        }
+    }
 
     const auto formatted = merged.dump(1, '\t') + "\n";
     Config parsed;
-    try {
-        parsed = parse_config(formatted);
-        validate_config(parsed);
-        ctx.validate_candidate_config(parsed);
-    } catch (const std::exception& error) {
-        throw ApiError(std::string("backup configuration is invalid: ") + error.what(), 400);
+    if (config_changed) {
+        try {
+            parsed = parse_config(formatted);
+            validate_config(parsed);
+            ctx.validate_candidate_config(parsed);
+        } catch (const std::exception& error) {
+            throw ApiError(
+                std::string("backup configuration is invalid: ") +
+                    error.what(),
+                400);
+        }
     }
 
-    const auto previous_config = read_text(ctx.config_path);
+    std::vector<FileReplacement> replacements;
+    if (config_changed) {
+        replacements.push_back({ctx.config_path, formatted, false});
+    }
     if (data.contains("transports")) {
-        write_atomic(fs::path(ctx.config_path).parent_path() / "transports.json",
-                     data.at("transports").dump(1, '\t') + "\n");
+        replacements.push_back({
+            fs::path(ctx.config_path).parent_path() / "transports.json",
+            data.at("transports").dump(1, '\t') + "\n",
+            false,
+        });
     }
     if (data.contains("nfqws")) {
         for (const auto& item : data.at("nfqws").items()) {
@@ -255,31 +361,134 @@ void restore_bundle(const ApiContext& ctx, const nlohmann::json& backup) {
             if (root.empty()) throw ApiError("invalid nfqws path in backup", 400);
             auto tail = relative;
             tail = tail.lexically_relative(first);
-            write_atomic(root / tail, decode_backup_file(item.value()), true);
+            replacements.push_back({
+                root / tail,
+                decode_backup_file(item.value()),
+                true,
+            });
         }
     }
 
-    write_atomic(ctx.config_path, formatted);
-    const auto result = ctx.enqueue_apply_validated_config(std::move(parsed), formatted);
-    if (!result.error.empty()) {
-        write_atomic(ctx.config_path, previous_config);
-        throw ApiError("restore apply failed: " + result.error, 500);
+    std::vector<FileSnapshot> snapshots;
+    snapshots.reserve(replacements.size());
+    for (const auto& replacement : replacements) {
+        snapshots.push_back(capture_file(replacement.path));
     }
-    if (data.contains("transports") &&
-        safe_exec({"/opt/etc/init.d/S79transport-manager", "restart"}, true) != 0)
-        throw ApiError("transport manager restart failed", 500);
-    if (data.contains("nfqws") &&
-        safe_exec({"/opt/etc/init.d/S51nfqws2", "restart"}, true) != 0)
-        throw ApiError("nfqws2 restart failed", 500);
+
+    std::optional<Config> previous_config;
+    std::string previous_config_json;
+    if (config_changed) {
+        const auto config_snapshot = std::find_if(
+            snapshots.begin(),
+            snapshots.end(),
+            [&ctx](const FileSnapshot& snapshot) {
+                return snapshot.path == fs::path(ctx.config_path);
+            });
+        if (config_snapshot == snapshots.end() || !config_snapshot->existed) {
+            throw ApiError("current configuration is unavailable for rollback",
+                           500);
+        }
+        try {
+            previous_config_json = config_snapshot->content;
+            previous_config = parse_config(previous_config_json);
+            validate_config(*previous_config);
+        } catch (const std::exception& error) {
+            throw ApiError(
+                std::string("current configuration cannot be used for rollback: ") +
+                    error.what(),
+                500);
+        }
+    }
+
+    try {
+        for (const auto& replacement : replacements) {
+            write_atomic(replacement.path,
+                         replacement.content,
+                         replacement.ensure_world_readable);
+        }
+
+        if (config_changed) {
+            const auto result =
+                ctx.enqueue_apply_validated_config(parsed, formatted);
+            if (!result.error.empty()) {
+                throw ApiError("restore apply failed: " + result.error, 500);
+            }
+        }
+        if (data.contains("transports") &&
+            safe_exec({"/opt/etc/init.d/S79transport-manager", "restart"},
+                      true) != 0) {
+            throw ApiError("transport manager restart failed", 500);
+        }
+        if (data.contains("nfqws") &&
+            safe_exec({"/opt/etc/init.d/S51nfqws2", "restart"}, true) != 0) {
+            throw ApiError("nfqws2 restart failed", 500);
+        }
+    } catch (...) {
+        const auto original_error = std::current_exception();
+        std::vector<std::string> rollback_errors;
+
+        for (auto snapshot = snapshots.rbegin();
+             snapshot != snapshots.rend();
+             ++snapshot) {
+            try {
+                restore_snapshot(*snapshot);
+            } catch (const std::exception& error) {
+                rollback_errors.push_back(error.what());
+            }
+        }
+
+        if (previous_config.has_value()) {
+            try {
+                const auto result = ctx.enqueue_apply_validated_config(
+                    *previous_config, previous_config_json);
+                if (!result.error.empty()) {
+                    rollback_errors.push_back(
+                        "runtime rollback failed: " + result.error);
+                }
+            } catch (const std::exception& error) {
+                rollback_errors.push_back(
+                    std::string("runtime rollback failed: ") + error.what());
+            }
+        }
+        if (data.contains("transports") &&
+            safe_exec({"/opt/etc/init.d/S79transport-manager", "restart"},
+                      true) != 0) {
+            rollback_errors.push_back(
+                "transport manager rollback restart failed");
+        }
+        if (data.contains("nfqws") &&
+            safe_exec({"/opt/etc/init.d/S51nfqws2", "restart"}, true) != 0) {
+            rollback_errors.push_back("nfqws2 rollback restart failed");
+        }
+
+        if (!rollback_errors.empty()) {
+            std::ostringstream message;
+            message << exception_message(original_error)
+                    << "; rollback was incomplete:";
+            for (const auto& error : rollback_errors) {
+                message << " " << error << ";";
+            }
+            Logger::instance().error("{}", message.str());
+            throw ApiError(message.str(), 500);
+        }
+        std::rethrow_exception(original_error);
+    }
 }
 
 } // namespace
 
 std::string create_full_rollback_backup(const ApiContext& ctx) {
     const auto payload = make_backup(ctx, all_groups()).dump(1, '\t') + "\n";
-    write_atomic(kRollbackPath, payload);
+    write_atomic(kRollbackPath, payload, false, static_cast<mode_t>(0600));
     return payload;
 }
+
+#ifdef KEEN_PBR3_TESTING
+void restore_backup_bundle_for_test(const ApiContext& ctx,
+                                    const nlohmann::json& backup) {
+    restore_bundle(ctx, backup);
+}
+#endif
 
 void register_backup_handler(ApiServer& server, ApiContext& ctx) {
     server.post("/api/backup", [&ctx](const std::string& body) -> std::string {
@@ -295,21 +504,12 @@ void register_backup_handler(ApiServer& server, ApiContext& ctx) {
         try { backup = nlohmann::json::parse(body); }
         catch (...) { throw ApiError("invalid backup JSON", 400); }
         ctx.begin_save_operation();
-        std::optional<nlohmann::json> automatic_rollback;
         try {
-            automatic_rollback = nlohmann::json::parse(create_full_rollback_backup(ctx));
+            create_full_rollback_backup(ctx);
             restore_bundle(ctx, backup);
             ctx.finish_config_operation();
             return R"({"ok":true})";
         } catch (...) {
-            if (automatic_rollback.has_value()) {
-                try {
-                    restore_bundle(ctx, *automatic_rollback);
-                } catch (const std::exception& rollback_error) {
-                    Logger::instance().error("Automatic backup rollback failed: {}",
-                                             rollback_error.what());
-                }
-            }
             ctx.finish_config_operation();
             throw;
         }

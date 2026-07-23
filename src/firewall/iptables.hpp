@@ -15,7 +15,7 @@ namespace keen_pbr3 {
 class IptablesFirewall : public Firewall {
 public:
     // Initialize the iptables backend; does not modify firewall state yet.
-    IptablesFirewall();
+    explicit IptablesFirewall(bool use_raw_prerouting = false);
     // Destructor performs best-effort cleanup without virtual dispatch.
     ~IptablesFirewall() override;
 
@@ -57,9 +57,13 @@ public:
     void cleanup() override;
     // Returns FirewallBackend::iptables.
     FirewallBackend backend() const override;
+    bool uses_raw_prerouting() const override {
+        return use_raw_prerouting_;
+    }
 
 private:
     static constexpr const char* CHAIN_NAME = "KeenPbrTable";
+    static constexpr const char* RAW_CHAIN_NAME = "KeenPbrRaw";
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
@@ -103,9 +107,21 @@ private:
         bool replace_active_chains,
         const std::vector<PendingRule>& rules,
         const FirewallGlobalPrefilter& prefilter = {});
+    static std::string build_raw_prerouting_script(
+        const std::string& prerouting_chain,
+        bool replace_active_chain,
+        const std::vector<PendingRule>& rules,
+        const FirewallGlobalPrefilter& prefilter = {});
+    static std::string build_output_generation_script(
+        const std::string& output_chain,
+        bool replace_active_chain,
+        const std::vector<PendingRule>& rules,
+        const FirewallGlobalPrefilter& prefilter = {});
     // Build early RETURN lines for the global prefilter.
     static std::string build_prefilter_lines(
-        const FirewallGlobalPrefilter& prefilter);
+        const FirewallGlobalPrefilter& prefilter,
+        const std::string& chain = CHAIN_NAME,
+        bool allow_conntrack = true);
     // Build the proto/port fragment for a single rule (single proto, not tcp/udp).
     static std::string build_proto_port_fragment(L4Proto proto,
                                                  const PortSpec& src_port,
@@ -118,6 +134,7 @@ private:
         const FirewallGlobalPrefilter& prefilter);
     bool ipv6_backend_available() const;
     bool dispatcher_chains_exist(bool ipv6) const;
+    void validate_raw_prerouting_capability() const;
     // Expand filter (proto, src_addr, dst_addr) into cross-product of PendingRules
     // and append them to out.  tcp/udp is split into two entries.  Multiple CIDRs
     // in src_addr / dst_addr each become separate rules (OR semantics when combined).
@@ -142,12 +159,15 @@ private:
     bool chain_v6_created_ = false;
     static const char* generation_prerouting_chain(FirewallSetGeneration generation);
     static const char* generation_output_chain(FirewallSetGeneration generation);
+    static const char* raw_generation_prerouting_chain(
+        FirewallSetGeneration generation);
     static FirewallSetGeneration opposite_generation(FirewallSetGeneration generation);
     std::optional<FirewallSetGeneration> active_v4_generation_;
     std::optional<FirewallSetGeneration> active_v6_generation_;
     FirewallSetGeneration target_v4_generation_{FirewallSetGeneration::A};
     FirewallSetGeneration target_v6_generation_{FirewallSetGeneration::A};
     bool apply_prepared_{false};
+    bool use_raw_prerouting_{false};
 
     // DNS redirect (client DNS enforcement) state
     bool dns_redirect_requested_ = false;
@@ -173,6 +193,7 @@ private:
 };
 
 // Factory function called from firewall.cpp
-std::unique_ptr<Firewall> create_iptables_firewall();
+std::unique_ptr<Firewall> create_iptables_firewall(
+    bool use_raw_prerouting = false);
 
 } // namespace keen_pbr3

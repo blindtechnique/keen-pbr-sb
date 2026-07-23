@@ -1,22 +1,44 @@
 #include "daemon.hpp"
 
+#include <arpa/inet.h>
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <ctime>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
+#include <grp.h>
+#include <map>
+#include <nlohmann/json.hpp>
+#include <ostream>
 #include <signal.h>
+#include <set>
+#include <streambuf>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <thread>
 #include <unistd.h>
 
+#include <keen-pbr/version.hpp>
+
+#include "../cache/cache_manager.hpp"
+#include "../cmd/test_routing.hpp"
+#include "../dns/dns_router.hpp"
+#include "../dns/dnsmasq_gen.hpp"
 #include "../firewall/firewall.hpp"
 #include "../firewall/firewall_verifier.hpp"
+#include "../ipc/control_protocol.hpp"
+#include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/daemon_signals.hpp"
+#include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
 #include "../dns/dns_probe_server.hpp" // IWYU pragma: keep
 #include "scheduler.hpp"
@@ -36,6 +58,135 @@ namespace {
 
 constexpr auto SIGUSR1_DEBOUNCE_DELAY = std::chrono::milliseconds{150};
 constexpr auto INTERFACE_MONITOR_RECONNECT_RETRY_DELAY = std::chrono::seconds{5};
+constexpr std::size_t kResolverStreamChunkBytes = 16U * 1024U;
+
+#ifndef KEEN_PBR_CONTROL_SOCKET
+#define KEEN_PBR_CONTROL_SOCKET "/run/keen-pbr/control.sock"
+#endif
+
+void send_all(int fd, const char* data, std::size_t size) {
+    std::size_t written = 0;
+    while (written < size) {
+        const ssize_t count =
+            ::send(fd, data + written, size - written, MSG_NOSIGNAL);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            throw ipc::ControlProtocolError(
+                "control socket write failed: " +
+                std::string(strerror(errno)));
+        }
+        written += static_cast<std::size_t>(count);
+    }
+}
+
+void receive_all(int fd, char* data, std::size_t size) {
+    std::size_t received = 0;
+    while (received < size) {
+        const ssize_t count =
+            ::recv(fd, data + received, size - received, 0);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            throw ipc::ControlProtocolError(
+                "truncated control request");
+        }
+        received += static_cast<std::size_t>(count);
+    }
+}
+
+class SocketStreamBuffer final : public std::streambuf {
+public:
+    explicit SocketStreamBuffer(int fd) : fd_(fd) {
+        setp(buffer_.data(), buffer_.data() + buffer_.size());
+    }
+
+    ~SocketStreamBuffer() override { (void)sync(); }
+
+protected:
+    int overflow(int character) override {
+        if (flush_buffer() != 0) return traits_type::eof();
+        if (character != traits_type::eof()) {
+            *pptr() = static_cast<char>(character);
+            pbump(1);
+        }
+        return character;
+    }
+
+    std::streamsize xsputn(const char* data,
+                           std::streamsize size) override {
+        std::streamsize written = 0;
+        while (written < size) {
+            if (pptr() == epptr() && flush_buffer() != 0) break;
+            const auto capacity =
+                static_cast<std::streamsize>(epptr() - pptr());
+            const auto chunk = std::min(capacity, size - written);
+            std::memcpy(
+                pptr(), data + written, static_cast<std::size_t>(chunk));
+            pbump(static_cast<int>(chunk));
+            written += chunk;
+        }
+        return written;
+    }
+
+    int sync() override { return flush_buffer(); }
+
+private:
+    int flush_buffer() {
+        const auto size =
+            static_cast<std::size_t>(pptr() - pbase());
+        if (size == 0) return 0;
+        try {
+            const std::uint32_t length =
+                htonl(static_cast<std::uint32_t>(size));
+            send_all(fd_,
+                     reinterpret_cast<const char*>(&length),
+                     sizeof(length));
+            send_all(fd_, pbase(), size);
+        } catch (...) {
+            return -1;
+        }
+        setp(buffer_.data(), buffer_.data() + buffer_.size());
+        return 0;
+    }
+
+    int fd_;
+    std::array<char, kResolverStreamChunkBytes> buffer_{};
+};
+
+std::string resolver_runtime_reason(
+    const RuntimeStateSnapshot& snapshot) {
+    switch (snapshot.runtime_state) {
+    case RuntimeState::starting:
+        return "runtime_starting";
+    case RuntimeState::stopped:
+        return "runtime_stopped";
+    case RuntimeState::broken:
+        return "runtime_broken";
+    case RuntimeState::shutting_down:
+        return "runtime_shutting_down";
+    default:
+        return "daemon_error";
+    }
+}
+
+bool peer_has_group(const ucred& peer, gid_t group_id) {
+    if (peer.gid == group_id) return true;
+
+    std::ifstream status(
+        "/proc/" + std::to_string(peer.pid) + "/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.rfind("Groups:", 0) != 0) continue;
+        std::istringstream groups(line.substr(7));
+        unsigned long group = 0;
+        while (groups >> group) {
+            if (group == static_cast<unsigned long>(group_id)) {
+                return true;
+            }
+        }
+        break;
+    }
+    return false;
+}
 
 std::int64_t steady_duration_ms(std::chrono::steady_clock::time_point started_at) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -68,7 +219,8 @@ Daemon::Daemon(Config config,
     , config_(std::move(config))
     , config_path_(std::move(config_path))
     , opts_(std::move(opts))
-    , firewall_(create_firewall(firewall_backend_preference(config_)))
+    , firewall_(create_firewall(firewall_backend_preference(config_),
+                                opts_.use_raw_prerouting))
     , interface_monitor_(std::make_unique<InterfaceMonitor>(
           [this](const InterfaceMonitor::Event& event) {
               handle_interface_event(event);
@@ -104,8 +256,12 @@ Daemon::Daemon(Config config,
     scheduler_ = std::make_unique<Scheduler>(*this);
 
 #ifdef WITH_API
-    dns_test_broadcaster_ = std::make_unique<SseBroadcaster>();
+    // DNS diagnostics are interactive and should have only one live probe.
+    // Combined with four runtime streams this leaves worker capacity for the
+    // REST API even on the minimum eight-thread cpp-httplib pool.
+    dns_test_broadcaster_ = std::make_unique<SseBroadcaster>(128, 1);
 #endif
+    setup_ipc_control_socket();
 }
 
 Daemon::~Daemon() {
@@ -118,6 +274,7 @@ Daemon::~Daemon() {
             close(control_fd_);
             control_fd_ = -1;
         }
+        remove_ipc_control_socket();
         if (signal_fd_ >= 0) {
             epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, signal_fd_, nullptr);
             close(signal_fd_);
@@ -147,6 +304,472 @@ void Daemon::setup_control_channel() {
     ev.data.fd = control_fd_;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, control_fd_, &ev) < 0) {
         throw DaemonError("epoll_ctl add control_fd failed: " + std::string(strerror(errno)));
+    }
+}
+
+void Daemon::setup_ipc_control_socket() {
+    ipc_control_socket_path_ = KEEN_PBR_CONTROL_SOCKET;
+    if (ipc_control_socket_path_.empty() ||
+        ipc_control_socket_path_.size() >=
+            sizeof(sockaddr_un::sun_path)) {
+        throw DaemonError("control socket path is invalid");
+    }
+
+    const auto parent =
+        std::filesystem::path(ipc_control_socket_path_).parent_path();
+    std::error_code directory_error;
+    std::filesystem::create_directories(parent, directory_error);
+    if (directory_error) {
+        throw DaemonError(
+            "failed to create control socket directory: " +
+            directory_error.message());
+    }
+
+    const group* control_group = ::getgrnam("keen-pbr");
+    if (control_group != nullptr) {
+        ipc_control_group_id_ = control_group->gr_gid;
+        if (::chown(parent.c_str(), 0, ipc_control_group_id_) != 0) {
+            throw DaemonError(
+                "failed to assign control socket directory group: " +
+                std::string(strerror(errno)));
+        }
+    } else {
+        ipc_control_group_id_ = static_cast<gid_t>(-1);
+        Logger::instance().info(
+            "Optional keen-pbr group is absent; control socket is root-only");
+    }
+    if (::chmod(parent.c_str(), 0750) != 0) {
+        throw DaemonError(
+            "failed to set control socket directory mode: " +
+            std::string(strerror(errno)));
+    }
+
+    struct stat existing {};
+    if (::lstat(ipc_control_socket_path_.c_str(), &existing) == 0) {
+        if (!S_ISSOCK(existing.st_mode) ||
+            ::unlink(ipc_control_socket_path_.c_str()) != 0) {
+            throw DaemonError("unsafe stale control socket path");
+        }
+    } else if (errno != ENOENT) {
+        throw DaemonError(
+            "failed to inspect control socket path: " +
+            std::string(strerror(errno)));
+    }
+
+    ipc_control_fd_ =
+        ::socket(AF_UNIX,
+                 SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                 0);
+    if (ipc_control_fd_ < 0) {
+        throw DaemonError(
+            "control socket create failed: " +
+            std::string(strerror(errno)));
+    }
+
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path,
+                ipc_control_socket_path_.c_str(),
+                ipc_control_socket_path_.size() + 1);
+    const gid_t socket_group =
+        ipc_control_group_id_ == static_cast<gid_t>(-1)
+            ? static_cast<gid_t>(0)
+            : ipc_control_group_id_;
+    const mode_t socket_mode =
+        ipc_control_group_id_ == static_cast<gid_t>(-1) ? 0600 : 0660;
+    if (::bind(ipc_control_fd_,
+               reinterpret_cast<const sockaddr*>(&address),
+               sizeof(address)) != 0 ||
+        ::listen(ipc_control_fd_, 16) != 0 ||
+        ::chown(ipc_control_socket_path_.c_str(), 0, socket_group) != 0 ||
+        ::chmod(ipc_control_socket_path_.c_str(), socket_mode) != 0) {
+        const std::string error = strerror(errno);
+        remove_ipc_control_socket();
+        throw DaemonError("control socket setup failed: " + error);
+    }
+
+    epoll_event event{};
+    event.events = EPOLLIN;
+    event.data.fd = ipc_control_fd_;
+    if (::epoll_ctl(
+            epoll_fd_, EPOLL_CTL_ADD, ipc_control_fd_, &event) != 0) {
+        const std::string error = strerror(errno);
+        remove_ipc_control_socket();
+        throw DaemonError(
+            "failed to register control socket: " + error);
+    }
+}
+
+void Daemon::remove_ipc_control_socket() noexcept {
+    if (ipc_control_fd_ >= 0) {
+        if (epoll_fd_ >= 0) {
+            (void)::epoll_ctl(
+                epoll_fd_, EPOLL_CTL_DEL, ipc_control_fd_, nullptr);
+        }
+        ::close(ipc_control_fd_);
+        ipc_control_fd_ = -1;
+    }
+    ipc_control_group_id_ = static_cast<gid_t>(-1);
+    if (!ipc_control_socket_path_.empty()) {
+        struct stat metadata {};
+        if (::lstat(ipc_control_socket_path_.c_str(), &metadata) == 0 &&
+            S_ISSOCK(metadata.st_mode)) {
+            (void)::unlink(ipc_control_socket_path_.c_str());
+        }
+        ipc_control_socket_path_.clear();
+    }
+}
+
+void Daemon::handle_ipc_control_socket() {
+    while (true) {
+        const int client =
+            ::accept4(ipc_control_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+        if (client < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            if (errno == EINTR) continue;
+            throw DaemonError(
+                "control socket accept failed: " +
+                std::string(strerror(errno)));
+        }
+
+        timeval timeout{5, 0};
+        (void)::setsockopt(
+            client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        (void)::setsockopt(
+            client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+        nlohmann::json request = nlohmann::json::object();
+        nlohmann::json response;
+        bool stream_dispatched = false;
+        try {
+            ucred peer{};
+            socklen_t peer_length = sizeof(peer);
+            if (::getsockopt(client,
+                             SOL_SOCKET,
+                             SO_PEERCRED,
+                             &peer,
+                             &peer_length) != 0) {
+                throw ipc::ControlProtocolError(
+                    "unable to verify control peer");
+            }
+
+            std::uint32_t length = 0;
+            receive_all(
+                client, reinterpret_cast<char*>(&length), sizeof(length));
+            const std::size_t payload_size = ntohl(length);
+            if (payload_size > ipc::kMaxControlMessageBytes) {
+                throw ipc::ControlProtocolError(
+                    "control message exceeds maximum size");
+            }
+            std::string frame(sizeof(length) + payload_size, '\0');
+            std::memcpy(frame.data(), &length, sizeof(length));
+            receive_all(client,
+                        frame.data() + sizeof(length),
+                        payload_size);
+            request = ipc::decode_message(frame);
+            ipc::validate_request_envelope(request);
+
+            const std::string operation =
+                request.at("operation").get<std::string>();
+            const bool root_peer = peer.uid == 0;
+            const bool list_update_member =
+                ipc_control_group_id_ != static_cast<gid_t>(-1) &&
+                peer_has_group(peer, ipc_control_group_id_) &&
+                operation == "download";
+            if (!root_peer && !list_update_member) {
+                throw ipc::ControlProtocolError(
+                    "control peer is not authorized for this operation");
+            }
+
+            const bool supported =
+                operation == "status" ||
+                operation == "resolver-config-hash" ||
+                operation == "download" ||
+                operation == "test-routing" ||
+                operation == "generate-resolver-config";
+            if (!supported) {
+                response = ipc::make_error_response(
+                    request,
+                    "unsupported_operation",
+                    "unsupported control operation");
+            } else if (operation == "test-routing") {
+                const std::string target =
+                    request.value("target", "");
+                if (target.empty()) {
+                    throw ipc::ControlProtocolError(
+                        "test-routing requires a target");
+                }
+                const auto result = compute_test_routing(
+                    config_store_.active_config(),
+                    list_service_.cache_manager(),
+                    target);
+                nlohmann::json entries = nlohmann::json::array();
+                for (const auto& entry : result.entries) {
+                    entries.push_back(
+                        {{"ip", entry.ip},
+                         {"expected_outbound", entry.expected_outbound},
+                         {"actual_outbound", entry.actual_outbound},
+                         {"ok", entry.ok}});
+                }
+                response = {
+                    {"protocol_version", ipc::kControlProtocolVersion},
+                    {"request_id", request.at("request_id")},
+                    {"ok", !result.dns_error.has_value()},
+                    {"result",
+                     {{"target", result.target},
+                      {"resolved_ips", result.resolved_ips},
+                      {"entries", std::move(entries)},
+                      {"warnings", result.warnings},
+                      {"dns_error", result.dns_error}}},
+                };
+            } else if (operation == "generate-resolver-config") {
+                const auto runtime_snapshot =
+                    runtime_state_store_.snapshot();
+                if (!runtime_snapshot.routing_runtime_active ||
+                    !routing_runtime_active_) {
+                    response = ipc::make_error_response(
+                        request,
+                        resolver_runtime_reason(runtime_snapshot),
+                        "resolver runtime is not active");
+                } else {
+                    const auto active_config =
+                        config_store_.active_config();
+                    const auto dns_config =
+                        active_config.dns.value_or(DnsConfig{});
+                    const auto cache_dir =
+                        active_config.daemon.value_or(DaemonConfig{})
+                            .cache_dir.value_or("/var/cache/keen-pbr");
+                    const auto requested_resolver =
+                        request.value("resolver", "dnsmasq");
+                    const auto type =
+                        requested_resolver == "dnsmasq-ipset"
+                            ? ResolverType::DNSMASQ_IPSET
+                            : (requested_resolver == "dnsmasq-nftset"
+                                   ? ResolverType::DNSMASQ_NFTSET
+                                   : (firewall_->backend() ==
+                                              FirewallBackend::nftables
+                                          ? ResolverType::DNSMASQ_NFTSET
+                                          : ResolverType::DNSMASQ_IPSET));
+                    const auto request_id =
+                        request.at("request_id").get<std::string>();
+                    const bool queued = blocking_executor_.try_post(
+                        "generate-resolver-config",
+                        [client,
+                         active_config,
+                         dns_config,
+                         cache_dir,
+                         type,
+                         request_id] {
+                            bool stream_started = false;
+                            try {
+                                CacheManager cache(
+                                    cache_dir,
+                                    max_file_size_bytes(active_config));
+                                std::set<std::string> referenced_lists;
+                                for (const auto& rule :
+                                     active_config.route
+                                         .value_or(RouteConfig{})
+                                         .rules.value_or(
+                                             std::vector<RouteRule>{})) {
+                                    if (!route_rule_enabled(rule)) continue;
+                                    for (const auto& list_name :
+                                         route_rule_lists(rule)) {
+                                        referenced_lists.insert(list_name);
+                                    }
+                                }
+                                for (const auto& rule :
+                                     dns_config.rules.value_or(
+                                         std::vector<DnsRule>{})) {
+                                    if (!dns_rule_enabled(rule)) continue;
+                                    for (const auto& list_name : rule.list) {
+                                        referenced_lists.insert(list_name);
+                                    }
+                                }
+                                const auto lists =
+                                    active_config.lists.value_or(
+                                        std::map<std::string, ListConfig>{});
+                                for (const auto& list_name :
+                                     referenced_lists) {
+                                    const auto list =
+                                        lists.find(list_name);
+                                    if (list == lists.end()) continue;
+                                    if (list->second.url.has_value() &&
+                                        !cache.has_cache(list_name)) {
+                                        throw ipc::ControlProtocolError(
+                                            "list_cache_missing");
+                                    }
+                                    if (list->second.file.has_value() &&
+                                        !std::filesystem::is_regular_file(
+                                            list->second.file.value())) {
+                                        throw ipc::ControlProtocolError(
+                                            "active_list_cache_mismatch");
+                                    }
+                                }
+
+                                const auto header = ipc::encode_message(
+                                    {{"protocol_version",
+                                      ipc::kControlProtocolVersion},
+                                     {"request_id", request_id},
+                                     {"ok", true},
+                                     {"stream", true}});
+                                send_all(
+                                    client, header.data(), header.size());
+                                stream_started = true;
+
+                                SocketStreamBuffer buffer(client);
+                                std::ostream output(&buffer);
+                                output
+                                    << "# keen-pbr resolver state: active\n";
+                                const auto ipv6 =
+                                    resolve_ipv6_support(active_config);
+                                ListStreamer streamer(cache);
+                                DnsServerRegistry registry(dns_config);
+                                DnsmasqGenerator generator(
+                                    registry,
+                                    streamer,
+                                    active_config.route.value_or(
+                                        RouteConfig{}),
+                                    dns_config,
+                                    active_config.lists.value_or(
+                                        std::map<std::string, ListConfig>{}),
+                                    type,
+                                    KEEN_PBR3_VERSION_FULL_STRING,
+                                    ipv6.enabled);
+                                generator.generate(output);
+                                output
+                                    << "txt-record=resolver-state.keen.pbr,"
+                                    << std::time(nullptr)
+                                    << "|active|runtime_active\n";
+                                output.flush();
+                                if (!output) {
+                                    throw ipc::ControlProtocolError(
+                                        "resolver stream write failed");
+                                }
+                                const std::uint32_t end_of_stream = 0;
+                                send_all(
+                                    client,
+                                    reinterpret_cast<const char*>(
+                                        &end_of_stream),
+                                    sizeof(end_of_stream));
+                            } catch (const std::exception& error) {
+                                if (!stream_started) {
+                                    try {
+                                        const auto error_response =
+                                            ipc::make_error_response(
+                                                {{"request_id", request_id}},
+                                                error.what(),
+                                                error.what());
+                                        const auto error_frame =
+                                            ipc::encode_message(
+                                                error_response);
+                                        send_all(client,
+                                                 error_frame.data(),
+                                                 error_frame.size());
+                                    } catch (...) {
+                                    }
+                                } else {
+                                    Logger::instance().warn(
+                                        "resolver config stream failed: {}",
+                                        error.what());
+                                }
+                            }
+                            ::close(client);
+                        });
+                    if (queued) {
+                        stream_dispatched = true;
+                    } else {
+                        response = ipc::make_error_response(
+                            request,
+                            "daemon_error",
+                            "resolver stream executor is unavailable");
+                    }
+                }
+            } else if (operation == "download") {
+                bool expected = false;
+                if (!ipc_mutation_inflight_.compare_exchange_strong(
+                        expected,
+                        true,
+                        std::memory_order_acq_rel)) {
+                    response = ipc::make_error_response(
+                        request,
+                        "busy",
+                        "another control mutation is in progress");
+                } else {
+                    struct MutationGate {
+                        std::atomic<bool>& flag;
+                        ~MutationGate() {
+                            flag.store(false, std::memory_order_release);
+                        }
+                    } gate{ipc_mutation_inflight_};
+
+                    const bool reload =
+                        request.value("reload", false);
+                    RemoteListsRefreshResult refresh;
+                    bool reloaded = false;
+                    if (reload) {
+                        auto result =
+                            execute_remote_list_refresh(nullptr, "ipc");
+                        refresh = std::move(result.refresh_result);
+                        reloaded = result.reloaded;
+                    } else {
+                        const auto relevant =
+                            collect_relevant_list_names(config_);
+                        const auto dns_relevant =
+                            collect_dns_relevant_list_names(config_);
+                        refresh = list_service_.refresh_remote_lists(
+                            config_,
+                            outbound_marks_,
+                            &relevant,
+                            nullptr,
+                            &dns_relevant);
+                    }
+                    response = {
+                        {"protocol_version",
+                         ipc::kControlProtocolVersion},
+                        {"request_id", request.at("request_id")},
+                        {"ok", refresh.failed_lists.empty()},
+                        {"result",
+                         {{"refreshed_lists",
+                           refresh.refreshed_lists},
+                          {"changed_lists", refresh.changed_lists},
+                          {"failed_lists", refresh.failed_lists},
+                          {"reloaded", reloaded}}},
+                    };
+                }
+            } else {
+                const auto snapshot =
+                    runtime_state_store_.snapshot();
+                response = {
+                    {"protocol_version",
+                     ipc::kControlProtocolVersion},
+                    {"request_id", request.at("request_id")},
+                    {"ok", true},
+                    {"result",
+                     {{"runtime_state",
+                       runtime_state_name(snapshot.runtime_state)},
+                      {"runtime_state_reason",
+                       snapshot.runtime_state_reason},
+                      {"routing_runtime_active",
+                       snapshot.routing_runtime_active},
+                      {"resolver_config_hash",
+                       snapshot.resolver_config_hash}}},
+                };
+            }
+        } catch (const std::exception& error) {
+            response = ipc::make_error_response(
+                request, "protocol_error", error.what());
+        }
+
+        if (!stream_dispatched) {
+            try {
+                const auto frame = ipc::encode_message(response);
+                send_all(client, frame.data(), frame.size());
+            } catch (const std::exception& error) {
+                Logger::instance().warn(
+                    "control response failed: {}", error.what());
+            }
+            ::close(client);
+        }
     }
 }
 
@@ -560,6 +1183,12 @@ void Daemon::remove_fd(int fd,
 }
 
 void Daemon::dispatch_event_fd(int fd, uint32_t events) {
+    if (fd == ipc_control_fd_) {
+        if ((events & EPOLLIN) != 0U) {
+            handle_ipc_control_socket();
+        }
+        return;
+    }
     if (fd == signal_fd_) {
         handle_signal();
         return;

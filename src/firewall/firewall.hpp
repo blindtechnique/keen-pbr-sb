@@ -226,6 +226,7 @@ public:
 
     // Return the backend type for this firewall instance.
     virtual FirewallBackend backend() const = 0;
+    virtual bool uses_raw_prerouting() const { return false; }
 
     // Non-copyable
     Firewall(const Firewall&) = delete;
@@ -247,6 +248,7 @@ const char* firewall_backend_name(FirewallBackend backend);
 // backend_pref: auto-detect, iptables, or nftables.
 // Throws FirewallError if requested backend is not available.
 std::unique_ptr<Firewall> create_firewall(
-    FirewallBackendPreference backend_pref = FirewallBackendPreference::auto_detect);
+    FirewallBackendPreference backend_pref = FirewallBackendPreference::auto_detect,
+    bool use_raw_prerouting = false);
 
 } // namespace keen_pbr3

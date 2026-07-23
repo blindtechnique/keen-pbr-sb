@@ -5,7 +5,7 @@
 ENABLED=yes
 PROCS=$(basename "$KEEN_PBR")
 PIDFILE="/opt/var/run/keen-pbr.pid"
-ARGS="--config $CONFIG --pid-file $PIDFILE service"
+ARGS="--config $CONFIG --pid-file $PIDFILE ${KEEN_PBR_ARGS:-} service"
 PREARGS=""
 POSTCMD=""
 DESC="keen-pbr"
@@ -137,6 +137,80 @@ check_runtime_dependencies() {
     check_netfilter_addons_component
     ensure_ipset_modules_loaded
     ensure_xt_multiport_loaded
+}
+
+remove_daemon_arg() {
+    local target="$1"
+    local arg
+    local filtered=""
+
+    for arg in $ARGS; do
+        [ "$arg" = "$target" ] || filtered="$filtered $arg"
+    done
+    ARGS="$filtered"
+}
+
+add_daemon_arg() {
+    remove_daemon_arg "$1"
+    ARGS="$ARGS $1"
+}
+
+ensure_raw_table_available() {
+    local raw_module
+
+    RAW_PREROUTING_ERROR=""
+    if iptables -t raw -S >/dev/null 2>&1; then
+        return 0
+    fi
+
+    raw_module="/lib/modules/$(uname -r)/iptable_raw.ko"
+    if [ ! -f "$raw_module" ]; then
+        RAW_PREROUTING_ERROR="$raw_module is unavailable"
+        return 1
+    fi
+    if ! insmod "$raw_module" 2>/dev/null &&
+       ! iptables -t raw -S >/dev/null 2>&1; then
+        RAW_PREROUTING_ERROR="failed to load $raw_module"
+        return 1
+    fi
+    if ! iptables -t raw -S >/dev/null 2>&1; then
+        RAW_PREROUTING_ERROR="the raw table probe failed"
+        return 1
+    fi
+}
+
+configure_raw_prerouting() {
+    local mode="${KEEN_PBR_RAW_PREROUTING:-auto}"
+
+    remove_daemon_arg --use-raw-prerouting
+    case "$mode" in
+        0|no|off|false|disabled)
+            log "raw PREROUTING disabled; using mangle PREROUTING"
+            return 0
+            ;;
+        1|yes|on|true|enabled)
+            if ! ensure_raw_table_available; then
+                log_error "raw PREROUTING was explicitly required: $RAW_PREROUTING_ERROR"
+                return 1
+            fi
+            add_daemon_arg --use-raw-prerouting
+            log "raw PREROUTING enabled by configuration"
+            return 0
+            ;;
+        auto)
+            if ensure_raw_table_available; then
+                add_daemon_arg --use-raw-prerouting
+                log "raw PREROUTING available; enabled automatically"
+            else
+                log "WARNING: raw PREROUTING unavailable ($RAW_PREROUTING_ERROR); using mangle PREROUTING"
+            fi
+            return 0
+            ;;
+        *)
+            log_error "Invalid KEEN_PBR_RAW_PREROUTING value: $mode (expected auto, on, or off)"
+            return 1
+            ;;
+    esac
 }
 
 enable_hwnat() {
@@ -281,6 +355,7 @@ stop_keen_pbr() {
 
 prepare_start() {
     check_runtime_dependencies
+    configure_raw_prerouting || return 1
     disable_hwnat
 }
 

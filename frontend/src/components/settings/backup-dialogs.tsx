@@ -116,8 +116,9 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        Файл может содержать секреты транспортов. Храните его в безопасном
-        месте.
+        Если выбраны транспорты, файл содержит их UUID, пароли и ключи в
+        открытом виде. Храните копию в безопасном месте и не пересылайте её
+        посторонним.
       </p>
       <div className="grid gap-2 sm:grid-cols-2">
         {BACKUP_GROUPS.map((group) => (

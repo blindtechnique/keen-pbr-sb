@@ -8,6 +8,7 @@ setup_script=""
 run_urltest="0"
 repeat_preserve_apply="0"
 drop_iptables_dispatchers_before_repeat="0"
+use_raw_prerouting="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --drop-iptables-dispatchers-before-repeat)
       drop_iptables_dispatchers_before_repeat="1"
+      shift
+      ;;
+    --use-raw-prerouting)
+      use_raw_prerouting="1"
       shift
       ;;
     *)
@@ -92,6 +97,9 @@ if [[ "$repeat_preserve_apply" == "1" ]]; then
 fi
 if [[ "$drop_iptables_dispatchers_before_repeat" == "1" ]]; then
   cmd+=(--drop-iptables-dispatchers-before-repeat)
+fi
+if [[ "$use_raw_prerouting" == "1" ]]; then
+  cmd+=(--use-raw-prerouting)
 fi
 
 "${cmd[@]}"

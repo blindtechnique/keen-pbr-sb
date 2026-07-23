@@ -76,6 +76,10 @@ set(KEEN_PBR_FRONTEND_ROOT "${CMAKE_INSTALL_FULL_DATADIR}/keen-pbr/frontend" CAC
   "Default frontend static root served by API (SPA assets)")
 set(KEEN_PBR_SYSTEM_RESOLVER_HOOK "${CMAKE_INSTALL_FULL_LIBDIR}/keen-pbr/dnsmasq.sh" CACHE STRING
   "System resolver hook command path compiled into keen-pbr")
+set(KEEN_PBR_CONTROL_SOCKET "/run/keen-pbr/control.sock" CACHE STRING
+  "Unix SOCK_STREAM control socket used by operational CLI commands")
+set(KEEN_PBR_RESOLVER_FALLBACK_CONFIG "${CMAKE_INSTALL_FULL_SYSCONFDIR}/keen-pbr/dnsmasq-fallback.conf" CACHE STRING
+  "Static dnsmasq config emitted when the daemon resolver stream is unavailable")
 set(KEEN_PBR_TARGET_OS "linux" CACHE STRING
   "Compile-time target OS identity exposed via /api/health/service (for example: openwrt, keenetic, debian)")
 
@@ -281,6 +285,9 @@ set(SOURCES
   src/daemon/runtime_state_store.cpp
   src/daemon/system_resolver_hook.cpp
   src/daemon/scheduler.cpp
+  src/ipc/control_protocol.cpp
+  src/ipc/control_client.cpp
+  src/ipc/resolver_fallback.cpp
   src/util/blocking_executor.cpp
   src/util/base64.cpp
   src/util/firewall_backend_utils.cpp
@@ -354,6 +361,8 @@ target_compile_definitions(keen-pbr PRIVATE
   KEEN_PBR_DEFAULT_LOG_FILE="${KEEN_PBR_DEFAULT_LOG_FILE}"
   KEEN_PBR_FRONTEND_ROOT="${KEEN_PBR_FRONTEND_ROOT}"
   KEEN_PBR_SYSTEM_RESOLVER_HOOK="${KEEN_PBR_SYSTEM_RESOLVER_HOOK}"
+  KEEN_PBR_CONTROL_SOCKET="${KEEN_PBR_CONTROL_SOCKET}"
+  KEEN_PBR_RESOLVER_FALLBACK_CONFIG="${KEEN_PBR_RESOLVER_FALLBACK_CONFIG}"
   KEEN_PBR_TARGET_OS="${KEEN_PBR_TARGET_OS}"
 )
 if(USE_KEENETIC_API)

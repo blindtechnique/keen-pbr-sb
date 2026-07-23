@@ -4,6 +4,7 @@
 
 #include "../log/logger.hpp"
 
+#include <chrono>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
@@ -28,6 +29,14 @@ void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
     server.get_stream("/api/dns/test",
                       [&ctx](const httplib::Request&, httplib::Response& res) {
         auto subscription = ctx.dns_test_broadcaster.subscribe();
+        if (!subscription) {
+            res.status = 503;
+            res.set_header("Retry-After", "5");
+            res.set_content(
+                R"({"error":"too many active DNS test streams"})",
+                "application/json");
+            return;
+        }
         Logger::instance().trace("sse_open", "path=/api/dns/test");
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
@@ -48,20 +57,30 @@ void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
                 std::string next_message;
                 {
                     KPBR_UNIQUE_LOCK(lock, subscription->mutex);
-                    while (!subscription->closed && subscription->messages.empty()) {
-                        subscription->cv.wait(lock);
+                    if (!subscription->closed &&
+                        subscription->messages.empty()) {
+                        subscription->cv.wait_for(
+                            lock, std::chrono::seconds(15));
                     }
 
-                    if (subscription->messages.empty()) {
+                    if (subscription->closed &&
+                        subscription->messages.empty()) {
                         Logger::instance().trace("sse_done", "path=/api/dns/test");
                         sink.done();
                         return true;
                     }
 
-                    next_message = std::move(subscription->messages.front());
-                    subscription->messages.pop_front();
+                    if (!subscription->messages.empty()) {
+                        next_message =
+                            std::move(subscription->messages.front());
+                        subscription->messages.pop_front();
+                    }
                 }
 
+                if (next_message.empty()) {
+                    static constexpr char kHeartbeat[] = ": heartbeat\n\n";
+                    return sink.write(kHeartbeat, sizeof(kHeartbeat) - 1);
+                }
                 const auto frame = make_sse_frame(next_message);
                 Logger::instance().trace("sse_event", "path=/api/dns/test bytes={}", frame.size());
                 return sink.write(frame.data(), frame.size());

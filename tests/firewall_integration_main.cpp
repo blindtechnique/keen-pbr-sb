@@ -38,6 +38,7 @@ struct CliOptions {
     bool run_urltest_probes{false};
     bool repeat_preserve_apply{false};
     bool drop_iptables_dispatchers_before_repeat{false};
+    bool use_raw_prerouting{false};
 };
 
 struct RuntimeCleanup {
@@ -77,7 +78,8 @@ void print_usage(const char* argv0) {
         << "Usage: " << argv0 << " --config <path> --backend <iptables|nftables> "
         << "--mode <destructive|preserve-sets> [--run-urltest-probes] "
         << "[--repeat-preserve-apply] "
-        << "[--drop-iptables-dispatchers-before-repeat] [--log-level <lvl>]\n";
+        << "[--drop-iptables-dispatchers-before-repeat] "
+        << "[--use-raw-prerouting] [--log-level <lvl>]\n";
 }
 
 CliOptions parse_args(int argc, char* argv[]) {
@@ -111,6 +113,8 @@ CliOptions parse_args(int argc, char* argv[]) {
             options.repeat_preserve_apply = true;
         } else if (arg == "--drop-iptables-dispatchers-before-repeat") {
             options.drop_iptables_dispatchers_before_repeat = true;
+        } else if (arg == "--use-raw-prerouting") {
+            options.use_raw_prerouting = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
@@ -331,6 +335,7 @@ void print_command_dump(const std::string& label,
 void dump_firewall_state(FirewallBackend backend) {
     if (backend == FirewallBackend::iptables) {
         print_command_dump("iptables-save", {"iptables-save", "-t", "mangle"});
+        print_command_dump("iptables-save-raw", {"iptables-save", "-t", "raw"});
         print_command_dump("ip6tables-save", {"ip6tables-save", "-t", "mangle"});
         print_command_dump("ipset-list", {"ipset", "list"});
         return;
@@ -444,7 +449,9 @@ int run_firewall_integration(int argc, char* argv[]) {
     NetlinkManager netlink;
     RouteTable route_table(netlink);
     PolicyRuleManager policy_rules(netlink);
-    auto firewall = create_firewall(parse_backend_preference(options.backend));
+    auto firewall = create_firewall(
+        parse_backend_preference(options.backend),
+        options.use_raw_prerouting);
     RuntimeCleanup cleanup{route_table, policy_rules, *firewall};
 
     FirewallState firewall_state;
@@ -477,13 +484,17 @@ int run_firewall_integration(int argc, char* argv[]) {
                 throw std::runtime_error(
                     "--drop-iptables-dispatchers-before-repeat requires the iptables backend");
             }
+            const char* prerouting_table =
+                options.use_raw_prerouting ? "raw" : "mangle";
+            const char* prerouting_chain =
+                options.use_raw_prerouting ? "KeenPbrRaw" : "KeenPbrTable";
             for (const auto& command : std::vector<std::vector<std::string>>{
-                     {"iptables", "-t", "mangle", "-D", "PREROUTING", "-j",
-                      "KeenPbrTable"},
+                     {"iptables", "-t", prerouting_table, "-D", "PREROUTING", "-j",
+                      prerouting_chain},
                      {"iptables", "-t", "mangle", "-D", "OUTPUT", "-j",
                       "KeenPbrOutput"},
-                     {"iptables", "-t", "mangle", "-F", "KeenPbrTable"},
-                     {"iptables", "-t", "mangle", "-X", "KeenPbrTable"},
+                     {"iptables", "-t", prerouting_table, "-F", prerouting_chain},
+                     {"iptables", "-t", prerouting_table, "-X", prerouting_chain},
                      {"iptables", "-t", "mangle", "-F", "KeenPbrOutput"},
                      {"iptables", "-t", "mangle", "-X", "KeenPbrOutput"},
                  }) {
@@ -504,6 +515,7 @@ int run_firewall_integration(int argc, char* argv[]) {
 
     const RoutingHealthReport report = build_routing_health_report(
         firewall->backend(),
+        firewall->uses_raw_prerouting(),
         firewall_state,
         route_table.get_routes(),
         policy_rules.get_rules(),
@@ -518,6 +530,8 @@ int run_firewall_integration(int argc, char* argv[]) {
 
     std::cout << "ok backend=" << options.backend
               << " mode=" << options.mode
+              << " raw_prerouting="
+              << (options.use_raw_prerouting ? "true" : "false")
               << " config=" << options.config_path << "\n";
     return 0;
 }

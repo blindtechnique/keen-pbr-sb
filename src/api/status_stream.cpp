@@ -26,9 +26,11 @@ std::string make_named_sse_frame(const std::string& event,
     return "event: " + event + "\ndata: " + payload + "\n\n";
 }
 
-StatusStream::StatusStream(SnapshotBuilder builder, size_t max_queue_size)
+StatusStream::StatusStream(SnapshotBuilder builder,
+                           size_t max_queue_size,
+                           size_t max_subscriptions)
     : builder_(std::move(builder))
-    , broadcaster_(max_queue_size) {}
+    , broadcaster_(max_queue_size, max_subscriptions) {}
 
 SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
     std::vector<std::string> changed_frames;
