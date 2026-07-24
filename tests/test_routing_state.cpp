@@ -1225,3 +1225,53 @@ TEST_CASE("live route matching accepts the kernel IPv6 default metric") {
     CHECK_FALSE(route_table_detail::route_metric_matches_live(expected, live));
     CHECK_FALSE(route_table_detail::route_matches_live(expected, live));
 }
+
+TEST_CASE("interface transitions trigger only their urltest parents") {
+    auto cfg = parse_minimal_config(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"wg0"},
+            {"tag":"backup","type":"interface","interface":"wg1"},
+            {"tag":"other","type":"interface","interface":"wg2"},
+            {
+                "tag":"failover",
+                "type":"urltest",
+                "url":"https://www.gstatic.com/generate_204",
+                "outbound_groups":[{"outbounds":["primary","backup"]}]
+            },
+            {
+                "tag":"unrelated",
+                "type":"urltest",
+                "url":"https://www.gstatic.com/generate_204",
+                "outbound_groups":[{"outbounds":["other"]}]
+            }
+        ]
+    })");
+
+    CHECK(find_affected_urltests(*cfg.outbounds, {"primary"}) ==
+          std::vector<std::string>{"failover"});
+    CHECK(find_affected_urltests(*cfg.outbounds, {"missing"}).empty());
+}
+
+TEST_CASE("interface transitions propagate through nested urltests") {
+    auto cfg = parse_minimal_config(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"wg0"},
+            {"tag":"backup","type":"interface","interface":"wg1"},
+            {
+                "tag":"inner",
+                "type":"urltest",
+                "url":"https://www.gstatic.com/generate_204",
+                "outbound_groups":[{"outbounds":["primary","backup"]}]
+            },
+            {
+                "tag":"outer",
+                "type":"urltest",
+                "url":"https://www.gstatic.com/generate_204",
+                "outbound_groups":[{"outbounds":["inner"]}]
+            }
+        ]
+    })");
+
+    CHECK(find_affected_urltests(*cfg.outbounds, {"primary"}) ==
+          std::vector<std::string>{"inner", "outer"});
+}

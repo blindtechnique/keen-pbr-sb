@@ -6,7 +6,10 @@
 
 namespace keen_pbr3 {
 
-void InterfaceProbe::probe(const std::vector<Target>& targets) {
+std::vector<std::string> InterfaceProbe::probe(
+    const std::vector<Target>& targets) {
+    std::vector<std::string> transitioned_tags;
+
     for (const auto& target : targets) {
         RetryConfig retry;
         retry.attempts = 2;
@@ -29,8 +32,15 @@ void InterfaceProbe::probe(const std::vector<Target>& targets) {
                                  result.error);
 
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto previous = results_.find(target.tag);
+        if (previous != results_.end() &&
+            previous->second.success != stored.success) {
+            transitioned_tags.push_back(target.tag);
+        }
         results_[target.tag] = std::move(stored);
     }
+
+    return transitioned_tags;
 }
 
 std::optional<InterfaceProbeResult> InterfaceProbe::result_for(

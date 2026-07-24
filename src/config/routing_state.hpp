@@ -29,6 +29,13 @@ inline bool is_reserved_table(uint32_t id) {
 
 using OutboundReachabilityFn = std::function<bool(const Outbound&)>;
 
+// Return URLTEST outbounds that directly or transitively contain one of the
+// changed child outbounds. Results preserve configuration order and contain
+// each URLTEST tag at most once.
+std::vector<std::string> find_affected_urltests(
+    const std::vector<Outbound>& outbounds,
+    const std::vector<std::string>& changed_outbound_tags);
+
 // Populate route tables and policy rules from config. Works for real or dry-run instances.
 void populate_routing_state(const Config& cfg,
                             const OutboundMarkMap& marks,

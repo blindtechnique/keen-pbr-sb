@@ -3,6 +3,7 @@
 #include "addr_spec.hpp"
 #include "../routing/target.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cstring>
 #include <set>
@@ -390,6 +391,53 @@ static uint32_t safe_table_id(uint32_t table_start, uint32_t offset) {
 }
 
 } // anonymous namespace
+
+std::vector<std::string> find_affected_urltests(
+    const std::vector<Outbound>& outbounds,
+    const std::vector<std::string>& changed_outbound_tags) {
+    std::set<std::string> affected_tags(changed_outbound_tags.begin(),
+                                        changed_outbound_tags.end());
+    std::set<std::string> affected_urltests;
+
+    bool discovered_parent = true;
+    while (discovered_parent) {
+        discovered_parent = false;
+        for (const auto& outbound : outbounds) {
+            if (outbound.type != OutboundType::URLTEST ||
+                affected_urltests.count(outbound.tag) > 0 ||
+                !outbound.outbound_groups.has_value()) {
+                continue;
+            }
+
+            bool contains_affected_child = false;
+            for (const auto& group : *outbound.outbound_groups) {
+                if (std::any_of(group.outbounds.begin(),
+                                group.outbounds.end(),
+                                [&affected_tags](const std::string& child_tag) {
+                                    return affected_tags.count(child_tag) > 0;
+                                })) {
+                    contains_affected_child = true;
+                    break;
+                }
+            }
+
+            if (contains_affected_child) {
+                affected_urltests.insert(outbound.tag);
+                affected_tags.insert(outbound.tag);
+                discovered_parent = true;
+            }
+        }
+    }
+
+    std::vector<std::string> result;
+    result.reserve(affected_urltests.size());
+    for (const auto& outbound : outbounds) {
+        if (affected_urltests.count(outbound.tag) > 0) {
+            result.push_back(outbound.tag);
+        }
+    }
+    return result;
+}
 
 void populate_routing_state(const Config& cfg,
                             const OutboundMarkMap& marks,

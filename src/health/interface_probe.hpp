@@ -43,8 +43,10 @@ public:
     void set_timeout(std::chrono::milliseconds timeout) { timeout_ = timeout; }
 
     // Runs one round of probes. Blocking: callers put it on the daemon's
-    // blocking executor rather than the event loop.
-    void probe(const std::vector<Target>& targets);
+    // blocking executor rather than the event loop. Returns tags whose
+    // reachability changed since the previous completed probe; the first
+    // observation only establishes a baseline.
+    std::vector<std::string> probe(const std::vector<Target>& targets);
 
     std::optional<InterfaceProbeResult> result_for(const std::string& tag) const;
 

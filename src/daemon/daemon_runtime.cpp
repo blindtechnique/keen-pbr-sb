@@ -355,9 +355,22 @@ void Daemon::probe_interfaces_now() {
     }
     // Probing blocks on the network, so it must not run on the event loop.
     blocking_executor_.try_post("interface-probe", [this, targets]() {
-        interface_probe_.probe(targets);
+        auto transitioned_tags = interface_probe_.probe(targets);
         post_control_task(
-            [this]() {
+            [this, transitioned_tags = std::move(transitioned_tags)]() {
+                if (urltest_manager_ && !transitioned_tags.empty()) {
+                    const auto affected_urltests = find_affected_urltests(
+                        config_.outbounds.value_or(std::vector<Outbound>{}),
+                        transitioned_tags);
+                    for (const auto& urltest_tag : affected_urltests) {
+                        Logger::instance().trace(
+                            "urltest_transition_probe",
+                            "tag={} changed_children={}",
+                            urltest_tag,
+                            transitioned_tags.size());
+                        urltest_manager_->trigger_immediate_test(urltest_tag);
+                    }
+                }
                 if (routing_runtime_active_) {
                     // Keenetic may recreate a tunnel route without changing
                     // its administrative UP state. Reconcile the owned policy
