@@ -8,6 +8,7 @@
 #include "../util/traced_mutex.hpp"
 
 #include <functional>
+#include <nlohmann/json.hpp>
 #include <string>
 
 namespace keen_pbr3 {
@@ -19,8 +20,8 @@ public:
     using SnapshotBuilder = std::function<StatusSnapshot()>;
 
     explicit StatusStream(SnapshotBuilder builder,
-                          size_t max_queue_size = 128,
-                          size_t max_subscriptions = 4);
+                          size_t max_queue_size = 32,
+                          size_t max_subscriptions = 8);
 
     SseBroadcaster::SubscriptionPtr subscribe();
     void unsubscribe(const SseBroadcaster::SubscriptionPtr& subscription);
@@ -32,11 +33,10 @@ private:
     SnapshotBuilder builder_;
     SseBroadcaster broadcaster_;
     TracedMutex mutex_;
-    std::string service_ GUARDED_BY(mutex_);
-    std::string outbounds_ GUARDED_BY(mutex_);
-    std::string interfaces_ GUARDED_BY(mutex_);
-    api::ConnectionEventState connections_state_ GUARDED_BY(mutex_);
-    std::string connections_ GUARDED_BY(mutex_);
+    nlohmann::json service_ GUARDED_BY(mutex_);
+    nlohmann::json outbounds_ GUARDED_BY(mutex_);
+    nlohmann::json interfaces_ GUARDED_BY(mutex_);
+    nlohmann::json connections_ GUARDED_BY(mutex_);
     bool connections_initialized_ GUARDED_BY(mutex_){false};
     bool initialized_ GUARDED_BY(mutex_){false};
 };

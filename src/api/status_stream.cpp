@@ -9,11 +9,6 @@ namespace keen_pbr3 {
 
 namespace {
 
-template<typename T>
-std::string serialize(const T& value) {
-    return nlohmann::json(value).dump();
-}
-
 std::string make_event_payload(const std::string& type,
                                const nlohmann::json& data) {
     return nlohmann::json{{"type", type}, {"data", data}}.dump();
@@ -39,21 +34,21 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
     {
         KPBR_LOCK_GUARD(mutex_);
         const auto snapshot = builder_();
-        const auto service = serialize(snapshot.service);
-        const auto outbounds = serialize(snapshot.outbounds);
-        const auto interfaces = serialize(snapshot.interfaces);
+        const nlohmann::json service = snapshot.service;
+        const nlohmann::json outbounds = snapshot.outbounds;
+        const nlohmann::json interfaces = snapshot.interfaces;
         if (initialized_) {
             if (service != service_) {
                 changed_frames.push_back(make_named_sse_frame(
-                    "service", make_event_payload("service", snapshot.service)));
+                    "service", make_event_payload("service", service)));
             }
             if (outbounds != outbounds_) {
                 changed_frames.push_back(make_named_sse_frame(
-                    "outbounds", make_event_payload("outbounds", snapshot.outbounds)));
+                    "outbounds", make_event_payload("outbounds", outbounds)));
             }
             if (interfaces != interfaces_) {
                 changed_frames.push_back(make_named_sse_frame(
-                    "interfaces", make_event_payload("interfaces", snapshot.interfaces)));
+                    "interfaces", make_event_payload("interfaces", interfaces)));
             }
         }
         service_ = service;
@@ -63,15 +58,15 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
 
         const auto payload = make_event_payload(
             "snapshot",
-            nlohmann::json{{"service", snapshot.service},
-                           {"outbounds", snapshot.outbounds},
-                           {"interfaces", snapshot.interfaces}});
+            nlohmann::json{{"service", service},
+                           {"outbounds", outbounds},
+                           {"interfaces", interfaces}});
         std::vector<std::string> initial_frames{
             make_named_sse_frame("snapshot", payload)};
         if (connections_initialized_) {
             initial_frames.push_back(make_named_sse_frame(
                 "connections",
-                make_event_payload("connections", connections_state_)));
+                make_event_payload("connections", connections_)));
         }
         subscription = broadcaster_.subscribe(std::move(initial_frames));
     }
@@ -95,9 +90,9 @@ void StatusStream::reconcile() {
     {
         KPBR_LOCK_GUARD(mutex_);
         const auto snapshot = builder_();
-        const auto service = serialize(snapshot.service);
-        const auto outbounds = serialize(snapshot.outbounds);
-        const auto interfaces = serialize(snapshot.interfaces);
+        const nlohmann::json service = snapshot.service;
+        const nlohmann::json outbounds = snapshot.outbounds;
+        const nlohmann::json interfaces = snapshot.interfaces;
         if (!initialized_) {
             service_ = service;
             outbounds_ = outbounds;
@@ -109,17 +104,17 @@ void StatusStream::reconcile() {
         if (service != service_) {
             service_ = service;
             frames.push_back(make_named_sse_frame(
-                "service", make_event_payload("service", snapshot.service)));
+                "service", make_event_payload("service", service)));
         }
         if (outbounds != outbounds_) {
             outbounds_ = outbounds;
             frames.push_back(make_named_sse_frame(
-                "outbounds", make_event_payload("outbounds", snapshot.outbounds)));
+                "outbounds", make_event_payload("outbounds", outbounds)));
         }
         if (interfaces != interfaces_) {
             interfaces_ = interfaces;
             frames.push_back(make_named_sse_frame(
-                "interfaces", make_event_payload("interfaces", snapshot.interfaces)));
+                "interfaces", make_event_payload("interfaces", interfaces)));
         }
     }
 
@@ -132,14 +127,13 @@ void StatusStream::publish_connections(api::ConnectionEventState state) {
     std::string frame;
     {
         KPBR_LOCK_GUARD(mutex_);
-        const auto serialized = serialize(state);
+        const nlohmann::json serialized = state;
         if (connections_initialized_ && serialized == connections_) return;
-        connections_state_ = std::move(state);
-        connections_ = serialized;
+        connections_ = std::move(serialized);
         connections_initialized_ = true;
         frame = make_named_sse_frame(
             "connections",
-            make_event_payload("connections", connections_state_));
+            make_event_payload("connections", connections_));
     }
     broadcaster_.publish(frame);
 }

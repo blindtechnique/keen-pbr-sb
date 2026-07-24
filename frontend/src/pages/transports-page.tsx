@@ -248,11 +248,14 @@ export function TransportsPage() {
   const configured: TransportSpec[] =
     configQuery.data?.status === 200 ? configQuery.data.data : []
   const configuredByTag = new Map(configured.map((spec) => [spec.tag, spec]))
-  const { locationOf } = useServerLocations(
-    items
-      .filter((item) => configuredByTag.get(item.tag)?.geo_mode === "auto")
-      .map((item) => item.server ?? "")
-  )
+  const autoGeoHosts = items
+    .filter((item) => configuredByTag.get(item.tag)?.geo_mode === "auto")
+    .map((item) => item.server ?? "")
+  const { locationOf } = useServerLocations(autoGeoHosts, {
+    // `geo_mode=auto` is persisted only after the user explicitly accepts
+    // the external lookup warning in the transport form.
+    allowExternalLookup: autoGeoHosts.length > 0,
+  })
 
   // libcronet.so — сетевой стек Chromium, без которого sing-box не умеет
   // naive. Он весит десятки мегабайт, поэтому не ставится вместе с пакетом:

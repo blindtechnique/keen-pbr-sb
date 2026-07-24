@@ -21,11 +21,18 @@ type LocationsResponse = {
   pending: boolean
 }
 
-export function useServerLocations(hosts: string[]) {
+export function useServerLocations(
+  hosts: string[],
+  {
+    allowExternalLookup,
+  }: {
+    allowExternalLookup: boolean
+  }
+) {
   const unique = Array.from(new Set(hosts.filter(Boolean))).sort()
 
   const query = useQuery<LocationsResponse>({
-    queryKey: ["server-locations", unique],
+    queryKey: ["server-locations", unique, allowExternalLookup],
     enabled: unique.length > 0,
     queryFn: async () => {
       const response = await fetch("/api/system/geo", {
@@ -33,7 +40,7 @@ export function useServerLocations(hosts: string[]) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           hosts: unique,
-          allow_external_lookup: true,
+          allow_external_lookup: allowExternalLookup,
         }),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)

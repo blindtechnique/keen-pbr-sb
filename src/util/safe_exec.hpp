@@ -162,6 +162,21 @@ inline std::string safe_exec_command_string(const std::vector<std::string>& args
     return out.str();
 }
 
+inline void log_failed_pipe_input(const std::string& command,
+                                  const std::string& input) {
+    constexpr std::size_t max_preview_bytes = 4096;
+    const bool truncated = input.size() > max_preview_bytes;
+    const std::string preview =
+        input.substr(0, std::min(input.size(), max_preview_bytes));
+    Logger::instance().error(
+        "safe_exec_pipe_input cmd={} input_bytes={} preview_bytes={} truncated={}:\n{}",
+        command,
+        input.size(),
+        preview.size(),
+        truncated ? "true" : "false",
+        preview);
+}
+
 // Execute a command with arguments directly via fork()+execvp(), bypassing
 // the shell entirely. This prevents shell injection attacks.
 // Returns the process exit code (0-255), or -1 on fork/exec failure.
@@ -445,6 +460,7 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
             "means the firmware is holding the xtables lock; the operation will "
             "be retried.",
             command, timeouts.timeout.count());
+        log_failed_pipe_input(command, input);
         return -1;
     }
     status = wait_result.status;
@@ -455,23 +471,34 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
                                  errno);
+        log_failed_pipe_input(command, input);
         return -1;
     }
     const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started_at).count();
     if (WIFEXITED(status)) {
         const int exit_code = WEXITSTATUS(status);
-        Logger::instance().trace("safe_exec_pipe_end",
-                                 "cmd={} exit_code={} duration_ms={}",
-                                 command,
-                                 exit_code,
-                                 duration_ms);
+        if (exit_code == 0) {
+            Logger::instance().trace("safe_exec_pipe_end",
+                                     "cmd={} exit_code={} duration_ms={}",
+                                     command,
+                                     exit_code,
+                                     duration_ms);
+        } else {
+            Logger::instance().error(
+                "safe_exec_pipe_failed cmd={} exit_code={} duration_ms={}",
+                command,
+                exit_code,
+                duration_ms);
+            log_failed_pipe_input(command, input);
+        }
         return exit_code;
     }
-    Logger::instance().trace("safe_exec_pipe_error",
-                             "cmd={} duration_ms={} reason=abnormal_exit",
-                             command,
-                             duration_ms);
+    Logger::instance().error(
+        "safe_exec_pipe_failed cmd={} duration_ms={} reason=abnormal_exit",
+        command,
+        duration_ms);
+    log_failed_pipe_input(command, input);
     return -1;
 }
 

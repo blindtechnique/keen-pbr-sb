@@ -4,6 +4,7 @@ VERSION_RESOLVER := $(abspath build_scripts/resolve-version.sh)
 KEEN_PBR_RELEASE := $(shell bash $(VERSION_RESOLVER) release "$(CURDIR)")
 GCC_BUILD_DIR := cmake-build-gcc
 CLANG_BUILD_DIR := cmake-build-clang
+BUILD_JOBS ?= $(shell nproc)
 DIST_DIR := build/dist
 TRANSPORT_MANAGER_DIR := extensions/transport-manager
 TRANSPORT_MANAGER_DIST_DIR := $(DIST_DIR)/transport-manager
@@ -73,7 +74,7 @@ generate: ## Regenerate src/api/generated/api_types.hpp from docs/openapi.yaml (
 
 test: ## Build and run unit tests (doctest)
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON
-	cmake --build $(GCC_BUILD_DIR) --target keen-pbr-tests crash-diagnostics-smoke
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-tests crash-diagnostics-smoke
 	$(GCC_BUILD_DIR)/tests/keen-pbr-tests
 	$(GCC_BUILD_DIR)/tests/crash-diagnostics-smoke
 

@@ -5,6 +5,7 @@
 #include "api/status_stream.hpp"
 
 #include <string>
+#include <vector>
 
 using namespace keen_pbr3;
 
@@ -110,6 +111,18 @@ TEST_CASE("status stream reserves API capacity by limiting long-lived clients") 
 
     stream.unsubscribe(first);
     CHECK(stream.subscribe());
+}
+
+TEST_CASE("status stream default supports a normal multi-tab session") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    std::vector<SseBroadcaster::SubscriptionPtr> subscriptions;
+
+    for (int index = 0; index < 5; ++index) {
+        auto subscription = stream.subscribe();
+        REQUIRE(subscription);
+        subscriptions.push_back(std::move(subscription));
+    }
 }
 
 TEST_CASE("status stream replays and publishes conntrack revisions") {

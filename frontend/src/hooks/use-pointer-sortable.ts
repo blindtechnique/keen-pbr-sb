@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,10 +36,11 @@ export function usePointerSortable({
 }: PointerSortableOptions) {
   const [renderedOrder, setRenderedOrder] = useState<number[] | null>(null)
   const [draggingPosition, setDraggingPosition] = useState<number | null>(null)
-  const itemRefs = useRef<(HTMLElement | null)[]>([])
   const orderRef = useRef<number[]>([])
   const draggingPositionRef = useRef<number | null>(null)
   const draggedItemRef = useRef<number | null>(null)
+  const dragContainerRef = useRef<HTMLElement | null>(null)
+  const renderSynchronizedRef = useRef(true)
   const previewRef = useRef<HTMLElement | null>(null)
   const previewOffsetYRef = useRef(0)
 
@@ -70,6 +72,8 @@ export function usePointerSortable({
       removePreview()
       draggingPositionRef.current = null
       draggedItemRef.current = null
+      dragContainerRef.current = null
+      renderSynchronizedRef.current = true
       setDraggingPosition(null)
       setRenderedOrder(null)
     },
@@ -82,6 +86,10 @@ export function usePointerSortable({
     },
     []
   )
+
+  useLayoutEffect(() => {
+    renderSynchronizedRef.current = true
+  }, [renderedOrder])
 
   const beginDrag =
     (position: number) => (event: PointerEvent<HTMLElement>) => {
@@ -121,6 +129,8 @@ export function usePointerSortable({
       orderRef.current = nextOrder
       draggingPositionRef.current = position
       draggedItemRef.current = nextOrder[position] ?? null
+      dragContainerRef.current = source.parentElement
+      renderSynchronizedRef.current = true
       previewRef.current = preview
       previewOffsetYRef.current = event.clientY - sourceBox.top
       setRenderedOrder(nextOrder)
@@ -139,11 +149,21 @@ export function usePointerSortable({
       previewRef.current.style.top = `${pointerY - previewOffsetYRef.current}px`
     }
 
+    // React may not have committed the previous visual reorder yet. Reading
+    // position attributes from the old DOM during that short window can undo
+    // the previous move. Wait for the layout commit before resolving another
+    // target.
+    if (!renderSynchronizedRef.current) {
+      return
+    }
+
     const hoveredItem = document
       .elementFromPoint(event.clientX, pointerY)
       ?.closest<HTMLElement>(itemSelector)
     const hoveredPosition = Number(
-      hoveredItem?.dataset.sortablePosition ?? Number.NaN
+      hoveredItem && dragContainerRef.current?.contains(hoveredItem)
+        ? hoveredItem.dataset.sortablePosition
+        : Number.NaN
     )
 
     let targetPosition = Number.isInteger(hoveredPosition)
@@ -154,17 +174,32 @@ export function usePointerSortable({
       targetPosition < 0 ||
       targetPosition >= orderRef.current.length
     ) {
-      const positions = orderRef.current.map((_item, position) => {
-        const element = itemRefs.current[position]
-        if (!element) {
-          return Number.POSITIVE_INFINITY
-        }
-        const box = element.getBoundingClientRect()
-        return box.top + box.height / 2
-      })
-      targetPosition = positions.findIndex((middle) => pointerY < middle)
-      if (targetPosition === -1) {
-        targetPosition = orderRef.current.length - 1
+      const candidates = Array.from(
+        dragContainerRef.current?.querySelectorAll<HTMLElement>(itemSelector) ??
+          []
+      )
+        .map((element) => {
+          const position = Number(element.dataset.sortablePosition)
+          const box = element.getBoundingClientRect()
+          return {
+            middle: box.top + box.height / 2,
+            position,
+          }
+        })
+        .filter(
+          ({ position }) =>
+            Number.isInteger(position) &&
+            position >= 0 &&
+            position < orderRef.current.length
+        )
+        .sort((left, right) => left.middle - right.middle)
+
+      targetPosition =
+        candidates.find(({ middle }) => pointerY < middle)?.position ??
+        candidates.at(-1)?.position ??
+        -1
+      if (targetPosition < 0) {
+        return
       }
     }
     if (targetPosition === currentPosition) {
@@ -180,6 +215,7 @@ export function usePointerSortable({
 
     orderRef.current = nextOrder
     draggingPositionRef.current = targetPosition
+    renderSynchronizedRef.current = false
     setRenderedOrder(nextOrder)
     setDraggingPosition(targetPosition)
   }
@@ -204,7 +240,6 @@ export function usePointerSortable({
     currentOrder,
     draggingPosition,
     setItemRef: (position: number, element: HTMLElement | null) => {
-      itemRefs.current[position] = element
       if (element) {
         element.dataset.sortablePosition = String(position)
       }
