@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type ForwardedRef,
+} from "react"
 import { AlertTriangleIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -12,10 +17,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import type {
+  SettingsSectionController,
+  SettingsSectionState,
+} from "@/components/settings/settings-section-control"
 
 type RemoteAccess = {
   enabled: boolean
@@ -36,7 +44,16 @@ type RemoteAccessDraft = {
  * disabled: an unauthenticated control panel on the open internet is not
  * something a single switch should be able to produce.
  */
-export function RemoteAccessCard() {
+export const RemoteAccessCard = forwardRef(RemoteAccessCardInner)
+
+function RemoteAccessCardInner(
+  {
+    onStateChange,
+  }: {
+    onStateChange: (state: SettingsSectionState) => void
+  },
+  ref: ForwardedRef<SettingsSectionController>
+) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -79,6 +96,7 @@ export function RemoteAccessCard() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["remote-access"] })
       setDraft({})
+      onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.remoteAccess.saved"))
     },
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
@@ -89,6 +107,47 @@ export function RemoteAccessCard() {
   // looks exactly like a blocked port, so it has to be said here.
   const listenReachable = query.data?.listen_reachable ?? true
   const blocked = !loginRequired || !listenReachable
+  const getSectionState = (
+    nextDraft = draft
+  ): SettingsSectionState => {
+    const nextPort = Number(nextDraft.port ?? port)
+    const dirty = Object.keys(nextDraft).length > 0
+    return {
+      dirty,
+      valid:
+        !dirty ||
+        (!blocked &&
+          Number.isInteger(nextPort) &&
+          nextPort >= 1 &&
+          nextPort <= 65535),
+    }
+  }
+
+  const updateDraft = (patch: Partial<RemoteAccessDraft>) => {
+    const nextDraft = { ...draft, ...patch }
+    setDraft(nextDraft)
+    onStateChange(getSectionState(nextDraft))
+  }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      reset: () => {
+        setDraft({})
+        onStateChange({ dirty: false, valid: true })
+      },
+      save: async () => {
+        const state = getSectionState()
+        if (!state.dirty) {
+          return
+        }
+        if (!state.valid) {
+          throw new Error(t("pages.settings.remoteAccess.portHint"))
+        }
+        await saveMutation.mutateAsync()
+      },
+    })
+  )
 
   return (
     <Card size="sm">
@@ -125,10 +184,7 @@ export function RemoteAccessCard() {
             disabled={blocked}
             id="remote-access-enabled"
             onCheckedChange={(nextEnabled) =>
-              setDraft((current) => ({
-                ...current,
-                enabled: nextEnabled,
-              }))
+              updateDraft({ enabled: nextEnabled })
             }
           />
           <Label className="cursor-pointer" htmlFor="remote-access-enabled">
@@ -153,10 +209,7 @@ export function RemoteAccessCard() {
                 id="remote-access-port"
                 inputMode="numeric"
                 onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    port: event.target.value,
-                  }))
+                  updateDraft({ port: event.target.value })
                 }
                 value={port}
               />
@@ -167,16 +220,6 @@ export function RemoteAccessCard() {
           </>
         ) : null}
 
-        <div className="flex justify-end">
-          <Button
-            disabled={saveMutation.isPending || blocked}
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending
-              ? t("common.saving")
-              : t("pages.settings.remoteAccess.save")}
-          </Button>
-        </div>
       </CardContent>
     </Card>
   )

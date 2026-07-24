@@ -8,13 +8,6 @@ import { cn } from "@/lib/utils"
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Tooltip,
@@ -31,11 +24,29 @@ import {
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
-// KeeneticOS desktop menu is 255 px wide at the reference viewport.
-const SIDEBAR_WIDTH = "255px"
-const SIDEBAR_WIDTH_MOBILE = "18rem"
-const SIDEBAR_WIDTH_ICON = "5rem"
+// The expanded KeeneticOS menu occupies 264 px, including its divider and
+// scrollbar gutter.
+const SIDEBAR_WIDTH = "264px"
+const SIDEBAR_WIDTH_MOBILE = "100vw"
+// Measured on the collapsed KeeneticOS navigation rail.
+const SIDEBAR_WIDTH_ICON = "72px"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+
+function getInitialSidebarOpen(defaultOpen: boolean) {
+  if (typeof document === "undefined") {
+    return defaultOpen
+  }
+
+  const storedState = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${SIDEBAR_COOKIE_NAME}=`))
+    ?.split("=")[1]
+
+  if (storedState === "true") return true
+  if (storedState === "false") return false
+  return defaultOpen
+}
 
 function SidebarProvider({
   defaultOpen = true,
@@ -55,7 +66,9 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(defaultOpen)
+  const [_open, _setOpen] = React.useState(() =>
+    getInitialSidebarOpen(defaultOpen)
+  )
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
@@ -118,6 +131,7 @@ function SidebarProvider({
           {
             "--sidebar-width": SIDEBAR_WIDTH,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
+            "--sidebar-offset": open ? SIDEBAR_WIDTH : SIDEBAR_WIDTH_ICON,
             ...style,
           } as React.CSSProperties
         }
@@ -146,7 +160,7 @@ function Sidebar({
   variant?: "sidebar" | "floating" | "inset"
   collapsible?: "offcanvas" | "icon" | "none"
 }) {
-  const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
+  const { isMobile, state, openMobile } = useSidebar()
 
   if (collapsible === "none") {
     return (
@@ -164,28 +178,29 @@ function Sidebar({
   }
 
   if (isMobile) {
+    if (!openMobile) return null
+
     return (
-      <Sheet open={openMobile} onOpenChange={setOpenMobile} {...props}>
-        <SheetContent
-          dir={dir}
-          data-sidebar="sidebar"
-          data-slot="sidebar"
-          data-mobile="true"
-          className="w-(--sidebar-width) bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
-          style={
-            {
-              "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
-            } as React.CSSProperties
-          }
-          side={side}
-        >
-          <SheetHeader className="sr-only">
-            <SheetTitle>Sidebar</SheetTitle>
-            <SheetDescription>Displays the mobile sidebar.</SheetDescription>
-          </SheetHeader>
-          <div className="flex h-full w-full flex-col">{children}</div>
-        </SheetContent>
-      </Sheet>
+      <div
+        aria-label="Sidebar"
+        className={cn(
+          "keen-mobile-sidebar w-(--sidebar-width) gap-0 bg-sidebar p-0 text-sidebar-foreground",
+          className
+        )}
+        data-mobile="true"
+        data-sidebar="sidebar"
+        data-slot="sidebar"
+        dir={dir}
+        role="navigation"
+        style={
+          {
+            "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
+          } as React.CSSProperties
+        }
+        {...props}
+      >
+        <div className="flex h-full w-full flex-col">{children}</div>
+      </div>
     )
   }
 

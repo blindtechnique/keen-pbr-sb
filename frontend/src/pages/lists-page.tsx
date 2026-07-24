@@ -329,53 +329,55 @@ export function ListsPage() {
         />
       ) : (
         <div className="space-y-3">
-          {listSelection.hasSelection ? (
-            <BulkSelectionToolbar
-              cancelLabel={t("common.cancel")}
-              countLabel={t("pages.lists.bulk.selected", {
-                count: listSelection.selectedCount,
-              })}
-              onCancel={() => {
-                listSelection.clear()
-              }}
-            >
-              <Button
-                className="md:hidden"
-                disabled={configMutationPending}
-                onClick={() => listSelection.setAllVisible(true)}
-                size="sm"
-                variant="outline"
+          <div className="relative h-0">
+            {listSelection.hasSelection ? (
+              <BulkSelectionToolbar
+                cancelLabel={t("common.cancel")}
+                countLabel={t("pages.lists.bulk.selected", {
+                  count: listSelection.selectedCount,
+                })}
+                onCancel={() => {
+                  listSelection.clear()
+                }}
               >
-                {t("common.selection.selectAllShort")}
-              </Button>
-              {hasRefreshableLists ? (
                 <Button
-                  disabled={
-                    refreshDisabled || selectedRefreshableLists.length === 0
-                  }
-                  onClick={() => void handleBulkRefreshSelected()}
+                  className="md:hidden"
+                  disabled={configMutationPending}
+                  onClick={() => listSelection.setAllVisible(true)}
                   size="sm"
                   variant="outline"
                 >
-                  <RefreshCw
-                    className={`mr-1 h-4 w-4 ${
-                      bulkRefreshRunning ? "animate-spin" : ""
-                    }`}
-                  />
-                  {t("pages.lists.bulk.refreshSelected")}
+                  {t("common.selection.selectAllShort")}
                 </Button>
-              ) : null}
-              <Button
-                disabled={configMutationPending}
-                onClick={handleBulkDelete}
-                size="sm"
-                variant="destructive"
-              >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("pages.lists.bulk.deleteSelected")}
-              </Button>
-            </BulkSelectionToolbar>
-          ) : null}
+                {hasRefreshableLists ? (
+                  <Button
+                    disabled={
+                      refreshDisabled || selectedRefreshableLists.length === 0
+                    }
+                    onClick={() => void handleBulkRefreshSelected()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <RefreshCw
+                      className={`mr-1 h-4 w-4 ${
+                        bulkRefreshRunning ? "animate-spin" : ""
+                      }`}
+                    />
+                    {t("pages.lists.bulk.refreshSelected")}
+                  </Button>
+                ) : null}
+                <Button
+                  disabled={configMutationPending}
+                  onClick={handleBulkDelete}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <Trash2 className="mr-1 h-4 w-4" />
+                  {t("pages.lists.bulk.deleteSelected")}
+                </Button>
+              </BulkSelectionToolbar>
+            ) : null}
+          </div>
           <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
             {tableRows.map((list) => (
               <div

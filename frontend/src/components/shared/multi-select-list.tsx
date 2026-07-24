@@ -1,21 +1,13 @@
 import { Autocomplete } from "@base-ui/react/autocomplete"
-import {
-  ChevronsUpDown,
-  GripVertical,
-  ListPlus,
-  Plus,
-  Trash2,
-} from "lucide-react"
+import { ChevronsUpDown, ListPlus, Plus, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import { DataTable } from "@/components/shared/data-table"
 import { FieldError } from "@/components/shared/field"
-import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-} from "@/components/ui/input-group"
+import { SortableCards } from "@/components/shared/sortable-cards"
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 function OptionLabel({
@@ -78,14 +70,6 @@ export function MultiSelectList({
 }) {
   const { t } = useTranslation()
   const [selectValue, setSelectValue] = useState("")
-  // Two separate states on purpose. Pressing the handle only *arms* the row -
-  // it makes it draggable, nothing more. The placeholder look arrives later,
-  // when the browser reports that a drag has actually begun. Doing both at
-  // once is what broke this: the placeholder hides the row's contents, the
-  // pointer was over hidden content before the gesture started, and the drag
-  // was cancelled before it could begin.
-  const [armedIndex, setArmedIndex] = useState<number | null>(null)
-  const [dragIndex, setDragIndex] = useState<number | null>(null)
   const selectedSet = new Set(value)
   const unavailableSet = new Set(unavailable)
   const availableOptions = options.filter(
@@ -123,6 +107,43 @@ export function MultiSelectList({
   }
   const shouldRenderPopup =
     filteredOptions.length > 0 || Boolean(selectValue.trim())
+  const removeOption = (itemIndex: number) => {
+    onChange(value.filter((_item, index) => index !== itemIndex))
+  }
+  const reorderOptions = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) {
+      return
+    }
+
+    const nextValue = [...value]
+    const [moved] = nextValue.splice(fromIndex, 1)
+    if (moved === undefined) {
+      return
+    }
+    nextValue.splice(toIndex, 0, moved)
+    onChange(nextValue)
+  }
+  const renderSelectedOption = (item: string, itemIndex: number) => (
+    <div className="flex min-w-0 items-start gap-2">
+      <div className="min-w-0 flex-1 py-0.5 text-sm font-medium text-foreground">
+        <OptionLabel
+          option={item}
+          renderItem={renderItem}
+          usageSubtitle={usageSubtitle}
+        />
+      </div>
+      <Button
+        aria-label={t("common.multiSelectList.removeItem", { item })}
+        className="text-destructive hover:text-destructive"
+        onClick={() => removeOption(itemIndex)}
+        size="icon-sm"
+        type="button"
+        variant="ghost"
+      >
+        <Trash2 className="h-4 w-4" />
+      </Button>
+    </div>
+  )
   const addSelect = (
     <Autocomplete.Root
       items={filteredOptions}
@@ -196,89 +217,51 @@ export function MultiSelectList({
       {value.length ? (
         <div
           className={cn(
-            "space-y-2 rounded-xl border p-3",
-            error ? "border-destructive" : "border-border"
+            "space-y-2",
+            error && "rounded-xl border border-destructive p-2"
           )}
         >
-          {value.map((item, index) => (
-            <InputGroup
-              key={`${item}-${index}`}
-              className={cn(
-                "h-auto min-h-8 cursor-default",
-                // Only the source row is marked. NDMS draws no line at the
-                // gap: the placeholder alone says where the row will land.
-                allowReorder && dragIndex === index && "keen-drag-lifted"
-              )}
-              draggable={allowReorder && armedIndex === index}
-              onDragEnd={() => {
-                setDragIndex(null)
-                setArmedIndex(null)
-              }}
-              onDragStart={() => setDragIndex(index)}
-              onDragOver={(event) => {
-                if (!allowReorder || dragIndex === null) return
-                event.preventDefault()
-              }}
-              onDrop={(event) => {
-                if (!allowReorder || dragIndex === null) return
-                event.preventDefault()
-                if (dragIndex !== index) {
-                  // Lift the item out and put it back at the gap that was
-                  // marked, rather than swapping with whatever sits there -
-                  // swapping is what made the list jump under the cursor.
-                  const nextValue = [...value]
-                  const [moved] = nextValue.splice(dragIndex, 1)
-                  nextValue.splice(index, 0, moved)
-                  onChange(nextValue)
-                }
-                setDragIndex(null)
-                setArmedIndex(null)
-              }}
-            >
-              {allowReorder ? (
-                <InputGroupAddon align="inline-start">
-                  <span
-                    aria-label={t("common.multiSelectList.reorderItem", {
+          {allowReorder ? (
+            <>
+              <div className="hidden md:block">
+                <DataTable
+                  compact
+                  reorder={{
+                    handleLabel: t(
+                      "common.multiSelectList.reorderItems",
+                      "Изменить порядок"
+                    ),
+                    onReorder: reorderOptions,
+                  }}
+                  rows={value.map((item, itemIndex) => [
+                    renderSelectedOption(item, itemIndex),
+                  ])}
+                />
+              </div>
+              <div className="md:hidden">
+                <SortableCards
+                  getKey={(item) => item}
+                  handleLabel={(item) =>
+                    t("common.multiSelectList.reorderItem", {
                       item,
                       defaultValue: "Переместить {{item}}",
-                    })}
-                    className="cursor-grab px-0.5 text-muted-foreground active:cursor-grabbing"
-                    // The handle is deliberately not draggable itself: a nested
-                    // draggable element steals the gesture from the row, and
-                    // the row is what has to travel. Pressing it only marks the
-                    // row as draggable, which keeps text selection working in
-                    // every other row.
-                    onPointerDown={() => setArmedIndex(index)}
-                    onPointerUp={() => setArmedIndex(null)}
-                    role="button"
-                  >
-                    <GripVertical className="h-4 w-4" />
-                  </span>
-                </InputGroupAddon>
-              ) : null}
-              <InputGroupAddon className="w-full flex-col items-stretch gap-0.5 text-left text-foreground">
-                <OptionLabel
-                  option={item}
-                  renderItem={renderItem}
-                  usageSubtitle={usageSubtitle}
-                />
-              </InputGroupAddon>
-              <InputGroupAddon align="inline-end">
-                <InputGroupButton
-                  aria-label={t("common.multiSelectList.removeItem", { item })}
-                  className="text-destructive hover:text-destructive"
-                  onClick={() =>
-                    onChange(
-                      value.filter((_, currentIndex) => currentIndex !== index)
-                    )
+                    })
                   }
-                  size="icon-xs"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </InputGroupButton>
-              </InputGroupAddon>
-            </InputGroup>
-          ))}
+                  items={value}
+                  onReorder={reorderOptions}
+                  renderCard={renderSelectedOption}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              {value.map((item, itemIndex) => (
+                <div className="rounded-xl border bg-card p-3" key={item}>
+                  {renderSelectedOption(item, itemIndex)}
+                </div>
+              ))}
+            </div>
+          )}
           <div>{addSelect}</div>
         </div>
       ) : (

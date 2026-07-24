@@ -26,44 +26,50 @@
 }
 
 :root {
-  --background: #EDEEF0;
+  --background: #edeef0;
   --foreground: #202020;
   --card: #ffffff;
-  --page: #FFFFFF;
+  --page: #ffffff;
   --card-foreground: #202020;
   --popover: #ffffff;
   --popover-foreground: #202020;
   /* Measured on the current KeeneticOS primary action and switch thumb. */
-  --primary: #0086CB;
+  --primary: #0086cb;
   --primary-foreground: #ffffff;
-  --secondary: #F5FAFC;
+  --secondary: #f5fafc;
   --secondary-foreground: #202020;
-  --muted: #FAFAFA;
-  --muted-foreground: #949B9F;
-  --accent: #ECF5FA;
-  --accent-foreground: #0086CB;
-  --destructive: #DB3F3E;
+  --muted: #fafafa;
+  --muted-foreground: #949b9f;
+  --accent: #ecf5fa;
+  --accent-foreground: #0086cb;
+  --destructive: #db3f3e;
   --destructive-foreground: oklch(1 0 0);
-  --warning: #E5952D;
+  --warning: #e5952d;
   --warning-foreground: oklch(52.354% 0.12011 59.695);
-  --success: #17815C;
+  --success: #17815c;
   --success-foreground: oklch(0.98 0 0);
-  --border: #EBEBEB;
-  --input: #949B9F;
-  --ring: #7FBCE0;
+  --status-neutral-background: #fafafa;
+  --status-neutral-border: #ededed;
+  --status-neutral-foreground: #686868;
+  --status-success-background: #e4faef;
+  --status-success-border: #cbf2df;
+  --status-success-foreground: #1e7049;
+  --border: #ebebeb;
+  --input: #949b9f;
+  --ring: #7fbce0;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: #FAFAFA;
-  --sidebar-foreground: #202020;
-  --sidebar-primary: #0086CB;
+  --sidebar: #fafafa;
+  --sidebar-foreground: #000000;
+  --sidebar-primary: #0086cb;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #EBEBEB;
-  --sidebar-accent-foreground: #202020;
-  --sidebar-border: #EBEBEB;
-  --sidebar-ring: #7FBCE0;
+  --sidebar-accent: #ebebeb;
+  --sidebar-accent-foreground: #000000;
+  --sidebar-border: #ebebeb;
+  --sidebar-ring: #7fbce0;
   /* NDMS declares exactly "Roboto, sans-serif". The long fallback stack we had
      meant the browser could quietly substitute a system face and every measured
      size came out wrong. */
@@ -120,6 +126,12 @@
   --warning-foreground: #ffbb57;
   --success: #25c478;
   --success-foreground: #ffffff;
+  --status-neutral-background: #444851;
+  --status-neutral-border: #767676;
+  --status-neutral-foreground: #c8c8c8;
+  --status-success-background: #40484f;
+  --status-success-border: #3a634f;
+  --status-success-foreground: #25c478;
   --border: #4d545f;
   --input: #4d545f;
   --ring: #77bce4;
@@ -139,20 +151,15 @@
   --shadow-2xs: 0 1px 4.5px 0px hsl(0 0% 0% / 0.07);
   --shadow-xs: 0 1px 4.5px 0px hsl(0 0% 0% / 0.07);
   --shadow-sm:
-    0 1px 4.5px 0px hsl(0 0% 0% / 0.14),
-    0 1px 2px -1px hsl(0 0% 0% / 0.14);
+    0 1px 4.5px 0px hsl(0 0% 0% / 0.14), 0 1px 2px -1px hsl(0 0% 0% / 0.14);
   --shadow:
-    0 1px 4.5px 0px hsl(0 0% 0% / 0.14),
-    0 1px 2px -1px hsl(0 0% 0% / 0.14);
+    0 1px 4.5px 0px hsl(0 0% 0% / 0.14), 0 1px 2px -1px hsl(0 0% 0% / 0.14);
   --shadow-md:
-    0 1px 4.5px 0px hsl(0 0% 0% / 0.14),
-    0 2px 4px -1px hsl(0 0% 0% / 0.14);
+    0 1px 4.5px 0px hsl(0 0% 0% / 0.14), 0 2px 4px -1px hsl(0 0% 0% / 0.14);
   --shadow-lg:
-    0 1px 4.5px 0px hsl(0 0% 0% / 0.14),
-    0 4px 6px -1px hsl(0 0% 0% / 0.14);
+    0 1px 4.5px 0px hsl(0 0% 0% / 0.14), 0 4px 6px -1px hsl(0 0% 0% / 0.14);
   --shadow-xl:
-    0 1px 4.5px 0px hsl(0 0% 0% / 0.14),
-    0 8px 10px -1px hsl(0 0% 0% / 0.14);
+    0 1px 4.5px 0px hsl(0 0% 0% / 0.14), 0 8px 10px -1px hsl(0 0% 0% / 0.14);
   --shadow-2xl: 0 1px 4.5px 0px hsl(0 0% 0% / 0.35);
 }
 
@@ -211,8 +218,13 @@
 }
 
 @keyframes status-beacon-success {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 45%, transparent); }
-  50% { box-shadow: 0 0 0 5px transparent; }
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px transparent;
+  }
 }
 
 .status-beacon-success {
@@ -220,7 +232,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .status-beacon-success { animation: none; }
+  .status-beacon-success {
+    animation: none;
+  }
 }
 
 @layer base {
@@ -256,6 +270,61 @@
 }
 
 @layer components {
+  .upsert-dialog-body [data-upsert-actions] {
+    position: sticky;
+    z-index: 10;
+    bottom: 0;
+    margin: 1.5rem -1.25rem 0;
+    padding: 0.75rem 1.25rem max(0.75rem, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--card) 96%, transparent);
+    box-shadow: 0 -8px 18px rgb(15 23 42 / 4%);
+  }
+
+  /* Measured from the KeeneticOS connection-state control in both themes:
+     24 px high, a 6 px state dot and a compact 12/20 label. */
+  .keenetic-status {
+    display: inline-flex;
+    min-height: 24px;
+    width: fit-content;
+    flex-shrink: 0;
+    align-items: center;
+    border: 1px solid var(--status-neutral-border);
+    border-radius: 4px;
+    background: var(--status-neutral-background);
+    padding: 0 12px;
+    color: var(--status-neutral-foreground);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    text-transform: uppercase;
+  }
+
+  .keenetic-status--success {
+    border-color: var(--status-success-border);
+    background: var(--status-success-background);
+    color: var(--status-success-foreground);
+  }
+
+  .keenetic-status__dot {
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    margin-right: 10px;
+    border-radius: 9999px;
+    background: currentColor;
+  }
+
+  /* KeeneticOS separates its 64 px menu toggle with a fading 30 px shadow,
+     rather than a hard divider. */
+  .keen-sidebar-toggle {
+    position: relative;
+  }
+
+  .keen-sidebar-toggle::before {
+    display: none;
+  }
+
   [data-slot="card"] {
     border: 1px solid var(--border);
     box-shadow: none;
@@ -284,21 +353,21 @@
   [data-slot="table"] thead th {
     font-weight: 400;
     color: var(--muted-foreground);
-    background: #FAFAFA;
-    border-bottom: 1px solid #EBEBEB;
+    background: #fafafa;
+    border-bottom: 1px solid #ebebeb;
   }
 
   .dark [data-slot="table"] thead th {
-    background: #2F3745;
+    background: #2f3745;
     border-bottom-color: var(--border);
   }
 
   [data-slot="table"] tbody tr {
-    border-color: #EBEBEB;
+    border-color: #ebebeb;
   }
 
   [data-slot="table"] tbody tr:hover {
-    background: #F5FAFC;
+    background: #f5fafc;
   }
 
   .dark [data-slot="table"] tbody tr {
@@ -306,7 +375,7 @@
   }
 
   .dark [data-slot="table"] tbody tr:hover {
-    background: #161C27;
+    background: #161c27;
   }
 
   /* There is no gradient in NDMS at all - I had invented one. The depth under
@@ -316,11 +385,11 @@
      --dashboard-background: #EDEEF0 for the dashboard, --background: #fff
      everywhere else. */
   .keen-canvas-overview {
-    background: #EDEEF0;
+    background: #edeef0;
   }
 
   .keen-canvas-page {
-    background: #FFFFFF;
+    background: #ffffff;
   }
 
   .keen-header-shadow {
@@ -339,28 +408,46 @@
   }
 
   /* NDMS type scale, verbatim. */
-  .keen-text-body-small { font-size: 12px; line-height: 20px; }
-  .keen-text-body { font-size: 14px; line-height: 22px; }
-  .keen-text-card-heading { font-size: 16px; line-height: 24px; }
-  .keen-text-h3 { font-size: 20px; line-height: 28px; }
-  .keen-text-h2 { font-size: 24px; line-height: 32px; }
-  .keen-text-h1 { font-size: 28px; line-height: 36px; }
+  .keen-text-body-small {
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .keen-text-body {
+    font-size: 14px;
+    line-height: 22px;
+  }
+  .keen-text-card-heading {
+    font-size: 16px;
+    line-height: 24px;
+  }
+  .keen-text-h3 {
+    font-size: 20px;
+    line-height: 28px;
+  }
+  .keen-text-h2 {
+    font-size: 24px;
+    line-height: 32px;
+  }
+  .keen-text-h1 {
+    font-size: 28px;
+    line-height: 36px;
+  }
 
   /* NDMS scrollbars: thumb #d6d8d9 on a #f0f0f0 track. */
   * {
-    scrollbar-color: #D6D8D9 #F0F0F0;
+    scrollbar-color: #d6d8d9 #f0f0f0;
     scrollbar-width: thin;
   }
 
   .dark * {
-    scrollbar-color: #3D5073 #2E3D57;
+    scrollbar-color: #3d5073 #2e3d57;
   }
 
   /* Dark KeeneticOS draws a 2px hairline around every card and no shadow at
      all. The shadow is a hover affordance: it appears under the pointer and
      the line stays put underneath it. */
   .dark [data-slot="card"] {
-    border: 1px solid #4D545F;
+    border: 1px solid #4d545f;
     box-shadow: none;
     transition: box-shadow 0.15s ease;
   }
@@ -394,7 +481,6 @@
     line-height: 36px;
   }
 
-
   /* The selected row in KeeneticOS spans the whole column - from the screen
      edge to the hairline - so the padding that centres the label must live on
      the label, never on the container. */
@@ -409,20 +495,13 @@
     border-radius: 0;
   }
 
-  /* Dragging in KeeneticOS lifts the row and marks the gap it would fall into,
-     instead of swapping rows under the cursor - the swap is what made ours
-     jump about. */
-  /* NDMS does not draw a line between rows at all. The row being dragged
-     becomes a placeholder in its old position - grey, dashed, contents hidden -
-     while the browser carries a picture of the row under the cursor:
-     .cdk-drag-placeholder { opacity:.5; border:3px dashed #fafafa;
-     border-radius:8px; background-color: var(--text-gray) }.
-     Both of my earlier attempts - a grey fill, then a white row with a shadow
-     and a hairline at the gap - were inventions. */
+  /* KeeneticOS lifts a visual copy and leaves a same-colour placeholder in the
+     list. Keeping the placeholder in layout lets neighbouring rows slide into
+     their new positions without a grey flash or a layout jump. */
   .keen-row-dragging > td,
   .keen-drag-lifted {
-    background: #6E6E6E;
-    opacity: 0.5;
+    background: var(--card);
+    opacity: 1;
   }
 
   .keen-drag-preview {
@@ -437,45 +516,79 @@
 
   .keen-row-dragging > td > *,
   .keen-drag-lifted > * {
-    visibility: hidden;
+    opacity: 0;
   }
 
   .keen-row-dragging > td:first-child {
     border-top-left-radius: 8px;
     border-bottom-left-radius: 8px;
-    border-left: 3px dashed #FAFAFA;
+    border-left: 3px dashed #fafafa;
   }
 
   .keen-row-dragging > td:last-child {
     border-top-right-radius: 8px;
     border-bottom-right-radius: 8px;
-    border-right: 3px dashed #FAFAFA;
+    border-right: 3px dashed #fafafa;
   }
 
   .keen-row-dragging > td {
-    border-top: 3px dashed #FAFAFA;
-    border-bottom: 3px dashed #FAFAFA;
+    border-top: 3px dashed #fafafa;
+    border-bottom: 3px dashed #fafafa;
   }
 
   /* An outline rather than a border: the list rows already carry a 1px border
      inside a fixed-height box, and widening it to 3px resized the row and
      broke the layout mid-drag. */
   .keen-drag-lifted {
-    outline: 3px dashed #FAFAFA;
+    outline: 3px dashed #fafafa;
     outline-offset: -3px;
     border-color: transparent;
     border-radius: 8px;
   }
 
-  .dark .keen-row-dragging > td,
-  .dark .keen-drag-lifted {
-    background: #949B9F;
-  }
-
-  /* Rows slide out of the way instead of jumping. NDMS uses .05s for this. */
+  /* Rows slide out of the way instead of jumping. NDMS uses 100 ms here. */
   [data-slot="table"] tbody tr,
   .keen-drag-lifted {
-    transition: transform 0.05s cubic-bezier(0, 0, 0.2, 1);
+    transition: transform 0.1s cubic-bezier(0, 0, 0.2, 1);
+  }
+
+  /* Keenetic settings are a sequence of flat sections under one tab strip,
+     not a dashboard made of independent cards. Keep the Card primitives for
+     their existing form semantics, but remove their visual container only
+     inside the settings panels. */
+  .settings-sections > [data-slot="card"] {
+    gap: 0.75rem !important;
+    overflow: visible !important;
+    border: 0 !important;
+    border-bottom: 1px solid var(--border) !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .settings-sections {
+    margin-top: 0.25rem !important;
+  }
+
+  .settings-sections [data-slot="card-title"] {
+    font-size: 20px !important;
+    font-weight: 700 !important;
+    line-height: 28px !important;
+    letter-spacing: normal !important;
+  }
+
+  .settings-sections [data-slot="card-header"],
+  .settings-sections [data-slot="card-content"] {
+    padding-right: 0 !important;
+    padding-left: 0 !important;
+  }
+
+  .settings-sections > [data-slot="card"]:hover {
+    box-shadow: none !important;
+  }
+
+  .settings-sections > [data-slot="card"]:last-of-type {
+    border-bottom: 0 !important;
   }
 
   .keen-service-state {
@@ -522,19 +635,185 @@
  */
 [data-slot="sidebar-menu-button"]:hover,
 [data-slot="sidebar-menu-sub-button"]:hover {
-  background: #F0F0F0;
+  background: #f0f0f0;
   color: #202020;
 }
 
 .dark [data-slot="sidebar-menu-button"],
 .dark [data-slot="sidebar-menu-sub-button"] {
-  color: #C2C2C2;
+  color: #c2c2c2;
 }
 
 .dark [data-slot="sidebar-menu-button"]:hover,
 .dark [data-slot="sidebar-menu-sub-button"]:hover {
-  background: #1B2434;
-  color: #C2C2C2;
+  background: #1b2434;
+  color: #c2c2c2;
+}
+
+/* The Keenetic rail is a real 72 px wide. A conventional border reduces the
+ * content box to 71 px, so the divider is painted as an inset shadow instead. */
+.keen-sidebar-divider {
+  box-shadow: inset -1px 0 var(--sidebar-border);
+}
+
+.keen-nav-rail-group + .keen-nav-rail-group,
+.keen-nav-overlay-group + .keen-nav-overlay-group {
+  border-top: 1px solid;
+  border-image: linear-gradient(to right, #0086cb 0%, rgb(0 134 203 / 0%) 100%)
+    1;
+}
+
+[data-slot="sheet-overlay"].keen-desktop-menu-backdrop {
+  top: 64px;
+  background: rgb(0 0 0 / 25%);
+  backdrop-filter: none;
+}
+
+[data-slot="sheet-content"].keen-desktop-menu-overlay {
+  top: 64px;
+  right: auto;
+  bottom: 0;
+  left: 0;
+  width: 264px;
+  max-width: none;
+  height: auto;
+  border: 0;
+  transform: none;
+  transition: opacity 120ms ease-out;
+}
+
+[data-slot="sheet-content"].keen-desktop-menu-overlay[data-starting-style],
+[data-slot="sheet-content"].keen-desktop-menu-overlay[data-ending-style] {
+  transform: none;
+  opacity: 0;
+}
+
+.keen-mobile-sidebar {
+  position: fixed !important;
+  z-index: 50 !important;
+  top: 64px !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  min-width: 100vw !important;
+  max-width: none !important;
+  height: calc(100dvh - 64px) !important;
+  min-height: calc(100dvh - 64px) !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: 0;
+  background: var(--sidebar);
+  transform: none !important;
+  translate: none !important;
+  box-shadow: none !important;
+  transition: opacity 140ms ease-out;
+}
+
+.keen-mobile-sidebar[data-starting-style],
+.keen-mobile-sidebar[data-ending-style] {
+  transform: none !important;
+  translate: none !important;
+  opacity: 0;
+}
+
+.keen-mobile-header,
+.keen-mobile-menu-button {
+  margin: 0;
+  border: 0;
+  outline-offset: 0;
+}
+
+.keen-mobile-menu-button {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  bottom: auto !important;
+  width: 64px !important;
+  min-width: 64px !important;
+  max-width: 64px !important;
+  height: 64px !important;
+  min-height: 64px !important;
+  max-height: 64px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  outline: 0 !important;
+  appearance: none;
+  background: #fafafa !important;
+  color: #686868 !important;
+  box-shadow: none !important;
+  line-height: 0;
+  transform: none !important;
+  translate: none !important;
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.keen-mobile-menu-button:hover,
+.keen-mobile-menu-button:focus-visible,
+.keen-mobile-menu-button[aria-expanded="true"] {
+  border: 0 !important;
+  outline: 0 !important;
+  background: #0086cb !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+  transform: none !important;
+  translate: none !important;
+}
+
+.dark .keen-mobile-menu-button {
+  background: var(--sidebar) !important;
+  color: #c2c2c2 !important;
+}
+
+.dark .keen-mobile-menu-button:hover,
+.dark .keen-mobile-menu-button:focus-visible,
+.dark .keen-mobile-menu-button[aria-expanded="true"] {
+  background: #0086cb !important;
+  color: #ffffff !important;
+}
+
+@media (min-width: 768px) {
+  .keen-sidebar-toggle {
+    position: relative;
+    z-index: 1;
+    isolation: isolate;
+    overflow: visible;
+    border: 0 !important;
+    box-shadow: inset -1px 0 var(--sidebar-border);
+  }
+
+  .keen-sidebar-toggle::after {
+    position: absolute;
+    top: -30px;
+    right: 1px;
+    left: 0;
+    height: 30px;
+    display: block;
+    pointer-events: none;
+    background: linear-gradient(to top, rgb(0 0 0 / 3%), transparent);
+    content: "";
+    transition: background 120ms ease-out;
+  }
+
+  .keen-sidebar-toggle:hover::after {
+    background: linear-gradient(to top, rgb(0 0 0 / 8%), transparent);
+  }
+
+  .keen-sidebar-toggle [data-slot="button"],
+  .keen-sidebar-toggle [data-slot="button"]:hover,
+  .keen-sidebar-toggle [data-slot="button"]:focus-visible,
+  .keen-sidebar-toggle [data-slot="button"]:active {
+    border: 0 !important;
+    outline: 0 !important;
+    background-clip: border-box !important;
+    box-shadow: none !important;
+    transform: none !important;
+    translate: none !important;
+  }
 }
 
 /* Переключатель, цвета KeeneticOS. Тоже вне слоёв: состояния тут
@@ -543,7 +822,7 @@
  * подсвечивать то, на что нельзя нажать, значит обманывать.
  */
 [data-slot="switch-thumb"] {
-  background: #FFFFFF;
+  background: #ffffff;
   box-shadow:
     0 1px 3px rgb(0 0 0 / 20%),
     0 1px 2px rgb(0 0 0 / 25%),
@@ -551,15 +830,15 @@
 }
 
 [data-slot="switch"][data-unchecked] [data-slot="switch-track"] {
-  background: #D2DADD;
+  background: #d2dadd;
 }
 
 [data-slot="switch"][data-checked] [data-slot="switch-track"] {
-  background: #CCE6F5;
+  background: #cce6f5;
 }
 
 [data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
-  background: #0097DC;
+  background: #0097dc;
   box-shadow:
     0 1px 3px rgb(0 151 220 / 20%),
     0 1px 2px rgb(0 151 220 / 25%),
@@ -587,25 +866,27 @@
 
 /* Dark mode keeps the same geometry and uses the darker Keenetic palette. */
 .dark [data-slot="switch"][data-unchecked] [data-slot="switch-track"] {
-  background: #2E3D57;
+  background: #2e3d57;
 }
 
 .dark [data-slot="switch"][data-unchecked] [data-slot="switch-thumb"] {
-  background: #808B96;
+  background: #808b96;
 }
 
 .dark [data-slot="switch"][data-checked] [data-slot="switch-track"] {
-  background: #3D5073;
+  background: #3d5073;
 }
 
 .dark [data-slot="switch"][data-checked] [data-slot="switch-thumb"],
 .dark
   [data-slot="switch"][data-unchecked]:hover:not([data-disabled])
   [data-slot="switch-thumb"] {
-  background: #0086CB;
+  background: #0086cb;
 }
 
-.dark [data-slot="switch"]:hover:not([data-disabled]) [data-slot="switch-thumb"] {
+.dark
+  [data-slot="switch"]:hover:not([data-disabled])
+  [data-slot="switch-thumb"] {
   box-shadow:
     0 0 0 10px rgb(61 80 115 / 30%),
     0 1px 3px rgb(0 0 0 / 35%),

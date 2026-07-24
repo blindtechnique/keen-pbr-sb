@@ -16,7 +16,7 @@ export function BulkSelectionToolbar({
 }) {
   return (
     <div
-      className="fixed inset-x-0 bottom-[calc(var(--warning-banner-height,0px)+env(safe-area-inset-bottom,0px))] z-50 flex max-h-[50dvh] w-full flex-wrap items-center gap-2 overflow-x-hidden overflow-y-auto border-t bg-card px-4 py-3 shadow-[0_-5px_16px_rgba(0,0,0,0.16)] md:left-(--sidebar-width) md:max-h-none md:flex-nowrap md:px-8"
+      className="fixed inset-x-0 bottom-[calc(var(--warning-banner-height,0px)+env(safe-area-inset-bottom,0px))] z-50 flex max-h-[50dvh] w-full flex-wrap items-center gap-2 overflow-x-hidden overflow-y-auto border-t bg-card px-4 py-3 shadow-[0_-5px_16px_rgba(0,0,0,0.16)] md:left-(--sidebar-offset) md:max-h-none md:flex-nowrap md:px-8"
       data-testid="bulk-selection-toolbar"
     >
       <span

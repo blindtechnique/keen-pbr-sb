@@ -1,9 +1,10 @@
-import { Pencil, Plus, Trash2 } from "lucide-react"
+import { Pencil, Plus, Save, Trash2 } from "lucide-react"
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
+import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import {
   useConfigMutationPending,
@@ -28,21 +29,55 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
+import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import {
+  areRouteRulesSemanticallyEqual,
   getApiErrorMessage,
+  getRouteRulesSemanticKey,
   getRoutingRuleRowId,
   reorderRules,
   setRouteRuleEnabled,
 } from "@/pages/routing-rules-utils"
 
 export function RoutingRulesPage() {
+  const configQuery = useGetConfig()
+  const loadedConfig = selectConfig(configQuery.data)
+  const baselineRules = loadedConfig?.route?.rules ?? []
+  const editorKey = loadedConfig
+    ? getRouteRulesSemanticKey(baselineRules)
+    : configQuery.isError
+      ? "error"
+      : "loading"
+
+  return (
+    <RoutingRulesEditor
+      configError={configQuery.isError}
+      configLoading={configQuery.isLoading}
+      key={editorKey}
+      loadedConfig={loadedConfig}
+    />
+  )
+}
+
+function RoutingRulesEditor({
+  loadedConfig,
+  configLoading,
+  configError,
+}: {
+  loadedConfig?: ConfigObject
+  configLoading: boolean
+  configError: boolean
+}) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
 
   const configMutationPending = useConfigMutationPending()
-  const configQuery = useGetConfig()
-  const loadedConfig = selectConfig(configQuery.data)
-  const routeRules = loadedConfig?.route?.rules ?? []
+  const baselineRules = loadedConfig?.route?.rules ?? []
+  const rulesSession = useSemanticEditSession(
+    baselineRules,
+    areRouteRulesSemanticallyEqual
+  )
+  const routeRules = rulesSession.value
   const ruleRowIds = routeRules.map((_rule, index) =>
     getRoutingRuleRowId(index)
   )
@@ -83,53 +118,58 @@ export function RoutingRulesPage() {
     },
   })
 
-  const persistRules = (
-    config: NonNullable<typeof loadedConfig>,
-    nextRules: RouteRule[],
-    options?: { clearSelection?: boolean }
-  ) => {
-    postConfigMutation.mutate(
-      {
-        data: {
-          ...config,
-          route: {
-            ...config.route,
-            rules: nextRules,
-          },
+  const stageRules = () => {
+    if (!loadedConfig || !rulesSession.isDirty) {
+      return
+    }
+
+    postConfigMutation.mutate({
+      data: {
+        ...loadedConfig,
+        route: {
+          ...loadedConfig.route,
+          rules: routeRules,
         },
       },
-      options?.clearSelection
-        ? {
-            onSuccess: () => {
-              ruleSelection.clear()
-            },
-          }
-        : undefined
+    })
+  }
+
+  const updateRules = (
+    update: RouteRule[] | ((currentRules: RouteRule[]) => RouteRule[]),
+    options?: { clearSelection?: boolean }
+  ) => {
+    rulesSession.setValue((currentRules) =>
+      typeof update === "function" ? update(currentRules) : update
     )
+    if (options?.clearSelection) {
+      ruleSelection.clear()
+    }
+  }
+
+  const cancelLocalChanges = () => {
+    rulesSession.reset()
+    ruleSelection.clear()
   }
 
   const handleReorder = (fromIndex: number, toIndex: number) => {
-    if (!loadedConfig) {
-      return
-    }
     if (fromIndex === toIndex || toIndex < 0 || toIndex >= routeRules.length) {
       return
     }
 
-    const nextRules = reorderRules(routeRules, fromIndex, toIndex)
-    persistRules(loadedConfig, nextRules)
+    updateRules(
+      (currentRules) => reorderRules(currentRules, fromIndex, toIndex),
+      { clearSelection: true }
+    )
   }
 
   const handleEnabledChange = (index: number, enabled: boolean) => {
-    if (!loadedConfig) {
-      return
-    }
-
-    persistRules(loadedConfig, setRouteRuleEnabled(routeRules, index, enabled))
+    updateRules((currentRules) =>
+      setRouteRuleEnabled(currentRules, index, enabled)
+    )
   }
 
   const handleBulkDelete = () => {
-    if (!loadedConfig || ruleSelection.selectedCount === 0) {
+    if (ruleSelection.selectedCount === 0) {
       return
     }
 
@@ -147,11 +187,11 @@ export function RoutingRulesPage() {
       (_rule, index) =>
         !ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
     )
-    persistRules(loadedConfig, nextRules, { clearSelection: true })
+    updateRules(nextRules, { clearSelection: true })
   }
 
   const handleBulkSetEnabled = (enabled: boolean) => {
-    if (!loadedConfig || ruleSelection.selectedCount === 0) {
+    if (ruleSelection.selectedCount === 0) {
       return
     }
 
@@ -175,7 +215,7 @@ export function RoutingRulesPage() {
         ? { ...rule, enabled }
         : rule
     )
-    persistRules(loadedConfig, nextRules)
+    updateRules(nextRules)
   }
 
   return (
@@ -187,26 +227,43 @@ export function RoutingRulesPage() {
       <PageActionBar>
         <ConfigTransferButtons
           config={loadedConfig}
-          disabled={configMutationPending}
+          disabled={configMutationPending || rulesSession.isDirty}
           kind="routing-rules"
           onImport={(nextConfig) =>
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
         <Button
-          disabled={configMutationPending}
+          disabled={configMutationPending || rulesSession.isDirty}
           onClick={() => navigate("/routing-rules/create")}
         >
           <Plus className="mr-1 h-4 w-4" />
           {t("pages.routingRules.actions.addRule")}
         </Button>
+        {rulesSession.isDirty ? (
+          <>
+            <Button
+              disabled={configMutationPending}
+              onClick={cancelLocalChanges}
+              variant="ghost"
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={configMutationPending} onClick={stageRules}>
+              <Save className="mr-1 h-4 w-4" />
+              {postConfigMutation.isPending
+                ? t("common.saving")
+                : t("pages.routingRules.actions.saveChanges")}
+            </Button>
+          </>
+        ) : null}
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
-      {configQuery.isLoading ? (
+      {configLoading ? (
         <TableSkeleton />
-      ) : configQuery.isError ? (
+      ) : configError ? (
         <ListPlaceholder
           description={t("common.loadErrorDescription")}
           title={t("common.unableToLoadData")}
@@ -258,10 +315,8 @@ export function RoutingRulesPage() {
               </BulkSelectionToolbar>
             ) : null}
           </div>
-          {/* На телефоне таблица разворачивается в столбик подписей и
-              читается как каша, а строки не перетаскиваются: HTML5-drag
-              на сенсорных экранах не работает. Поэтому там своя раскладка
-              карточками и своё перетаскивание на pointer-событиях. */}
+          {/* На телефоне остаётся компактная карточная раскладка, но механизм
+              сортировки у неё тот же pointer-sortable, что у desktop-строк. */}
           <div className="md:hidden">
             <SortableCards
               disabled={configMutationPending}
@@ -300,6 +355,7 @@ export function RoutingRulesPage() {
                       <Button
                         aria-label={t("common.edit")}
                         className="size-8"
+                        disabled={configMutationPending || rulesSession.isDirty}
                         onClick={() =>
                           navigate(`/routing-rules/${row.index}/edit`)
                         }
@@ -389,7 +445,7 @@ export function RoutingRulesPage() {
                 <ActionButtons
                   actions={[
                     {
-                      disabled: configMutationPending,
+                      disabled: configMutationPending || rulesSession.isDirty,
                       icon: <Pencil className="h-4 w-4" />,
                       label: t("common.edit"),
                       onClick: () =>

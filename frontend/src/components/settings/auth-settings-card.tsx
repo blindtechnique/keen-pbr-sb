@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type ForwardedRef,
+} from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -10,7 +15,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -22,6 +26,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import type {
+  SettingsSectionController,
+  SettingsSectionState,
+} from "@/components/settings/settings-section-control"
 
 type AuthStatus = {
   enabled: boolean
@@ -40,7 +48,16 @@ type AuthDraft = {
  * Lets the login mode be switched from the interface. Router credentials are
  * verified before the change is stored, so a typo cannot lock anyone out.
  */
-export function AuthSettingsCard() {
+export const AuthSettingsCard = forwardRef(AuthSettingsCardInner)
+
+function AuthSettingsCardInner(
+  {
+    onStateChange,
+  }: {
+    onStateChange: (state: SettingsSectionState) => void
+  },
+  ref: ForwardedRef<SettingsSectionController>
+) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -87,13 +104,74 @@ export function AuthSettingsCard() {
       setPassword("")
       await queryClient.invalidateQueries({ queryKey: ["auth-status"] })
       setDraft({})
+      onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.auth.saved"))
     },
     onError: (error: Error) =>
       toast.error(error.message, { richColors: true }),
   })
 
-  const needsCredentials = provider === "local" && enabled
+  const getSectionState = (
+    nextDraft = draft,
+    nextUsername = username,
+    nextPassword = password
+  ): SettingsSectionState => {
+    const nextEnabled =
+      nextDraft.enabled ?? statusQuery.data?.enabled ?? true
+    const nextProvider =
+      nextDraft.provider ??
+      (statusQuery.data?.provider === "local" ? "local" : "keenetic")
+    const dirty =
+      Object.keys(nextDraft).length > 0 ||
+      nextUsername.length > 0 ||
+      nextPassword.length > 0
+    const credentialsRequired = nextProvider === "local" && nextEnabled
+    return {
+      dirty,
+      valid:
+        !dirty ||
+        !credentialsRequired ||
+        (nextUsername.length > 0 && nextPassword.length > 0),
+    }
+  }
+
+  const updateDraft = (patch: Partial<AuthDraft>) => {
+    const nextDraft = { ...draft, ...patch }
+    setDraft(nextDraft)
+    onStateChange(getSectionState(nextDraft))
+  }
+
+  const updateUsername = (nextUsername: string) => {
+    setUsername(nextUsername)
+    onStateChange(getSectionState(draft, nextUsername, password))
+  }
+
+  const updatePassword = (nextPassword: string) => {
+    setPassword(nextPassword)
+    onStateChange(getSectionState(draft, username, nextPassword))
+  }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      reset: () => {
+        setDraft({})
+        setUsername("")
+        setPassword("")
+        onStateChange({ dirty: false, valid: true })
+      },
+      save: async () => {
+        const state = getSectionState()
+        if (!state.dirty) {
+          return
+        }
+        if (!state.valid) {
+          throw new Error(t("pages.settings.auth.verifyHint"))
+        }
+        await saveMutation.mutateAsync()
+      },
+    })
+  )
 
   return (
     <Card size="sm">
@@ -109,10 +187,7 @@ export function AuthSettingsCard() {
             checked={enabled}
             id="auth-enabled"
             onCheckedChange={(nextEnabled) =>
-              setDraft((current) => ({
-                ...current,
-                enabled: nextEnabled,
-              }))
+              updateDraft({ enabled: nextEnabled })
             }
           />
           <Label className="cursor-pointer" htmlFor="auth-enabled">
@@ -126,10 +201,9 @@ export function AuthSettingsCard() {
               <Label>{t("pages.settings.auth.provider")}</Label>
               <Select
                 onValueChange={(value) =>
-                  setDraft((current) => ({
-                    ...current,
+                  updateDraft({
                     provider: value === "local" ? "local" : "keenetic",
-                  }))
+                  })
                 }
                 value={provider}
               >
@@ -168,10 +242,7 @@ export function AuthSettingsCard() {
                 <Input
                   id="auth-endpoint"
                   onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      endpoint: event.target.value,
-                    }))
+                    updateDraft({ endpoint: event.target.value })
                   }
                   placeholder="127.0.0.1:80"
                   value={endpoint}
@@ -187,7 +258,7 @@ export function AuthSettingsCard() {
                 <Input
                   autoComplete="username"
                   id="auth-username"
-                  onChange={(event) => setUsername(event.target.value)}
+                  onChange={(event) => updateUsername(event.target.value)}
                   value={username}
                 />
               </div>
@@ -198,7 +269,7 @@ export function AuthSettingsCard() {
                 <Input
                   autoComplete="new-password"
                   id="auth-password"
-                  onChange={(event) => setPassword(event.target.value)}
+                  onChange={(event) => updatePassword(event.target.value)}
                   type="password"
                   value={password}
                 />
@@ -213,19 +284,6 @@ export function AuthSettingsCard() {
           </>
         ) : null}
 
-        <div className="flex justify-end">
-          <Button
-            disabled={
-              saveMutation.isPending ||
-              (needsCredentials && (!username || !password))
-            }
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending
-              ? t("common.saving")
-              : t("pages.settings.auth.save")}
-          </Button>
-        </div>
       </CardContent>
     </Card>
   )

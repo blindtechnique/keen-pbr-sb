@@ -7,8 +7,10 @@
 #include "../http/http_client.hpp"
 
 #include <keen-pbr/version.hpp>
+#include <chrono>
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +34,9 @@ constexpr const char* kCurrentPackage =
     "/opt/var/lib/keen-pbr/rescue/current.ipk";
 constexpr const char* kPreviousPackage =
     "/opt/var/lib/keen-pbr/rescue/previous.ipk";
+constexpr const char* kReleaseCacheFile =
+    "/opt/var/cache/keen-pbr/software-release.json";
+constexpr auto kReleaseCacheTtl = std::chrono::hours(1);
 
 std::string read_file_tail(const std::filesystem::path& path,
                            std::streamoff limit) {
@@ -99,6 +104,138 @@ nlohmann::json local_update_status() {
     return status;
 }
 
+nlohmann::json read_release_cache() {
+    try {
+        std::ifstream input(kReleaseCacheFile, std::ios::binary);
+        if (!input) return nlohmann::json::object();
+        auto cache = nlohmann::json::parse(input);
+        return cache.is_object() ? cache : nlohmann::json::object();
+    } catch (const nlohmann::json::exception&) {
+        return nlohmann::json::object();
+    }
+}
+
+void write_release_cache(const nlohmann::json& release,
+                         std::int64_t cached_at) {
+    const std::filesystem::path path(kReleaseCacheFile);
+    const auto temporary = path.string() + ".tmp";
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return;
+
+    {
+        std::ofstream output(temporary,
+                             std::ios::binary | std::ios::trunc);
+        if (!output) return;
+        output << nlohmann::json{{"cached_at", cached_at},
+                                 {"release", release}}
+                      .dump();
+        if (!output) return;
+    }
+
+    std::filesystem::rename(temporary, path, ec);
+    if (!ec) return;
+    ec.clear();
+    std::filesystem::remove(path, ec);
+    ec.clear();
+    std::filesystem::rename(temporary, path, ec);
+}
+
+std::int64_t unix_time_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+bool release_cache_is_fresh(const nlohmann::json& cache,
+                            std::int64_t now) {
+    if (!cache.contains("release") || !cache["release"].is_object())
+        return false;
+    const auto cached_at = cache.value("cached_at", std::int64_t{0});
+    const auto ttl = std::chrono::duration_cast<std::chrono::seconds>(
+                         kReleaseCacheTtl)
+                         .count();
+    return cached_at > 0 && now >= cached_at && now - cached_at < ttl;
+}
+
+nlohmann::json download_latest_release() {
+    HttpClient client;
+    client.set_timeout(std::chrono::seconds(15));
+    client.set_user_agent("keen-pbr-sb/" KEEN_PBR3_VERSION_STRING);
+    client.set_max_response_size(512U * 1024U);
+    return nlohmann::json::parse(client.download(
+        "https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest"));
+}
+
+std::string release_string(const nlohmann::json& release,
+                           const char* field) {
+    const auto value = release.find(field);
+    return value != release.end() && value->is_string()
+               ? value->get<std::string>()
+               : std::string{};
+}
+
+nlohmann::json software_update_status(bool force_remote_check) {
+    auto response = local_update_status();
+    const std::string current = std::string("v") +
+                                KEEN_PBR3_VERSION_STRING + "-sb." +
+                                KEEN_PBR3_VERSION_RELEASE_STRING;
+    const auto now = unix_time_now();
+    const auto cache = read_release_cache();
+    nlohmann::json release = nlohmann::json::object();
+    bool cached = false;
+    std::string check_error;
+
+    if (!force_remote_check && release_cache_is_fresh(cache, now)) {
+        release = cache["release"];
+        cached = true;
+    } else {
+        try {
+            release = download_latest_release();
+            write_release_cache(release, now);
+        } catch (const std::exception& error) {
+            check_error = error.what();
+            if (cache.contains("release") && cache["release"].is_object()) {
+                release = cache["release"];
+                cached = true;
+            }
+        }
+    }
+
+    const auto latest = release_string(release, "tag_name");
+    auto release_notes = release_string(release, "body");
+    constexpr std::size_t kReleaseNotesLimit = 64U * 1024U;
+    if (release_notes.size() > kReleaseNotesLimit) {
+        release_notes.resize(kReleaseNotesLimit);
+        release_notes += "\n\n…";
+    }
+    const auto release_url = release_string(release, "html_url");
+    const auto release_name = release_string(release, "name");
+    const auto changelog_url =
+        safe_github_tag(latest)
+            ? std::string(
+                  "https://github.com/blindtechnique/keen-pbr-sb/blob/") +
+                  latest + "/CHANGELOG.md"
+            : std::string{};
+
+    response.update(
+        nlohmann::json{{"current", current},
+                       {"latest", latest},
+                       {"available",
+                        !latest.empty() &&
+                            is_newer_fork_version(latest, current)},
+                       {"current_ahead",
+                        !latest.empty() &&
+                            is_newer_fork_version(current, latest)},
+                       {"release_name", release_name},
+                       {"release_notes", release_notes},
+                       {"release_url", release_url},
+                       {"changelog_url", changelog_url},
+                       {"cached", cached},
+                       {"check_error", check_error}});
+    return response;
+}
+
 std::mutex& update_start_mutex() {
     static std::mutex mutex;
     return mutex;
@@ -115,36 +252,11 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
     });
 
     server.get("/api/system/update", []() -> std::string {
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(15));
-        client.set_max_response_size(512U * 1024U);
-        const auto release = nlohmann::json::parse(client.download(
-            "https://api.github.com/repos/blindtechnique/keen-pbr-sb/releases/latest"));
-        const auto latest = release.value("tag_name", std::string{});
-        const std::string current = std::string("v") + KEEN_PBR3_VERSION_STRING +
-                                    "-sb." + KEEN_PBR3_VERSION_RELEASE_STRING;
-        auto release_notes = release.value("body", std::string{});
-        constexpr std::size_t kReleaseNotesLimit = 64U * 1024U;
-        if (release_notes.size() > kReleaseNotesLimit) {
-            release_notes.resize(kReleaseNotesLimit);
-            release_notes += "\n\n…";
-        }
-        const auto release_url = release.value("html_url", std::string{});
-        const auto release_name = release.value("name", std::string{});
-        const auto changelog_url = safe_github_tag(latest)
-            ? std::string("https://github.com/blindtechnique/keen-pbr-sb/blob/") +
-                  latest + "/CHANGELOG.md"
-            : std::string{};
-        auto response = local_update_status();
-        response.update(nlohmann::json{{"current", current},
-                                       {"latest", latest},
-                                       {"available", is_newer_fork_version(latest, current)},
-                                       {"current_ahead", is_newer_fork_version(current, latest)},
-                                       {"release_name", release_name},
-                                       {"release_notes", release_notes},
-                                       {"release_url", release_url},
-                                       {"changelog_url", changelog_url}});
-        return response.dump();
+        return software_update_status(false).dump();
+    });
+
+    server.post("/api/system/update/check", []() -> std::string {
+        return software_update_status(true).dump();
     });
 
     // Local-only endpoint for cheap progress polling. Unlike the release check

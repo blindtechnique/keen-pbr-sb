@@ -9,7 +9,7 @@ import {
   ScrollTextIcon,
   SparklesIcon,
 } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 import { toast } from "sonner"
@@ -34,7 +34,11 @@ import {
 import { CodeEditor } from "@/components/shared/code-editor"
 import { TemplatePicker } from "@/components/lists/template-picker"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
-import { UpsertPage } from "@/components/shared/upsert-page"
+import {
+  UpsertPage,
+  type UpsertPagePresentation,
+} from "@/components/shared/upsert-page"
+import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -119,25 +123,34 @@ const sampleNewList: ListDraft = {
 export function ListUpsertPage({
   mode,
   listId,
+  presentation = "page",
 }: {
   mode: "create" | "edit"
   listId?: string
+  presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
 
   if (!loadedConfig) {
     return (
       <UpsertPage
-        cardDescription={t("pages.listUpsert.cardDescription")}
+        cardDescription={t(
+          presentation === "dialog"
+            ? "pages.listUpsert.simpleCardDescription"
+            : "pages.listUpsert.cardDescription"
+        )}
         cardTitle={
           mode === "create"
             ? t("pages.listUpsert.createTitle")
             : t("pages.listUpsert.editTitle")
         }
         description={t("pages.listUpsert.description")}
+        onClose={() => navigate("/lists")}
+        presentation={presentation}
         title={
           mode === "create"
             ? t("pages.listUpsert.createTitle")
@@ -166,6 +179,8 @@ export function ListUpsertPage({
         cardDescription={t("pages.listUpsert.missing.cardDescription")}
         cardTitle={t("pages.listUpsert.missing.cardTitle")}
         description={t("pages.listUpsert.missing.description")}
+        onClose={() => navigate("/lists")}
+        presentation={presentation}
         title={t("pages.listUpsert.editTitle")}
       >
         <div className="flex justify-end">
@@ -179,7 +194,11 @@ export function ListUpsertPage({
 
   return (
     <UpsertPage
-      cardDescription={t("pages.listUpsert.cardDescription")}
+      cardDescription={t(
+        presentation === "dialog"
+          ? "pages.listUpsert.simpleCardDescription"
+          : "pages.listUpsert.cardDescription"
+      )}
       cardTitle={
         mode === "create"
           ? t("pages.listUpsert.createTitle")
@@ -188,6 +207,9 @@ export function ListUpsertPage({
             })
       }
       description={t("pages.listUpsert.description")}
+      dirty={dirty}
+      onClose={() => navigate("/lists")}
+      presentation={presentation}
       title={
         mode === "create"
           ? t("pages.listUpsert.createTitle")
@@ -202,6 +224,8 @@ export function ListUpsertPage({
         listId={listId}
         loadedConfig={loadedConfig}
         mode={mode}
+        onDirtyChange={setDirty}
+        presentation={presentation}
       />
     </UpsertPage>
   )
@@ -214,6 +238,8 @@ function ListForm({
   existingListNames,
   listId,
   loadedConfig,
+  onDirtyChange,
+  presentation,
 }: {
   mode: "create" | "edit"
   outbounds: Outbound[]
@@ -221,10 +247,13 @@ function ListForm({
   existingListNames: string[]
   listId?: string
   loadedConfig: ConfigObject
+  onDirtyChange: (dirty: boolean) => void
+  presentation: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
+  const close = useUpsertPageClose()
   const [activeSourceGroups, setActiveSourceGroups] = useState<
     ListSourceGroup[]
   >(() => getActiveSourceGroupsFromDraft(draft))
@@ -253,6 +282,17 @@ function ListForm({
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
+        if (
+          presentation === "dialog" &&
+          !activeSourceGroups.some((group) =>
+            isSourceGroupPopulated(group, value)
+          )
+        ) {
+          toast.error(t("pages.listUpsert.validation.sourceRequired"), {
+            richColors: true,
+          })
+          return undefined
+        }
         if (
           mode === "create" &&
           quickSetup.createRouteRule &&
@@ -340,8 +380,16 @@ function ListForm({
           | undefined
       )?.unmapped ?? []
   )
+  const formIsDirty = useStore(form.store, (state) => !state.isPristine)
 
   const isCreate = mode === "create"
+  const hasDnsServerChange =
+    mode === "edit" && dnsServerForList !== currentDnsServer
+  const isDirty = formIsDirty || hasDnsServerChange
+
+  useEffect(() => {
+    onDirtyChange(isDirty)
+  }, [isDirty, onDirtyChange])
 
   const handleSourceGroupSelect = (group: ListSourceGroup) => {
     const currentValues = form.state.values
@@ -444,40 +492,42 @@ function ListForm({
               }}
             </form.Field>
 
-            <form.Field
-              name={LIST_FIELD_NAMES.ttlMs}
-              validators={{
-                onMount: ({ value }) => getTtlError(value, t) ?? undefined,
-                onChange: ({ value }) => getTtlError(value, t) ?? undefined,
-              }}
-            >
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
+            {presentation === "page" ? (
+              <form.Field
+                name={LIST_FIELD_NAMES.ttlMs}
+                validators={{
+                  onMount: ({ value }) => getTtlError(value, t) ?? undefined,
+                  onChange: ({ value }) => getTtlError(value, t) ?? undefined,
+                }}
+              >
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
 
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor="list-ttl-ms">
-                      {t("pages.listUpsert.fields.ttlMs")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id="list-ttl-ms"
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t("pages.listUpsert.fields.ttlMsHint")}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor="list-ttl-ms">
+                        {t("pages.listUpsert.fields.ttlMs")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id="list-ttl-ms"
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t("pages.listUpsert.fields.ttlMsHint")}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+            ) : null}
           </FieldGroup>
         </CardContent>
       </Card>
@@ -504,7 +554,7 @@ function ListForm({
                   className={cn(
                     isMobile && "h-auto min-h-11 py-2.5",
                     active &&
-                      "z-10 border-primary bg-primary/[0.12] text-foreground ring-1 ring-inset ring-primary/40 hover:bg-primary/[0.18]"
+                      "z-10 border-primary bg-primary/[0.12] text-foreground ring-1 ring-primary/40 ring-inset hover:bg-primary/[0.18]"
                   )}
                   key={group}
                   onClick={() => handleSourceGroupSelect(group)}
@@ -574,36 +624,42 @@ function ListForm({
                 )}
               </form.Field>
 
-              <form.Field name={LIST_FIELD_NAMES.detour}>
-                {(field) => {
-                  const error = getFirstFieldError(field.state.meta.errors)
+              {presentation === "page" ? (
+                <form.Field name={LIST_FIELD_NAMES.detour}>
+                  {(field) => {
+                    const error = getFirstFieldError(field.state.meta.errors)
 
-                  return (
-                    <Field invalid={Boolean(error)}>
-                      <FieldLabel>
-                        {t("pages.listUpsert.fields.detour")}
-                      </FieldLabel>
-                      <FieldContent>
-                        <OutboundSelect
-                          allowEmpty
-                          ariaInvalid={Boolean(error)}
-                          emptyLabel={t("pages.listUpsert.fields.detourEmpty")}
-                          onValueChange={field.handleChange}
-                          outbounds={outbounds}
-                          placeholder={t(
-                            "pages.listUpsert.fields.detourPlaceholder"
-                          )}
-                          value={field.state.value}
-                        />
-                        <FieldHint
-                          description={t("pages.listUpsert.fields.detourHint")}
-                          error={error}
-                        />
-                      </FieldContent>
-                    </Field>
-                  )
-                }}
-              </form.Field>
+                    return (
+                      <Field invalid={Boolean(error)}>
+                        <FieldLabel>
+                          {t("pages.listUpsert.fields.detour")}
+                        </FieldLabel>
+                        <FieldContent>
+                          <OutboundSelect
+                            allowEmpty
+                            ariaInvalid={Boolean(error)}
+                            emptyLabel={t(
+                              "pages.listUpsert.fields.detourEmpty"
+                            )}
+                            onValueChange={field.handleChange}
+                            outbounds={outbounds}
+                            placeholder={t(
+                              "pages.listUpsert.fields.detourPlaceholder"
+                            )}
+                            value={field.state.value}
+                          />
+                          <FieldHint
+                            description={t(
+                              "pages.listUpsert.fields.detourHint"
+                            )}
+                            error={error}
+                          />
+                        </FieldContent>
+                      </Field>
+                    )
+                  }}
+                </form.Field>
+              ) : null}
             </FieldGroup>
           </CardContent>
         </Card>
@@ -875,13 +931,8 @@ function ListForm({
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="flex justify-end gap-3">
-        <Button
-          onClick={() => navigate("/lists")}
-          size="xl"
-          type="button"
-          variant="outline"
-        >
+      <div className="flex justify-end gap-3" data-upsert-actions>
+        <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>
         <form.Subscribe
@@ -893,7 +944,9 @@ function ListForm({
           {({ canSubmit, isPristine }) => (
             <Button
               disabled={
-                postConfigMutation.isPending || isPristine || !canSubmit
+                postConfigMutation.isPending ||
+                (isPristine && !hasDnsServerChange) ||
+                !canSubmit
               }
               size="xl"
               type="submit"

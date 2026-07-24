@@ -29,6 +29,7 @@ import { ServicesStatusCard } from "@/components/overview/services-status-card"
 import { RouterInfoCard } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
+import { SystemStatusSummary } from "@/components/overview/system-status-summary"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
 export function OverviewPage() {
@@ -90,21 +91,23 @@ export function OverviewPage() {
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 xl:grid-cols-3">
-        <RouterInfoCard />
+      <SystemStatusSummary
+        configIsDraft={configIsDraft}
+        dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
+        dnsStatus={dnsCheckStatus}
+        listCount={Object.keys(loadedConfig?.lists ?? {}).length}
+        routingOverall={routingHealth?.overall}
+        ruleCount={loadedConfig?.route?.rules?.length ?? 0}
+        serviceStatus={serviceHealth?.status}
+      />
 
-        <DnsCheckWidget
-          dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
-          onStatusChange={setDnsCheckStatus}
-        />
+      <RouterInfoCard />
 
-        <ServicesStatusCard />
-      </div>
-
-      <RoutingTestPanel />
-
-      <div className="grid gap-3 xl:grid-cols-2">
-        <SectionCard className="h-full" title={t("overview.outbounds.title")}>
+      <div className="grid gap-3 xl:grid-cols-5">
+        <SectionCard
+          className="h-full xl:col-span-3"
+          title={t("overview.outbounds.title")}
+        >
           {configQuery.isLoading ? <TableSkeleton /> : null}
           {configQuery.isError || runtimeOutboundsQuery.isError ? (
             <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
@@ -132,8 +135,21 @@ export function OverviewPage() {
           ) : null}
         </SectionCard>
 
+        <div className="xl:col-span-2">
+          <ServicesStatusCard />
+        </div>
+      </div>
+
+      <RoutingTestPanel />
+
+      <div className="grid gap-3 xl:grid-cols-3">
+        <DnsCheckWidget
+          dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
+          onStatusChange={setDnsCheckStatus}
+        />
+
         <SectionCard
-          className="h-full"
+          className="h-full xl:col-span-2"
           contentClassName="flex flex-1 flex-col"
           title={t("overview.routing.title")}
           action={

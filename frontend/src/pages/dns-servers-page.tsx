@@ -1,7 +1,8 @@
-import { ArrowRight, Pencil, Plus, Trash2 } from "lucide-react"
+import { ArrowRight, Pencil, Plus, Save, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 import { useLocation } from "wouter"
 
 import type { getConfigResponse } from "@/api/generated/keen-api"
@@ -23,9 +24,12 @@ import {
   type DeleteImpactItem,
 } from "@/components/shared/delete-impact-dialog"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
+import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -35,6 +39,34 @@ import {
 } from "@/pages/dns-servers-utils"
 
 export function DnsServersPage() {
+  const configQuery = useGetConfig()
+  const config = getConfigData(configQuery.data)
+  const fallback = config?.dns?.fallback ?? []
+  const editorKey = config
+    ? JSON.stringify(fallback)
+    : configQuery.isError
+      ? "error"
+      : "loading"
+
+  return (
+    <DnsServersEditor
+      config={config}
+      configError={configQuery.isError}
+      configLoading={configQuery.isLoading}
+      key={editorKey}
+    />
+  )
+}
+
+function DnsServersEditor({
+  config,
+  configError,
+  configLoading,
+}: {
+  config?: ConfigObject
+  configError: boolean
+  configLoading: boolean
+}) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
   const [deleteRequest, setDeleteRequest] = useState<{
@@ -45,20 +77,35 @@ export function DnsServersPage() {
   } | null>(null)
   const [deletePreview, setDeletePreview] = useState<typeof deleteRequest>(null)
   const configMutationPending = useConfigMutationPending()
-  const configQuery = useGetConfig()
   const postConfigMutation = usePostConfigMutation()
-
-  const config = getConfigData(configQuery.data)
+  const fallbackSession = useSemanticEditSession(
+    config?.dns?.fallback ?? [],
+    semanticJsonEqual
+  )
 
   // The fallback chain lives here now: it is a property of the servers
   // themselves, not of the per-list rules.
   const handleFallbackChange = (fallback: string[]) => {
-    if (!config) {
+    fallbackSession.setValue(fallback)
+  }
+  const saveFallback = () => {
+    if (!config || !fallbackSession.isDirty) {
       return
     }
-    postConfigMutation.mutate({
-      data: { ...config, dns: { ...config.dns, fallback } },
-    })
+
+    postConfigMutation.mutate(
+      {
+        data: {
+          ...config,
+          dns: { ...config.dns, fallback: fallbackSession.value },
+        },
+      },
+      {
+        onSuccess: () => {
+          toast.success(t("pages.dnsServers.fallbackSaved"))
+        },
+      }
+    )
   }
   const visibleDeleteRequest = deleteRequest ?? deletePreview
   const dnsServers = useMemo(() => config?.dns?.servers ?? [], [config])
@@ -109,33 +156,60 @@ export function DnsServersPage() {
   return (
     <div className="space-y-3">
       <PageHeader
-        actions={
-          <Button
-            disabled={configMutationPending}
-            onClick={() => navigate("/dns-servers/create")}
-          >
-            <Plus className="mr-1 h-4 w-4" />
-            {t("pages.dnsServers.actions.add")}
-          </Button>
-        }
         description={t("pages.dnsServers.description")}
         title={t("pages.dnsServers.title")}
       />
+      <PageActionBar>
+        <Button
+          disabled={configMutationPending || fallbackSession.isDirty}
+          onClick={() => navigate("/dns-servers/create")}
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          {t("pages.dnsServers.actions.add")}
+        </Button>
+        {fallbackSession.isDirty ? (
+          <>
+            <Button
+              disabled={configMutationPending}
+              onClick={fallbackSession.reset}
+              variant="ghost"
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button disabled={configMutationPending} onClick={saveFallback}>
+              <Save className="mr-1 h-4 w-4" />
+              {postConfigMutation.isPending
+                ? t("common.saving")
+                : t("common.save")}
+            </Button>
+          </>
+        ) : null}
+      </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
-      {!configQuery.isLoading && !configQuery.isError ? (
+      {!configLoading && !configError ? (
         <div className="mb-4">
           <FallbackServersField
-            config={config}
+            config={
+              config
+                ? {
+                    ...config,
+                    dns: {
+                      ...config.dns,
+                      fallback: fallbackSession.value,
+                    },
+                  }
+                : undefined
+            }
             onChange={handleFallbackChange}
           />
         </div>
       ) : null}
 
-      {configQuery.isLoading ? (
+      {configLoading ? (
         <TableSkeleton />
-      ) : configQuery.isError ? (
+      ) : configError ? (
         <ListPlaceholder
           description={t("pages.dnsServers.loadErrorDescription")}
           title={t("common.unableToLoadData")}
@@ -149,23 +223,25 @@ export function DnsServersPage() {
       ) : (
         <div className="space-y-3">
           <div className="relative h-0">
-          {serverSelection.hasSelection ? (
-            <BulkSelectionToolbar
-              countLabel={t("pages.dnsServers.bulk.selected", {
-                count: serverSelection.selectedCount,
-              })}
-            >
-              <Button
-                disabled={configMutationPending}
-                onClick={deleteServersBulk}
-                size="sm"
-                variant="destructive"
+            {serverSelection.hasSelection ? (
+              <BulkSelectionToolbar
+                cancelLabel={t("common.cancel")}
+                countLabel={t("pages.dnsServers.bulk.selected", {
+                  count: serverSelection.selectedCount,
+                })}
+                onCancel={serverSelection.clear}
               >
-                <Trash2 className="mr-1 h-4 w-4" />
-                {t("pages.dnsServers.bulk.delete")}
-              </Button>
-            </BulkSelectionToolbar>
-          ) : null}
+                <Button
+                  disabled={configMutationPending || fallbackSession.isDirty}
+                  onClick={deleteServersBulk}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <Trash2 className="mr-1 h-4 w-4" />
+                  {t("pages.dnsServers.bulk.delete")}
+                </Button>
+              </BulkSelectionToolbar>
+            ) : null}
           </div>
           <DataTable
             headers={[
@@ -195,7 +271,7 @@ export function DnsServersPage() {
               <ActionButtons
                 actions={[
                   {
-                    disabled: configMutationPending,
+                    disabled: configMutationPending || fallbackSession.isDirty,
                     icon: <Pencil className="h-4 w-4" />,
                     label: t("common.edit"),
                     onClick: () =>
@@ -210,7 +286,7 @@ export function DnsServersPage() {
             selection={{
               rowIds: serverRowIds,
               selectedIds: serverSelection.selectedIds,
-              disabled: configMutationPending,
+              disabled: configMutationPending || fallbackSession.isDirty,
               onToggle: serverSelection.toggleOne,
               onToggleAll: serverSelection.setAllVisible,
               selectAllLabel: t("common.selection.selectAll"),

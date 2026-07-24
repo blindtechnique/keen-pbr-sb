@@ -1,5 +1,5 @@
 import { Suspense, lazy } from "react"
-import { Redirect, Route, Switch } from "wouter"
+import { Redirect, Route, Switch, useSearch } from "wouter"
 
 import { AppShell } from "@/components/layout/app-shell"
 import { AuthGate } from "@/components/auth-gate"
@@ -46,10 +46,16 @@ const GeneralConfigPage = lazy(() =>
     default: m.GeneralConfigPage,
   }))
 )
-const BackupPage = lazy(() => import("@/pages/backup-page").then((m) => ({ default: m.BackupPage })))
-const RestorePage = lazy(() => import("@/pages/backup-page").then((m) => ({ default: m.RestorePage })))
+const BackupPage = lazy(() =>
+  import("@/pages/backup-page").then((m) => ({ default: m.BackupPage }))
+)
+const RestorePage = lazy(() =>
+  import("@/pages/backup-page").then((m) => ({ default: m.RestorePage }))
+)
 const ListUpsertPage = lazy(() =>
-  import("@/pages/list-upsert-page").then((m) => ({ default: m.ListUpsertPage }))
+  import("@/pages/list-upsert-page").then((m) => ({
+    default: m.ListUpsertPage,
+  }))
 )
 const ListsPage = lazy(() =>
   import("@/pages/lists-page").then((m) => ({ default: m.ListsPage }))
@@ -90,6 +96,94 @@ function PageFallback() {
   )
 }
 
+function useEditorPresentation() {
+  const search = useSearch()
+  return new URLSearchParams(search).get("view") === "page" ? "page" : "dialog"
+}
+
+function ListEditorRoute({
+  mode,
+  listId,
+}: {
+  mode: "create" | "edit"
+  listId?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return <ListUpsertPage listId={listId} mode={mode} presentation="page" />
+  }
+
+  return (
+    <>
+      <ListsPage />
+      <ListUpsertPage listId={listId} mode={mode} presentation="dialog" />
+    </>
+  )
+}
+
+function DnsServerEditorRoute({
+  mode,
+  serverTag,
+}: {
+  mode: "create" | "edit"
+  serverTag?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <DnsServerUpsertPage
+        mode={mode}
+        presentation="page"
+        serverTag={serverTag}
+      />
+    )
+  }
+
+  return (
+    <>
+      <DnsServersPage />
+      <DnsServerUpsertPage
+        mode={mode}
+        presentation="dialog"
+        serverTag={serverTag}
+      />
+    </>
+  )
+}
+
+function RoutingRuleEditorRoute({
+  mode,
+  ruleIndex,
+}: {
+  mode: "create" | "edit"
+  ruleIndex?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <RoutingRuleUpsertPage
+        mode={mode}
+        presentation="page"
+        ruleIndex={ruleIndex}
+      />
+    )
+  }
+
+  return (
+    <>
+      <RoutingRulesPage />
+      <RoutingRuleUpsertPage
+        mode={mode}
+        presentation="dialog"
+        ruleIndex={ruleIndex}
+      />
+    </>
+  )
+}
+
 function App() {
   return (
     <AuthGate>
@@ -102,10 +196,12 @@ function App() {
             <Route component={BackupPage} path="/backup" />
             <Route component={RestorePage} path="/restore" />
             <Route path="/lists/create">
-              <ListUpsertPage mode="create" />
+              <ListEditorRoute mode="create" />
             </Route>
             <Route path="/lists/:listId/edit">
-              {(params) => <ListUpsertPage listId={params.listId} mode="edit" />}
+              {(params) => (
+                <ListEditorRoute listId={params.listId} mode="edit" />
+              )}
             </Route>
             <Route component={CatalogPage} path="/catalog" />
             <Route component={ListsPage} path="/lists" />
@@ -114,7 +210,10 @@ function App() {
             </Route>
             <Route path="/outbounds/:outboundId/edit">
               {(params) => (
-                <OutboundUpsertPage mode="edit" outboundId={params.outboundId} />
+                <OutboundUpsertPage
+                  mode="edit"
+                  outboundId={params.outboundId}
+                />
               )}
             </Route>
             <Route component={OutboundsPage} path="/outbounds" />
@@ -122,11 +221,11 @@ function App() {
             <Route component={ConnectionsPage} path="/connections" />
             <Route component={NfqwsPage} path="/nfqws" />
             <Route path="/dns-servers/create">
-              <DnsServerUpsertPage mode="create" />
+              <DnsServerEditorRoute mode="create" />
             </Route>
             <Route path="/dns-servers/:serverTag/edit">
               {(params) => (
-                <DnsServerUpsertPage
+                <DnsServerEditorRoute
                   mode="edit"
                   serverTag={decodeURIComponent(params.serverTag)}
                 />
@@ -143,11 +242,14 @@ function App() {
             </Route>
             <Route component={DnsRulesPage} path="/dns-rules" />
             <Route path="/routing-rules/create">
-              <RoutingRuleUpsertPage mode="create" />
+              <RoutingRuleEditorRoute mode="create" />
             </Route>
             <Route path="/routing-rules/:ruleIndex/edit">
               {(params) => (
-                <RoutingRuleUpsertPage mode="edit" ruleIndex={params.ruleIndex} />
+                <RoutingRuleEditorRoute
+                  mode="edit"
+                  ruleIndex={params.ruleIndex}
+                />
               )}
             </Route>
             <Route component={RoutingRulesPage} path="/routing-rules" />

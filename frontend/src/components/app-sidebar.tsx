@@ -1,15 +1,15 @@
 "use client"
 
 import type { ComponentProps } from "react"
-import {
-  LayoutGridIcon,
-  LogOutIcon,
-  ShieldIcon,
-  WaypointsIcon,
-} from "lucide-react"
+import { LayoutGridIcon, ShieldIcon, WaypointsIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { AppBrandHeader } from "@/components/layout/app-brand-header"
+import {
+  KeeneticMenuArrowIcon,
+  KeeneticMenuIcon,
+} from "@/components/layout/keenetic-menu-icons"
+import { MobileMenuControls } from "@/components/layout/top-bar-controls"
 import { NavMain } from "@/components/nav-main"
 import {
   Sidebar,
@@ -21,8 +21,9 @@ import { useSidebar } from "@/components/ui/sidebar-context"
 import { Button } from "@/components/ui/button"
 
 export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
-  const { isMobile, toggleSidebar } = useSidebar()
+  const { isMobile, state, toggleSidebar } = useSidebar()
   const { t } = useTranslation()
+  const collapsed = !isMobile && state === "collapsed"
 
   const data = {
     navMain: [
@@ -91,59 +92,44 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
   }
 
   return (
-    <Sidebar collapsible="icon" {...props}>
-      <SidebarHeader
-        className={
-          isMobile
-            ? "h-16 bg-card px-4 py-2"
-            : "h-16 justify-center bg-card py-0 pr-4 pl-8 group-data-[collapsible=icon]:px-2"
-        }
-      >
-        <SidebarMenuHeader isMobile={isMobile} onMenuClick={toggleSidebar} />
-      </SidebarHeader>
+    <Sidebar className="z-40" collapsible="icon" {...props}>
+      {!isMobile ? (
+        <SidebarHeader className="keen-sidebar-brand relative z-20 h-16 w-[264px] min-w-[264px] justify-center bg-card py-0 pr-4 pl-8">
+          <AppBrandHeader />
+        </SidebarHeader>
+      ) : null}
       {/* No horizontal padding: in KeeneticOS the selected row runs from the
           screen edge all the way to the hairline, and any padding here leaves
           it floating in the middle of the column. */}
-      <SidebarContent className="border-r px-0 py-0">
+      <SidebarContent className="keen-sidebar-divider px-0 py-0">
         <NavMain items={data.navMain} />
       </SidebarContent>
       {/* The footer is the button: padding here would leave a pale margin
           around the hover fill instead of letting it reach the edges. */}
-      <SidebarFooter
-        className={
-          isMobile
-            ? "border-t px-4 py-3"
-            : "border-t border-r bg-sidebar p-0 group-data-[collapsible=icon]:hidden"
-        }
-      >
-        <div>
+      {isMobile ? (
+        <SidebarFooter className="keen-sidebar-toggle h-16 shrink-0 bg-sidebar p-0">
+          <MobileMenuControls />
+        </SidebarFooter>
+      ) : (
+        <SidebarFooter className="keen-sidebar-toggle h-16 shrink-0 bg-sidebar p-0">
           <Button
-            className="h-12 w-full justify-start rounded-none bg-sidebar px-4 text-[14px] font-normal text-primary hover:bg-[#EDEDED] hover:text-primary"
-            onClick={async () => {
-              await fetch("/api/auth/logout", { method: "POST" })
-              window.location.assign("/")
-            }}
+            aria-label={collapsed ? t("brand.showMenu") : t("brand.hideMenu")}
+            className="h-16 w-full justify-start gap-3 rounded-none bg-sidebar px-6 text-[16px] leading-[23px] font-bold text-primary group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 hover:bg-sidebar-accent hover:text-primary"
+            onClick={toggleSidebar}
+            title={collapsed ? t("brand.showMenu") : t("brand.hideMenu")}
             variant="ghost"
           >
-            <LogOutIcon />
-            {t("auth.signOut")}
+            {collapsed ? (
+              <KeeneticMenuIcon className="shrink-0" />
+            ) : (
+              <KeeneticMenuArrowIcon className="ml-0.5 shrink-0" />
+            )}
+            <span className="group-data-[collapsible=icon]:hidden">
+              {t("brand.hideMenu")}
+            </span>
           </Button>
-        </div>
-      </SidebarFooter>
+        </SidebarFooter>
+      )}
     </Sidebar>
   )
-}
-
-function SidebarMenuHeader({
-  isMobile,
-  onMenuClick,
-}: {
-  isMobile: boolean
-  onMenuClick: () => void
-}) {
-  if (isMobile) {
-    return <AppBrandHeader onMenuClick={onMenuClick} />
-  }
-
-  return <AppBrandHeader />
 }

@@ -13,6 +13,7 @@ import {
   BackupDialog,
   RestoreDialog,
 } from "@/components/settings/backup-dialogs"
+import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { getSoftwareUpdateDialogContent } from "@/components/settings/software-update-view"
 import { Button } from "@/components/ui/button"
 import {
@@ -55,6 +56,8 @@ type SoftwareUpdateStatus = {
   success?: boolean | null
   package_rescue_ready?: boolean
   package_rollback_available?: boolean
+  check_error?: string
+  cached?: boolean
 }
 
 type SoftwareUpdateProgress = Pick<
@@ -113,16 +116,32 @@ export function SoftwareUpdateCard() {
     async (showFeedback = false) => {
       if (showFeedback) setChecking(true)
       try {
-        const response = await fetch("/api/system/update")
+        let response = await fetch(
+          showFeedback ? "/api/system/update/check" : "/api/system/update",
+          showFeedback ? { method: "POST" } : undefined
+        )
+        // Older sb.11 backends do not expose the explicit refresh endpoint.
+        // Keep frontend-only previews compatible until the next IPK is
+        // installed on the router.
+        if (
+          showFeedback &&
+          (response.status === 404 || response.status === 405)
+        ) {
+          response = await fetch("/api/system/update")
+        }
         const body = (await response.json().catch(() => ({}))) as Partial<
           SoftwareUpdateStatus & { error: string }
         >
         if (!response.ok)
           throw new Error(body.error ?? `HTTP ${response.status}`)
         setStatus(body as SoftwareUpdateStatus)
-        setError("")
+        setError(
+          body.check_error ? t("pages.settings.softwareUpdate.checkFailed") : ""
+        )
         if (showFeedback) {
-          if (body.available) {
+          if (body.check_error) {
+            toast.warning(t("pages.settings.softwareUpdate.cachedResult"))
+          } else if (body.available) {
             toast.success(
               t("pages.settings.softwareUpdate.availableToast", {
                 version: body.latest,
@@ -135,10 +154,26 @@ export function SoftwareUpdateCard() {
           }
         }
       } catch (refreshError) {
-        const message =
-          refreshError instanceof Error
-            ? refreshError.message
-            : t("pages.settings.softwareUpdate.checkFailed")
+        const detail = refreshError instanceof Error ? refreshError.message : ""
+        const message = t("pages.settings.softwareUpdate.checkFailed")
+        setStatus((previous) => {
+          if (previous) {
+            return { ...previous, check_error: detail || message }
+          }
+          return {
+            current: __APP_VERSION__ ? `v${__APP_VERSION__}` : "",
+            latest: "",
+            available: false,
+            current_ahead: false,
+            release_name: "",
+            release_notes: "",
+            release_url: "",
+            changelog_url: "",
+            running: false,
+            log: "",
+            check_error: detail || message,
+          }
+        })
         setError(message)
         if (showFeedback) toast.error(message, { richColors: true })
       } finally {
@@ -290,14 +325,7 @@ export function SoftwareUpdateCard() {
 
   return (
     <>
-      <Card
-        className={
-          status?.available
-            ? "border-success/60 bg-success/5 shadow-[0_0_0_1px_color-mix(in_srgb,var(--success)_18%,transparent)]"
-            : undefined
-        }
-        size="sm"
-      >
+      <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.softwareUpdate.title")}</CardTitle>
           <CardDescription>
@@ -305,7 +333,18 @@ export function SoftwareUpdateCard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <UpdateVersionSummary status={status} />
+          <div className="flex min-w-0 flex-col items-start gap-2">
+            <KeeneticStatus tone={status?.available ? "success" : "neutral"}>
+              {status?.available
+                ? t("common.updateStatus.available")
+                : status?.check_error
+                  ? t("common.updateStatus.unavailable")
+                  : status
+                    ? t("common.updateStatus.current")
+                    : t("common.updateStatus.checking")}
+            </KeeneticStatus>
+            <UpdateVersionSummary status={status} />
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button
               disabled={status?.running || starting || checking}
@@ -493,13 +532,20 @@ function UpdateVersionSummary({
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.current")}:{" "}
         </span>
-        <code>{status?.current ?? "—"}</code>
+        <code>
+          {status?.current || (__APP_VERSION__ ? `v${__APP_VERSION__}` : "—")}
+        </code>
       </div>
       <div>
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.latest")}:{" "}
         </span>
-        <code>{status?.latest ?? "—"}</code>
+        <code>
+          {status?.latest ||
+            (status?.check_error
+              ? t("pages.settings.softwareUpdate.unavailableValue")
+              : "—")}
+        </code>
       </div>
     </div>
   )

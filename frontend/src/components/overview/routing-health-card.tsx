@@ -1,5 +1,5 @@
 import { type ReactNode, useMemo, useState } from "react"
-import { HeartPlus } from "lucide-react"
+import { CheckCircle2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import type {
@@ -12,7 +12,6 @@ import {
   Empty,
   EmptyDescription,
   EmptyHeader,
-  EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
 
@@ -77,26 +76,19 @@ export function RoutingHealthCard({
         </label>
       </div>
 
-      {!hasVisibleEntries ? (
-        <Empty className="min-h-0 flex-1 rounded-lg border border-dashed px-4 py-6">
+      {!hasVisibleEntries && !showHealthyEntries ? (
+        <div className="flex min-h-12 items-center gap-2 border-y border-border py-2 text-sm text-success">
+          <CheckCircle2 className="size-5 shrink-0" />
+          <span>{t("overview.routing.allHealthyDescription")}</span>
+        </div>
+      ) : null}
+
+      {!hasVisibleEntries && showHealthyEntries ? (
+        <Empty className="min-h-0 flex-1 px-4 py-5">
           <EmptyHeader>
-            {!showHealthyEntries ? (
-              <EmptyMedia
-                variant="icon"
-                className="bg-success/10 text-success [&_svg:not([class*='size-'])]:size-5"
-              >
-                <HeartPlus />
-              </EmptyMedia>
-            ) : null}
-            <EmptyTitle>
-              {showHealthyEntries
-                ? t("overview.routing.noChecksTitle")
-                : t("overview.routing.allHealthyTitle")}
-            </EmptyTitle>
+            <EmptyTitle>{t("overview.routing.noChecksTitle")}</EmptyTitle>
             <EmptyDescription>
-              {showHealthyEntries
-                ? t("overview.routing.noChecksDescription")
-                : t("overview.routing.allHealthyDescription")}
+              {t("overview.routing.noChecksDescription")}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>

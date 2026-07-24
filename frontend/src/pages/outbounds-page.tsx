@@ -39,8 +39,13 @@ import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import { PageHeader } from "@/components/shared/page-header"
 import { PageActionBar } from "@/components/shared/page-action-bar"
+import {
+  SectionTabs,
+  type SectionTab,
+} from "@/components/shared/section-tabs"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { useSectionTab } from "@/hooks/use-section-tab"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -61,6 +66,8 @@ type OutboundItem = {
   runtimeInterface?: RuntimeInterfaceInventoryEntry
   runtimeState?: RuntimeOutboundState
 }
+
+type OutboundGroupKey = "interfaces" | "failover" | "system"
 
 export function OutboundsPage() {
   const { t } = useTranslation()
@@ -159,22 +166,44 @@ export function OutboundsPage() {
   const outboundSelection = useRowSelection(outboundRowIds)
   // Grouped so the page reads as "what carries traffic" first, then failover
   // groups, then the plumbing, instead of one undifferentiated list.
-  const outboundGroups = [
+  const outboundGroups: Array<{
+    key: OutboundGroupKey
+    items: OutboundItem[]
+  }> = [
     {
-      key: "interfaces",
+      key: "interfaces" as const,
       items: outboundItems.filter((item) => item.type === "interface"),
     },
     {
-      key: "failover",
+      key: "failover" as const,
       items: outboundItems.filter((item) => item.type === "urltest"),
     },
     {
-      key: "system",
+      key: "system" as const,
       items: outboundItems.filter(
         (item) => item.type !== "interface" && item.type !== "urltest"
       ),
     },
-  ].filter((group) => group.items.length > 0)
+  ]
+  const outboundTabs: SectionTab<OutboundGroupKey>[] = outboundGroups.map(
+    (group) => ({
+      value: group.key,
+      label: t(`pages.outbounds.groups.${group.key}`),
+      count: group.items.length,
+    })
+  )
+  const [activeGroupKey, setActiveGroupKey] = useSectionTab<OutboundGroupKey>(
+    ["interfaces", "failover", "system"],
+    "interfaces"
+  )
+  const activeOutboundGroup =
+    outboundGroups.find((group) => group.key === activeGroupKey) ??
+    outboundGroups[0]
+
+  const changeActiveGroup = (nextGroup: OutboundGroupKey) => {
+    outboundSelection.clear()
+    setActiveGroupKey(nextGroup)
+  }
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -298,6 +327,12 @@ export function OutboundsPage() {
         />
       ) : (
         <div className="space-y-3">
+          <SectionTabs
+            ariaLabel={t("pages.outbounds.tabs.ariaLabel")}
+            onValueChange={changeActiveGroup}
+            tabs={outboundTabs}
+            value={activeGroupKey}
+          />
           <div className="relative h-0">
             {outboundSelection.hasSelection ? (
               <BulkSelectionToolbar
@@ -317,39 +352,41 @@ export function OutboundsPage() {
               </BulkSelectionToolbar>
             ) : null}
           </div>
-          {outboundGroups.map((group) => (
-            <div className="space-y-2" key={group.key}>
-              <h2 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-                {t(`pages.outbounds.groups.${group.key}`)}
-              </h2>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {group.items.map((item) => (
-                  <OutboundCard
-                    key={item.id}
-                    onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
-                    onToggleSelected={() =>
-                      outboundSelection.toggleOne(item.id)
-                    }
-                    outbound={item.outbound}
-                    protocol={
-                      item.outbound.type === "urltest"
-                        ? protocolOfGroup(item.outbound, interfaceOfTag)
-                        : protocolOf(item.outbound.interface ?? "")
-                    }
-                    runtimeState={item.runtimeState}
-                    selectLabel={t("common.selection.selectRow", {
-                      rowLabel: item.id,
-                    })}
-                    selected={outboundSelection.selectedIds.has(item.id)}
-                    dependencies={dependenciesByTag.get(item.id) ?? []}
-                    onRefreshLatency={() => probeMutation.mutate()}
-                    refreshingLatency={probeMutation.isPending}
-                    selectionDisabled={configMutationPending}
-                  />
-                ))}
-              </div>
+          {activeOutboundGroup.items.length === 0 ? (
+            <ListPlaceholder
+              description={t(
+                `pages.outbounds.groupsEmpty.${activeOutboundGroup.key}`
+              )}
+              title={t(`pages.outbounds.groups.${activeOutboundGroup.key}`)}
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {activeOutboundGroup.items.map((item) => (
+                <OutboundCard
+                  key={item.id}
+                  onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
+                  onToggleSelected={() =>
+                    outboundSelection.toggleOne(item.id)
+                  }
+                  outbound={item.outbound}
+                  protocol={
+                    item.outbound.type === "urltest"
+                      ? protocolOfGroup(item.outbound, interfaceOfTag)
+                      : protocolOf(item.outbound.interface ?? "")
+                  }
+                  runtimeState={item.runtimeState}
+                  selectLabel={t("common.selection.selectRow", {
+                    rowLabel: item.id,
+                  })}
+                  selected={outboundSelection.selectedIds.has(item.id)}
+                  dependencies={dependenciesByTag.get(item.id) ?? []}
+                  onRefreshLatency={() => probeMutation.mutate()}
+                  refreshingLatency={probeMutation.isPending}
+                  selectionDisabled={configMutationPending}
+                />
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
       <DeleteImpactDialog

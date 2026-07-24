@@ -82,7 +82,7 @@ export function WarningBanner({
     <div
       ref={containerRef}
       className={cn(
-        "fixed inset-x-0 bottom-0 z-20 min-h-16 border-t md:left-(--sidebar-width)",
+        "fixed inset-x-0 bottom-0 z-20 min-h-16 border-t md:left-(--sidebar-offset)",
         "bg-card",
         isError
           ? "border-destructive/40"

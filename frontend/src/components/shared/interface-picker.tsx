@@ -206,6 +206,7 @@ type InterfaceMultiSelectListProps = {
   placeholderTitle?: string
   placeholderDescription?: string
   error?: string | null
+  flat?: boolean
 }
 
 export function InterfaceMultiSelectList({
@@ -218,6 +219,7 @@ export function InterfaceMultiSelectList({
   placeholderTitle,
   placeholderDescription,
   error,
+  flat = false,
 }: InterfaceMultiSelectListProps) {
   const { t } = useTranslation()
   const [pickerValue, setPickerValue] = useState("")
@@ -246,8 +248,13 @@ export function InterfaceMultiSelectList({
     <div className="space-y-2" data-field-name={name}>
       <div
         className={cn(
-          "space-y-3 rounded-xl border p-3",
-          error ? "border-destructive" : "border-border"
+          "space-y-3",
+          flat
+            ? error
+              ? "border-l-2 border-destructive pl-3"
+              : null
+            : "rounded-xl border p-3",
+          !flat && (error ? "border-destructive" : "border-border")
         )}
       >
         {value.length ? (

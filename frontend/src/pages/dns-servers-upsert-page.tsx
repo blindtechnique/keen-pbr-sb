@@ -18,7 +18,11 @@ import {
   FieldLabel,
 } from "@/components/shared/field"
 import { OutboundSelect } from "@/components/shared/outbound-select"
-import { UpsertPage } from "@/components/shared/upsert-page"
+import {
+  UpsertPage,
+  type UpsertPagePresentation,
+} from "@/components/shared/upsert-page"
+import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -67,12 +71,15 @@ type DnsServerFieldName =
 export function DnsServerUpsertPage({
   mode,
   serverTag,
+  presentation = "page",
 }: {
   mode: "create" | "edit"
   serverTag?: string
+  presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
   const serviceHealthQuery = useGetHealthService()
   const config = selectConfig(configQuery.data)
@@ -98,6 +105,8 @@ export function DnsServerUpsertPage({
         cardDescription={t("pages.dnsServerUpsert.missingCardDescription")}
         cardTitle={t("pages.dnsServerUpsert.missingCardTitle")}
         description={t("pages.dnsServerUpsert.missingDescription")}
+        onClose={() => navigate("/dns-servers")}
+        presentation={presentation}
         title={t("pages.dnsServerUpsert.editTitle")}
       >
         <div className="flex justify-end">
@@ -120,6 +129,9 @@ export function DnsServerUpsertPage({
             })
       }
       description={t("pages.dnsServerUpsert.description")}
+      dirty={dirty}
+      onClose={() => navigate("/dns-servers")}
+      presentation={presentation}
       title={
         mode === "create"
           ? t("pages.dnsServerUpsert.createTitle")
@@ -130,7 +142,7 @@ export function DnsServerUpsertPage({
         config={config}
         initialDraft={initialDraft}
         mode={mode}
-        onCancel={() => navigate("/dns-servers")}
+        onDirtyChange={setDirty}
         onSaved={() => navigate("/dns-servers")}
         serverTag={serverTag}
         supportsKeeneticDns={supportsKeeneticDns}
@@ -144,7 +156,7 @@ function DnsServerForm({
   serverTag,
   config,
   initialDraft,
-  onCancel,
+  onDirtyChange,
   onSaved,
   supportsKeeneticDns,
 }: {
@@ -152,11 +164,12 @@ function DnsServerForm({
   serverTag?: string
   config: ConfigObject | undefined
   initialDraft: DnsServerDraft
-  onCancel: () => void
+  onDirtyChange: (dirty: boolean) => void
   onSaved: () => void
   supportsKeeneticDns: boolean
 }) {
   const { t } = useTranslation()
+  const close = useUpsertPageClose()
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null)
   const showTypeSelector =
     supportsKeeneticDns || initialDraft.type === DnsServerType.keenetic
@@ -224,6 +237,7 @@ function DnsServerForm({
           | undefined
       )?.unmapped ?? []
   )
+  const isDirty = useStore(form.store, (state) => !state.isPristine)
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -253,6 +267,10 @@ function DnsServerForm({
     form.reset(initialDraft)
     clearFormServerErrors(form)
   }, [form, initialDraft])
+
+  useEffect(() => {
+    onDirtyChange(isDirty)
+  }, [isDirty, onDirtyChange])
 
   const configServers = config?.dns?.servers ?? []
 
@@ -507,8 +525,8 @@ function DnsServerForm({
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="flex justify-end gap-3">
-        <Button onClick={onCancel} size="xl" type="button" variant="outline">
+      <div className="flex justify-end gap-3" data-upsert-actions>
+        <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>
         <form.Subscribe

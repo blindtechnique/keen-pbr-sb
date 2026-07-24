@@ -306,18 +306,33 @@ nlohmann::json nfqws_update_status(bool force = false) {
 
     const std::lock_guard lock(mutex);
     const auto now = std::chrono::steady_clock::now();
-    if (!force && !cached.empty() && now - checked_at < kCacheLifetime) return cached;
+    const auto current = installed_version();
+    if (current.empty()) {
+        cached = nlohmann::json{{"ok", true},
+                                {"installed", false},
+                                {"current", ""},
+                                {"latest", ""},
+                                {"available", false},
+                                {"release_url", ""}};
+        checked_at = now;
+        return cached;
+    }
+    if (!force && !cached.empty() && cached.value("installed", false) &&
+        cached.value("current", std::string{}) == current &&
+        now - checked_at < kCacheLifetime) {
+        return cached;
+    }
 
     HttpClient client;
     client.set_timeout(std::chrono::seconds(10));
     client.set_max_response_size(256U * 1024U);
     const auto release = nlohmann::json::parse(client.download(
         "https://api.github.com/repos/nfqws/nfqws2-keenetic/releases/latest"));
-    const auto current = installed_version();
     const auto latest = release.value("tag_name", std::string{});
     if (latest.empty()) throw ApiError("nfqws2 release does not contain a version", 502);
 
     cached = nlohmann::json{{"ok", true},
+                            {"installed", true},
                             {"current", current},
                             {"latest", latest},
                             {"available", newer_version(latest, current)},

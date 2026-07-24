@@ -1,8 +1,16 @@
 import { useState } from "react"
-import { LanguagesIcon, PaletteIcon } from "lucide-react"
+import {
+  LanguagesIcon,
+  LoaderCircleIcon,
+  LogOutIcon,
+  PaletteIcon,
+} from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { toast } from "sonner"
 
 import { NotificationsBell } from "@/components/layout/notifications-bell"
+import { HeaderHealthIndicator } from "@/components/layout/header-health-indicator"
+import { TOP_BAR_CONTROL_CLASS } from "@/components/layout/top-bar-control-styles"
 import { useLanguage } from "@/components/language-provider"
 import { useTheme } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
@@ -29,20 +37,59 @@ const LANGUAGE_OPTIONS = [
  * its own global controls.
  */
 export function TopBarControls() {
+  return <SystemControlIcons showNotifications={true} />
+}
+
+export function MobileMenuControls() {
+  return (
+    <div className="flex h-16 w-full items-center justify-end gap-1 px-4">
+      <SystemControlIcons popoverSide="top" showNotifications={false} />
+    </div>
+  )
+}
+
+function SystemControlIcons({
+  popoverSide = "bottom",
+  showNotifications,
+}: {
+  popoverSide?: "top" | "bottom"
+  showNotifications: boolean
+}) {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language, setLanguage } = useLanguage()
   const [openMenu, setOpenMenu] = useState<"language" | "theme" | null>(null)
+  const [signingOut, setSigningOut] = useState(false)
+
+  const handleSignOut = async () => {
+    setSigningOut(true)
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      window.location.assign("/")
+    } catch {
+      toast.error(t("auth.unavailable"), { richColors: true })
+      setSigningOut(false)
+    }
+  }
 
   return (
-    <div className="flex items-center gap-0.5">
-      <NotificationsBell />
+    <div className="flex items-center">
+      {showNotifications ? (
+        <>
+          <HeaderHealthIndicator />
+          <NotificationsBell />
+        </>
+      ) : null}
 
       <IconMenu
-        icon={<LanguagesIcon className="size-4" />}
+        icon={<LanguagesIcon />}
         label={t("common.language")}
         onOpenChange={(open) => setOpenMenu(open ? "language" : null)}
         open={openMenu === "language"}
+        side={popoverSide}
       >
         {LANGUAGE_OPTIONS.map((option) => (
           <MenuOption
@@ -59,10 +106,11 @@ export function TopBarControls() {
       </IconMenu>
 
       <IconMenu
-        icon={<PaletteIcon className="size-4" />}
+        icon={<PaletteIcon />}
         label={t("common.theme")}
         onOpenChange={(open) => setOpenMenu(open ? "theme" : null)}
         open={openMenu === "theme"}
+        side={popoverSide}
       >
         {THEME_OPTIONS.map((option) => (
           <MenuOption
@@ -77,6 +125,22 @@ export function TopBarControls() {
           </MenuOption>
         ))}
       </IconMenu>
+
+      <Button
+        aria-label={t("auth.signOut")}
+        className={TOP_BAR_CONTROL_CLASS}
+        disabled={signingOut}
+        onClick={() => void handleSignOut()}
+        size="icon"
+        title={t("auth.signOut")}
+        variant="ghost"
+      >
+        {signingOut ? (
+          <LoaderCircleIcon className="animate-spin" />
+        ) : (
+          <LogOutIcon />
+        )}
+      </Button>
     </div>
   )
 }
@@ -86,12 +150,14 @@ function IconMenu({
   label,
   open,
   onOpenChange,
+  side,
   children,
 }: {
   icon: React.ReactNode
   label: string
   open: boolean
   onOpenChange: (open: boolean) => void
+  side: "top" | "bottom"
   children: React.ReactNode
 }) {
   return (
@@ -100,7 +166,7 @@ function IconMenu({
         render={
           <Button
             aria-label={label}
-            className="size-9 text-primary hover:bg-accent hover:text-primary"
+            className={TOP_BAR_CONTROL_CLASS}
             size="icon"
             title={label}
             variant="ghost"
@@ -109,7 +175,7 @@ function IconMenu({
       >
         {icon}
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-44 p-1">
+      <PopoverContent align="end" className="w-44 p-1" side={side}>
         {children}
       </PopoverContent>
     </Popover>

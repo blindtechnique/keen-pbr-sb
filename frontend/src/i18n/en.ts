@@ -33,6 +33,7 @@ export const enTranslation = {
     rollback: "Roll back configuration",
     rollbackCompleted: "The configuration was restored from backup.",
     tabs: {
+      ariaLabel: "nfqws2 sections",
       settings: "Settings",
       strategies: "Strategies",
       lists: "Lists",
@@ -121,6 +122,12 @@ export const enTranslation = {
       "Credentials are configured by the keen-pbr-sb installer. This is a separate local account; see README for details.",
   },
   common: {
+    updateStatus: {
+      available: "Update available",
+      current: "No updates",
+      checking: "Checking for updates",
+      unavailable: "Update check unavailable",
+    },
     dependencies: {
       title: "Depends on this: {{count}}",
       none: "Nothing depends on this - deleting it breaks nothing",
@@ -138,7 +145,18 @@ export const enTranslation = {
     disabled: "Disabled",
     close: "Close",
     cancel: "Cancel",
+    save: "Save",
     saving: "Saving…",
+    openAdvancedEditor: "Advanced editor",
+    unsavedChanges: {
+      title: "Discard changes?",
+      description:
+        "This form has unsaved changes. Closing it now will discard them.",
+      continueEditing: "Continue editing",
+      discard: "Discard",
+      advancedEditorDisabled:
+        "Save or discard the changes in this form before switching views.",
+    },
     copy: "Copy",
     copied: "Copied",
     clipboardUnavailable: "Clipboard unavailable",
@@ -157,6 +175,8 @@ export const enTranslation = {
       noItemsSelected: "No items selected",
       addFirstItem: "Add your first item to start building this list.",
       removeItem: "Remove {{item}}",
+      reorderItem: "Move {{item}}",
+      reorderItems: "Change order",
     },
     listUsage: {
       usedElsewhere: "Also in: {{summary}}",
@@ -223,8 +243,8 @@ export const enTranslation = {
       systemMonitor: "Dashboard",
       catalog: "List catalogue",
       settings: "Settings",
-      outbounds: "Outgoing connections",
-      transports: "Transports (sing-box)",
+      outbounds: "Routes and failover",
+      transports: "Tunnels and proxies",
       connections: "Connections",
       dnsServers: "DNS Servers",
       lists: "Lists",
@@ -237,6 +257,7 @@ export const enTranslation = {
     title: "Notifications",
     empty: "Nothing to report",
     updateAvailable: "Version {{version}} is available",
+    nfqwsUpdateAvailable: "nfqws2 update {{version}} is available",
   },
   connections: {
     age: {
@@ -287,13 +308,18 @@ export const enTranslation = {
       description:
         "VLESS, VMess, Trojan, Shadowsocks and other managed proxy transports require sing-box. Run the keen-pbr-sb installer over SSH and select the tested version.",
     },
-    title: "Transports",
+    title: "Tunnels and proxies",
     description:
-      "Native and managed tunnel interfaces available to keen-pbr outbounds.",
+      "Managed tunnels and proxies that provide interfaces for keen-pbr routing.",
+    tabs: {
+      all: "All",
+      other: "Other",
+      ariaLabel: "Transport types",
+    },
     refresh: "Refresh",
-    add: "Add transport",
+    add: "Add tunnel or proxy",
     unavailable: "Transport manager unavailable",
-    empty: "No transports configured.",
+    empty: "No tunnels or proxies configured.",
     interface: "Interface",
     server: "Server",
     connection: "Connection",
@@ -390,6 +416,7 @@ export const enTranslation = {
       createOutbound: "Make it an exit point",
       createFailover: "Create failover (URLTest)",
       bindOutbound: "Make it an exit point",
+      alreadyBound: "Already linked to “{{tag}}”",
     },
     states: {
       connected: "Connected",
@@ -401,9 +428,17 @@ export const enTranslation = {
   },
   brand: {
     logoAlt: "keen-pbr-sb logo",
-    version: "Version {{version}}",
-    tagline: "Get packets sorted",
+    tagline:
+      "Routing, tunnels, and Keenetic network services in one interface.",
     openMenu: "Open menu",
+    closeMenu: "Close menu",
+    hideMenu: "Hide menu",
+    showMenu: "Expand menu",
+  },
+  headerHealth: {
+    healthy: "All systems are operating normally",
+    attention: "Some systems require attention",
+    failed: "Some systems are not working",
   },
   warning: {
     draftChanged: "Configuration was changed. Save it to disk to apply it.",
@@ -457,6 +492,25 @@ export const enTranslation = {
     },
   },
   overview: {
+    summary: {
+      healthy: {
+        title: "System is operating normally",
+        description:
+          "Routing, DNS, and active outgoing connections are responding.",
+      },
+      waiting: {
+        title: "Loading system state",
+        description:
+          "Services are being queried; current state will appear automatically.",
+      },
+      degraded: {
+        title: "Attention required",
+        description: "A routing, DNS, or service health check has failed.",
+      },
+      routing: "Routing",
+      configuration: "{{lists}} lists · {{rules}} rules",
+      draft: "Unsaved draft",
+    },
     router: {
       title: "Router",
       unavailable:
@@ -464,15 +518,21 @@ export const enTranslation = {
       cpu: "CPU",
       memory: "Memory",
       memoryValue: "{{used}} MB / {{total}} MB ({{percent}}%)",
+      memoryValueCompact: "{{percent}}% · {{used}}/{{total}} MB",
       memoryTotalOnly: "{{total}} MB",
       disk: "Entware disk",
       diskValue: "{{used}} MB / {{total}} MB ({{percent}}%)",
+      diskValueCompact: "{{percent}}% · {{used}}/{{total}}",
+      capacityMb: "{{value}} MB",
+      capacityGb: "{{value}} GB",
       wan: "WAN address",
       clients: "Clients",
-      clientsValue: "{{active}} active / {{total}} total",
+      clientsValue: "{{active}} of {{total}}",
       firmware: "Firmware",
       uptime: "Uptime",
       uptimeValue: "{{days}}d {{hours}}h {{minutes}}m",
+      uptimeHoursValue: "{{hours}}h {{minutes}}m",
+      uptimeMinutesValue: "{{minutes}}m",
       loadAverage: "Load average",
     },
     services: {
@@ -714,6 +774,7 @@ export const enTranslation = {
       title: "List catalogue",
       description:
         "Ready-made sets of domains and rules. Pick the ones you want and say where their traffic should go.",
+      categoriesAriaLabel: "Catalog categories",
       source: "Source:",
       updatedAt: "updated {{date}}",
       count: "{{count}} lists",
@@ -746,6 +807,14 @@ export const enTranslation = {
       },
     },
     settings: {
+      tabs: {
+        ariaLabel: "Settings sections",
+        general: "General",
+        access: "Access",
+        logging: "Logging",
+        advanced: "Advanced",
+        maintenance: "Maintenance",
+      },
       backup: {
         title: "Backup and restore",
         description:
@@ -821,6 +890,19 @@ export const enTranslation = {
           "Block traffic when outbound drops (kill-switch)",
         strictEnforcementHint:
           "If a VPN or interface goes offline, traffic matching its rules is blocked instead of falling back to the main routing table. Can be overridden per outbound.",
+        strictEnforcementOptions: {
+          automatic: "Automatic (recommended)",
+          enabled: "Always block",
+          disabled: "Do not block",
+        },
+        strictEnforcementHints: {
+          automatic:
+            "Gatewayless tunnels are protected against leaks while regular gateways remain permissive. Individual outbound connections can override this mode.",
+          enabled:
+            "An unavailable route is blocked for every interface outbound so traffic cannot fall back to the main routing table.",
+          disabled:
+            "Global blocking is disabled. Traffic may fall back to the main routing table unless the outbound connection overrides this setting.",
+        },
         skipMarkedPacketsLabel: "Skip packets that are already marked",
         skipMarkedPacketsHint:
           "Ignore packets that already have a fwmark set by other firewall rules so policy routing does not process them again.",
@@ -907,6 +989,9 @@ export const enTranslation = {
         result: "Update log",
         waitingForLog: "Update started; waiting for the first log lines…",
         checkFailed: "Could not check for updates.",
+        cachedResult:
+          "GitHub is temporarily unavailable. Showing the last saved data.",
+        unavailableValue: "check unavailable",
         startFailed: "Could not start the update.",
       },
       advanced: {
@@ -932,6 +1017,7 @@ export const enTranslation = {
     dnsServers: {
       title: "DNS Servers",
       description: "Upstream DNS servers used for domain name resolution.",
+      fallbackSaved: "Fallback DNS order saved to the draft",
       keeneticAddress: "Keenetic built-in DNS",
       actions: {
         add: "Add DNS server",
@@ -1039,6 +1125,7 @@ export const enTranslation = {
       actions: {
         reorder: "Drag to reorder",
         addRule: "Add routing rule",
+        saveChanges: "Save changes",
         enableRule: "Enable rule",
         disableRule: "Disable rule",
       },
@@ -1051,7 +1138,7 @@ export const enTranslation = {
         disable: "Disable selected",
         delete: "Delete selected",
         confirmDelete:
-          "Delete {{count}} routing rule(s)? This cannot be undone from this screen alone.",
+          "Delete {{count}} routing rule(s)? You can cancel before saving.",
       },
       empty: {
         title: "No routing rules yet",
@@ -1082,6 +1169,8 @@ export const enTranslation = {
         "This rule directs matching traffic to the specified outbound.",
       cardDescription:
         "Choose lists and outbound, then optionally narrow by protocol, ports, and addresses.",
+      simpleCardDescription:
+        "Choose a list and an outbound connection. That is enough for a working rule; optional match conditions stay in the advanced editor.",
       messages: {
         saved: "Routing rule staged. Apply new config to persist it.",
       },
@@ -1155,8 +1244,17 @@ export const enTranslation = {
         failover: "Failover groups",
         system: "System outbounds",
       },
-      title: "Outgoing connections",
-      description: "Your configured outbounds and urltest groups.",
+      groupsEmpty: {
+        interfaces: "No tunnels or interfaces have been added yet.",
+        failover: "No failover groups have been configured yet.",
+        system: "No system outbounds have been configured yet.",
+      },
+      tabs: {
+        ariaLabel: "Outgoing connection sections",
+      },
+      title: "Routes and failover",
+      description:
+        "Traffic destinations: tunnels and interfaces, failover groups, and system outbounds.",
       actions: { new: "Add outbound" },
       bulk: {
         selected: "{{count}} selected",
@@ -1536,6 +1634,8 @@ export const enTranslation = {
         "A list can contain domains and IPs you enter directly, load from a URL, or import from a file.",
       cardDescription:
         "Review the list source, TTL, and matching entries before saving.",
+      simpleCardDescription:
+        "Enter a name and a list source. TTL and download options stay in the advanced editor.",
       messages: {
         created: "List staged. Apply new config to persist it.",
         updated: "List changes staged. Apply new config to persist them.",
@@ -1626,6 +1726,7 @@ export const enTranslation = {
           "IP addresses or CIDR ranges, one per line. E.g. `93.184.216.34`, `10.0.0.0/8`.",
       },
       validation: {
+        sourceRequired: "Fill in the selected source so the list can be used.",
         nameRequired: "Name is required.",
         duplicateName: "A list with this name already exists.",
         invalidTtl: "TTL must be a non-negative integer.",

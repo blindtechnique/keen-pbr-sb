@@ -1,9 +1,15 @@
 import { useQuery } from "@tanstack/react-query"
-import { useState } from "react"
+import { useState, type MouseEvent } from "react"
 import { BellIcon, CheckCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import { nfqwsUpdateQueryOptions } from "@/api/nfqws"
 import { Button } from "@/components/ui/button"
+import { TOP_BAR_CONTROL_CLASS } from "@/components/layout/top-bar-control-styles"
+import {
+  collectNotices,
+  type SoftwareUpdateResponse,
+} from "@/components/layout/notifications"
 import {
   Popover,
   PopoverContent,
@@ -15,24 +21,13 @@ type LogsResponse = {
   lines: string[]
 }
 
-type UpdateResponse = {
-  available?: boolean
-  latest?: string
-}
-
-type Notice = {
-  id: string
-  level: "error" | "warning" | "info"
-  text: string
-  timestamp?: string
-}
-
 /**
  * Notifications are derived rather than stored: the log already records
  * everything the service considers worth saying, so a separate feed would only
  * be a second place for the same facts to drift out of sync.
  */
 const DISMISSED_KEY = "keen-pbr-notifications-dismissed-until"
+const DISMISSED_IDS_KEY = "keen-pbr-notifications-dismissed-ids"
 
 export function NotificationsBell() {
   const { t } = useTranslation()
@@ -41,13 +36,20 @@ export function NotificationsBell() {
     const stored = window.localStorage.getItem(DISMISSED_KEY)
     return stored ? Number(stored) : 0
   })
-
-  const dismissAll = () => {
-    const now = Date.now()
-    window.localStorage.setItem(DISMISSED_KEY, String(now))
-    setDismissedUntil(now)
-    setOpen(false)
-  }
+  const [dismissedIds, setDismissedIds] = useState<ReadonlySet<string>>(() => {
+    const stored = window.localStorage.getItem(DISMISSED_IDS_KEY)
+    if (!stored) return new Set()
+    try {
+      const parsed: unknown = JSON.parse(stored)
+      return new Set(
+        Array.isArray(parsed)
+          ? parsed.filter((value): value is string => typeof value === "string")
+          : []
+      )
+    } catch {
+      return new Set()
+    }
+  })
 
   const logsQuery = useQuery<LogsResponse>({
     queryKey: ["logs", "notifications"],
@@ -60,7 +62,7 @@ export function NotificationsBell() {
     refetchIntervalInBackground: false,
   })
 
-  const updateQuery = useQuery<UpdateResponse>({
+  const updateQuery = useQuery<SoftwareUpdateResponse>({
     queryKey: ["system-update", "notifications"],
     queryFn: async () => {
       const response = await fetch("/api/system/update")
@@ -73,12 +75,35 @@ export function NotificationsBell() {
     refetchIntervalInBackground: false,
   })
 
+  const nfqwsUpdateQuery = useQuery(nfqwsUpdateQueryOptions())
+
   const notices = collectNotices(
     logsQuery.data?.lines ?? [],
     updateQuery.data,
+    nfqwsUpdateQuery.data,
     dismissedUntil,
+    dismissedIds,
     t
   )
+
+  const dismissAll = (event: MouseEvent<HTMLButtonElement>) => {
+    const now =
+      event.timeStamp > 1_000_000_000_000
+        ? event.timeStamp
+        : performance.timeOrigin + event.timeStamp
+    const syntheticIds = notices
+      .filter((notice) => notice.timestamp === undefined)
+      .map((notice) => notice.id)
+    const nextDismissedIds = new Set([...dismissedIds, ...syntheticIds])
+    window.localStorage.setItem(DISMISSED_KEY, String(now))
+    window.localStorage.setItem(
+      DISMISSED_IDS_KEY,
+      JSON.stringify([...nextDismissedIds])
+    )
+    setDismissedUntil(now)
+    setDismissedIds(nextDismissedIds)
+    setOpen(false)
+  }
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
@@ -86,14 +111,14 @@ export function NotificationsBell() {
         render={
           <Button
             aria-label={t("notifications.title")}
-            className="relative size-9 text-primary hover:bg-accent hover:text-primary"
+            className={TOP_BAR_CONTROL_CLASS}
             size="icon"
             title={t("notifications.title")}
             variant="ghost"
           />
         }
       >
-        <BellIcon className="size-4" />
+        <BellIcon />
         {notices.length > 0 ? (
           <span
             className={cn(
@@ -107,7 +132,9 @@ export function NotificationsBell() {
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 p-0">
         <div className="flex items-center justify-between gap-2 border-b py-1.5 pr-1.5 pl-3">
-          <span className="text-sm font-medium">{t("notifications.title")}</span>
+          <span className="text-sm font-medium">
+            {t("notifications.title")}
+          </span>
           {notices.length > 0 ? (
             <Button
               className="h-7 gap-1.5 px-2 text-xs text-muted-foreground"
@@ -156,52 +183,4 @@ export function NotificationsBell() {
       </PopoverContent>
     </Popover>
   )
-}
-
-const MAX_NOTICES = 20
-
-/**
- * Log lines look like "2026-07-19 23:13:43.549 [W] message". The level marker
- * is absent on ordinary info lines, which is exactly what we want to skip.
- */
-function collectNotices(
-  lines: string[],
-  update: UpdateResponse | undefined,
-  dismissedUntil: number,
-  t: (key: string, options?: Record<string, unknown>) => string
-): Notice[] {
-  const notices: Notice[] = []
-
-  if (update?.available && update.latest) {
-    notices.push({
-      id: `update-${update.latest}`,
-      level: "info",
-      text: t("notifications.updateAvailable", { version: update.latest }),
-    })
-  }
-
-  // Newest first: the tail of the file is the most recent.
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (notices.length >= MAX_NOTICES) {
-      break
-    }
-    const line = lines[index]
-    const match = line.match(/^(\S+ \S+)\s+\[([EW])\]\s+(.*)$/)
-    if (!match) {
-      continue
-    }
-    const [, timestamp, marker, text] = match
-    // The log keeps its history; dismissing only hides what was already read.
-    if (dismissedUntil > 0 && Date.parse(timestamp.replace(" ", "T")) <= dismissedUntil) {
-      continue
-    }
-    notices.push({
-      id: `${timestamp}-${index}`,
-      level: marker === "E" ? "error" : "warning",
-      text,
-      timestamp,
-    })
-  }
-
-  return notices
 }

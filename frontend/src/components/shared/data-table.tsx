@@ -1,7 +1,8 @@
-import { useRef, useState, type ReactNode } from "react"
+import type { ReactNode } from "react"
 import { GripVerticalIcon } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
+import { usePointerSortable } from "@/hooks/use-pointer-sortable"
 import { cn } from "@/lib/utils"
 import {
   Table,
@@ -28,6 +29,32 @@ export type DataTableReorder = {
   handleLabel?: string
 }
 
+function createTableRowPreview(source: HTMLElement) {
+  const sourceRow = source.closest<HTMLTableRowElement>("tr") ?? source
+  const sourceTable = sourceRow.closest<HTMLTableElement>("table")
+  const previewTable = document.createElement("table")
+  const previewBody = document.createElement("tbody")
+  const previewRow = sourceRow.cloneNode(true) as HTMLElement
+
+  if (sourceTable) {
+    previewTable.className = sourceTable.className
+  }
+  previewTable.classList.add("table-fixed", "border-collapse", "bg-card")
+
+  const sourceCells = sourceRow.querySelectorAll<HTMLElement>("th, td")
+  const previewCells = previewRow.querySelectorAll<HTMLElement>("th, td")
+  previewCells.forEach((cell, index) => {
+    const sourceCell = sourceCells[index]
+    if (sourceCell) {
+      cell.style.width = `${sourceCell.getBoundingClientRect().width}px`
+    }
+  })
+
+  previewBody.append(previewRow)
+  previewTable.append(previewBody)
+  return previewTable
+}
+
 export function DataTable({
   headers,
   rows,
@@ -43,13 +70,18 @@ export function DataTable({
   selection?: DataTableSelection
   reorder?: DataTableReorder
 }) {
-  const [dragIndex, setDragIndex] = useState<number | null>(null)
-  const [dropIndex, setDropIndex] = useState<number | null>(null)
-  const armedDragIndex = useRef<number | null>(null)
   const hasSelection = Boolean(
     selection && selection.rowIds.length === rows.length
   )
   const hasReorder = Boolean(reorder)
+  const { currentOrder, draggingPosition, getHandleProps, setItemRef } =
+    usePointerSortable({
+      itemCount: rows.length,
+      disabled: !hasReorder || reorder?.disabled,
+      itemSelector: "[data-sortable-table-row]",
+      onReorder: (fromIndex, toIndex) => reorder?.onReorder(fromIndex, toIndex),
+      createPreview: createTableRowPreview,
+    })
   const leadingColumns = (hasReorder ? 1 : 0) + (hasSelection ? 1 : 0)
   const headersWithSelection = headers
     ? [...Array(leadingColumns).fill(""), ...headers]
@@ -111,217 +143,188 @@ export function DataTable({
 
   return (
     <>
-    <div className="hidden max-w-full overflow-x-auto border-b md:block">
-      <Table className={compact ? "w-full text-sm" : "w-full text-sm"}>
-        {headersWithSelection && (
-          <TableHeader className="bg-muted/70 text-xs tracking-wide text-muted-foreground uppercase">
-            <TableRow>
-              {headersWithSelection.map((header, headerIndex) => (
-                <TableHead
-                  className={headClass(headerIndex)}
-                  key={`${header}-${headerIndex}`}
-                >
-                  {hasSelection && headerIndex === leadingColumns - 1 ? (
-                    <div className="flex justify-center">
-                      <Checkbox
-                        aria-label={
-                          selection!.selectAllLabel ?? "Select all visible rows"
-                        }
-                        checked={allVisibleSelected}
-                        disabled={
-                          selection!.disabled || visibleRowIds.length === 0
-                        }
-                        onCheckedChange={(checked) => {
-                          selection!.onToggleAll(checked === true, selection!.rowIds)
-                        }}
-                      />
-                    </div>
-                  ) : (
-                    header
-                  )}
-                </TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-        )}
-        <TableBody>
-          {rows.map((row, index) => {
-            const rowId = hasSelection ? (selection!.rowIds[index] ?? "") : ""
-
-            const isDropTarget = hasReorder && dropIndex === index && dragIndex !== index
-
-            return (
-              <TableRow
-                className={cn(
-                  "transition-[background-color,box-shadow,opacity] duration-150",
-                  hasReorder && dragIndex === index &&
-                    "keen-row-dragging relative z-10",
-                  isDropTarget &&
-                    (dragIndex !== null && dragIndex < index
-                      ? "keen-row-drop-after"
-                      : "keen-row-drop-before")
-                )}
-                draggable={hasReorder && !reorder?.disabled}
-                key={hasSelection ? rowId || index : `${row[0]}-${index}`}
-                onDragEnd={() => {
-                  armedDragIndex.current = null
-                  setDragIndex(null)
-                  setDropIndex(null)
-                }}
-                onDragStart={(event) => {
-                  if (!hasReorder || armedDragIndex.current !== index) {
-                    event.preventDefault()
-                    return
-                  }
-                  event.dataTransfer.effectAllowed = "move"
-                  setDragIndex(index)
-                  setDropIndex(index)
-                }}
-                onDragOver={(event) => {
-                  if (!hasReorder || dragIndex === null) return
-                  event.preventDefault()
-                  setDropIndex(index)
-                }}
-                onDrop={(event) => {
-                  if (!hasReorder || dragIndex === null) return
-                  event.preventDefault()
-                  if (dragIndex !== index) reorder!.onReorder(dragIndex, index)
-                  setDragIndex(null)
-                  setDropIndex(null)
-                }}
-              >
-                {hasReorder ? (
-                  <TableCell className={cellClass(0)}>
-                    <button
-                      aria-label={reorder!.handleLabel ?? "Reorder row"}
-                      className="flex cursor-grab items-center justify-center text-muted-foreground transition-colors hover:text-foreground active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
-                      disabled={reorder!.disabled}
-                      // Rows stay undraggable until the handle is pressed, so
-                      // text selection inside cells keeps working.
-                      onPointerCancel={() => {
-                        armedDragIndex.current = null
-                      }}
-                      onPointerDown={() => {
-                        armedDragIndex.current = index
-                      }}
-                      onPointerUp={() => {
-                        if (dragIndex === null) armedDragIndex.current = null
-                      }}
-                      title={reorder!.handleLabel ?? "Reorder row"}
-                      type="button"
-                    >
-                      <GripVerticalIcon className="h-4 w-4" />
-                    </button>
-                  </TableCell>
-                ) : null}
-                {hasSelection ? (
-                  <TableCell className={cellClass(leadingColumns - 1)}>
-                    <div className="flex justify-center">
-                      <Checkbox
-                        aria-label={
-                          rowId
-                            ? selection!.getRowLabel(rowId)
-                            : (selection!.selectAllLabel ?? "Select row")
-                        }
-                        checked={
-                          rowId ? selection!.selectedIds.has(rowId) : false
-                        }
-                        disabled={selection!.disabled || !rowId}
-                        onCheckedChange={() => {
-                          if (rowId) {
-                            selection!.onToggle(rowId)
+      <div className="hidden max-w-full overflow-x-auto border-b md:block">
+        <Table className={compact ? "w-full text-sm" : "w-full text-sm"}>
+          {headersWithSelection && (
+            <TableHeader className="bg-muted/70 text-xs tracking-wide text-muted-foreground uppercase">
+              <TableRow>
+                {headersWithSelection.map((header, headerIndex) => (
+                  <TableHead
+                    className={headClass(headerIndex)}
+                    key={`${header}-${headerIndex}`}
+                  >
+                    {hasSelection && headerIndex === leadingColumns - 1 ? (
+                      <div className="flex justify-center">
+                        <Checkbox
+                          aria-label={
+                            selection!.selectAllLabel ??
+                            "Select all visible rows"
                           }
-                        }}
-                      />
-                    </div>
-                  </TableCell>
-                ) : null}
-                {row.map((cell, cellIndex) => {
-                  const displayIndex = cellIndex + leadingColumns
-
-                  return (
-                    <TableCell
-                      className={cellClass(displayIndex)}
-                      key={cellIndex}
-                    >
-                      {cell}
-                    </TableCell>
-                  )
-                })}
+                          checked={allVisibleSelected}
+                          disabled={
+                            selection!.disabled || visibleRowIds.length === 0
+                          }
+                          onCheckedChange={(checked) => {
+                            selection!.onToggleAll(
+                              checked === true,
+                              selection!.rowIds
+                            )
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      header
+                    )}
+                  </TableHead>
+                ))}
               </TableRow>
-            )
-          })}
-        </TableBody>
-      </Table>
-    </div>
-
-    {/* Narrow screens get one block per row instead of a table that would have
-        to be scrolled sideways to read. */}
-    <div className="divide-y border-y md:hidden">
-      {rows.map((row, index) => {
-        const rowId = hasSelection ? (selection!.rowIds[index] ?? "") : ""
-        const actionsCell = headers ? row[row.length - 1] : undefined
-        const bodyCells = headers ? row.slice(0, -1) : row
-
-        return (
-          <div
-            className="space-y-2 py-3"
-            key={hasSelection ? rowId || index : `mobile-${index}`}
-          >
-            <div className="flex items-center gap-2">
-              {hasReorder ? (
-                <button
-                  aria-label={reorder!.handleLabel ?? "Reorder row"}
-                  className="cursor-grab text-muted-foreground disabled:opacity-40"
-                  disabled={reorder!.disabled}
-                  type="button"
-                >
-                  <GripVerticalIcon className="h-4 w-4" />
-                </button>
-              ) : null}
-              {hasSelection ? (
-                <Checkbox
-                  aria-label={
-                    rowId
-                      ? selection!.getRowLabel(rowId)
-                      : (selection!.selectAllLabel ?? "Select row")
-                  }
-                  checked={rowId ? selection!.selectedIds.has(rowId) : false}
-                  disabled={selection!.disabled || !rowId}
-                  onCheckedChange={() => {
-                    if (rowId) selection!.onToggle(rowId)
-                  }}
-                />
-              ) : null}
-              <div className="ml-auto">{actionsCell}</div>
-            </div>
-
-            {bodyCells.map((cell, cellIndex) => {
-              const label = headers?.[cellIndex]
-              if (!label) {
-                return (
-                  <div className="min-w-0" key={cellIndex}>
-                    {cell}
-                  </div>
-                )
-              }
+            </TableHeader>
+          )}
+          <TableBody>
+            {currentOrder.map((rowIndex, position) => {
+              const row = rows[rowIndex] ?? []
+              const rowId = hasSelection
+                ? (selection!.rowIds[rowIndex] ?? "")
+                : ""
 
               return (
-                <div
-                  className="grid grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-start gap-2 text-sm"
-                  key={cellIndex}
+                <TableRow
+                  className={cn(
+                    "transition-[background-color,box-shadow,opacity] duration-150",
+                    hasReorder &&
+                      draggingPosition === position &&
+                      "keen-row-dragging relative z-10"
+                  )}
+                  data-sortable-table-row
+                  key={
+                    hasSelection ? rowId || rowIndex : `${row[0]}-${rowIndex}`
+                  }
+                  ref={(element) => {
+                    setItemRef(position, element)
+                  }}
                 >
-                  <span className="text-xs text-muted-foreground uppercase">
-                    {label}
-                  </span>
-                  <div className="min-w-0 break-words">{cell}</div>
-                </div>
+                  {hasReorder ? (
+                    <TableCell className={cellClass(0)}>
+                      <button
+                        aria-label={reorder!.handleLabel ?? "Reorder row"}
+                        className="flex cursor-grab touch-none items-center justify-center text-muted-foreground transition-colors hover:text-foreground active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={reorder!.disabled}
+                        title={reorder!.handleLabel ?? "Reorder row"}
+                        type="button"
+                        {...getHandleProps(position)}
+                      >
+                        <GripVerticalIcon className="h-4 w-4" />
+                      </button>
+                    </TableCell>
+                  ) : null}
+                  {hasSelection ? (
+                    <TableCell className={cellClass(leadingColumns - 1)}>
+                      <div className="flex justify-center">
+                        <Checkbox
+                          aria-label={
+                            rowId
+                              ? selection!.getRowLabel(rowId)
+                              : (selection!.selectAllLabel ?? "Select row")
+                          }
+                          checked={
+                            rowId ? selection!.selectedIds.has(rowId) : false
+                          }
+                          disabled={selection!.disabled || !rowId}
+                          onCheckedChange={() => {
+                            if (rowId) {
+                              selection!.onToggle(rowId)
+                            }
+                          }}
+                        />
+                      </div>
+                    </TableCell>
+                  ) : null}
+                  {row.map((cell, cellIndex) => {
+                    const displayIndex = cellIndex + leadingColumns
+
+                    return (
+                      <TableCell
+                        className={cellClass(displayIndex)}
+                        key={cellIndex}
+                      >
+                        {cell}
+                      </TableCell>
+                    )
+                  })}
+                </TableRow>
               )
             })}
-          </div>
-        )
-      })}
-    </div>
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Narrow screens get one block per row instead of a table that would have
+        to be scrolled sideways to read. */}
+      <div className="divide-y border-y md:hidden">
+        {rows.map((row, index) => {
+          const rowId = hasSelection ? (selection!.rowIds[index] ?? "") : ""
+          const actionsCell = headers ? row[row.length - 1] : undefined
+          const bodyCells = headers ? row.slice(0, -1) : row
+
+          return (
+            <div
+              className="space-y-2 py-3"
+              key={hasSelection ? rowId || index : `mobile-${index}`}
+            >
+              <div className="flex items-center gap-2">
+                {hasReorder ? (
+                  <button
+                    aria-label={reorder!.handleLabel ?? "Reorder row"}
+                    className="cursor-grab text-muted-foreground disabled:opacity-40"
+                    disabled={reorder!.disabled}
+                    type="button"
+                  >
+                    <GripVerticalIcon className="h-4 w-4" />
+                  </button>
+                ) : null}
+                {hasSelection ? (
+                  <Checkbox
+                    aria-label={
+                      rowId
+                        ? selection!.getRowLabel(rowId)
+                        : (selection!.selectAllLabel ?? "Select row")
+                    }
+                    checked={rowId ? selection!.selectedIds.has(rowId) : false}
+                    disabled={selection!.disabled || !rowId}
+                    onCheckedChange={() => {
+                      if (rowId) selection!.onToggle(rowId)
+                    }}
+                  />
+                ) : null}
+                <div className="ml-auto">{actionsCell}</div>
+              </div>
+
+              {bodyCells.map((cell, cellIndex) => {
+                const label = headers?.[cellIndex]
+                if (!label) {
+                  return (
+                    <div className="min-w-0" key={cellIndex}>
+                      {cell}
+                    </div>
+                  )
+                }
+
+                return (
+                  <div
+                    className="grid grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)] items-start gap-2 text-sm"
+                    key={cellIndex}
+                  >
+                    <span className="text-xs text-muted-foreground uppercase">
+                      {label}
+                    </span>
+                    <div className="min-w-0 break-words">{cell}</div>
+                  </div>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
     </>
   )
 }

@@ -2,7 +2,7 @@ import type { ReactNode } from "react"
 import { useLocation } from "wouter"
 
 import { AppSidebar } from "@/components/app-sidebar"
-import { AppBrandHeader } from "@/components/layout/app-brand-header"
+import { MobileAppHeader } from "@/components/layout/mobile-app-header"
 import { useWarningBannerState } from "@/components/layout/warning-banner-state"
 import { WarningBanner } from "@/components/layout/warning-banner"
 import { TopBarControls } from "@/components/layout/top-bar-controls"
@@ -40,7 +40,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <DesktopSystemBar />
           <main
             aria-labelledby="page-title"
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto"
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]"
             id="main-content"
           >
             {/* No max-width: NDMS lets its panels use the whole window, and a
@@ -49,9 +49,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div
               className={cn(
                 "min-w-0 px-4 pt-4 sm:px-6",
-                isOverview
-                  ? "lg:px-8 lg:pt-5"
-                  : "lg:pt-[33px] lg:pr-8 lg:pl-[41px]"
+                isOverview ? "lg:px-8 lg:pt-5" : "lg:pt-[33px] lg:pr-8 lg:pl-8"
               )}
               style={{
                 paddingBottom:
@@ -82,23 +80,14 @@ function DesktopSystemBar() {
 }
 
 function MobileSidebarHeader() {
-  const { toggleSidebar } = useSidebar()
+  const { openMobile, toggleSidebar } = useSidebar()
 
   return (
-    // Fixed positioning keeps the system bar visible even if a page moves
-    // scrolling from the main container to the document. The wrapper reserves
-    // its height so page content never slips underneath it.
-    <div className="h-14 shrink-0 md:hidden">
-      <div className="keen-header-shadow fixed inset-x-0 top-0 z-40 bg-card">
-        <div className="flex h-14 items-center gap-2 px-4">
-          <AppBrandHeader
-            className="min-w-0 flex-1"
-            onMenuClick={toggleSidebar}
-            variant="topbar"
-          />
-          <TopBarControls />
-        </div>
-      </div>
+    // The page itself scrolls inside <main>, so this sibling never moves.
+    // Keeping it in normal layout avoids a fixed overlay covering the sticky
+    // action bar after mobile overscroll or history restoration.
+    <div className="relative z-40 flex h-16 shrink-0 md:hidden">
+      <MobileAppHeader menuOpen={openMobile} onMenuClick={toggleSidebar} />
     </div>
   )
 }

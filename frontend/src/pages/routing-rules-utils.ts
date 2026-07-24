@@ -1,6 +1,7 @@
 import type { ApiError } from "@/api/client"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import { getApiErrorMessage as getSharedApiErrorMessage } from "@/lib/api-errors"
+import { stableJsonStringify } from "@/lib/semantic-json"
 
 export type RouteRuleDraft = {
   enabled: boolean
@@ -18,6 +19,25 @@ export const protoOptions = ["", "tcp", "udp", "tcp/udp"] as const
 
 export function getRoutingRuleRowId(index: number) {
   return String(index)
+}
+
+function normalizeRouteRulesForComparison(rules: readonly RouteRule[]) {
+  return rules.map((rule) => ({
+    ...rule,
+    enabled: rule.enabled ?? true,
+    list: rule.list ?? [],
+  }))
+}
+
+export function getRouteRulesSemanticKey(rules: readonly RouteRule[]) {
+  return stableJsonStringify(normalizeRouteRulesForComparison(rules))
+}
+
+export function areRouteRulesSemanticallyEqual(
+  left: readonly RouteRule[],
+  right: readonly RouteRule[]
+) {
+  return getRouteRulesSemanticKey(left) === getRouteRulesSemanticKey(right)
 }
 
 export const emptyRouteRuleDraft: RouteRuleDraft = {

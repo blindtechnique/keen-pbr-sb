@@ -33,6 +33,7 @@ export const ruTranslation = {
     rollback: "Откатить конфигурацию",
     rollbackCompleted: "Конфигурация восстановлена из резервной копии.",
     tabs: {
+      ariaLabel: "Разделы nfqws2",
       settings: "Настройки",
       strategies: "Стратегии",
       lists: "Списки",
@@ -121,6 +122,12 @@ export const ruTranslation = {
       "Данные задаются установщиком keen-pbr-sb. Это отдельная локальная учётная запись; источник указан в README.",
   },
   common: {
+    updateStatus: {
+      available: "Есть обновление",
+      current: "Нет обновлений",
+      checking: "Проверка обновлений",
+      unavailable: "Проверка недоступна",
+    },
     dependencies: {
       title: "От этого зависит: {{count}}",
       none: "Ничего от этого не зависит — удаление ничего не сломает",
@@ -138,7 +145,18 @@ export const ruTranslation = {
     disabled: "Выключено",
     close: "Закрыть",
     cancel: "Отмена",
+    save: "Сохранить",
     saving: "Сохранение…",
+    openAdvancedEditor: "Расширенный редактор",
+    unsavedChanges: {
+      title: "Отменить изменения?",
+      description:
+        "В форме есть несохранённые изменения. Если закрыть её сейчас, они будут потеряны.",
+      continueEditing: "Продолжить редактирование",
+      discard: "Не сохранять",
+      advancedEditorDisabled:
+        "Сначала сохраните или отмените изменения в текущей форме.",
+    },
     copy: "Копировать",
     copied: "Скопировано",
     clipboardUnavailable: "Буфер обмена недоступен",
@@ -158,6 +176,8 @@ export const ruTranslation = {
       addFirstItem:
         "Добавьте первый элемент, чтобы начать формировать этот список.",
       removeItem: "Удалить {{item}}",
+      reorderItem: "Переместить {{item}}",
+      reorderItems: "Изменить порядок",
     },
     listUsage: {
       usedElsewhere: "Используется ещё в: {{summary}}",
@@ -224,8 +244,8 @@ export const ruTranslation = {
       systemMonitor: "Дашборд",
       catalog: "Каталог списков",
       settings: "Настройки",
-      outbounds: "Исходящие соединения",
-      transports: "Транспорты (sing-box)",
+      outbounds: "Маршруты и резервирование",
+      transports: "Туннели и прокси",
       connections: "Соединения",
       dnsServers: "DNS-серверы",
       lists: "Списки",
@@ -238,6 +258,7 @@ export const ruTranslation = {
     title: "Уведомления",
     empty: "Пока всё спокойно",
     updateAvailable: "Доступна версия {{version}}",
+    nfqwsUpdateAvailable: "Для nfqws2 доступно обновление {{version}}",
   },
   connections: {
     age: {
@@ -288,13 +309,18 @@ export const ruTranslation = {
       description:
         "Для VLESS, VMess, Trojan, Shadowsocks и других управляемых proxy-транспортов установите sing-box. Запустите установщик keen-pbr-sb по SSH и выберите протестированную версию.",
     },
-    title: "Транспорты",
+    title: "Туннели и прокси",
     description:
-      "Нативные и управляемые туннельные интерфейсы для исходящих соединений keen-pbr.",
+      "Управляемые туннели и прокси, которые создают интерфейсы для маршрутизации keen-pbr.",
+    tabs: {
+      all: "Все",
+      other: "Другие",
+      ariaLabel: "Типы транспортов",
+    },
     refresh: "Обновить",
-    add: "Добавить транспорт",
+    add: "Добавить туннель или прокси",
     unavailable: "Менеджер транспортов недоступен",
-    empty: "Транспорты пока не настроены.",
+    empty: "Туннели и прокси пока не настроены.",
     interface: "Интерфейс",
     server: "Сервер",
     connection: "Соединение",
@@ -391,6 +417,7 @@ export const ruTranslation = {
       createOutbound: "Сделать исходящим соединением",
       createFailover: "Создать резервирование",
       bindOutbound: "Сделать исходящим соединением",
+      alreadyBound: "Уже связано с «{{tag}}»",
     },
     states: {
       connected: "Подключено",
@@ -402,9 +429,17 @@ export const ruTranslation = {
   },
   brand: {
     logoAlt: "логотип keen-pbr-sb",
-    version: "Версия {{version}}",
-    tagline: "Пакет для пакетов с пакетами",
+    tagline:
+      "Маршрутизация, туннели и сетевые сервисы Keenetic в одном интерфейсе.",
     openMenu: "Открыть меню",
+    closeMenu: "Закрыть меню",
+    hideMenu: "Скрыть меню",
+    showMenu: "Развернуть меню",
+  },
+  headerHealth: {
+    healthy: "Все системы работают штатно",
+    attention: "Некоторые системы требуют внимания",
+    failed: "Некоторые системы не работают",
   },
   warning: {
     draftChanged:
@@ -449,7 +484,8 @@ export const ruTranslation = {
     success: "Операция завершена",
     successDescription: "Все этапы выполнены успешно.",
     error: "Операция завершилась с ошибкой",
-    errorDescription: "Не выполненные этапы пропущены. Проверьте отмеченный этап.",
+    errorDescription:
+      "Не выполненные этапы пропущены. Проверьте отмеченный этап.",
     dismiss: "Закрыть",
     stages: {
       validate_config: "Проверка конфигурации",
@@ -460,6 +496,26 @@ export const ruTranslation = {
     },
   },
   overview: {
+    summary: {
+      healthy: {
+        title: "Система работает штатно",
+        description:
+          "Маршрутизация, DNS и активные исходящие соединения отвечают.",
+      },
+      waiting: {
+        title: "Получаем состояние системы",
+        description:
+          "Службы уже опрашиваются; актуальные данные появятся автоматически.",
+      },
+      degraded: {
+        title: "Требуется внимание",
+        description:
+          "Одна из проверок маршрутизации, DNS или службы завершилась ошибкой.",
+      },
+      routing: "Маршрутизация",
+      configuration: "{{lists}} списков · {{rules}} правил",
+      draft: "Есть несохранённый черновик",
+    },
     router: {
       title: "Роутер",
       unavailable:
@@ -467,15 +523,21 @@ export const ruTranslation = {
       cpu: "Процессор",
       memory: "Память",
       memoryValue: "{{used}} МБ / {{total}} МБ ({{percent}}%)",
+      memoryValueCompact: "{{percent}}% · {{used}}/{{total}} МБ",
       memoryTotalOnly: "{{total}} МБ",
       disk: "Диск Entware",
       diskValue: "{{used}} МБ / {{total}} МБ ({{percent}}%)",
+      diskValueCompact: "{{percent}}% · {{used}}/{{total}}",
+      capacityMb: "{{value}} МБ",
+      capacityGb: "{{value}} ГБ",
       wan: "Адрес WAN",
       clients: "Клиенты",
-      clientsValue: "{{active}} активно / {{total}} всего",
+      clientsValue: "{{active}} из {{total}}",
       firmware: "Версия ПО",
       uptime: "Время работы",
       uptimeValue: "{{days}} д {{hours}} ч {{minutes}} мин",
+      uptimeHoursValue: "{{hours}} ч {{minutes}} мин",
+      uptimeMinutesValue: "{{minutes}} мин",
       loadAverage: "Средняя нагрузка",
     },
     services: {
@@ -723,6 +785,7 @@ export const ruTranslation = {
       title: "Каталог списков",
       description:
         "Готовые наборы доменов и правил. Выберите нужные и укажите, куда направлять их трафик.",
+      categoriesAriaLabel: "Категории каталога",
       source: "Источник:",
       updatedAt: "обновлён {{date}}",
       count: "{{count}} списков",
@@ -755,6 +818,14 @@ export const ruTranslation = {
       },
     },
     settings: {
+      tabs: {
+        ariaLabel: "Разделы настроек",
+        general: "Основные",
+        access: "Доступ",
+        logging: "Журнал",
+        advanced: "Дополнительно",
+        maintenance: "Обслуживание",
+      },
       backup: {
         title: "Резервное копирование",
         description:
@@ -830,6 +901,19 @@ export const ruTranslation = {
           "Блокировать трафик при падении исходящего соединения (kill-switch)",
         strictEnforcementHint:
           "Если VPN или интерфейс отключится, трафик по его правилам будет заблокирован, а не отправлен через основную таблицу маршрутизации. Можно переопределить для каждого исходящего соединения.",
+        strictEnforcementOptions: {
+          automatic: "Автоматически (рекомендуется)",
+          enabled: "Всегда блокировать",
+          disabled: "Не блокировать",
+        },
+        strictEnforcementHints: {
+          automatic:
+            "Туннели без шлюза защищены от утечки, а обычные шлюзы остаются доступными. Отдельное исходящее соединение может переопределить этот режим.",
+          enabled:
+            "Для всех интерфейсных исходящих соединений недоступный маршрут блокируется, чтобы трафик не ушёл напрямую.",
+          disabled:
+            "Глобальная блокировка выключена. При падении интерфейса трафик может перейти в основную таблицу маршрутизации, если соединение не переопределяет настройку.",
+        },
         skipMarkedPacketsLabel: "Не обрабатывать маркированные пакеты",
         skipMarkedPacketsHint:
           "Игнорировать пакеты, у которых уже есть fwmark проставленный другими правилами firewall, чтобы policy routing не обрабатывал их повторно.",
@@ -919,6 +1003,9 @@ export const ruTranslation = {
         result: "Журнал обновления",
         waitingForLog: "Обновление запущено, ожидаем первые строки журнала…",
         checkFailed: "Не удалось проверить обновления.",
+        cachedResult:
+          "GitHub временно недоступен. Показаны последние сохранённые данные.",
+        unavailableValue: "проверка недоступна",
         startFailed: "Не удалось запустить обновление.",
       },
       advanced: {
@@ -944,6 +1031,7 @@ export const ruTranslation = {
     dnsServers: {
       title: "DNS-серверы",
       description: "Upstream DNS-серверы для разрешения доменных имён.",
+      fallbackSaved: "Порядок fallback DNS сохранён в черновик",
       keeneticAddress: "Встроенный DNS Keenetic",
       actions: {
         add: "Добавить DNS-сервер",
@@ -1051,6 +1139,7 @@ export const ruTranslation = {
       actions: {
         reorder: "Перетащите, чтобы изменить порядок",
         addRule: "Добавить правило маршрутизации",
+        saveChanges: "Сохранить изменения",
         enableRule: "Включить правило",
         disableRule: "Выключить правило",
       },
@@ -1064,7 +1153,7 @@ export const ruTranslation = {
         disable: "Выключить выбранные",
         delete: "Удалить выбранные",
         confirmDelete:
-          "Удалить {{count}} правил(о/а) маршрутизации? Изменение нельзя отменить здесь одним действием.",
+          "Удалить {{count}} правил(о/а) маршрутизации? До сохранения действие можно отменить.",
       },
       empty: {
         title: "Правил маршрутизации пока нет",
@@ -1095,6 +1184,8 @@ export const ruTranslation = {
         "Это правило направляет подходящий трафик в указанное соединение.",
       cardDescription:
         "Выберите списки и соединение, затем при необходимости сузьте правило по протоколу, портам и адресам.",
+      simpleCardDescription:
+        "Выберите список и исходящее соединение. Этого достаточно для рабочего правила; дополнительные условия доступны в расширенном редакторе.",
       messages: {
         saved:
           "Правило маршрутизации сохранено в черновик. Примените новый конфиг, чтобы записать его.",
@@ -1171,9 +1262,17 @@ export const ruTranslation = {
         failover: "Резервирование",
         system: "Системные выходы",
       },
-      title: "Исходящие соединения",
+      groupsEmpty: {
+        interfaces: "Туннели и интерфейсы пока не добавлены.",
+        failover: "Группы резервирования пока не настроены.",
+        system: "Системные выходы пока не настроены.",
+      },
+      tabs: {
+        ariaLabel: "Разделы исходящих соединений",
+      },
+      title: "Маршруты и резервирование",
       description:
-        "Куда уходит трафик: туннели, интерфейсы и группы резервирования.",
+        "Куда уходит трафик: туннели и интерфейсы, группы резервирования и системные выходы.",
       actions: { new: "Добавить соединение" },
       bulk: {
         selected: "Выбрано: {{count}}",
@@ -1566,6 +1665,8 @@ export const ruTranslation = {
         "Список может содержать домены и IP, введённые вручную, загруженные по URL или из файла.",
       cardDescription:
         "Проверьте источник списка, TTL и содержимое перед сохранением.",
+      simpleCardDescription:
+        "Укажите имя и источник списка. TTL и параметры загрузки доступны в расширенном редакторе.",
       messages: {
         created:
           "Список сохранён в черновик. Примените новый конфиг, чтобы записать его.",
@@ -1660,6 +1761,8 @@ export const ruTranslation = {
           "IP-адреса или диапазоны CIDR, по одному в строке. Напр. `93.184.216.34`, `10.0.0.0/8`.",
       },
       validation: {
+        sourceRequired:
+          "Заполните выбранный источник, чтобы список мог работать.",
         nameRequired: "Имя обязательно.",
         duplicateName: "Список с таким именем уже существует.",
         invalidTtl: "TTL должен быть неотрицательным целым числом.",

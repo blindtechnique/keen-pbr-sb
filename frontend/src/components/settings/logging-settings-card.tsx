@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import {
+  forwardRef,
+  useImperativeHandle,
+  useState,
+  type ForwardedRef,
+} from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -10,7 +15,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import {
   Select,
@@ -21,6 +25,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import type {
+  SettingsSectionController,
+  SettingsSectionState,
+} from "@/components/settings/settings-section-control"
 
 type LogSettings = {
   file_enabled: boolean
@@ -36,7 +44,16 @@ const LEVELS = ["error", "warn", "info", "verbose", "debug"] as const
  * on by default. The switch exists for people who would rather not have the
  * router write to flash continuously.
  */
-export function LoggingSettingsCard() {
+export const LoggingSettingsCard = forwardRef(LoggingSettingsCardInner)
+
+function LoggingSettingsCardInner(
+  {
+    onStateChange,
+  }: {
+    onStateChange: (state: SettingsSectionState) => void
+  },
+  ref: ForwardedRef<SettingsSectionController>
+) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
@@ -52,6 +69,17 @@ export function LoggingSettingsCard() {
   const [draft, setDraft] = useState<LogSettingsDraft>({})
   const fileEnabled = draft.file_enabled ?? query.data?.file_enabled ?? true
   const level = draft.level ?? query.data?.level ?? "info"
+  const getSectionState = (
+    nextDraft = draft
+  ): SettingsSectionState => ({
+    dirty: Object.keys(nextDraft).length > 0,
+    valid: true,
+  })
+  const updateDraft = (patch: LogSettingsDraft) => {
+    const nextDraft = { ...draft, ...patch }
+    setDraft(nextDraft)
+    onStateChange(getSectionState(nextDraft))
+  }
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -69,10 +97,27 @@ export function LoggingSettingsCard() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["log-settings"] })
       setDraft({})
+      onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.logging.saved"))
     },
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      reset: () => {
+        setDraft({})
+        onStateChange({ dirty: false, valid: true })
+      },
+      save: async () => {
+        if (!getSectionState().dirty) {
+          return
+        }
+        await saveMutation.mutateAsync()
+      },
+    })
+  )
 
   return (
     <Card size="sm">
@@ -88,10 +133,7 @@ export function LoggingSettingsCard() {
             checked={fileEnabled}
             id="logging-enabled"
             onCheckedChange={(nextEnabled) =>
-              setDraft((current) => ({
-                ...current,
-                file_enabled: nextEnabled,
-              }))
+              updateDraft({ file_enabled: nextEnabled })
             }
           />
           <Label className="cursor-pointer" htmlFor="logging-enabled">
@@ -104,10 +146,7 @@ export function LoggingSettingsCard() {
           <Select
             disabled={!fileEnabled}
             onValueChange={(value) =>
-              setDraft((current) => ({
-                ...current,
-                level: value ?? "info",
-              }))
+              updateDraft({ level: value ?? "info" })
             }
             value={level}
           >
@@ -137,16 +176,6 @@ export function LoggingSettingsCard() {
           {t("pages.settings.logging.pathHint")}
         </p>
 
-        <div className="flex justify-end">
-          <Button
-            disabled={saveMutation.isPending}
-            onClick={() => saveMutation.mutate()}
-          >
-            {saveMutation.isPending
-              ? t("common.saving")
-              : t("pages.settings.logging.save")}
-          </Button>
-        </div>
       </CardContent>
     </Card>
   )

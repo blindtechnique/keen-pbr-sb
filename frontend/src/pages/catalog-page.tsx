@@ -8,13 +8,19 @@ import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { RouteRule } from "@/api/generated/model/routeRule"
-import { useConfigMutationPending, usePostConfigMutation } from "@/api/mutations"
+import {
+  useConfigMutationPending,
+  usePostConfigMutation,
+} from "@/api/mutations"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
+import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
+import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 
@@ -78,7 +84,6 @@ export function CatalogPage() {
     },
   })
 
-  const [category, setCategory] = useState("all")
   const [search, setSearch] = useState("")
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [destination, setDestination] = useState("")
@@ -124,6 +129,37 @@ export function CatalogPage() {
   const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
   const existingNames = new Set(Object.keys(config?.lists ?? {}))
 
+  const categories = useMemo(() => {
+    const present = new Set(presets.map((preset) => preset.category))
+    return CATEGORY_ORDER.filter((key) => present.has(key))
+  }, [presets])
+
+  const categoryTabs = useMemo<SectionTab<string>[]>(() => {
+    const counts = new Map<string, number>()
+    for (const preset of presets) {
+      if (preset.category) {
+        counts.set(preset.category, (counts.get(preset.category) ?? 0) + 1)
+      }
+    }
+
+    return [
+      {
+        value: "all",
+        label: t("pages.catalog.categories.all"),
+        count: presets.length,
+      },
+      ...categories.map((key) => ({
+        value: key,
+        label: t(`pages.catalog.categories.${key}`),
+        count: counts.get(key) ?? 0,
+      })),
+    ]
+  }, [categories, presets, t])
+  const [category, setCategory] = useSectionTab(
+    categoryTabs.map((tab) => tab.value),
+    "all"
+  )
+
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase()
     return presets.filter(
@@ -132,11 +168,6 @@ export function CatalogPage() {
         (needle === "" || preset.name.toLowerCase().includes(needle))
     )
   }, [presets, category, search])
-
-  const categories = useMemo(() => {
-    const present = new Set(presets.map((preset) => preset.category))
-    return CATEGORY_ORDER.filter((key) => present.has(key))
-  }, [presets])
 
   const toggle = (id: string) => {
     setSelected((previous) => {
@@ -158,7 +189,10 @@ export function CatalogPage() {
     const nextConfig: ConfigObject = {
       ...config,
       lists: { ...(config.lists ?? {}) },
-      route: { ...(config.route ?? {}), rules: [...(config.route?.rules ?? [])] },
+      route: {
+        ...(config.route ?? {}),
+        rules: [...(config.route?.rules ?? [])],
+      },
     }
 
     const added: string[] = []
@@ -175,7 +209,10 @@ export function CatalogPage() {
       // A preset carries either a compiled rule set or a plain domain list;
       // taking the URL when present keeps the entry small and updatable.
       const entry: ListConfig = url
-        ? { url, ...(effectiveSourceDetour ? { detour: effectiveSourceDetour } : {}) }
+        ? {
+            url,
+            ...(effectiveSourceDetour ? { detour: effectiveSourceDetour } : {}),
+          }
         : { domains: domains ?? [] }
 
       if (!url && (!domains || domains.length === 0)) {
@@ -223,7 +260,7 @@ export function CatalogPage() {
         title={t("pages.catalog.title")}
       />
 
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-y border-border px-3 py-2">
         <p className="text-[13px] text-muted-foreground">
           {t("pages.catalog.source")}{" "}
           <a
@@ -277,21 +314,12 @@ export function CatalogPage() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        <CategoryChip
-          active={category === "all"}
-          label={t("pages.catalog.categories.all")}
-          onClick={() => setCategory("all")}
-        />
-        {categories.map((key) => (
-          <CategoryChip
-            active={category === key}
-            key={key}
-            label={t(`pages.catalog.categories.${key}`)}
-            onClick={() => setCategory(key)}
-          />
-        ))}
-      </div>
+      <SectionTabs
+        ariaLabel={t("pages.catalog.categoriesAriaLabel")}
+        onValueChange={setCategory}
+        tabs={categoryTabs}
+        value={category}
+      />
 
       <Input
         onChange={(event) => setSearch(event.target.value)}
@@ -365,7 +393,7 @@ export function CatalogPage() {
         })}
       </div>
 
-      <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t bg-card pt-3 pb-1">
+      <BottomActionBar contentClassName="justify-between">
         <span className="text-[13px] text-muted-foreground">
           {t("pages.catalog.selected", { count: selected.size })}
         </span>
@@ -390,33 +418,8 @@ export function CatalogPage() {
             {t("pages.catalog.add")}
           </Button>
         </div>
-      </div>
+      </BottomActionBar>
     </div>
-  )
-}
-
-function CategoryChip({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      className={cn(
-        "rounded-full border px-3 py-1 text-[13px]",
-        active
-          ? "border-primary bg-accent text-primary"
-          : "border-border text-foreground hover:bg-secondary"
-      )}
-      onClick={onClick}
-      type="button"
-    >
-      {label}
-    </button>
   )
 }
 

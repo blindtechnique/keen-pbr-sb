@@ -10,23 +10,17 @@ import {
   TrashIcon,
   UploadIcon,
 } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/shared/page-header"
+import { KeeneticStatus } from "@/components/shared/keenetic-status"
+import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
-import {
-  CardAction,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -51,6 +45,14 @@ import {
   rollbackBackup,
   type BackupSelection,
 } from "@/lib/backup"
+import {
+  NFQWS_UPDATE_QUERY_KEY,
+  nfqwsAction,
+  nfqwsUpdateQueryOptions,
+  type NfqwsActionResult,
+  type NfqwsUpdateStatus,
+} from "@/api/nfqws"
+import { cn } from "@/lib/utils"
 
 type NfqwsFile = {
   name: string
@@ -74,21 +76,16 @@ type Status = {
   strategies: Strategy[]
   active_strategy: string
 }
-type Tab = "settings" | "strategies" | "lists" | "lua" | "logs" | "check"
+const NFQWS_TAB_VALUES = [
+  "settings",
+  "strategies",
+  "lists",
+  "lua",
+  "logs",
+  "check",
+] as const
 
-type NfqwsActionResult = {
-  ok: boolean
-  output?: string
-  strategy_created?: string
-}
-
-type NfqwsUpdateStatus = {
-  ok: boolean
-  current: string
-  latest: string
-  available: boolean
-  release_url?: string
-}
+type Tab = (typeof NFQWS_TAB_VALUES)[number]
 
 type OperationState = {
   open: boolean
@@ -111,25 +108,6 @@ type RunOperation = (
   successMessage: string,
   rollbackAvailable?: boolean
 ) => Promise<boolean>
-
-async function nfqwsAction<T = NfqwsActionResult>(
-  payload: Record<string, unknown>
-): Promise<T> {
-  const response = await fetch("/api/nfqws", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok || data.ok === false)
-    throw new Error(
-      data.error ??
-        data.message ??
-        data.output?.trim() ??
-        `HTTP ${response.status}`
-    )
-  return data as T
-}
 
 export function NfqwsPage() {
   const { t } = useTranslation()
@@ -165,15 +143,9 @@ export function NfqwsPage() {
     },
     onError: (error) => toast.error(error.message, { richColors: true }),
   })
-  const updateQuery = useQuery<NfqwsUpdateStatus>({
-    queryKey: ["nfqws", "update"],
-    queryFn: () => nfqwsAction({ action: "check_update" }),
+  const updateQuery = useQuery({
+    ...nfqwsUpdateQueryOptions(),
     enabled: status?.installed === true,
-    retry: false,
-    staleTime: 30 * 60 * 1_000,
-    refetchInterval: 30 * 60 * 1_000,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: false,
   })
 
   const runOperation: RunOperation = async (
@@ -261,9 +233,11 @@ export function NfqwsPage() {
           action: "check_update",
           force: true,
         })
-        queryClient.setQueryData(["nfqws", "update"], latest)
+        queryClient.setQueryData(NFQWS_UPDATE_QUERY_KEY, latest)
       } catch {
-        await queryClient.invalidateQueries({ queryKey: ["nfqws", "update"] })
+        await queryClient.invalidateQueries({
+          queryKey: NFQWS_UPDATE_QUERY_KEY,
+        })
       }
     }
   }
@@ -280,14 +254,16 @@ export function NfqwsPage() {
         action: "check_update",
         force: true,
       })
-      queryClient.setQueryData(["nfqws", "update"], latest)
+      queryClient.setQueryData(NFQWS_UPDATE_QUERY_KEY, latest)
       if (latest.available) {
         toast.success(t("nfqws.updateAvailable", { version: latest.latest }))
       } else {
         toast.success(t("nfqws.upToDate"))
       }
     } catch (error) {
-      await queryClient.invalidateQueries({ queryKey: ["nfqws", "update"] })
+      await queryClient.invalidateQueries({
+        queryKey: NFQWS_UPDATE_QUERY_KEY,
+      })
       toast.error(
         error instanceof Error ? error.message : t("nfqws.operationFailed"),
         { richColors: true }
@@ -370,6 +346,10 @@ export function NfqwsPage() {
       setBundleExportPending(false)
     }
   }
+  const nfqwsTabs: SectionTab<Tab>[] = NFQWS_TAB_VALUES.map((value) => ({
+    value,
+    label: t(`nfqws.tabs.${value}`),
+  }))
 
   return (
     <div className="space-y-3">
@@ -436,26 +416,22 @@ export function NfqwsPage() {
 
       {status?.installed ? (
         <>
-          <Card
-            className={
-              updateQuery.data?.available
-                ? "border-emerald-500/70 bg-emerald-500/[0.06] shadow-[0_0_0_1px_rgb(16_185_129/0.12)]"
-                : undefined
-            }
-          >
-            <CardHeader>
-              <CardTitle>{t("nfqws.service")}</CardTitle>
-              <CardDescription>
-                {t("nfqws.version", { version: status.version || "—" })}
-                {updateQuery.data?.available ? (
-                  <span className="mt-1 block font-medium text-emerald-700 dark:text-emerald-400">
-                    {t("nfqws.updateAvailable", {
-                      version: updateQuery.data.latest,
-                    })}
-                  </span>
-                ) : null}
-              </CardDescription>
-              <CardAction>
+          <NfqwsSection
+            title={t("nfqws.service")}
+            description={t("nfqws.version", {
+              version: status.version || "—",
+            })}
+            action={
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <KeeneticStatus
+                  tone={updateQuery.data?.available ? "success" : "neutral"}
+                >
+                  {updateQuery.data?.available
+                    ? t("common.updateStatus.available")
+                    : updateQuery.data
+                      ? t("common.updateStatus.current")
+                      : t("common.updateStatus.checking")}
+                </KeeneticStatus>
                 <Badge
                   size="xs"
                   variant={status.running ? "success" : "secondary"}
@@ -463,9 +439,10 @@ export function NfqwsPage() {
                   <span className="mr-1.5 size-1.5 rounded-full bg-current" />
                   {status.running ? t("nfqws.running") : t("nfqws.stopped")}
                 </Badge>
-              </CardAction>
-            </CardHeader>
-            <CardContent className="flex flex-wrap items-center justify-between gap-2">
+              </div>
+            }
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label className="flex cursor-pointer items-center gap-2">
                 <Switch
                   aria-label={
@@ -528,35 +505,15 @@ export function NfqwsPage() {
                   {t("nfqws.upgrade")}
                 </Button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </NfqwsSection>
 
-          <div className="flex flex-wrap gap-x-1 border-b">
-            {(
-              [
-                "settings",
-                "strategies",
-                "lists",
-                "lua",
-                "logs",
-                "check",
-              ] as Tab[]
-            ).map((value) => (
-              <Button
-                key={value}
-                className={
-                  tab === value
-                    ? "rounded-none border-x-0 border-t-0 border-b-2 border-primary bg-transparent px-4 text-foreground shadow-none hover:bg-transparent"
-                    : "rounded-none border-0 border-b-2 border-transparent bg-transparent px-4 text-muted-foreground shadow-none hover:bg-muted/50 hover:text-foreground"
-                }
-                onClick={() => setTab(value)}
-                size="default"
-                variant="ghost"
-              >
-                {t(`nfqws.tabs.${value}`)}
-              </Button>
-            ))}
-          </div>
+          <SectionTabs
+            ariaLabel={t("nfqws.tabs.ariaLabel")}
+            onValueChange={setTab}
+            tabs={nfqwsTabs}
+            value={tab}
+          />
 
           {tab === "settings" ? (
             <SettingsEditor
@@ -873,12 +830,11 @@ function SettingsEditor({
     "POLICY_NAME",
   ]
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("nfqws.settingsTitle")}</CardTitle>
-        <CardDescription>{t("nfqws.settingsDescription")}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <NfqwsSection
+      description={t("nfqws.settingsDescription")}
+      title={t("nfqws.settingsTitle")}
+    >
+      <div className="space-y-4">
         {textFields.map((key) => (
           <div className="grid gap-1.5" key={key}>
             <Label>{key}</Label>
@@ -940,8 +896,8 @@ function SettingsEditor({
             {t("nfqws.save")}
           </Button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </NfqwsSection>
   )
 }
 
@@ -1004,12 +960,11 @@ function StrategiesEditor({
     }
   }
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("nfqws.strategiesTitle")}</CardTitle>
-        <CardDescription>{t("nfqws.strategiesDescription")}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <NfqwsSection
+      description={t("nfqws.strategiesDescription")}
+      title={t("nfqws.strategiesTitle")}
+    >
+      <div className="space-y-4">
         <div className="flex flex-wrap gap-2">
           <select
             className="h-9 min-w-60 rounded-md border bg-background px-3"
@@ -1085,8 +1040,8 @@ function StrategiesEditor({
             {t("common.delete")}
           </Button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </NfqwsSection>
   )
 }
 
@@ -1157,15 +1112,12 @@ function FilesEditor({
     refresh()
   }
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          {t(
-            `nfqws.tabs.${category === "list" ? "lists" : category === "lua" ? "lua" : "logs"}`
-          )}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <NfqwsSection
+      title={t(
+        `nfqws.tabs.${category === "list" ? "lists" : category === "lua" ? "lua" : "logs"}`
+      )}
+    >
+      <div className="space-y-4">
         <div className="flex flex-wrap gap-2">
           <select
             className="h-9 min-w-60 rounded-md border bg-background px-3"
@@ -1231,8 +1183,8 @@ function FilesEditor({
             </Button>
           </div>
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </NfqwsSection>
   )
 }
 
@@ -1248,12 +1200,11 @@ function UrlCheck() {
     setResult(response.reachable)
   }
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("nfqws.checkTitle")}</CardTitle>
-        <CardDescription>{t("nfqws.checkDescription")}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
+    <NfqwsSection
+      description={t("nfqws.checkDescription")}
+      title={t("nfqws.checkTitle")}
+    >
+      <div className="space-y-4">
         <div className="flex gap-2">
           <Input onChange={(event) => setUrl(event.target.value)} value={url} />
           <Button onClick={() => void check()}>{t("nfqws.check")}</Button>
@@ -1274,7 +1225,40 @@ function UrlCheck() {
             </AlertDescription>
           </Alert>
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </NfqwsSection>
+  )
+}
+
+function NfqwsSection({
+  action,
+  children,
+  className,
+  description,
+  title,
+}: {
+  action?: ReactNode
+  children: ReactNode
+  className?: string
+  description?: ReactNode
+  title: ReactNode
+}) {
+  return (
+    <section className={cn("space-y-4 py-2", className)}>
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-[20px] leading-7 font-bold text-foreground">
+            {title}
+          </h2>
+          {description ? (
+            <div className="mt-1 text-sm leading-[22px] text-muted-foreground">
+              {description}
+            </div>
+          ) : null}
+        </div>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+      {children}
+    </section>
   )
 }

@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "preview": "vite preview",
     "api:generate": "orval --config ./orval.config.ts",
     "api:check": "bun run api:generate && git diff --exit-code -- src/api/generated"
