@@ -58,6 +58,7 @@ const CATEGORY_ORDER = [
 ]
 
 const DIRECT = "__direct__"
+const EMPTY_PRESETS: readonly Preset[] = []
 
 export function CatalogPage() {
   const { t } = useTranslation()
@@ -120,7 +121,7 @@ export function CatalogPage() {
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
-  const presets = catalogQuery.data?.presets ?? []
+  const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
   const existingNames = new Set(Object.keys(config?.lists ?? {}))
 
   const visible = useMemo(() => {

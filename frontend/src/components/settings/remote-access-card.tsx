@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { AlertTriangleIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -26,6 +26,11 @@ type RemoteAccess = {
   listen_reachable?: boolean
 }
 
+type RemoteAccessDraft = {
+  enabled: boolean
+  port: string
+}
+
 /**
  * Publishing the panel is off by default and refuses to turn on while login is
  * disabled: an unauthenticated control panel on the open internet is not
@@ -44,14 +49,9 @@ export function RemoteAccessCard() {
     },
   })
 
-  const [enabled, setEnabled] = useState(false)
-  const [port, setPort] = useState("12121")
-
-  useEffect(() => {
-    if (!query.data) return
-    setEnabled(query.data.enabled)
-    setPort(String(query.data.port))
-  }, [query.data])
+  const [draft, setDraft] = useState<Partial<RemoteAccessDraft>>({})
+  const enabled = draft.enabled ?? query.data?.enabled ?? false
+  const port = draft.port ?? String(query.data?.port ?? 12121)
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -78,6 +78,7 @@ export function RemoteAccessCard() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["remote-access"] })
+      setDraft({})
       toast.success(t("pages.settings.remoteAccess.saved"))
     },
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
@@ -123,7 +124,12 @@ export function RemoteAccessCard() {
             checked={enabled}
             disabled={blocked}
             id="remote-access-enabled"
-            onCheckedChange={setEnabled}
+            onCheckedChange={(nextEnabled) =>
+              setDraft((current) => ({
+                ...current,
+                enabled: nextEnabled,
+              }))
+            }
           />
           <Label className="cursor-pointer" htmlFor="remote-access-enabled">
             {t("pages.settings.remoteAccess.enabled")}
@@ -146,7 +152,12 @@ export function RemoteAccessCard() {
               <Input
                 id="remote-access-port"
                 inputMode="numeric"
-                onChange={(event) => setPort(event.target.value)}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    port: event.target.value,
+                  }))
+                }
                 value={port}
               />
               <p className="text-xs text-muted-foreground">

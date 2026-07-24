@@ -86,7 +86,7 @@ export function useWarningBannerState(): WarningBannerState {
   const mode =
     retainedOperation && !visibleOperation
       ? "hidden"
-      : getWarningBannerMode(serviceHealth, Date.now(), visibleOperation)
+      : getWarningBannerMode(serviceHealth, nowMs, visibleOperation)
   const shouldTrackNowMs = mode === "dnsmasq-converging"
 
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -27,6 +27,8 @@ type LogSettings = {
   level: string
 }
 
+type LogSettingsDraft = Partial<LogSettings>
+
 const LEVELS = ["error", "warn", "info", "verbose", "debug"] as const
 
 /**
@@ -47,14 +49,9 @@ export function LoggingSettingsCard() {
     },
   })
 
-  const [fileEnabled, setFileEnabled] = useState(true)
-  const [level, setLevel] = useState("info")
-
-  useEffect(() => {
-    if (!query.data) return
-    setFileEnabled(query.data.file_enabled)
-    setLevel(query.data.level)
-  }, [query.data])
+  const [draft, setDraft] = useState<LogSettingsDraft>({})
+  const fileEnabled = draft.file_enabled ?? query.data?.file_enabled ?? true
+  const level = draft.level ?? query.data?.level ?? "info"
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -71,6 +68,7 @@ export function LoggingSettingsCard() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["log-settings"] })
+      setDraft({})
       toast.success(t("pages.settings.logging.saved"))
     },
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
@@ -89,7 +87,12 @@ export function LoggingSettingsCard() {
           <Switch
             checked={fileEnabled}
             id="logging-enabled"
-            onCheckedChange={setFileEnabled}
+            onCheckedChange={(nextEnabled) =>
+              setDraft((current) => ({
+                ...current,
+                file_enabled: nextEnabled,
+              }))
+            }
           />
           <Label className="cursor-pointer" htmlFor="logging-enabled">
             {t("pages.settings.logging.enabled")}
@@ -100,7 +103,12 @@ export function LoggingSettingsCard() {
           <Label>{t("pages.settings.logging.level")}</Label>
           <Select
             disabled={!fileEnabled}
-            onValueChange={(value) => setLevel(value ?? "info")}
+            onValueChange={(value) =>
+              setDraft((current) => ({
+                ...current,
+                level: value ?? "info",
+              }))
+            }
             value={level}
           >
             <SelectTrigger>

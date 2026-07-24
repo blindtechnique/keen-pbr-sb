@@ -61,7 +61,7 @@ struct InterfaceMonitor::Impl {
             }
             char name[IF_NAMESIZE] = {};
             if (if_indextoname(addr->ifa_index, name) != nullptr) {
-                callback(Event{std::string(name), false, false});
+                callback(Event{std::string(name), false, false, true});
             }
             return;
         }

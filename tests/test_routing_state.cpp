@@ -1154,3 +1154,74 @@ TEST_CASE("route table clear only releases tracked routes") {
 
     CHECK(routes.get_routes().empty());
 }
+
+TEST_CASE("live route matching keeps urltest metrics distinct") {
+    RouteSpec selected;
+    selected.destination = "default";
+    selected.table = 155;
+    selected.interface = "nwg2";
+    selected.family = AF_INET;
+    selected.metric = 0;
+
+    RouteSpec fallback = selected;
+    fallback.metric = 1;
+
+    DumpedRoute live;
+    live.destination = "default";
+    live.table = 155;
+    live.interface = "nwg2";
+    live.family = AF_INET;
+    live.metric = 0;
+    live.protocol = KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+
+    CHECK(route_table_detail::route_matches_live(selected, live));
+    CHECK_FALSE(route_table_detail::route_matches_live(fallback, live));
+
+    const auto missing =
+        route_table_detail::find_missing_live_routes({selected, fallback}, {live});
+    REQUIRE(missing.size() == 1);
+    CHECK(missing.front().metric == 1);
+}
+
+TEST_CASE("live route matching does not adopt an unowned route") {
+    RouteSpec expected;
+    expected.destination = "default";
+    expected.table = 155;
+    expected.interface = "nwg2";
+    expected.family = AF_INET;
+    expected.protocol = KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+
+    DumpedRoute live;
+    live.destination = expected.destination;
+    live.table = expected.table;
+    live.interface = expected.interface;
+    live.family = expected.family;
+    live.protocol = 4;
+
+    CHECK_FALSE(route_table_detail::route_matches_live(expected, live));
+    CHECK(route_table_detail::find_missing_live_routes({expected}, {live}).size() == 1);
+}
+
+TEST_CASE("live route matching accepts the kernel IPv6 default metric") {
+    RouteSpec expected;
+    expected.destination = "default";
+    expected.table = 155;
+    expected.interface = "wg0";
+    expected.family = AF_INET6;
+    expected.metric = 0;
+
+    DumpedRoute live;
+    live.destination = expected.destination;
+    live.table = expected.table;
+    live.interface = expected.interface;
+    live.family = AF_INET6;
+    live.metric = 1024;
+    live.protocol = KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+
+    CHECK(route_table_detail::route_metric_matches_live(expected, live));
+    CHECK(route_table_detail::route_matches_live(expected, live));
+
+    expected.metric = 1;
+    CHECK_FALSE(route_table_detail::route_metric_matches_live(expected, live));
+    CHECK_FALSE(route_table_detail::route_matches_live(expected, live));
+}

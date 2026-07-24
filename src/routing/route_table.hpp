@@ -6,6 +6,25 @@
 
 namespace keen_pbr3 {
 
+namespace route_table_detail {
+
+// Linux normalizes an IPv6 route without an explicit priority to metric 1024,
+// while IPv4 keeps metric 0. Treat those two IPv6 representations as the same
+// route without weakening metric matching for weighted urltest routes.
+bool route_metric_matches_live(const RouteSpec& expected,
+                               const DumpedRoute& actual);
+
+// Exact identity used by the runtime reconciler. Metrics and the reserved
+// protocol are part of the identity because urltest intentionally keeps
+// several default routes through the same interface with different metrics.
+bool route_matches_live(const RouteSpec& expected, const DumpedRoute& actual);
+
+std::vector<RouteSpec> find_missing_live_routes(
+    const std::vector<RouteSpec>& desired,
+    const std::vector<DumpedRoute>& live);
+
+} // namespace route_table_detail
+
 // Manages installed kernel routes, tracking them for duplicate avoidance and cleanup.
 // Uses NetlinkManager for actual kernel operations.
 class RouteTable {
@@ -25,8 +44,10 @@ public:
     void remove(const RouteSpec& spec);
 
     // Install missing routes before removing obsolete routes tracked by this
-    // process. This keeps the old forwarding path available while a new one
-    // is being installed.
+    // process. Live kernel state is reconciled as well: firmware interface
+    // restarts may discard a route without updating this process' inventory.
+    // This keeps the old forwarding path available while a new one is being
+    // installed.
     void reconcile(const std::vector<RouteSpec>& desired);
     void add_missing(const std::vector<RouteSpec>& desired);
     void remove_obsolete(const std::vector<RouteSpec>& desired);

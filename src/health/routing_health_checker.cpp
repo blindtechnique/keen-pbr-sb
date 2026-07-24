@@ -31,7 +31,7 @@ bool route_matches(const RouteSpec& expected, const DumpedRoute& actual) {
            expected.gateway == actual.gateway &&
            expected.blackhole == actual.blackhole &&
            expected.unreachable == actual.unreachable &&
-           (expected.metric == 0 || expected.metric == actual.metric) &&
+           route_table_detail::route_metric_matches_live(expected, actual) &&
            (expected.family == 0 || expected.family == actual.family);
 }
 

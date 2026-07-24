@@ -259,7 +259,10 @@ Daemon::Daemon(Config config,
     // DNS diagnostics are interactive and should have only one live probe.
     // Combined with four runtime streams this leaves worker capacity for the
     // REST API even on the minimum eight-thread cpp-httplib pool.
-    dns_test_broadcaster_ = std::make_unique<SseBroadcaster>(128, 1);
+    // Browsers may keep the old EventSource alive briefly while reconnecting
+    // after a daemon restart. A single-slot broadcaster turns that harmless
+    // overlap into a false "DNS event stream unavailable" result.
+    dns_test_broadcaster_ = std::make_unique<SseBroadcaster>(128, 4);
 #endif
     setup_ipc_control_socket();
 }
@@ -1070,14 +1073,19 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         status_stream_->reconcile();
     }
 #endif
-    if (!event.administrative_state_changed ||
+    if ((!event.administrative_state_changed && !event.address_changed) ||
         !is_interface_outbound_in_use(event.interface_name)) {
         return;
     }
 
-    log.info("Interface {} state changed to {}, iproute and firewall refresh triggered",
-             event.interface_name,
-             event.is_up ? "UP" : "DOWN");
+    if (event.address_changed) {
+        log.info("Interface {} address changed, iproute and firewall refresh triggered",
+                 event.interface_name);
+    } else {
+        log.info("Interface {} state changed to {}, iproute and firewall refresh triggered",
+                 event.interface_name,
+                 event.is_up ? "UP" : "DOWN");
+    }
     refresh_iproute_and_firewall_runtime();
 }
 

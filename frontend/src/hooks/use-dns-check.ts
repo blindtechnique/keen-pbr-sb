@@ -35,6 +35,7 @@ type UseDnsCheckReturn = {
 export const DNS_CHECK_DOMAIN_SUFFIX = "check.keen.pbr"
 
 const browserCheckTimeoutMs = 5_000
+const sseConnectionTimeoutMs = 12_000
 const pcCheckTimeoutMs = 300_000
 const pcWarningTimeoutMs = 30_000
 
@@ -99,6 +100,25 @@ export function useDnsCheck(): UseDnsCheckReturn {
       eventSourceRef.current = eventSource
 
       let sseConnected = false
+      const finishTimedOutCheck = () => {
+        cleanup()
+
+        if (!sseConnected) {
+          setStatus("sse-fail")
+          return
+        }
+
+        if (performBrowserRequest) {
+          setStatus("browser-fail")
+          return
+        }
+
+        setCheckState((current) => ({
+          ...current,
+          waiting: false,
+          showWarning: true,
+        }))
+      }
 
       eventSource.onmessage = (event) => {
         const payload = parseDnsCheckEvent(event.data)
@@ -107,7 +127,17 @@ export function useDnsCheck(): UseDnsCheckReturn {
         }
 
         if (payload.type === "HELLO") {
+          if (sseConnected) {
+            return
+          }
           sseConnected = true
+          if (checkTimeoutRef.current !== null) {
+            window.clearTimeout(checkTimeoutRef.current)
+          }
+          checkTimeoutRef.current = window.setTimeout(
+            finishTimedOutCheck,
+            performBrowserRequest ? browserCheckTimeoutMs : pcCheckTimeoutMs
+          )
 
           if (performBrowserRequest) {
             fetchControllerRef.current = new AbortController()
@@ -143,30 +173,13 @@ export function useDnsCheck(): UseDnsCheckReturn {
       }
 
       eventSource.onerror = () => {
-        // Let the timeout decide whether the connection or lookup failed.
+        // EventSource reconnects automatically. Keep the check alive during
+        // the short overlap caused by a daemon restart.
       }
 
       checkTimeoutRef.current = window.setTimeout(
-        () => {
-          cleanup()
-
-          if (!sseConnected) {
-            setStatus("sse-fail")
-            return
-          }
-
-          if (performBrowserRequest) {
-            setStatus("browser-fail")
-            return
-          }
-
-          setCheckState((current) => ({
-            ...current,
-            waiting: false,
-            showWarning: true,
-          }))
-        },
-        performBrowserRequest ? browserCheckTimeoutMs : pcCheckTimeoutMs
+        finishTimedOutCheck,
+        sseConnectionTimeoutMs
       )
     },
     [cleanup]

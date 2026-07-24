@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -30,6 +30,12 @@ type AuthStatus = {
   authenticated: boolean
 }
 
+type AuthDraft = {
+  enabled: boolean
+  provider: "local" | "keenetic"
+  endpoint: string
+}
+
 /**
  * Lets the login mode be switched from the interface. Router credentials are
  * verified before the change is stored, so a typo cannot lock anyone out.
@@ -47,19 +53,16 @@ export function AuthSettingsCard() {
     },
   })
 
-  const [enabled, setEnabled] = useState(true)
-  const [provider, setProvider] = useState<"local" | "keenetic">("keenetic")
-  const [endpoint, setEndpoint] = useState("127.0.0.1:80")
+  const [draft, setDraft] = useState<Partial<AuthDraft>>({})
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
 
-  useEffect(() => {
-    const status = statusQuery.data
-    if (!status) return
-    setEnabled(status.enabled)
-    setProvider(status.provider === "local" ? "local" : "keenetic")
-    setEndpoint(status.keenetic_endpoint || "127.0.0.1:80")
-  }, [statusQuery.data])
+  const enabled = draft.enabled ?? statusQuery.data?.enabled ?? true
+  const provider =
+    draft.provider ??
+    (statusQuery.data?.provider === "local" ? "local" : "keenetic")
+  const endpoint =
+    draft.endpoint ?? statusQuery.data?.keenetic_endpoint ?? "127.0.0.1:80"
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -83,6 +86,7 @@ export function AuthSettingsCard() {
     onSuccess: async () => {
       setPassword("")
       await queryClient.invalidateQueries({ queryKey: ["auth-status"] })
+      setDraft({})
       toast.success(t("pages.settings.auth.saved"))
     },
     onError: (error: Error) =>
@@ -104,7 +108,12 @@ export function AuthSettingsCard() {
           <Switch
             checked={enabled}
             id="auth-enabled"
-            onCheckedChange={setEnabled}
+            onCheckedChange={(nextEnabled) =>
+              setDraft((current) => ({
+                ...current,
+                enabled: nextEnabled,
+              }))
+            }
           />
           <Label className="cursor-pointer" htmlFor="auth-enabled">
             {t("pages.settings.auth.enabled")}
@@ -117,7 +126,10 @@ export function AuthSettingsCard() {
               <Label>{t("pages.settings.auth.provider")}</Label>
               <Select
                 onValueChange={(value) =>
-                  setProvider(value === "local" ? "local" : "keenetic")
+                  setDraft((current) => ({
+                    ...current,
+                    provider: value === "local" ? "local" : "keenetic",
+                  }))
                 }
                 value={provider}
               >
@@ -155,7 +167,12 @@ export function AuthSettingsCard() {
                 </Label>
                 <Input
                   id="auth-endpoint"
-                  onChange={(event) => setEndpoint(event.target.value)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      endpoint: event.target.value,
+                    }))
+                  }
                   placeholder="127.0.0.1:80"
                   value={endpoint}
                 />

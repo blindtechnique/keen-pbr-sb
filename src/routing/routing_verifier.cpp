@@ -1,4 +1,5 @@
 #include "routing_verifier.hpp"
+#include "route_table.hpp"
 
 #include <netinet/in.h>
 #include <sstream>
@@ -26,10 +27,7 @@ bool route_type_matches(const RouteSpec& expected, const DumpedRoute& actual) {
 }
 
 bool route_metric_matches(const RouteSpec& expected, const DumpedRoute& actual) {
-    if (expected.metric == 0) {
-        return true;
-    }
-    return expected.metric == actual.metric;
+    return route_table_detail::route_metric_matches_live(expected, actual);
 }
 
 bool route_matches_expected(const RouteSpec& expected, const DumpedRoute& actual) {

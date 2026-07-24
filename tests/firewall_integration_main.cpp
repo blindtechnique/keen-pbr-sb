@@ -115,6 +115,38 @@ void verify_metric_scoped_route_delete(NetlinkManager& netlink) {
     cleanup();
 }
 
+void verify_route_reconcile_restores_vanished_route(NetlinkManager& netlink) {
+    constexpr uint32_t kTable = 248;
+
+    RouteSpec selected;
+    selected.destination = "default";
+    selected.table = kTable;
+    selected.interface = "lo";
+    selected.family = AF_INET;
+
+    RouteSpec fallback = selected;
+    fallback.metric = 1;
+
+    RouteTable routes(netlink);
+    routes.add(selected);
+    routes.add(fallback);
+
+    // Simulate a firmware interface refresh removing one of the routes behind
+    // the daemon's back while its owned-state inventory still contains it.
+    netlink.delete_route(fallback);
+    routes.add_missing({selected, fallback});
+
+    const auto live = netlink.dump_routes_in_table(kTable, AF_INET);
+    const bool restored = std::any_of(
+        live.begin(), live.end(), [&](const DumpedRoute& route) {
+            return route_table_detail::route_matches_live(fallback, route);
+        });
+    if (!restored) {
+        throw std::runtime_error(
+            "Route reconciler did not restore a vanished weighted fallback");
+    }
+}
+
 std::string read_file(const std::string& path) {
     std::ifstream input(path);
     if (!input.is_open()) {
@@ -501,6 +533,7 @@ int run_firewall_integration(int argc, char* argv[]) {
 
     NetlinkManager netlink;
     verify_metric_scoped_route_delete(netlink);
+    verify_route_reconcile_restores_vanished_route(netlink);
     RouteTable route_table(netlink);
     PolicyRuleManager policy_rules(netlink);
     auto firewall = create_firewall(

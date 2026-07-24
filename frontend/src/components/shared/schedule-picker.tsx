@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { Input } from "@/components/ui/input"
@@ -10,6 +10,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  buildCron,
+  CUSTOM_SCHEDULE,
+  parseSchedule,
+  type Frequency,
+  type ParsedSchedule,
+} from "@/components/shared/schedule"
 
 const HOURS = Array.from({ length: 24 }, (_, hour) => hour)
 
@@ -22,17 +29,6 @@ const WEEKDAY_KEYS = [
   "friday",
   "saturday",
 ] as const
-
-export const CUSTOM_SCHEDULE = "custom"
-
-type Frequency = "hourly" | "daily" | "weekly" | "monthly" | typeof CUSTOM_SCHEDULE
-
-type ParsedSchedule = {
-  frequency: Frequency
-  hour: number
-  weekday: number
-  day: number
-}
 
 /**
  * Cron is precise but unreadable. Offer the handful of schedules people
@@ -47,29 +43,21 @@ export function SchedulePicker({
 }) {
   const { t } = useTranslation()
   const parsed = parseSchedule(value)
-  const [frequency, setFrequency] = useState<Frequency>(parsed.frequency)
-  const emittedValue = useRef<string | null>(null)
-
-  useEffect(() => {
-    if (emittedValue.current === value) {
-      emittedValue.current = null
-      return
-    }
-    setFrequency(parseSchedule(value).frequency)
-  }, [value])
-
-  const emit = (nextValue: string) => {
-    emittedValue.current = nextValue
-    onChange(nextValue)
-  }
+  const [selection, setSelection] = useState<{
+    value: string
+    frequency: Frequency
+  }>({ value, frequency: parsed.frequency })
+  const frequency =
+    selection.value === value ? selection.frequency : parsed.frequency
 
   const update = (next: Partial<ParsedSchedule>) => {
     const merged = { ...parsed, frequency, ...next }
     if (merged.frequency === CUSTOM_SCHEDULE) {
       return
     }
-    setFrequency(merged.frequency)
-    emit(buildCron(merged))
+    const nextValue = buildCron(merged)
+    setSelection({ value: nextValue, frequency: merged.frequency })
+    onChange(nextValue)
   }
 
   return (
@@ -77,7 +65,7 @@ export function SchedulePicker({
       <Select
         onValueChange={(next) => {
           if (next === CUSTOM_SCHEDULE) {
-            setFrequency(CUSTOM_SCHEDULE)
+            setSelection({ value, frequency: CUSTOM_SCHEDULE })
             return
           }
           update({ frequency: next as Frequency })
@@ -200,86 +188,15 @@ export function SchedulePicker({
 
       {frequency === CUSTOM_SCHEDULE ? (
         <Input
-          onChange={(event) => emit(event.target.value)}
+          onChange={(event) => {
+            const nextValue = event.target.value
+            setSelection({ value: nextValue, frequency: CUSTOM_SCHEDULE })
+            onChange(nextValue)
+          }}
           placeholder="0 4 * * 0"
           value={value}
         />
       ) : null}
     </div>
   )
-}
-
-/** Recognises the expressions this picker can produce; anything else is custom. */
-export function parseSchedule(expression: string): ParsedSchedule {
-  const fallback: ParsedSchedule = {
-    frequency: CUSTOM_SCHEDULE,
-    hour: 4,
-    weekday: 0,
-    day: 1,
-  }
-  const fields = expression.trim().split(/\s+/)
-  if (fields.length !== 5) {
-    return fallback
-  }
-
-  const [minute, hour, dayOfMonth, month, weekday] = fields
-  if (minute !== "0" || month !== "*") {
-    return fallback
-  }
-
-  if (hour === "*" && dayOfMonth === "*" && weekday === "*") {
-    return { ...fallback, frequency: "hourly" }
-  }
-
-  const parsedHour = Number(hour)
-  if (!Number.isInteger(parsedHour) || parsedHour < 0 || parsedHour > 23) {
-    return fallback
-  }
-
-  if (dayOfMonth === "*" && weekday === "*") {
-    return { ...fallback, frequency: "daily", hour: parsedHour }
-  }
-
-  if (dayOfMonth === "*") {
-    const parsedWeekday = Number(weekday)
-    if (!Number.isInteger(parsedWeekday) || parsedWeekday < 0 || parsedWeekday > 6) {
-      return fallback
-    }
-    return {
-      ...fallback,
-      frequency: "weekly",
-      hour: parsedHour,
-      weekday: parsedWeekday,
-    }
-  }
-
-  if (weekday === "*") {
-    const parsedDay = Number(dayOfMonth)
-    if (!Number.isInteger(parsedDay) || parsedDay < 1 || parsedDay > 28) {
-      return fallback
-    }
-    return {
-      ...fallback,
-      frequency: "monthly",
-      hour: parsedHour,
-      day: parsedDay,
-    }
-  }
-
-  return fallback
-}
-
-function buildCron(schedule: ParsedSchedule): string {
-  switch (schedule.frequency) {
-    case "hourly":
-      return "0 * * * *"
-    case "daily":
-      return `0 ${schedule.hour} * * *`
-    case "weekly":
-      return `0 ${schedule.hour} * * ${schedule.weekday}`
-    case "monthly":
-      return `0 ${schedule.hour} ${schedule.day} * *`
-    default:
-      return "0 4 * * 0"
-  }
 }

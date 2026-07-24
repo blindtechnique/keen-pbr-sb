@@ -198,13 +198,14 @@ void Daemon::restart_routing_runtime() {
 void Daemon::setup_static_routing() {
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
     log_ipv6_support_decision_once(ipv6_decision);
+    const auto main_table_routes = netlink_.dump_routes_in_table(254);
     populate_routing_state(
         config_,
         outbound_marks_,
         route_table_,
         policy_rules_,
-        [this](const Outbound& outbound) {
-            return is_interface_outbound_reachable(outbound, netlink_);
+        [&main_table_routes](const Outbound& outbound) {
+            return is_interface_outbound_reachable(outbound, main_table_routes);
         },
         &firewall_state_.get_urltest_selections(),
         ipv6_decision.enabled);
@@ -215,13 +216,14 @@ void Daemon::reconcile_static_routing() {
     log_ipv6_support_decision_once(ipv6_decision);
     RouteTable desired_routes(netlink_, true);
     PolicyRuleManager desired_rules(netlink_, true);
+    const auto main_table_routes = netlink_.dump_routes_in_table(254);
     populate_routing_state(
         config_,
         outbound_marks_,
         desired_routes,
         desired_rules,
-        [this](const Outbound& outbound) {
-            return is_interface_outbound_reachable(outbound, netlink_);
+        [&main_table_routes](const Outbound& outbound) {
+            return is_interface_outbound_reachable(outbound, main_table_routes);
         },
         &firewall_state_.get_urltest_selections(),
         ipv6_decision.enabled);
@@ -354,15 +356,22 @@ void Daemon::probe_interfaces_now() {
     // Probing blocks on the network, so it must not run on the event loop.
     blocking_executor_.try_post("interface-probe", [this, targets]() {
         interface_probe_.probe(targets);
-#ifdef WITH_API
         post_control_task(
             [this]() {
+                if (routing_runtime_active_) {
+                    // Keenetic may recreate a tunnel route without changing
+                    // its administrative UP state. Reconcile the owned policy
+                    // tables after the regular probe so vanished urltest
+                    // fallback routes heal without a service restart.
+                    reconcile_static_routing();
+                }
+#ifdef WITH_API
                 if (status_stream_) {
                     status_stream_->reconcile();
                 }
+#endif
             },
             "interface-probe-status");
-#endif
     });
 }
 
