@@ -193,6 +193,11 @@ void apply_remote_access_rules(const std::string& listen_address) {
         wan, port);
 }
 
+void remove_remote_access_rules() {
+    std::lock_guard<std::mutex> lock(settings_mutex());
+    drop_rules();
+}
+
 void register_remote_access_handler(ApiServer& server, ApiContext& ctx) {
     server.get("/api/system/remote-access", [&ctx]() -> std::string {
         const auto config = ctx.get_visible_config();

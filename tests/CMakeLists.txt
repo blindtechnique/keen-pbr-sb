@@ -16,6 +16,7 @@ add_executable(keen-pbr-tests
   test_list_set_usage.cpp
   test_list_service.cpp
   test_control_protocol.cpp
+  test_status_command.cpp
   test_resolver_fallback.cpp
   test_list_parser.cpp
   test_list_streamer.cpp
@@ -87,6 +88,7 @@ add_executable(keen-pbr-tests
   ../src/lists/list_set_usage.cpp
   ../src/config/list_parser.cpp
   ../src/cmd/test_routing.cpp
+  ../src/cmd/status.cpp
   ../src/daemon/list_service.cpp
   ../src/daemon/pid_file.cpp
   ../src/daemon/resolver_health.cpp
@@ -97,6 +99,8 @@ add_executable(keen-pbr-tests
   ../src/http/curl_runtime.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/health/url_tester.cpp
+  ../src/health/routing_health_checker.cpp
+  ../src/routing/firewall_state.cpp
   ../src/routing/netlink.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp
@@ -112,6 +116,7 @@ add_executable(keen-pbr-tests
   ../src/runtime/runtime_state_machine.cpp
   ../src/routing/policy_rule.cpp
   ../src/routing/route_table.cpp
+  ../src/routing/routing_verifier.cpp
   ../src/routing/target.cpp
 )
 set_target_properties(keen-pbr-tests PROPERTIES
@@ -120,7 +125,10 @@ set_target_properties(keen-pbr-tests PROPERTIES
   CXX_EXTENSIONS NO
 )
 
-target_compile_definitions(keen-pbr-tests PRIVATE KEEN_PBR3_TESTING)
+target_compile_definitions(keen-pbr-tests PRIVATE
+  KEEN_PBR3_TESTING
+  KEEN_PBR_DEFAULT_CONFIG_PATH="${KEEN_PBR_DEFAULT_CONFIG_PATH}"
+)
 
 # Reuse include paths from the main target so generated headers such as
 # <keen-pbr/version.hpp> are always visible to tests.

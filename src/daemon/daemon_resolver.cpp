@@ -19,7 +19,7 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr auto kResolverConfigHashActualRefreshInterval = std::chrono::seconds{5};
+constexpr auto kResolverConfigHashActualRefreshInterval = std::chrono::seconds{60};
 
 bool dns_config_uses_keenetic_server(const std::optional<DnsConfig>& dns_cfg_opt) {
     if (!dns_cfg_opt.has_value()) {
@@ -37,20 +37,48 @@ bool dns_config_uses_keenetic_server(const std::optional<DnsConfig>& dns_cfg_opt
 
 } // namespace
 
-void Daemon::update_resolver_config_hash() {
-    ListStreamer streamer(list_service_.cache_manager());
-    const DnsConfig dns_cfg = config_.dns.value_or(DnsConfig{});
-    DnsServerRegistry dns_registry(dns_cfg);
-    const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
+ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
+    ResolverGenerationSnapshot snapshot;
+    snapshot.config = config_;
+    snapshot.resolver_type =
+        firewall_->backend() == FirewallBackend::nftables
+            ? ResolverType::DNSMASQ_NFTSET
+            : ResolverType::DNSMASQ_IPSET;
+    const DnsConfig dns_cfg = snapshot.config.dns.value_or(DnsConfig{});
+    const Ipv6SupportDecision ipv6_decision =
+        resolve_ipv6_support(snapshot.config);
     log_ipv6_support_decision_once(ipv6_decision);
-    const std::string resolver_config_hash = DnsmasqGenerator::compute_config_hash(
+    snapshot.ipv6_enabled = ipv6_decision.enabled;
+    snapshot.generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    ListStreamer streamer(list_service_.cache_manager());
+    DnsServerRegistry dns_registry(dns_cfg);
+    // DnsmasqGenerator retains references while computing the hash. Keep
+    // optional defaults alive for the complete call.
+    const RouteConfig route_cfg =
+        snapshot.config.route.value_or(RouteConfig{});
+    const std::map<std::string, ListConfig> lists =
+        snapshot.config.lists.value_or(
+            std::map<std::string, ListConfig>{});
+    DnsmasqGenerator generator(
         dns_registry,
         streamer,
-        config_.route.value_or(RouteConfig{}),
+        route_cfg,
         dns_cfg,
-        config_.lists.value_or(std::map<std::string, ListConfig>{}),
+        lists,
+        snapshot.resolver_type,
         KEEN_PBR3_VERSION_FULL_STRING,
-        ipv6_decision.enabled);
+        snapshot.ipv6_enabled);
+    snapshot.expected_hash = generator.compute_config_hash();
+    return snapshot;
+}
+
+void Daemon::update_resolver_config_hash() {
+    auto snapshot = std::make_shared<ResolverGenerationSnapshot>(
+        make_resolver_generation_snapshot());
+    const std::string resolver_config_hash = snapshot->expected_hash;
+    resolver_generation_snapshot_ = std::move(snapshot);
+    resolver_config_hash_actual_retry_attempt_ = 0;
     resolver_sync_.expected_hash_updated(resolver_config_hash);
     const std::int64_t apply_started_ts =
         apply_started_ts_.load(std::memory_order_acquire);
@@ -101,7 +129,7 @@ void Daemon::transition_runtime_or_throw(RuntimeState next, const char* reason) 
     }
 }
 
-void Daemon::publish_runtime_state() {
+void Daemon::publish_runtime_state(bool reconcile_status_stream) {
     Logger::instance().trace(
         "runtime_state_publish",
         "routing_runtime_active={} runtime_state={} reason={}",
@@ -110,22 +138,31 @@ void Daemon::publish_runtime_state() {
         runtime_state_machine_.reason());
     runtime_state_store_.publish(build_runtime_state_snapshot());
 #ifdef WITH_API
-    if (status_stream_) {
+    if (reconcile_status_stream && status_stream_) {
         status_stream_->reconcile();
     }
 #endif
 }
 
 void Daemon::schedule_resolver_config_hash_actual_refresh() {
+    schedule_resolver_config_hash_actual_after(
+        kResolverConfigHashActualRefreshInterval,
+        "resolver-config-hash-actual");
+}
+
+void Daemon::schedule_resolver_config_hash_actual_after(
+    std::chrono::seconds delay,
+    const char* task_name) {
     if (resolver_config_hash_actual_task_id_ >= 0) {
         scheduler_->cancel(resolver_config_hash_actual_task_id_);
     }
-    resolver_config_hash_actual_task_id_ = scheduler_->schedule_repeating(
-        kResolverConfigHashActualRefreshInterval,
+    resolver_config_hash_actual_task_id_ = scheduler_->schedule_oneshot(
+        delay,
         [this]() {
+            resolver_config_hash_actual_task_id_ = -1;
             maybe_schedule_resolver_config_hash_actual_refresh();
         },
-        "resolver-config-hash-actual");
+        task_name);
 }
 
 void Daemon::schedule_keenetic_dns_refresh() {
@@ -148,8 +185,8 @@ void Daemon::schedule_keenetic_dns_refresh() {
                 if (refresh_keenetic_dns_cache(true)) {
                     const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
                     apply_started_ts_.store(apply_started_ts, std::memory_order_release);
-                    run_system_resolver_hook_reload();
                     update_resolver_config_hash();
+                    (void)run_system_resolver_hook_reload();
                     refresh_resolver_config_hash_actual_async();
                     publish_runtime_state();
                 }
@@ -197,15 +234,13 @@ bool Daemon::refresh_keenetic_dns_cache(bool force_refresh) {
 }
 
 void Daemon::schedule_resolver_config_hash_actual_retry() {
-    if (resolver_config_hash_actual_retry_task_id_ >= 0) {
-        scheduler_->cancel(resolver_config_hash_actual_retry_task_id_);
+    const auto delay = resolver_convergence_retry_delay(
+        resolver_config_hash_actual_retry_attempt_);
+    if (resolver_config_hash_actual_retry_attempt_ < 6) {
+        ++resolver_config_hash_actual_retry_attempt_;
     }
-    resolver_config_hash_actual_retry_task_id_ = scheduler_->schedule_oneshot(
-        std::chrono::seconds{1},
-        [this]() {
-            resolver_config_hash_actual_retry_task_id_ = -1;
-            maybe_schedule_resolver_config_hash_actual_refresh();
-        },
+    schedule_resolver_config_hash_actual_after(
+        delay,
         "resolver-config-hash-actual-retry");
 }
 
@@ -234,22 +269,33 @@ void Daemon::commit_resolver_hash_probe_result(
                                          "resolver={} generation={} reason=stale_runtime",
                                          resolver_addr,
                                          generation);
+                schedule_resolver_config_hash_actual_after(
+                    std::chrono::seconds{1},
+                    "resolver-config-hash-stale-generation-retry");
                 return;
             }
 
             const std::int64_t apply_started_ts =
                 apply_started_ts_.load(std::memory_order_acquire);
             const std::int64_t now_ts = unix_timestamp_now_seconds();
+            const auto previous_snapshot =
+                resolver_sync_.snapshot(now_ts);
             if (probe_result.has_value() &&
                 probe_result->status == ResolverConfigHashProbeStatus::SUCCESS) {
                 resolver_sync_.probe_succeeded(probe_result->parsed_value.hash,
                                                probe_result->parsed_value.ts,
                                                probe_completed_ts);
-                Logger::instance().verbose("Resolver config hash (actual): {}",
-                                           probe_result->parsed_value.hash);
+                if (previous_snapshot.actual_hash !=
+                    probe_result->parsed_value.hash) {
+                    Logger::instance().verbose(
+                        "Resolver config hash (actual): {}",
+                        probe_result->parsed_value.hash);
+                }
                 if (probe_result->parsed_value.ts.has_value() &&
                     apply_started_ts > 0 &&
-                    *probe_result->parsed_value.ts < apply_started_ts) {
+                    *probe_result->parsed_value.ts < apply_started_ts &&
+                    previous_snapshot.expected_hash !=
+                        probe_result->parsed_value.hash) {
                     Logger::instance().verbose(
                         "Resolver config hash TXT is older than current apply; using live actual value "
                         "(resolver={}, txt_ts={}, apply_started_ts={})",
@@ -306,8 +352,13 @@ void Daemon::commit_resolver_hash_probe_result(
             if (resolver_snapshot.sync_state ==
                 api::ResolverConfigSyncState::CONVERGING) {
                 schedule_resolver_config_hash_actual_retry();
+            } else {
+                resolver_config_hash_actual_retry_attempt_ = 0;
+                schedule_resolver_config_hash_actual_refresh();
             }
-            publish_runtime_state();
+            publish_runtime_state(
+                !resolver_sync_semantically_equal(previous_snapshot,
+                                                  resolver_snapshot));
         },
         "resolver-hash-refresh-commit");
 }
@@ -338,12 +389,15 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
                                                                  true,
                                                                  std::memory_order_acq_rel)) {
         Logger::instance().trace("resolver_hash_refresh_skip", "reason=inflight");
+        schedule_resolver_config_hash_actual_after(
+            std::chrono::seconds{1},
+            "resolver-config-hash-inflight-retry");
         return;
     }
 
     const auto generation = runtime_generation_.load(std::memory_order_acquire);
     const TraceId trace_id = ensure_trace_id();
-    const bool enqueued = blocking_executor_.try_post(
+    const bool enqueued = resolver_io_executor_.try_post(
         "resolver-config-hash-actual",
         [this, resolver_addr, generation, trace_id]() mutable {
             ScopedTraceContext trace_scope(trace_id);
@@ -407,12 +461,18 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
         resolver_hash_refresh_inflight_.store(false, std::memory_order_release);
         Logger::instance().trace("resolver_hash_refresh_skip",
                                  "reason=executor_unavailable");
+        schedule_resolver_config_hash_actual_after(
+            std::chrono::seconds{1},
+            "resolver-config-hash-executor-retry");
     }
 }
 
 void Daemon::maybe_schedule_resolver_config_hash_actual_refresh() {
     if (resolver_hash_refresh_inflight_.load(std::memory_order_acquire)) {
         Logger::instance().trace("resolver_hash_refresh_skip", "reason=inflight");
+        schedule_resolver_config_hash_actual_after(
+            std::chrono::seconds{1},
+            "resolver-config-hash-inflight-retry");
         return;
     }
     refresh_resolver_config_hash_actual_async();

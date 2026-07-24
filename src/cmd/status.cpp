@@ -15,16 +15,24 @@
 #include "../util/ipv6_support.hpp"
 
 #include <netinet/in.h>
+#include <charconv>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace keen_pbr3 {
 
 namespace {
+
+struct RuntimeStatusContext {
+    std::string state;
+    bool routing_runtime_active{false};
+};
 
 std::string check_status_label(CheckStatus s) {
     switch (s) {
@@ -288,70 +296,74 @@ void print_header(const RoutingHealthReport& report, const std::string& config_p
     }
 }
 
+void print_runtime_status(const std::optional<RuntimeStatusContext>& runtime) {
+    if (!runtime.has_value()) {
+        return;
+    }
+
+    std::cout << "Runtime: " << runtime->state
+              << " (routing "
+              << (runtime->routing_runtime_active ? "active" : "inactive")
+              << ")\n";
+}
+
 void print_outbound_section(const Config& config,
                             const OutboundMarkMap& marks,
-                            const RouteTable& routes,
                             const RoutingHealthReport& report) {
     std::map<std::string, std::vector<const RouteTableCheck*>> routes_by_outbound;
     for (const auto& rt : report.route_tables) {
         routes_by_outbound[rt.outbound_tag].push_back(&rt);
     }
 
-    std::map<std::pair<uint32_t, uint32_t>, const PolicyRuleCheck*> rules_by_mark_table;
+    std::map<uint32_t, std::vector<const PolicyRuleCheck*>> rules_by_mark;
     for (const auto& pr : report.policy_rules) {
-        rules_by_mark_table[{pr.fwmark, pr.expected_table}] = &pr;
+        rules_by_mark[pr.fwmark].push_back(&pr);
     }
 
     std::cout << "\nOutbounds:\n";
 
-    uint32_t table_start = static_cast<uint32_t>(
-        config.iproute.value_or(IprouteConfig{}).table_start.value_or(150));
-    uint32_t table_offset = 0;
-
     const auto& outbounds = config.outbounds.value_or(std::vector<Outbound>{});
     for (const auto& ob : outbounds) {
-        const bool routable =
-            (ob.type == OutboundType::INTERFACE ||
-             ob.type == OutboundType::TABLE ||
-             ob.type == OutboundType::URLTEST);
-
-        uint32_t table_id = 0;
-        uint32_t priority = 0;
-
-        if (routable) {
-            if (ob.type == OutboundType::TABLE) {
-                table_id = static_cast<uint32_t>(ob.table.value_or(0));
-                priority = table_start + table_offset;
-            } else {
-                table_id = table_start + table_offset;
-                priority = table_id;
-            }
-            ++table_offset;
-        }
-
         uint32_t fwmark = 0;
         auto mark_it = marks.find(ob.tag);
         if (mark_it != marks.end()) {
             fwmark = mark_it->second;
         }
 
+        const auto policy_it = rules_by_mark.find(fwmark);
+        const auto route_it = routes_by_outbound.find(ob.tag);
+        std::optional<uint32_t> table_id;
+        if (policy_it != rules_by_mark.end() && !policy_it->second.empty()) {
+            table_id = policy_it->second.front()->expected_table;
+        } else if (route_it != routes_by_outbound.end() &&
+                   !route_it->second.empty()) {
+            table_id = route_it->second.front()->table_id;
+        } else if (ob.type == OutboundType::TABLE && ob.table.has_value()) {
+            table_id = static_cast<uint32_t>(*ob.table);
+        }
+
         std::cout << "  " << ob.tag << " [" << outbound_type_label(ob.type) << "]";
         if (ob.type == OutboundType::INTERFACE) {
             std::cout << " iface=" << ob.interface.value_or("")
-                      << " fwmark=" << fwmark_hex(fwmark)
-                      << " table=" << table_id;
-        } else if (ob.type == OutboundType::TABLE) {
-            std::cout << " table=" << table_id
                       << " fwmark=" << fwmark_hex(fwmark);
+            if (table_id.has_value()) {
+                std::cout << " table=" << *table_id;
+            }
+        } else if (ob.type == OutboundType::TABLE) {
+            if (table_id.has_value()) {
+                std::cout << " table=" << *table_id;
+            }
+            std::cout << " fwmark=" << fwmark_hex(fwmark);
         } else if (ob.type == OutboundType::URLTEST) {
-            std::cout << " fwmark=" << fwmark_hex(fwmark)
-                      << " table=" << table_id;
+            std::cout << " fwmark=" << fwmark_hex(fwmark);
+            if (table_id.has_value()) {
+                std::cout << " table=" << *table_id;
+            }
         }
         std::cout << "\n";
 
-        auto rt_it = routes_by_outbound.find(ob.tag);
-        if (rt_it != routes_by_outbound.end()) {
-            for (const auto* rt : rt_it->second) {
+        if (route_it != routes_by_outbound.end()) {
+            for (const auto* rt : route_it->second) {
                 const std::string route_desc = "route   " + format_route_brief(*rt);
                 std::cout << "    " << pad_dots(route_desc, check_status_label(rt->status)) << "\n";
                 if (rt->status != CheckStatus::ok) {
@@ -360,30 +372,22 @@ void print_outbound_section(const Config& config,
             }
         }
 
-        if (fwmark != 0) {
-            auto pr_it = rules_by_mark_table.find({fwmark, table_id});
-            if (pr_it != rules_by_mark_table.end()) {
-                const auto& pr = *pr_it->second;
-                std::string suffix = check_status_label(pr.status);
-                const auto families = format_rule_presence(pr);
+        if (policy_it != rules_by_mark.end()) {
+            for (const auto* pr : policy_it->second) {
+                std::string suffix = check_status_label(pr->status);
+                const auto families = format_rule_presence(*pr);
                 if (!families.empty()) {
                     suffix += " " + families;
                 }
                 const std::string rule_desc = keen_pbr3::format("rule    {}/{} -> table={} pri={}",
-                                                                fwmark_hex(pr.fwmark),
-                                                                fwmark_hex(pr.fwmask),
-                                                                pr.expected_table,
-                                                                pr.priority);
+                                                                fwmark_hex(pr->fwmark),
+                                                                fwmark_hex(pr->fwmask),
+                                                                pr->expected_table,
+                                                                pr->priority);
                 std::cout << "    " << pad_dots(rule_desc, suffix) << "\n";
-                if (pr.status != CheckStatus::ok) {
-                    print_detail_if_needed(pr.detail, "      ");
+                if (pr->status != CheckStatus::ok) {
+                    print_detail_if_needed(pr->detail, "      ");
                 }
-            } else if (routable) {
-                const std::string rule_desc = keen_pbr3::format("rule    {} -> table={} pri={}",
-                                                                fwmark_hex(fwmark),
-                                                                table_id,
-                                                                priority);
-                std::cout << "    " << pad_dots(rule_desc, "MISSING") << "\n";
             }
         }
     }
@@ -424,18 +428,166 @@ void print_firewall_section(const std::vector<DisplayFirewallRule>& firewall_rul
 }
 
 void print_overall_summary(const RoutingHealthReport& report,
-                           const std::vector<DisplayFirewallRule>& firewall_rules) {
+                            const std::vector<DisplayFirewallRule>& firewall_rules,
+                            bool runtime_ok) {
     const int failed = count_failed_checks(report, firewall_rules);
     std::cout << "\nOverall: ";
     if (!report.error.empty()) {
         std::cout << "ERROR\n";
-    } else if (failed == 0) {
+    } else if (failed == 0 && report.overall_ok && runtime_ok) {
         std::cout << "OK\n";
+    } else if (failed == 0) {
+        std::cout << "DEGRADED\n";
     } else {
         std::cout << "DEGRADED (" << failed << " check(s) failed)\n";
     }
 
     std::cout << "Status values: OK / MISSING / MISMATCH / ERROR\n";
+}
+
+int render_status_report(const Config& config,
+                         const std::string& config_path,
+                         const RoutingHealthReport& report,
+                         std::optional<RuntimeStatusContext> runtime =
+                             std::nullopt) {
+    auto marks = allocate_outbound_marks(
+        config.fwmark.value_or(FwmarkConfig{}),
+        config.outbounds.value_or(std::vector<Outbound>{}));
+    const auto display_firewall_rules =
+        build_display_firewall_rules(config, marks, report.firewall_rules);
+    const bool runtime_ok =
+        !runtime.has_value() ||
+        (runtime->state == "running" && runtime->routing_runtime_active);
+
+    print_header(report, config_path);
+    print_runtime_status(runtime);
+    print_outbound_section(config, marks, report);
+    print_firewall_section(display_firewall_rules, report);
+    print_overall_summary(report, display_firewall_rules, runtime_ok);
+    return runtime_ok && report.overall_ok &&
+                   count_failed_checks(report, display_firewall_rules) == 0
+               ? 0
+               : 1;
+}
+
+CheckStatus check_status_from_api(api::CheckStatus status) {
+    switch (status) {
+        case api::CheckStatus::OK:
+            return CheckStatus::ok;
+        case api::CheckStatus::MISSING:
+            return CheckStatus::missing;
+        case api::CheckStatus::MISMATCH:
+            return CheckStatus::mismatch;
+    }
+    throw std::runtime_error("unknown API check status");
+}
+
+uint32_t hex_uint32_from_string(const std::string& text) {
+    uint32_t result = 0;
+    const char* first = text.data();
+    const char* last = first + text.size();
+    if (text.size() >= 2 && text[0] == '0' && text[1] == 'x') {
+        first += 2;
+    }
+    const auto parsed = std::from_chars(first, last, result, 16);
+    if (first == last || parsed.ec != std::errc{} || parsed.ptr != last) {
+        throw std::runtime_error(
+            "invalid hexadecimal value in status response: " + text);
+    }
+    return result;
+}
+
+uint32_t uint32_from_api(int64_t value, const char* field_name) {
+    if (value < 0 ||
+        value > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::runtime_error(
+            std::string("invalid value for ") + field_name +
+            " in status response");
+    }
+    return static_cast<uint32_t>(value);
+}
+
+RoutingHealthReport routing_health_report_from_api(
+    const api::RoutingHealthResponse& health) {
+    RoutingHealthReport report;
+    report.firewall_backend =
+        health.firewall_backend ==
+                api::RoutingHealthResponseFirewallBackend::NFTABLES
+            ? FirewallBackend::nftables
+            : FirewallBackend::iptables;
+    report.overall_ok =
+        health.overall == api::RoutingHealthResponseOverall::OK;
+    report.firewall_chain.chain_present = health.firewall.chain_present;
+    report.firewall_chain.prerouting_hook_present =
+        health.firewall.prerouting_hook_present;
+    report.firewall_chain.detail = health.firewall.detail.value_or("");
+
+    for (const auto& item : health.firewall_rules) {
+        FirewallRuleCheck check;
+        check.set_name = item.set_name;
+        check.action = item.action;
+        if (item.expected_fwmark.has_value()) {
+            check.expected_fwmark =
+                hex_uint32_from_string(*item.expected_fwmark);
+        }
+        if (item.actual_fwmark.has_value()) {
+            check.actual_fwmark =
+                hex_uint32_from_string(*item.actual_fwmark);
+        }
+        check.status = check_status_from_api(item.status);
+        check.detail = item.detail.value_or("");
+        report.firewall_rules.push_back(std::move(check));
+    }
+
+    for (const auto& item : health.route_tables) {
+        RouteTableCheck check;
+        check.table_id =
+            uint32_from_api(item.table_id, "route table_id");
+        check.outbound_tag = item.outbound_tag;
+        check.expected_destination = item.expected_destination;
+        check.expected_interface = item.expected_interface;
+        check.expected_gateway = item.expected_gateway;
+        if (item.expected_metric.has_value()) {
+            check.expected_metric = uint32_from_api(
+                *item.expected_metric, "route expected_metric");
+        }
+        check.expected_route_type = item.expected_route_type;
+        check.table_exists = item.table_exists;
+        check.default_route_present = item.default_route_present;
+        check.interface_matches = item.interface_matches;
+        check.gateway_matches = item.gateway_matches;
+        check.status = check_status_from_api(item.status);
+        check.detail = item.detail.value_or("");
+        report.route_tables.push_back(std::move(check));
+    }
+
+    for (const auto& item : health.policy_rules) {
+        PolicyRuleCheck check;
+        check.fwmark = hex_uint32_from_string(item.fwmark);
+        check.fwmask = hex_uint32_from_string(item.fwmask);
+        check.expected_table =
+            uint32_from_api(item.expected_table, "policy expected_table");
+        check.priority =
+            uint32_from_api(item.priority, "policy priority");
+        check.rule_present_v4 = item.rule_present_v4;
+        check.rule_present_v6 = item.rule_present_v6;
+        check.status = check_status_from_api(item.status);
+        check.detail = item.detail.value_or("");
+        report.policy_rules.push_back(std::move(check));
+    }
+    return report;
+}
+
+RoutingHealthReport routing_health_report_from_json(
+    const nlohmann::json& value) {
+    if (value.contains("error")) {
+        RoutingHealthReport report;
+        report.error =
+            value.get<api::RoutingHealthErrorResponse>().error;
+        return report;
+    }
+    return routing_health_report_from_api(
+        value.get<api::RoutingHealthResponse>());
 }
 
 } // namespace
@@ -489,14 +641,42 @@ int run_status_command(const Config& config, const std::string& config_path) {
         routes.get_routes(),
         rules.get_rules(),
         netlink);
-    const auto display_firewall_rules = build_display_firewall_rules(config, marks, report.firewall_rules);
+    return render_status_report(config, config_path, report);
+}
 
-    print_header(report, config_path);
-    print_outbound_section(config, marks, routes, report);
-    print_firewall_section(display_firewall_rules, report);
-    print_overall_summary(report, display_firewall_rules);
+int run_status_command(const nlohmann::json& response) {
+    if (!response.value("ok", false)) {
+        return 1;
+    }
 
-    return count_failed_checks(report, display_firewall_rules) == 0 ? 0 : 1;
+    try {
+        const auto& result = response.at("result");
+        if (!result.contains("config") ||
+            !result.contains("routing_health") ||
+            !result.contains("runtime_state") ||
+            !result.contains("routing_runtime_active")) {
+            std::cerr
+                << "keen-pbr status: incompatible daemon response; "
+                   "restart keen-pbr after upgrading the package\n";
+            return 1;
+        }
+
+        RuntimeStatusContext runtime{
+            result.at("runtime_state").get<std::string>(),
+            result.at("routing_runtime_active").get<bool>(),
+        };
+        return render_status_report(
+            result.at("config").get<Config>(),
+            result.value("config_path", KEEN_PBR_DEFAULT_CONFIG_PATH),
+            routing_health_report_from_json(result.at("routing_health")),
+            std::move(runtime));
+    } catch (const nlohmann::json::exception& error) {
+        std::cerr
+            << "keen-pbr status: incompatible daemon response: "
+            << error.what()
+            << "; restart keen-pbr after upgrading the package\n";
+        return 1;
+    }
 }
 
 } // namespace keen_pbr3

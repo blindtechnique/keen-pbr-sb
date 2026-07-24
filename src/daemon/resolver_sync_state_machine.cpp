@@ -28,6 +28,25 @@ api::ResolverConfigProbeStatus resolver_probe_status_from_hash_probe_status(
     return api::ResolverConfigProbeStatus::UNKNOWN;
 }
 
+bool resolver_sync_semantically_equal(const ResolverSyncSnapshot& lhs,
+                                      const ResolverSyncSnapshot& rhs) {
+    return lhs.expected_hash == rhs.expected_hash &&
+           lhs.actual_hash == rhs.actual_hash &&
+           lhs.actual_ts == rhs.actual_ts &&
+           lhs.apply_started_ts == rhs.apply_started_ts &&
+           lhs.sync_state == rhs.sync_state &&
+           lhs.probe_status == rhs.probe_status &&
+           lhs.live_status == rhs.live_status;
+}
+
+std::chrono::seconds resolver_convergence_retry_delay(std::uint32_t attempt) {
+    constexpr std::uint32_t kMaximumPowerOfTwoAttempt = 5;
+    if (attempt > kMaximumPowerOfTwoAttempt) {
+        return std::chrono::seconds{60};
+    }
+    return std::chrono::seconds{1U << attempt};
+}
+
 void ResolverSyncStateMachine::runtime_stopped() {
     runtime_active_ = false;
     resolver_configured_ = false;

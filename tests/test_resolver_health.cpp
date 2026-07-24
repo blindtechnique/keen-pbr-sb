@@ -208,3 +208,33 @@ TEST_CASE("resolver sync state machine: stopped or not configured is unknown") {
     CHECK(snapshot.probe_status == api::ResolverConfigProbeStatus::NOT_CONFIGURED);
     CHECK(snapshot.live_status == api::ResolverLiveStatus::UNKNOWN);
 }
+
+TEST_CASE("resolver convergence retry uses bounded exponential backoff") {
+    CHECK(resolver_convergence_retry_delay(0) == std::chrono::seconds{1});
+    CHECK(resolver_convergence_retry_delay(1) == std::chrono::seconds{2});
+    CHECK(resolver_convergence_retry_delay(2) == std::chrono::seconds{4});
+    CHECK(resolver_convergence_retry_delay(3) == std::chrono::seconds{8});
+    CHECK(resolver_convergence_retry_delay(4) == std::chrono::seconds{16});
+    CHECK(resolver_convergence_retry_delay(5) == std::chrono::seconds{32});
+    CHECK(resolver_convergence_retry_delay(6) == std::chrono::seconds{60});
+    CHECK(resolver_convergence_retry_delay(40) == std::chrono::seconds{60});
+}
+
+TEST_CASE("resolver semantic state ignores only probe timestamp") {
+    ResolverSyncSnapshot baseline;
+    baseline.expected_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    baseline.actual_hash = baseline.expected_hash;
+    baseline.actual_ts = 100;
+    baseline.last_probe_ts = 101;
+    baseline.apply_started_ts = 99;
+    baseline.sync_state = api::ResolverConfigSyncState::CONVERGED;
+    baseline.probe_status = api::ResolverConfigProbeStatus::SUCCESS;
+    baseline.live_status = api::ResolverLiveStatus::HEALTHY;
+
+    auto fresh_probe = baseline;
+    fresh_probe.last_probe_ts = 160;
+    CHECK(resolver_sync_semantically_equal(baseline, fresh_probe));
+
+    fresh_probe.actual_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    CHECK_FALSE(resolver_sync_semantically_equal(baseline, fresh_probe));
+}

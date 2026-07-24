@@ -14,6 +14,7 @@
 #include <cpptrace/utils.hpp>
 #include <keen-pbr/version.hpp>
 
+#include "cmd/status.hpp"
 #include "crash/crash_diagnostics.hpp"
 #include "log/file_sink.hpp"
 #ifdef WITH_API
@@ -304,8 +305,20 @@ int main(int argc, char* argv[]) {
                  {"operation", operation},
                  {"reload", opts.download_reload},
                  {"target", opts.test_routing_target}});
-            if (opts.resolver_config_hash &&
-                response.value("ok", false)) {
+            if (opts.run_status) {
+                if (response.value("ok", false)) {
+                    return keen_pbr3::run_status_command(response);
+                }
+                const auto& error =
+                    response.value("error", nlohmann::json::object());
+                std::cerr
+                    << "keen-pbr status: "
+                    << error.value("code", "daemon_error") << ": "
+                    << error.value("message", "status request failed")
+                    << '\n';
+                return 1;
+            } else if (opts.resolver_config_hash &&
+                       response.value("ok", false)) {
                 std::cout
                     << response.at("result").value(
                            "resolver_config_hash", "")

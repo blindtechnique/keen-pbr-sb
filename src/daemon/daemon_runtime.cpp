@@ -1,6 +1,7 @@
 #include "daemon.hpp"
 
 #include <fstream>
+#include <future>
 #include <map>
 #include <set>
 #include <sstream>
@@ -24,29 +25,133 @@
 
 namespace keen_pbr3 {
 
-void Daemon::run_system_resolver_hook_reload() {
+namespace {
+
+class ResolverIpcGate {
+public:
+    explicit ResolverIpcGate(std::atomic<bool>& flag) : flag_(flag) {
+        if (flag_.exchange(true, std::memory_order_acq_rel)) {
+            throw DaemonError("system resolver operation is already in progress");
+        }
+    }
+
+    ~ResolverIpcGate() {
+        flag_.store(false, std::memory_order_release);
+    }
+
+    ResolverIpcGate(const ResolverIpcGate&) = delete;
+    ResolverIpcGate& operator=(const ResolverIpcGate&) = delete;
+
+private:
+    std::atomic<bool>& flag_;
+};
+
+} // namespace
+
+bool Daemon::run_system_resolver_hook(std::string_view action,
+                                      bool manage_ipc_gate) {
     auto& log = Logger::instance();
 
-    std::string command;
-    int exit_code = 0;
-    const bool ok = execute_system_resolver_reload_hook(
-        config_,
-        hook_command_executor_,
-        command,
-        exit_code);
-
-    if (command.empty()) {
-        return;
+    const auto args = build_system_resolver_hook_args(config_, action);
+    if (args.empty()) {
+        return true;
     }
 
-    if (!ok) {
-        log.warn("System resolver reload hook failed (exit code: {}): {}",
+    std::string command;
+    for (std::size_t index = 0; index < args.size(); ++index) {
+        if (index != 0) command += ' ';
+        command += args[index];
+    }
+
+    auto execute_hook = [this, args] {
+        KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
+        return hook_command_executor_(args);
+    };
+
+    std::optional<ResolverIpcGate> gate;
+    if (manage_ipc_gate) {
+        gate.emplace(ipc_resolver_hook_inflight_);
+    }
+
+    int exit_code = 0;
+    const bool pump_control_socket =
+        is_event_loop_thread() ||
+        !event_loop_active_.load(std::memory_order_acquire);
+    if (pump_control_socket) {
+        auto hook_result = resolver_hook_executor_.submit(
+            "system-resolver-hook-command", std::move(execute_hook));
+        while (hook_result.wait_for(std::chrono::milliseconds{10}) !=
+               std::future_status::ready) {
+            handle_ipc_control_socket();
+        }
+        exit_code = hook_result.get();
+    } else {
+        exit_code = execute_hook();
+    }
+
+    if (exit_code != 0) {
+        log.warn("System resolver hook failed (exit code: {}): {}",
                  exit_code,
                  command);
-        return;
+        return false;
     }
 
-    log.info("System resolver reload hook complete: {}", command);
+    log.info("System resolver hook complete: {}", command);
+    return true;
+}
+
+bool Daemon::run_system_resolver_hook_reload() {
+    if (build_system_resolver_reload_args(config_).empty()) {
+        return true;
+    }
+
+    // Keep the cache revision stable from hash calculation through the final
+    // streamed byte. Remote list downloads use the exclusive side.
+    KPBR_SHARED_LOCK(cache_snapshot, resolver_cache_snapshot_mutex_);
+    update_resolver_config_hash();
+    auto generation = std::make_shared<ResolverGenerationSnapshot>(
+        *resolver_generation_snapshot_);
+    generation->stream_epoch =
+        resolver_stream_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    resolver_generation_snapshot_ = generation;
+    const std::uint64_t expected_epoch =
+        generation->stream_epoch;
+    ResolverIpcGate gate(ipc_resolver_hook_inflight_);
+    if (!run_system_resolver_hook("reload", false)) {
+        return false;
+    }
+    if (!wait_for_resolver_stream_epoch(
+            expected_epoch, std::chrono::seconds{15})) {
+        Logger::instance().warn(
+            "System resolver hook completed without the expected dnsmasq "
+            "configuration stream (epoch={})",
+            expected_epoch);
+        return false;
+    }
+
+    // Lists and DNS cache files remain live on disk while streaming. Refresh
+    // the expected hash only after the completed stream boundary.
+    update_resolver_config_hash();
+    return true;
+}
+
+bool Daemon::wait_for_resolver_stream_epoch(
+    std::uint64_t expected_epoch,
+    std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (resolver_stream_completed_epoch_.load(
+                std::memory_order_acquire) == expected_epoch) {
+            return true;
+        }
+        if (is_event_loop_thread() ||
+            !event_loop_active_.load(std::memory_order_acquire)) {
+            handle_ipc_control_socket();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    return resolver_stream_completed_epoch_.load(
+               std::memory_order_acquire) == expected_epoch;
 }
 
 bool Daemon::routing_runtime_active() const {
@@ -76,14 +181,8 @@ void Daemon::stop_routing_runtime() {
         keenetic_dns_refresh_task_id_ = -1;
     }
 
-    std::optional<int> resolver_exit_code;
-    if (config_.dns.has_value() && config_.dns->system_resolver.has_value()) {
-        const auto args = build_system_resolver_hook_args(config_, "deactivate");
-        const int exit_code = hook_command_executor_(args);
-        if (exit_code != 0) {
-            resolver_exit_code = exit_code;
-        }
-    }
+    const bool resolver_deactivated =
+        run_system_resolver_hook("deactivate");
 
     // Routing and firewall teardown has already happened. Publish the real
     // state even when dnsmasq fallback activation fails; reporting "running"
@@ -94,9 +193,8 @@ void Daemon::stop_routing_runtime() {
     publish_runtime_state();
     log.info("Routing runtime stopped.");
 
-    if (resolver_exit_code.has_value()) {
-        throw DaemonError("System resolver deactivate hook failed with exit code " +
-                          std::to_string(*resolver_exit_code));
+    if (!resolver_deactivated) {
+        throw DaemonError("System resolver deactivate hook failed");
     }
 }
 
@@ -117,19 +215,15 @@ void Daemon::start_routing_runtime() {
         (void)refresh_keenetic_dns_cache(true);
         apply_firewall(FirewallApplyMode::Destructive);
 
-        if (config_.dns.has_value() && config_.dns->system_resolver.has_value()) {
-            const auto args = build_system_resolver_hook_args(config_, "activate");
-            const int exit_code = hook_command_executor_(args);
-            if (exit_code != 0) {
-                throw DaemonError("System resolver activate hook failed with exit code " +
-                                  std::to_string(exit_code));
-            }
+        apply_started_ts_.store(
+            unix_timestamp_now_seconds(), std::memory_order_release);
+        update_resolver_config_hash();
+        if (!run_system_resolver_hook_reload()) {
+            throw DaemonError("System resolver reload hook failed");
         }
 
         routing_runtime_active_ = true;
         transition_runtime_or_throw(RuntimeState::running, "runtime start complete");
-        apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-        update_resolver_config_hash();
         schedule_keenetic_dns_refresh();
         refresh_resolver_config_hash_actual_async();
         publish_runtime_state();
@@ -164,14 +258,8 @@ void Daemon::start_routing_runtime() {
             log.error("Failed to clean firewall after start failure: {}",
                       cleanup_error.what());
         }
-        const auto deactivate_args =
-            build_system_resolver_hook_args(config_, "deactivate");
-        if (!deactivate_args.empty()) {
-            const int exit_code = hook_command_executor_(deactivate_args);
-            if (exit_code != 0) {
-                log.warn("System resolver fallback recovery failed with exit code {}",
-                         exit_code);
-            }
+        if (!run_system_resolver_hook("deactivate")) {
+            log.warn("System resolver fallback recovery failed");
         }
         routing_runtime_active_ = false;
         refresh_resolver_config_hash_actual_async();
@@ -486,9 +574,18 @@ ListsRefreshExecutionResult Daemon::execute_remote_list_refresh(
     ListsRefreshExecutionResult result;
     const auto relevant_lists = collect_relevant_list_names(config_);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_);
-    result.refresh_result =
-        list_service_.refresh_remote_lists(
-            config_, outbound_marks_, &relevant_lists, target_lists, &dns_relevant_lists);
+    {
+        KPBR_SHARED_UNIQUE_LOCK(
+            cache_write,
+            resolver_cache_snapshot_mutex_);
+        result.refresh_result =
+            list_service_.refresh_remote_lists(
+                config_,
+                outbound_marks_,
+                &relevant_lists,
+                target_lists,
+                &dns_relevant_lists);
+    }
 
     if (!result.refresh_result.changed_lists.empty()) {
         log.info("Lists refresh ({}): updated list(s): {}", source,
@@ -504,7 +601,8 @@ ListsRefreshExecutionResult Daemon::execute_remote_list_refresh(
         log.info("Lists refresh ({}): relevant list(s) changed ({}), reloading runtime",
                  source,
                  format_list_names(result.refresh_result.relevant_changed_lists));
-        apply_config(config_, false);
+        bool rolled_back = false;
+        apply_config_with_rollback(config_, rolled_back, false);
         result.reloaded = true;
         return result;
     }
@@ -592,7 +690,9 @@ void Daemon::commit_lists_refresh_async_result(
                     "Lists refresh (autoupdate): relevant list(s) changed ({}), reloading runtime",
                     format_list_names(result.refresh_result.relevant_changed_lists));
                 try {
-                    apply_config(config_snapshot, false);
+                    bool rolled_back = false;
+                    apply_config_with_rollback(
+                        config_snapshot, rolled_back, false);
                     result.reloaded = true;
                 } catch (const std::exception& e) {
                     Logger::instance().error("Lists autoupdate reload failed: {}", e.what());
@@ -660,11 +760,17 @@ void Daemon::refresh_lists_and_maybe_reload_async() {
                                      "source=autoupdate generation={}",
                                      generation);
             try {
-                refresh_result = list_service_.refresh_remote_lists(config_snapshot,
-                                                                   marks_snapshot,
-                                                                   &relevant_lists,
-                                                                   nullptr,
-                                                                   &dns_relevant_lists);
+                {
+                    KPBR_SHARED_UNIQUE_LOCK(
+                        cache_write,
+                        resolver_cache_snapshot_mutex_);
+                    refresh_result = list_service_.refresh_remote_lists(
+                        config_snapshot,
+                        marks_snapshot,
+                        &relevant_lists,
+                        nullptr,
+                        &dns_relevant_lists);
+                }
             } catch (const std::exception& e) {
                 error = e.what();
             }
@@ -698,7 +804,12 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
         config.outbounds.value_or(std::vector<Outbound>{}));
 
     if (refresh_remote_lists) {
-        (void)list_service_.refresh_remote_lists(prepared.config, prepared.outbound_marks);
+        KPBR_SHARED_UNIQUE_LOCK(
+            cache_write,
+            resolver_cache_snapshot_mutex_);
+        (void)list_service_.refresh_remote_lists(
+            prepared.config,
+            prepared.outbound_marks);
         prepared.remote_lists_refreshed = true;
     }
 
@@ -728,11 +839,6 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         scheduler_->cancel(resolver_config_hash_actual_task_id_);
         resolver_config_hash_actual_task_id_ = -1;
     }
-    if (resolver_config_hash_actual_retry_task_id_ >= 0) {
-        scheduler_->cancel(resolver_config_hash_actual_retry_task_id_);
-        resolver_config_hash_actual_retry_task_id_ = -1;
-    }
-
     outbound_marks_ = std::move(prepared.outbound_marks);
     config_ = std::move(prepared.config);
     firewall_state_.set_outbound_marks(outbound_marks_);
@@ -759,14 +865,15 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     if (resolver_reload_required(resolver_snapshot.expected_hash,
                                  resolver_snapshot.actual_hash,
                                  resolver_snapshot.live_status)) {
-        run_system_resolver_hook_reload();
+        if (!run_system_resolver_hook_reload()) {
+            throw DaemonError(
+                "system resolver reload did not complete its configuration stream");
+        }
     } else {
         Logger::instance().info(
             "Skipping dnsmasq reload: resolver configuration is unchanged and healthy");
     }
     refresh_resolver_config_hash_actual_async();
-    schedule_resolver_config_hash_actual_refresh();
-
     config_store_.replace_active(config_, outbound_marks_);
     routing_runtime_active_ = true;
     transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
@@ -793,16 +900,20 @@ void Daemon::apply_config(Config config, bool refresh_remote_lists) {
     apply_prepared_runtime_inputs(prepare_runtime_inputs(config, refresh_remote_lists));
 }
 
-void Daemon::apply_config_with_rollback(const Config& next_config, bool& rolled_back) {
+void Daemon::apply_config_with_rollback(const Config& next_config,
+                                        bool& rolled_back,
+                                        bool refresh_remote_lists) {
     Config previous_config = config_;
 
     try {
-        apply_config(next_config);
+        apply_config(next_config, refresh_remote_lists);
         rolled_back = false;
     } catch (...) {
         try {
-            apply_config(previous_config);
+            apply_config(previous_config, false);
             rolled_back = true;
+            Logger::instance().warn(
+                "Configuration apply failed; previous runtime was restored");
         } catch (const std::exception& rollback_error) {
             Logger::instance().error("Rollback to previous config failed: {}", rollback_error.what());
             rolled_back = false;
@@ -824,7 +935,8 @@ void Daemon::reload_from_disk() {
     ss << ifs.rdbuf();
     Config next_config = parse_config(ss.str());
     validate_config(next_config);
-    apply_config(std::move(next_config));
+    bool rolled_back = false;
+    apply_config_with_rollback(next_config, rolled_back);
 }
 
 } // namespace keen_pbr3

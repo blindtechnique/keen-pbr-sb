@@ -34,6 +34,7 @@
 #include "../dns/dnsmasq_gen.hpp"
 #include "../firewall/firewall.hpp"
 #include "../firewall/firewall_verifier.hpp"
+#include "../health/routing_health_checker.hpp"
 #include "../ipc/control_protocol.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
@@ -264,12 +265,18 @@ Daemon::Daemon(Config config,
     // overlap into a false "DNS event stream unavailable" result.
     dns_test_broadcaster_ = std::make_unique<SseBroadcaster>(128, 4);
 #endif
+    // Acquire ownership before touching the shared control-socket path. A
+    // second instance must fail without unlinking the live daemon's socket.
+    write_pid_file();
     setup_ipc_control_socket();
 }
 
 Daemon::~Daemon() {
     try {
         accept_posted_control_tasks_.store(false, std::memory_order_release);
+        resolver_hook_executor_.shutdown();
+        resolver_stream_executor_.shutdown();
+        resolver_io_executor_.shutdown();
         blocking_executor_.shutdown();
 
         if (control_fd_ >= 0) {
@@ -474,6 +481,12 @@ void Daemon::handle_ipc_control_socket() {
 
             const std::string operation =
                 request.at("operation").get<std::string>();
+            const bool resolver_hook_inflight =
+                ipc_resolver_hook_inflight_.load(
+                    std::memory_order_acquire);
+            const bool resolver_read_only_operation =
+                operation == "status" ||
+                operation == "resolver-config-hash";
             const bool root_peer = peer.uid == 0;
             const bool list_update_member =
                 ipc_control_group_id_ != static_cast<gid_t>(-1) &&
@@ -495,6 +508,15 @@ void Daemon::handle_ipc_control_socket() {
                     request,
                     "unsupported_operation",
                     "unsupported control operation");
+            } else if (
+                resolver_hook_inflight &&
+                operation != "generate-resolver-config" &&
+                !resolver_read_only_operation) {
+                response = ipc::make_error_response(
+                    request,
+                    "busy",
+                    "mutating control operations are unavailable during "
+                    "resolver reload");
             } else if (operation == "test-routing") {
                 const std::string target =
                     request.value("target", "");
@@ -526,17 +548,31 @@ void Daemon::handle_ipc_control_socket() {
                       {"dns_error", result.dns_error}}},
                 };
             } else if (operation == "generate-resolver-config") {
-                const auto runtime_snapshot =
-                    runtime_state_store_.snapshot();
-                if (!runtime_snapshot.routing_runtime_active ||
-                    !routing_runtime_active_) {
+                const RuntimeState runtime_state =
+                    runtime_state_machine_.state();
+                const bool resolver_generation_available =
+                    runtime_state == RuntimeState::starting ||
+                    runtime_state == RuntimeState::running ||
+                    runtime_state == RuntimeState::restart_required ||
+                    runtime_state == RuntimeState::applying;
+                if (!resolver_generation_available) {
+                    const auto runtime_snapshot =
+                        runtime_state_store_.snapshot();
                     response = ipc::make_error_response(
                         request,
                         resolver_runtime_reason(runtime_snapshot),
                         "resolver runtime is not active");
+                } else if (!resolver_generation_snapshot_) {
+                    response = ipc::make_error_response(
+                        request,
+                        "resolver_generation_unavailable",
+                        "resolver generation is not available");
                 } else {
-                    const auto active_config =
-                        config_store_.active_config();
+                    // Capture the exact candidate generation that requested
+                    // the reload. The committed ConfigStore can still contain
+                    // the previous generation until transactional apply ends.
+                    const auto generation = resolver_generation_snapshot_;
+                    const Config& active_config = generation->config;
                     const auto dns_config =
                         active_config.dns.value_or(DnsConfig{});
                     const auto cache_dir =
@@ -549,22 +585,24 @@ void Daemon::handle_ipc_control_socket() {
                             ? ResolverType::DNSMASQ_IPSET
                             : (requested_resolver == "dnsmasq-nftset"
                                    ? ResolverType::DNSMASQ_NFTSET
-                                   : (firewall_->backend() ==
-                                              FirewallBackend::nftables
-                                          ? ResolverType::DNSMASQ_NFTSET
-                                          : ResolverType::DNSMASQ_IPSET));
+                                   : generation->resolver_type);
                     const auto request_id =
                         request.at("request_id").get<std::string>();
-                    const bool queued = blocking_executor_.try_post(
+                    const bool queued =
+                        resolver_stream_executor_.try_post(
                         "generate-resolver-config",
-                        [client,
-                         active_config,
+                        [this,
+                         client,
+                         generation,
                          dns_config,
                          cache_dir,
                          type,
                          request_id] {
                             bool stream_started = false;
+                            bool stream_completed = false;
                             try {
+                                const Config& active_config =
+                                    generation->config;
                                 CacheManager cache(
                                     cache_dir,
                                     max_file_size_bytes(active_config));
@@ -636,8 +674,6 @@ void Daemon::handle_ipc_control_socket() {
                                 std::ostream output(&buffer);
                                 output
                                     << "# keen-pbr resolver state: active\n";
-                                const auto ipv6 =
-                                    resolve_ipv6_support(active_config);
                                 ListStreamer streamer(cache);
                                 DnsServerRegistry registry(dns_config);
                                 DnsmasqGenerator generator(
@@ -648,7 +684,7 @@ void Daemon::handle_ipc_control_socket() {
                                     lists,
                                     type,
                                     KEEN_PBR3_VERSION_FULL_STRING,
-                                    ipv6.enabled);
+                                    generation->ipv6_enabled);
                                 generator.generate(output);
                                 output
                                     << "txt-record=resolver-state.keen.pbr,"
@@ -665,6 +701,7 @@ void Daemon::handle_ipc_control_socket() {
                                     reinterpret_cast<const char*>(
                                         &end_of_stream),
                                     sizeof(end_of_stream));
+                                stream_completed = true;
                             } catch (const std::exception& error) {
                                 if (!stream_started) {
                                     try {
@@ -688,6 +725,11 @@ void Daemon::handle_ipc_control_socket() {
                                 }
                             }
                             ::close(client);
+                            if (stream_completed) {
+                                resolver_stream_completed_epoch_.store(
+                                    generation->stream_epoch,
+                                    std::memory_order_release);
+                            }
                         });
                     if (queued) {
                         stream_dispatched = true;
@@ -730,12 +772,17 @@ void Daemon::handle_ipc_control_socket() {
                             collect_relevant_list_names(config_);
                         const auto dns_relevant =
                             collect_dns_relevant_list_names(config_);
-                        refresh = list_service_.refresh_remote_lists(
-                            config_,
-                            outbound_marks_,
-                            &relevant,
-                            nullptr,
-                            &dns_relevant);
+                        {
+                            KPBR_SHARED_UNIQUE_LOCK(
+                                cache_write,
+                                resolver_cache_snapshot_mutex_);
+                            refresh = list_service_.refresh_remote_lists(
+                                config_,
+                                outbound_marks_,
+                                &relevant,
+                                nullptr,
+                                &dns_relevant);
+                        }
                     }
                     response = {
                         {"protocol_version",
@@ -750,6 +797,44 @@ void Daemon::handle_ipc_control_socket() {
                           {"reloaded", reloaded}}},
                     };
                 }
+            } else if (operation == "status") {
+                const auto snapshot =
+                    runtime_state_store_.snapshot();
+                RoutingHealthReport routing_health;
+                if (snapshot.runtime_state == RuntimeState::starting) {
+                    routing_health.firewall_backend =
+                        firewall_->backend();
+                    routing_health.firewall_chain.detail =
+                        "routing runtime initialization is in progress";
+                } else {
+                    routing_health = build_routing_health_report(
+                        firewall_->backend(),
+                        firewall_->uses_raw_prerouting(),
+                        snapshot.firewall_state,
+                        snapshot.route_specs,
+                        snapshot.policy_rule_specs,
+                        netlink_);
+                }
+                response = {
+                    {"protocol_version",
+                     ipc::kControlProtocolVersion},
+                    {"request_id", request.at("request_id")},
+                    {"ok", true},
+                    {"result",
+                     {{"runtime_state",
+                       runtime_state_name(snapshot.runtime_state)},
+                      {"config_path", config_path_},
+                      {"config", config_store_.active_config()},
+                      {"routing_health",
+                       routing_health_report_to_json(
+                           routing_health)},
+                      {"runtime_state_reason",
+                       snapshot.runtime_state_reason},
+                      {"routing_runtime_active",
+                       snapshot.routing_runtime_active},
+                      {"resolver_config_hash",
+                       snapshot.resolver_config_hash}}},
+                };
             } else {
                 const auto snapshot =
                     runtime_state_store_.snapshot();
@@ -759,13 +844,7 @@ void Daemon::handle_ipc_control_socket() {
                     {"request_id", request.at("request_id")},
                     {"ok", true},
                     {"result",
-                     {{"runtime_state",
-                       runtime_state_name(snapshot.runtime_state)},
-                      {"runtime_state_reason",
-                       snapshot.runtime_state_reason},
-                      {"routing_runtime_active",
-                       snapshot.routing_runtime_active},
-                      {"resolver_config_hash",
+                     {{"resolver_config_hash",
                        snapshot.resolver_config_hash}}},
                 };
             }
@@ -1254,16 +1333,23 @@ void Daemon::run_event_loop() {
 void Daemon::run() {
     auto& log = Logger::instance();
 
-    write_pid_file();
-
+    try {
     setup_static_routing();
     log.info("Static routing tables and ip rules installed.");
 
     log.info("Startup lists: checking local cache; only missing remote lists will be downloaded.");
     const auto relevant_lists = collect_relevant_list_names(config_);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_);
-    const RemoteListsRefreshResult refresh_result = list_service_.download_uncached(
-        config_, outbound_marks_, &relevant_lists, &dns_relevant_lists);
+    const RemoteListsRefreshResult refresh_result = [&]() {
+        KPBR_SHARED_UNIQUE_LOCK(
+            cache_write,
+            resolver_cache_snapshot_mutex_);
+        return list_service_.download_uncached(
+            config_,
+            outbound_marks_,
+            &relevant_lists,
+            &dns_relevant_lists);
+    }();
 
     if (!refresh_result.cached_lists.empty()) {
         log.info("Startup lists: using cached list(s): {}", format_list_names(refresh_result.cached_lists));
@@ -1318,13 +1404,14 @@ void Daemon::run() {
     // Always reload once more from the live daemon; otherwise a cache-complete
     // startup can remain on fallback DNS indefinitely.
     apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-    run_system_resolver_hook_reload();
     update_resolver_config_hash();
+    if (!run_system_resolver_hook_reload()) {
+        throw DaemonError(
+            "system resolver reload did not complete its configuration stream");
+    }
     routing_runtime_active_ = true;
     transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
-    refresh_resolver_config_hash_actual_async();
-    schedule_resolver_config_hash_actual_refresh();
 
     setup_dns_probe();
 
@@ -1333,6 +1420,97 @@ void Daemon::run() {
 #ifdef WITH_API
     setup_api();
 #endif
+    } catch (...) {
+        // Startup installs owned kernel state before dnsmasq proves that it
+        // consumed the matching resolver generation. Any failure before the
+        // event loop starts must therefore unwind every owned subsystem; the
+        // normal shutdown tail below is never reached in this path.
+        log.error("Daemon startup failed; rolling back partial runtime state.");
+        runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
+        scheduler_->cancel_all();
+#ifdef WITH_API
+        if (status_stream_) {
+            status_stream_->close_all();
+        }
+        if (dns_test_broadcaster_) {
+            dns_test_broadcaster_->close_all();
+        }
+        if (api_server_) {
+            api_server_->stop();
+        }
+        try {
+            teardown_conntrack_events();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: conntrack cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        remove_remote_access_rules();
+#endif
+        try {
+            unregister_interface_monitor_fd();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: interface monitor cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        try {
+            teardown_dns_probe();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: DNS probe cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        if (urltest_manager_) {
+            try {
+                urltest_manager_->clear();
+            } catch (const std::exception& cleanup_error) {
+                log.error("Startup rollback: urltest cleanup failed: {}",
+                          cleanup_error.what());
+            }
+        }
+        try {
+            policy_rules_.clear();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: policy-rule cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        try {
+            route_table_.clear();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: route cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        try {
+            firewall_->cleanup();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: firewall cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        try {
+            if (!run_system_resolver_hook("deactivate")) {
+                log.error(
+                    "Startup rollback: resolver fallback activation failed.");
+            }
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: resolver fallback activation failed: {}",
+                      cleanup_error.what());
+        }
+        routing_runtime_active_ = false;
+        resolver_sync_.runtime_stopped();
+        try {
+            transition_runtime_or_throw(
+                RuntimeState::broken, "startup failed and was rolled back");
+            publish_runtime_state();
+        } catch (const std::exception& state_error) {
+            log.error("Startup rollback: state publication failed: {}",
+                      state_error.what());
+        }
+        try {
+            remove_pid_file();
+        } catch (const std::exception& cleanup_error) {
+            log.error("Startup rollback: PID cleanup failed: {}",
+                      cleanup_error.what());
+        }
+        throw;
+    }
 
     log.info("Daemon running. PID: {}", getpid());
 
@@ -1340,6 +1518,11 @@ void Daemon::run() {
     event_loop_thread_id_.store(std::this_thread::get_id(), std::memory_order_relaxed);
     event_loop_active_.store(true, std::memory_order_release);
     accept_posted_control_tasks_.store(true, std::memory_order_release);
+
+    // Async resolver probe results commit through post_control_task(). Starting
+    // the probe before posted tasks are accepted drops that commit and leaves
+    // the in-flight flag stuck forever.
+    refresh_resolver_config_hash_actual_async();
 
     // Populate latency and interface liveness immediately. The periodic probe
     // intentionally runs every 20 seconds, but using that interval as the
@@ -1353,7 +1536,6 @@ void Daemon::run() {
     event_loop_active_.store(false, std::memory_order_release);
     event_loop_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
     accept_posted_control_tasks_.store(false, std::memory_order_release);
-    blocking_executor_.shutdown();
 
     log.info("Shutting down...");
     transition_runtime_or_throw(RuntimeState::shutting_down, "daemon shutdown requested");
@@ -1369,7 +1551,16 @@ void Daemon::run() {
     if (api_server_) {
         api_server_->stop();
     }
+    teardown_conntrack_events();
+    remove_remote_access_rules();
 #endif
+
+    // Stop accepting API work before draining workers. Otherwise a handler can
+    // enqueue against an executor that has already been shut down.
+    resolver_hook_executor_.shutdown();
+    resolver_stream_executor_.shutdown();
+    resolver_io_executor_.shutdown();
+    blocking_executor_.shutdown();
 
     teardown_dns_probe();
 

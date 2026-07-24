@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,7 @@ class UrltestManager;
 class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
+enum class ResolverType;
 
 #ifdef WITH_API
 enum class ConfigOperationState : uint8_t;
@@ -77,6 +79,15 @@ struct PreparedRuntimeInputs {
     Config config;
     OutboundMarkMap outbound_marks;
     bool remote_lists_refreshed{false};
+};
+
+struct ResolverGenerationSnapshot {
+    Config config;
+    ResolverType resolver_type;
+    bool ipv6_enabled{true};
+    std::string expected_hash;
+    std::uint64_t generation{0};
+    std::uint64_t stream_epoch{0};
 };
 
 // Helper to get tag from any outbound variant
@@ -184,13 +195,19 @@ private:
     void apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared);
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
                                                 bool refresh_remote_lists = true);
-    void apply_config_with_rollback(const Config& next_config, bool& rolled_back);
+    void apply_config_with_rollback(const Config& next_config,
+                                    bool& rolled_back,
+                                    bool refresh_remote_lists = true);
     void reload_from_disk();
     void start_routing_runtime();
     void stop_routing_runtime();
     void restart_routing_runtime();
     bool routing_runtime_active() const;
-    void run_system_resolver_hook_reload();
+    bool run_system_resolver_hook(std::string_view action,
+                                  bool manage_ipc_gate = true);
+    bool run_system_resolver_hook_reload();
+    bool wait_for_resolver_stream_epoch(std::uint64_t expected_epoch,
+                                        std::chrono::milliseconds timeout);
     void schedule_lists_autoupdate();
     // Re-applies rules after a failed startup attempt, backing off each time.
     void schedule_startup_firewall_retry(int attempt = 1);
@@ -265,20 +282,24 @@ private:
 
     // Recompute resolver_config_hash_ from current config/cache state
     void update_resolver_config_hash();
+    ResolverGenerationSnapshot make_resolver_generation_snapshot();
     // Schedule (or reschedule) the periodic refresh of resolver_config_hash_actual_.
     void schedule_resolver_config_hash_actual_refresh();
+    void schedule_resolver_config_hash_actual_after(
+        std::chrono::seconds delay,
+        const char* task_name);
     RuntimeStateSnapshot build_runtime_state_snapshot() const;
-    void publish_runtime_state();
+    void publish_runtime_state(bool reconcile_status_stream = true);
     void transition_runtime_or_throw(RuntimeState next, const char* reason);
 
     // Lists autoupdate state
     int lists_autoupdate_task_id_{-1};
     // Periodic refresh task for cached Keenetic DNS server values.
     int keenetic_dns_refresh_task_id_{-1};
-    // Periodic refresh task for the actual resolver config hash / live status.
+    // Single timer for either the steady resolver poll or convergence retry.
     int resolver_config_hash_actual_task_id_{-1};
-    // Short-interval retry while resolver hash is converging after apply.
-    int resolver_config_hash_actual_retry_task_id_{-1};
+    // Exponential retry step for resolver convergence probes.
+    std::uint32_t resolver_config_hash_actual_retry_attempt_{0};
     // Debounced runtime refresh triggered by SIGUSR1.
     int sigusr1_refresh_task_id_{-1};
     // Retry task for interface monitor netlink reconnect after failure.
@@ -290,7 +311,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<std::thread::id> event_loop_thread_id_{};
     std::atomic<bool> event_loop_active_{false};
-    std::atomic<bool> accept_posted_control_tasks_{true};
+    std::atomic<bool> accept_posted_control_tasks_{false};
 
     struct FdEntry {
         int fd;
@@ -347,10 +368,28 @@ private:
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
     BlockingExecutor blocking_executor_{2, 64};
+    // Resolver hooks can synchronously request a generated configuration.
+    // Keep command execution, streaming and TXT probes on independent queues.
+    BlockingExecutor resolver_hook_executor_{1, 16};
+    BlockingExecutor resolver_stream_executor_{1, 16};
+    BlockingExecutor resolver_io_executor_{1, 32};
     std::atomic<std::uint64_t> runtime_generation_{1};
     std::atomic<bool> remote_list_refresh_inflight_{false};
     std::atomic<bool> ipc_mutation_inflight_{false};
+    std::atomic<bool> ipc_resolver_hook_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
+    std::atomic<std::uint64_t> resolver_stream_epoch_{0};
+    std::atomic<std::uint64_t> resolver_stream_completed_epoch_{0};
+    TracedMutex system_resolver_hook_mutex_;
+    // A resolver generation hashes and streams the same immutable view of
+    // list-cache files. Remote refreshes take the exclusive side; the reload
+    // coordinator and its stream worker share the read side.
+    TracedSharedMutex resolver_cache_snapshot_mutex_;
+    // One immutable generation is shared with the stream worker. This avoids
+    // copying the full configuration (including large inline lists) once in
+    // the IPC handler and again into the worker closure.
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        resolver_generation_snapshot_;
     // Multiple open pages can request the same manual probe at once. Keep at
     // most one queued/running round so a weak router never forks duplicate
     // health checks for a single click or refresh cycle.

@@ -25,6 +25,10 @@ void register_remote_access_handler(ApiServer& server, ApiContext& ctx);
 // invisible from the outside - it looks exactly like a blocked port.
 void apply_remote_access_rules(const std::string& listen_address = {});
 
+// Removes only the rules owned by the remote-access feature without changing
+// the user's persisted preference.
+void remove_remote_access_rules();
+
 // True when the configured bind address can accept connections from outside.
 bool listen_address_is_reachable(const std::string& listen_address);
 

@@ -3,6 +3,7 @@
 #include "../api/generated/api_types.hpp"
 #include "../dns/dns_txt_client.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -61,5 +62,14 @@ private:
 
 api::ResolverConfigProbeStatus resolver_probe_status_from_hash_probe_status(
     ResolverConfigHashProbeStatus status);
+
+// Probe timestamps are observability metadata. They do not change resolver
+// health and must not fan out an otherwise identical runtime state over SSE.
+bool resolver_sync_semantically_equal(const ResolverSyncSnapshot& lhs,
+                                      const ResolverSyncSnapshot& rhs);
+
+// Retry only while a freshly applied resolver generation is converging.
+// Attempts are zero-based: 1, 2, 4, 8, 16, 32, then 60 seconds.
+std::chrono::seconds resolver_convergence_retry_delay(std::uint32_t attempt);
 
 } // namespace keen_pbr3
