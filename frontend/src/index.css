@@ -783,34 +783,24 @@
     isolation: isolate;
     overflow: visible;
     border: 0 !important;
-    box-shadow: inset -1px 0 var(--sidebar-border);
+    box-shadow: none;
   }
 
   .keen-sidebar-toggle::after {
     position: absolute;
     top: -30px;
-    right: 1px;
+    right: 0;
     left: 0;
     height: 30px;
     display: block;
     pointer-events: none;
-    background: linear-gradient(
-      to top,
-      transparent 0,
-      rgb(0 0 0 / 3%) 3px,
-      transparent 100%
-    );
+    background: linear-gradient(to top, rgb(0 0 0 / 3%), transparent);
     content: "";
     transition: background 120ms ease-out;
   }
 
   .keen-sidebar-toggle:hover::after {
-    background: linear-gradient(
-      to top,
-      transparent 0,
-      rgb(0 0 0 / 8%) 3px,
-      transparent 100%
-    );
+    background: linear-gradient(to top, rgb(0 0 0 / 8%), transparent);
   }
 
   .keen-sidebar-toggle [data-slot="button"],

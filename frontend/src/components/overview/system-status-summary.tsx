@@ -49,8 +49,9 @@ export function SystemStatusSummary({
 
   return (
     <section
+      data-slot="card"
       className={cn(
-        "flex flex-col gap-3 rounded-[6px] border bg-card px-4 py-3 shadow-xs sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-3 rounded-[6px] border bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
         tone === "degraded" && "border-destructive/40",
         tone === "waiting" && "border-warning/40"
       )}
