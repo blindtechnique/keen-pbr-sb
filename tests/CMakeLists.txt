@@ -50,6 +50,7 @@ add_executable(keen-pbr-tests
   test_status_stream.cpp
   test_lifecycle_operation.cpp
   test_runtime_state_machine.cpp
+  test_urltest_manager.cpp
   test_port_spec_util.cpp
   test_pid_file.cpp
   test_crash_diagnostics.cpp
@@ -99,8 +100,10 @@ add_executable(keen-pbr-tests
   ../src/http/curl_runtime.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/health/url_tester.cpp
+  ../src/health/circuit_breaker.cpp
   ../src/health/routing_health_checker.cpp
   ../src/routing/firewall_state.cpp
+  ../src/routing/urltest_manager.cpp
   ../src/routing/netlink.cpp
   ../src/routing/interface_monitor.cpp
   ../src/util/blocking_executor.cpp

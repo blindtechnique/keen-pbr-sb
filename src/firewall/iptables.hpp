@@ -12,6 +12,13 @@
 
 namespace keen_pbr3 {
 
+#ifdef KEEN_PBR3_TESTING
+namespace testing {
+bool restore_wait_option_supported_for_test(const std::string& program);
+void reset_restore_wait_option_probe_for_test();
+} // namespace testing
+#endif
+
 class IptablesFirewall : public Firewall {
 public:
     // Initialize the iptables backend; does not modify firewall state yet.
@@ -133,7 +140,14 @@ private:
         const PendingRule& pr,
         const FirewallGlobalPrefilter& prefilter);
     bool ipv6_backend_available() const;
-    bool dispatcher_chains_exist(bool ipv6) const;
+    // true  = chains and built-in jumps are present
+    // false = a successful table snapshot confirms they are missing
+    // nullopt = the snapshot itself failed (for example, xtables lock contention)
+    std::optional<bool> dispatcher_chains_exist(bool ipv6) const;
+    static bool snapshot_contains_dispatcher_scaffold(
+        const std::string& snapshot,
+        const char* builtin,
+        const char* chain);
     void validate_raw_prerouting_capability() const;
     // Expand filter (proto, src_addr, dst_addr) into cross-product of PendingRules
     // and append them to out.  tcp/udp is split into two entries.  Multiple CIDRs

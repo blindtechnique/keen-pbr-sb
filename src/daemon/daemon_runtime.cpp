@@ -353,11 +353,14 @@ void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
         try {
             reconcile_static_routing();
             apply_firewall(FirewallApplyMode::PreserveSets);
-            publish_runtime_state();
             log.info("Routing and firewall rebuilt after urltest change.");
         } catch (const std::exception& e) {
             log.error("Error rebuilding routing/firewall after urltest change: {}", e.what());
         }
+        // Publish the committed probe and the best live kernel state even when
+        // firewall reconciliation failed. Otherwise the UI can retain the
+        // pre-selection "no exit responds" snapshot indefinitely.
+        publish_runtime_state();
     }, "urltest-selection-change:" + urltest_tag);
 }
 
@@ -379,10 +382,16 @@ void Daemon::commit_urltest_probe_results(const std::string& urltest_tag,
                                          probe_generation);
                 return;
             }
-            urltest_manager_->commit_probe_results(urltest_tag,
-                                                   probe_generation,
-                                                   std::move(results));
-            publish_runtime_state();
+            const bool selection_changed =
+                urltest_manager_->commit_probe_results(urltest_tag,
+                                                       probe_generation,
+                                                       std::move(results));
+            // A changed selection has a dedicated control task which first
+            // reconciles the route and then publishes one coherent snapshot.
+            // Unchanged latency/health results can be published immediately.
+            if (!selection_changed) {
+                publish_runtime_state();
+            }
         },
         "urltest-commit:" + urltest_tag);
 }

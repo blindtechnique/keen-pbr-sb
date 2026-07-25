@@ -188,6 +188,14 @@ public:
     const std::string second = fw.static_set_name("abcdefghijklmnopqrstuvwx", AF_INET);
     return {first, second};
   }
+
+  static bool snapshot_contains_dispatcher_scaffold(
+      const std::string& snapshot,
+      const char* builtin,
+      const char* chain) {
+    return IptablesFirewall::snapshot_contains_dispatcher_scaffold(
+        snapshot, builtin, chain);
+  }
 };
 
 } // namespace keen_pbr3
@@ -202,6 +210,35 @@ TEST_CASE("generation ipset names alternate and stay within the kernel limit") {
   CHECK(second == "kpbr4S_abcdefghijklmnopqrstuvwx");
   CHECK(first.size() == 31);
   CHECK(second.size() == 31);
+}
+
+TEST_CASE("dispatcher scaffold requires both the owned chain and builtin hook") {
+  const std::string complete =
+      "-P PREROUTING ACCEPT\n"
+      "-N KeenPbrRaw\n"
+      "-A PREROUTING -j KeenPbrRaw\n"
+      "-A KeenPbrRaw -j KeenPbrRaw_A\n";
+  CHECK(T::snapshot_contains_dispatcher_scaffold(
+      complete, "PREROUTING", "KeenPbrRaw"));
+
+  const std::string chain_without_hook =
+      "-P PREROUTING ACCEPT\n"
+      "-N KeenPbrRaw\n"
+      "-A KeenPbrRaw -j KeenPbrRaw_A\n";
+  CHECK_FALSE(T::snapshot_contains_dispatcher_scaffold(
+      chain_without_hook, "PREROUTING", "KeenPbrRaw"));
+
+  const std::string hook_without_chain =
+      "-P PREROUTING ACCEPT\n"
+      "-A PREROUTING -j KeenPbrRaw\n";
+  CHECK_FALSE(T::snapshot_contains_dispatcher_scaffold(
+      hook_without_chain, "PREROUTING", "KeenPbrRaw"));
+
+  const std::string similarly_named_chain =
+      "-N KeenPbrRaw_A\n"
+      "-A PREROUTING -j KeenPbrRaw_A\n";
+  CHECK_FALSE(T::snapshot_contains_dispatcher_scaffold(
+      similarly_named_chain, "PREROUTING", "KeenPbrRaw"));
 }
 
 TEST_CASE("generation script dispatches prerouting and output independently") {

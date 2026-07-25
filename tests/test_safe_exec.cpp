@@ -1,5 +1,6 @@
 #include "../src/util/safe_exec.hpp"
 #include "../src/util/ipv6_support.hpp"
+#include "../src/firewall/iptables.hpp"
 
 #include <doctest/doctest.h>
 
@@ -278,6 +279,42 @@ TEST_CASE("iptables_ipv6_supported: probes ip6tables-restore test script") {
     CHECK(iptables_ipv6_supported());
     CHECK(read_file(restore_args_path) == "--test\n");
     CHECK(read_file(restore_stdin_path) == "*mangle\nCOMMIT\n");
+}
+
+TEST_CASE("iptables restore wait capability is probed without a rules transaction") {
+    TempDir temp_dir;
+    const auto probe_args_path = temp_dir.path() / "restore-probe-args";
+    write_executable(
+        temp_dir.path() / "iptables-restore",
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" > \"$KEEN_PBR_TEST_RESTORE_PROBE_ARGS\"\n"
+        "printf 'iptables-restore: invalid option -- w\\n' >&2\n"
+        "exit 1\n");
+
+    EnvironmentGuard path_guard("PATH");
+    EnvironmentGuard probe_args_guard("KEEN_PBR_TEST_RESTORE_PROBE_ARGS");
+    LoggerSinkGuard logger_sink_guard;
+    path_guard.set(temp_dir.path());
+    probe_args_guard.set(probe_args_path);
+
+    std::string log;
+    const auto previous_level = Logger::instance().level();
+    Logger::instance().set_level(LogLevel::debug);
+    Logger::instance().set_sink([&log](const std::string& line) {
+        log += line;
+        log += '\n';
+    });
+
+    testing::reset_restore_wait_option_probe_for_test();
+    CHECK_FALSE(testing::restore_wait_option_supported_for_test(
+        "iptables-restore"));
+    testing::reset_restore_wait_option_probe_for_test();
+    Logger::instance().set_level(previous_level);
+
+    CHECK(read_file(probe_args_path) == "-w 0 --test\n");
+    CHECK(log.find("safe_exec_pipe_input") == std::string::npos);
+    CHECK(log.find("safe_exec_pipe_failed") == std::string::npos);
+    CHECK(log.find("invalid option") == std::string::npos);
 }
 
 TEST_CASE("wait_for_child_with_timeout: reaps a child that finishes in time") {

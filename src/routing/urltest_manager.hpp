@@ -13,7 +13,7 @@
 
 namespace keen_pbr3 {
 
-class Scheduler;
+class RepeatingTaskScheduler;
 
 // Per-urltest outbound state: test results, circuit breakers, selected child.
 struct UrltestState {
@@ -43,7 +43,7 @@ using UrltestCommitCallback = std::function<void(const std::string&,
 class UrltestManager {
 public:
     UrltestManager(URLTester& tester, const OutboundMarkMap& marks,
-                   Scheduler& scheduler,
+                   RepeatingTaskScheduler& scheduler,
                    BlockingExecutor& blocking_executor,
                    UrltestChangeCallback on_change,
                    UrltestCommitCallback on_commit);
@@ -52,9 +52,9 @@ public:
     UrltestManager(const UrltestManager&) = delete;
     UrltestManager& operator=(const UrltestManager&) = delete;
 
-    // Register a urltest outbound, run the initial URL test, and schedule
-    // periodic retests. on_change_ is NOT called for the initial selection —
-    // call get_selected() after this returns to read the initial value.
+    // Register a urltest outbound, queue the initial URL test, and schedule
+    // periodic retests. A successful initial selection invokes on_change_
+    // asynchronously when its probe result is committed.
     void register_urltest(const Outbound& ut);
 
     // Run tests immediately for a specific urltest outbound (e.g. on SIGUSR1).
@@ -95,7 +95,7 @@ private:
 
     URLTester& tester_;
     const OutboundMarkMap& marks_;
-    Scheduler& scheduler_;
+    RepeatingTaskScheduler& scheduler_;
     BlockingExecutor& blocking_executor_;
     UrltestChangeCallback on_change_;
     UrltestCommitCallback on_commit_;

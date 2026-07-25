@@ -346,6 +346,42 @@ static bool is_restore_tool(const std::string& program) {
     return program == "iptables-restore" || program == "ip6tables-restore";
 }
 
+static bool restore_wait_option_supported(const std::string& program) {
+    if (xtables_wait_supported >= 0) {
+        return xtables_wait_supported == 1;
+    }
+
+    // Probe the option without feeding the real transaction to the tool.
+    // Entware's legacy iptables-restore rejects -w, and using the actual rules
+    // as the capability probe logs a scary failure even though the subsequent
+    // unguarded fallback succeeds.
+    const auto probe = safe_exec_capture(
+        {program, "-w", "0", "--test"},
+        /*suppress_stderr=*/true,
+        /*max_bytes=*/1024);
+    xtables_wait_supported =
+        !probe.timed_out && !probe.truncated && probe.exit_code == 0 ? 1 : 0;
+    Logger::instance().verbose(
+        "{} xtables wait option support: {}",
+        program,
+        xtables_wait_supported == 1 ? "yes" : "no");
+    return xtables_wait_supported == 1;
+}
+
+#ifdef KEEN_PBR3_TESTING
+namespace testing {
+
+bool restore_wait_option_supported_for_test(const std::string& program) {
+    return restore_wait_option_supported(program);
+}
+
+void reset_restore_wait_option_probe_for_test() {
+    xtables_wait_supported = -1;
+}
+
+} // namespace testing
+#endif
+
 // Turns "exited with status 1" into something actionable.
 //
 // iptables-restore prints the reason and, usually, "Error occurred at line: N".
@@ -398,21 +434,16 @@ static void pipe_to_cmd(const std::vector<std::string>& args, const std::string&
     // The Keenetic firmware reconfigures iptables dozens of times a second while
     // it brings interfaces up at boot. Without -w our restore call waits on the
     // xtables lock indefinitely and the daemon never reaches its event loop.
-    if (is_restore_tool(args[0]) && xtables_wait_supported != 0) {
+    if (is_restore_tool(args[0]) && restore_wait_option_supported(args[0])) {
         std::string error_output;
         const int status = safe_exec_pipe_stdin(with_wait_option(args), input, &error_output);
         if (status == 0) {
-            xtables_wait_supported = 1;
             return;
         }
-        if (xtables_wait_supported == 1) {
-            throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
-        }
-        // First attempt and it failed: the option may simply be unsupported.
-        // Fall through to the plain invocation and remember the answer.
-        Logger::instance().verbose(
-            "{} rejected -w, falling back to an unguarded invocation", args[0]);
-        xtables_wait_supported = 0;
+        // Support was established by an empty --test transaction. A failure
+        // here is therefore a real ruleset/lock error and must not be hidden by
+        // replaying the same mutation without locking.
+        throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
     }
 
     std::string error_output;
@@ -436,16 +467,48 @@ bool IptablesFirewall::ipv6_backend_available() const {
     return iptables_ipv6_supported();
 }
 
-bool IptablesFirewall::dispatcher_chains_exist(bool ipv6) const {
+std::optional<bool> IptablesFirewall::dispatcher_chains_exist(bool ipv6) const {
     const char* command = ipv6 ? "ip6tables" : "iptables";
     const bool raw_prerouting = use_raw_prerouting_ && !ipv6;
-    return safe_exec(
-               {command, "-t", raw_prerouting ? "raw" : "mangle", "-S",
-                raw_prerouting ? RAW_CHAIN_NAME : CHAIN_NAME},
-               /*suppress_output=*/true) == 0 &&
-           safe_exec(
-               {command, "-t", "mangle", "-S", OUTPUT_CHAIN_NAME},
-               /*suppress_output=*/true) == 0;
+    const char* prerouting_table = raw_prerouting ? "raw" : "mangle";
+    const char* prerouting_chain = raw_prerouting ? RAW_CHAIN_NAME : CHAIN_NAME;
+
+    const auto prerouting = safe_exec_capture(
+        {command, "-t", prerouting_table, "-S"},
+        /*suppress_stderr=*/true,
+        /*max_bytes=*/256U * 1024U);
+    if (prerouting.exit_code != 0 || prerouting.timed_out || prerouting.truncated) {
+        return std::nullopt;
+    }
+
+    std::string mangle_snapshot;
+    if (std::string_view(prerouting_table) == "mangle") {
+        mangle_snapshot = prerouting.stdout_output;
+    } else {
+        const auto mangle = safe_exec_capture(
+            {command, "-t", "mangle", "-S"},
+            /*suppress_stderr=*/true,
+            /*max_bytes=*/256U * 1024U);
+        if (mangle.exit_code != 0 || mangle.timed_out || mangle.truncated) {
+            return std::nullopt;
+        }
+        mangle_snapshot = mangle.stdout_output;
+    }
+
+    return snapshot_contains_dispatcher_scaffold(
+               prerouting.stdout_output, "PREROUTING", prerouting_chain) &&
+           snapshot_contains_dispatcher_scaffold(
+               mangle_snapshot, "OUTPUT", OUTPUT_CHAIN_NAME);
+}
+
+bool IptablesFirewall::snapshot_contains_dispatcher_scaffold(
+    const std::string& snapshot,
+    const char* builtin,
+    const char* chain) {
+    return snapshot.find(std::string("-N ") + chain + "\n") !=
+               std::string::npos &&
+           snapshot.find(std::string("-A ") + builtin + " -j " + chain + "\n") !=
+               std::string::npos;
 }
 
 std::string IptablesFirewall::build_proto_port_fragment(L4Proto proto,
@@ -927,16 +990,33 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
 
     // The daemon can outlive externally flushed firewall state. Do not use the
     // incremental A/B switch unless both stable dispatchers still exist.
+    const auto v4_dispatchers = active_v4_generation_.has_value()
+        ? dispatcher_chains_exist(false)
+        : std::optional<bool>{true};
+    const auto v6_dispatchers =
+        effective_ipv6 && active_v6_generation_.has_value()
+        ? dispatcher_chains_exist(true)
+        : std::optional<bool>{true};
     const bool v4_dispatchers_missing =
-        active_v4_generation_.has_value() &&
-        !dispatcher_chains_exist(false);
+        v4_dispatchers.has_value() && !*v4_dispatchers;
     const bool v6_dispatchers_missing =
-        effective_ipv6 &&
-        active_v6_generation_.has_value() &&
-        !dispatcher_chains_exist(true);
-    if (v4_dispatchers_missing || v6_dispatchers_missing) {
-        Logger::instance().warn(
-            "iptables dispatcher chains are missing; recreating the firewall scaffold");
+        v6_dispatchers.has_value() && !*v6_dispatchers;
+    if (!v4_dispatchers.has_value() || !v6_dispatchers.has_value()) {
+        Logger::instance().verbose(
+            "Could not inspect one or more iptables dispatcher tables; "
+            "preserving the live scaffold and letting the restore transaction retry normally");
+    }
+    const bool dispatcher_state_fully_known =
+        v4_dispatchers.has_value() && v6_dispatchers.has_value();
+    if (dispatcher_state_fully_known &&
+        (v4_dispatchers_missing || v6_dispatchers_missing)) {
+        // Keenetic legitimately rebuilds firmware-owned tables. Recovering our
+        // own small scaffold is routine reconciliation, not a user-facing
+        // fault; a failed rebuild still surfaces as the restore exception.
+        // cleanup_rules_impl() sweeps both address families, so never call it
+        // while either snapshot is indeterminate.
+        Logger::instance().info(
+            "iptables dispatcher chains or hooks were removed; recreating the firewall scaffold");
         cleanup_rules_impl(/*sweep_live_state=*/true);
     }
 

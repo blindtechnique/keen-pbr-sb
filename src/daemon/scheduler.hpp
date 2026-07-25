@@ -19,9 +19,22 @@ public:
 
 using TaskCallback = std::function<void()>;
 
+// Small scheduling boundary used by runtime components that only need
+// repeating jobs. Keeping this interface narrower than Scheduler lets those
+// components be tested without constructing a complete Daemon/epoll loop.
+class RepeatingTaskScheduler {
+public:
+    virtual ~RepeatingTaskScheduler() = default;
+
+    virtual int schedule_repeating(std::chrono::milliseconds interval,
+                                   TaskCallback cb,
+                                   std::string label = "") = 0;
+    virtual void cancel(int task_id) = 0;
+};
+
 // Timerfd-based periodic task scheduler that integrates with the
 // Daemon epoll event loop via add_fd/remove_fd.
-class Scheduler {
+class Scheduler : public RepeatingTaskScheduler {
 public:
     // Takes a reference to the Daemon for fd registration.
     // Caller must ensure Daemon outlives this Scheduler.
@@ -38,7 +51,7 @@ public:
     // The first invocation fires after `interval` elapses.
     int schedule_repeating(std::chrono::milliseconds interval,
                            TaskCallback cb,
-                           std::string label = "");
+                           std::string label = "") override;
 
     // Schedule a one-shot task. Returns a task ID for later cancellation.
     // The callback fires once after `delay` elapses.
@@ -47,7 +60,7 @@ public:
                          std::string label = "");
 
     // Cancel a previously scheduled task by ID.
-    void cancel(int task_id);
+    void cancel(int task_id) override;
 
     // Cancel all scheduled tasks.
     void cancel_all();

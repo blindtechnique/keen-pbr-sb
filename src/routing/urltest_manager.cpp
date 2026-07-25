@@ -33,7 +33,7 @@ std::chrono::seconds normalize_interval_seconds(const Outbound& outbound) {
 
 UrltestManager::UrltestManager(URLTester& tester,
                                const OutboundMarkMap& marks,
-                               Scheduler& scheduler,
+                               RepeatingTaskScheduler& scheduler,
                                BlockingExecutor& blocking_executor,
                                UrltestChangeCallback on_change,
                                UrltestCommitCallback on_commit)

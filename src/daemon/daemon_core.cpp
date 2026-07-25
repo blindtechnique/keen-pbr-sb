@@ -1368,7 +1368,6 @@ void Daemon::run() {
                  format_list_names(refresh_result.failed_lists));
     }
 
-    register_urltest_outbounds();
     // Applying rules must never abort startup. At boot the firmware holds the
     // xtables lock while it brings interfaces up, so this can legitimately fail;
     // coming up without rules and retrying beats leaving the router with no
@@ -1420,12 +1419,23 @@ void Daemon::run() {
 #ifdef WITH_API
     setup_api();
 #endif
+
+    // Async runtime probes commit through post_control_task(). Accept their
+    // results before starting any probe, but keep event_loop_active_ false
+    // until every fallible startup step has completed. This lets fast native
+    // URLTest children queue their first result without exposing a half-started
+    // daemon to synchronous control requests.
+    accept_posted_control_tasks_.store(true, std::memory_order_release);
+    register_urltest_outbounds();
+    refresh_resolver_config_hash_actual_async();
+    probe_interfaces_now();
     } catch (...) {
         // Startup installs owned kernel state before dnsmasq proves that it
         // consumed the matching resolver generation. Any failure before the
         // event loop starts must therefore unwind every owned subsystem; the
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
+        accept_posted_control_tasks_.store(false, std::memory_order_release);
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
         scheduler_->cancel_all();
 #ifdef WITH_API
@@ -1517,19 +1527,6 @@ void Daemon::run() {
     running_.store(true, std::memory_order_release);
     event_loop_thread_id_.store(std::this_thread::get_id(), std::memory_order_relaxed);
     event_loop_active_.store(true, std::memory_order_release);
-    accept_posted_control_tasks_.store(true, std::memory_order_release);
-
-    // Async resolver probe results commit through post_control_task(). Starting
-    // the probe before posted tasks are accepted drops that commit and leaves
-    // the in-flight flag stuck forever.
-    refresh_resolver_config_hash_actual_async();
-
-    // Populate latency and interface liveness immediately. The periodic probe
-    // intentionally runs every 20 seconds, but using that interval as the
-    // initial delay leaves a freshly opened dashboard at "unknown". Queue it
-    // only after control-task delivery is active so its SSE reconciliation
-    // cannot be lost when a local probe completes unusually quickly.
-    probe_interfaces_now();
 
     run_event_loop();
 
