@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import type { RouteRule } from "../src/api/generated/model/routeRule"
+import { isSemanticallyDirty } from "../src/lib/semantic-dirty"
 import { semanticJsonEqual } from "../src/lib/semantic-json"
 import {
   areRouteRulesSemanticallyEqual,
@@ -30,6 +31,48 @@ describe("semantic JSON equality", () => {
 
   test("keeps array order significant", () => {
     expect(semanticJsonEqual(["direct", "vpn"], ["vpn", "direct"])).toBe(false)
+  })
+})
+
+describe("semantic dirty adapter", () => {
+  test("becomes clean after restoring the normalized baseline", () => {
+    const baseline = { name: "vpn", address: "1.1.1.1" }
+
+    expect(
+      isSemanticallyDirty(
+        { name: "vpn", address: " 8.8.8.8 " },
+        baseline,
+        {
+          equals: semanticJsonEqual,
+          normalize: (value) => ({
+            ...value,
+            address: value.address.trim(),
+          }),
+        }
+      )
+    ).toBe(true)
+
+    expect(
+      isSemanticallyDirty(
+        { name: "vpn", address: " 1.1.1.1 " },
+        baseline,
+        {
+          equals: semanticJsonEqual,
+          normalize: (value) => ({
+            ...value,
+            address: value.address.trim(),
+          }),
+        }
+      )
+    ).toBe(false)
+  })
+
+  test("keeps ordered values semantically significant", () => {
+    expect(
+      isSemanticallyDirty(["direct", "vpn"], ["vpn", "direct"], {
+        equals: semanticJsonEqual,
+      })
+    ).toBe(true)
   })
 })
 

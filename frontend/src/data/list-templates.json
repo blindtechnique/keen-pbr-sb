@@ -534,7 +534,7 @@
   {
     "id": "list",
     "name": "Реклама и трекеры",
-    "description": "Блокирует рекламу и трекеры через action:reject — выбор outbound не требуется",
+    "description": "Блокирует рекламу и трекеры через action:reject — выбор маршрута не требуется",
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
     "category": "block"
   }

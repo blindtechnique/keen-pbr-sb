@@ -1,5 +1,5 @@
 import { Plus } from "lucide-react"
-import { useId } from "react"
+import { useEffect, useId, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { revalidateLogic, useForm } from "@tanstack/react-form"
@@ -34,16 +34,13 @@ import { MultiSelectList } from "@/components/shared/multi-select-list"
 import { OrderedGroupCard } from "@/components/shared/ordered-group-card"
 import { SectionCard } from "@/components/shared/section-card"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
-import { UpsertPage } from "@/components/shared/upsert-page"
+import {
+  UpsertPage,
+  type UpsertPagePresentation,
+} from "@/components/shared/upsert-page"
+import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
   clearFormServerErrors,
@@ -52,7 +49,15 @@ import {
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { getInterfaceSearchText } from "@/lib/runtime-interfaces"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
+import {
+  mapStrictEnforcementToOption,
+  normalizeOutboundDraftForPersistence,
+  normalizeOutboundGroups,
+  type OutboundDraft,
+  type StrictEnforcementOption,
+} from "@/pages/outbound-upsert-utils"
 import {
   Select,
   SelectContent,
@@ -62,26 +67,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-
-type OutboundDraft = {
-  tag: string
-  type: Outbound["type"]
-  interfaceName: string
-  gateway: string
-  gateway6: string
-  table: string
-  outbounds: string[][]
-  probeUrl: string
-  interval: string
-  tolerance: string
-  retryAttempts: string
-  retryInterval: string
-  circuitBreakerFailures: string
-  circuitBreakerSuccesses: string
-  circuitBreakerTimeout: string
-  circuitBreakerHalfOpen: string
-  strictEnforcement: string
-}
 
 const OUTBOUND_FIELD_NAMES = {
   tag: "tag",
@@ -126,7 +111,11 @@ const sampleNewOutbound: OutboundDraft = {
   strictEnforcement: "default",
 }
 
-const strictOptions = ["default", "enabled", "disabled"] as const
+const strictOptions = [
+  "default",
+  "enabled",
+  "disabled",
+] as const satisfies readonly StrictEnforcementOption[]
 
 const outboundTypeOptions: Outbound["type"][] = [
   "interface",
@@ -139,12 +128,15 @@ const outboundTypeOptions: Outbound["type"][] = [
 export function OutboundUpsertPage({
   mode,
   outboundId,
+  presentation = "page",
 }: {
   mode: "create" | "edit"
   outboundId?: string
+  presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
 
@@ -158,6 +150,8 @@ export function OutboundUpsertPage({
             : t("pages.outboundUpsert.editTitle")
         }
         description={t("pages.outboundUpsert.description")}
+        onClose={() => navigate("/outbounds")}
+        presentation={presentation}
         title={
           mode === "create"
             ? t("pages.outboundUpsert.createTitle")
@@ -188,6 +182,8 @@ export function OutboundUpsertPage({
         cardDescription={t("pages.outboundUpsert.missing.cardDescription")}
         cardTitle={t("pages.outboundUpsert.missing.cardTitle")}
         description={t("pages.outboundUpsert.missing.description")}
+        onClose={() => navigate("/outbounds")}
+        presentation={presentation}
         title={t("pages.outboundUpsert.editTitle")}
       >
         <div className="flex justify-end">
@@ -208,6 +204,9 @@ export function OutboundUpsertPage({
           : t("pages.outboundUpsert.editCardTitle", { tag: draft.tag })
       }
       description={t("pages.outboundUpsert.description")}
+      dirty={dirty}
+      onClose={() => navigate("/outbounds")}
+      presentation={presentation}
       title={
         mode === "create"
           ? t("pages.outboundUpsert.createTitle")
@@ -219,46 +218,10 @@ export function OutboundUpsertPage({
         draft={draft}
         loadedConfig={loadedConfig}
         mode={mode}
-        onCancel={() => navigate("/outbounds")}
+        onDirtyChange={setDirty}
         outboundId={outboundId}
       />
     </UpsertPage>
-  )
-}
-
-export function OutboundCreateDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}) {
-  const { t } = useTranslation()
-  const configQuery = useGetConfig()
-  const loadedConfig = selectConfig(configQuery.data)
-
-  return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>{t("pages.outboundUpsert.createTitle")}</DialogTitle>
-          <DialogDescription>
-            {t("pages.outboundUpsert.description")}
-          </DialogDescription>
-        </DialogHeader>
-        {loadedConfig ? (
-          <OutboundForm
-            draft={{ ...sampleNewOutbound, outbounds: [[]] }}
-            loadedConfig={loadedConfig}
-            mode="create"
-            onCancel={() => onOpenChange(false)}
-            onSaved={() => onOpenChange(false)}
-          />
-        ) : (
-          <div className="h-48 animate-pulse rounded-lg bg-muted" />
-        )}
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -286,19 +249,22 @@ function OutboundForm({
   draft,
   loadedConfig,
   onCancel,
+  onDirtyChange,
   onSaved,
   outboundId,
 }: {
   mode: "create" | "edit"
   draft: OutboundDraft
   loadedConfig: ConfigObject
-  onCancel: () => void
+  onCancel?: () => void
+  onDirtyChange?: (dirty: boolean) => void
   onSaved?: () => void
   outboundId?: string
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
+  const close = useUpsertPageClose()
   const existingOutbounds = selectOutbounds(loadedConfig)
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const runtimeInterfaces =
@@ -327,6 +293,9 @@ function OutboundForm({
     value: option,
     label: getStrictOptionLabel(option, t),
   }))
+  const [baselinePayload] = useState(() =>
+    normalizeOutboundDraftForPersistence(draft)
+  )
 
   const form = useForm({
     defaultValues: draft,
@@ -356,7 +325,7 @@ function OutboundForm({
           }
         }
 
-        const payload = buildOutboundPayload(value)
+        const payload = normalizeOutboundDraftForPersistence(value)
         const nextOutbounds =
           mode === "create"
             ? [...existingOutbounds, payload]
@@ -439,6 +408,17 @@ function OutboundForm({
           | undefined
       )?.unmapped ?? []
   )
+  const isDirty = useStore(form.store, (state) =>
+    !semanticJsonEqual(
+      normalizeOutboundDraftForPersistence(state.values),
+      baselinePayload
+    )
+  )
+  const canSubmit = useStore(form.store, (state) => state.canSubmit)
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty)
+  }, [isDirty, onDirtyChange])
 
   const isInterface = outboundType === "interface"
   const isTable = outboundType === "table"
@@ -1200,30 +1180,24 @@ function OutboundForm({
 
       <ServerValidationAlert errors={unmappedServerErrors} />
 
-      <div className="flex justify-end gap-3">
-        <Button onClick={onCancel} size="xl" type="button" variant="outline">
+      <div className="flex justify-end gap-3" data-upsert-actions>
+        <Button
+          onClick={onCancel ?? close}
+          size="xl"
+          type="button"
+          variant="outline"
+        >
           {t("common.cancel")}
         </Button>
-        <form.Subscribe
-          selector={(state) => ({
-            canSubmit: state.canSubmit,
-            isPristine: state.isPristine,
-          })}
+        <Button
+          disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
+          size="xl"
+          type="submit"
         >
-          {({ canSubmit, isPristine }) => (
-            <Button
-              disabled={
-                postConfigMutation.isPending || isPristine || !canSubmit
-              }
-              size="xl"
-              type="submit"
-            >
-              {mode === "create"
-                ? t("pages.outboundUpsert.actions.create")
-                : t("pages.outboundUpsert.actions.save")}
-            </Button>
-          )}
-        </form.Subscribe>
+          {mode === "create"
+            ? t("pages.outboundUpsert.actions.create")
+            : t("pages.outboundUpsert.actions.save")}
+        </Button>
       </div>
     </form>
   )
@@ -1289,61 +1263,6 @@ function mapOutboundToDraft(outbound: Outbound): OutboundDraft {
   }
 }
 
-function buildOutboundPayload(draft: OutboundDraft): Outbound {
-  const tag = draft.tag.trim()
-
-  if (draft.type === "interface") {
-    return {
-      type: "interface",
-      tag,
-      interface: draft.interfaceName.trim() || undefined,
-      gateway: draft.gateway.trim() || undefined,
-      gateway6: draft.gateway6.trim() || undefined,
-      strict_enforcement: mapStrictEnforcementToBoolean(
-        draft.strictEnforcement
-      ),
-    }
-  }
-
-  if (draft.type === "table") {
-    return {
-      type: "table",
-      tag,
-      table: parseNumber(draft.table),
-    }
-  }
-
-  if (draft.type === "urltest") {
-    return {
-      type: "urltest",
-      tag,
-      url: draft.probeUrl.trim() || undefined,
-      interval_ms: parseNumber(draft.interval),
-      tolerance_ms: parseNumber(draft.tolerance),
-      outbound_groups: normalizeOutboundGroups(draft.outbounds).map(
-        (group) => ({
-          outbounds: group,
-        })
-      ),
-      retry: {
-        attempts: parseNumber(draft.retryAttempts),
-        interval_ms: parseNumber(draft.retryInterval),
-      },
-      circuit_breaker: {
-        failure_threshold: parseNumber(draft.circuitBreakerFailures),
-        success_threshold: parseNumber(draft.circuitBreakerSuccesses),
-        timeout_ms: parseNumber(draft.circuitBreakerTimeout),
-        half_open_max_requests: parseNumber(draft.circuitBreakerHalfOpen),
-      },
-    }
-  }
-
-  return {
-    type: draft.type,
-    tag,
-  }
-}
-
 function getOutboundDraft(
   config: ConfigObject | undefined,
   outboundId?: string
@@ -1354,16 +1273,6 @@ function getOutboundDraft(
 
   const outbound = findOutboundByTag(config, outboundId)
   return outbound ? mapOutboundToDraft(outbound) : null
-}
-
-function normalizeOutboundGroups(groups: string[][]) {
-  if (!groups.length) {
-    return [[]]
-  }
-
-  return groups.map((group) =>
-    group.map((value) => value.trim()).filter(Boolean)
-  )
 }
 
 function moveGroup(groups: string[][], fromIndex: number, toIndex: number) {
@@ -1397,22 +1306,6 @@ function getInterfaceOutboundSearchText(
   return [tag, interfaceName, getInterfaceSearchText(runtimeInterface)]
     .filter(Boolean)
     .join(" ")
-}
-
-function mapStrictEnforcementToOption(value: boolean | undefined): string {
-  if (value === undefined) {
-    return strictOptions[0]
-  }
-
-  return value ? strictOptions[1] : strictOptions[2]
-}
-
-function mapStrictEnforcementToBoolean(value: string): boolean | undefined {
-  if (value === strictOptions[0]) {
-    return undefined
-  }
-
-  return value === strictOptions[1]
 }
 
 function getStrictOptionLabel(
@@ -1468,17 +1361,6 @@ function validateUrltestGroupReferences(
   }
 
   return null
-}
-
-function parseNumber(value: string): number | undefined {
-  const trimmed = value.trim()
-
-  if (!trimmed) {
-    return undefined
-  }
-
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 function resolveOutboundFieldPath(

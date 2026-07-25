@@ -53,6 +53,8 @@ import {
   protoOptions,
   toRouteRuleDraft,
 } from "@/pages/routing-rules-utils"
+import { isSemanticallyDirty } from "@/lib/semantic-dirty"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 
 const ROUTING_RULE_FIELD_NAMES = {
   enabled: "enabled",
@@ -218,12 +220,14 @@ function RoutingRuleForm({
   }))
 
   const postConfigMutation = usePostConfigMutation()
+  const [initialDraft] = useState(() =>
+    mode === "edit" && existingRule
+      ? toRouteRuleDraft(existingRule)
+      : emptyRouteRuleDraft
+  )
 
   const form = useForm({
-    defaultValues:
-      mode === "edit" && existingRule
-        ? toRouteRuleDraft(existingRule)
-        : emptyRouteRuleDraft,
+    defaultValues: initialDraft,
     validationLogic: revalidateLogic({
       mode: "submit",
       modeAfterSubmission: "change",
@@ -310,7 +314,12 @@ function RoutingRuleForm({
           | undefined
       )?.unmapped ?? []
   )
-  const isDirty = useStore(form.store, (state) => !state.isPristine)
+  const isDirty = useStore(form.store, (state) =>
+    isSemanticallyDirty(state.values, initialDraft, {
+      equals: semanticJsonEqual,
+      normalize: normalizeRouteRuleDraft,
+    })
+  )
 
   useEffect(() => {
     onDirtyChange(isDirty)
@@ -636,16 +645,11 @@ function RoutingRuleForm({
           {t("common.cancel")}
         </Button>
         <form.Subscribe
-          selector={(state) => ({
-            canSubmit: state.canSubmit,
-            isPristine: state.isPristine,
-          })}
+          selector={(state) => state.canSubmit}
         >
-          {({ canSubmit, isPristine }) => (
+          {(canSubmit) => (
             <Button
-              disabled={
-                postConfigMutation.isPending || isPristine || !canSubmit
-              }
+              disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
               size="xl"
               type="submit"
             >

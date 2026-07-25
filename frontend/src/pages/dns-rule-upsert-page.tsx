@@ -1,4 +1,5 @@
 import { toast } from "sonner"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
@@ -22,7 +23,11 @@ import {
 } from "@/components/shared/field"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
-import { UpsertPage } from "@/components/shared/upsert-page"
+import {
+  UpsertPage,
+  type UpsertPagePresentation,
+} from "@/components/shared/upsert-page"
+import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useListUsageSubtitle } from "@/hooks/use-list-usage-subtitle"
@@ -31,6 +36,8 @@ import {
   setFormServerErrors,
   splitFormApiErrors,
 } from "@/lib/form-api-errors"
+import { isSemanticallyDirty } from "@/lib/semantic-dirty"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 import {
   Select,
   SelectContent,
@@ -42,7 +49,9 @@ import {
 } from "@/components/ui/select"
 import {
   buildUpdatedConfigWithRules,
+  type DnsRuleDraft,
   getRuleDraft,
+  normalizeDnsRuleDraft,
   validateRules,
 } from "@/pages/dns-rules-utils"
 
@@ -59,12 +68,15 @@ type DnsRuleFieldName =
 export function DnsRuleUpsertPage({
   mode,
   ruleIndex,
+  presentation = "page",
 }: {
   mode: "create" | "edit"
   ruleIndex?: string
+  presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
+  const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
 
   const loadedConfig = selectConfig(configQuery.data)
@@ -81,6 +93,8 @@ export function DnsRuleUpsertPage({
         cardDescription={t("pages.dnsRuleUpsert.missing.cardDescription")}
         cardTitle={t("pages.dnsRuleUpsert.missing.cardTitle")}
         description={t("pages.dnsRuleUpsert.missing.description")}
+        onClose={() => navigate("/dns-rules")}
+        presentation={presentation}
         title={t("pages.dnsRuleUpsert.editTitle")}
       >
         <div className="flex justify-end">
@@ -102,6 +116,8 @@ export function DnsRuleUpsertPage({
             : t("pages.dnsRuleUpsert.editTitle")
         }
         description={t("pages.dnsRuleUpsert.description")}
+        onClose={() => navigate("/dns-rules")}
+        presentation={presentation}
         title={
           mode === "create"
             ? t("pages.dnsRuleUpsert.createTitle")
@@ -119,14 +135,33 @@ export function DnsRuleUpsertPage({
   }
 
   return (
-    <DnsRuleForm
-      key={`${mode}:${ruleIndex ?? "new"}`}
-      existingRule={existingRule}
-      loadedConfig={loadedConfig}
-      mode={mode}
-      parsedRuleIndex={parsedRuleIndex}
-      rules={rules}
-    />
+    <UpsertPage
+      cardDescription={t("pages.dnsRuleUpsert.cardDescription")}
+      cardTitle={
+        mode === "create"
+          ? t("pages.dnsRuleUpsert.createTitle")
+          : t("pages.dnsRuleUpsert.editTitle")
+      }
+      description={t("pages.dnsRuleUpsert.description")}
+      dirty={dirty}
+      onClose={() => navigate("/dns-rules")}
+      presentation={presentation}
+      title={
+        mode === "create"
+          ? t("pages.dnsRuleUpsert.createTitle")
+          : t("pages.dnsRuleUpsert.editTitle")
+      }
+    >
+      <DnsRuleForm
+        key={`${mode}:${ruleIndex ?? "new"}`}
+        existingRule={existingRule}
+        loadedConfig={loadedConfig}
+        mode={mode}
+        onDirtyChange={setDirty}
+        parsedRuleIndex={parsedRuleIndex}
+        rules={rules}
+      />
+    </UpsertPage>
   )
 }
 
@@ -134,18 +169,21 @@ function DnsRuleForm({
   existingRule,
   loadedConfig,
   mode,
+  onDirtyChange,
   parsedRuleIndex,
   rules,
 }: {
   existingRule?: DnsRule
   loadedConfig: ConfigObject
   mode: "create" | "edit"
+  onDirtyChange: (dirty: boolean) => void
   parsedRuleIndex: number
   rules: DnsRule[]
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
+  const close = useUpsertPageClose()
   const serverTags = (loadedConfig.dns?.servers ?? [])
     .map((server) => server.tag)
     .filter(Boolean)
@@ -160,17 +198,19 @@ function DnsRuleForm({
     mode === "edit" ? parsedRuleIndex : undefined
   )
   const postConfigMutation = usePostConfigMutation()
+  const [baselineDraft] = useState<DnsRuleDraft>(() =>
+    mode === "edit" && existingRule
+      ? getRuleDraft(existingRule)
+      : {
+          enabled: true,
+          server: serverTags[0] ?? "",
+          lists: [],
+          allowDomainRebinding: false,
+        }
+  )
   const form = useForm({
     defaultValues: {
-      rule:
-        mode === "edit" && existingRule
-          ? getRuleDraft(existingRule)
-          : {
-              enabled: true,
-              server: serverTags[0] ?? "",
-              lists: [],
-              allowDomainRebinding: false,
-            },
+      rule: baselineDraft,
     },
     validators: {
       onSubmitAsync: async ({ value }) => {
@@ -266,29 +306,26 @@ function DnsRuleForm({
           | undefined
       )?.unmapped ?? []
   )
+  const isDirty = useStore(form.store, (state) =>
+    isSemanticallyDirty(state.values.rule, baselineDraft, {
+      equals: semanticJsonEqual,
+      normalize: normalizeDnsRuleDraft,
+    })
+  )
+
+  useEffect(() => {
+    onDirtyChange(isDirty)
+  }, [isDirty, onDirtyChange])
 
   return (
-    <UpsertPage
-      cardDescription={t("pages.dnsRuleUpsert.cardDescription")}
-      cardTitle={
-        mode === "create"
-          ? t("pages.dnsRuleUpsert.createTitle")
-          : t("pages.dnsRuleUpsert.editTitle")
-      }
-      description={t("pages.dnsRuleUpsert.description")}
-      title={
-        mode === "create"
-          ? t("pages.dnsRuleUpsert.createTitle")
-          : t("pages.dnsRuleUpsert.editTitle")
-      }
+    <form
+      className="space-y-6"
+      onSubmit={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        void form.handleSubmit()
+      }}
     >
-      <form
-        className="space-y-6"
-        onSubmit={(event) => {
-          event.preventDefault()
-          form.handleSubmit()
-        }}
-      >
         <FieldGroup>
           <form.Field name={DNS_RULE_FIELD_NAMES.enabled}>
             {(field) => (
@@ -432,9 +469,9 @@ function DnsRuleForm({
 
         <ServerValidationAlert errors={unmappedServerErrors} />
 
-        <div className="flex justify-end gap-3">
+        <div className="flex justify-end gap-3" data-upsert-actions>
           <Button
-            onClick={() => navigate("/dns-rules")}
+            onClick={close}
             size="xl"
             type="button"
             variant="outline"
@@ -442,15 +479,12 @@ function DnsRuleForm({
             {t("common.cancel")}
           </Button>
           <form.Subscribe
-            selector={(state) => ({
-              canSubmit: state.canSubmit,
-              isPristine: state.isPristine,
-            })}
+            selector={(state) => state.canSubmit}
           >
-            {({ canSubmit, isPristine }) => (
+            {(canSubmit) => (
               <Button
                 disabled={
-                  postConfigMutation.isPending || isPristine || !canSubmit
+                  postConfigMutation.isPending || !isDirty || !canSubmit
                 }
                 size="xl"
                 type="submit"
@@ -462,8 +496,7 @@ function DnsRuleForm({
             )}
           </form.Subscribe>
         </div>
-      </form>
-    </UpsertPage>
+    </form>
   )
 }
 

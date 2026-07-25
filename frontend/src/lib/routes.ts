@@ -21,13 +21,13 @@ export const navItems: NavItem[] = [
   { key: "general", label: "Settings", path: "/general", group: "status" },
   {
     key: "outbounds",
-    label: "Outbounds",
+    label: "Routes and failover",
     path: "/outbounds",
     group: "internet",
   },
   {
     key: "transports",
-    label: "Transports",
+    label: "Tunnels and proxies",
     path: "/transports",
     group: "internet",
   },

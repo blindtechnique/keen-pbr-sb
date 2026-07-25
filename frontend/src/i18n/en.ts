@@ -93,20 +93,20 @@ export const enTranslation = {
     exported: "The export was prepared and downloaded.",
     exportFailed: "Failed to create the export file.",
     replaceOutboundConflicts:
-      "Replace existing outbounds tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
+      "Replace existing routes and failover targets tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
     replaceTransportConflicts:
-      "Replace existing transports tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
+      "Replace existing tunnels and proxies tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
     transportSecretsWarning:
-      "The export contains connection links, passwords, and other transport secrets. Save it to this computer?",
+      "The export contains connection links, passwords, and other tunnel or proxy secrets. Save it to this computer?",
     invalidFormat: "The file is not a compatible keen-pbr-sb export.",
     replaceLists:
       "Replace all existing lists? Choose Cancel to merge them instead.",
     replaceRules:
       "Replace all routing rules? Choose Cancel to append imported rules instead.",
     mapOutbound:
-      "Outbound “{{missing}}” does not exist. Select one of: {{available}}",
+      "Route “{{missing}}” does not exist. Select one of: {{available}}",
     outboundRequired:
-      "Every imported rule must be mapped to an existing outbound.",
+      "Every imported rule must be mapped to an existing route or failover target.",
   },
   auth: {
     title: "Sign in to keen-pbr-sb",
@@ -202,7 +202,7 @@ export const enTranslation = {
   runtime: {
     healthy: "Healthy",
     notHealthy: "Not healthy",
-    activeOutbound: "Active outbound {{value}}",
+    activeOutbound: "Active route: {{value}}",
     activeInterface: "Active {{value}}",
     outboundStatus: {
       healthy: "Healthy",
@@ -295,7 +295,7 @@ export const enTranslation = {
         "NaiveProxy runs on Chromium's network stack, which sing-box keeps in a separate library of several dozen megabytes. It is not installed with the package so it does not take up room on routers that never use naive. It can be fetched now, from the same sing-box release that is installed.",
       install: "Fetch the component",
       installing: "Fetching…",
-      installed: "Component installed, the transport can start",
+      installed: "Component installed, the tunnel or proxy can start",
       failed: "Could not fetch the component",
     },
     latencyValue: "{{value}} ms",
@@ -306,7 +306,7 @@ export const enTranslation = {
     singBoxMissing: {
       title: "sing-box is not installed",
       description:
-        "VLESS, VMess, Trojan, Shadowsocks and other managed proxy transports require sing-box. Run the keen-pbr-sb installer over SSH and select the tested version.",
+        "VLESS, VMess, Trojan, Shadowsocks and other managed proxy connections require sing-box. Run the keen-pbr-sb installer over SSH and select the tested version.",
     },
     title: "Tunnels and proxies",
     description:
@@ -314,11 +314,11 @@ export const enTranslation = {
     tabs: {
       all: "All",
       other: "Other",
-      ariaLabel: "Transport types",
+      ariaLabel: "Tunnel and proxy types",
     },
     refresh: "Refresh",
     add: "Add tunnel or proxy",
-    unavailable: "Transport manager unavailable",
+    unavailable: "Tunnel and proxy manager unavailable",
     empty: "No tunnels or proxies configured.",
     interface: "Interface",
     server: "Server",
@@ -326,10 +326,10 @@ export const enTranslation = {
     loopProtection: {
       action: "Exclude server from tunnel",
       confirm:
-        "Add {{server}} to the first pass-through rule? This creates the transport_servers list, an ignore outbound named transport_bypass, and a highest-priority routing rule.",
+        "Add {{server}} to the first pass-through rule? This creates the transport_servers list, an ignore route named transport_bypass, and a highest-priority routing rule.",
       saved: "Routing-loop protection was added",
       tagConflict:
-        "Tag {{tag}} is already used by another outbound type. Rename it and try again.",
+        "Tag {{tag}} is already used by another route type. Rename it and try again.",
     },
     pid: "PID",
     updatedAt: "Updated",
@@ -343,31 +343,31 @@ export const enTranslation = {
     restart: "Restart",
     latency: "Latency",
     latencyUnavailable: "not measured",
-    started: "Transport start requested",
-    stopped: "Transport stop requested",
-    restarted: "Transport restart requested",
+    started: "Tunnel or proxy start requested",
+    stopped: "Tunnel or proxy stop requested",
+    restarted: "Tunnel or proxy restart requested",
     nativeManagedExternally:
       "This native interface is managed by KeeneticOS or another service.",
-    deleteTitle: "Delete transport?",
+    deleteTitle: "Delete tunnel or proxy?",
     deleteDescription:
       "The managed process will be stopped and its definition removed.",
     configMessages: {
-      create: "Transport created",
-      update: "Transport updated",
-      delete: "Transport deleted",
+      create: "Tunnel or proxy created",
+      update: "Tunnel or proxy updated",
+      delete: "Tunnel or proxy deleted",
     },
     form: {
-      createOutbound: "Make it an exit point",
+      createOutbound: "Create a route now",
       createOutboundHint:
-        "The tunnel appears among the exit points under the same name and can be picked in routing rules straight away.",
-      outboundExists: "An outbound tagged {{tag}} already exists",
-      createTitle: "Add transport",
-      editTitle: "Edit transport",
+        "The tunnel or proxy appears under Routes and failover with the same name and can be picked in routing rules straight away.",
+      outboundExists: "A route tagged {{tag}} already exists",
+      createTitle: "Add tunnel or proxy",
+      editTitle: "Edit tunnel or proxy",
       description:
         "Expose a native interface or a scoped proxy TUN to keen-pbr.",
       tag: "Tag",
       tagHint:
-        "1–24 characters: start with a lowercase Latin letter, then use only a–z, 0–9 and underscore. Example: my_transport.",
+        "1–24 characters: start with a lowercase Latin letter, then use only a–z, 0–9 and underscore. Example: my_tunnel.",
       type: "Type",
       native: "Native interface",
       singBox: "sing-box connection",
@@ -386,9 +386,9 @@ export const enTranslation = {
       shareLink: "Connection link",
       shareLinkHint:
         "Supports VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS and HTTP proxy links.",
-      outboundJson: "sing-box outbound JSON",
+      outboundJson: "sing-box connection JSON",
       outboundJsonHint:
-        "Advanced mode for any outbound type supported by the installed sing-box version. The tag is assigned automatically.",
+        "Advanced mode for any connection type supported by the installed sing-box version. The tag is assigned automatically.",
       keepConnection: "Leave blank to keep the saved connection",
       server: "Server",
       port: "Port",
@@ -410,12 +410,12 @@ export const enTranslation = {
       save: "Save",
     },
     routing: {
-      title: "A transport is not a route yet",
+      title: "This tunnel or proxy is not used by a route yet",
       description:
-        "First bind the transport interface to an Interface outbound. For automatic switching, create a URLTest outbound and add two or more interface outbounds to its groups.",
-      createOutbound: "Make it an exit point",
-      createFailover: "Create failover (URLTest)",
-      bindOutbound: "Make it an exit point",
+        "First create an Interface route for this interface. For automatic switching, create a URLTest failover target and add two or more interface routes to its groups.",
+      createOutbound: "Create route",
+      createFailover: "Create failover",
+      bindOutbound: "Create route",
       alreadyBound: "Already linked to “{{tag}}”",
     },
     states: {
@@ -496,7 +496,7 @@ export const enTranslation = {
       healthy: {
         title: "System is operating normally",
         description:
-          "Routing, DNS, and active outgoing connections are responding.",
+          "Routing, DNS, tunnels, and proxies are operating normally.",
       },
       waiting: {
         title: "Loading system state",
@@ -552,7 +552,7 @@ export const enTranslation = {
       singbox: "sing-box",
       nfqws: "nfqws2",
       transportsRunning: "{{running}} of {{total}} running",
-      noTransports: "No transports configured",
+      noTransports: "No tunnels or proxies configured",
       notInstalled: "Not installed",
       running: "Service is running",
       stopped: "Service is stopped",
@@ -561,7 +561,7 @@ export const enTranslation = {
       badgeAbsent: "None",
     },
     pageDescription:
-      "Overview of routing runtime, config state, and active outbounds",
+      "Overview of routing runtime, routes, tunnels, and proxies",
     runtime: {
       title: "Routing runtime",
       description: "Control policy-based routing.",
@@ -618,10 +618,10 @@ export const enTranslation = {
         unavailable: "Unavailable",
         unknown: "Unknown",
       },
-      title: "Outgoing connections",
-      loadError: "Unable to load outbound health.",
-      emptyTitle: "No outbounds configured",
-      emptyDescription: "Add outbounds to see health checks.",
+      title: "Routes and failover",
+      loadError: "Unable to load route and failover health.",
+      emptyTitle: "No routes or failover targets configured",
+      emptyDescription: "Add a route or failover target to see its health.",
       inUse: "In use",
       urltestTitle: "urltest",
       headers: {
@@ -633,7 +633,7 @@ export const enTranslation = {
         interface: "Interface {{name}}",
         interfaceWithGateway: "Interface {{name}} (gw: {{gateway}})",
         table: "Table {{value}}",
-        outbound: "Outbound {{name}}",
+        outbound: "Route {{name}}",
       },
     },
     routing: {
@@ -684,8 +684,8 @@ export const enTranslation = {
           config: "Your full configuration file (including the lists in use)",
           serviceHealth: "Service health",
           routingHealth: "Routing health",
-          outbounds: "Outbounds status",
-          names: "Names of lists, outbounds, and interfaces",
+          outbounds: "Routes and failover status",
+          names: "Names of lists, routes, and interfaces",
         },
         trustWarning: "Please share this file only with people you trust.",
         hideListsOption: "Hide list contents and list URLs",
@@ -881,15 +881,15 @@ export const enTranslation = {
       },
       title: "Settings",
       description:
-        "Global defaults that apply to all your outbounds and rules.",
+        "Global defaults that apply to all your routes and rules.",
       saved: "Settings staged. Apply new config to persist them.",
       general: {
         title: "General",
-        description: "Default behavior for all outbounds.",
+        description: "Default behavior for all routes.",
         strictEnforcementLabel:
-          "Block traffic when outbound drops (kill-switch)",
+          "Block traffic when a route drops (kill-switch)",
         strictEnforcementHint:
-          "If a VPN or interface goes offline, traffic matching its rules is blocked instead of falling back to the main routing table. Can be overridden per outbound.",
+          "If a VPN or interface goes offline, traffic matching its rules is blocked instead of falling back to the main routing table. Can be overridden per route.",
         strictEnforcementOptions: {
           automatic: "Automatic (recommended)",
           enabled: "Always block",
@@ -897,11 +897,11 @@ export const enTranslation = {
         },
         strictEnforcementHints: {
           automatic:
-            "Gatewayless tunnels are protected against leaks while regular gateways remain permissive. Individual outbound connections can override this mode.",
+            "Gatewayless tunnels are protected against leaks while regular gateways remain permissive. Individual routes can override this mode.",
           enabled:
-            "An unavailable route is blocked for every interface outbound so traffic cannot fall back to the main routing table.",
+            "An unavailable path is blocked for every interface route so traffic cannot fall back to the main routing table.",
           disabled:
-            "Global blocking is disabled. Traffic may fall back to the main routing table unless the outbound connection overrides this setting.",
+            "Global blocking is disabled. Traffic may fall back to the main routing table unless the route overrides this setting.",
         },
         skipMarkedPacketsLabel: "Skip packets that are already marked",
         skipMarkedPacketsHint:
@@ -967,7 +967,7 @@ export const enTranslation = {
       softwareUpdate: {
         title: "keen-pbr-sb update",
         description:
-          "Checks the latest published Release, verifies SHA256SUMS, and installs the IPK while preserving configuration, transports, and the web account.",
+          "Checks the latest published Release, verifies SHA256SUMS, and installs the IPK while preserving configuration, tunnel and proxy interfaces, and the web account.",
         current: "Installed",
         latest: "Latest release",
         check: "Check for updates",
@@ -1000,14 +1000,14 @@ export const enTranslation = {
           "Advanced settings - only change these if you know what you're doing.",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
-          "The starting fwmark assigned to your first outbound. Each additional outbound gets the next value in the range.",
+          "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",
         fwmarkMaskLabel: "Firewall mark mask",
         fwmarkMaskHintPrefix:
           "Bitmask defining which bits are used for fwmarks. Must be a continuous block of hex",
         fwmarkMaskHintSuffix: "digits, e.g.",
         tableStartLabel: "IP routing table starting value",
         tableStartHint:
-          "The routing table ID assigned to your first outbound. Each additional outbound gets the next ID.",
+          "The routing table ID assigned to your first route. Each additional route gets the next ID.",
       },
       actions: {
         saving: "Saving...",
@@ -1031,7 +1031,7 @@ export const enTranslation = {
       headers: {
         name: "Name",
         address: "Address",
-        outbound: "Outbound",
+        outbound: "Route",
         actions: "Actions",
       },
       delete: {
@@ -1074,7 +1074,7 @@ export const enTranslation = {
       description:
         "This server will be available in your DNS rules and as a fallback.",
       cardDescription:
-        "Choose the DNS server type and optional detour outbound.",
+        "Choose the DNS server type and an optional route for its queries.",
       editCardTitle: "Edit {{tag}}",
       fields: {
         tag: "Name",
@@ -1099,11 +1099,11 @@ export const enTranslation = {
         addressPlaceholder: "1.1.1.1 or [2606:4700::1111]:53",
         addressHint:
           "The server's IP address, e.g. `1.1.1.1` or `[2606:4700::1111]:53`.",
-        detour: "Make requests via Outbound",
+        detour: "Make requests via route",
         detourEmpty: "Not selected",
-        detourPlaceholder: "Optional outbound tag",
+        detourPlaceholder: "Optional route tag",
         detourHint:
-          "Optional: send DNS queries for this server through a specific outbound (e.g. a VPN).",
+          "Optional: send DNS queries for this server through a specific route (e.g. a VPN).",
       },
       validation: {
         tagRequired: "Name is required.",
@@ -1121,7 +1121,7 @@ export const enTranslation = {
     routingRules: {
       title: "Routing rules",
       description:
-        "Rules that decide which outbound handles matching traffic. Evaluated top to bottom.",
+        "Rules that decide which route handles matching traffic. Evaluated top to bottom.",
       actions: {
         reorder: "Drag to reorder",
         addRule: "Add routing rule",
@@ -1143,12 +1143,12 @@ export const enTranslation = {
       empty: {
         title: "No routing rules yet",
         description:
-          "Add a routing rule to direct matching traffic to an outbound.",
+          "Add a routing rule to direct matching traffic to a route.",
       },
       headers: {
         order: "Order",
         criteria: "Match",
-        outbound: "Outbound",
+        outbound: "Route",
         runtime: "Runtime",
         actions: "Actions",
       },
@@ -1166,11 +1166,11 @@ export const enTranslation = {
       createTitle: "Create routing rule",
       editTitle: "Edit routing rule",
       description:
-        "This rule directs matching traffic to the specified outbound.",
+        "This rule directs matching traffic to the specified route.",
       cardDescription:
-        "Choose lists and outbound, then optionally narrow by protocol, ports, and addresses.",
+        "Choose lists and a route, then optionally narrow by protocol, ports, and addresses.",
       simpleCardDescription:
-        "Choose a list and an outbound connection. That is enough for a working rule; optional match conditions stay in the advanced editor.",
+        "Choose a list and a route. That is enough for a working rule; optional match conditions stay in the advanced editor.",
       messages: {
         saved: "Routing rule staged. Apply new config to persist it.",
       },
@@ -1185,7 +1185,7 @@ export const enTranslation = {
         atLeastOneCondition:
           "Specify at least one condition: list, DSCP, source/destination address, or source/destination port.",
         dscpRange: "DSCP must be an integer between 1 and 63.",
-        outboundRequired: "Outbound tag is required.",
+        outboundRequired: "A route is required.",
       },
       actions: { create: "Create rule", save: "Save rule" },
       fields: {
@@ -1213,10 +1213,10 @@ export const enTranslation = {
           "Source IP/CIDR. Comma-separated. Prefix `!` to negate.",
         destinationAddressHint:
           "Destination IP/CIDR. Comma-separated. Prefix `!` to negate.",
-        outbound: "Outbound",
-        selectOutbound: "Select outbound",
-        configuredOutbounds: "Configured outbounds",
-        outboundHint: "Which outbound should handle matching traffic.",
+        outbound: "Route",
+        selectOutbound: "Select route",
+        configuredOutbounds: "Configured routes",
+        outboundHint: "Which route should handle matching traffic.",
       },
       placeholders: {
         dscp: "46",
@@ -1242,49 +1242,50 @@ export const enTranslation = {
       groups: {
         interfaces: "Tunnels and interfaces",
         failover: "Failover groups",
-        system: "System outbounds",
+        system: "System routes",
       },
       groupsEmpty: {
         interfaces: "No tunnels or interfaces have been added yet.",
         failover: "No failover groups have been configured yet.",
-        system: "No system outbounds have been configured yet.",
+        system: "No system routes have been configured yet.",
       },
       tabs: {
-        ariaLabel: "Outgoing connection sections",
+        ariaLabel: "Route and failover sections",
       },
       title: "Routes and failover",
       description:
-        "Traffic destinations: tunnels and interfaces, failover groups, and system outbounds.",
-      actions: { new: "Add outbound" },
+        "Traffic destinations: tunnels and interfaces, failover groups, and system routes.",
+      actions: { new: "Add route or failover target" },
       bulk: {
         selected: "{{count}} selected",
         delete: "Delete selected",
         confirmDelete:
-          "Delete {{count}} outbound(s)? Dependencies are not validated until save.",
+          "Delete {{count}} route(s) or failover target(s)? Dependencies are not validated until save.",
       },
       deleteDialog: {
-        title: "Delete outbounds?",
+        title: "Delete routes or failover targets?",
         description:
           "Confirming this operation will make the following changes:",
         confirm: "Delete",
         items: {
-          outboundPrefix: "Outbound",
+          outboundPrefix: "Route",
           outboundSuffix: "will be deleted.",
-          dependentOutboundPrefix: "Dependent urltest outbound",
+          dependentOutboundPrefix: "Dependent failover target",
           dependentOutboundSuffix: "will be deleted.",
           routingRule: "Routing rule #{{number}} will be removed.",
           ruleDetail: "{{label}}: {{value}}",
           dnsDetour: 'DNS server "{{server}}" will be changed.',
           urltestGroupChanged:
-            'Group #{{group}} in urltest outbound "{{outbound}}" will be changed.',
+            'Group #{{group}} in failover target "{{outbound}}" will be changed.',
           urltestGroupRemoved:
-            'Group #{{group}} in urltest outbound "{{outbound}}" will be deleted.',
-          groupOutbounds: "Outbounds",
+            'Group #{{group}} in failover target "{{outbound}}" will be deleted.',
+          groupOutbounds: "Group routes",
         },
       },
       empty: {
-        title: "No outbounds yet",
-        description: "Add an outbound to start building routing behavior.",
+        title: "No routes or failover targets yet",
+        description:
+          "Add a route or failover target to start building routing behavior.",
       },
       headers: {
         tag: "Name",
@@ -1298,40 +1299,41 @@ export const enTranslation = {
         gateway4: "gateway4={{value}}",
         gateway6: "gateway6={{value}}",
         table: "table={{value}}",
-        urltest: "outbounds={{value}}",
+        urltest: "routes={{value}}",
       },
       messages: {
         missingReference:
-          'Outbound "{{outbound}}" references missing outbound tag "{{referenced}}".',
+          'Route "{{outbound}}" references missing route "{{referenced}}".',
       },
       brokenReferences: {
         title: "The configuration contains broken references",
       },
     },
     outboundUpsert: {
-      createTitle: "Create outbound",
-      editTitle: "Edit outbound",
+      createTitle: "Create route or failover target",
+      editTitle: "Edit route or failover target",
       editCardTitle: "Edit {{tag}}",
       description:
-        "An outbound can be a single network interface, a routing table, or a urltest group that picks the fastest option.",
-      cardDescription: "Configure interface or urltest outbounds.",
+        "A route can use a network interface, an existing routing table, or a failover group that selects an available option.",
+      cardDescription: "Configure a route, system action, or failover target.",
       missing: {
-        cardDescription: "The requested outbound could not be found.",
-        cardTitle: "Missing outbound",
-        description: "Return to the outbounds table and choose a valid entry.",
-        back: "Back to outbounds",
+        cardDescription: "The requested route or failover target could not be found.",
+        cardTitle: "Missing route",
+        description:
+          "Return to Routes and failover and choose a valid entry.",
+        back: "Back to routes",
       },
-      actions: { create: "Create outbound", save: "Save outbound" },
+      actions: { create: "Create route", save: "Save route" },
       common: {
         noExtraFields:
-          "No additional fields are required for this type beyond the outbound tag.",
+          "No additional fields are required for this type beyond the route tag.",
       },
       fields: {
         tag: "Name",
         tagHint:
-          "A unique name for this outbound. Referenced in traffic rules and groups.",
+          "A unique name for this route. Referenced in traffic rules and failover groups.",
         type: "Type",
-        outboundTypes: "Outbound types",
+        outboundTypes: "Route types",
         typeOptions: {
           interface: "Interface",
           table: "Routing table",
@@ -1343,43 +1345,43 @@ export const enTranslation = {
       interface: {
         title: "Interface settings",
         description:
-          "Set the egress interface and optional IPv4/IPv6 gateways for this outbound.",
+          "Set the egress interface and optional IPv4/IPv6 gateways for this route.",
         interface: "Interface",
         interfacePlaceholder: "Select or type an interface",
         interfaceHint: "Egress interface name, e.g. `tun0`, `eth0`, `wg0`.",
         gateway: "Gateway (IPv4)",
-        gatewayHint: "Optional IPv4 gateway for this outbound.",
+        gatewayHint: "Optional IPv4 gateway for this route.",
         gateway6: "Gateway (IPv6)",
-        gateway6Hint: "Optional IPv6 gateway for this outbound.",
+        gateway6Hint: "Optional IPv6 gateway for this route.",
       },
       table: {
         title: "Routing table settings",
-        description: "Map this outbound to an existing kernel routing table.",
+        description: "Map this route to an existing kernel routing table.",
         field: "Table ID",
-        hint: "Kernel routing table ID for this outbound.",
+        hint: "Kernel routing table ID for this route.",
       },
       blackhole: {
         title: "Blackhole behavior",
         description:
-          "Blackhole outbounds intentionally drop all matching traffic.",
+          "Blackhole routes intentionally drop all matching traffic.",
       },
       ignore: {
         title: "Ignore behavior",
         description:
-          "Ignore outbounds pass matching traffic through without policy-based routing changes.",
+          "Ignore routes pass matching traffic through without policy-based routing changes.",
       },
       urltest: {
-        groupsTitle: "Outbound groups (urltest)",
+        groupsTitle: "Failover groups",
         groupsDescription:
-          "Add outbounds to this group. The fastest responding outbound (by urltest probe) will be selected.",
+          "Add routes to this group. The fastest available route according to the URLTest probe is selected automatically.",
         groupTitle: "Group {{index}}",
         groupDescription:
           "Priority {{index}} - higher priority groups are preferred.",
-        interfaceOutbounds: "Interface outbounds",
-        addOutbound: "Add outbound",
-        noInterfaceOutbounds: "No interface outbounds found.",
+        interfaceOutbounds: "Interface routes",
+        addOutbound: "Add route",
+        noInterfaceOutbounds: "No interface routes found.",
         addInterfaceOutboundsFirst:
-          "Add interface outbounds first so urltest groups have selectable targets.",
+          "Add interface routes first so the failover group has selectable targets.",
         addGroup: "Add group",
         probingTitle: "Probing and retries",
         probingDescription:
@@ -1391,10 +1393,10 @@ export const enTranslation = {
         intervalHint: "How often to request the Probe URL (in milliseconds).",
         tolerance: "Tolerance (ms)",
         toleranceHint:
-          "Don't switch outbounds unless the latency difference exceeds this value. Prevents flapping.",
+          "Do not switch routes unless the latency difference exceeds this value. Prevents flapping.",
         retryAttempts: "Retry attempts",
         retryAttemptsHint:
-          "Extra probe attempts before marking the outbound as failed.",
+          "Extra probe attempts before marking the route as failed.",
         retryInterval: "Retry interval (ms)",
         retryIntervalHint:
           "Delay between retries after a failed probe (in milliseconds).",
@@ -1416,21 +1418,21 @@ export const enTranslation = {
       },
       strictEnforcement: {
         label: "Kill-switch override",
-        hint: "Override the global kill-switch setting for this outbound connection.",
+        hint: "Override the global kill-switch setting for this route.",
         default: "Default (as in global config)",
         explanations: {
           default: "Use the global kill-switch setting.",
           enabled:
-            "Enabled: if the interface goes down, traffic for this connection is blocked instead of leaking directly through the WAN.",
+            "Enabled: if the interface goes down, traffic for this route is blocked instead of leaking directly through the WAN.",
           disabled:
             "Disabled: if the interface goes down, traffic may use another matching route, including the regular WAN.",
         },
       },
       validation: {
         tagRequired: "Tag is required.",
-        duplicateTag: 'Outbound tag "{{tag}}" already exists.',
+        duplicateTag: 'Route tag "{{tag}}" already exists.',
         missingReference:
-          'Outbound "{{outbound}}" references missing outbound tag "{{referenced}}".',
+          'Route "{{outbound}}" references missing route "{{referenced}}".',
       },
     },
     dnsRules: {
@@ -1691,14 +1693,14 @@ export const enTranslation = {
         description:
           "Optionally create linked rules together with the list. All changes are saved in one operation.",
         createRouteRule: "Create a routing rule for this list",
-        selectOutbound: "Select a tunnel or another outbound",
+        selectOutbound: "Select a route or failover target",
         createDnsRule: "Create a DNS rule for this list",
         selectDnsServer: "Select a DNS server",
         noDnsServers:
           "Create a DNS server first, then it will become available here.",
         manualHint:
           "Leave the checkboxes off to configure rules manually after creating the list.",
-        routeRequired: "Select an outbound for the routing rule.",
+        routeRequired: "Select a route or failover target for the routing rule.",
         dnsRequired: "Select a DNS server for the DNS rule.",
       },
       fields: {
@@ -1707,11 +1709,11 @@ export const enTranslation = {
         ttlMs: "IP cache duration (ms)",
         ttlMsHint:
           "How long to keep resolved IPs in the ipset. `0` = no timeout.",
-        detour: "Make requests via Outbound",
+        detour: "Make requests via route",
         detourEmpty: "Not selected",
-        detourPlaceholder: "Optional outbound tag",
+        detourPlaceholder: "Optional route tag",
         detourHint:
-          "Optional outbound to use when downloading this list from a remote URL.",
+          "Optional route to use when downloading this list from a remote URL.",
         url: "Remote URL",
         urlHint:
           "Optional: a URL to download entries from. Combined with anything you add below.",

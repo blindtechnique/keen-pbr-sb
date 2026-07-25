@@ -1,4 +1,5 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { DnsRule } from "@/api/generated/model/dnsRule"
 import i18n from "@/i18n"
 
 export type DnsRuleDraft = {
@@ -23,8 +24,19 @@ export function getRuleDraft(rule?: {
   return {
     enabled: rule?.enabled ?? true,
     server: rule?.server ?? "",
-    lists: rule?.list ?? [],
+    lists: [...(rule?.list ?? [])],
     allowDomainRebinding: rule?.allow_domain_rebinding ?? false,
+  }
+}
+
+export function normalizeDnsRuleDraft(rule: DnsRuleDraft): DnsRule {
+  return {
+    enabled: rule.enabled,
+    server: rule.server.trim(),
+    list: Array.from(
+      new Set(rule.lists.map((list) => list.trim()).filter(Boolean))
+    ).sort(),
+    allow_domain_rebinding: rule.allowDomainRebinding,
   }
 }
 
@@ -38,12 +50,7 @@ export function buildUpdatedConfigWithRules(
     dns: {
       ...config.dns,
       fallback,
-      rules: rules.map((rule) => ({
-        enabled: rule.enabled,
-        server: rule.server,
-        list: rule.lists,
-        allow_domain_rebinding: rule.allowDomainRebinding,
-      })),
+      rules: rules.map(normalizeDnsRuleDraft),
     },
   }
 }

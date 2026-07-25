@@ -184,6 +184,68 @@ function RoutingRuleEditorRoute({
   )
 }
 
+function DnsRuleEditorRoute({
+  mode,
+  ruleIndex,
+}: {
+  mode: "create" | "edit"
+  ruleIndex?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <DnsRuleUpsertPage
+        mode={mode}
+        presentation="page"
+        ruleIndex={ruleIndex}
+      />
+    )
+  }
+
+  return (
+    <>
+      <DnsRulesPage />
+      <DnsRuleUpsertPage
+        mode={mode}
+        presentation="dialog"
+        ruleIndex={ruleIndex}
+      />
+    </>
+  )
+}
+
+function OutboundEditorRoute({
+  mode,
+  outboundId,
+}: {
+  mode: "create" | "edit"
+  outboundId?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <OutboundUpsertPage
+        mode={mode}
+        outboundId={outboundId}
+        presentation="page"
+      />
+    )
+  }
+
+  return (
+    <>
+      <OutboundsPage />
+      <OutboundUpsertPage
+        mode={mode}
+        outboundId={outboundId}
+        presentation="dialog"
+      />
+    </>
+  )
+}
+
 function App() {
   return (
     <AuthGate>
@@ -206,11 +268,11 @@ function App() {
             <Route component={CatalogPage} path="/catalog" />
             <Route component={ListsPage} path="/lists" />
             <Route path="/outbounds/create">
-              <OutboundUpsertPage mode="create" />
+              <OutboundEditorRoute mode="create" />
             </Route>
             <Route path="/outbounds/:outboundId/edit">
               {(params) => (
-                <OutboundUpsertPage
+                <OutboundEditorRoute
                   mode="edit"
                   outboundId={params.outboundId}
                 />
@@ -233,11 +295,14 @@ function App() {
             </Route>
             <Route component={DnsServersPage} path="/dns-servers" />
             <Route path="/dns-rules/create">
-              <DnsRuleUpsertPage mode="create" />
+              <DnsRuleEditorRoute mode="create" />
             </Route>
             <Route path="/dns-rules/:ruleIndex/edit">
               {(params) => (
-                <DnsRuleUpsertPage mode="edit" ruleIndex={params.ruleIndex} />
+                <DnsRuleEditorRoute
+                  mode="edit"
+                  ruleIndex={params.ruleIndex}
+                />
               )}
             </Route>
             <Route component={DnsRulesPage} path="/dns-rules" />

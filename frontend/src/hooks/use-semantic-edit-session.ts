@@ -1,13 +1,16 @@
 import { useCallback, useState } from "react"
 
-type Equality<T> = (left: T, right: T) => boolean
+import {
+  isSemanticallyDirty,
+  type SemanticEquality,
+} from "@/lib/semantic-dirty"
 
 export function useSemanticEditSession<T>(
   baseline: T,
-  equals: Equality<T> = Object.is
+  equals: SemanticEquality<T> = Object.is
 ) {
   const [value, setValue] = useState<T>(baseline)
-  const isDirty = !equals(value, baseline)
+  const isDirty = isSemanticallyDirty(value, baseline, { equals })
   const reset = useCallback(() => {
     setValue(baseline)
   }, [baseline])

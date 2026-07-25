@@ -41,6 +41,8 @@ import {
   clearFormServerErrors,
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
+import { isSemanticallyDirty } from "@/lib/semantic-dirty"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 import { useForm } from "@tanstack/react-form"
 import { useStore } from "@tanstack/react-store"
 
@@ -141,6 +143,7 @@ export function DnsServerUpsertPage({
       <DnsServerForm
         config={config}
         initialDraft={initialDraft}
+        key={`${mode}:${serverTag ?? "new"}:${existingServer ? "loaded" : "empty"}`}
         mode={mode}
         onDirtyChange={setDirty}
         onSaved={() => navigate("/dns-servers")}
@@ -171,8 +174,9 @@ function DnsServerForm({
   const { t } = useTranslation()
   const close = useUpsertPageClose()
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null)
+  const [baselineDraft] = useState(initialDraft)
   const showTypeSelector =
-    supportsKeeneticDns || initialDraft.type === DnsServerType.keenetic
+    supportsKeeneticDns || baselineDraft.type === DnsServerType.keenetic
   const dnsTypeSelectItems = [
     {
       value: DnsServerType.static,
@@ -184,7 +188,7 @@ function DnsServerForm({
     },
   ]
   const form = useForm({
-    defaultValues: initialDraft,
+    defaultValues: baselineDraft,
     onSubmit: ({ value }) => {
       if (!config) {
         return
@@ -237,7 +241,12 @@ function DnsServerForm({
           | undefined
       )?.unmapped ?? []
   )
-  const isDirty = useStore(form.store, (state) => !state.isPristine)
+  const isDirty = useStore(form.store, (state) =>
+    isSemanticallyDirty(state.values, baselineDraft, {
+      equals: semanticJsonEqual,
+      normalize: normalizeDnsServerDraftForComparison,
+    })
+  )
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -262,11 +271,6 @@ function DnsServerForm({
       },
     },
   })
-
-  useEffect(() => {
-    form.reset(initialDraft)
-    clearFormServerErrors(form)
-  }, [form, initialDraft])
 
   useEffect(() => {
     onDirtyChange(isDirty)
@@ -530,17 +534,14 @@ function DnsServerForm({
           {t("common.cancel")}
         </Button>
         <form.Subscribe
-          selector={(state) => ({
-            canSubmit: state.canSubmit,
-            isPristine: state.isPristine,
-          })}
+          selector={(state) => state.canSubmit}
         >
-          {({ canSubmit, isPristine }) => (
+          {(canSubmit) => (
             <Button
               disabled={
                 postConfigMutation.isPending ||
                 !config ||
-                isPristine ||
+                !isDirty ||
                 !canSubmit
               }
               size="xl"
@@ -567,6 +568,20 @@ function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
     type: server.type ?? DnsServerType.static,
     address: server.address ?? "",
     detour: server.detour ?? "",
+  }
+}
+
+function normalizeDnsServerDraftForComparison(draft: DnsServerDraft) {
+  const isKeeneticDns = draft.type === DnsServerType.keenetic
+  const normalizedAddress = normalizeDnsAddress(draft.address)
+
+  return {
+    tag: draft.tag.trim(),
+    type: draft.type,
+    address: isKeeneticDns
+      ? ""
+      : (normalizedAddress ?? draft.address.trim()),
+    detour: isKeeneticDns ? "" : draft.detour.trim(),
   }
 }
 

@@ -794,13 +794,23 @@
     height: 30px;
     display: block;
     pointer-events: none;
-    background: linear-gradient(to top, rgb(0 0 0 / 3%), transparent);
+    background: linear-gradient(
+      to top,
+      transparent 0,
+      rgb(0 0 0 / 3%) 3px,
+      transparent 100%
+    );
     content: "";
     transition: background 120ms ease-out;
   }
 
   .keen-sidebar-toggle:hover::after {
-    background: linear-gradient(to top, rgb(0 0 0 / 8%), transparent);
+    background: linear-gradient(
+      to top,
+      transparent 0,
+      rgb(0 0 0 / 8%) 3px,
+      transparent 100%
+    );
   }
 
   .keen-sidebar-toggle [data-slot="button"],

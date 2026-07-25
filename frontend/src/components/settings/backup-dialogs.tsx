@@ -28,8 +28,8 @@ import {
 
 const GROUP_LABELS: Readonly<Record<BackupGroup, string>> = {
   general: "Конфигурация общих настроек",
-  transports: "Транспорты",
-  outbounds: "Исходящие соединения",
+  transports: "Туннели и прокси",
+  outbounds: "Маршруты и резервирование",
   dns: "Настройки DNS",
   routing: "Списки и правила маршрутизации",
   nfqws: "Конфигурация и списки nfqws2",
@@ -116,8 +116,8 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        Если выбраны транспорты, файл содержит их UUID, пароли и ключи в
-        открытом виде. Храните копию в безопасном месте и не пересылайте её
+        Если выбраны туннели и прокси, файл содержит их UUID, пароли и ключи
+        в открытом виде. Храните копию в безопасном месте и не пересылайте её
         посторонним.
       </p>
       <div className="grid gap-2 sm:grid-cols-2">

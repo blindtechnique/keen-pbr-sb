@@ -55,7 +55,6 @@ import {
   getOutboundDeleteImpact,
   type OutboundDeleteImpact,
 } from "@/pages/outbounds-utils"
-import { OutboundCreateDialog } from "@/pages/outbound-upsert-page"
 
 type OutboundItem = {
   id: string
@@ -73,7 +72,6 @@ export function OutboundsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
-  const [createOpen, setCreateOpen] = useState(false)
   const [deleteRequest, setDeleteRequest] = useState<{
     tags: string[]
     impact: OutboundDeleteImpact
@@ -286,7 +284,7 @@ export function OutboundsPage() {
         />
         <Button
           disabled={configMutationPending}
-          onClick={() => setCreateOpen(true)}
+          onClick={() => navigate("/outbounds/create")}
         >
           <Plus className="mr-1 h-4 w-4" />
           {t("pages.outbounds.actions.new")}
@@ -414,7 +412,6 @@ export function OutboundsPage() {
         open={deleteRequest !== null}
         title={t("pages.outbounds.deleteDialog.title")}
       />
-      <OutboundCreateDialog onOpenChange={setCreateOpen} open={createOpen} />
     </div>
   )
 }

@@ -67,6 +67,8 @@ import {
 } from "@/lib/form-api-errors"
 import { cn } from "@/lib/utils"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
+import { isSemanticallyDirty } from "@/lib/semantic-dirty"
+import { semanticJsonEqual } from "@/lib/semantic-json"
 import { useIsMobile } from "@/hooks/use-mobile"
 
 type ListDraft = {
@@ -262,23 +264,29 @@ function ListForm({
   const dnsServerTags = (loadedConfig.dns?.servers ?? []).map(
     (server) => server.tag
   )
-  const [quickSetup, setQuickSetup] = useState<QuickSetup>({
+  const [baselineDraft] = useState(draft)
+  const [initialQuickSetup] = useState<QuickSetup>(() => ({
     createRouteRule: false,
     routeOutbound: "",
     createDnsRule: false,
     dnsServer: dnsServerTags[0] ?? "",
-  })
+  }))
+  const [quickSetup, setQuickSetup] =
+    useState<QuickSetup>(initialQuickSetup)
   // DNS rules are edited where they belong — next to the list they apply to —
   // instead of in a separate section listing every rule at once.
   const currentDnsServer =
     (loadedConfig.dns?.rules ?? []).find((rule) =>
       (rule.list ?? []).includes(listId ?? "")
     )?.server ?? ""
-  const [dnsServerForList, setDnsServerForList] = useState(currentDnsServer)
+  const [initialDnsServerForList] = useState(currentDnsServer)
+  const [dnsServerForList, setDnsServerForList] = useState(
+    initialDnsServerForList
+  )
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
 
   const form = useForm({
-    defaultValues: draft,
+    defaultValues: baselineDraft,
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
@@ -342,7 +350,7 @@ function ListForm({
             error: apiError,
             fieldNames: Object.values(LIST_FIELD_NAMES),
             resolvePath: (path) =>
-              resolveListFieldPath(path, value.name || draft.name),
+              resolveListFieldPath(path, value.name || baselineDraft.name),
           })
 
           setFormServerErrors(form, {
@@ -380,12 +388,24 @@ function ListForm({
           | undefined
       )?.unmapped ?? []
   )
-  const formIsDirty = useStore(form.store, (state) => !state.isPristine)
+  const formIsDirty = useStore(form.store, (state) =>
+    isSemanticallyDirty(state.values, baselineDraft, {
+      equals: semanticJsonEqual,
+      normalize: normalizeListDraftForComparison,
+    })
+  )
 
   const isCreate = mode === "create"
   const hasDnsServerChange =
-    mode === "edit" && dnsServerForList !== currentDnsServer
-  const isDirty = formIsDirty || hasDnsServerChange
+    mode === "edit" && dnsServerForList !== initialDnsServerForList
+  const hasQuickSetupChange =
+    mode === "create" &&
+    isSemanticallyDirty(quickSetup, initialQuickSetup, {
+      equals: semanticJsonEqual,
+      normalize: normalizeQuickSetupForComparison,
+    })
+  const isDirty =
+    formIsDirty || hasDnsServerChange || hasQuickSetupChange
 
   useEffect(() => {
     onDirtyChange(isDirty)
@@ -936,16 +956,13 @@ function ListForm({
           {t("common.cancel")}
         </Button>
         <form.Subscribe
-          selector={(state) => ({
-            canSubmit: state.canSubmit,
-            isPristine: state.isPristine,
-          })}
+          selector={(state) => state.canSubmit}
         >
-          {({ canSubmit, isPristine }) => (
+          {(canSubmit) => (
             <Button
               disabled={
                 postConfigMutation.isPending ||
-                (isPristine && !hasDnsServerChange) ||
+                !isDirty ||
                 !canSubmit
               }
               size="xl"
@@ -1152,6 +1169,24 @@ function getListConfigFromDraft(draft: ListDraft): ListConfig {
   }
 
   return listConfig
+}
+
+function normalizeListDraftForComparison(draft: ListDraft) {
+  return {
+    name: draft.name.trim(),
+    config: getListConfigFromDraft(draft),
+  }
+}
+
+function normalizeQuickSetupForComparison(quickSetup: QuickSetup) {
+  return {
+    createRouteRule: quickSetup.createRouteRule,
+    routeOutbound: quickSetup.createRouteRule
+      ? quickSetup.routeOutbound
+      : "",
+    createDnsRule: quickSetup.createDnsRule,
+    dnsServer: quickSetup.createDnsRule ? quickSetup.dnsServer : "",
+  }
 }
 
 function splitLines(value: string) {
