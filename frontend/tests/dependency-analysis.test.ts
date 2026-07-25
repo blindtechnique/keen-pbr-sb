@@ -43,4 +43,41 @@ describe("backend dependency mapping", () => {
       ])
     )
   })
+
+  test("uses a list alias for dependency labels without changing the target", () => {
+    const config: ConfigObject = {
+      lists: {
+        ai: {
+          display_name: "AI-сервисы",
+          detour: "vpn",
+        },
+      },
+    }
+    const references: DependencyReference[] = [
+      {
+        target: { kind: "outbound", id: "vpn", cascaded: false },
+        dependent_kind: "list",
+        dependent_id: "ai",
+        relation: "uses_outbound",
+        consequence: "delete",
+        path: "lists.ai.detour",
+        href: "/lists/ai/edit",
+      },
+    ]
+
+    expect(mapDependencyReferences(config, references)).toEqual(
+      new Map([
+        [
+          "outbound:vpn",
+          [
+            {
+              kind: "list",
+              label: "AI-сервисы (ai)",
+              href: "/lists/ai/edit",
+            },
+          ],
+        ],
+      ])
+    )
+  })
 })

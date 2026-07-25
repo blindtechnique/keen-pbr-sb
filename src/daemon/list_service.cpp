@@ -245,6 +245,12 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 continue;
             }
 
+            if (!download_result.warning_message.empty()) {
+                Logger::instance().warn("List '{}': {}",
+                                        name,
+                                        download_result.warning_message);
+            }
+
             result.changed_lists.push_back(name);
             if (relevant_lists && relevant_lists->count(name) > 0) {
                 result.relevant_changed_lists.push_back(name);

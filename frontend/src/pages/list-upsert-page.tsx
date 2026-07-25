@@ -15,9 +15,7 @@ import { useLocation } from "wouter"
 import { toast } from "sonner"
 
 import type { ApiError } from "@/api/client"
-import type { DnsRule } from "@/api/generated/model/dnsRule"
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { Outbound } from "@/api/generated/model/outbound"
 import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
@@ -70,29 +68,24 @@ import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { useIsMobile } from "@/hooks/use-mobile"
-
-type ListDraft = {
-  name: string
-  ttlMs: string
-  detour: string
-  domains: string
-  ipCidrs: string
-  url: string
-  file: string
-}
+import {
+  NO_DNS_RULE,
+  buildUpdatedConfigForListUpsert,
+  getDraftFromMapEntry,
+  normalizeListDraftForComparison,
+  normalizeQuickSetupForComparison,
+  splitLines,
+  type ListDraft,
+  type QuickSetup,
+} from "@/pages/list-upsert-utils"
 
 type ListSourceGroup = "url" | "file" | "inline"
-type QuickSetup = {
-  createRouteRule: boolean
-  routeOutbound: string
-  createDnsRule: boolean
-  dnsServer: string
-}
 type ListFieldName = (typeof LIST_FIELD_NAMES)[keyof typeof LIST_FIELD_NAMES]
 
 const LIST_SOURCE_GROUPS: ListSourceGroup[] = ["url", "file", "inline"]
 const DEFAULT_SOURCE_GROUP: ListSourceGroup = "url"
 const LIST_FIELD_NAMES = {
+  displayName: "displayName",
   name: "name",
   ttlMs: "ttlMs",
   detour: "detour",
@@ -113,6 +106,7 @@ const LIST_SOURCE_GROUP_FIELDS = {
 } satisfies Record<ListSourceGroup, ListFieldName[]>
 
 const sampleNewList: ListDraft = {
+  displayName: "",
   name: "",
   ttlMs: "7200000",
   detour: "",
@@ -205,7 +199,10 @@ export function ListUpsertPage({
         mode === "create"
           ? t("pages.listUpsert.createTitle")
           : t("pages.listUpsert.editCardTitle", {
-              name: draft?.name ?? t("pages.listUpsert.fallbackName"),
+              name:
+                draft?.displayName.trim() ||
+                draft?.name ||
+                t("pages.listUpsert.fallbackName"),
             })
       }
       description={t("pages.listUpsert.description")}
@@ -271,8 +268,7 @@ function ListForm({
     createDnsRule: false,
     dnsServer: dnsServerTags[0] ?? "",
   }))
-  const [quickSetup, setQuickSetup] =
-    useState<QuickSetup>(initialQuickSetup)
+  const [quickSetup, setQuickSetup] = useState<QuickSetup>(initialQuickSetup)
   // DNS rules are edited where they belong — next to the list they apply to —
   // instead of in a separate section listing every rule at once.
   const currentDnsServer =
@@ -292,6 +288,7 @@ function ListForm({
         clearFormServerErrors(form)
         if (
           presentation === "dialog" &&
+          mode === "create" &&
           !activeSourceGroups.some((group) =>
             isSourceGroupPopulated(group, value)
           )
@@ -404,8 +401,7 @@ function ListForm({
       equals: semanticJsonEqual,
       normalize: normalizeQuickSetupForComparison,
     })
-  const isDirty =
-    formIsDirty || hasDnsServerChange || hasQuickSetupChange
+  const isDirty = formIsDirty || hasDnsServerChange || hasQuickSetupChange
 
   useEffect(() => {
     onDirtyChange(isDirty)
@@ -471,6 +467,37 @@ function ListForm({
         </CardHeader>
         <CardContent>
           <FieldGroup>
+            <form.Field name={LIST_FIELD_NAMES.displayName}>
+              {(field) => {
+                const error = getFirstFieldError(field.state.meta.errors)
+
+                return (
+                  <Field invalid={Boolean(error)}>
+                    <FieldLabel htmlFor="list-display-name">
+                      {t("pages.listUpsert.fields.displayName")}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Input
+                        aria-invalid={Boolean(error)}
+                        id="list-display-name"
+                        onBlur={field.handleBlur}
+                        onChange={(event) =>
+                          field.handleChange(event.target.value)
+                        }
+                        value={field.state.value}
+                      />
+                      <FieldHint
+                        description={t(
+                          "pages.listUpsert.fields.displayNameHint"
+                        )}
+                        error={error ?? null}
+                      />
+                    </FieldContent>
+                  </Field>
+                )
+              }}
+            </form.Field>
+
             <form.Field
               name={LIST_FIELD_NAMES.name}
               validators={{
@@ -489,7 +516,7 @@ function ListForm({
                 return (
                   <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor="list-name">
-                      {t("pages.listUpsert.fields.name")}
+                      {t("pages.listUpsert.fields.technicalId")}
                     </FieldLabel>
                     <FieldContent>
                       <Input
@@ -503,7 +530,11 @@ function ListForm({
                         value={field.state.value}
                       />
                       <FieldHint
-                        description={t("pages.listUpsert.fields.nameHint")}
+                        description={t(
+                          isCreate
+                            ? "pages.listUpsert.fields.technicalIdCreateHint"
+                            : "pages.listUpsert.fields.technicalIdEditHint"
+                        )}
                         error={error ?? null}
                       />
                     </FieldContent>
@@ -829,6 +860,12 @@ function ListForm({
         onOpenChange={setTemplatePickerOpen}
         onSelect={(template) => {
           form.setFieldValue(LIST_FIELD_NAMES.url, template.url)
+          if (
+            isCreate &&
+            !form.getFieldValue(LIST_FIELD_NAMES.displayName).trim()
+          ) {
+            form.setFieldValue(LIST_FIELD_NAMES.displayName, template.name)
+          }
           if (isCreate && !form.getFieldValue(LIST_FIELD_NAMES.name)) {
             form.setFieldValue(LIST_FIELD_NAMES.name, template.id)
           }
@@ -955,16 +992,10 @@ function ListForm({
         <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>
-        <form.Subscribe
-          selector={(state) => state.canSubmit}
-        >
+        <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
-              disabled={
-                postConfigMutation.isPending ||
-                !isDirty ||
-                !canSubmit
-              }
+              disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
               size="xl"
               type="submit"
             >
@@ -1011,189 +1042,6 @@ function isSourceGroupPopulated(group: ListSourceGroup, draft: ListDraft) {
   }
 
   return draft[group].trim().length > 0
-}
-
-function getDraftFromMapEntry(
-  name: string | undefined,
-  listConfig?: ListConfig
-): ListDraft | null {
-  if (!name || !listConfig) {
-    return null
-  }
-
-  return {
-    name,
-    ttlMs: String(listConfig.ttl_ms ?? 0),
-    detour: listConfig.detour ?? "",
-    domains: (listConfig.domains ?? []).join("\n"),
-    ipCidrs: (listConfig.ip_cidrs ?? []).join("\n"),
-    url: listConfig.url ?? "",
-    file: listConfig.file ?? "",
-  }
-}
-
-const NO_DNS_RULE = "__none__"
-
-function buildUpdatedConfigForListUpsert(
-  config: ConfigObject,
-  mode: "create" | "edit",
-  nextDraft: ListDraft,
-  originalName?: string,
-  quickSetup?: QuickSetup,
-  dnsServerForList?: string
-): ConfigObject {
-  const nextLists = { ...(config.lists ?? {}) }
-  const trimmedName = nextDraft.name.trim()
-  const resolvedName =
-    mode === "edit" ? (originalName?.trim() ?? trimmedName) : trimmedName
-  const nextListConfig = getListConfigFromDraft(nextDraft)
-
-  nextLists[resolvedName] = nextListConfig
-
-  const updated: ConfigObject = {
-    ...config,
-    lists: nextLists,
-  }
-  if (quickSetup?.createRouteRule && quickSetup.routeOutbound) {
-    updated.route = {
-      ...(config.route ?? {}),
-      rules: [
-        ...(config.route?.rules ?? []),
-        {
-          enabled: true,
-          list: [resolvedName],
-          outbound: quickSetup.routeOutbound,
-        },
-      ],
-    }
-  }
-  if (quickSetup?.createDnsRule && quickSetup.dnsServer) {
-    updated.dns = {
-      ...(config.dns ?? {}),
-      rules: [
-        ...(config.dns?.rules ?? []),
-        {
-          enabled: true,
-          list: [resolvedName],
-          server: quickSetup.dnsServer,
-          allow_domain_rebinding: false,
-        },
-      ],
-    }
-  }
-
-  if (dnsServerForList !== undefined) {
-    updated.dns = {
-      ...(config.dns ?? {}),
-      rules: applyDnsRuleForList(
-        config.dns?.rules ?? [],
-        resolvedName,
-        dnsServerForList === NO_DNS_RULE ? "" : dnsServerForList
-      ),
-    }
-  }
-  return updated
-}
-
-/**
- * Keeps at most one DNS rule per list. An empty server drops the binding; a
- * rule shared with other lists only loses this list instead of disappearing.
- */
-function applyDnsRuleForList(
-  rules: DnsRule[],
-  listName: string,
-  server: string
-): DnsRule[] {
-  const next: DnsRule[] = []
-  let applied = false
-
-  for (const rule of rules) {
-    const lists = rule.list ?? []
-    if (!lists.includes(listName)) {
-      next.push(rule)
-      continue
-    }
-
-    if (lists.length > 1) {
-      next.push({ ...rule, list: lists.filter((item) => item !== listName) })
-      continue
-    }
-
-    if (server) {
-      next.push({ ...rule, server })
-      applied = true
-    }
-  }
-
-  if (server && !applied) {
-    next.push({
-      enabled: true,
-      list: [listName],
-      server,
-      allow_domain_rebinding: false,
-    })
-  }
-
-  return next
-}
-
-function getListConfigFromDraft(draft: ListDraft): ListConfig {
-  const domains = splitLines(draft.domains)
-  const ipCidrs = splitLines(draft.ipCidrs)
-  const trimmedUrl = draft.url.trim()
-  const trimmedFile = draft.file.trim()
-  const trimmedDetour = draft.detour.trim()
-  const ttlMs = Number.parseInt(draft.ttlMs.trim(), 10)
-
-  const listConfig: ListConfig = {}
-  listConfig.ttl_ms = Number.isNaN(ttlMs) ? 0 : ttlMs
-
-  if (trimmedUrl) {
-    listConfig.url = trimmedUrl
-  }
-
-  if (trimmedFile) {
-    listConfig.file = trimmedFile
-  }
-
-  if (domains.length > 0) {
-    listConfig.domains = domains
-  }
-
-  if (ipCidrs.length > 0) {
-    listConfig.ip_cidrs = ipCidrs
-  }
-
-  if (trimmedDetour) {
-    listConfig.detour = trimmedDetour
-  }
-
-  return listConfig
-}
-
-function normalizeListDraftForComparison(draft: ListDraft) {
-  return {
-    name: draft.name.trim(),
-    config: getListConfigFromDraft(draft),
-  }
-}
-
-function normalizeQuickSetupForComparison(quickSetup: QuickSetup) {
-  return {
-    createRouteRule: quickSetup.createRouteRule,
-    routeOutbound: quickSetup.createRouteRule
-      ? quickSetup.routeOutbound
-      : "",
-    createDnsRule: quickSetup.createDnsRule,
-    dnsServer: quickSetup.createDnsRule ? quickSetup.dnsServer : "",
-  }
-}
-
-function splitLines(value: string) {
-  return value
-    .split("\n")
-    .map((entry) => entry.trim())
-    .filter(Boolean)
 }
 
 function getFirstFieldError(errors: unknown[]) {
@@ -1252,6 +1100,10 @@ function resolveListFieldPath(
 
   if (normalizedName && path === `lists.${normalizedName}.ttl_ms`) {
     return LIST_FIELD_NAMES.ttlMs
+  }
+
+  if (normalizedName && path === `lists.${normalizedName}.display_name`) {
+    return LIST_FIELD_NAMES.displayName
   }
 
   if (normalizedName && path === `lists.${normalizedName}.domains`) {

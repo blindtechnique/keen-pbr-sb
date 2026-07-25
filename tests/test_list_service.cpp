@@ -3,14 +3,20 @@
 #include "../src/daemon/list_service.hpp"
 #include "../src/log/logger.hpp"
 #include "../src/http/curl_runtime.hpp"
+#include "../src/lists/srs_decoder.hpp"
+
+#include <zlib.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <netinet/in.h>
@@ -71,6 +77,7 @@ struct HttpResponse {
     int status{200};
     std::string reason{"OK"};
     std::string body;
+    bool not_modified_when_conditional{false};
     std::vector<std::string> headers;
 };
 
@@ -172,6 +179,13 @@ private:
             response.status = 404;
             response.reason = "Not Found";
         }
+        if (response.not_modified_when_conditional &&
+            (request.find("\r\nIf-None-Match:") != std::string::npos ||
+             request.find("\r\nIf-Modified-Since:") != std::string::npos)) {
+            response.status = 304;
+            response.reason = "Not Modified";
+            response.body.clear();
+        }
 
         std::ostringstream out;
         out << "HTTP/1.1 " << response.status << ' ' << response.reason << "\r\n"
@@ -191,6 +205,24 @@ private:
     std::atomic<bool> running_{true};
     std::thread worker_;
 };
+
+std::string empty_srs_file(std::uint8_t version = 2) {
+    const std::array<std::uint8_t, 1> payload{0}; // zero rules
+    uLongf compressed_size = compressBound(payload.size());
+    std::string compressed(compressed_size, '\0');
+    REQUIRE(compress2(
+                reinterpret_cast<Bytef*>(compressed.data()),
+                &compressed_size,
+                payload.data(),
+                payload.size(),
+                Z_BEST_COMPRESSION) == Z_OK);
+    compressed.resize(compressed_size);
+
+    std::string result{"SRS", 3};
+    result.push_back(static_cast<char>(version));
+    result += compressed;
+    return result;
+}
 
 } // namespace
 
@@ -413,7 +445,11 @@ TEST_CASE("refresh_remote_lists: 304 not modified does not log a warning") {
         cache_manager.ensure_dir();
         CacheMetadata metadata;
         metadata.etag = "\"abc\"";
+        metadata.url = server.url("/not-modified.txt");
         cache_manager.save_metadata("remote", metadata);
+        std::ofstream cached(cache_manager.cache_path("remote"));
+        REQUIRE(cached.good());
+        cached << "cached.example\n";
     }
 
     ListService service(temp_dir);
@@ -430,6 +466,151 @@ TEST_CASE("refresh_remote_lists: 304 not modified does not log a warning") {
     CHECK(result.failed_lists.empty());
     CHECK(result.changed_lists.empty());
     CHECK_FALSE(logs.contains("failed to refresh"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists: empty SRS replaces stale cache and decoder revision bypasses 304") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/empty.srs",
+         HttpResponse{
+             200,
+             "OK",
+             empty_srs_file(),
+             true,
+             {"ETag: \"empty-v1\"",
+              "Last-Modified: Fri, 25 Jul 2026 00:00:00 GMT"}}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    {
+        CacheManager cache_manager(temp_dir);
+        cache_manager.ensure_dir();
+        std::ofstream stale(cache_manager.cache_path("remote"));
+        REQUIRE(stale.good());
+        stale << "stale.example\n";
+        CacheMetadata old_metadata;
+        old_metadata.etag = "\"empty-v1\"";
+        old_metadata.last_modified = "Fri, 25 Jul 2026 00:00:00 GMT";
+        old_metadata.url = server.url("/empty.srs");
+        cache_manager.save_metadata("remote", old_metadata);
+    }
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/empty.srs");
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto first =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(first.changed_lists == std::vector<std::string>{"remote"});
+
+    std::ifstream converted(service.cache_manager().cache_path("remote"),
+                            std::ios::binary);
+    REQUIRE(converted.good());
+    CHECK(std::string(std::istreambuf_iterator<char>(converted), {}) == "");
+
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    REQUIRE(metadata.srs_decoder_revision.has_value());
+    CHECK(*metadata.srs_decoder_revision == kSrsDecoderRevision);
+
+    const auto second =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(second.changed_lists.empty());
+    CHECK(second.unchanged_lists == std::vector<std::string>{"remote"});
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists: changing URL never reuses validators from old source") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/new.txt",
+         HttpResponse{
+             200,
+             "OK",
+             "new.example\n",
+             true,
+             {"ETag: \"shared\""}}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    {
+        CacheManager cache_manager(temp_dir);
+        cache_manager.ensure_dir();
+        std::ofstream stale(cache_manager.cache_path("remote"));
+        REQUIRE(stale.good());
+        stale << "old.example\n";
+        CacheMetadata old_metadata;
+        old_metadata.etag = "\"shared\"";
+        old_metadata.url = "https://old.example/list.txt";
+        cache_manager.save_metadata("remote", old_metadata);
+    }
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/new.txt");
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto first =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(first.changed_lists == std::vector<std::string>{"remote"});
+
+    std::ifstream refreshed(service.cache_manager().cache_path("remote"));
+    REQUIRE(refreshed.good());
+    CHECK(std::string(std::istreambuf_iterator<char>(refreshed), {}) ==
+          "new.example\n");
+
+    const auto second =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(second.changed_lists.empty());
+    CHECK(second.unchanged_lists == std::vector<std::string>{"remote"});
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists: metadata without cached body forces full download") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/recover.txt",
+         HttpResponse{
+             200,
+             "OK",
+             "recovered.example\n",
+             true,
+             {"ETag: \"same\""}}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    {
+        CacheManager cache_manager(temp_dir);
+        cache_manager.ensure_dir();
+        CacheMetadata orphan_metadata;
+        orphan_metadata.etag = "\"same\"";
+        orphan_metadata.url = server.url("/recover.txt");
+        cache_manager.save_metadata("remote", orphan_metadata);
+    }
+
+    ListService service(temp_dir);
+    service.ensure_dir();
+    ListConfig remote;
+    remote.url = server.url("/recover.txt");
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(result.changed_lists == std::vector<std::string>{"remote"});
+
+    std::ifstream recovered(service.cache_manager().cache_path("remote"));
+    REQUIRE(recovered.good());
+    CHECK(std::string(std::istreambuf_iterator<char>(recovered), {}) ==
+          "recovered.example\n");
 
     std::filesystem::remove_all(temp_dir);
 }

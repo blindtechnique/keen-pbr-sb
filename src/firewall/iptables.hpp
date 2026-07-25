@@ -148,7 +148,6 @@ private:
         const std::string& snapshot,
         const char* builtin,
         const char* chain);
-    void validate_raw_prerouting_capability() const;
     // Expand filter (proto, src_addr, dst_addr) into cross-product of PendingRules
     // and append them to out.  tcp/udp is split into two entries.  Multiple CIDRs
     // in src_addr / dst_addr each become separate rules (OR semantics when combined).

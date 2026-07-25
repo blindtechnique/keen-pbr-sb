@@ -155,11 +155,17 @@ add_daemon_arg() {
     ARGS="$ARGS $1"
 }
 
+probe_raw_table() {
+    # Wait for concurrent NDMS/Entware xtables users instead of treating a
+    # transient lock as proof that raw PREROUTING is unavailable.
+    iptables -w 10 -t raw -S >/dev/null 2>&1
+}
+
 ensure_raw_table_available() {
     local raw_module
 
     RAW_PREROUTING_ERROR=""
-    if iptables -t raw -S >/dev/null 2>&1; then
+    if probe_raw_table; then
         return 0
     fi
 
@@ -169,11 +175,11 @@ ensure_raw_table_available() {
         return 1
     fi
     if ! insmod "$raw_module" 2>/dev/null &&
-       ! iptables -t raw -S >/dev/null 2>&1; then
+       ! probe_raw_table; then
         RAW_PREROUTING_ERROR="failed to load $raw_module"
         return 1
     fi
-    if ! iptables -t raw -S >/dev/null 2>&1; then
+    if ! probe_raw_table; then
         RAW_PREROUTING_ERROR="the raw table probe failed"
         return 1
     fi

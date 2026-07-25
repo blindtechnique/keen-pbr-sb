@@ -6,7 +6,6 @@ import { toast } from "sonner"
 
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import {
   useConfigMutationPending,
@@ -22,6 +21,7 @@ import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { withListDisplayName } from "@/lib/list-display"
 import { cn } from "@/lib/utils"
 
 /**
@@ -208,12 +208,17 @@ export function CatalogPage() {
 
       // A preset carries either a compiled rule set or a plain domain list;
       // taking the URL when present keeps the entry small and updatable.
-      const entry: ListConfig = url
-        ? {
-            url,
-            ...(effectiveSourceDetour ? { detour: effectiveSourceDetour } : {}),
-          }
-        : { domains: domains ?? [] }
+      const entry = withListDisplayName(
+        url
+          ? {
+              url,
+              ...(effectiveSourceDetour
+                ? { detour: effectiveSourceDetour }
+                : {}),
+            }
+          : { domains: domains ?? [] },
+        preset.name
+      )
 
       if (!url && (!domains || domains.length === 0)) {
         continue

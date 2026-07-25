@@ -1,6 +1,7 @@
 import type { Outbound } from "@/api/generated/model/outbound"
 
 export type StrictEnforcementOption = "default" | "enabled" | "disabled"
+export type UrltestSelectionMode = NonNullable<Outbound["selection_mode"]>
 
 export type OutboundDraft = {
   tag: string
@@ -13,6 +14,7 @@ export type OutboundDraft = {
   probeUrl: string
   interval: string
   tolerance: string
+  selectionMode: UrltestSelectionMode
   retryAttempts: string
   retryInterval: string
   circuitBreakerFailures: string
@@ -62,6 +64,8 @@ export function normalizeOutboundDraftForPersistence(
       url: draft.probeUrl.trim() || undefined,
       interval_ms: parseNumber(draft.interval),
       tolerance_ms: parseNumber(draft.tolerance),
+      selection_mode:
+        draft.selectionMode === "priority" ? "priority" : undefined,
       outbound_groups: normalizeOutboundGroups(draft.outbounds).map(
         (group) => ({
           outbounds: group,

@@ -38,10 +38,23 @@ import {
   parseNfqwsConfig,
   type NfqwsConfigForm,
 } from "@/lib/nfqws-config"
-import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
+import { formatDownloadTimestamp } from "@/lib/download"
+import {
+  InvalidNfqwsBackupError,
+  NfqwsBackupScopeMissingError,
+  createNfqwsBackupSelection,
+  hasNfqwsBackupFiles,
+  parseNfqwsBackupBundle,
+  selectNfqwsBackupBundle,
+  selectNfqwsBackupFiles,
+  type NfqwsBackupScope,
+} from "@/lib/nfqws-backup"
 import {
   createBackup,
   downloadBackup,
+  InvalidBackupBundleError,
+  parseBackupBundle,
+  restoreBackup as restoreBackupBundle,
   rollbackBackup,
   type BackupSelection,
 } from "@/lib/backup"
@@ -122,8 +135,17 @@ export function NfqwsPage() {
     refetchInterval: 10_000,
   })
   const status = query.data
-  const bundleImportRef = useRef<HTMLInputElement>(null)
-  const [bundleExportPending, setBundleExportPending] = useState(false)
+  const backupImportRef = useRef<HTMLInputElement>(null)
+  const [backupOpen, setBackupOpen] = useState(false)
+  const [backupImportScope, setBackupImportScope] =
+    useState<NfqwsBackupScope>("all")
+  const [backupPending, setBackupPending] = useState<{
+    action: "download" | "restore"
+    scope: NfqwsBackupScope
+  } | null>(null)
+  const [backupRevision, setBackupRevision] = useState(0)
+  const [configDirty, setConfigDirty] = useState(false)
+  const [strategyDirty, setStrategyDirty] = useState(false)
   const [refreshPending, setRefreshPending] = useState(false)
   const [tab, setTab] = useState<Tab>("settings")
   const [upgradeOpen, setUpgradeOpen] = useState(false)
@@ -201,7 +223,8 @@ export function NfqwsPage() {
         outbounds: false,
         dns: false,
         routing: false,
-        nfqws: true,
+        nfqws_config: true,
+        nfqws_lists: true,
       }
       try {
         const backup = await createBackup(groups)
@@ -286,55 +309,30 @@ export function NfqwsPage() {
       await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
     }
   }
-  const bundleMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const parsed = JSON.parse(await file.text()) as {
-        format?: string
-        version?: number
-        files?: Record<string, unknown>
-      }
-      if (
-        parsed.format !== "keen-pbr-sb-nfqws" ||
-        parsed.version !== 1 ||
-        !parsed.files
-      ) {
-        throw new Error(t("configTransfer.invalidFormat"))
-      }
-      await nfqwsAction({ action: "import_bundle", files: parsed.files })
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      toast.success(t("configTransfer.imported"))
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : t("configTransfer.invalidFormat"),
-        { richColors: true }
-      ),
-    onSettled: () => {
-      if (bundleImportRef.current) bundleImportRef.current.value = ""
-    },
-  })
+  const listDraftCount = Object.values(drafts).filter(
+    (draft) => draft.category === "list"
+  ).length
+  const luaDraftCount = Object.values(drafts).filter(
+    (draft) => draft.category === "lua"
+  ).length
+  const configScopeDirty = configDirty || strategyDirty || luaDraftCount > 0
+  const scopeHasDrafts = (scope: NfqwsBackupScope) =>
+    (scope !== "list" && configScopeDirty) ||
+    (scope !== "config" && listDraftCount > 0)
 
-  const exportBundle = async () => {
-    if (!status) return
-    setBundleExportPending(true)
+  const exportBackup = async (scope: NfqwsBackupScope) => {
+    setBackupPending({ action: "download", scope })
     try {
-      const files: Record<"config" | "list", Record<string, string>> = {
-        config: {},
-        list: {},
-      }
-      for (const file of status.files) {
-        if (file.category !== "config" && file.category !== "list") continue
-        files[file.category][file.name] = (await readFile(file)).content
-      }
-      downloadJson(`keen-pbr-sb-nfqws-${formatDownloadTimestamp()}.json`, {
-        format: "keen-pbr-sb-nfqws",
-        version: 1,
-        files,
-      })
+      const suffix =
+        scope === "config" ? "config" : scope === "list" ? "lists" : "all"
+      downloadBackup(
+        selectNfqwsBackupBundle(
+          await createBackup(createNfqwsBackupSelection(scope)),
+          scope
+        ),
+        `keen-pbr-sb-nfqws-${suffix}-${formatDownloadTimestamp()}.json`
+      )
+      toast.success(t("nfqws.backup.downloaded"))
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -343,7 +341,85 @@ export function NfqwsPage() {
         { richColors: true }
       )
     } finally {
-      setBundleExportPending(false)
+      setBackupPending(null)
+    }
+  }
+
+  const chooseBackup = (scope: NfqwsBackupScope) => {
+    if (scopeHasDrafts(scope)) {
+      toast.error(t("nfqws.backup.unsavedBlocked"), { richColors: true })
+      return
+    }
+    setBackupImportScope(scope)
+    backupImportRef.current?.click()
+  }
+
+  const restoreBackup = async (file?: File) => {
+    if (!file) return
+    const scope = backupImportScope
+    if (scopeHasDrafts(scope)) {
+      toast.error(t("nfqws.backup.unsavedBlocked"), { richColors: true })
+      if (backupImportRef.current) backupImportRef.current.value = ""
+      return
+    }
+
+    setBackupPending({ action: "restore", scope })
+    try {
+      const parsed: unknown = JSON.parse(await file.text())
+      let execute: () => Promise<NfqwsActionResult>
+      try {
+        const bundle = selectNfqwsBackupBundle(parseBackupBundle(parsed), scope)
+        execute = async () => {
+          await restoreBackupBundle(bundle)
+          return { ok: true, output: t("nfqws.backup.restored") }
+        }
+      } catch (error) {
+        if (!(error instanceof InvalidBackupBundleError)) throw error
+        const legacyBundle = parseNfqwsBackupBundle(parsed)
+        const files = selectNfqwsBackupFiles(legacyBundle.files, scope)
+        if (!hasNfqwsBackupFiles(files)) {
+          throw new NfqwsBackupScopeMissingError()
+        }
+        execute = async () => {
+          await nfqwsAction({ action: "import_bundle", files })
+          const restarted = await nfqwsAction<NfqwsActionResult>({
+            action: "service",
+            command: "restart",
+          })
+          return {
+            ...restarted,
+            output: [t("nfqws.backup.restored"), restarted.output?.trim()]
+              .filter(Boolean)
+              .join("\n\n"),
+          }
+        }
+      }
+
+      setBackupOpen(false)
+      const completed = await runOperation(
+        t("nfqws.backup.restoreTitle"),
+        execute,
+        t("nfqws.backup.restored")
+      )
+      if (completed) {
+        await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
+        setBackupRevision((revision) => revision + 1)
+      }
+    } catch (error) {
+      const message =
+        error instanceof NfqwsBackupScopeMissingError
+          ? t("nfqws.backup.scopeMissing")
+          : error instanceof InvalidBackupBundleError ||
+              error instanceof InvalidNfqwsBackupError ||
+              error instanceof SyntaxError
+            ? t("configTransfer.invalidFormat")
+            : error instanceof Error
+              ? error.message
+              : t("configTransfer.invalidFormat")
+      toast.error(message, { richColors: true })
+    } finally {
+      setBackupPending(null)
+      if (backupImportRef.current) backupImportRef.current.value = ""
     }
   }
   const nfqwsTabs: SectionTab<Tab>[] = NFQWS_TAB_VALUES.map((value) => ({
@@ -357,37 +433,18 @@ export function NfqwsPage() {
         actions={
           <div className="flex flex-wrap gap-2">
             <Button
-              disabled={
-                !status?.installed ||
-                bundleMutation.isPending ||
-                bundleExportPending
-              }
-              onClick={() => void exportBundle()}
+              disabled={!status?.installed || backupPending !== null}
+              onClick={() => setBackupOpen(true)}
               variant="outline"
             >
               <DownloadIcon />
-              {t("configTransfer.exportAll")}
-            </Button>
-            <Button
-              disabled={
-                !status?.installed ||
-                bundleMutation.isPending ||
-                bundleExportPending
-              }
-              onClick={() => bundleImportRef.current?.click()}
-              variant="outline"
-            >
-              <UploadIcon />
-              {t("configTransfer.importAll")}
+              {t("nfqws.backup.button")}
             </Button>
             <input
               accept="application/json,.json"
               className="hidden"
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                if (file) bundleMutation.mutate(file)
-              }}
-              ref={bundleImportRef}
+              onChange={(event) => void restoreBackup(event.target.files?.[0])}
+              ref={backupImportRef}
               type="file"
             />
             <Button
@@ -517,12 +574,15 @@ export function NfqwsPage() {
 
           {tab === "settings" ? (
             <SettingsEditor
+              key={`settings-${backupRevision}`}
+              onDirtyChange={setConfigDirty}
               status={status}
               refresh={() => void query.refetch()}
             />
           ) : null}
           {tab === "strategies" ? (
             <StrategiesEditor
+              onDirtyChange={setStrategyDirty}
               refresh={() => void query.refetch()}
               runOperation={runOperation}
               status={status}
@@ -610,6 +670,15 @@ export function NfqwsPage() {
             onUpgrade={() => void runUpgrade()}
             open={upgradeOpen}
           />
+          <NfqwsBackupDialog
+            busy={backupPending}
+            configDirty={configScopeDirty}
+            listDraftCount={listDraftCount}
+            onDownload={(scope) => void exportBackup(scope)}
+            onOpenChange={setBackupOpen}
+            onRestore={chooseBackup}
+            open={backupOpen}
+          />
         </>
       ) : null}
     </div>
@@ -676,6 +745,124 @@ function NfqwsOperationDialog({
             {t("nfqws.closeResult")}
           </Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function NfqwsBackupDialog({
+  busy,
+  configDirty,
+  listDraftCount,
+  onDownload,
+  onOpenChange,
+  onRestore,
+  open,
+}: {
+  busy: {
+    action: "download" | "restore"
+    scope: NfqwsBackupScope
+  } | null
+  configDirty: boolean
+  listDraftCount: number
+  onDownload: (scope: NfqwsBackupScope) => void
+  onOpenChange: (open: boolean) => void
+  onRestore: (scope: NfqwsBackupScope) => void
+  open: boolean
+}) {
+  const { t } = useTranslation()
+  const rows: {
+    scope: NfqwsBackupScope
+    title: string
+    description: string
+  }[] = [
+    {
+      scope: "config",
+      title: t("nfqws.backup.configTitle"),
+      description: t("nfqws.backup.configDescription"),
+    },
+    {
+      scope: "list",
+      title: t("nfqws.backup.listsTitle"),
+      description: t("nfqws.backup.listsDescription"),
+    },
+    {
+      scope: "all",
+      title: t("nfqws.backup.allTitle"),
+      description: t("nfqws.backup.allDescription"),
+    },
+  ]
+  const isBlocked = (scope: NfqwsBackupScope) =>
+    (scope !== "list" && configDirty) ||
+    (scope !== "config" && listDraftCount > 0)
+
+  return (
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && busy) return
+        onOpenChange(nextOpen)
+      }}
+      open={open}
+    >
+      <DialogContent
+        className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl"
+        showCloseButton={!busy}
+      >
+        <DialogHeader>
+          <DialogTitle>{t("nfqws.backup.title")}</DialogTitle>
+          <DialogDescription>{t("nfqws.backup.description")}</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 overflow-y-auto">
+          <div className="divide-y">
+            {rows.map(({ description, scope, title }) => {
+              const blocked = isBlocked(scope)
+              return (
+                <div
+                  className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
+                  key={scope}
+                >
+                  <div className="min-w-0">
+                    <p className="font-medium">{title}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {description}
+                    </p>
+                    {blocked ? (
+                      <p className="mt-1 text-sm text-destructive">
+                        {t("nfqws.backup.unsavedBlocked")}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">
+                    <Button
+                      disabled={busy !== null}
+                      onClick={() => onDownload(scope)}
+                      variant="outline"
+                    >
+                      {busy?.action === "download" && busy.scope === scope ? (
+                        <LoaderCircleIcon className="animate-spin" />
+                      ) : (
+                        <DownloadIcon />
+                      )}
+                      {t("nfqws.backup.download")}
+                    </Button>
+                    <Button
+                      disabled={busy !== null || blocked}
+                      onClick={() => onRestore(scope)}
+                      variant="outline"
+                    >
+                      {busy?.action === "restore" && busy.scope === scope ? (
+                        <LoaderCircleIcon className="animate-spin" />
+                      ) : (
+                        <UploadIcon />
+                      )}
+                      {t("nfqws.backup.restore")}
+                    </Button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   )
@@ -776,9 +963,11 @@ async function readFile(file: NfqwsFile) {
 }
 
 function SettingsEditor({
+  onDirtyChange,
   status,
   refresh,
 }: {
+  onDirtyChange: (dirty: boolean) => void
   status: Status
   refresh: () => void
 }) {
@@ -789,6 +978,7 @@ function SettingsEditor({
   const fileName = file?.name
   const [source, setSource] = useState("")
   const [form, setForm] = useState<NfqwsConfigForm | null>(null)
+  const [baselineForm, setBaselineForm] = useState<NfqwsConfigForm | null>(null)
   useEffect(() => {
     if (fileName)
       void nfqwsAction<{ content: string }>({
@@ -796,18 +986,36 @@ function SettingsEditor({
         category: "config",
         name: fileName,
       }).then(({ content }) => {
+        const parsed = parseNfqwsConfig(content)
         setSource(content)
-        setForm(parseNfqwsConfig(content))
+        setForm(parsed)
+        setBaselineForm(parsed)
       })
   }, [fileName])
+  const dirty =
+    form !== null &&
+    baselineForm !== null &&
+    JSON.stringify(form) !== JSON.stringify(baselineForm)
+  useEffect(() => {
+    onDirtyChange(dirty)
+  }, [dirty, onDirtyChange])
+  useEffect(
+    () => () => {
+      onDirtyChange(false)
+    },
+    [onDirtyChange]
+  )
   const save = async () => {
     if (!file || !form) return
+    const nextSource = formatNfqwsConfig(source, form)
     await nfqwsAction({
       action: "save_file",
       category: "config",
       name: file.name,
-      content: formatNfqwsConfig(source, form),
+      content: nextSource,
     })
+    setSource(nextSource)
+    setBaselineForm(form)
     toast.success(t("nfqws.saved"))
     refresh()
   }
@@ -902,10 +1110,12 @@ function SettingsEditor({
 }
 
 function StrategiesEditor({
+  onDirtyChange,
   refresh,
   runOperation,
   status,
 }: {
+  onDirtyChange: (dirty: boolean) => void
   refresh: () => void
   runOperation: RunOperation
   status: Status
@@ -915,6 +1125,19 @@ function StrategiesEditor({
     status.active_strategy || status.strategies[0]?.name || ""
   const [selected, setSelected] = useState(preferredStrategy)
   const [draftContent, setDraftContent] = useState<Record<string, string>>({})
+  const dirty = Object.entries(draftContent).some(([name, content]) => {
+    const persisted = status.strategies.find((item) => item.name === name)
+    return persisted === undefined || persisted.content !== content
+  })
+  useEffect(() => {
+    onDirtyChange(dirty)
+  }, [dirty, onDirtyChange])
+  useEffect(
+    () => () => {
+      onDirtyChange(false)
+    },
+    [onDirtyChange]
+  )
   const effectiveSelected =
     status.strategies.some((item) => item.name === selected) ||
     Object.hasOwn(draftContent, selected)
@@ -952,6 +1175,13 @@ function StrategiesEditor({
         name: effectiveSelected,
         content,
       })
+      if (action === "save_strategy" || action === "delete_strategy") {
+        setDraftContent((current) => {
+          const next = { ...current }
+          delete next[effectiveSelected]
+          return next
+        })
+      }
       toast.success(t("nfqws.saved"))
       refresh()
     } catch (error) {

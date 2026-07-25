@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { formatListReferenceLabels } from "@/lib/list-display"
 import {
   buildUpdatedConfigWithRules,
   getRuleDraft,
@@ -278,39 +279,39 @@ export function DnsRulesPage() {
           ) : (
             <div className="space-y-3">
               <div className="relative h-0">
-              {ruleSelection.hasSelection ? (
-                <BulkSelectionToolbar
-                  countLabel={t("pages.dnsRules.bulk.selected", {
-                    count: ruleSelection.selectedCount,
-                  })}
-                >
-                  <Button
-                    disabled={configMutationPending}
-                    onClick={() => handleBulkSetEnabled(true)}
-                    size="sm"
-                    variant="outline"
+                {ruleSelection.hasSelection ? (
+                  <BulkSelectionToolbar
+                    countLabel={t("pages.dnsRules.bulk.selected", {
+                      count: ruleSelection.selectedCount,
+                    })}
                   >
-                    {t("pages.dnsRules.bulk.enable")}
-                  </Button>
-                  <Button
-                    disabled={configMutationPending}
-                    onClick={() => handleBulkSetEnabled(false)}
-                    size="sm"
-                    variant="outline"
-                  >
-                    {t("pages.dnsRules.bulk.disable")}
-                  </Button>
-                  <Button
-                    disabled={configMutationPending}
-                    onClick={handleBulkDeleteRules}
-                    size="sm"
-                    variant="destructive"
-                  >
-                    <Trash2 className="mr-1 h-4 w-4" />
-                    {t("pages.dnsRules.bulk.delete")}
-                  </Button>
-                </BulkSelectionToolbar>
-              ) : null}
+                    <Button
+                      disabled={configMutationPending}
+                      onClick={() => handleBulkSetEnabled(true)}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {t("pages.dnsRules.bulk.enable")}
+                    </Button>
+                    <Button
+                      disabled={configMutationPending}
+                      onClick={() => handleBulkSetEnabled(false)}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {t("pages.dnsRules.bulk.disable")}
+                    </Button>
+                    <Button
+                      disabled={configMutationPending}
+                      onClick={handleBulkDeleteRules}
+                      size="sm"
+                      variant="destructive"
+                    >
+                      <Trash2 className="mr-1 h-4 w-4" />
+                      {t("pages.dnsRules.bulk.delete")}
+                    </Button>
+                  </BulkSelectionToolbar>
+                ) : null}
               </div>
               <DataTable
                 headers={[
@@ -349,7 +350,10 @@ export function DnsRulesPage() {
                       <span className="font-medium text-foreground">
                         {t("pages.dnsRules.criteriaLabels.lists")}:
                       </span>{" "}
-                      {rule.list.join(", ")}
+                      {formatListReferenceLabels(
+                        rule.list,
+                        loadedConfig?.lists
+                      )}
                     </li>
                   </ul>,
                   <span className="font-medium" key={`server-${index}`}>

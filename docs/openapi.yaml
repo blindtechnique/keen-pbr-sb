@@ -1004,11 +1004,23 @@ components:
             best are considered equivalent. Used with `urltest` outbound type.
           default: 100
           example: 100
+        selection_mode:
+          type: string
+          enum: [latency, priority]
+          description: >
+            Selection policy used with `urltest` outbound type. `latency` keeps
+            the current route while it remains within the configured tolerance
+            of the fastest healthy candidate. `priority` always selects the
+            first healthy outbound in the highest-priority healthy group and
+            returns to it after recovery. When omitted, `latency` is used.
+          default: latency
+          example: "priority"
         outbound_groups:
           type: array
           description: >
             Ordered list of outbound groups. Required for `urltest` outbound type.
-            Groups are tried in order; within a group the outbound is selected by weight.
+            Groups are tried by ascending weight and then by declaration order.
+            Selection within a group follows `selection_mode`.
           items:
             $ref: "#/components/schemas/OutboundGroup"
         retry:
@@ -1022,8 +1034,19 @@ components:
         Defines a named list of domains and/or IP CIDRs used in routing and DNS rules.
         At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided.
         List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$`
-        and be at most 24 characters.
+        and be at most 24 characters. `display_name` is presentation-only:
+        rules, caches, sets, and API references always use the map key.
       properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. Unicode is allowed.
+            The value must contain a non-whitespace character and must not
+            contain ASCII control characters. It never replaces the list key
+            in routing or DNS references.
+          example: "Сервисы ИИ"
         url:
           type: string
           description: URL to a remote list file to download and cache.
@@ -1585,6 +1608,8 @@ components:
           type: string
         download_time:
           type: string
+        srs_decoder_revision:
+          type: integer
         ips:
           type: integer
         cidrs:
@@ -1901,6 +1926,13 @@ components:
         - https_proxy
         - socks5_proxy
 
+    NdmsInterfaceRole:
+      type: string
+      enum:
+        - client
+        - server
+        - unknown
+
     NdmsInterfaceCapabilities:
       type: object
       required: [can_edit, can_delete, can_hide, backup_required]
@@ -1918,23 +1950,31 @@ components:
       type: object
       required:
         - id
-        - kernel_name
+        - firmware_interface_name
         - label
         - firmware_type
         - kind
+        - role
         - owner
         - capabilities
       properties:
         id:
           type: string
+        firmware_interface_name:
+          type: string
+          description: Logical interface identifier reported by KeeneticOS RCI.
         kernel_name:
           type: string
+          nullable: true
+          description: Resolved Linux interface name. Null or omitted when no safe runtime match exists.
         label:
           type: string
         firmware_type:
           type: string
         kind:
           $ref: "#/components/schemas/NdmsTunnelKind"
+        role:
+          $ref: "#/components/schemas/NdmsInterfaceRole"
         owner:
           type: string
           enum: [keenetic]

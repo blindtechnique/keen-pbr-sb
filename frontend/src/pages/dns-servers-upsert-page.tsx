@@ -43,22 +43,15 @@ import {
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import {
+  buildUpdatedConfigForDnsServerUpsert,
+  getDnsServerDraft,
+  normalizeDnsAddress,
+  normalizeDnsServerDraftForComparison,
+  type DnsServerDraft,
+} from "@/pages/dns-server-upsert-utils"
 import { useForm } from "@tanstack/react-form"
 import { useStore } from "@tanstack/react-store"
-
-type DnsServerDraft = {
-  tag: string
-  type: typeof DnsServerType.static | typeof DnsServerType.keenetic
-  address: string
-  detour: string
-}
-
-const emptyDnsServerDraft: DnsServerDraft = {
-  tag: "",
-  type: DnsServerType.static,
-  address: "",
-  detour: "",
-}
 
 const DNS_SERVER_FIELD_NAMES = {
   tag: "tag",
@@ -147,6 +140,7 @@ export function DnsServerUpsertPage({
         mode={mode}
         onDirtyChange={setDirty}
         onSaved={() => navigate("/dns-servers")}
+        presentation={presentation}
         serverTag={serverTag}
         supportsKeeneticDns={supportsKeeneticDns}
       />
@@ -161,6 +155,7 @@ function DnsServerForm({
   initialDraft,
   onDirtyChange,
   onSaved,
+  presentation,
   supportsKeeneticDns,
 }: {
   mode: "create" | "edit"
@@ -169,6 +164,7 @@ function DnsServerForm({
   initialDraft: DnsServerDraft
   onDirtyChange: (dirty: boolean) => void
   onSaved: () => void
+  presentation: UpsertPagePresentation
   supportsKeeneticDns: boolean
 }) {
   const { t } = useTranslation()
@@ -194,38 +190,15 @@ function DnsServerForm({
         return
       }
 
-      const normalizedTag = value.tag.trim()
-      const isKeeneticDns = value.type === DnsServerType.keenetic
-      const normalizedAddress = isKeeneticDns
-        ? null
-        : normalizeDnsAddress(value.address)
-      if (!isKeeneticDns && !normalizedAddress) {
+      const updatedConfig = buildUpdatedConfigForDnsServerUpsert(
+        config,
+        mode,
+        value,
+        serverTag
+      )
+      if (!updatedConfig) {
         return
       }
-
-      const normalizedDetour = isKeeneticDns ? "" : value.detour.trim()
-      const nextServer: DnsServer = {
-        tag: normalizedTag,
-        type: value.type,
-        ...(normalizedAddress ? { address: normalizedAddress } : {}),
-        ...(normalizedDetour ? { detour: normalizedDetour } : {}),
-      }
-
-      const currentServers = config.dns?.servers ?? []
-      const nextServers =
-        mode === "edit"
-          ? currentServers.map((server) =>
-              server.tag === serverTag ? nextServer : server
-            )
-          : [...currentServers, nextServer]
-
-      const updatedConfig = {
-        ...config,
-        dns: {
-          ...(config.dns ?? {}),
-          servers: nextServers,
-        },
-      } satisfies ConfigObject
 
       setApiErrorMessage(null)
       clearFormServerErrors(form)
@@ -479,40 +452,42 @@ function DnsServerForm({
                   }}
                 </form.Field>
 
-                <form.Field name={DNS_SERVER_FIELD_NAMES.detour}>
-                  {(field) => {
-                    if (isKeeneticDns) {
-                      return null
-                    }
+                {presentation === "page" ? (
+                  <form.Field name={DNS_SERVER_FIELD_NAMES.detour}>
+                    {(field) => {
+                      if (isKeeneticDns) {
+                        return null
+                      }
 
-                    return (
-                      <Field>
-                        <FieldLabel>
-                          {t("pages.dnsServerUpsert.fields.detour")}
-                        </FieldLabel>
-                        <FieldContent>
-                          <OutboundSelect
-                            allowEmpty
-                            emptyLabel={t(
-                              "pages.dnsServerUpsert.fields.detourEmpty"
-                            )}
-                            onValueChange={field.handleChange}
-                            outbounds={config?.outbounds ?? []}
-                            placeholder={t(
-                              "pages.routingRuleUpsert.fields.selectOutbound"
-                            )}
-                            value={field.state.value}
-                          />
-                          <FieldHint
-                            description={t(
-                              "pages.dnsServerUpsert.fields.detourHint"
-                            )}
-                          />
-                        </FieldContent>
-                      </Field>
-                    )
-                  }}
-                </form.Field>
+                      return (
+                        <Field>
+                          <FieldLabel>
+                            {t("pages.dnsServerUpsert.fields.detour")}
+                          </FieldLabel>
+                          <FieldContent>
+                            <OutboundSelect
+                              allowEmpty
+                              emptyLabel={t(
+                                "pages.dnsServerUpsert.fields.detourEmpty"
+                              )}
+                              onValueChange={field.handleChange}
+                              outbounds={config?.outbounds ?? []}
+                              placeholder={t(
+                                "pages.routingRuleUpsert.fields.selectOutbound"
+                              )}
+                              value={field.state.value}
+                            />
+                            <FieldHint
+                              description={t(
+                                "pages.dnsServerUpsert.fields.detourHint"
+                              )}
+                            />
+                          </FieldContent>
+                        </Field>
+                      )
+                    }}
+                  </form.Field>
+                ) : null}
               </>
             )
           }}
@@ -533,9 +508,7 @@ function DnsServerForm({
         <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>
-        <form.Subscribe
-          selector={(state) => state.canSubmit}
-        >
+        <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
               disabled={
@@ -556,33 +529,6 @@ function DnsServerForm({
       </div>
     </form>
   )
-}
-
-function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
-  if (!server) {
-    return emptyDnsServerDraft
-  }
-
-  return {
-    tag: server.tag,
-    type: server.type ?? DnsServerType.static,
-    address: server.address ?? "",
-    detour: server.detour ?? "",
-  }
-}
-
-function normalizeDnsServerDraftForComparison(draft: DnsServerDraft) {
-  const isKeeneticDns = draft.type === DnsServerType.keenetic
-  const normalizedAddress = normalizeDnsAddress(draft.address)
-
-  return {
-    tag: draft.tag.trim(),
-    type: draft.type,
-    address: isKeeneticDns
-      ? ""
-      : (normalizedAddress ?? draft.address.trim()),
-    detour: isKeeneticDns ? "" : draft.detour.trim(),
-  }
 }
 
 function getFirstFieldError(errors: unknown[]) {
@@ -628,83 +574,6 @@ function getAddressError(value: string) {
   }
 
   return undefined
-}
-
-function normalizeDnsAddress(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return null
-  }
-
-  const bracketedV6Match = /^\[([^\]]+)\](?::(\d+))?$/.exec(trimmed)
-  if (bracketedV6Match) {
-    const host = bracketedV6Match[1].trim().toLowerCase()
-    const port = bracketedV6Match[2]
-    if (!isLikelyIpv6(host) || !isValidPort(port)) {
-      return null
-    }
-
-    return port ? `[${host}]:${port}` : host
-  }
-
-  const maybeIpv4WithPort = /^(\d+\.\d+\.\d+\.\d+)(?::(\d+))?$/.exec(trimmed)
-  if (maybeIpv4WithPort) {
-    const host = maybeIpv4WithPort[1]
-    const port = maybeIpv4WithPort[2]
-    if (!isValidIpv4(host) || !isValidPort(port)) {
-      return null
-    }
-
-    return port ? `${host}:${port}` : host
-  }
-
-  if (trimmed.includes(":")) {
-    const host = trimmed.toLowerCase()
-    if (!isLikelyIpv6(host)) {
-      return null
-    }
-
-    return host
-  }
-
-  return null
-}
-
-function isValidIpv4(value: string) {
-  const octets = value.split(".")
-  if (octets.length !== 4) {
-    return false
-  }
-
-  return octets.every((octet) => {
-    if (!/^\d+$/.test(octet)) {
-      return false
-    }
-
-    const num = Number(octet)
-    return num >= 0 && num <= 255
-  })
-}
-
-function isLikelyIpv6(value: string) {
-  if (!/^[0-9a-f:]+$/i.test(value)) {
-    return false
-  }
-
-  return value.includes(":")
-}
-
-function isValidPort(value?: string) {
-  if (!value) {
-    return true
-  }
-
-  if (!/^\d+$/.test(value)) {
-    return false
-  }
-
-  const port = Number(value)
-  return port >= 1 && port <= 65535
 }
 
 function resolveDnsServerFieldPath(

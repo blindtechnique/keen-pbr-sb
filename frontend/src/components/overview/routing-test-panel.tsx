@@ -3,6 +3,7 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import { usePostRoutingTestMutation } from "@/api/mutations"
+import type { ConfigObject } from "@/api/generated/model"
 import { SectionCard } from "@/components/shared/section-card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
@@ -23,7 +24,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
 
-export function RoutingTestPanel() {
+export function RoutingTestPanel({ lists }: { lists?: ConfigObject["lists"] }) {
   const { t } = useTranslation()
   const [testTarget, setTestTarget] = useState("")
   const [routingInputError, setRoutingInputError] = useState<string | null>(
@@ -132,7 +133,10 @@ export function RoutingTestPanel() {
       ) : null}
 
       {routingDiagnostics ? (
-        <RoutingDiagnosticsResult diagnostics={routingDiagnostics} />
+        <RoutingDiagnosticsResult
+          diagnostics={routingDiagnostics}
+          lists={lists}
+        />
       ) : null}
     </SectionCard>
   )

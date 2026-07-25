@@ -55,9 +55,12 @@ std::vector<L4Proto> expand_l4_protos_for_iptables(const FirewallRuleCriteria& c
 
 IptablesFirewall::IptablesFirewall(bool use_raw_prerouting)
     : use_raw_prerouting_(use_raw_prerouting) {
-    if (use_raw_prerouting_) {
-        validate_raw_prerouting_capability();
-    }
+    // S80keen-pbr capability-gates raw PREROUTING before adding the daemon
+    // argument. Do not repeat `iptables -t raw -S` here: Keenetic may briefly
+    // hold the xtables lock between the init probe and daemon construction,
+    // which is not evidence that the raw table disappeared. The transactional
+    // restore in apply() is authoritative and its failure is retried without
+    // taking down the API process.
 }
 
 FirewallSetGeneration IptablesFirewall::opposite_generation(
@@ -86,15 +89,6 @@ const char* IptablesFirewall::raw_generation_prerouting_chain(
     return generation == FirewallSetGeneration::A
         ? "KeenPbrRaw_A"
         : "KeenPbrRaw_B";
-}
-
-void IptablesFirewall::validate_raw_prerouting_capability() const {
-    if (safe_exec({"iptables", "-t", "raw", "-S"},
-                  /*suppress_output=*/true) != 0) {
-        throw FirewallError(
-            "--use-raw-prerouting was requested, but the IPv4 raw table is "
-            "unavailable; no fallback to mangle PREROUTING was performed");
-    }
 }
 
 void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {

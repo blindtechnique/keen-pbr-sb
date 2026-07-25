@@ -46,6 +46,13 @@ class UrltestTransport final : public HttpTransport {
 public:
     HttpTransportResponse perform(const HttpTransportRequest& request) override {
         HttpTransportResponse response;
+        if (request.fwmark == kPrimaryMark &&
+            !primary_available_.load(std::memory_order_acquire)) {
+            response.status_code = 503;
+            response.elapsed = std::chrono::milliseconds(1);
+            return response;
+        }
+
         response.status_code = 204;
         const bool prefer_primary = prefer_primary_.load(std::memory_order_acquire);
         if (request.fwmark == kPrimaryMark) {
@@ -60,11 +67,16 @@ public:
         prefer_primary_.store(value, std::memory_order_release);
     }
 
+    void set_primary_available(bool value) {
+        primary_available_.store(value, std::memory_order_release);
+    }
+
     static constexpr std::uint32_t kPrimaryMark = 0x10000;
     static constexpr std::uint32_t kBackupMark = 0x20000;
 
 private:
     std::atomic<bool> prefer_primary_{true};
+    std::atomic<bool> primary_available_{true};
 };
 
 struct PendingCommit {
@@ -124,6 +136,20 @@ Outbound make_urltest_outbound() {
     outbound.retry = retry;
     outbound.tolerance_ms = 0;
     outbound.outbound_groups = std::vector<OutboundGroup>{group};
+    return outbound;
+}
+
+Outbound make_priority_urltest_outbound() {
+    auto outbound = make_urltest_outbound();
+    outbound.selection_mode = UrltestSelectionMode::PRIORITY;
+
+    CircuitBreakerConfig circuit_breaker;
+    circuit_breaker.failure_threshold = 1;
+    circuit_breaker.success_threshold = 2;
+    circuit_breaker.half_open_max_requests = 1;
+    circuit_breaker.timeout_ms = 0;
+    outbound.circuit_breaker = circuit_breaker;
+
     return outbound;
 }
 
@@ -238,6 +264,108 @@ TEST_CASE("urltest ignores a probe result from a previous registration") {
                                        std::move(current.results)));
     CHECK(manager.get_selected("automatic") == "primary");
     CHECK(change_count == 1);
+}
+
+TEST_CASE("priority urltest returns to the first healthy declared outbound") {
+    auto transport = std::make_shared<UrltestTransport>();
+    // The preferred outbound is deliberately slower. Priority mode must use
+    // declaration order, not latency, while both candidates are healthy.
+    transport->prefer_primary(false);
+
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(1, 8);
+    CommitQueue commits;
+    std::vector<std::string> changes;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [&changes](const std::string&, const std::string& selected) {
+            changes.push_back(selected);
+        },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+        });
+
+    manager.register_urltest(make_priority_urltest_outbound());
+    auto initial = commits.pop();
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)));
+    CHECK(manager.get_selected("automatic") == "primary");
+
+    transport->set_primary_available(false);
+    manager.trigger_immediate_test("automatic");
+    auto failed_primary = commits.pop();
+    CHECK(manager.commit_probe_results(failed_primary.tag,
+                                       failed_primary.generation,
+                                       std::move(failed_primary.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+
+    transport->set_primary_available(true);
+    manager.trigger_immediate_test("automatic");
+    auto first_recovery_probe = commits.pop();
+    CHECK_FALSE(manager.commit_probe_results(first_recovery_probe.tag,
+                                             first_recovery_probe.generation,
+                                             std::move(first_recovery_probe.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+
+    manager.trigger_immediate_test("automatic");
+    auto recovered_primary = commits.pop();
+    CHECK(manager.commit_probe_results(recovered_primary.tag,
+                                       recovered_primary.generation,
+                                       std::move(recovered_primary.results)));
+    CHECK(manager.get_selected("automatic") == "primary");
+
+    CHECK(changes == std::vector<std::string>{"primary", "backup", "primary"});
+}
+
+TEST_CASE("priority urltest honors group weight before declaration order") {
+    auto transport = std::make_shared<UrltestTransport>();
+    transport->prefer_primary(false);
+
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(1, 8);
+    CommitQueue commits;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [](const std::string&, const std::string&) {},
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+        });
+
+    auto outbound = make_priority_urltest_outbound();
+    OutboundGroup lower_priority;
+    lower_priority.outbounds = {"backup"};
+    lower_priority.weight = 20;
+    OutboundGroup higher_priority;
+    higher_priority.outbounds = {"primary"};
+    higher_priority.weight = 5;
+    outbound.outbound_groups =
+        std::vector<OutboundGroup>{lower_priority, higher_priority};
+
+    manager.register_urltest(outbound);
+    auto initial = commits.pop();
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)));
+    CHECK(manager.get_selected("automatic") == "primary");
 }
 
 } // namespace keen_pbr3

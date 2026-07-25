@@ -27,6 +27,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useConfigMutationPending } from "@/api/mutations"
 import { useIsMobile } from "@/hooks/use-mobile"
 
 export type UpsertPagePresentation = "page" | "dialog"
@@ -53,16 +54,21 @@ export function UpsertPage({
   const { t } = useTranslation()
   const [location, navigate] = useLocation()
   const isMobile = useIsMobile()
+  const mutationPending = useConfigMutationPending()
   const [discardDialogOpen, setDiscardDialogOpen] = useState(false)
 
   const close = useCallback(() => {
+    if (mutationPending) {
+      return
+    }
+
     if (dirty) {
       setDiscardDialogOpen(true)
       return
     }
 
     onClose?.()
-  }, [dirty, onClose])
+  }, [dirty, mutationPending, onClose])
   const closeContextValue = useMemo(() => close, [close])
 
   useEffect(() => {
@@ -89,6 +95,7 @@ export function UpsertPage({
         </DialogHeader>
         <DialogFooter>
           <Button
+            disabled={mutationPending}
             onClick={() => setDiscardDialogOpen(false)}
             type="button"
             variant="outline"
@@ -96,6 +103,7 @@ export function UpsertPage({
             {t("common.unsavedChanges.continueEditing")}
           </Button>
           <Button
+            disabled={mutationPending}
             onClick={() => {
               setDiscardDialogOpen(false)
               onClose?.()
@@ -132,11 +140,11 @@ export function UpsertPage({
                 </div>
                 <Button
                   aria-label={t("common.openAdvancedEditor")}
-                  disabled={dirty}
+                  disabled={dirty || mutationPending}
                   onClick={() => navigate(`${location}?view=page`)}
                   size={isMobile ? "icon-sm" : "sm"}
                   title={
-                    dirty
+                    dirty || mutationPending
                       ? t("common.unsavedChanges.advancedEditorDisabled")
                       : t("common.openAdvancedEditor")
                   }

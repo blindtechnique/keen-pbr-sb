@@ -57,6 +57,7 @@ import {
   normalizeOutboundGroups,
   type OutboundDraft,
   type StrictEnforcementOption,
+  type UrltestSelectionMode,
 } from "@/pages/outbound-upsert-utils"
 import {
   Select,
@@ -79,6 +80,7 @@ const OUTBOUND_FIELD_NAMES = {
   probeUrl: "probeUrl",
   interval: "interval",
   tolerance: "tolerance",
+  selectionMode: "selectionMode",
   retryAttempts: "retryAttempts",
   retryInterval: "retryInterval",
   circuitBreakerFailures: "circuitBreakerFailures",
@@ -102,6 +104,7 @@ const sampleNewOutbound: OutboundDraft = {
   probeUrl: "https://www.gstatic.com/generate_204",
   interval: "180000",
   tolerance: "100",
+  selectionMode: "latency",
   retryAttempts: "3",
   retryInterval: "1000",
   circuitBreakerFailures: "5",
@@ -116,6 +119,11 @@ const strictOptions = [
   "enabled",
   "disabled",
 ] as const satisfies readonly StrictEnforcementOption[]
+
+const urltestSelectionModes = [
+  "latency",
+  "priority",
+] as const satisfies readonly UrltestSelectionMode[]
 
 const outboundTypeOptions: Outbound["type"][] = [
   "interface",
@@ -845,6 +853,52 @@ function OutboundForm({
           title={t("pages.outboundUpsert.urltest.probingTitle")}
         >
           <div className="grid gap-4 md:grid-cols-2">
+            <form.Field name={OUTBOUND_FIELD_NAMES.selectionMode}>
+              {(field) => (
+                <Field>
+                  <FieldLabel>
+                    {t("pages.outboundUpsert.urltest.selectionMode")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Select
+                      items={urltestSelectionModes.map((mode) => ({
+                        value: mode,
+                        label: t(
+                          `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
+                        ),
+                      }))}
+                      onValueChange={(value) =>
+                        field.handleChange(
+                          (value as UrltestSelectionMode | null) ?? "latency"
+                        )
+                      }
+                      value={field.state.value}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {urltestSelectionModes.map((mode) => (
+                            <SelectItem key={mode} value={mode}>
+                              {t(
+                                `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldHint
+                      description={t(
+                        `pages.outboundUpsert.urltest.selectionModeHints.${field.state.value}`
+                      )}
+                    />
+                  </FieldContent>
+                </Field>
+              )}
+            </form.Field>
+
             <form.Field name={OUTBOUND_FIELD_NAMES.probeUrl}>
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
@@ -1240,6 +1294,7 @@ function mapOutboundToDraft(outbound: Outbound): OutboundDraft {
     probeUrl: outbound.url ?? sampleNewOutbound.probeUrl,
     interval: outbound.interval_ms?.toString() ?? sampleNewOutbound.interval,
     tolerance: outbound.tolerance_ms?.toString() ?? sampleNewOutbound.tolerance,
+    selectionMode: outbound.selection_mode ?? sampleNewOutbound.selectionMode,
     retryAttempts:
       outbound.retry?.attempts?.toString() ?? sampleNewOutbound.retryAttempts,
     retryInterval:

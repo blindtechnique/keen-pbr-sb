@@ -74,14 +74,19 @@ export function DataTable({
     selection && selection.rowIds.length === rows.length
   )
   const hasReorder = Boolean(reorder)
-  const { currentOrder, draggingPosition, getHandleProps, setItemRef } =
-    usePointerSortable({
-      itemCount: rows.length,
-      disabled: !hasReorder || reorder?.disabled,
-      itemSelector: "[data-sortable-table-row]",
-      onReorder: (fromIndex, toIndex) => reorder?.onReorder(fromIndex, toIndex),
-      createPreview: createTableRowPreview,
-    })
+  const {
+    currentOrder,
+    draggingPosition,
+    getContainerProps,
+    getHandleProps,
+    setItemRef,
+  } = usePointerSortable({
+    itemCount: rows.length,
+    disabled: !hasReorder || reorder?.disabled,
+    itemSelector: "[data-sortable-table-row]",
+    onReorder: (fromIndex, toIndex) => reorder?.onReorder(fromIndex, toIndex),
+    createPreview: createTableRowPreview,
+  })
   const leadingColumns = (hasReorder ? 1 : 0) + (hasSelection ? 1 : 0)
   const headersWithSelection = headers
     ? [...Array(leadingColumns).fill(""), ...headers]
@@ -180,7 +185,7 @@ export function DataTable({
               </TableRow>
             </TableHeader>
           )}
-          <TableBody>
+          <TableBody {...getContainerProps()}>
             {currentOrder.map((rowIndex, position) => {
               const row = rows[rowIndex] ?? []
               const rowId = hasSelection

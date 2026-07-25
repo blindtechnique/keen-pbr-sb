@@ -2,9 +2,10 @@ import { CircleOff } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import type { RoutingTestResponse } from "@/api/generated/model"
+import type { ConfigObject, RoutingTestResponse } from "@/api/generated/model"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Checkbox } from "@/components/ui/checkbox"
+import { getListReferenceLabel } from "@/lib/list-display"
 import {
   Table,
   TableBody,
@@ -25,8 +26,10 @@ const emptyRuleDiagnostics: RoutingTestResponse["rule_diagnostics"] = []
 
 export function RoutingDiagnosticsResult({
   diagnostics,
+  lists,
 }: {
   diagnostics: RoutingTestResponse
+  lists?: ConfigObject["lists"]
 }) {
   const { t } = useTranslation()
   const [showAllRules, setShowAllRules] = useState(false)
@@ -86,7 +89,7 @@ export function RoutingDiagnosticsResult({
                         <div className="text-xs text-muted-foreground">
                           {rule.interface_name || t("common.noneShort")}
                         </div>
-                        <RuleConditions rule={rule.rule} />
+                        <RuleConditions lists={lists} rule={rule.rule} />
                       </div>
                     </TableHead>
                   ))}
@@ -103,7 +106,10 @@ export function RoutingDiagnosticsResult({
                       {rule.target_match ? (
                         <span className="text-xs font-medium text-green-700">
                           {t("overview.routingDiagnostics.listMatch", {
-                            list: rule.target_match.list,
+                            list: getListReferenceLabel(
+                              rule.target_match.list,
+                              lists
+                            ),
                             via: rule.target_match.via,
                           })}
                         </span>
@@ -146,12 +152,14 @@ export function RoutingDiagnosticsResult({
 }
 
 function RuleConditions({
+  lists,
   rule,
 }: {
+  lists?: ConfigObject["lists"]
   rule: RoutingTestResponse["rule_diagnostics"][number]["rule"]
 }) {
   const { t } = useTranslation()
-  const conditions = getRuleConditions(rule)
+  const conditions = getRuleConditions(rule, lists)
 
   if (conditions.length === 0) {
     return (

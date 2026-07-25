@@ -519,31 +519,12 @@
     opacity: 0;
   }
 
-  .keen-row-dragging > td:first-child {
-    border-top-left-radius: 8px;
-    border-bottom-left-radius: 8px;
-    border-left: 3px dashed #fafafa;
-  }
-
-  .keen-row-dragging > td:last-child {
-    border-top-right-radius: 8px;
-    border-bottom-right-radius: 8px;
-    border-right: 3px dashed #fafafa;
-  }
-
-  .keen-row-dragging > td {
-    border-top: 3px dashed #fafafa;
-    border-bottom: 3px dashed #fafafa;
-  }
-
-  /* An outline rather than a border: the list rows already carry a 1px border
-     inside a fixed-height box, and widening it to 3px resized the row and
-     broke the layout mid-drag. */
+  /* The placeholder keeps the normal surface and border in both themes.
+     A bright dashed outline looked foreign in dark mode and changed the visual
+     weight of the row while its neighbours were moving. */
   .keen-drag-lifted {
-    outline: 3px dashed #fafafa;
-    outline-offset: -3px;
-    border-color: transparent;
-    border-radius: 8px;
+    outline: 0;
+    border-color: var(--border);
   }
 
   /* Rows slide out of the way instead of jumping. NDMS uses 100 ms here. */

@@ -102,6 +102,7 @@ namespace api {
         std::optional<std::string> etag;
         std::optional<int64_t> ips;
         std::optional<std::string> last_modified;
+        std::optional<int64_t> srs_decoder_revision;
         std::optional<std::string> url;
     };
 
@@ -178,6 +179,7 @@ namespace api {
 
     struct ListConfigValue {
         std::optional<std::string> detour;
+        std::optional<std::string> display_name;
         std::optional<std::vector<std::string>> domains;
         std::optional<std::string> file;
         std::optional<std::vector<std::string>> ip_cidrs;
@@ -200,6 +202,8 @@ namespace api {
         std::optional<int64_t> interval_ms;
     };
 
+    enum class SelectionMode : int { LATENCY, PRIORITY };
+
     enum class OutboundType : int { BLACKHOLE, IGNORE, INTERFACE, TABLE, URLTEST };
 
     struct OutboundElement {
@@ -211,6 +215,7 @@ namespace api {
         std::optional<std::vector<OutboundGroupElement>> outbound_groups;
         std::optional<int64_t> probe_timeout_ms;
         std::optional<Retry> retry;
+        std::optional<SelectionMode> selection_mode;
         std::optional<bool> strict_enforcement;
         std::optional<int64_t> table;
         std::string tag;
@@ -455,16 +460,20 @@ namespace api {
 
     enum class Owner : int { KEENETIC };
 
+    enum class Role : int { CLIENT, SERVER, UNKNOWN };
+
     struct NdmsTunnelInterfaceElement {
         NdmsInterfaceCapabilities capabilities;
         std::optional<bool> connected;
+        std::string firmware_interface_name;
         std::string firmware_type;
         std::string id;
-        std::string kernel_name;
+        std::optional<std::string> kernel_name;
         Kind kind;
         std::string label;
         std::optional<bool> link;
         Owner owner;
+        Role role;
     };
 
     enum class MutationMode : int { DISABLED };
@@ -781,6 +790,7 @@ namespace api {
         std::optional<ListsAutoupdate> lists_autoupdate_config;
         std::optional<NdmsInterfaceCapabilities> ndms_interface_capabilities;
         std::optional<NdmsInterfaceInventoryResponse> ndms_interface_inventory_response;
+        std::optional<Role> ndms_interface_role;
         std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
         std::optional<Kind> ndms_tunnel_kind;
         std::optional<OutboundElement> outbound;
@@ -1061,6 +1071,9 @@ namespace api {
     void from_json(const json & j, DnsServerType & x);
     void to_json(json & j, const DnsServerType & x);
 
+    void from_json(const json & j, SelectionMode & x);
+    void to_json(json & j, const SelectionMode & x);
+
     void from_json(const json & j, OutboundType & x);
     void to_json(json & j, const OutboundType & x);
 
@@ -1114,6 +1127,9 @@ namespace api {
 
     void from_json(const json & j, Owner & x);
     void to_json(json & j, const Owner & x);
+
+    void from_json(const json & j, Role & x);
+    void to_json(json & j, const Role & x);
 
     void from_json(const json & j, MutationMode & x);
     void to_json(json & j, const MutationMode & x);
@@ -1193,6 +1209,7 @@ namespace api {
         x.etag = get_stack_optional<std::string>(j, "etag");
         x.ips = get_stack_optional<int64_t>(j, "ips");
         x.last_modified = get_stack_optional<std::string>(j, "last_modified");
+        x.srs_decoder_revision = get_stack_optional<int64_t>(j, "srs_decoder_revision");
         x.url = get_stack_optional<std::string>(j, "url");
     }
 
@@ -1204,6 +1221,7 @@ namespace api {
         j["etag"] = x.etag;
         j["ips"] = x.ips;
         j["last_modified"] = x.last_modified;
+        j["srs_decoder_revision"] = x.srs_decoder_revision;
         j["url"] = x.url;
     }
 
@@ -1349,6 +1367,7 @@ namespace api {
 
     inline void from_json(const json & j, ListConfigValue& x) {
         x.detour = get_stack_optional<std::string>(j, "detour");
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.domains = get_stack_optional<std::vector<std::string>>(j, "domains");
         x.file = get_stack_optional<std::string>(j, "file");
         x.ip_cidrs = get_stack_optional<std::vector<std::string>>(j, "ip_cidrs");
@@ -1359,6 +1378,7 @@ namespace api {
     inline void to_json(json & j, const ListConfigValue & x) {
         j = json::object();
         j["detour"] = x.detour;
+        j["display_name"] = x.display_name;
         j["domains"] = x.domains;
         j["file"] = x.file;
         j["ip_cidrs"] = x.ip_cidrs;
@@ -1408,6 +1428,7 @@ namespace api {
         x.outbound_groups = get_stack_optional<std::vector<OutboundGroupElement>>(j, "outbound_groups");
         x.probe_timeout_ms = get_stack_optional<int64_t>(j, "probe_timeout_ms");
         x.retry = get_stack_optional<Retry>(j, "retry");
+        x.selection_mode = get_stack_optional<SelectionMode>(j, "selection_mode");
         x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
         x.table = get_stack_optional<int64_t>(j, "table");
         x.tag = j.at("tag").get<std::string>();
@@ -1426,6 +1447,7 @@ namespace api {
         j["outbound_groups"] = x.outbound_groups;
         j["probe_timeout_ms"] = x.probe_timeout_ms;
         j["retry"] = x.retry;
+        j["selection_mode"] = x.selection_mode;
         j["strict_enforcement"] = x.strict_enforcement;
         j["table"] = x.table;
         j["tag"] = x.tag;
@@ -1866,19 +1888,22 @@ namespace api {
     inline void from_json(const json & j, NdmsTunnelInterfaceElement& x) {
         x.capabilities = j.at("capabilities").get<NdmsInterfaceCapabilities>();
         x.connected = get_stack_optional<bool>(j, "connected");
+        x.firmware_interface_name = j.at("firmware_interface_name").get<std::string>();
         x.firmware_type = j.at("firmware_type").get<std::string>();
         x.id = j.at("id").get<std::string>();
-        x.kernel_name = j.at("kernel_name").get<std::string>();
+        x.kernel_name = get_stack_optional<std::string>(j, "kernel_name");
         x.kind = j.at("kind").get<Kind>();
         x.label = j.at("label").get<std::string>();
         x.link = get_stack_optional<bool>(j, "link");
         x.owner = j.at("owner").get<Owner>();
+        x.role = j.at("role").get<Role>();
     }
 
     inline void to_json(json & j, const NdmsTunnelInterfaceElement & x) {
         j = json::object();
         j["capabilities"] = x.capabilities;
         j["connected"] = x.connected;
+        j["firmware_interface_name"] = x.firmware_interface_name;
         j["firmware_type"] = x.firmware_type;
         j["id"] = x.id;
         j["kernel_name"] = x.kernel_name;
@@ -1886,6 +1911,7 @@ namespace api {
         j["label"] = x.label;
         j["link"] = x.link;
         j["owner"] = x.owner;
+        j["role"] = x.role;
     }
 
     inline void from_json(const json & j, NdmsInterfaceInventoryResponse& x) {
@@ -2422,6 +2448,7 @@ namespace api {
         x.lists_autoupdate_config = get_stack_optional<ListsAutoupdate>(j, "ListsAutoupdateConfig");
         x.ndms_interface_capabilities = get_stack_optional<NdmsInterfaceCapabilities>(j, "NdmsInterfaceCapabilities");
         x.ndms_interface_inventory_response = get_stack_optional<NdmsInterfaceInventoryResponse>(j, "NdmsInterfaceInventoryResponse");
+        x.ndms_interface_role = get_stack_optional<Role>(j, "NdmsInterfaceRole");
         x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
         x.ndms_tunnel_kind = get_stack_optional<Kind>(j, "NdmsTunnelKind");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
@@ -2512,6 +2539,7 @@ namespace api {
         j["ListsAutoupdateConfig"] = x.lists_autoupdate_config;
         j["NdmsInterfaceCapabilities"] = x.ndms_interface_capabilities;
         j["NdmsInterfaceInventoryResponse"] = x.ndms_interface_inventory_response;
+        j["NdmsInterfaceRole"] = x.ndms_interface_role;
         j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
         j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
         j["Outbound"] = x.outbound;
@@ -2600,6 +2628,20 @@ namespace api {
             case DnsServerType::KEENETIC: j = "keenetic"; break;
             case DnsServerType::STATIC: j = "static"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"DnsServerType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, SelectionMode & x) {
+        if (j == "latency") x = SelectionMode::LATENCY;
+        else if (j == "priority") x = SelectionMode::PRIORITY;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SelectionMode\""); }
+    }
+
+    inline void to_json(json & j, const SelectionMode & x) {
+        switch (x) {
+            case SelectionMode::LATENCY: j = "latency"; break;
+            case SelectionMode::PRIORITY: j = "priority"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SelectionMode\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -2930,6 +2972,22 @@ namespace api {
         switch (x) {
             case Owner::KEENETIC: j = "keenetic"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"Owner\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Role & x) {
+        if (j == "client") x = Role::CLIENT;
+        else if (j == "server") x = Role::SERVER;
+        else if (j == "unknown") x = Role::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Role\""); }
+    }
+
+    inline void to_json(json & j, const Role & x) {
+        switch (x) {
+            case Role::CLIENT: j = "client"; break;
+            case Role::SERVER: j = "server"; break;
+            case Role::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Role\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

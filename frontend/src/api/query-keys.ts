@@ -3,6 +3,7 @@ import {
   getGetDnsTestQueryKey,
   getGetHealthRoutingQueryKey,
   getGetHealthServiceQueryKey,
+  getGetNdmsInterfaceInventoryQueryKey,
   getGetRuntimeInterfacesQueryKey,
   getGetRuntimeOutboundsQueryKey,
   getGetTransportsQueryKey,
@@ -12,6 +13,7 @@ import {
 export const queryKeys = {
   healthService: getGetHealthServiceQueryKey,
   healthRouting: getGetHealthRoutingQueryKey,
+  ndmsInterfaceInventory: getGetNdmsInterfaceInventoryQueryKey,
   runtimeInterfaces: getGetRuntimeInterfacesQueryKey,
   runtimeOutbounds: getGetRuntimeOutboundsQueryKey,
   transports: getGetTransportsQueryKey,

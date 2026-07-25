@@ -29,6 +29,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
+import { formatListReferenceLabels } from "@/lib/list-display"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -350,7 +351,7 @@ function getDnsServerDeleteImpactItems(
       label: t("pages.dnsServers.deleteDialog.items.dnsRule", {
         number: index + 1,
       }),
-      details: getDnsRuleDetails(config?.dns?.rules?.[index], t),
+      details: getDnsRuleDetails(config?.dns?.rules?.[index], config?.lists, t),
     })
   }
 
@@ -378,6 +379,7 @@ function getDnsServerDeleteImpactItems(
 
 function getDnsRuleDetails(
   rule: DnsRule | undefined,
+  lists: ConfigObject["lists"],
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -387,7 +389,7 @@ function getDnsRuleDetails(
   return [
     formatDetail(
       t("pages.dnsRules.criteriaLabels.lists"),
-      formatListValue(rule.list, t)
+      formatListReferenceLabels(rule.list, lists)
     ),
     formatDetail(t("pages.dnsRules.headers.serverTag"), rule.server),
   ]

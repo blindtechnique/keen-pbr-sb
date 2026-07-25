@@ -61,13 +61,14 @@ export function InterfacePicker({
   className,
 }: InterfacePickerProps) {
   const { t } = useTranslation()
+  const { names } = useInterfaceNames()
   const [isFocused, setIsFocused] = useState(false)
   const trimmedValue = value.trim()
   const selectedInterface = findInterface(interfaces, value)
   const hasExactInterface = Boolean(selectedInterface)
   const filteredInterfaces = useMemo(
-    () => filterInterfaces(interfaces, value),
-    [interfaces, value]
+    () => filterInterfaces(interfaces, value, names),
+    [interfaces, names, value]
   )
   const pickerItems = useMemo<InterfacePickerItem[]>(() => {
     if (!allowCustomOption || !trimmedValue || hasExactInterface) {
@@ -623,7 +624,8 @@ function isVirtualInterface(
 
 function filterInterfaces(
   interfaces: RuntimeInterfaceInventoryEntry[],
-  query: string
+  query: string,
+  names: Record<string, { label: string; type?: string }>
 ) {
   const normalizedQuery = query.trim().toLowerCase()
   if (!normalizedQuery) {
@@ -631,7 +633,14 @@ function filterInterfaces(
   }
 
   return interfaces.filter((item) =>
-    [item.name, ...(item.ipv4_addresses ?? []), ...(item.ipv6_addresses ?? [])]
+    [
+      item.name,
+      names[item.name]?.label,
+      names[item.name]?.type,
+      ...(item.ipv4_addresses ?? []),
+      ...(item.ipv6_addresses ?? []),
+    ]
+      .filter(Boolean)
       .join(" ")
       .toLowerCase()
       .includes(normalizedQuery)

@@ -36,8 +36,8 @@ using UrltestCommitCallback = std::function<void(const std::string&,
                                                  TraceId)>;
 
 // Manages periodic URL testing for urltest outbounds, tracks per-child-outbound
-// latencies and circuit breaker states, and selects the best outbound using the
-// weighted group algorithm.
+// latencies and circuit breaker states, and selects an outbound using the
+// configured latency or declared-priority policy within weighted groups.
 //
 // All public methods are thread-safe.
 class UrltestManager {
@@ -89,7 +89,7 @@ private:
     // Runs tests and invokes on_change_ if the selection changes.
     void run_tests(const std::string& tag);
 
-    // Select the best outbound using the weighted group / tolerance algorithm.
+    // Select an outbound using weighted groups and the configured selection mode.
     // Caller must hold at least a shared_lock on mutex_.
     std::string select_outbound(const std::string& tag) REQUIRES_SHARED(mutex_);
 

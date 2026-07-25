@@ -32,7 +32,8 @@ const GROUP_LABELS: Readonly<Record<BackupGroup, string>> = {
   outbounds: "Маршруты и резервирование",
   dns: "Настройки DNS",
   routing: "Списки и правила маршрутизации",
-  nfqws: "Конфигурация и списки nfqws2",
+  nfqws_config: "Конфигурация nfqws2",
+  nfqws_lists: "Списки nfqws2",
 }
 
 type ManagedDialogProps = {
@@ -116,8 +117,8 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
   return (
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        Если выбраны туннели и прокси, файл содержит их UUID, пароли и ключи
-        в открытом виде. Храните копию в безопасном месте и не пересылайте её
+        Если выбраны туннели и прокси, файл содержит их UUID, пароли и ключи в
+        открытом виде. Храните копию в безопасном месте и не пересылайте её
         посторонним.
       </p>
       <div className="grid gap-2 sm:grid-cols-2">

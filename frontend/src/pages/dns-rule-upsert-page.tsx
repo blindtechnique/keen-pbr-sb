@@ -21,6 +21,7 @@ import {
   FieldHint,
   FieldLabel,
 } from "@/components/shared/field"
+import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import {
@@ -36,6 +37,7 @@ import {
   setFormServerErrors,
   splitFormApiErrors,
 } from "@/lib/form-api-errors"
+import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import {
@@ -159,6 +161,7 @@ export function DnsRuleUpsertPage({
         mode={mode}
         onDirtyChange={setDirty}
         parsedRuleIndex={parsedRuleIndex}
+        presentation={presentation}
         rules={rules}
       />
     </UpsertPage>
@@ -171,6 +174,7 @@ function DnsRuleForm({
   mode,
   onDirtyChange,
   parsedRuleIndex,
+  presentation,
   rules,
 }: {
   existingRule?: DnsRule
@@ -178,6 +182,7 @@ function DnsRuleForm({
   mode: "create" | "edit"
   onDirtyChange: (dirty: boolean) => void
   parsedRuleIndex: number
+  presentation: UpsertPagePresentation
   rules: DnsRule[]
 }) {
   const { t } = useTranslation()
@@ -191,7 +196,10 @@ function DnsRuleForm({
     value: serverTag,
     label: serverTag,
   }))
-  const listOptions = Object.keys(loadedConfig.lists ?? {})
+  const listOptions = sortListIdsByDisplayName(
+    Object.keys(loadedConfig.lists ?? {}),
+    loadedConfig.lists
+  )
   const listUsageSubtitle = useListUsageSubtitle(
     rules,
     "dns",
@@ -326,117 +334,125 @@ function DnsRuleForm({
         void form.handleSubmit()
       }}
     >
-        <FieldGroup>
-          <form.Field name={DNS_RULE_FIELD_NAMES.enabled}>
-            {(field) => (
-              <Field>
+      <FieldGroup>
+        <form.Field name={DNS_RULE_FIELD_NAMES.enabled}>
+          {(field) => (
+            <Field>
+              <FieldContent>
+                <div className="flex items-center space-x-3">
+                  <Checkbox
+                    checked={field.state.value}
+                    id="dns-rule-enabled"
+                    onCheckedChange={(checked) =>
+                      field.handleChange(checked === true)
+                    }
+                  />
+                  <FieldLabel
+                    className="cursor-pointer flex-col items-start gap-0"
+                    htmlFor="dns-rule-enabled"
+                  >
+                    {t("common.enabled")}
+                  </FieldLabel>
+                </div>
+              </FieldContent>
+            </Field>
+          )}
+        </form.Field>
+
+        <form.Field name={DNS_RULE_FIELD_NAMES.server}>
+          {(field) => {
+            const error = getFirstFieldError(field.state.meta.errors)
+            return (
+              <Field invalid={Boolean(error)}>
+                <FieldLabel>
+                  {t("pages.dnsRuleUpsert.fields.serverTag")}
+                </FieldLabel>
                 <FieldContent>
-                  <div className="flex items-center space-x-3">
-                    <Checkbox
-                      checked={field.state.value}
-                      id="dns-rule-enabled"
-                      onCheckedChange={(checked) =>
-                        field.handleChange(checked === true)
-                      }
-                    />
-                    <FieldLabel
-                      className="cursor-pointer flex-col items-start gap-0"
-                      htmlFor="dns-rule-enabled"
-                    >
-                      {t("common.enabled")}
-                    </FieldLabel>
-                  </div>
+                  <Select
+                    items={serverSelectItems}
+                    onValueChange={(server) => field.handleChange(server ?? "")}
+                    value={field.state.value}
+                  >
+                    <SelectTrigger aria-invalid={Boolean(error)}>
+                      <SelectValue
+                        placeholder={t(
+                          "pages.dnsRuleUpsert.fields.selectServer"
+                        )}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectLabel>
+                          {t("pages.dnsRuleUpsert.fields.dnsServers")}
+                        </SelectLabel>
+                        {serverTags.map((serverTag) => (
+                          <SelectItem key={serverTag} value={serverTag}>
+                            {serverTag}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldHint
+                    description={
+                      serverTags.length === 0
+                        ? t("pages.dnsRuleUpsert.fields.noServers")
+                        : undefined
+                    }
+                    error={error}
+                  />
                 </FieldContent>
               </Field>
-            )}
-          </form.Field>
+            )
+          }}
+        </form.Field>
 
-          <form.Field name={DNS_RULE_FIELD_NAMES.server}>
-            {(field) => {
-              const error = getFirstFieldError(field.state.meta.errors)
-              return (
-                <Field invalid={Boolean(error)}>
-                  <FieldLabel>
-                    {t("pages.dnsRuleUpsert.fields.serverTag")}
-                  </FieldLabel>
-                  <FieldContent>
-                    <Select
-                      items={serverSelectItems}
-                      onValueChange={(server) =>
-                        field.handleChange(server ?? "")
-                      }
-                      value={field.state.value}
-                    >
-                      <SelectTrigger aria-invalid={Boolean(error)}>
-                        <SelectValue
-                          placeholder={t(
-                            "pages.dnsRuleUpsert.fields.selectServer"
-                          )}
-                        />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectLabel>
-                            {t("pages.dnsRuleUpsert.fields.dnsServers")}
-                          </SelectLabel>
-                          {serverTags.map((serverTag) => (
-                            <SelectItem key={serverTag} value={serverTag}>
-                              {serverTag}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    <FieldHint
-                      description={
-                        serverTags.length === 0
-                          ? t("pages.dnsRuleUpsert.fields.noServers")
-                          : undefined
-                      }
-                      error={error}
-                    />
-                  </FieldContent>
-                </Field>
-              )
-            }}
-          </form.Field>
+        <form.Field name={DNS_RULE_FIELD_NAMES.lists}>
+          {(field) => {
+            const error = getFirstFieldError(field.state.meta.errors)
+            return (
+              <Field invalid={Boolean(error)}>
+                <FieldLabel>
+                  {t("pages.dnsRuleUpsert.fields.listNames")}
+                </FieldLabel>
+                <FieldContent>
+                  <MultiSelectList
+                    name={DNS_RULE_FIELD_NAMES.lists}
+                    onChange={field.handleChange}
+                    options={listOptions}
+                    error={error}
+                    placeholderDescription={t(
+                      "pages.dnsRuleUpsert.fields.listPlaceholderDescription"
+                    )}
+                    placeholderTitle={t(
+                      "pages.dnsRuleUpsert.fields.noListsSelected"
+                    )}
+                    getSearchText={(technicalId) =>
+                      getListSearchText(technicalId, loadedConfig.lists)
+                    }
+                    renderItem={(technicalId) => (
+                      <ListIdentityLabel
+                        lists={loadedConfig.lists}
+                        technicalId={technicalId}
+                      />
+                    )}
+                    usageSubtitle={listUsageSubtitle}
+                    value={field.state.value}
+                  />
+                  <FieldHint
+                    description={
+                      listOptions.length === 0
+                        ? t("pages.dnsRuleUpsert.fields.noLists")
+                        : undefined
+                    }
+                  />
+                </FieldContent>
+              </Field>
+            )
+          }}
+        </form.Field>
 
-          <form.Field name={DNS_RULE_FIELD_NAMES.lists}>
-            {(field) => {
-              const error = getFirstFieldError(field.state.meta.errors)
-              return (
-                <Field invalid={Boolean(error)}>
-                  <FieldLabel>
-                    {t("pages.dnsRuleUpsert.fields.listNames")}
-                  </FieldLabel>
-                  <FieldContent>
-                    <MultiSelectList
-                      name={DNS_RULE_FIELD_NAMES.lists}
-                      onChange={field.handleChange}
-                      options={listOptions}
-                      error={error}
-                      placeholderDescription={t(
-                        "pages.dnsRuleUpsert.fields.listPlaceholderDescription"
-                      )}
-                      placeholderTitle={t(
-                        "pages.dnsRuleUpsert.fields.noListsSelected"
-                      )}
-                      usageSubtitle={listUsageSubtitle}
-                      value={field.state.value}
-                    />
-                    <FieldHint
-                      description={
-                        listOptions.length === 0
-                          ? t("pages.dnsRuleUpsert.fields.noLists")
-                          : undefined
-                      }
-                    />
-                  </FieldContent>
-                </Field>
-              )
-            }}
-          </form.Field>
-
+        {presentation === "page" ? (
           <form.Field name={DNS_RULE_FIELD_NAMES.allowDomainRebinding}>
             {(field) => (
               <Field>
@@ -465,37 +481,29 @@ function DnsRuleForm({
               </Field>
             )}
           </form.Field>
-        </FieldGroup>
+        ) : null}
+      </FieldGroup>
 
-        <ServerValidationAlert errors={unmappedServerErrors} />
+      <ServerValidationAlert errors={unmappedServerErrors} />
 
-        <div className="flex justify-end gap-3" data-upsert-actions>
-          <Button
-            onClick={close}
-            size="xl"
-            type="button"
-            variant="outline"
-          >
-            {t("common.cancel")}
-          </Button>
-          <form.Subscribe
-            selector={(state) => state.canSubmit}
-          >
-            {(canSubmit) => (
-              <Button
-                disabled={
-                  postConfigMutation.isPending || !isDirty || !canSubmit
-                }
-                size="xl"
-                type="submit"
-              >
-                {mode === "create"
-                  ? t("pages.dnsRuleUpsert.actions.create")
-                  : t("pages.dnsRuleUpsert.actions.save")}
-              </Button>
-            )}
-          </form.Subscribe>
-        </div>
+      <div className="flex justify-end gap-3" data-upsert-actions>
+        <Button onClick={close} size="xl" type="button" variant="outline">
+          {t("common.cancel")}
+        </Button>
+        <form.Subscribe selector={(state) => state.canSubmit}>
+          {(canSubmit) => (
+            <Button
+              disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
+              size="xl"
+              type="submit"
+            >
+              {mode === "create"
+                ? t("pages.dnsRuleUpsert.actions.create")
+                : t("pages.dnsRuleUpsert.actions.save")}
+            </Button>
+          )}
+        </form.Subscribe>
+      </div>
     </form>
   )
 }

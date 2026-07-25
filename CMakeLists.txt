@@ -238,6 +238,7 @@ set(SOURCES
   src/lists/kernel_set_tester.cpp
   src/lists/list_streamer.cpp
   src/lists/list_set_usage.cpp
+  src/lists/srs_decoder.cpp
   src/cache/cache_manager.cpp
   src/connections/conntrack_event_monitor.cpp
   src/cmd/status.cpp

@@ -56,6 +56,23 @@ describe("routing diagnostics helpers", () => {
       { key: "destinationPort", value: "443" },
     ])
   })
+
+  test("shows a list alias while preserving the technical reference", () => {
+    expect(
+      getRuleConditions(
+        {
+          list: ["work"],
+          outbound: "vpn",
+        },
+        {
+          work: {
+            display_name: "Работа",
+            domains: ["example.com"],
+          },
+        }
+      )
+    ).toEqual([{ key: "lists", value: "Работа (work)" }])
+  })
 })
 
 function buildRuleDiagnostic(

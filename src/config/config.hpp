@@ -43,6 +43,7 @@ using DaemonConfig         = api::Daemon;
 using ApiConfig            = api::ApiConfig;
 using Outbound             = api::OutboundElement;
 using OutboundType         = api::OutboundType;  // enum: INTERFACE, TABLE, BLACKHOLE, IGNORE, URLTEST
+using UrltestSelectionMode = api::SelectionMode; // enum: LATENCY, PRIORITY
 using OutboundGroup        = api::OutboundGroupElement;
 using RetryConfig          = api::Retry;
 using CircuitBreakerConfig = api::CircuitBreakerConfig;

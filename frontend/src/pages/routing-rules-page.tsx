@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
+import { formatListReferenceLabels } from "@/lib/list-display"
 import {
   areRouteRulesSemanticallyEqual,
   getApiErrorMessage,
@@ -103,7 +104,7 @@ function RoutingRulesEditor({
 
   const tableRows = routeRules.map((rule: RouteRule, index: number) => {
     const runtimeState = runtimeOutboundByTag.get(rule.outbound)
-    return getRouteRuleRow(rule, index, t, runtimeState)
+    return getRouteRuleRow(rule, index, t, loadedConfig?.lists, runtimeState)
   })
 
   const postConfigMutation = usePostConfigMutation({
@@ -479,12 +480,13 @@ function getRouteRuleRow(
   rule: RouteRule,
   index: number,
   t: (key: string) => string,
+  lists: ConfigObject["lists"],
   runtimeState?: RuntimeOutboundState
 ) {
   const conditions = [
     {
       label: t("pages.routingRules.criteriaLabels.lists"),
-      value: (rule.list ?? []).join(", "),
+      value: formatListReferenceLabels(rule.list ?? [], lists),
     },
     {
       label: t("pages.routingRules.criteriaLabels.proto"),

@@ -52,6 +52,11 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
+  formatListReferenceLabels,
+  getListDisplayName,
+  getListReferenceLabel,
+} from "@/lib/list-display"
+import {
   buildUpdatedConfigForListsDelete,
   getListDeleteImpact,
   type ListDeleteImpact,
@@ -68,6 +73,8 @@ type ListDraft = {
 
 type ListTableRow = {
   id: string
+  displayName: string
+  technicalId?: string
   draft: ListDraft
   locationLabel: string
   locationIcon?: "external"
@@ -128,11 +135,18 @@ export function ListsPage() {
           toast.error(
             failedLists.length === 1
               ? t("pages.lists.messages.refreshFailedOne", {
-                  names: failedLists[0],
+                  names: getListReferenceLabel(
+                    failedLists[0],
+                    loadedConfig?.lists
+                  ),
                 })
               : t("pages.lists.messages.refreshFailedMany", {
                   count: failedLists.length,
-                  names: formatFailedListNamesForToast(failedLists, t),
+                  names: formatFailedListNamesForToast(
+                    failedLists,
+                    loadedConfig?.lists,
+                    t
+                  ),
                 }),
             { richColors: true }
           )
@@ -157,6 +171,10 @@ export function ListsPage() {
   const tableRows = useMemo(
     () => getTableRowsFromListMap(loadedConfig?.lists, listRefreshState, t),
     [loadedConfig?.lists, listRefreshState, t]
+  )
+  const tableRowsById = useMemo(
+    () => new Map(tableRows.map((row) => [row.id, row])),
+    [tableRows]
   )
   const dependencyTargets = useMemo(
     () => tableRows.map((row) => ({ kind: "list" as const, id: row.id })),
@@ -386,7 +404,7 @@ export function ListsPage() {
               >
                 <Checkbox
                   aria-label={t("common.selection.selectRow", {
-                    rowLabel: list.id,
+                    rowLabel: getListAccessibleLabel(list),
                   })}
                   checked={listSelection.selectedIds.has(list.id)}
                   className="mt-0.5 shrink-0"
@@ -397,8 +415,15 @@ export function ListsPage() {
                   <div className="flex min-w-0 items-start gap-2">
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">
-                        {list.draft.name}
+                        {list.displayName}
                       </p>
+                      {list.technicalId ? (
+                        <p className="truncate text-xs text-muted-foreground">
+                          {t("pages.lists.technicalId", {
+                            id: list.technicalId,
+                          })}
+                        </p>
+                      ) : null}
                       <p className="truncate text-xs text-muted-foreground">
                         {list.locationLabel}
                       </p>
@@ -467,7 +492,7 @@ export function ListsPage() {
               rows={tableRows.map((list) => [
                 <div className="space-y-1" key={`${list.id}-name`}>
                   <div className="flex items-center gap-2 font-medium">
-                    {list.draft.name}
+                    {list.displayName}
                     {list.locationIcon === "external" ? (
                       <a
                         aria-label={list.locationLabel}
@@ -480,6 +505,13 @@ export function ListsPage() {
                       </a>
                     ) : null}
                   </div>
+                  {list.technicalId ? (
+                    <div className="text-sm text-muted-foreground md:text-xs">
+                      {t("pages.lists.technicalId", {
+                        id: list.technicalId,
+                      })}
+                    </div>
+                  ) : null}
                   <div className="text-sm text-muted-foreground md:text-xs">
                     {list.locationLabel}
                   </div>
@@ -560,7 +592,9 @@ export function ListsPage() {
                 onToggleAll: listSelection.setAllVisible,
                 selectAllLabel: t("common.selection.selectAll"),
                 getRowLabel: (rowId) =>
-                  t("common.selection.selectRow", { rowLabel: rowId }),
+                  t("common.selection.selectRow", {
+                    rowLabel: getListAccessibleLabel(tableRowsById.get(rowId)),
+                  }),
               }}
             />
           </div>
@@ -569,7 +603,12 @@ export function ListsPage() {
       <DeleteImpactDialog
         confirmLabel={t("pages.lists.deleteDialog.confirm")}
         description={t("pages.lists.deleteDialog.description", {
-          names: visibleDeleteRequest?.ids.join(", ") ?? "",
+          names: visibleDeleteRequest
+            ? formatListReferenceLabels(
+                visibleDeleteRequest.ids,
+                visibleDeleteRequest.config.lists
+              )
+            : "",
         })}
         impactItems={
           visibleDeleteRequest
@@ -609,7 +648,7 @@ function getListDeleteImpactItems(
       label: (
         <>
           {t("pages.lists.deleteDialog.items.listPrefix")}{" "}
-          <strong>{listId}</strong>{" "}
+          <strong>{getListReferenceLabel(listId, config?.lists)}</strong>{" "}
           {t("pages.lists.deleteDialog.items.listSuffix")}
         </>
       ),
@@ -622,7 +661,13 @@ function getListDeleteImpactItems(
       label: t("pages.lists.deleteDialog.items.routeRuleRemoved", {
         number: index + 1,
       }),
-      details: getRouteRuleDetails(rule, deletedListIds, true, t),
+      details: getRouteRuleDetails(
+        rule,
+        deletedListIds,
+        true,
+        config?.lists,
+        t
+      ),
     })
   }
 
@@ -635,7 +680,13 @@ function getListDeleteImpactItems(
       label: t("pages.lists.deleteDialog.items.routeRuleUpdated", {
         number: index + 1,
       }),
-      details: getRouteRuleDetails(rule, deletedListIds, false, t),
+      details: getRouteRuleDetails(
+        rule,
+        deletedListIds,
+        false,
+        config?.lists,
+        t
+      ),
     })
   }
 
@@ -645,7 +696,7 @@ function getListDeleteImpactItems(
       label: t("pages.lists.deleteDialog.items.dnsRuleRemoved", {
         number: index + 1,
       }),
-      details: getDnsRuleDetails(rule, deletedListIds, true, t),
+      details: getDnsRuleDetails(rule, deletedListIds, true, config?.lists, t),
     })
   }
 
@@ -658,7 +709,7 @@ function getListDeleteImpactItems(
       label: t("pages.lists.deleteDialog.items.dnsRuleUpdated", {
         number: index + 1,
       }),
-      details: getDnsRuleDetails(rule, deletedListIds, false, t),
+      details: getDnsRuleDetails(rule, deletedListIds, false, config?.lists, t),
     })
   }
 
@@ -669,6 +720,7 @@ function getRouteRuleDetails(
   rule: RouteRule | undefined,
   deletedListIds: ReadonlySet<string>,
   isRemoved: boolean,
+  lists: ConfigObject["lists"],
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -684,8 +736,8 @@ function getRouteRuleDetails(
       formatDetail(
         t("pages.routingRules.criteriaLabels.lists"),
         isRemoved
-          ? formatListValue(beforeLists, t)
-          : formatTransition(beforeLists, afterLists, t)
+          ? formatListValue(beforeLists, lists, t)
+          : formatTransition(beforeLists, afterLists, lists, t)
       )
     )
   }
@@ -728,6 +780,7 @@ function getDnsRuleDetails(
   rule: DnsRule | undefined,
   deletedListIds: ReadonlySet<string>,
   isRemoved: boolean,
+  lists: ConfigObject["lists"],
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -740,8 +793,8 @@ function getDnsRuleDetails(
     formatDetail(
       t("pages.dnsRules.criteriaLabels.lists"),
       isRemoved
-        ? formatListValue(rule.list, t)
-        : formatTransition(rule.list, afterLists, t)
+        ? formatListValue(rule.list, lists, t)
+        : formatTransition(rule.list, afterLists, lists, t)
     ),
     formatDetail(t("pages.dnsRules.headers.serverTag"), rule.server),
   ]
@@ -770,12 +823,13 @@ function formatDetail(label: string, value: ReactNode) {
 function formatTransition(
   before: string[],
   after: string[],
+  lists: ConfigObject["lists"],
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   return (
     <ChangeValue
-      after={formatListValue(after, t)}
-      before={formatListValue(before, t)}
+      after={formatListValue(after, lists, t)}
+      before={formatListValue(before, lists, t)}
     />
   )
 }
@@ -792,16 +846,22 @@ function ChangeValue({ after, before }: { after: string; before: string }) {
 
 function formatListValue(
   values: string[],
+  lists: ConfigObject["lists"],
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
-  return values.length > 0 ? values.join(", ") : t("common.noneShort")
+  return values.length > 0
+    ? formatListReferenceLabels(values, lists)
+    : t("common.noneShort")
 }
 
 function formatFailedListNamesForToast(
   names: string[],
+  lists: ConfigObject["lists"],
   t: ReturnType<typeof useTranslation>["t"]
 ) {
-  const visibleNames = names.slice(0, MAX_FAILED_LIST_NAMES_IN_TOAST)
+  const visibleNames = names
+    .slice(0, MAX_FAILED_LIST_NAMES_IN_TOAST)
+    .map((name) => getListReferenceLabel(name, lists))
   const hiddenCount = names.length - visibleNames.length
   const label = visibleNames.join(", ")
 
@@ -814,18 +874,30 @@ function formatFailedListNamesForToast(
   })}`
 }
 
+function getListAccessibleLabel(list: ListTableRow | undefined) {
+  if (!list) {
+    return ""
+  }
+  return list.technicalId
+    ? `${list.displayName} (${list.technicalId})`
+    : list.displayName
+}
+
 function getTableRowsFromListMap(
   lists: ConfigObject["lists"],
   listRefreshState: ConfigStateResponseListRefreshState,
   t: (key: string) => string
 ): ListTableRow[] {
   return Object.entries(lists ?? {}).map(([name, listConfig]) => {
+    const displayName = getListDisplayName(name, lists)
     const domains = listConfig.domains ?? []
     const ipCidrs = listConfig.ip_cidrs ?? []
     const showInlineStats = !listConfig.url && !listConfig.file
 
     return {
       id: name,
+      displayName,
+      technicalId: displayName !== name ? name : undefined,
       draft: {
         name,
         ttlMs: String(listConfig.ttl_ms ?? 0),

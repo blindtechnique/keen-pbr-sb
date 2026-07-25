@@ -6,6 +6,7 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DependencyAnalysisTargetRequest } from "@/api/generated/model/dependencyAnalysisTargetRequest"
 import type { DependencyReference } from "@/api/generated/model/dependencyReference"
 import type { Dependency } from "@/lib/dependencies"
+import { getListReferenceLabel } from "@/lib/list-display"
 
 const MAX_TARGETS_PER_REQUEST = 256
 
@@ -24,7 +25,7 @@ function configRelationshipFingerprint(
     lists: Object.fromEntries(
       Object.entries(config.lists ?? {}).map(([name, list]) => [
         name,
-        { detour: list.detour },
+        { detour: list.detour, displayName: list.display_name },
       ])
     ),
     route: config.route?.rules ?? [],
@@ -36,10 +37,7 @@ function configRelationshipFingerprint(
   })
 }
 
-function dependencyLabel(
-  reference: DependencyReference,
-  config: ConfigObject
-) {
+function dependencyLabel(reference: DependencyReference, config: ConfigObject) {
   const index = Number(reference.dependent_id)
   switch (reference.dependent_kind) {
     case "routing_rule": {
@@ -52,14 +50,14 @@ function dependencyLabel(
     }
     case "outbound_group":
       return reference.dependent_id.split(":")[0] ?? reference.dependent_id
+    case "list":
+      return getListReferenceLabel(reference.dependent_id, config.lists)
     default:
       return reference.dependent_id
   }
 }
 
-function dependencyKind(
-  reference: DependencyReference
-): Dependency["kind"] {
+function dependencyKind(reference: DependencyReference): Dependency["kind"] {
   switch (reference.dependent_kind) {
     case "routing_rule":
       return "routingRule"

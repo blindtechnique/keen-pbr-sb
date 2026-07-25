@@ -1,4 +1,5 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import { getListReferenceLabel } from "@/lib/list-display"
 
 export type DependencyKind =
   | "routingRule"
@@ -87,7 +88,7 @@ export function findBrokenReferences(
     if (list.detour && !outbounds.has(list.detour)) {
       add({
         id: `list:${name}:detour:${list.detour}`,
-        label: `Список ${name} → ${list.detour}`,
+        label: `Список ${getListReferenceLabel(name, config.lists)} → ${list.detour}`,
         href: `/lists/${name}/edit`,
       })
     }

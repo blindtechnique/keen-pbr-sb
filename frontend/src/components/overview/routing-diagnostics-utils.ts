@@ -1,7 +1,9 @@
 import type {
+  ConfigObject,
   RouteRule,
   RoutingTestRuleDiagnostic,
 } from "@/api/generated/model"
+import { formatListReferenceLabels } from "@/lib/list-display"
 
 export type RuleCondition = {
   key:
@@ -33,11 +35,17 @@ export function isGrayRuleDiagnostic(rule: RoutingTestRuleDiagnostic) {
   return rule.ip_rows.every((ipRow) => ipRow.in_ipset !== true)
 }
 
-export function getRuleConditions(rule: RouteRule): RuleCondition[] {
+export function getRuleConditions(
+  rule: RouteRule,
+  lists?: ConfigObject["lists"]
+): RuleCondition[] {
   const conditions: RuleCondition[] = []
 
   if (rule.list && rule.list.length > 0) {
-    conditions.push({ key: "lists", value: rule.list.join(", ") })
+    conditions.push({
+      key: "lists",
+      value: formatListReferenceLabels(rule.list, lists),
+    })
   }
   if (hasText(rule.proto)) {
     conditions.push({ key: "proto", value: rule.proto })

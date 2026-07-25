@@ -1,7 +1,9 @@
 import {
+  getNdmsInterfaceInventory,
   getHealthService,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
+  useGetNdmsInterfaceInventory as useGeneratedNdmsInterfaceInventory,
   useGetHealthService as useGeneratedHealthService,
   useGetRuntimeInterfaces as useGeneratedRuntimeInterfaces,
   useGetRuntimeOutbounds as useGeneratedRuntimeOutbounds,
@@ -12,6 +14,7 @@ export {
   getDnsTest,
   getHealthRouting,
   getHealthService,
+  getNdmsInterfaceInventory,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
   getTransports,
@@ -20,6 +23,7 @@ export {
   getGetDnsTestQueryOptions,
   getGetHealthRoutingQueryOptions,
   getGetHealthServiceQueryOptions,
+  getGetNdmsInterfaceInventoryQueryOptions,
   getGetRuntimeInterfacesQueryOptions,
   getGetRuntimeOutboundsQueryOptions,
   getGetTransportsQueryOptions,
@@ -30,6 +34,21 @@ export {
   useGetTransports,
   useGetTransportConfig,
 } from "@/api/generated/keen-api"
+
+export function useGetNdmsInterfaceInventory() {
+  return useGeneratedNdmsInterfaceInventory<
+    Awaited<ReturnType<typeof getNdmsInterfaceInventory>>
+  >({
+    query: {
+      // NDMS metadata changes only when the firmware configuration changes.
+      // Live link state comes from the shared runtime SSE snapshot instead of
+      // adding another polling loop on a resource-constrained router.
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+  })
+}
 
 export function useGetHealthService() {
   return useGeneratedHealthService<

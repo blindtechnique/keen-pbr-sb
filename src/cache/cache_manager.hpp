@@ -27,6 +27,7 @@ enum class CacheDownloadStatus {
 struct CacheDownloadResult {
     CacheDownloadStatus status{CacheDownloadStatus::Failed};
     std::string error_message;
+    std::string warning_message;
     std::optional<long> http_status_code;
 
     bool updated() const {

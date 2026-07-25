@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
 #include <limits>
 #include <net/if.h>
@@ -181,6 +182,109 @@ bool parse_uint_in_range(const std::string& raw, int min_value, int max_value, i
 constexpr size_t IPSET_MAX_NAME = 31;
 constexpr size_t IPSET_PREFIX_LEN = 7; // len("kpbr4d_")
 constexpr size_t MAX_TAG_LEN = IPSET_MAX_NAME - IPSET_PREFIX_LEN; // 24
+constexpr size_t MAX_LIST_DISPLAY_NAME_CODE_POINTS = 80;
+
+bool contains_ascii_control(const std::string& value) {
+    return std::any_of(
+        value.begin(), value.end(), [](unsigned char character) {
+            return character < 0x20U || character == 0x7FU;
+        });
+}
+
+bool is_unicode_whitespace(uint32_t code_point) {
+    return (code_point >= 0x09U && code_point <= 0x0DU) ||
+           code_point == 0x20U || code_point == 0x85U ||
+           code_point == 0xA0U || code_point == 0x1680U ||
+           (code_point >= 0x2000U && code_point <= 0x200AU) ||
+           code_point == 0x2028U || code_point == 0x2029U ||
+           code_point == 0x202FU || code_point == 0x205FU ||
+           code_point == 0x3000U;
+}
+
+struct Utf8Summary {
+    size_t code_points{0};
+    bool has_non_whitespace{false};
+};
+
+std::optional<Utf8Summary> summarize_utf8(const std::string& value) {
+    Utf8Summary summary;
+    for (size_t offset = 0; offset < value.size();) {
+        const auto first = static_cast<unsigned char>(value[offset]);
+        size_t length = 0;
+        uint32_t code_point = 0;
+        if (first <= 0x7FU) {
+            length = 1;
+            code_point = first;
+        } else if (first >= 0xC2U && first <= 0xDFU) {
+            length = 2;
+            code_point = first & 0x1FU;
+        } else if (first >= 0xE0U && first <= 0xEFU) {
+            length = 3;
+            code_point = first & 0x0FU;
+        } else if (first >= 0xF0U && first <= 0xF4U) {
+            length = 4;
+            code_point = first & 0x07U;
+        } else {
+            return std::nullopt;
+        }
+
+        if (offset + length > value.size()) return std::nullopt;
+        for (size_t index = 1; index < length; ++index) {
+            const auto continuation =
+                static_cast<unsigned char>(value[offset + index]);
+            if ((continuation & 0xC0U) != 0x80U) return std::nullopt;
+            code_point = (code_point << 6U) | (continuation & 0x3FU);
+        }
+
+        if (length == 3) {
+            const auto second =
+                static_cast<unsigned char>(value[offset + 1]);
+            if ((first == 0xE0U && second < 0xA0U) ||
+                (first == 0xEDU && second > 0x9FU)) {
+                return std::nullopt;
+            }
+        } else if (length == 4) {
+            const auto second =
+                static_cast<unsigned char>(value[offset + 1]);
+            if ((first == 0xF0U && second < 0x90U) ||
+                (first == 0xF4U && second > 0x8FU)) {
+                return std::nullopt;
+            }
+        }
+
+        offset += length;
+        ++summary.code_points;
+        summary.has_non_whitespace =
+            summary.has_non_whitespace || !is_unicode_whitespace(code_point);
+    }
+    return summary;
+}
+
+void validate_list_display_name(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::string& path,
+    const std::optional<std::string>& display_name) {
+    if (!display_name.has_value()) return;
+    if (contains_ascii_control(*display_name)) {
+        add_issue(issues, path,
+                  "List display name must not contain ASCII control characters");
+        return;
+    }
+
+    const auto summary = summarize_utf8(*display_name);
+    if (!summary.has_value()) {
+        add_issue(issues, path, "List display name must be valid UTF-8");
+    } else if (!summary->has_non_whitespace) {
+        add_issue(issues, path,
+                  "List display name must contain a non-whitespace character");
+    } else if (summary->code_points > MAX_LIST_DISPLAY_NAME_CODE_POINTS) {
+        add_issue(
+            issues, path,
+            "List display name must not exceed " +
+                std::to_string(MAX_LIST_DISPLAY_NAME_CODE_POINTS) +
+                " Unicode code points");
+    }
+}
 
 bool is_valid_tag(const std::string& value) {
     if (value.empty() || value.size() > MAX_TAG_LEN) {
@@ -761,6 +865,8 @@ void validate_config(const Config& cfg) {
     for (const auto& [name, list_cfg] : cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
         const std::string list_path = name.empty() ? "lists" : "lists." + name;
         validate_tag(issues, list_path, "List name", name);
+        validate_list_display_name(
+            issues, list_path + ".display_name", list_cfg.display_name);
 
         const bool has_url = list_cfg.url.has_value();
         const bool has_file = list_cfg.file.has_value();

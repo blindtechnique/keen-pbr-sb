@@ -6,15 +6,20 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { NdmsInterfaceCapabilities } from './ndmsInterfaceCapabilities';
+import type { NdmsInterfaceRole } from './ndmsInterfaceRole';
 import type { NdmsTunnelInterfaceOwner } from './ndmsTunnelInterfaceOwner';
 import type { NdmsTunnelKind } from './ndmsTunnelKind';
 
 export interface NdmsTunnelInterface {
   id: string;
-  kernel_name: string;
+  /** Logical interface identifier reported by KeeneticOS RCI. */
+  firmware_interface_name: string;
+  /** Resolved Linux interface name. Null or omitted when no safe runtime match exists. */
+  kernel_name?: string | null;
   label: string;
   firmware_type: string;
   kind: NdmsTunnelKind;
+  role: NdmsInterfaceRole;
   owner: NdmsTunnelInterfaceOwner;
   connected?: boolean;
   link?: boolean;

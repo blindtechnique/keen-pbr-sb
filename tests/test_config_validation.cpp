@@ -153,6 +153,86 @@ TEST_CASE("list name: dot in name is rejected") {
     CHECK_THROWS_AS(parse_test_config(list_config_json("my.list")), ConfigError);
 }
 
+TEST_CASE("list display_name supports unicode and round-trips") {
+    const auto parsed = parse_test_config(
+        list_config_json(
+            "ai_services",
+            R"({"display_name":"Сервисы ИИ","domains":["example.com"]})"));
+    REQUIRE(parsed.lists.has_value());
+    REQUIRE(parsed.lists->at("ai_services").display_name.has_value());
+    CHECK(*parsed.lists->at("ai_services").display_name == "Сервисы ИИ");
+
+    const auto serialized = nlohmann::json(parsed);
+    CHECK(serialized.at("lists")
+              .at("ai_services")
+              .at("display_name") == "Сервисы ИИ");
+    const auto reparsed = parse_test_config(serialized.dump());
+    REQUIRE(reparsed.lists->at("ai_services").display_name.has_value());
+    CHECK(*reparsed.lists->at("ai_services").display_name == "Сервисы ИИ");
+}
+
+TEST_CASE("list display_name rejects blank and ASCII control values") {
+    const auto blank = validate_issues(
+        list_config_json(
+            "ads",
+            R"({"display_name":" \t\r\n ","domains":["example.com"]})"));
+    REQUIRE(blank.size() == 1);
+    CHECK(blank[0].path == "lists.ads.display_name");
+
+    const auto control = validate_issues(
+        list_config_json(
+            "ads",
+            R"({"display_name":"Ads\u0007list","domains":["example.com"]})"));
+    REQUIRE(control.size() == 1);
+    CHECK(control[0].path == "lists.ads.display_name");
+
+    const auto unicode_blank = validate_issues(
+        list_config_json(
+            "ads",
+            R"({"display_name":"\u00a0\u3000","domains":["example.com"]})"));
+    REQUIRE(unicode_blank.size() == 1);
+    CHECK(unicode_blank[0].path == "lists.ads.display_name");
+}
+
+TEST_CASE("list display_name limit counts Unicode code points") {
+    std::string valid_alias;
+    for (size_t index = 0; index < 80; ++index) valid_alias += "Я";
+    const std::string too_long_alias = valid_alias + "Я";
+
+    nlohmann::json valid_body{
+        {"display_name", valid_alias},
+        {"domains", nlohmann::json::array({"example.com"})},
+    };
+    CHECK_NOTHROW(parse_test_config(
+        list_config_json("unicode", valid_body.dump())));
+
+    nlohmann::json invalid_body{
+        {"display_name", too_long_alias},
+        {"domains", nlohmann::json::array({"example.com"})},
+    };
+    const auto issues = validate_issues(
+        list_config_json("unicode", invalid_body.dump()));
+    REQUIRE(issues.size() == 1);
+    CHECK(issues[0].path == "lists.unicode.display_name");
+}
+
+TEST_CASE("list display_name is not a routing reference") {
+    CHECK_NOTHROW(parse_test_config(R"({
+        "lists":{"ai":{"display_name":"Сервисы ИИ","domains":["example.com"]}},
+        "outbounds":[{"tag":"wan","type":"interface","interface":"eth0"}],
+        "route":{"rules":[{"list":["ai"],"outbound":"wan"}]}
+    })"));
+
+    const auto issues = validate_issues(R"({
+        "lists":{"ai":{"display_name":"Сервисы ИИ","domains":["example.com"]}},
+        "outbounds":[{"tag":"wan","type":"interface","interface":"eth0"}],
+        "route":{"rules":[{"list":["Сервисы ИИ"],"outbound":"wan"}]}
+    })");
+    REQUIRE(issues.size() == 1);
+    CHECK(issues[0].path == "route.rules[0].list[0]");
+    CHECK(issues[0].message.find("unknown list") != std::string::npos);
+}
+
 // =============================================================================
 // DNS server detour validation
 // =============================================================================
@@ -195,6 +275,41 @@ TEST_CASE("urltest URL is required and limited to HTTP(S)") {
     CHECK_THROWS_AS(parse_test_config(prefix + R"({"tag":"ut","type":"urltest","url":"file:///tmp/x","outbound_groups":[{"outbounds":["vpn"]}]}]})"), ConfigError);
     CHECK_THROWS_AS(parse_test_config(prefix + R"({"tag":"ut","type":"urltest","url":"ftp://example.test/x","outbound_groups":[{"outbounds":["vpn"]}]}]})"), ConfigError);
     CHECK_NOTHROW(parse_test_config(prefix + R"({"tag":"ut","type":"urltest","url":"https://example.test/x","outbound_groups":[{"outbounds":["vpn"]}]}]})"));
+}
+
+TEST_CASE("urltest selection mode defaults to latency and accepts priority") {
+    const auto default_config = parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    REQUIRE(default_config.outbounds.has_value());
+    REQUIRE(default_config.outbounds->size() == 2);
+    CHECK_FALSE(default_config.outbounds->at(1).selection_mode.has_value());
+
+    const auto priority_config = parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "selection_mode":"priority",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    REQUIRE(priority_config.outbounds.has_value());
+    REQUIRE(priority_config.outbounds->at(1).selection_mode.has_value());
+    CHECK(*priority_config.outbounds->at(1).selection_mode ==
+          UrltestSelectionMode::PRIORITY);
+
+    CHECK_THROWS_AS(parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "selection_mode":"unknown",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })"), ConfigError);
 }
 
 TEST_CASE("dns detour: unknown outbound tag is rejected") {

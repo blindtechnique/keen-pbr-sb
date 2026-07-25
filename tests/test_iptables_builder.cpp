@@ -29,6 +29,16 @@ L4Proto parse_test_proto(const std::string& proto) {
 
 } // namespace
 
+TEST_CASE("raw prerouting selection does not perform a racy constructor probe") {
+  // The Keenetic init script capability-gates raw PREROUTING before launching
+  // the daemon. Repeating `iptables -t raw -S` here used to turn a transient
+  // xtables lock during firmware startup into a fatal daemon startup failure.
+  // The real transactional restore remains the authoritative capability check
+  // and its failure is handled by the daemon's scheduled firewall retry.
+  IptablesFirewall firewall(/*use_raw_prerouting=*/true);
+  CHECK(firewall.uses_raw_prerouting());
+}
+
 // Friend class with test access to IptablesFirewall private methods.
 class IptablesBuilderTest {
 public:

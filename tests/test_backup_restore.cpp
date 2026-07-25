@@ -224,6 +224,155 @@ TEST_CASE("backup export keeps selected groups separate") {
           nlohmann::json(original).at("outbounds"));
 }
 
+TEST_CASE("nfqws backup exports config and lists as independent groups") {
+    BackupTempDir directory;
+    const auto nfqws_root = directory.path / "nfqws2";
+    const auto strategies_root = directory.path / "strategies";
+    std::filesystem::create_directories(nfqws_root / "lua");
+    std::filesystem::create_directories(strategies_root);
+
+    write_text(nfqws_root / "nfqws2.conf", "config");
+    write_text(nfqws_root / "user.list", "example.com");
+    write_text(nfqws_root / "lua" / "strategy.lua", "return true");
+    write_text(nfqws_root / "lua" / "packed.lua.gz", "compressed");
+    write_text(nfqws_root / "ignored.txt", "unsupported");
+    write_text(strategies_root / "custom.conf", "strategy");
+    write_text(strategies_root / "ignored.list", "unsupported");
+
+    const auto config = create_nfqws_backup_section_for_test(
+        {{"nfqws_config", true}, {"nfqws_lists", false}},
+        nfqws_root.string(),
+        strategies_root.string());
+    CHECK(config.contains("nfqws2/nfqws2.conf"));
+    CHECK(config.contains("nfqws2/lua/strategy.lua"));
+    CHECK(config.contains("nfqws2/lua/packed.lua.gz"));
+    CHECK(config.contains("strategies/custom.conf"));
+    CHECK_FALSE(config.contains("nfqws2/user.list"));
+    CHECK_FALSE(config.contains("nfqws2/ignored.txt"));
+    CHECK_FALSE(config.contains("strategies/ignored.list"));
+
+    const auto lists = create_nfqws_backup_section_for_test(
+        {{"nfqws_config", false}, {"nfqws_lists", true}},
+        nfqws_root.string(),
+        strategies_root.string());
+    REQUIRE(lists.size() == 1);
+    CHECK(lists.contains("nfqws2/user.list"));
+}
+
+TEST_CASE("nfqws split selection takes precedence over legacy flag") {
+    BackupTempDir directory;
+    const auto nfqws_root = directory.path / "nfqws2";
+    const auto strategies_root = directory.path / "strategies";
+    std::filesystem::create_directories(nfqws_root);
+    std::filesystem::create_directories(strategies_root);
+    write_text(nfqws_root / "nfqws2.conf", "config");
+    write_text(nfqws_root / "user.list", "example.com");
+
+    const auto legacy = create_nfqws_backup_section_for_test(
+        {{"nfqws", true}},
+        nfqws_root.string(),
+        strategies_root.string());
+    CHECK(legacy.contains("nfqws2/nfqws2.conf"));
+    CHECK(legacy.contains("nfqws2/user.list"));
+
+    const auto both = create_nfqws_backup_section_for_test(
+        {{"nfqws_config", true}, {"nfqws_lists", true}},
+        nfqws_root.string(),
+        strategies_root.string());
+    CHECK(both == legacy);
+
+    const auto split = create_nfqws_backup_section_for_test(
+        {{"nfqws", true},
+         {"nfqws_config", false},
+         {"nfqws_lists", true}},
+        nfqws_root.string(),
+        strategies_root.string());
+    CHECK_FALSE(split.contains("nfqws2/nfqws2.conf"));
+    CHECK(split.contains("nfqws2/user.list"));
+}
+
+TEST_CASE("nfqws restore rejects files outside declared split group") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:12121");
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+
+    SseBroadcaster broadcaster;
+    std::vector<Config> applied;
+    auto context = make_backup_context(
+        config_path.string(), broadcaster, original, applied);
+    const nlohmann::json backup{
+        {"format", "keen-pbr-sb-backup"},
+        {"schema", 1},
+        {"groups",
+         {{"nfqws_config", true}, {"nfqws_lists", false}}},
+        {"data",
+         {{"nfqws",
+           {{"nfqws2/user.list", "example.com"}}}}},
+    };
+
+    CHECK_THROWS_AS(
+        restore_backup_bundle_for_test(context, backup), ApiError);
+    CHECK(applied.empty());
+}
+
+TEST_CASE("nfqws restore rejects unsupported file classes") {
+    BackupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:12121");
+    write_text(
+        config_path,
+        nlohmann::json(original).dump(1, '\t') + "\n");
+
+    SseBroadcaster broadcaster;
+    std::vector<Config> applied;
+    auto context = make_backup_context(
+        config_path.string(), broadcaster, original, applied);
+    const nlohmann::json backup{
+        {"format", "keen-pbr-sb-backup"},
+        {"schema", 1},
+        {"data",
+         {{"nfqws",
+           {{"strategies/not-a-strategy.list", "example.com"}}}}},
+    };
+
+    CHECK_THROWS_AS(
+        restore_backup_bundle_for_test(context, backup), ApiError);
+    CHECK(applied.empty());
+}
+
+TEST_CASE("nfqws restore rejects intermediate and target symlinks") {
+    BackupTempDir directory;
+    const auto root = directory.path / "nfqws2";
+    const auto outside = directory.path / "outside";
+    std::filesystem::create_directories(root);
+    std::filesystem::create_directories(outside);
+
+    std::error_code error;
+    std::filesystem::create_directory_symlink(
+        outside, root / "linked-directory", error);
+    REQUIRE_FALSE(error);
+    CHECK_THROWS_AS(
+        validate_confined_restore_target_for_test(
+            root.string(),
+            (root / "linked-directory" / "escaped.conf").string()),
+        ApiError);
+
+    write_text(outside / "outside.conf", "outside");
+    std::filesystem::create_symlink(
+        outside / "outside.conf", root / "linked-file.conf", error);
+    REQUIRE_FALSE(error);
+    CHECK_THROWS_AS(
+        validate_confined_restore_target_for_test(
+            root.string(), (root / "linked-file.conf").string()),
+        ApiError);
+
+    CHECK_NOTHROW(validate_confined_restore_target_for_test(
+        root.string(), (root / "new" / "safe.conf").string()));
+}
+
 TEST_CASE("backup validation rejects path traversal before touching files") {
     BackupTempDir directory;
     const auto config_path = directory.path / "config.json";

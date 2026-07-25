@@ -39,10 +39,7 @@ import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import { PageHeader } from "@/components/shared/page-header"
 import { PageActionBar } from "@/components/shared/page-action-bar"
-import {
-  SectionTabs,
-  type SectionTab,
-} from "@/components/shared/section-tabs"
+import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { useSectionTab } from "@/hooks/use-section-tab"
@@ -50,6 +47,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { formatListReferenceLabels } from "@/lib/list-display"
 import {
   buildUpdatedConfigForOutboundsDelete,
   getOutboundDeleteImpact,
@@ -363,9 +361,7 @@ export function OutboundsPage() {
                 <OutboundCard
                   key={item.id}
                   onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
-                  onToggleSelected={() =>
-                    outboundSelection.toggleOne(item.id)
-                  }
+                  onToggleSelected={() => outboundSelection.toggleOne(item.id)}
                   outbound={item.outbound}
                   protocol={
                     item.outbound.type === "urltest"
@@ -458,7 +454,11 @@ function getOutboundDeleteImpactItems(
       label: t("pages.outbounds.deleteDialog.items.routingRule", {
         number: index + 1,
       }),
-      details: getRouteRuleImpactDetails(config?.route?.rules?.[index], t),
+      details: getRouteRuleImpactDetails(
+        config?.route?.rules?.[index],
+        config?.lists,
+        t
+      ),
     })
   }
 
@@ -514,6 +514,7 @@ function getOutboundDeleteImpactItems(
 
 function getRouteRuleImpactDetails(
   rule: RouteRule | undefined,
+  lists: ConfigObject["lists"],
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -527,7 +528,7 @@ function getRouteRuleImpactDetails(
     },
     {
       label: t("pages.routingRules.criteriaLabels.lists"),
-      value: (rule.list ?? []).join(", "),
+      value: formatListReferenceLabels(rule.list ?? [], lists),
     },
     {
       label: t("pages.routingRules.criteriaLabels.proto"),

@@ -84,7 +84,6 @@ export function OverviewPage() {
     dnsCheckStatus !== "checking" &&
     !configIsDraft
 
-
   const routingHealthErrorMessage = routingHealthQuery.isError
     ? getRoutingHealthErrorMessage(routingHealthQuery.error, t)
     : null
@@ -116,7 +115,8 @@ export function OverviewPage() {
               </AlertDescription>
             </Alert>
           ) : null}
-          {!configQuery.isLoading && (loadedConfig?.outbounds ?? []).length === 0 ? (
+          {!configQuery.isLoading &&
+          (loadedConfig?.outbounds ?? []).length === 0 ? (
             <Empty className="border">
               <EmptyHeader>
                 <EmptyTitle>{t("overview.outbounds.emptyTitle")}</EmptyTitle>
@@ -140,7 +140,7 @@ export function OverviewPage() {
         </div>
       </div>
 
-      <RoutingTestPanel />
+      <RoutingTestPanel lists={loadedConfig?.lists} />
 
       <div className="grid gap-3 xl:grid-cols-3">
         <DnsCheckWidget
@@ -212,7 +212,6 @@ export function OverviewPage() {
   )
 }
 
-
 function TableSkeleton() {
   return (
     <div className="space-y-2">
@@ -239,5 +238,3 @@ function getRoutingHealthErrorMessage(
     t("overview.routing.loadError")
   )
 }
-
-

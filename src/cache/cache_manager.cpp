@@ -1,16 +1,16 @@
 #include "cache_manager.hpp"
-#include "../util/safe_exec.hpp"
+#include "../config/list_parser.hpp"
+#include "../lists/srs_decoder.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
-#include <set>
+#include <sstream>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace keen_pbr3 {
 
@@ -44,7 +44,7 @@ std::string clean_download_error_message(const std::exception& error) {
     return message;
 }
 
-bool is_sing_box_rule_set_url(const std::string& url) {
+bool is_srs_rule_set_url(const std::string& url) {
     const auto end = url.find_first_of("?#");
     std::string path = url.substr(0, end);
     std::transform(path.begin(), path.end(), path.begin(),
@@ -52,98 +52,163 @@ bool is_sing_box_rule_set_url(const std::string& url) {
     return path.size() >= 4 && path.compare(path.size() - 4, 4, ".srs") == 0;
 }
 
-std::vector<std::string> sing_box_candidates() {
-    std::vector<std::string> candidates;
-    if (const char* configured = std::getenv("KEEN_PBR_SING_BOX"); configured && *configured) {
-        candidates.emplace_back(configured);
+std::size_t saturating_multiply(std::size_t value, std::size_t multiplier) {
+    if (value > std::numeric_limits<std::size_t>::max() / multiplier) {
+        return std::numeric_limits<std::size_t>::max();
     }
-    try {
-        std::ifstream config("/opt/etc/keen-pbr/transports.json");
-        if (config) {
-            auto parsed = nlohmann::json::parse(config);
-            const auto binary = parsed.value("sing_box_binary", std::string{});
-            if (!binary.empty()) candidates.push_back(binary);
-        }
-    } catch (const std::exception&) {
-        // Fall through to standard paths when the optional companion config is absent or invalid.
-    }
-    candidates.emplace_back("/opt/bin/sing-box");
-    candidates.emplace_back("/usr/bin/sing-box");
-    candidates.emplace_back("sing-box");
-    return candidates;
+    return value * multiplier;
 }
 
-void collect_srs_entries(const nlohmann::json& rule,
-                         std::set<std::string>& entries,
-                         size_t& unsupported) {
-    if (!rule.is_object()) return;
-    if (rule.value("invert", false)) {
-        ++unsupported;
-        return;
-    }
-    const auto collect = [&](const char* field, const std::string& prefix = {}) {
-        const auto it = rule.find(field);
-        if (it == rule.end() || !it->is_array()) return;
-        for (const auto& value : *it) {
-            if (value.is_string() && !value.get_ref<const std::string&>().empty()) {
-                entries.insert(prefix + value.get_ref<const std::string&>());
+SrsDecodeLimits srs_decode_limits(std::size_t max_file_size_bytes) {
+    constexpr std::size_t kRouterTrieNodeCap = 1000000U;
+    SrsDecodeLimits limits;
+    limits.max_compressed_bytes =
+        std::max<std::size_t>(1U, std::min(limits.max_compressed_bytes,
+                                           max_file_size_bytes));
+    limits.max_decompressed_bytes =
+        std::max<std::size_t>(
+            1U,
+            std::min(limits.max_decompressed_bytes,
+                     saturating_multiply(max_file_size_bytes, 4U)));
+    limits.max_total_string_bytes =
+        std::min(limits.max_total_string_bytes, limits.max_decompressed_bytes);
+    limits.max_trie_labels =
+        std::min({limits.max_trie_labels,
+                  limits.max_decompressed_bytes,
+                  kRouterTrieNodeCap - 1U});
+    limits.max_trie_nodes =
+        std::min({limits.max_trie_nodes,
+                  limits.max_trie_labels + 1U,
+                  kRouterTrieNodeCap});
+    limits.max_output_string_bytes =
+        std::min(limits.max_output_string_bytes, max_file_size_bytes);
+    limits.max_output_entries =
+        std::min(limits.max_output_entries,
+                 std::max<std::size_t>(1U, max_file_size_bytes / 32U));
+    return limits;
+}
+
+std::optional<std::string> decode_srs_native(
+    const std::filesystem::path& input,
+    const std::filesystem::path& text_output,
+    std::size_t max_output_bytes,
+    std::string& warning_message) {
+    try {
+        auto decoded = decode_srs_file(input, srs_decode_limits(max_output_bytes));
+
+        std::ofstream target(text_output, std::ios::binary);
+        if (!target) {
+            return "failed to create converted SRS cache file";
+        }
+
+        std::size_t output_bytes = 0;
+        std::size_t output_entries = 0;
+        std::size_t exact_domains_mapped = 0;
+        std::size_t invalid_domains_skipped = 0;
+        const auto write_entry = [&](std::string_view prefix,
+                                     std::string_view value)
+            -> std::optional<std::string> {
+            const std::size_t line_bytes = prefix.size() + value.size() + 1U;
+            if (line_bytes > max_output_bytes - output_bytes) {
+                return "converted SRS list exceeds configured file size limit";
+            }
+            target << prefix << value << '\n';
+            if (!target) {
+                return "failed to write converted SRS cache file";
+            }
+            output_bytes += line_bytes;
+            ++output_entries;
+            return std::nullopt;
+        };
+
+        for (const auto& domain : decoded.domains) {
+            if (domain.rfind("*.", 0) == 0 || (!domain.empty() && domain.front() == '.')) {
+                ++invalid_domains_skipped;
+                continue;
+            }
+            const auto normalized = ListParser::normalize_domain(domain);
+            if (!normalized.has_value()) {
+                ++invalid_domains_skipped;
+                continue;
+            }
+            if (const auto error = write_entry({}, *normalized); error.has_value()) {
+                return error;
+            }
+            ++exact_domains_mapped;
+        }
+        for (const auto& suffix : decoded.domain_suffixes) {
+            if (suffix.rfind("*.", 0) == 0 || (!suffix.empty() && suffix.front() == '.')) {
+                ++invalid_domains_skipped;
+                continue;
+            }
+            const auto normalized = ListParser::normalize_domain(suffix);
+            if (!normalized.has_value()) {
+                ++invalid_domains_skipped;
+                continue;
+            }
+            if (const auto error = write_entry("*.", *normalized); error.has_value()) {
+                return error;
             }
         }
-    };
-    collect("domain");
-    collect("domain_suffix", "*.");
-    collect("ip_cidr");
-
-    for (const char* field : {"domain_keyword", "domain_regex", "source_ip_cidr"}) {
-        const auto it = rule.find(field);
-        if (it != rule.end() && it->is_array() && !it->empty()) unsupported += it->size();
-    }
-    const auto nested = rule.find("rules");
-    if (nested != rule.end() && nested->is_array()) {
-        for (const auto& child : *nested) collect_srs_entries(child, entries, unsupported);
-    }
-}
-
-std::optional<std::string> decompile_srs(const std::filesystem::path& input,
-                                         const std::filesystem::path& json_output,
-                                         const std::filesystem::path& text_output) {
-    bool decompiled = false;
-    for (const auto& binary : sing_box_candidates()) {
-        if (binary.find('/') != std::string::npos && !std::filesystem::exists(binary)) continue;
-        if (safe_exec({binary, "rule-set", "decompile", "--output", json_output.string(), input.string()},
-                      /*suppress_output=*/true) == 0) {
-            decompiled = true;
-            break;
-        }
-    }
-    if (!decompiled) {
-        return "sing-box rule-set decompile failed; install sing-box 1.10+ or set KEEN_PBR_SING_BOX";
-    }
-
-    try {
-        std::ifstream source(json_output);
-        if (!source) return "sing-box did not create decompiled rule-set JSON";
-        const auto document = nlohmann::json::parse(source);
-        const auto rules = document.find("rules");
-        if (rules == document.end() || !rules->is_array()) return "decompiled SRS has no rules array";
-
-        std::set<std::string> entries;
-        size_t unsupported = 0;
-        for (const auto& rule : *rules) collect_srs_entries(rule, entries, unsupported);
-        if (entries.empty()) {
-            return unsupported > 0
-                ? "SRS contains only unsupported keyword, regex, source or inverted rules"
-                : "SRS contains no domain, domain_suffix or ip_cidr entries";
+        for (const auto& cidr : decoded.ip_cidrs) {
+            if (const auto error = write_entry({}, cidr); error.has_value()) {
+                return error;
+            }
         }
 
-        std::ofstream target(text_output);
-        if (!target) return "failed to create converted SRS cache file";
-        for (const auto& entry : entries) target << entry << '\n';
-        if (!target) return "failed to write converted SRS cache file";
+        if (output_entries == 0U &&
+            (decoded.skipped_rules != 0U ||
+             decoded.unsupported_fields != 0U ||
+             invalid_domains_skipped != 0U)) {
+            return "SRS contains no safely representable domain, domain suffix or IP/CIDR entries";
+        }
+
+        std::vector<std::string> warning_parts;
+        if (exact_domains_mapped != 0U) {
+            warning_parts.push_back(
+                "mapped " + std::to_string(exact_domains_mapped) +
+                " exact domain(s) to keen-pbr root-and-subdomain semantics");
+        }
+        if (decoded.unsupported_fields != 0U) {
+            warning_parts.push_back(
+                "skipped " + std::to_string(decoded.unsupported_fields) +
+                " unsupported condition(s)");
+        }
+        if (decoded.skipped_rules != 0U) {
+            auto part =
+                "skipped " + std::to_string(decoded.skipped_rules) + " rule(s)";
+            if (decoded.inverted_rules != 0U) {
+                part += ", including " + std::to_string(decoded.inverted_rules) +
+                        " inverted rule(s)";
+            }
+            warning_parts.push_back(std::move(part));
+        }
+        if (invalid_domains_skipped != 0U) {
+            warning_parts.push_back(
+                "skipped " + std::to_string(invalid_domains_skipped) +
+                " invalid domain value(s)");
+        }
+        if (!warning_parts.empty()) {
+            std::ostringstream warning;
+            warning << "SRS import is lossy: ";
+            for (std::size_t index = 0; index < warning_parts.size(); ++index) {
+                if (index != 0U) {
+                    warning << "; ";
+                }
+                warning << warning_parts[index];
+            }
+            warning_message = warning.str();
+        }
+        return std::nullopt;
+    } catch (const SrsDecodeError& error) {
+        if (error.kind() == SrsDecodeErrorKind::UnsupportedVersion) {
+            return std::string(error.what()) +
+                   "; update keen-pbr-sb to add support before importing this file";
+        }
+        return error.what();
     } catch (const std::exception& error) {
-        return std::string("failed to convert decompiled SRS: ") + error.what();
+        return std::string("failed to decode SRS: ") + error.what();
     }
-    return std::nullopt;
 }
 
 } // namespace
@@ -167,14 +232,26 @@ void CacheManager::set_max_file_size(size_t bytes) {
 CacheDownloadResult CacheManager::download(const std::string& name,
                                            const std::string& url,
                                            const CacheDownloadOptions& options) {
+    const bool srs = is_srs_rule_set_url(url);
     CacheMetadata existing = load_metadata(name);
+    const bool same_source =
+        existing.url.has_value() && *existing.url == url;
+    const bool current_srs_revision =
+        !srs ||
+        (existing.srs_decoder_revision.has_value() &&
+         *existing.srs_decoder_revision == kSrsDecoderRevision);
+    std::error_code cache_error;
+    const bool cached_body_exists =
+        std::filesystem::is_regular_file(cache_path(name), cache_error);
+    const bool use_conditionals =
+        same_source && current_srs_revision && cached_body_exists;
 
     ConditionalDownloadResult result;
     try {
         result = http_client_.download_conditional(
             url,
-            existing.etag.value_or(""),
-            existing.last_modified.value_or(""),
+            use_conditionals ? existing.etag.value_or("") : "",
+            use_conditionals ? existing.last_modified.value_or("") : "",
             HttpRequestOptions{options.fwmark});
     } catch (const HttpError& e) {
         if (e.status_code() > 0) {
@@ -185,6 +262,11 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         return download_failed(e.what());
     }
 
+    if (result.not_modified && !use_conditionals) {
+        return download_failed(
+            "HTTP 304 received without a matching local cache validator",
+            304);
+    }
     if (result.not_modified) {
         CacheDownloadResult not_modified;
         not_modified.status = CacheDownloadStatus::NotModified;
@@ -196,8 +278,7 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     std::filesystem::path tmp_path = cache_dir_ / (name + ".txt.tmp");
     std::filesystem::path tmp_meta = cache_dir_ / (name + ".meta.json.tmp");
     std::filesystem::path tmp_srs = cache_dir_ / (name + ".srs.tmp");
-    std::filesystem::path tmp_srs_json = cache_dir_ / (name + ".srs.json.tmp");
-    const bool srs = is_sing_box_rule_set_url(url);
+    std::string conversion_warning;
 
     {
         std::ofstream ofs(srs ? tmp_srs : tmp_path, std::ios::binary);
@@ -211,9 +292,13 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     }
 
     if (srs) {
-        const auto conversion_error = decompile_srs(tmp_srs, tmp_srs_json, tmp_path);
+        std::string{}.swap(result.body);
+        auto conversion_error =
+            decode_srs_native(tmp_srs,
+                              tmp_path,
+                              max_file_size_bytes_,
+                              conversion_warning);
         std::filesystem::remove(tmp_srs);
-        std::filesystem::remove(tmp_srs_json);
         if (conversion_error.has_value()) {
             std::filesystem::remove(tmp_path);
             return download_failed(*conversion_error);
@@ -225,13 +310,15 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     meta.last_modified = result.last_modified;
     meta.url = url;
     meta.download_time = current_time_iso();
+    if (srs) {
+        meta.srs_decoder_revision = kSrsDecoderRevision;
+    }
 
     {
         std::ofstream ofs(tmp_meta);
         if (!ofs) {
             std::filesystem::remove(tmp_path);
             std::filesystem::remove(tmp_srs);
-            std::filesystem::remove(tmp_srs_json);
             return download_failed("failed to open temporary cache metadata for writing");
         }
         ofs << nlohmann::json(meta).dump(2) << '\n';
@@ -255,6 +342,9 @@ CacheDownloadResult CacheManager::download(const std::string& name,
 
     CacheDownloadResult updated;
     updated.status = CacheDownloadStatus::Updated;
+    if (srs) {
+        updated.warning_message = std::move(conversion_warning);
+    }
     return updated;
 }
 

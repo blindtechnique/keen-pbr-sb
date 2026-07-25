@@ -17,6 +17,7 @@ const baselineDraft = {
   probeUrl: "https://www.gstatic.com/generate_204",
   interval: "180000",
   tolerance: "100",
+  selectionMode: "latency",
   retryAttempts: "3",
   retryInterval: "1000",
   circuitBreakerFailures: "5",
@@ -69,5 +70,24 @@ describe("outbound editor persisted normalization", () => {
     })
 
     expect(semanticJsonEqual(reordered, baseline)).toBe(false)
+  })
+
+  test("keeps latency as the compatible default and persists priority mode", () => {
+    const latency = normalizeOutboundDraftForPersistence({
+      ...baselineDraft,
+      type: "urltest",
+      outbounds: [["primary"], ["backup"]],
+      selectionMode: "latency",
+    })
+    const priority = normalizeOutboundDraftForPersistence({
+      ...baselineDraft,
+      type: "urltest",
+      outbounds: [["primary"], ["backup"]],
+      selectionMode: "priority",
+    })
+
+    expect(latency.selection_mode).toBeUndefined()
+    expect(priority.selection_mode).toBe("priority")
+    expect(semanticJsonEqual(priority, latency)).toBe(false)
   })
 })

@@ -262,7 +262,7 @@ std::vector<const Outbound*> find_urltest_children(const std::vector<Outbound>& 
         });
     }
 
-    std::sort(groups.begin(), groups.end(), [](const GroupRef& lhs, const GroupRef& rhs) {
+    std::stable_sort(groups.begin(), groups.end(), [](const GroupRef& lhs, const GroupRef& rhs) {
         return lhs.weight < rhs.weight;
     });
 
@@ -325,6 +325,23 @@ std::optional<std::string> select_urltest_child(const Outbound& urltest,
         [](const CandidateResult& lhs, const CandidateResult& rhs) {
             return lhs.group_weight < rhs.group_weight;
         })->group_weight;
+
+    if (urltest.selection_mode.value_or(UrltestSelectionMode::LATENCY) ==
+        UrltestSelectionMode::PRIORITY) {
+        for (const auto* child : ordered_children) {
+            const auto result_it = std::find_if(
+                successful_results.begin(),
+                successful_results.end(),
+                [best_weight, child](const CandidateResult& result) {
+                    return result.group_weight == best_weight &&
+                           result.child_tag == child->tag;
+                });
+            if (result_it != successful_results.end()) {
+                return result_it->child_tag;
+            }
+        }
+        return std::nullopt;
+    }
 
     uint32_t min_latency = std::numeric_limits<uint32_t>::max();
     for (const auto& result : successful_results) {

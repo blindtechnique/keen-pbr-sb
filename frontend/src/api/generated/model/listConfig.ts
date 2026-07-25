@@ -7,10 +7,17 @@
  */
 
 /**
- * Defines a named list of domains and/or IP CIDRs used in routing and DNS rules. At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided. List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$` and be at most 24 characters.
+ * Defines a named list of domains and/or IP CIDRs used in routing and DNS rules. At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided. List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$` and be at most 24 characters. `display_name` is presentation-only: rules, caches, sets, and API references always use the map key.
 
  */
 export interface ListConfig {
+  /**
+     * Optional human-readable alias shown by clients. Unicode is allowed. The value must contain a non-whitespace character and must not contain ASCII control characters. It never replaces the list key in routing or DNS references.
+
+     * @minLength 1
+     * @maxLength 80
+     */
+  display_name?: string;
   /** URL to a remote list file to download and cache. */
   url?: string;
   /** Inline list of domain patterns (supports `*.` wildcards). */

@@ -83,6 +83,27 @@ export const enTranslation = {
     check: "Check",
     reachable: "The website returned a readable response.",
     unreachable: "The website is unavailable or returned no readable response.",
+    backup: {
+      button: "Backups",
+      title: "nfqws2 backups",
+      description:
+        "Back up or restore the configuration and lists independently.",
+      configTitle: "nfqws2 configuration",
+      configDescription:
+        "Configuration files, Lua scripts, and user strategies.",
+      listsTitle: "nfqws2 lists",
+      listsDescription: "All user and service .list files.",
+      allTitle: "Everything together",
+      allDescription: "Configuration and lists in a single backup.",
+      download: "Download",
+      restore: "Restore",
+      downloaded: "The backup was created and downloaded.",
+      restoreTitle: "Restore nfqws2",
+      restored: "The nfqws2 files were restored and the service restarted.",
+      scopeMissing: "The file does not contain the selected nfqws2 section.",
+      unsavedBlocked:
+        "Restore is unavailable: save or discard the unsaved changes in this section first.",
+    },
   },
   configTransfer: {
     export: "Export",
@@ -348,6 +369,39 @@ export const enTranslation = {
     restarted: "Tunnel or proxy restart requested",
     nativeManagedExternally:
       "This native interface is managed by KeeneticOS or another service.",
+    nativeInterface: {
+      keeneticOwner: "Managed by KeeneticOS",
+      logicalName: "Keenetic interface",
+      kernelName: "System interface",
+      protocol: "Protocol",
+      role: "Role",
+      roleClient: "Client",
+      roleServer: "Server",
+      roleUnknown: "Unknown",
+      liveState: "Live state",
+      liveUp: "Present and enabled",
+      liveDown: "Present but disabled",
+      liveUnavailable: "Not found in the kernel inventory",
+      connectedState: "Connection",
+      connected: "Connected",
+      disconnected: "Disconnected",
+      linkState: "Link",
+      linkUp: "Link up",
+      linkDown: "Link down",
+      latency: "Latency",
+      boundRoute: "Route",
+      routeNotConfigured: "Not configured",
+      unknown: "Unknown",
+      unresolved: "Not resolved",
+      routeNotClient:
+        "Only interfaces confirmed by KeeneticOS as client tunnels can be attached to a route.",
+      routeUnresolved:
+        "A route cannot be created until KeeneticOS resolves the Linux interface name.",
+      routeNotLive:
+        "A route can only be created while the kernel interface is present and enabled.",
+      routeConfigUnavailable:
+        "A route cannot be created until the current configuration is loaded.",
+    },
     deleteTitle: "Delete tunnel or proxy?",
     deleteDescription:
       "The managed process will be stopped and its definition removed.",
@@ -880,8 +934,7 @@ export const enTranslation = {
         saved: "Login settings saved, sign in again",
       },
       title: "Settings",
-      description:
-        "Global defaults that apply to all your routes and rules.",
+      description: "Global defaults that apply to all your routes and rules.",
       saved: "Settings staged. Apply new config to persist them.",
       general: {
         title: "General",
@@ -1165,12 +1218,13 @@ export const enTranslation = {
     routingRuleUpsert: {
       createTitle: "Create routing rule",
       editTitle: "Edit routing rule",
-      description:
-        "This rule directs matching traffic to the specified route.",
+      description: "This rule directs matching traffic to the specified route.",
       cardDescription:
         "Choose lists and a route, then optionally narrow by protocol, ports, and addresses.",
       simpleCardDescription:
         "Choose a list and a route. That is enough for a working rule; optional match conditions stay in the advanced editor.",
+      advancedConditionsPresent:
+        "This rule already has additional conditions. They will be preserved; open the advanced editor to review or change them.",
       messages: {
         saved: "Routing rule staged. Apply new config to persist it.",
       },
@@ -1317,10 +1371,10 @@ export const enTranslation = {
         "A route can use a network interface, an existing routing table, or a failover group that selects an available option.",
       cardDescription: "Configure a route, system action, or failover target.",
       missing: {
-        cardDescription: "The requested route or failover target could not be found.",
+        cardDescription:
+          "The requested route or failover target could not be found.",
         cardTitle: "Missing route",
-        description:
-          "Return to Routes and failover and choose a valid entry.",
+        description: "Return to Routes and failover and choose a valid entry.",
         back: "Back to routes",
       },
       actions: { create: "Create route", save: "Save route" },
@@ -1373,7 +1427,7 @@ export const enTranslation = {
       urltest: {
         groupsTitle: "Failover groups",
         groupsDescription:
-          "Add routes to this group. The fastest available route according to the URLTest probe is selected automatically.",
+          "Add routes in preference order. The available-route selection policy is configured below.",
         groupTitle: "Group {{index}}",
         groupDescription:
           "Priority {{index}} - higher priority groups are preferred.",
@@ -1385,7 +1439,18 @@ export const enTranslation = {
         addGroup: "Add group",
         probingTitle: "Probing and retries",
         probingDescription:
-          "Configure how the urltest group probes candidates and retries failed checks.",
+          "Configure the selection policy, availability probe, and retries after failures.",
+        selectionMode: "Selection mode",
+        selectionModeOptions: {
+          latency: "Lowest latency",
+          priority: "Priority with return to primary",
+        },
+        selectionModeHints: {
+          latency:
+            "Selects the fastest healthy route and avoids switching while the difference remains within tolerance.",
+          priority:
+            "Always uses the first healthy route in the first healthy group and returns to it after recovery.",
+        },
         probeUrl: "Probe URL",
         probeUrlHint:
           "The service fetches this URL at the configured interval to verify the interface is alive and measure latency.",
@@ -1598,6 +1663,7 @@ export const enTranslation = {
         refreshFailedMore: "+{{count}} more",
       },
       lastUpdated: "Last updated: {{value}}",
+      technicalId: "Technical ID: {{id}}",
       neverUpdated: "Never updated",
       noStats: "-",
       source: {
@@ -1613,7 +1679,7 @@ export const enTranslation = {
         button: "Pick a ready-made list",
         title: "Ready-made lists",
         description:
-          "Curated sing-box rule sets: choose a service and its URL fills the field.",
+          "Ready-made lists, including `.srs` files that keen-pbr-sb reads without sing-box installed. Choose a service and its URL fills the field.",
         search: "Search by name or address",
         add: "Select",
         empty: "Nothing found",
@@ -1637,7 +1703,7 @@ export const enTranslation = {
       cardDescription:
         "Review the list source, TTL, and matching entries before saving.",
       simpleCardDescription:
-        "Enter a name and a list source. TTL and download options stay in the advanced editor.",
+        "Enter a display name, technical ID, and list source. TTL and download options stay in the advanced editor.",
       messages: {
         created: "List staged. Apply new config to persist it.",
         updated: "List changes staged. Apply new config to persist them.",
@@ -1655,7 +1721,8 @@ export const enTranslation = {
       },
       common: {
         title: "List settings",
-        description: "Set the list identity before choosing the source.",
+        description:
+          "Set a readable display name and stable technical ID before choosing the source.",
       },
       sourceSwitcher: {
         title: "Source type",
@@ -1700,10 +1767,19 @@ export const enTranslation = {
           "Create a DNS server first, then it will become available here.",
         manualHint:
           "Leave the checkboxes off to configure rules manually after creating the list.",
-        routeRequired: "Select a route or failover target for the routing rule.",
+        routeRequired:
+          "Select a route or failover target for the routing rule.",
         dnsRequired: "Select a DNS server for the DNS rule.",
       },
       fields: {
+        displayName: "Display name",
+        displayNameHint:
+          "A readable name shown in the interface. Unicode is supported; this field is optional.",
+        technicalId: "Technical ID",
+        technicalIdCreateHint:
+          "Stable identifier used in rules and references: lowercase Latin letters, digits, and underscores.",
+        technicalIdEditHint:
+          "Used in rules and references. The technical ID cannot be changed after creation.",
         name: "Name",
         nameHint: "Stable identifier used in rules and references.",
         ttlMs: "IP cache duration (ms)",
@@ -1716,7 +1792,7 @@ export const enTranslation = {
           "Optional route to use when downloading this list from a remote URL.",
         url: "Remote URL",
         urlHint:
-          "Optional: a URL to download entries from. Combined with anything you add below.",
+          "Optional: a plain-text list or an `.srs` file in format version 1-5. It is merged with the other content; sing-box is not required for `.srs`.",
         file: "Absolute file path",
         fileHint:
           "Optional: a file path on the device to load entries from. Combined with other sources.",
@@ -1729,8 +1805,8 @@ export const enTranslation = {
       },
       validation: {
         sourceRequired: "Fill in the selected source so the list can be used.",
-        nameRequired: "Name is required.",
-        duplicateName: "A list with this name already exists.",
+        nameRequired: "Technical ID is required.",
+        duplicateName: "A list with this technical ID already exists.",
         invalidTtl: "TTL must be a non-negative integer.",
       },
     },

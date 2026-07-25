@@ -8,14 +8,15 @@
 #include "../util/base64.hpp"
 #include "../util/safe_exec.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
-#include <set>
 #include <stdexcept>
 #include <vector>
 #include <fcntl.h>
@@ -94,10 +95,12 @@ struct FileReplacement {
     fs::path path;
     std::string content;
     bool ensure_world_readable{false};
+    std::optional<fs::path> confinement_root;
 };
 
 struct FileSnapshot {
     fs::path path;
+    std::optional<fs::path> confinement_root;
     bool existed{false};
     std::string content;
     mode_t mode{0600};
@@ -105,9 +108,70 @@ struct FileSnapshot {
     gid_t group{0};
 };
 
-FileSnapshot capture_file(const fs::path& path) {
+bool unsafe_relative_path(const fs::path& path) {
+    return path.empty() || path.is_absolute() ||
+           std::any_of(
+               path.begin(), path.end(), [](const fs::path& component) {
+                   return component == ".." || component == ".";
+               });
+}
+
+void validate_confined_restore_target(const fs::path& root,
+                                      const fs::path& target) {
+    const auto normalized_root = root.lexically_normal();
+    const auto normalized_target = target.lexically_normal();
+    if (!normalized_root.is_absolute() || !normalized_target.is_absolute()) {
+        throw ApiError("nfqws restore path must be absolute", 400);
+    }
+
+    const auto relative = normalized_target.lexically_relative(normalized_root);
+    if (unsafe_relative_path(relative)) {
+        throw ApiError("nfqws restore path escapes its root", 400);
+    }
+
+    auto inspect = [&](const fs::path& path, bool require_directory,
+                       bool allow_missing) {
+        struct stat metadata {};
+        if (::lstat(path.c_str(), &metadata) != 0) {
+            if (errno == ENOENT && allow_missing) return false;
+            throw ApiError("cannot inspect nfqws restore path " +
+                               path.string(),
+                           500);
+        }
+        if (S_ISLNK(metadata.st_mode)) {
+            throw ApiError("nfqws restore path contains a symbolic link", 400);
+        }
+        if (require_directory && !S_ISDIR(metadata.st_mode)) {
+            throw ApiError(
+                "nfqws restore parent is not a directory", 400);
+        }
+        if (!require_directory && !S_ISREG(metadata.st_mode)) {
+            throw ApiError("nfqws restore target is not a regular file", 400);
+        }
+        return true;
+    };
+
+    bool parent_missing = !inspect(normalized_root, true, true);
+    fs::path current = normalized_root;
+    for (auto component = relative.begin(); component != relative.end();
+         ++component) {
+        current /= *component;
+        const bool is_target = std::next(component) == relative.end();
+        if (parent_missing) continue;
+        const bool exists = inspect(current, !is_target, true);
+        if (!exists) parent_missing = true;
+    }
+}
+
+FileSnapshot capture_file(
+    const fs::path& path,
+    const std::optional<fs::path>& confinement_root = std::nullopt) {
+    if (confinement_root.has_value()) {
+        validate_confined_restore_target(*confinement_root, path);
+    }
     FileSnapshot snapshot;
     snapshot.path = path;
+    snapshot.confinement_root = confinement_root;
 
     struct stat metadata {};
     if (::lstat(path.c_str(), &metadata) != 0) {
@@ -138,6 +202,10 @@ void sync_parent_directory(const fs::path& path) {
 }
 
 void restore_snapshot(const FileSnapshot& snapshot) {
+    if (snapshot.confinement_root.has_value()) {
+        validate_confined_restore_target(
+            *snapshot.confinement_root, snapshot.path);
+    }
     if (snapshot.existed) {
         write_atomic(snapshot.path,
                      snapshot.content,
@@ -170,35 +238,124 @@ std::string exception_message(std::exception_ptr error) {
 }
 
 bool selected(const nlohmann::json& groups, const char* name) {
-    return groups.value(name, false);
+    if (!groups.is_object())
+        throw ApiError("invalid backup groups", 400);
+    const auto value = groups.find(name);
+    if (value == groups.end()) return false;
+    if (!value->is_boolean())
+        throw ApiError("invalid backup group selection", 400);
+    return value->get<bool>();
 }
 
-void add_tree(nlohmann::json& files, const fs::path& root, const std::string& prefix,
-              std::size_t& total_bytes, std::size_t& file_count) {
-    static const std::set<std::string> allowed_extensions{".conf", ".list", ".lua"};
+enum class NfqwsBackupGroup {
+    config,
+    lists,
+};
+
+struct NfqwsSelection {
+    bool config{false};
+    bool lists{false};
+
+    bool includes(NfqwsBackupGroup group) const {
+        return group == NfqwsBackupGroup::config ? config : lists;
+    }
+
+    bool any() const {
+        return config || lists;
+    }
+};
+
+NfqwsSelection nfqws_selection(const nlohmann::json& groups) {
+    const bool has_split_selection =
+        groups.contains("nfqws_config") || groups.contains("nfqws_lists");
+    if (has_split_selection) {
+        return {
+            selected(groups, "nfqws_config"),
+            selected(groups, "nfqws_lists"),
+        };
+    }
+
+    const bool legacy_selected = selected(groups, "nfqws");
+    return {legacy_selected, legacy_selected};
+}
+
+bool has_unsafe_path_component(const fs::path& path) {
+    return std::any_of(
+        path.begin(), path.end(), [](const fs::path& component) {
+            return component == ".." || component == ".";
+        });
+}
+
+std::optional<NfqwsBackupGroup> classify_nfqws_path(
+    const fs::path& relative) {
+    if (relative.is_absolute() || relative.empty() ||
+        has_unsafe_path_component(relative)) {
+        return std::nullopt;
+    }
+
+    const auto first = *relative.begin();
+    const auto extension = relative.extension().string();
+    const auto filename = relative.filename().string();
+    const bool compressed_lua =
+        filename.size() >= 7 &&
+        filename.substr(filename.size() - 7) == ".lua.gz";
+
+    if (first == "strategies") {
+        return extension == ".conf"
+                   ? std::optional{NfqwsBackupGroup::config}
+                   : std::nullopt;
+    }
+    if (first != "nfqws2") return std::nullopt;
+    if (extension == ".list") return NfqwsBackupGroup::lists;
+    if (extension == ".conf" || extension == ".lua" || compressed_lua)
+        return NfqwsBackupGroup::config;
+    return std::nullopt;
+}
+
+void add_nfqws_tree(nlohmann::json& files,
+                    const fs::path& root,
+                    const std::string& prefix,
+                    const NfqwsSelection& selection,
+                    std::size_t& total_bytes,
+                    std::size_t& file_count) {
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return;
     for (const auto& entry : fs::recursive_directory_iterator(root, ec)) {
         if (ec || entry.is_symlink(ec) || !entry.is_regular_file(ec)) continue;
-        const auto filename = entry.path().filename().string();
-        const bool compressed_lua = filename.size() >= 7 &&
-                                    filename.substr(filename.size() - 7) == ".lua.gz";
-        if (!compressed_lua && !allowed_extensions.count(entry.path().extension().string())) continue;
+        const auto relative = fs::relative(entry.path(), root, ec);
+        if (ec || relative.empty()) continue;
+        const fs::path backup_path = fs::path(prefix) / relative;
+        const auto group = classify_nfqws_path(backup_path);
+        if (!group.has_value() || !selection.includes(*group)) continue;
         const auto file_size = entry.file_size(ec);
         if (ec) continue;
         if (file_size > kMaxBackupFileBytes)
             throw ApiError("backup contains a file larger than the per-file limit", 413);
         if (++file_count > kMaxBackupFiles || total_bytes + file_size > kMaxBackupBytes)
             throw ApiError("backup content exceeds the aggregate limit", 413);
-        const auto relative = fs::relative(entry.path(), root, ec);
-        if (ec || relative.empty()) continue;
         const auto value = read_text(entry.path());
         total_bytes += value.size();
-        files[prefix + "/" + relative.generic_string()] = {
+        files[backup_path.generic_string()] = {
             {"encoding", kBase64Encoding},
             {"data", base64_encode(value)},
         };
     }
+}
+
+nlohmann::json collect_nfqws_files(const nlohmann::json& groups,
+                                   const fs::path& nfqws_root,
+                                   const fs::path& strategies_root) {
+    const auto selection = nfqws_selection(groups);
+    nlohmann::json files = nlohmann::json::object();
+    if (!selection.any()) return files;
+
+    std::size_t total_bytes = 0;
+    std::size_t file_count = 0;
+    add_nfqws_tree(files, nfqws_root, "nfqws2", selection, total_bytes,
+                   file_count);
+    add_nfqws_tree(files, strategies_root, "strategies", selection,
+                   total_bytes, file_count);
+    return files;
 }
 
 std::string decode_backup_file(const nlohmann::json& value) {
@@ -240,14 +397,11 @@ nlohmann::json make_backup(const ApiContext& ctx, const nlohmann::json& groups) 
         data["lists"] = source.value("lists", nlohmann::json::object());
         data["route"] = source.value("route", nlohmann::json::object());
     }
-    if (selected(groups, "nfqws")) {
-        nlohmann::json files = nlohmann::json::object();
-        std::size_t total_bytes = 0;
-        std::size_t file_count = 0;
-        add_tree(files, "/opt/etc/nfqws2", "nfqws2", total_bytes, file_count);
-        add_tree(files, "/opt/etc/keen-pbr/nfqws-strategies", "strategies",
-                 total_bytes, file_count);
-        data["nfqws"] = std::move(files);
+    if (nfqws_selection(groups).any()) {
+        data["nfqws"] = collect_nfqws_files(
+            groups,
+            "/opt/etc/nfqws2",
+            "/opt/etc/keen-pbr/nfqws-strategies");
     }
     nlohmann::json backup = {{"format", "keen-pbr-sb-backup"}, {"schema", 1},
             {"created_at", std::chrono::duration_cast<std::chrono::seconds>(
@@ -260,7 +414,8 @@ nlohmann::json make_backup(const ApiContext& ctx, const nlohmann::json& groups) 
 
 nlohmann::json all_groups() {
     return {{"general", true}, {"transports", true}, {"outbounds", true},
-            {"dns", true}, {"routing", true}, {"nfqws", true}};
+            {"dns", true}, {"routing", true}, {"nfqws_config", true},
+            {"nfqws_lists", true}};
 }
 
 void validate_bundle(const nlohmann::json& backup) {
@@ -284,6 +439,16 @@ void validate_bundle(const nlohmann::json& backup) {
     if (data.contains("nfqws")) {
         if (!data.at("nfqws").is_object() || data.at("nfqws").size() > kMaxBackupFiles)
             throw ApiError("invalid nfqws backup section", 400);
+        std::optional<NfqwsSelection> declared_selection;
+        if (backup.contains("groups")) {
+            if (!backup.at("groups").is_object())
+                throw ApiError("invalid backup groups", 400);
+            const auto& groups = backup.at("groups");
+            if (groups.contains("nfqws_config") ||
+                groups.contains("nfqws_lists")) {
+                declared_selection = nfqws_selection(groups);
+            }
+        }
         std::size_t total_bytes = 0;
         for (const auto& item : data.at("nfqws").items()) {
             const auto content = decode_backup_file(item.value());
@@ -292,18 +457,16 @@ void validate_bundle(const nlohmann::json& backup) {
             total_bytes += content.size();
             const fs::path relative(item.key());
             if (relative.is_absolute() || relative.empty() ||
-                std::any_of(relative.begin(), relative.end(), [](const fs::path& part) {
-                    return part == ".." || part == ".";
-                }))
+                has_unsafe_path_component(relative))
                 throw ApiError("invalid nfqws path in backup", 400);
-            const auto first = *relative.begin();
-            const auto extension = relative.extension().string();
-            const auto filename = relative.filename().string();
-            const bool allowed = first == "nfqws2"
-                ? (extension == ".conf" || extension == ".list" || extension == ".lua" ||
-                   (filename.size() >= 7 && filename.substr(filename.size() - 7) == ".lua.gz"))
-                : first == "strategies" && extension == ".conf";
-            if (!allowed) throw ApiError("unsupported nfqws file in backup", 400);
+            const auto group = classify_nfqws_path(relative);
+            if (!group.has_value())
+                throw ApiError("unsupported nfqws file in backup", 400);
+            if (declared_selection.has_value() &&
+                !declared_selection->includes(*group)) {
+                throw ApiError(
+                    "nfqws backup file does not match selected group", 400);
+            }
         }
         if (total_bytes > kMaxBackupBytes)
             throw ApiError("nfqws backup section is too large", 413);
@@ -365,6 +528,7 @@ void restore_bundle(const ApiContext& ctx, const nlohmann::json& backup) {
                 root / tail,
                 decode_backup_file(item.value()),
                 true,
+                root,
             });
         }
     }
@@ -372,7 +536,8 @@ void restore_bundle(const ApiContext& ctx, const nlohmann::json& backup) {
     std::vector<FileSnapshot> snapshots;
     snapshots.reserve(replacements.size());
     for (const auto& replacement : replacements) {
-        snapshots.push_back(capture_file(replacement.path));
+        snapshots.push_back(capture_file(
+            replacement.path, replacement.confinement_root));
     }
 
     std::optional<Config> previous_config;
@@ -402,6 +567,10 @@ void restore_bundle(const ApiContext& ctx, const nlohmann::json& backup) {
 
     try {
         for (const auto& replacement : replacements) {
+            if (replacement.confinement_root.has_value()) {
+                validate_confined_restore_target(
+                    *replacement.confinement_root, replacement.path);
+            }
             write_atomic(replacement.path,
                          replacement.content,
                          replacement.ensure_world_readable);
@@ -488,6 +657,19 @@ nlohmann::json create_backup_bundle_for_test(
     const ApiContext& ctx,
     const nlohmann::json& groups) {
     return make_backup(ctx, groups);
+}
+
+nlohmann::json create_nfqws_backup_section_for_test(
+    const nlohmann::json& groups,
+    const std::string& nfqws_root,
+    const std::string& strategies_root) {
+    return collect_nfqws_files(groups, nfqws_root, strategies_root);
+}
+
+void validate_confined_restore_target_for_test(
+    const std::string& root,
+    const std::string& target) {
+    validate_confined_restore_target(root, target);
 }
 
 void restore_backup_bundle_for_test(const ApiContext& ctx,

@@ -374,30 +374,55 @@ std::string UrltestManager::select_outbound(const std::string& tag) {
             .weight = static_cast<uint32_t>(groups[i].weight.value_or(1)),
         });
     }
-    std::sort(sorted_groups.begin(),
-              sorted_groups.end(),
-              [](const GroupRef& lhs, const GroupRef& rhs) {
-                  return lhs.weight < rhs.weight;
-              });
+    std::stable_sort(sorted_groups.begin(),
+                     sorted_groups.end(),
+                     [](const GroupRef& lhs, const GroupRef& rhs) {
+                         return lhs.weight < rhs.weight;
+                     });
+
+    const auto healthy_result = [&state](const std::string& child_tag)
+        -> const URLTestResult* {
+        const auto cb_it = state.circuit_breakers.find(child_tag);
+        // HALF_OPEN is probe-only. Routing user traffic through it before the
+        // configured success threshold would bypass the circuit breaker's
+        // recovery contract and make priority mode flap back too early.
+        if (cb_it == state.circuit_breakers.end() ||
+            cb_it->second.state(child_tag) != CircuitState::closed) {
+            return nullptr;
+        }
+
+        const auto result_it = state.last_results.find(child_tag);
+        if (result_it == state.last_results.end() || !result_it->second.success) {
+            return nullptr;
+        }
+
+        return &result_it->second;
+    };
+
+    const bool prefer_declared_priority =
+        ut.selection_mode.value_or(UrltestSelectionMode::LATENCY) ==
+        UrltestSelectionMode::PRIORITY;
 
     for (const auto& group_ref : sorted_groups) {
         const auto& group = groups[group_ref.index];
+
+        if (prefer_declared_priority) {
+            for (const auto& child_tag : group.outbounds) {
+                if (healthy_result(child_tag) != nullptr) {
+                    return child_tag;
+                }
+            }
+            continue;
+        }
+
         uint32_t min_latency = std::numeric_limits<uint32_t>::max();
 
         for (const auto& child_tag : group.outbounds) {
-            const auto cb_it = state.circuit_breakers.find(child_tag);
-            if (cb_it == state.circuit_breakers.end()) {
+            const auto* result = healthy_result(child_tag);
+            if (result == nullptr) {
                 continue;
             }
-            if (cb_it->second.state(child_tag) == CircuitState::open) {
-                continue;
-            }
-
-            const auto result_it = state.last_results.find(child_tag);
-            if (result_it == state.last_results.end() || !result_it->second.success) {
-                continue;
-            }
-            min_latency = std::min(min_latency, result_it->second.latency_ms);
+            min_latency = std::min(min_latency, result->latency_ms);
         }
 
         if (min_latency == std::numeric_limits<uint32_t>::max()) {
@@ -411,33 +436,20 @@ std::string UrltestManager::select_outbound(const std::string& tag) {
                                                group.outbounds.end(),
                                                state.selected_outbound);
             if (existing_it != group.outbounds.end()) {
-                const auto cb_it = state.circuit_breakers.find(state.selected_outbound);
-                if (cb_it != state.circuit_breakers.end() &&
-                    cb_it->second.state(state.selected_outbound) != CircuitState::open) {
-                    const auto result_it = state.last_results.find(state.selected_outbound);
-                    if (result_it != state.last_results.end() &&
-                        result_it->second.success &&
-                        result_it->second.latency_ms <= min_latency + tolerance) {
-                        return state.selected_outbound;
-                    }
+                const auto* result = healthy_result(state.selected_outbound);
+                if (result != nullptr &&
+                    result->latency_ms <= min_latency + tolerance) {
+                    return state.selected_outbound;
                 }
             }
         }
 
         for (const auto& child_tag : group.outbounds) {
-            const auto cb_it = state.circuit_breakers.find(child_tag);
-            if (cb_it == state.circuit_breakers.end()) {
+            const auto* result = healthy_result(child_tag);
+            if (result == nullptr) {
                 continue;
             }
-            if (cb_it->second.state(child_tag) == CircuitState::open) {
-                continue;
-            }
-
-            const auto result_it = state.last_results.find(child_tag);
-            if (result_it == state.last_results.end() || !result_it->second.success) {
-                continue;
-            }
-            if (result_it->second.latency_ms <= min_latency + tolerance) {
+            if (result->latency_ms <= min_latency + tolerance) {
                 return child_tag;
             }
         }

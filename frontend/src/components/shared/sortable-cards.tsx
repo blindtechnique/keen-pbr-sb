@@ -26,13 +26,18 @@ export function SortableCards<T>({
   disabled?: boolean
   handleLabel: string | ((item: T, index: number) => string)
 }) {
-  const { currentOrder, draggingPosition, getHandleProps, setItemRef } =
-    usePointerSortable({
-      itemCount: items.length,
-      disabled,
-      itemSelector: "[data-sortable-card]",
-      onReorder,
-    })
+  const {
+    currentOrder,
+    draggingPosition,
+    getContainerProps,
+    getHandleProps,
+    setItemRef,
+  } = usePointerSortable({
+    itemCount: items.length,
+    disabled,
+    itemSelector: "[data-sortable-card]",
+    onReorder,
+  })
 
   return (
     <div
@@ -40,6 +45,7 @@ export function SortableCards<T>({
         "space-y-2 overscroll-contain",
         draggingPosition !== null && "select-none"
       )}
+      {...getContainerProps()}
     >
       {currentOrder.map((itemIndex, position) => (
         <div

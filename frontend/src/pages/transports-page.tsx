@@ -33,6 +33,8 @@ import {
 } from "@/api/mutations"
 import {
   useGetConfig,
+  useGetNdmsInterfaceInventory,
+  useGetRuntimeInterfaces,
   useGetRuntimeOutbounds,
   useGetTransportConfig,
   useGetTransports,
@@ -42,6 +44,7 @@ import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
+import { NativeInterfaceCard } from "@/components/transports/native-interface-card"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -65,6 +68,10 @@ import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
 import { queryKeys } from "@/api/query-keys"
 import { countryFlag } from "@/data/countries"
 import { useSectionTab } from "@/hooks/use-section-tab"
+import {
+  dedupeLegacyNativeTransports,
+  mapNativeInterfaces,
+} from "@/lib/native-interfaces"
 
 type ProbeEntry = {
   success: boolean
@@ -89,6 +96,12 @@ function transportProvider(item: TransportStatus, otherLabel: string) {
   const type = item.type.trim().toLowerCase()
   const protocol = item.protocol?.trim().toLowerCase() ?? ""
 
+  // A native tracker is owned outside transport-manager even when its
+  // protocol happens to be WireGuard. Ownership takes precedence over the
+  // protocol tab so lifecycle controls can never leak onto Keenetic objects.
+  if (type === "native" || type.includes("keenetic")) {
+    return { key: "keenetic", label: "KeeneticOS" }
+  }
   if (type.includes("sing")) {
     return { key: "sing-box", label: "sing-box" }
   }
@@ -112,10 +125,6 @@ function transportProvider(item: TransportStatus, otherLabel: string) {
   ) {
     return { key: "wireguard", label: "WireGuard" }
   }
-  if (type === "native" || type.includes("keenetic")) {
-    return { key: "keenetic", label: "KeeneticOS" }
-  }
-
   const label = item.type.trim() || otherLabel
   const normalizedKey = label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   return {
@@ -211,9 +220,28 @@ export function TransportsPage() {
     () => (query.data?.status === 200 ? query.data.data : []),
     [query.data]
   )
+  const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
+  const runtimeInterfacesQuery = useGetRuntimeInterfaces()
+  const nativeInterfaces = useMemo(
+    () =>
+      mapNativeInterfaces(
+        ndmsInventoryQuery.data?.status === 200 &&
+          ndmsInventoryQuery.data.data.available
+          ? ndmsInventoryQuery.data.data.interfaces
+          : [],
+        runtimeInterfacesQuery.data?.status === 200
+          ? runtimeInterfacesQuery.data.data.interfaces
+          : []
+      ),
+    [ndmsInventoryQuery.data, runtimeInterfacesQuery.data]
+  )
+  const managedItems = useMemo(
+    () => dedupeLegacyNativeTransports(items, nativeInterfaces),
+    [items, nativeInterfaces]
+  )
   const providerGroups = useMemo(
-    () => groupTransports(items, t("transports.tabs.other")),
-    [items, t]
+    () => groupTransports(managedItems, t("transports.tabs.other")),
+    [managedItems, t]
   )
   const transportTabs = useMemo<SectionTab<string>[]>(() => {
     const providerTabs = providerGroups.map((group) => ({
@@ -221,18 +249,30 @@ export function TransportsPage() {
       label: group.label,
       count: group.items.length,
     }))
+    if (nativeInterfaces.length > 0) {
+      const keeneticTab = providerTabs.find((tab) => tab.value === "keenetic")
+      if (keeneticTab) {
+        keeneticTab.count += nativeInterfaces.length
+      } else {
+        providerTabs.push({
+          value: "keenetic",
+          label: "KeeneticOS",
+          count: nativeInterfaces.length,
+        })
+      }
+    }
 
-    return providerGroups.length > 1
+    return providerTabs.length > 1
       ? [
           {
             value: "all",
             label: t("transports.tabs.all"),
-            count: items.length,
+            count: managedItems.length + nativeInterfaces.length,
           },
           ...providerTabs,
         ]
       : providerTabs
-  }, [items.length, providerGroups, t])
+  }, [managedItems.length, nativeInterfaces.length, providerGroups, t])
   const transportTabValues =
     transportTabs.length > 0 ? transportTabs.map((tab) => tab.value) : ["all"]
   const [activeTransportTab, setActiveTransportTab] = useSectionTab(
@@ -241,9 +281,13 @@ export function TransportsPage() {
   )
   const visibleItems =
     activeTransportTab === "all"
-      ? items
+      ? managedItems
       : (providerGroups.find((group) => group.key === activeTransportTab)
           ?.items ?? [])
+  const visibleNativeInterfaces =
+    activeTransportTab === "all" || activeTransportTab === "keenetic"
+      ? nativeInterfaces
+      : []
   const configQuery = useGetTransportConfig()
   const configured: TransportSpec[] =
     configQuery.data?.status === 200 ? configQuery.data.data : []
@@ -689,14 +733,28 @@ export function TransportsPage() {
           {t("transports.add")}
         </Button>
         <Button
-          disabled={query.isFetching}
+          disabled={
+            query.isFetching ||
+            ndmsInventoryQuery.isFetching ||
+            runtimeInterfacesQuery.isFetching
+          }
           onClick={() => {
             void query.refetch()
             void configQuery.refetch()
+            void ndmsInventoryQuery.refetch()
+            void runtimeInterfacesQuery.refetch()
           }}
           variant="outline"
         >
-          <RefreshCwIcon className={query.isFetching ? "animate-spin" : ""} />
+          <RefreshCwIcon
+            className={
+              query.isFetching ||
+              ndmsInventoryQuery.isFetching ||
+              runtimeInterfacesQuery.isFetching
+                ? "animate-spin"
+                : ""
+            }
+          />
           {t("transports.refresh")}
         </Button>
       </PageActionBar>
@@ -740,7 +798,11 @@ export function TransportsPage() {
         </Alert>
       ) : null}
 
-      {!query.isLoading && !error && items.length === 0 ? (
+      {!query.isLoading &&
+      !ndmsInventoryQuery.isLoading &&
+      !error &&
+      managedItems.length === 0 &&
+      nativeInterfaces.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
             {t("transports.empty")}
@@ -954,43 +1016,69 @@ export function TransportsPage() {
                         })
                       : t("transports.routing.bindOutbound")}
                   </Button>
-                  <span className="ml-auto flex shrink-0 items-center gap-1">
-                    <Button
-                      aria-label={t("common.edit")}
-                      className="size-8"
-                      onClick={() => {
-                        const spec = configured.find(
-                          (entry) => entry.tag === item.tag
-                        )
-                        if (spec) {
-                          setEditing(spec)
-                          setDialogOpen(true)
+                  {item.type !== "native" ? (
+                    <span className="ml-auto flex shrink-0 items-center gap-1">
+                      <Button
+                        aria-label={t("common.edit")}
+                        className="size-8"
+                        onClick={() => {
+                          const spec = configured.find(
+                            (entry) => entry.tag === item.tag
+                          )
+                          if (spec) {
+                            setEditing(spec)
+                            setDialogOpen(true)
+                          }
+                        }}
+                        size="icon"
+                        title={t("common.edit")}
+                        variant="ghost"
+                      >
+                        <PencilIcon className="size-4" />
+                      </Button>
+                      <Button
+                        aria-label={t("common.delete")}
+                        className="size-8 text-destructive hover:text-destructive"
+                        onClick={() =>
+                          setDeleting(
+                            configured.find((entry) => entry.tag === item.tag)
+                          )
                         }
-                      }}
-                      size="icon"
-                      title={t("common.edit")}
-                      variant="ghost"
-                    >
-                      <PencilIcon className="size-4" />
-                    </Button>
-                    <Button
-                      aria-label={t("common.delete")}
-                      className="size-8 text-destructive hover:text-destructive"
-                      onClick={() =>
-                        setDeleting(
-                          configured.find((entry) => entry.tag === item.tag)
-                        )
-                      }
-                      size="icon"
-                      title={t("common.delete")}
-                      variant="ghost"
-                    >
-                      <TrashIcon className="size-4" />
-                    </Button>
-                  </span>
+                        size="icon"
+                        title={t("common.delete")}
+                        variant="ghost"
+                      >
+                        <TrashIcon className="size-4" />
+                      </Button>
+                    </span>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
+          )
+        })}
+        {visibleNativeInterfaces.map((nativeInterface) => {
+          const boundOutbound = nativeInterface.kernelName
+            ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
+            : undefined
+
+          return (
+            <NativeInterfaceCard
+              boundOutboundTag={boundOutbound?.tag}
+              hasConfig={Boolean(keenConfig)}
+              key={`keenetic:${nativeInterface.id}`}
+              latencyMs={
+                nativeInterface.kernelName
+                  ? transportLatencyByInterface.get(nativeInterface.kernelName)
+                  : undefined
+              }
+              nativeInterface={nativeInterface}
+              onCreateRoute={(interfaceName) =>
+                navigate(
+                  `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
+                )
+              }
+            />
           )
         })}
       </div>

@@ -7,6 +7,7 @@
  */
 import type { CircuitBreakerConfig } from './circuitBreakerConfig';
 import type { OutboundGroup } from './outboundGroup';
+import type { OutboundSelectionMode } from './outboundSelectionMode';
 import type { OutboundType } from './outboundType';
 import type { RetryConfig } from './retryConfig';
 
@@ -43,7 +44,10 @@ export interface Outbound {
   /** Latency tolerance in milliseconds; outbounds within this range of the best are considered equivalent. Used with `urltest` outbound type.
    */
   tolerance_ms?: number;
-  /** Ordered list of outbound groups. Required for `urltest` outbound type. Groups are tried in order; within a group the outbound is selected by weight.
+  /** Selection policy used with `urltest` outbound type. `latency` keeps the current route while it remains within the configured tolerance of the fastest healthy candidate. `priority` always selects the first healthy outbound in the highest-priority healthy group and returns to it after recovery. When omitted, `latency` is used.
+   */
+  selection_mode?: OutboundSelectionMode;
+  /** Ordered list of outbound groups. Required for `urltest` outbound type. Groups are tried by ascending weight and then by declaration order. Selection within a group follows `selection_mode`.
    */
   outbound_groups?: OutboundGroup[];
   retry?: RetryConfig;

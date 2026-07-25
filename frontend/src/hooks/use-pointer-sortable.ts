@@ -1,12 +1,11 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent,
-  type PointerEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react"
 
 type PreviewFactory = (source: HTMLElement) => HTMLElement
@@ -19,12 +18,66 @@ type PointerSortableOptions = {
   createPreview?: PreviewFactory
 }
 
+type SortableCandidate = {
+  middle: number
+  position: number
+}
+
 function identityOrder(itemCount: number) {
   return Array.from({ length: itemCount }, (_item, index) => index)
 }
 
 function clonePreview(source: HTMLElement) {
   return source.cloneNode(true) as HTMLElement
+}
+
+export function resolveSortableTargetPosition(
+  pointerY: number,
+  currentPosition: number,
+  candidates: readonly SortableCandidate[],
+  itemCount: number
+) {
+  const orderedCandidates = [...candidates]
+    .filter(
+      ({ middle, position }) =>
+        Number.isFinite(middle) &&
+        Number.isInteger(position) &&
+        position >= 0 &&
+        position < itemCount
+    )
+    .sort((left, right) => left.middle - right.middle)
+
+  const currentCandidate = orderedCandidates.find(
+    ({ position }) => position === currentPosition
+  )
+  if (!currentCandidate) {
+    return -1
+  }
+
+  let targetPosition = currentPosition
+  if (pointerY > currentCandidate.middle) {
+    for (const candidate of orderedCandidates) {
+      if (
+        candidate.position > currentPosition &&
+        pointerY >= candidate.middle
+      ) {
+        targetPosition = candidate.position
+      }
+    }
+  } else if (pointerY < currentCandidate.middle) {
+    for (let index = orderedCandidates.length - 1; index >= 0; index -= 1) {
+      const candidate = orderedCandidates[index]
+      if (
+        candidate &&
+        candidate.position < currentPosition &&
+        pointerY <= candidate.middle
+      ) {
+        targetPosition = candidate.position
+      }
+    }
+  }
+
+  return targetPosition
 }
 
 export function usePointerSortable({
@@ -40,9 +93,9 @@ export function usePointerSortable({
   const draggingPositionRef = useRef<number | null>(null)
   const draggedItemRef = useRef<number | null>(null)
   const dragContainerRef = useRef<HTMLElement | null>(null)
-  const renderSynchronizedRef = useRef(true)
   const previewRef = useRef<HTMLElement | null>(null)
   const previewOffsetYRef = useRef(0)
+  const activePointerIdRef = useRef<number | null>(null)
 
   const currentOrder = useMemo(
     () => renderedOrder ?? identityOrder(itemCount),
@@ -69,11 +122,11 @@ export function usePointerSortable({
         onReorder(draggedItem, finalPosition)
       }
 
+      activePointerIdRef.current = null
       removePreview()
       draggingPositionRef.current = null
       draggedItemRef.current = null
       dragContainerRef.current = null
-      renderSynchronizedRef.current = true
       setDraggingPosition(null)
       setRenderedOrder(null)
     },
@@ -87,12 +140,66 @@ export function usePointerSortable({
     []
   )
 
-  useLayoutEffect(() => {
-    renderSynchronizedRef.current = true
-  }, [renderedOrder])
+  const moveDrag = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      const currentPosition = draggingPositionRef.current
+      if (
+        currentPosition === null ||
+        event.pointerId !== activePointerIdRef.current
+      ) {
+        return
+      }
+
+      event.preventDefault()
+      const pointerY = event.clientY
+      if (previewRef.current) {
+        previewRef.current.style.top = `${pointerY - previewOffsetYRef.current}px`
+      }
+
+      // Resolve the destination from the visual slots rather than from the
+      // element directly below the pointer. React can still be committing the
+      // previous reorder while pointer events keep arriving; slot coordinates
+      // remain valid during that window, whereas a hovered row can still carry
+      // the previous item and make a downward drag jump back or stop.
+      const candidates = Array.from(
+        dragContainerRef.current?.querySelectorAll<HTMLElement>(itemSelector) ??
+          []
+      ).map((element) => {
+        const position = Number(element.dataset.sortablePosition)
+        const box = element.getBoundingClientRect()
+        return {
+          middle: box.top + box.height / 2,
+          position,
+        }
+      })
+
+      const targetPosition = resolveSortableTargetPosition(
+        pointerY,
+        currentPosition,
+        candidates,
+        orderRef.current.length
+      )
+      if (targetPosition < 0 || targetPosition === currentPosition) {
+        return
+      }
+
+      const nextOrder = [...orderRef.current]
+      const [movedItem] = nextOrder.splice(currentPosition, 1)
+      if (movedItem === undefined) {
+        return
+      }
+      nextOrder.splice(targetPosition, 0, movedItem)
+
+      orderRef.current = nextOrder
+      draggingPositionRef.current = targetPosition
+      setRenderedOrder(nextOrder)
+      setDraggingPosition(targetPosition)
+    },
+    [itemSelector]
+  )
 
   const beginDrag =
-    (position: number) => (event: PointerEvent<HTMLElement>) => {
+    (position: number) => (event: ReactPointerEvent<HTMLElement>) => {
       if (
         disabled ||
         event.button !== 0 ||
@@ -107,8 +214,19 @@ export function usePointerSortable({
         return
       }
 
+      const container = source.parentElement
+      if (!container) {
+        return
+      }
+
+      if (draggingPositionRef.current !== null) {
+        finishDrag(false)
+      }
+
       event.preventDefault()
-      event.currentTarget.setPointerCapture(event.pointerId)
+
+      const pointerId = event.pointerId
+      container.setPointerCapture(pointerId)
 
       const nextOrder = [...currentOrder]
       const sourceBox = source.getBoundingClientRect()
@@ -129,96 +247,14 @@ export function usePointerSortable({
       orderRef.current = nextOrder
       draggingPositionRef.current = position
       draggedItemRef.current = nextOrder[position] ?? null
-      dragContainerRef.current = source.parentElement
-      renderSynchronizedRef.current = true
+      dragContainerRef.current = container
       previewRef.current = preview
       previewOffsetYRef.current = event.clientY - sourceBox.top
+      activePointerIdRef.current = pointerId
+
       setRenderedOrder(nextOrder)
       setDraggingPosition(position)
     }
-
-  const moveDrag = (event: PointerEvent<HTMLElement>) => {
-    const currentPosition = draggingPositionRef.current
-    if (currentPosition === null) {
-      return
-    }
-
-    event.preventDefault()
-    const pointerY = event.clientY
-    if (previewRef.current) {
-      previewRef.current.style.top = `${pointerY - previewOffsetYRef.current}px`
-    }
-
-    // React may not have committed the previous visual reorder yet. Reading
-    // position attributes from the old DOM during that short window can undo
-    // the previous move. Wait for the layout commit before resolving another
-    // target.
-    if (!renderSynchronizedRef.current) {
-      return
-    }
-
-    const hoveredItem = document
-      .elementFromPoint(event.clientX, pointerY)
-      ?.closest<HTMLElement>(itemSelector)
-    const hoveredPosition = Number(
-      hoveredItem && dragContainerRef.current?.contains(hoveredItem)
-        ? hoveredItem.dataset.sortablePosition
-        : Number.NaN
-    )
-
-    let targetPosition = Number.isInteger(hoveredPosition)
-      ? hoveredPosition
-      : -1
-
-    if (
-      targetPosition < 0 ||
-      targetPosition >= orderRef.current.length
-    ) {
-      const candidates = Array.from(
-        dragContainerRef.current?.querySelectorAll<HTMLElement>(itemSelector) ??
-          []
-      )
-        .map((element) => {
-          const position = Number(element.dataset.sortablePosition)
-          const box = element.getBoundingClientRect()
-          return {
-            middle: box.top + box.height / 2,
-            position,
-          }
-        })
-        .filter(
-          ({ position }) =>
-            Number.isInteger(position) &&
-            position >= 0 &&
-            position < orderRef.current.length
-        )
-        .sort((left, right) => left.middle - right.middle)
-
-      targetPosition =
-        candidates.find(({ middle }) => pointerY < middle)?.position ??
-        candidates.at(-1)?.position ??
-        -1
-      if (targetPosition < 0) {
-        return
-      }
-    }
-    if (targetPosition === currentPosition) {
-      return
-    }
-
-    const nextOrder = [...orderRef.current]
-    const [movedItem] = nextOrder.splice(currentPosition, 1)
-    if (movedItem === undefined) {
-      return
-    }
-    nextOrder.splice(targetPosition, 0, movedItem)
-
-    orderRef.current = nextOrder
-    draggingPositionRef.current = targetPosition
-    renderSynchronizedRef.current = false
-    setRenderedOrder(nextOrder)
-    setDraggingPosition(targetPosition)
-  }
 
   const handleKeyDown =
     (position: number) => (event: KeyboardEvent<HTMLElement>) => {
@@ -239,6 +275,27 @@ export function usePointerSortable({
   return {
     currentOrder,
     draggingPosition,
+    getContainerProps: () => ({
+      onLostPointerCapture: (event: ReactPointerEvent<HTMLElement>) => {
+        if (
+          event.pointerId === activePointerIdRef.current &&
+          draggingPositionRef.current !== null
+        ) {
+          finishDrag(false)
+        }
+      },
+      onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => {
+        if (event.pointerId === activePointerIdRef.current) {
+          finishDrag(false)
+        }
+      },
+      onPointerMove: moveDrag,
+      onPointerUp: (event: ReactPointerEvent<HTMLElement>) => {
+        if (event.pointerId === activePointerIdRef.current) {
+          finishDrag(true)
+        }
+      },
+    }),
     setItemRef: (position: number, element: HTMLElement | null) => {
       if (element) {
         element.dataset.sortablePosition = String(position)
@@ -246,15 +303,7 @@ export function usePointerSortable({
     },
     getHandleProps: (position: number) => ({
       onKeyDown: handleKeyDown(position),
-      onLostPointerCapture: () => {
-        if (draggingPositionRef.current !== null) {
-          finishDrag(false)
-        }
-      },
-      onPointerCancel: () => finishDrag(false),
       onPointerDown: beginDrag(position),
-      onPointerMove: moveDrag,
-      onPointerUp: () => finishDrag(true),
     }),
   }
 }

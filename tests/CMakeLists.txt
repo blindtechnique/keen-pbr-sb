@@ -20,12 +20,14 @@ add_executable(keen-pbr-tests
   test_resolver_fallback.cpp
   test_list_parser.cpp
   test_list_streamer.cpp
+  test_srs_decoder.cpp
   test_http_client.cpp
   test_config_validation.cpp
   test_config_writer.cpp
   test_dependency_analysis.cpp
   test_routing_state.cpp
   test_runtime_interface_inventory.cpp
+  test_api_ndms_names.cpp
   test_api_runtime_interfaces.cpp
   test_api_runtime_inventory.cpp
   test_api_dependency_analysis.cpp
@@ -87,6 +89,7 @@ add_executable(keen-pbr-tests
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_streamer.cpp
   ../src/lists/list_set_usage.cpp
+  ../src/lists/srs_decoder.cpp
   ../src/config/list_parser.cpp
   ../src/cmd/test_routing.cpp
   ../src/cmd/status.cpp
@@ -152,6 +155,7 @@ target_include_directories(keen-pbr-tests PRIVATE
 target_link_libraries(keen-pbr-tests PRIVATE
   nlohmann_json::nlohmann_json
   ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
   PkgConfig::LIBNL
   PkgConfig::LIBNL_ROUTE
   cpptrace::cpptrace
@@ -199,6 +203,7 @@ if(WITH_API)
     ../src/api/status_stream.cpp
     ../src/api/health_response.cpp
     ../src/api/handler_status_events.cpp
+    ../src/api/handler_ndms_names.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
     ../src/api/handler_dependency_analysis.cpp
@@ -245,6 +250,7 @@ add_executable(keen-pbr-firewall-it
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_set_usage.cpp
   ../src/lists/list_streamer.cpp
+  ../src/lists/srs_decoder.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
   ../src/routing/firewall_state.cpp
@@ -278,6 +284,7 @@ target_include_directories(keen-pbr-firewall-it PRIVATE
 target_link_libraries(keen-pbr-firewall-it PRIVATE
   nlohmann_json::nlohmann_json
   ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
   PkgConfig::LIBNL
   PkgConfig::LIBNL_ROUTE
   cpptrace::cpptrace

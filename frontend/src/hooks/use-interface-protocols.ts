@@ -1,6 +1,10 @@
 import type { Outbound } from "@/api/generated/model"
-import { useGetTransports } from "@/api/queries"
+import {
+  useGetNdmsInterfaceInventory,
+  useGetTransports,
+} from "@/api/queries"
 import { useInterfaceNames } from "@/hooks/use-interface-names"
+import { nativeTunnelKindLabel } from "@/lib/native-interfaces"
 
 /**
  * Короткая метка протокола для интерфейса: VLESS, AWG, WG, IKEV2, OPENVPN.
@@ -13,6 +17,7 @@ import { useInterfaceNames } from "@/hooks/use-interface-names"
  */
 export function useInterfaceProtocols() {
   const transportsQuery = useGetTransports()
+  const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const { names } = useInterfaceNames()
 
   const byInterface = new Map<string, string>()
@@ -21,6 +26,20 @@ export function useInterfaceProtocols() {
     for (const transport of transportsQuery.data.data) {
       if (transport.interface && transport.protocol) {
         byInterface.set(transport.interface, transport.protocol.toUpperCase())
+      }
+    }
+  }
+
+  if (ndmsInventoryQuery.data?.status === 200) {
+    for (const nativeInterface of ndmsInventoryQuery.data.data.interfaces) {
+      if (
+        nativeInterface.kernel_name &&
+        !byInterface.has(nativeInterface.kernel_name)
+      ) {
+        byInterface.set(
+          nativeInterface.kernel_name,
+          nativeTunnelKindLabel(nativeInterface.kind)
+        )
       }
     }
   }
