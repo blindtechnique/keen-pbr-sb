@@ -24,6 +24,11 @@
     "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
 #endif
 
+#ifndef KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH
+#define KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH \
+    "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
+#endif
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -102,6 +107,21 @@ public:
                    const std::vector<std::string>& arguments,
                    const std::vector<std::pair<std::string, std::string>>&
                        environment = {}) {
+        const auto metadata =
+            root / "opt/var/lib/keen-pbr/rescue/portable-stat.sh";
+        fs::create_directories(metadata.parent_path());
+        if (::chmod(metadata.parent_path().c_str(), 0700) != 0) {
+            throw std::system_error(
+                errno, std::generic_category(), "chmod rescue directory");
+        }
+        fs::copy_file(
+            KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH,
+            metadata,
+            fs::copy_options::overwrite_existing);
+        if (::chmod(metadata.c_str(), 0700) != 0) {
+            throw std::system_error(
+                errno, std::generic_category(), "chmod");
+        }
         int output_pipe[2] = {-1, -1};
         if (::pipe(output_pipe) != 0) {
             throw std::system_error(
@@ -461,4 +481,49 @@ TEST_CASE("sync-generation is owner checked and reports canonical result") {
     CHECK(run_command(
               temporary.path, {"release", owner_text, token})
               .exit_code == 0);
+}
+
+TEST_CASE("only an uninstall owner can atomically release and remove rescue helpers") {
+    TempDirectory temporary;
+    PausedProcess owner;
+    const auto owner_text =
+        std::to_string(static_cast<long>(owner.pid()));
+    const auto rescue =
+        temporary.path / "opt/var/lib/keen-pbr/rescue";
+    const auto guard =
+        temporary.path / "opt/etc/init.d/S00keen-pbr-rescue";
+    fs::create_directories(guard.parent_path());
+    write_file(guard, "guard\n");
+    write_file(rescue / "rescue-update.sh", "rescue\n");
+    write_file(rescue / "update-lock.sh", "lock\n");
+
+    const auto ordinary =
+        run_command(temporary.path, {"acquire", owner_text, "config-save"});
+    REQUIRE(ordinary.exit_code == 0);
+    const auto ordinary_token = strip_newline(ordinary.output);
+    CHECK(run_command(
+              temporary.path,
+              {"release-and-clean", owner_text, ordinary_token})
+              .exit_code == 1);
+    CHECK(fs::exists(guard));
+    CHECK(fs::exists(rescue / "update-lock.sh"));
+    REQUIRE(run_command(
+                temporary.path,
+                {"release", owner_text, ordinary_token})
+                .exit_code == 0);
+
+    const auto uninstall =
+        run_command(temporary.path, {"acquire", owner_text, "uninstall"});
+    REQUIRE(uninstall.exit_code == 0);
+    const auto uninstall_token = strip_newline(uninstall.output);
+    REQUIRE(run_command(
+                temporary.path,
+                {"release-and-clean", owner_text, uninstall_token})
+                .exit_code == 0);
+    CHECK_FALSE(fs::exists(
+        temporary.path / "opt/var/run/keen-pbr-update.lock"));
+    CHECK_FALSE(fs::exists(guard));
+    CHECK_FALSE(fs::exists(rescue / "rescue-update.sh"));
+    CHECK_FALSE(fs::exists(rescue / "update-lock.sh"));
+    CHECK_FALSE(fs::exists(rescue / "portable-stat.sh"));
 }

@@ -1,8 +1,10 @@
 #!/bin/sh
 
-# opkg runs postrm for the previous package during an upgrade/reinstall too.
-# Do not report a final removal while the replacement package is being installed.
-[ "${PKG_UPGRADE:-0}" = "1" ] && exit 0
+# opkg does not consistently set PKG_UPGRADE for a same-version
+# --force-reinstall. Never remove the durable early-boot guard merely because
+# package files are temporarily being replaced. The official uninstaller marks
+# an intentional final removal explicitly after checking recovery state.
+[ "${KEEN_PBR_FINAL_REMOVE:-0}" = "1" ] || exit 0
 
 ROOT=${KEEN_PBR_RESCUE_ROOT:-}
 case "$ROOT" in
@@ -45,7 +47,11 @@ fi
 if [ "$KEEP_GUARD" = "1" ]; then
     echo "keen-pbr recovery state is not clean; preserving S00keen-pbr-rescue" >&2
 else
-    rm -f "${ROOT}/opt/etc/init.d/S00keen-pbr-rescue"
+    rm -f \
+        "${ROOT}/opt/etc/init.d/S00keen-pbr-rescue" \
+        "$RESCUE_DIR/rescue-update.sh" \
+        "$RESCUE_DIR/update-lock.sh" \
+        "$RESCUE_DIR/portable-stat.sh"
 fi
 
 cat <<'EOF'

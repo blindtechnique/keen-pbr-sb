@@ -22,6 +22,11 @@
     "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
 #endif
 
+#ifndef KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH
+#define KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH \
+    "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
+#endif
+
 namespace keen_pbr3 {
 namespace {
 
@@ -87,6 +92,21 @@ fs::path copy_real_helper(const fs::path& directory) {
     };
     const auto helper = directory / "update-lock.sh";
     write_executable(helper, body);
+    std::ifstream metadata_input(
+        KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH, std::ios::binary);
+    REQUIRE(metadata_input);
+    const std::string metadata_body{
+        std::istreambuf_iterator<char>(metadata_input),
+        std::istreambuf_iterator<char>(),
+    };
+    write_executable(
+        directory / "root" /
+            "opt/var/lib/keen-pbr/rescue/portable-stat.sh",
+        metadata_body);
+    REQUIRE(
+        ::chmod(
+            (directory / "root" / "opt/var/lib/keen-pbr/rescue").c_str(),
+            0700) == 0);
     return helper;
 }
 

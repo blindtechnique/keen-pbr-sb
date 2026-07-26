@@ -176,7 +176,9 @@ target_compile_definitions(keen-pbr-rescue-tests PRIVATE
   KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+  KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
   KEEN_PBR_INSTALL_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/install.sh"
+  KEEN_PBR_POSTINST_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postinst"
   KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
 )
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
@@ -238,6 +240,7 @@ set_target_properties(keen-pbr-maintenance-lock-tests PROPERTIES
 target_compile_definitions(keen-pbr-maintenance-lock-tests PRIVATE
   KEEN_PBR3_TESTING
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+  KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
 )
 target_include_directories(keen-pbr-maintenance-lock-tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
@@ -261,6 +264,7 @@ set_target_properties(keen-pbr-update-lock-protocol-tests PROPERTIES
 )
 target_compile_definitions(keen-pbr-update-lock-protocol-tests PRIVATE
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+  KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
 )
 target_include_directories(keen-pbr-update-lock-protocol-tests PRIVATE
   ${CMAKE_SOURCE_DIR}/third_party/doctest
@@ -285,7 +289,9 @@ target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+  KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
   KEEN_PBR_INSTALL_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/install.sh"
+  KEEN_PBR_POSTINST_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postinst"
   KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
 )
 

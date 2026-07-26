@@ -11,6 +11,7 @@ TRANSPORT_CONFIG="/opt/etc/keen-pbr/transports.json"
 RESCUE_DIR="/opt/var/lib/keen-pbr/rescue"
 RESCUE_HELPER="$RESCUE_DIR/rescue-update.sh"
 LOCK_HELPER="$RESCUE_DIR/update-lock.sh"
+METADATA_HELPER="$RESCUE_DIR/portable-stat.sh"
 LOCK_DIR="/opt/var/run/keen-pbr-update.lock"
 UPDATE_ONLY=0
 LOCK_OWNER_PID=${KEEN_PBR_UPDATE_LOCK_PID:-}
@@ -279,6 +280,7 @@ fallback_discard_owned_lock() {
 acquire_update_lock() {
     mkdir -p "$(dirname "$LOCK_DIR")" || return 1
     if [ -x "$LOCK_HELPER" ] &&
+       [ -f "$METADATA_HELPER" ] && [ ! -L "$METADATA_HELPER" ] &&
        [ "$("$LOCK_HELPER" version 2>/dev/null || true)" = "2" ]; then
         LOCK_HELPER_V2=1
     else
@@ -442,6 +444,7 @@ bootstrap_rescue_helpers() {
         die "проверенный IPK не содержит data.tar.gz"
     [ -s "$payload" ] || die "data.tar.gz в проверенном IPK пуст"
     tar -xzf "$payload" -C "$helper_tree" \
+        ./opt/usr/lib/keen-pbr/portable-stat.sh \
         ./opt/usr/lib/keen-pbr/rescue-update.sh \
         ./opt/usr/lib/keen-pbr/rescue-startup-guard.sh \
         ./opt/usr/lib/keen-pbr/update-lock.sh ||
@@ -449,22 +452,26 @@ bootstrap_rescue_helpers() {
     rescue_source="$helper_tree/opt/usr/lib/keen-pbr/rescue-update.sh"
     startup_guard_source="$helper_tree/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
     lock_source="$helper_tree/opt/usr/lib/keen-pbr/update-lock.sh"
+    metadata_source="$helper_tree/opt/usr/lib/keen-pbr/portable-stat.sh"
     [ -f "$rescue_source" ] && [ ! -L "$rescue_source" ] &&
         [ -f "$startup_guard_source" ] &&
         [ ! -L "$startup_guard_source" ] &&
-        [ -f "$lock_source" ] && [ ! -L "$lock_source" ] ||
+        [ -f "$lock_source" ] && [ ! -L "$lock_source" ] &&
+        [ -f "$metadata_source" ] && [ ! -L "$metadata_source" ] ||
         die "rescue helper в IPK имеет небезопасный тип"
     /bin/sh -n "$rescue_source" || die "получен повреждённый rescue helper"
     /bin/sh -n "$startup_guard_source" ||
         die "получен повреждённый startup guard"
     /bin/sh -n "$lock_source" || die "получен повреждённый update lock helper"
+    /bin/sh -n "$metadata_source" ||
+        die "получен повреждённый metadata helper"
 
     [ ! -L "$RESCUE_DIR" ] &&
         { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } ||
         die "каталог rescue имеет небезопасный тип"
     mkdir -p "$RESCUE_DIR"
     chmod 0700 "$RESCUE_DIR" || die "не удалось защитить каталог rescue"
-    for helper in rescue-update.sh update-lock.sh; do
+    for helper in portable-stat.sh rescue-update.sh update-lock.sh; do
         source="$helper_tree/opt/usr/lib/keen-pbr/$helper"
         temporary="$RESCUE_DIR/$helper.tmp.$$"
         cp "$source" "$temporary" || die "не удалось подготовить $helper"
@@ -804,7 +811,8 @@ install_package_transactionally() {
         die "rescue helper не установлен"
     "$RESCUE_HELPER" stage "$PACKAGE_FILE"
 
-    if KEEN_PBR_RESCUE_TRANSACTION=1 \
+    if PKG_UPGRADE=1 \
+           KEEN_PBR_RESCUE_TRANSACTION=1 \
            KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
            /opt/bin/opkg --force-reinstall install "$PACKAGE_FILE" &&
        [ -x "$RESCUE_HELPER" ] &&

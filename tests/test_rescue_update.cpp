@@ -33,6 +33,11 @@
     "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
 #endif
 
+#ifndef KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH
+#define KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH \
+    "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
+#endif
+
 #ifndef KEEN_PBR_TRANSPORT_INIT_PATH
 #define KEEN_PBR_TRANSPORT_INIT_PATH \
     "packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager"
@@ -57,6 +62,7 @@ namespace {
 namespace fs = std::filesystem;
 
 std::string read_file(const fs::path& path);
+void install_portable_stat(const fs::path& root);
 
 TEST_CASE(
     "transport init consumes persistent transaction bypass before daemon start") {
@@ -138,6 +144,7 @@ class LockGuardianProcess {
 public:
     LockGuardianProcess(const fs::path& root,
                         const std::string& operation) {
+        install_portable_stat(root);
         int control[2] = {-1, -1};
         int status[2] = {-1, -1};
         if (::pipe(control) != 0 || ::pipe(status) != 0) {
@@ -354,6 +361,13 @@ std::string read_file(const fs::path& path) {
             std::istreambuf_iterator<char>()};
 }
 
+void install_portable_stat(const fs::path& root) {
+    write_file(
+        root / "opt/var/lib/keen-pbr/rescue/portable-stat.sh",
+        read_file(KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH),
+        0700);
+}
+
 std::size_t count_occurrences(const std::string& text,
                               const std::string& needle) {
     std::size_t count = 0;
@@ -394,6 +408,15 @@ fs::path config_dir(const fs::path& root) {
 
 void install_runtime_mocks(const fs::path& root) {
     write_file(
+        root / "opt/bin/stat",
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" != -t ]; then\n"
+        "  printf '%s\\n' \"stat: invalid option -- '${1#-}'\" >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "exec /usr/bin/stat -t \"$2\"\n",
+        0700);
+    write_file(
         root / "opt/bin/opkg",
         "#!/bin/sh\n"
         "count_file=\"$KEEN_PBR_RESCUE_ROOT/opkg-count\"\n"
@@ -433,6 +456,9 @@ void install_runtime_mocks(const fs::path& root) {
         "  \"$ROOT/opt/var/lib/keen-pbr/recovery/backup-restore/active.json\"\n",
         0700);
     write_file(root / "mock-bin/sleep", "#!/bin/sh\nexit 0\n", 0700);
+    write_file(rescue_dir(root) / "portable-stat.sh",
+               read_file(KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH),
+               0700);
     write_file(rescue_dir(root) / "update-lock.sh",
                read_file(KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH),
                0700);
@@ -472,7 +498,8 @@ int run_script(const fs::path& root,
                bool package_postinst = false,
                bool package_upgrade = false,
                bool fail_pending_after_commit = false,
-               bool persistent_transaction = false) {
+               bool persistent_transaction = false,
+               bool final_remove = false) {
     const auto pid = ::fork();
     if (pid < 0)
         throw std::system_error(errno, std::generic_category(), "fork");
@@ -519,6 +546,8 @@ int run_script(const fs::path& root,
             ::setenv("PKG_UPGRADE", "1", 1);
         if (persistent_transaction)
             ::setenv("KEEN_PBR_PERSISTENT_TRANSACTION", "1", 1);
+        if (final_remove)
+            ::setenv("KEEN_PBR_FINAL_REMOVE", "1", 1);
         if (!stdout_path.empty()) {
             const int descriptor =
                 ::open(stdout_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -540,6 +569,7 @@ int run_script(const fs::path& root,
 }
 
 fs::path write_install_lock_harness(const fs::path& root) {
+    install_portable_stat(root);
     const auto installer = read_file(KEEN_PBR_INSTALL_SCRIPT_PATH);
     const auto begin = installer.find("valid_lock_pid() {");
     const auto end = installer.find("\nsay() {", begin);
@@ -554,6 +584,7 @@ fs::path write_install_lock_harness(const fs::path& root) {
         "umask 077\n"
         "ROOT=$KEEN_PBR_RESCUE_ROOT\n"
         "LOCK_HELPER=\"$ROOT/opt/var/lib/keen-pbr/rescue/update-lock.sh\"\n"
+        "METADATA_HELPER=\"$ROOT/opt/var/lib/keen-pbr/rescue/portable-stat.sh\"\n"
         "LOCK_DIR=\"$ROOT/opt/var/run/keen-pbr-update.lock\"\n"
         "LOCK_OWNER_PID=${KEEN_PBR_UPDATE_LOCK_PID:-}\n"
         "LOCK_TOKEN=${KEEN_PBR_UPDATE_LOCK_TOKEN:-}\n"
@@ -605,6 +636,7 @@ int run_lock(const fs::path& root,
              const std::vector<std::string>& arguments,
              const fs::path& stdout_path = {},
              bool fail_before_commit = false) {
+    install_portable_stat(root);
     return run_script(root,
                       KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH,
                       arguments,
@@ -642,6 +674,30 @@ int run_startup_guard(const fs::path& root,
                       false,
                       false,
                       persistent_transaction);
+}
+
+int run_postrm(const fs::path& root,
+               bool final_remove = false,
+               bool package_upgrade = false) {
+    return run_script(root,
+                      KEEN_PBR_POSTRM_SCRIPT_PATH,
+                      {},
+                      0,
+                      0,
+                      {},
+                      true,
+                      {},
+                      {},
+                      {},
+                      false,
+                      {},
+                      false,
+                      false,
+                      false,
+                      package_upgrade,
+                      false,
+                      false,
+                      final_remove);
 }
 
 void prepare_two_generations(const fs::path& root) {
@@ -1206,31 +1262,90 @@ TEST_CASE("package postinst refuses persistent recovery before mutations") {
     CHECK(guard < first_mutation);
 }
 
-TEST_CASE("final uninstall removes S00 while package replacement preserves it") {
+TEST_CASE("package postinst restores early guard before metadata validation") {
+    const auto postinst = read_file(KEEN_PBR_POSTINST_SCRIPT_PATH);
+    const auto guard_install = postinst.find(
+        "/opt/usr/lib/keen-pbr/rescue-startup-guard.sh");
+    const auto metadata_load = postinst.find(". \"$METADATA_HELPER\"");
+    REQUIRE(guard_install != std::string::npos);
+    REQUIRE(metadata_load != std::string::npos);
+    CHECK(guard_install < metadata_load);
+}
+
+TEST_CASE("target package scripts use the portable metadata boundary") {
+    for (const auto* script :
+         {KEEN_PBR_POSTINST_SCRIPT_PATH,
+          KEEN_PBR_RESCUE_SCRIPT_PATH,
+          KEEN_PBR_RESCUE_STARTUP_GUARD_PATH,
+          KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH}) {
+        CHECK(read_file(script).find("stat -c") == std::string::npos);
+    }
+}
+
+TEST_CASE("package replacement protects the legacy postrm transition") {
+    CHECK(
+        read_file(KEEN_PBR_INSTALL_SCRIPT_PATH).find("PKG_UPGRADE=1") !=
+        std::string::npos);
+    CHECK(
+        read_file(KEEN_PBR_RESCUE_SCRIPT_PATH).find("PKG_UPGRADE=1") !=
+        std::string::npos);
+}
+
+TEST_CASE("unsafe rescue directory cannot inject metadata helper code") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    const auto rescue = rescue_dir(root);
+    const auto marker = root / "metadata-helper-executed";
+    write_file(
+        root / "opt/bin/stat",
+        "#!/bin/sh\n"
+        "[ \"${1:-}\" = -t ] || exit 1\n"
+        "exec /usr/bin/stat -t \"$2\"\n",
+        0700);
+    write_file(
+        rescue / "portable-stat.sh",
+        "touch \"$KEEN_PBR_RESCUE_ROOT/metadata-helper-executed\"\n",
+        0700);
+    REQUIRE(::chmod(rescue.c_str(), 0777) == 0);
+
+    CHECK(
+        run_script(
+            root,
+            KEEN_PBR_RESCUE_SCRIPT_PATH,
+            {"status"},
+            0,
+            0,
+            {},
+            false) == 2);
+    CHECK_FALSE(fs::exists(marker));
+
+    CHECK(
+        run_script(
+            root,
+            KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH,
+            {"protocol"},
+            0,
+            0,
+            {},
+            false) == 2);
+    CHECK_FALSE(fs::exists(marker));
+}
+
+TEST_CASE(
+    "only an explicit final uninstall removes the clean recovery guard") {
     TempDirectory directory;
     const auto root = directory.path;
     const auto guard = root / "opt/etc/init.d/S00keen-pbr-rescue";
     write_file(guard, "#!/bin/sh\nexit 0\n", 0700);
 
-    REQUIRE(run_script(root,
-                       KEEN_PBR_POSTRM_SCRIPT_PATH,
-                       {},
-                       0,
-                       0,
-                       {},
-                       true,
-                       {},
-                       {},
-                       {},
-                       false,
-                       {},
-                       false,
-                       false,
-                       false,
-                       true) == 0);
+    REQUIRE(run_postrm(root, false, true) == 0);
     CHECK(fs::exists(guard));
 
-    REQUIRE(run_script(root, KEEN_PBR_POSTRM_SCRIPT_PATH, {}) == 0);
+    // Same-version opkg --force-reinstall does not reliably set PKG_UPGRADE.
+    REQUIRE(run_postrm(root) == 0);
+    CHECK(fs::exists(guard));
+
+    REQUIRE(run_postrm(root, true) == 0);
     CHECK_FALSE(fs::exists(guard));
 }
 
@@ -1249,7 +1364,7 @@ TEST_CASE("final uninstall preserves early guard for forensic recovery state") {
         write_file(guard, "#!/bin/sh\nexit 0\n", 0700);
         write_file(root / "opt/var/lib/keen-pbr" / relative, "{}\n");
 
-        REQUIRE(run_script(root, KEEN_PBR_POSTRM_SCRIPT_PATH, {}) == 0);
+        REQUIRE(run_postrm(root, true) == 0);
         CHECK(fs::exists(guard));
     }
 }

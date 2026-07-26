@@ -37,6 +37,76 @@ PENDING_TARGET_IPK="$RESCUE_DIR/pending-target.ipk"
 PENDING_TARGET_CONFIG="$RESCUE_DIR/pending-target-config"
 SNAPSHOT_MANIFEST=".snapshot-manifest"
 SNAPSHOT_READY=".snapshot-ready"
+STABLE_METADATA_HELPER="${RESCUE_DIR}/portable-stat.sh"
+PACKAGE_METADATA_HELPER="${ROOT}/opt/usr/lib/keen-pbr/portable-stat.sh"
+
+bootstrap_rescue_directory_is_private() {
+    [ -d "$RESCUE_DIR" ] && [ ! -L "$RESCUE_DIR" ] || return 1
+    if [ -x "${ROOT}/opt/bin/stat" ]; then
+        bootstrap_output=$(
+            LC_ALL=C "${ROOT}/opt/bin/stat" -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif [ -x "${ROOT}/opt/bin/busybox" ]; then
+        bootstrap_output=$(
+            LC_ALL=C "${ROOT}/opt/bin/busybox" \
+                stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif command -v stat >/dev/null 2>&1; then
+        bootstrap_output=$(
+            LC_ALL=C stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif command -v busybox >/dev/null 2>&1; then
+        bootstrap_output=$(
+            LC_ALL=C busybox stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    else
+        return 1
+    fi
+    case "$bootstrap_output" in
+        "$RESCUE_DIR "*)
+            bootstrap_fields=${bootstrap_output#"$RESCUE_DIR "}
+            ;;
+        *) return 1 ;;
+    esac
+    set -- $bootstrap_fields
+    [ "$#" -ge 5 ] || return 1
+    bootstrap_mode_hex=$3
+    bootstrap_uid=$4
+    case "$bootstrap_mode_hex" in
+        ''|*[!0-9A-Fa-f]*) return 1 ;;
+    esac
+    [ "${#bootstrap_mode_hex}" -le 8 ] || return 1
+    case "$bootstrap_uid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    bootstrap_mode=$((0x$bootstrap_mode_hex & 4095))
+    bootstrap_expected_uid=$(id -u 2>/dev/null) || return 1
+    [ "$bootstrap_mode" -eq 448 ] 2>/dev/null &&
+        [ "$bootstrap_uid" = "$bootstrap_expected_uid" ]
+}
+
+load_metadata_helper() {
+    requested_helper=${KEEN_PBR_PORTABLE_STAT_HELPER:-}
+    if [ -n "$requested_helper" ]; then
+        metadata_helper=$requested_helper
+    elif [ -f "$PACKAGE_METADATA_HELPER" ] &&
+         [ ! -L "$PACKAGE_METADATA_HELPER" ]; then
+        metadata_helper=$PACKAGE_METADATA_HELPER
+    else
+        bootstrap_rescue_directory_is_private || {
+            echo "Refusing unsafe rescue metadata directory" >&2
+            exit 2
+        }
+        metadata_helper=$STABLE_METADATA_HELPER
+    fi
+    [ -f "$metadata_helper" ] && [ ! -L "$metadata_helper" ] || {
+        echo "Portable metadata helper is missing or unsafe" >&2
+        exit 2
+    }
+    . "$metadata_helper" || exit 2
+}
+
+load_metadata_helper
 
 [ ! -L "$RESCUE_DIR" ] &&
     { [ ! -e "$RESCUE_DIR" ] || [ -d "$RESCUE_DIR" ]; } || {
@@ -116,15 +186,7 @@ read_hash() {
 }
 
 file_mode() {
-    target=$1
-    if [ -x "${ROOT}/opt/bin/stat" ]; then
-        "${ROOT}/opt/bin/stat" -c '%a' "$target"
-    elif command -v stat >/dev/null 2>&1; then
-        stat -c '%a' "$target"
-    else
-        echo "stat is required for rescue snapshots" >&2
-        return 1
-    fi
+    keen_pbr_stat_value '%a' "$1"
 }
 
 write_ipk_hash() {
@@ -710,7 +772,8 @@ restart_runtime() {
 opkg_install_archive() {
     archive=$1
     valid_ipk_file "$archive" || return 2
-    KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
+    PKG_UPGRADE=1 \
+        KEEN_PBR_REPLACE_DNSMASQ_DEFAULTS=N \
         "$OPKG" --force-reinstall install "$archive"
 }
 

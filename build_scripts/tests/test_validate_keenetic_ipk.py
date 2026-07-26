@@ -111,11 +111,16 @@ def make_ipk(
     conffiles = ("\n".join(sorted(VALIDATOR.REQUIRED_CONFFILES)) + "\n").encode()
     control = tar_archive(
         {
+            "control": (b"Package: keen-pbr\nVersion: 1\n", 0o644),
             "conffiles": (conffiles, 0o644),
             "postinst": (
-                b"#!/bin/sh\n# REPLACE_WITH_A_LONG_RANDOM_VALUE /dev/urandom\n",
+                b"#!/bin/sh\n"
+                b"# REPLACE_WITH_A_LONG_RANDOM_VALUE /dev/urandom\n"
+                b". /opt/usr/lib/keen-pbr/portable-stat.sh\n",
                 executable,
             ),
+            "prerm": (b"#!/bin/sh\nexit 0\n", executable),
+            "postrm": (b"#!/bin/sh\nexit 0\n", executable),
         }
     )
     members = {
@@ -148,6 +153,41 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             package = Path(directory) / "keen-pbr.ipk"
             make_ipk(package, outer_tar=True)
             VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_unexpected_outer_member(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(package)
+            members = VALIDATOR.read_ar(package)
+            members["unexpected"] = b"payload"
+            package.write_bytes(ar_archive(members))
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "unexpected outer IPK members"
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_non_executable_postinst(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(package)
+            members = VALIDATOR.read_ar(package)
+            with tarfile.open(
+                fileobj=io.BytesIO(members["control.tar.gz"]), mode="r:*"
+            ) as source:
+                control_files = {
+                    VALIDATOR.normalized(item.name): (
+                        source.extractfile(item).read(),
+                        0o644 if VALIDATOR.normalized(item.name) == "postinst" else item.mode,
+                    )
+                    for item in source.getmembers()
+                    if item.isfile()
+                }
+            members["control.tar.gz"] = tar_archive(control_files)
+            package.write_bytes(ar_archive(members))
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError, "postinst"
+            ):
+                VALIDATOR.validate(package, "aarch64")
 
 
 if __name__ == "__main__":

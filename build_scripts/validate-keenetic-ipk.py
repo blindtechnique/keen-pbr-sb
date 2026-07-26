@@ -31,6 +31,7 @@ REQUIRED_EXECUTABLES = {
     "opt/usr/lib/keen-pbr/rescue-update.sh",
     "opt/usr/lib/keen-pbr/rescue-startup-guard.sh",
     "opt/usr/lib/keen-pbr/update-lock.sh",
+    "opt/usr/lib/keen-pbr/portable-stat.sh",
 }
 REQUIRED_FILES = REQUIRED_EXECUTABLES | {
     "opt/etc/keen-pbr/config.json",
@@ -51,6 +52,23 @@ REQUIRED_CONFFILES = {
     "/opt/etc/keen-pbr/local.lst",
     "/opt/etc/keen-pbr/dnsmasq-fallback.conf",
     "/opt/etc/keen-pbr/transports.json",
+}
+REQUIRED_CONTROL_FILES = {
+    "control",
+    "conffiles",
+    "postinst",
+    "prerm",
+    "postrm",
+}
+REQUIRED_CONTROL_EXECUTABLES = {
+    "postinst",
+    "prerm",
+    "postrm",
+}
+EXPECTED_OUTER_MEMBERS = {
+    "debian-binary",
+    "control.tar.gz",
+    "data.tar.gz",
 }
 
 
@@ -79,8 +97,34 @@ def read_ar(path: Path) -> dict[str, bytes]:
             raise ValidationError("truncated ar member")
         offset += size + size % 2
         name = raw_name.rstrip("/")
+        if name in members:
+            raise ValidationError(f"duplicate ar member: {name}")
         members[name] = payload
     return members
+
+
+def validated_member_name(name: str, archive_name: str) -> str:
+    if "\\" in name:
+        raise ValidationError(f"{archive_name} contains unsafe member path: {name}")
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValidationError(f"{archive_name} contains unsafe member path: {name}")
+    parts = tuple(part for part in path.parts if part not in ("", "."))
+    if not parts:
+        raise ValidationError(f"{archive_name} contains an empty member path")
+    return "/".join(parts)
+
+
+def indexed_tar_members(
+    archive: tarfile.TarFile, archive_name: str
+) -> dict[str, tarfile.TarInfo]:
+    entries: dict[str, tarfile.TarInfo] = {}
+    for item in archive.getmembers():
+        name = validated_member_name(item.name, archive_name)
+        if name in entries:
+            raise ValidationError(f"{archive_name} contains duplicate member: {name}")
+        entries[name] = item
+    return entries
 
 
 def read_ipk(path: Path) -> dict[str, bytes]:
@@ -90,11 +134,16 @@ def read_ipk(path: Path) -> dict[str, bytes]:
         with tarfile.open(path, mode="r:*") as archive:
             members: dict[str, bytes] = {}
             for item in archive.getmembers():
+                name = validated_member_name(item.name, "outer IPK archive")
                 if not item.isfile():
                     continue
                 stream = archive.extractfile(item)
                 if stream is not None:
-                    members[normalized(item.name)] = stream.read()
+                    if name in members:
+                        raise ValidationError(
+                            f"outer IPK archive contains duplicate member: {name}"
+                        )
+                    members[name] = stream.read()
             return members
     except tarfile.TarError as error:
         raise ValidationError("IPK is neither an ar nor a tar archive") from error
@@ -138,11 +187,16 @@ def validate_elf(member: tarfile.TarInfo, content: bytes, arch: str) -> None:
 
 def validate(path: Path, arch: str) -> None:
     members = read_ipk(path)
-    if members.get("debian-binary", b"").strip() != b"2.0":
+    if set(members) != EXPECTED_OUTER_MEMBERS:
+        raise ValidationError(
+            "unexpected outer IPK members: "
+            + ", ".join(sorted(set(members) ^ EXPECTED_OUTER_MEMBERS))
+        )
+    if members.get("debian-binary") != b"2.0\n":
         raise ValidationError("missing or unsupported debian-binary member")
 
     with open_tar(find_archive(members, "data.tar")) as data_tar:
-        entries = {normalized(item.name): item for item in data_tar.getmembers()}
+        entries = indexed_tar_members(data_tar, "data archive")
         missing = sorted(REQUIRED_FILES - entries.keys())
         if missing:
             raise ValidationError("missing package files: " + ", ".join(missing))
@@ -166,9 +220,20 @@ def validate(path: Path, arch: str) -> None:
             raise ValidationError("transport API key placeholder is missing")
 
     with open_tar(find_archive(members, "control.tar")) as control_tar:
-        entries = {normalized(item.name): item for item in control_tar.getmembers()}
-        if "postinst" not in entries or "conffiles" not in entries:
-            raise ValidationError("control archive must contain postinst and conffiles")
+        entries = indexed_tar_members(control_tar, "control archive")
+        missing_control = sorted(REQUIRED_CONTROL_FILES - entries.keys())
+        if missing_control:
+            raise ValidationError(
+                "control archive is missing files: " + ", ".join(missing_control)
+            )
+        for name in REQUIRED_CONTROL_FILES:
+            if not entries[name].isfile():
+                raise ValidationError(f"control archive member is not a file: {name}")
+            if entries[name].uid != 0 or entries[name].gid != 0:
+                raise ValidationError(f"control archive member is not root-owned: {name}")
+        for name in REQUIRED_CONTROL_EXECUTABLES:
+            if not entries[name].mode & stat.S_IXUSR:
+                raise ValidationError(f"control script is not executable: {name}")
         conffiles_stream = control_tar.extractfile(entries["conffiles"])
         postinst_stream = control_tar.extractfile(entries["postinst"])
         if conffiles_stream is None or postinst_stream is None:
@@ -182,6 +247,10 @@ def validate(path: Path, arch: str) -> None:
         postinst = postinst_stream.read().decode()
         if "REPLACE_WITH_A_LONG_RANDOM_VALUE" not in postinst or "/dev/urandom" not in postinst:
             raise ValidationError("postinst does not initialize the transport API key")
+        if "stat -c" in postinst:
+            raise ValidationError("postinst requires GNU stat instead of the BusyBox-compatible helper")
+        if "portable-stat.sh" not in postinst:
+            raise ValidationError("postinst does not load portable metadata support")
 
 
 def main() -> int:

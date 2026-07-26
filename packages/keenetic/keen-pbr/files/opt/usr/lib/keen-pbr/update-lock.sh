@@ -18,9 +18,80 @@ OWNER_FILE="$LOCK_DIR/owner"
 PROVISIONAL_FILE="$LOCK_DIR/provisional"
 GENERATION_DIR="${ROOT}/opt/var/lib/keen-pbr"
 GENERATION_FILE="$GENERATION_DIR/maintenance-generation"
+RESCUE_DIR="${ROOT}/opt/var/lib/keen-pbr/rescue"
 CLEANUP_OWNED=0
 GUARD_OWNER_PID=
 GUARD_TOKEN=
+STABLE_METADATA_HELPER="${RESCUE_DIR}/portable-stat.sh"
+PACKAGE_METADATA_HELPER="${ROOT}/opt/usr/lib/keen-pbr/portable-stat.sh"
+
+bootstrap_rescue_directory_is_private() {
+    [ -d "$RESCUE_DIR" ] && [ ! -L "$RESCUE_DIR" ] || return 1
+    if [ -x "${ROOT}/opt/bin/stat" ]; then
+        bootstrap_output=$(
+            LC_ALL=C "${ROOT}/opt/bin/stat" -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif [ -x "${ROOT}/opt/bin/busybox" ]; then
+        bootstrap_output=$(
+            LC_ALL=C "${ROOT}/opt/bin/busybox" \
+                stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif command -v stat >/dev/null 2>&1; then
+        bootstrap_output=$(
+            LC_ALL=C stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif command -v busybox >/dev/null 2>&1; then
+        bootstrap_output=$(
+            LC_ALL=C busybox stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    else
+        return 1
+    fi
+    case "$bootstrap_output" in
+        "$RESCUE_DIR "*)
+            bootstrap_fields=${bootstrap_output#"$RESCUE_DIR "}
+            ;;
+        *) return 1 ;;
+    esac
+    set -- $bootstrap_fields
+    [ "$#" -ge 5 ] || return 1
+    bootstrap_mode_hex=$3
+    bootstrap_uid=$4
+    case "$bootstrap_mode_hex" in
+        ''|*[!0-9A-Fa-f]*) return 1 ;;
+    esac
+    [ "${#bootstrap_mode_hex}" -le 8 ] || return 1
+    case "$bootstrap_uid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    bootstrap_mode=$((0x$bootstrap_mode_hex & 4095))
+    bootstrap_expected_uid=$(id -u 2>/dev/null) || return 1
+    [ "$bootstrap_mode" -eq 448 ] 2>/dev/null &&
+        [ "$bootstrap_uid" = "$bootstrap_expected_uid" ]
+}
+
+load_metadata_helper() {
+    requested_helper=${KEEN_PBR_PORTABLE_STAT_HELPER:-}
+    if [ -n "$requested_helper" ]; then
+        metadata_helper=$requested_helper
+    elif [ -f "$PACKAGE_METADATA_HELPER" ] &&
+         [ ! -L "$PACKAGE_METADATA_HELPER" ]; then
+        metadata_helper=$PACKAGE_METADATA_HELPER
+    else
+        bootstrap_rescue_directory_is_private || {
+            echo "Refusing unsafe rescue metadata directory" >&2
+            exit 2
+        }
+        metadata_helper=$STABLE_METADATA_HELPER
+    fi
+    [ -f "$metadata_helper" ] && [ ! -L "$metadata_helper" ] || {
+        echo "Portable metadata helper is missing or unsafe" >&2
+        exit 2
+    }
+    . "$metadata_helper" || exit 2
+}
+
+load_metadata_helper
 
 valid_operation() {
     operation=${1:-}
@@ -68,15 +139,7 @@ valid_generation() {
 }
 
 stat_value() {
-    format=$1
-    target=$2
-    if [ -x "${ROOT}/opt/bin/stat" ]; then
-        "${ROOT}/opt/bin/stat" -c "$format" "$target"
-    elif command -v stat >/dev/null 2>&1; then
-        stat -c "$format" "$target"
-    else
-        return 1
-    fi
+    keen_pbr_stat_value "$1" "$2"
 }
 
 effective_uid() {
@@ -681,6 +744,26 @@ release_lock() {
     rmdir "$LOCK_DIR"
 }
 
+release_lock_and_cleanup_rescue() {
+    requested_pid=${1:-}
+    requested_token=${2:-}
+    lock_is_held_by "$requested_pid" "$requested_token" || return 1
+    [ "$(operation_from_token "$requested_token")" = "uninstall" ] || return 1
+
+    # Remove canonical helper names while the uninstall lock is still held.
+    # This script and the metadata functions are already loaded in the current
+    # process, so unlinking them does not prevent the final lock release. A new
+    # installer can only enter after rmdir(LOCK_DIR), at which point it sees no
+    # stale helpers and uses its verified-IPK bootstrap/fallback path.
+    rm -f \
+        "${ROOT}/opt/etc/init.d/S00keen-pbr-rescue" \
+        "$RESCUE_DIR/rescue-update.sh" \
+        "$RESCUE_DIR/portable-stat.sh" \
+        "$RESCUE_DIR/update-lock.sh" ||
+        return 1
+    release_lock "$requested_pid" "$requested_token"
+}
+
 reserve_generation() {
     requested_pid=${1:-}
     requested_token=${2:-}
@@ -851,6 +934,10 @@ case "${1:-}" in
         [ "$#" -eq 3 ] || exit 2
         release_lock "$2" "$3"
         ;;
+    release-and-clean)
+        [ "$#" -eq 3 ] || exit 2
+        release_lock_and_cleanup_rescue "$2" "$3"
+        ;;
     owner)
         [ "$#" -eq 1 ] || exit 2
         owner_pid=$(read_owner_pid) || exit 1
@@ -874,7 +961,7 @@ case "${1:-}" in
         guard_lock "$2" "${3:-}" "${4:-}"
         ;;
     *)
-        echo "Usage: $0 {version|protocol|acquire PID [OPERATION]|held PID TOKEN|operation PID TOKEN|transfer PID TOKEN NEW_PID|release PID TOKEN|owner|generation|reserve PID TOKEN EXPECTED|sync-generation PID TOKEN EXPECTED|guard OPERATION [OWNER_PID TOKEN]}" >&2
+        echo "Usage: $0 {version|protocol|acquire PID [OPERATION]|held PID TOKEN|operation PID TOKEN|transfer PID TOKEN NEW_PID|release PID TOKEN|release-and-clean PID TOKEN|owner|generation|reserve PID TOKEN EXPECTED|sync-generation PID TOKEN EXPECTED|guard OPERATION [OWNER_PID TOKEN]}" >&2
         exit 2
         ;;
 esac

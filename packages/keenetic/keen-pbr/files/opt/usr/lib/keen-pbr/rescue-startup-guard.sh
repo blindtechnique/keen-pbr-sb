@@ -16,6 +16,8 @@ PENDING_FILE="$RESCUE_DIR/pending"
 UNKNOWN_FILE="$RESCUE_DIR/UNKNOWN"
 STABLE_HELPER="$RESCUE_DIR/rescue-update.sh"
 PACKAGE_HELPER="${ROOT}/opt/usr/lib/keen-pbr/rescue-update.sh"
+STABLE_METADATA_HELPER="$RESCUE_DIR/portable-stat.sh"
+PACKAGE_METADATA_HELPER="${ROOT}/opt/usr/lib/keen-pbr/portable-stat.sh"
 RECOVERY_DIR="${ROOT}/opt/var/lib/keen-pbr/recovery"
 CONFIG_SAVE_DIR="$RECOVERY_DIR/config-save"
 BACKUP_RESTORE_DIR="$RECOVERY_DIR/backup-restore"
@@ -35,10 +37,75 @@ fail() {
     exit 1
 }
 
+bootstrap_rescue_directory_is_private() {
+    [ -d "$RESCUE_DIR" ] && [ ! -L "$RESCUE_DIR" ] || return 1
+    if [ -x "${ROOT}/opt/bin/stat" ]; then
+        bootstrap_output=$(
+            LC_ALL=C "${ROOT}/opt/bin/stat" -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif [ -x "${ROOT}/opt/bin/busybox" ]; then
+        bootstrap_output=$(
+            LC_ALL=C "${ROOT}/opt/bin/busybox" \
+                stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif command -v stat >/dev/null 2>&1; then
+        bootstrap_output=$(
+            LC_ALL=C stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    elif command -v busybox >/dev/null 2>&1; then
+        bootstrap_output=$(
+            LC_ALL=C busybox stat -t "$RESCUE_DIR" 2>/dev/null
+        ) || return 1
+    else
+        return 1
+    fi
+    case "$bootstrap_output" in
+        "$RESCUE_DIR "*)
+            bootstrap_fields=${bootstrap_output#"$RESCUE_DIR "}
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    set -- $bootstrap_fields
+    [ "$#" -ge 5 ] || return 1
+    bootstrap_mode_hex=$3
+    bootstrap_uid=$4
+    case "$bootstrap_mode_hex" in
+        ''|*[!0-9A-Fa-f]*) return 1 ;;
+    esac
+    [ "${#bootstrap_mode_hex}" -le 8 ] || return 1
+    case "$bootstrap_uid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    bootstrap_mode=$((0x$bootstrap_mode_hex & 4095))
+    bootstrap_expected_uid=$(id -u 2>/dev/null) || return 1
+    [ "$bootstrap_mode" -eq 448 ] 2>/dev/null &&
+        [ "$bootstrap_uid" = "$bootstrap_expected_uid" ]
+}
+
+load_metadata_helper() {
+    if [ -f "$PACKAGE_METADATA_HELPER" ] &&
+       [ ! -L "$PACKAGE_METADATA_HELPER" ]; then
+        metadata_helper=$PACKAGE_METADATA_HELPER
+    else
+        bootstrap_rescue_directory_is_private ||
+            fail "keen-pbr cannot safely load rescue metadata support"
+        [ -f "$STABLE_METADATA_HELPER" ] &&
+            [ ! -L "$STABLE_METADATA_HELPER" ] ||
+            fail "keen-pbr portable metadata helper is unavailable"
+        metadata_helper=$STABLE_METADATA_HELPER
+    fi
+    . "$metadata_helper" ||
+        fail "keen-pbr cannot load portable metadata support"
+}
+
 case "${1:-}" in
     start|restart|restartall|reload|reapply-firewall|reapply-dnsmasq-config) ;;
     *) exit 0 ;;
 esac
+
+load_metadata_helper
 
 validate_private_directory() {
     directory=$1
@@ -47,7 +114,7 @@ validate_private_directory() {
         fail "keen-pbr recovery state has an unsafe directory: $directory"
     fi
 
-    metadata=$(stat -c '%a:%u' "$directory" 2>/dev/null) ||
+    metadata=$(keen_pbr_stat_value '%a:%u' "$directory") ||
         fail "keen-pbr cannot inspect recovery directory metadata: $directory"
     expected_uid=$(id -u 2>/dev/null) ||
         fail "keen-pbr cannot determine the recovery owner"
