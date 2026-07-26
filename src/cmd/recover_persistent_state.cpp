@@ -169,18 +169,30 @@ ProbeResult probe_recovery_state(
     return {active_operation};
 }
 
+const std::vector<std::string>&
+managed_process_names(
+    backup::RecoveryOperation operation) {
+    (void)operation;
+    // A config-save transaction can own both config.json and
+    // transports.json.  The preflight deliberately does not partially parse
+    // active.json before the RecoveryCoordinator verifies the journal, so use
+    // one conservative offline boundary for both operations.  This prevents a
+    // live transport-manager from rewriting transports.json while recovery is
+    // restoring the exact snapshot.
+    static const std::vector<std::string> names{
+        "keen-pbr",
+        "transport-manager",
+        "nfqws2",
+        "nfqws",
+        "sing-box",
+    };
+    return names;
+}
+
 bool production_runtime_active(
     backup::RecoveryOperation operation) {
-    const std::vector<std::string> managed_names =
-        operation == backup::RecoveryOperation::config_save
-            ? std::vector<std::string>{"keen-pbr"}
-            : std::vector<std::string>{
-                  "keen-pbr",
-                  "transport-manager",
-                  "nfqws2",
-                  "nfqws",
-                  "sing-box",
-              };
+    const auto& managed_names =
+        managed_process_names(operation);
     const auto self = ::getpid();
     std::error_code error;
     fs::directory_iterator iterator(
@@ -382,6 +394,14 @@ backup::RecoveryCoordinatorLayout production_layout() {
 }
 
 } // namespace
+
+#ifdef KEEN_PBR3_TESTING
+std::vector<std::string>
+recovery_managed_process_names_for_testing(
+    backup::RecoveryOperation operation) {
+    return managed_process_names(operation);
+}
+#endif
 
 int run_recover_persistent_state(
     const RecoverPersistentStateOptions& options,

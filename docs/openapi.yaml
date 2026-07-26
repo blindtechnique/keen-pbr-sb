@@ -522,6 +522,63 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/transports/config/apply:
+    post:
+      summary: Atomically create a transport and its linked outgoing route
+      description: >
+        Creates one managed transport and the interface outbound that exposes
+        it to keen-pbr as a single durable transaction. The server derives the
+        outbound tag and interface from the transport, rejects an existing
+        configuration draft or ownership collision, and rolls both resources
+        back when either runtime cannot be committed. This endpoint currently
+        supports creation with `linked_outbound.mode=ensure` only.
+      operationId: postTransportConfigApply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransportConfigApplyRequest"
+      responses:
+        "200":
+          description: Both resources were committed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransportConfigApplyResponse"
+        "400":
+          description: Invalid transport, linked outbound, or request shape
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            A draft exists, a tag or interface is already owned, or another
+            configuration/runtime operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction, persistence, or rollback failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Transport manager returned an invalid response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Transport manager, routing runtime, or recovery is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/transports/config/export:
     get:
       summary: Export complete transport configuration
@@ -850,6 +907,74 @@ components:
           enum: [created, updated, deleted]
         tag:
           type: string
+
+    TransportLinkedOutboundEnsure:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [ensure]
+          description: >
+            Create the interface outbound in the same transaction as the
+            transport. Other modes are reserved for future API versions.
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias for the linked outgoing route.
+            When omitted, the server reuses the transport alias when present.
+        strict_enforcement:
+          type: [boolean, "null"]
+          description: >
+            Optional per-route strict-enforcement override. Null or omission
+            leaves the global kill-switch policy in effect.
+
+    TransportConfigApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [operation, transport, linked_outbound]
+      properties:
+        operation:
+          type: string
+          enum: [create]
+        transport:
+          $ref: "#/components/schemas/TransportSpec"
+        linked_outbound:
+          $ref: "#/components/schemas/TransportLinkedOutboundEnsure"
+
+    TransportConfigApplyResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [applied]
+        message:
+          type: string
+          description: Human-readable transaction result.
+        saved:
+          type: boolean
+          description: Whether the durable configuration commit completed.
+        applied:
+          type: boolean
+          description: Whether the routing runtime accepted the committed config.
+        rolled_back:
+          type: boolean
+          description: Whether an apply failure was rolled back before the response.
+        transport_revision:
+          type: string
+          description: Committed transport-manager configuration revision.
+        config_revision:
+          type: string
+          description: SHA-256 revision of the committed keen-pbr configuration.
+        apply_started_ts:
+          type: integer
+          format: int64
+          description: Server-authoritative Unix timestamp when runtime apply started.
 
     # -------------------------------------------------------------------------
     # /api/config — configuration object schema

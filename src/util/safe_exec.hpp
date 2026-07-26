@@ -7,13 +7,16 @@
 #include <atomic>
 #include <cstdint>
 #include <cerrno>
+#include <cstdlib>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -188,8 +191,25 @@ inline void log_failed_pipe_input(const std::string& command,
 inline int safe_exec_with_timeouts(
     const std::vector<std::string>& args,
     bool suppress_output,
-    const SafeExecTimeouts& timeouts) {
+    const SafeExecTimeouts& timeouts,
+    const std::vector<std::pair<std::string, std::string>>&
+        child_environment = {}) {
     if (args.empty()) return -1;
+    for (const auto& [name, value] : child_environment) {
+        if (name.empty() ||
+            name.find('=') != std::string::npos ||
+            name.find('\0') != std::string::npos ||
+            value.find('\0') != std::string::npos) {
+            return -1;
+        }
+    }
+    if (!child_environment.empty() &&
+        (args.front().empty() ||
+         args.front().front() != '/')) {
+        // execve() intentionally does not perform a PATH lookup. Requiring an
+        // absolute executable keeps the child branch async-signal-safe.
+        return -1;
+    }
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
     Logger::instance().debug("safe_exec_start cmd={} suppress_output={}",
@@ -202,6 +222,49 @@ inline int safe_exec_with_timeouts(
         argv.push_back(arg.c_str());
     }
     argv.push_back(nullptr);
+
+    // Build the complete child environment before fork(). The child performs
+    // only descriptor operations and execve(); it never calls setenv(), which
+    // may allocate and deadlock after fork in this multithreaded daemon.
+    std::vector<std::string> environment_storage;
+    std::vector<char*> environment;
+    if (!child_environment.empty()) {
+        const auto is_overridden =
+            [&child_environment](
+                const std::string_view entry) {
+                return std::any_of(
+                    child_environment.begin(),
+                    child_environment.end(),
+                    [entry](const auto& override_value) {
+                        const auto& name =
+                            override_value.first;
+                        return entry.size() > name.size() &&
+                               entry.compare(
+                                   0,
+                                   name.size(),
+                                   name) == 0 &&
+                               entry[name.size()] == '=';
+                    });
+            };
+        for (char** entry = environ;
+             entry != nullptr && *entry != nullptr;
+             ++entry) {
+            if (!is_overridden(*entry)) {
+                environment_storage.emplace_back(*entry);
+            }
+        }
+        for (const auto& [name, value] :
+             child_environment) {
+            environment_storage.push_back(
+                name + "=" + value);
+        }
+        environment.reserve(
+            environment_storage.size() + 1U);
+        for (auto& entry : environment_storage) {
+            environment.push_back(entry.data());
+        }
+        environment.push_back(nullptr);
+    }
 
     const pid_t pid = fork();
     if (pid == -1) {
@@ -228,7 +291,18 @@ inline int safe_exec_with_timeouts(
                 close(devnull);
             }
         }
-        execvp(argv[0], const_cast<char* const*>(argv.data()));
+        if (!child_environment.empty()) {
+            ::execve(
+                argv[0],
+                const_cast<char* const*>(
+                    argv.data()),
+                environment.data());
+        } else {
+            ::execvp(
+                argv[0],
+                const_cast<char* const*>(
+                    argv.data()));
+        }
         _exit(127); // execvp failed
     }
 
@@ -274,6 +348,21 @@ inline int safe_exec(const std::vector<std::string>& args,
                      bool suppress_output = false) {
     return safe_exec_with_timeouts(
         args, suppress_output, safe_exec_timeouts());
+}
+
+// Apply fixed environment overrides in the forked child only. The executable
+// must be absolute so the post-fork branch can call execve() directly without
+// PATH lookup, allocation, or mutation of the daemon's environment.
+inline int safe_exec_with_environment(
+    const std::vector<std::string>& args,
+    const std::vector<std::pair<std::string, std::string>>&
+        child_environment,
+    bool suppress_output = false) {
+    return safe_exec_with_timeouts(
+        args,
+        suppress_output,
+        safe_exec_timeouts(),
+        child_environment);
 }
 
 // Execute a command with arguments, piping input data to its stdin.

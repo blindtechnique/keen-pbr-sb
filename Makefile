@@ -92,7 +92,7 @@ clang-build: ## Configure and compile with Clang in a host-only build dir
 
 clang-check: ## Compile with Clang thread-safety analysis enabled; never runs binaries
 	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS) -DBUILD_TESTS=ON -DENABLE_THREAD_SAFETY_ANALYSIS=ON
-	cmake --build $(CLANG_BUILD_DIR) --target keen-pbr keen-pbr-tests thread-safety-smoke
+	cmake --build $(CLANG_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests thread-safety-smoke
 
 CLANGD_TIDY_ARGS ?=
 

@@ -9,9 +9,11 @@
 #include "../backup/restore_transaction.hpp"
 #include "../config/config.hpp"
 #include "../config/config_writer.hpp"
+#include "../crypto/sha256.hpp"
 #include "../log/logger.hpp"
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <exception>
@@ -38,8 +40,10 @@ constexpr const char* kRecoveryStateRoot =
 enum class ConfigSaveCheckpoint {
     wal_started,
     generation_reserved,
+    transport_mutated,
     config_written,
     files_committed,
+    transports_ready,
     apply_returned,
     core_applied,
     wal_committed,
@@ -130,14 +134,15 @@ std::string secure_transaction_id() {
 }
 
 backup::PersistentLayout config_save_layout(
-    const std::string& config_path) {
+    const std::string& config_path,
+    bool includes_transports = false) {
     backup::PersistentLayout layout;
     layout.config = config_path;
-    // Operation snapshots identify the file as "config"; the other roots are
-    // intentionally inert for this one-file transaction.
     layout.transports =
         fs::path(config_path).parent_path() /
-        ".keen-pbr-unused-transports.json";
+        (includes_transports
+             ? "transports.json"
+             : ".keen-pbr-unused-transports.json");
     return layout;
 }
 
@@ -159,12 +164,25 @@ void inject_config_save_fault(
 bool restore_exact_config_snapshot(
     const ConfigSaveRuntimeOptions& options,
     const backup::PersistentLayout& persistent_layout,
+    const std::function<void()>& before_completion,
     std::string& failure) noexcept {
     try {
-        backup::RecoveryCoordinator coordinator({
-            options.recovery_state_root,
-            persistent_layout,
-        });
+        backup::RecoveryCoordinator coordinator(
+            {
+                options.recovery_state_root,
+                persistent_layout,
+            },
+            backup::RecoveryCoordinatorHooks{
+                before_completion
+                    ? [before_completion](
+                          RestoreTransactionOperation,
+                          const RestoreJournalEntry&) {
+                          before_completion();
+                      }
+                    : std::function<void(
+                          RestoreTransactionOperation,
+                          const RestoreJournalEntry&)>{},
+            });
         const auto result = coordinator.recover();
         if (result.outcome !=
                 backup::RecoveryOutcome::rollback_completed ||
@@ -181,6 +199,36 @@ bool restore_exact_config_snapshot(
         failure = "Unknown exact config recovery failure";
     }
     return false;
+}
+
+void mark_config_save_unknown_best_effort(
+    const ConfigSaveRuntimeOptions& options,
+    const RestoreTransaction& transaction) noexcept {
+    // The operation-local marker blocks direct access to the stale rollback
+    // payload. The global marker blocks RecoveryCoordinator before it can
+    // inspect or apply any operation journal. Both are attempted independently
+    // so one filesystem failure cannot suppress the other safety barrier.
+    try {
+        RestoreJournal(transaction.state_directory())
+            .mark_unknown();
+    } catch (...) {
+    }
+    try {
+        RestoreJournal(options.recovery_state_root)
+            .mark_unknown();
+    } catch (...) {
+    }
+}
+
+bool restore_exact_config_snapshot(
+    const ConfigSaveRuntimeOptions& options,
+    const backup::PersistentLayout& persistent_layout,
+    std::string& failure) noexcept {
+    return restore_exact_config_snapshot(
+        options,
+        persistent_layout,
+        {},
+        failure);
 }
 
 bool stop_routing_best_effort(ApiContext& ctx) noexcept {
@@ -338,6 +386,624 @@ private:
 
 } // namespace
 
+std::string serialize_config_for_persistence(
+    const Config& config) {
+    return serialize_config_pretty(config);
+}
+
+namespace {
+
+std::string commit_prepared_config_impl(
+    ApiContext& ctx,
+    std::string maintenance_operation,
+    PrepareConfigCommit prepare,
+    const std::function<void(
+        const std::string&,
+        const std::string&)>& write_config_file,
+    const ConfigSaveRuntimeOptions& runtime_options) {
+    try {
+        auto maintenance =
+            ctx.acquire_maintenance_lease(
+                std::move(maintenance_operation));
+        ConfigOperationGuard config_operation(ctx);
+        auto prepared = prepare();
+
+        LifecycleOperationSnapshot lifecycle;
+        if (ctx.lifecycle_operations) {
+            if (const auto active =
+                    ctx.lifecycle_operations->begin(
+                        LifecycleOperationType::ApplyConfig,
+                        {
+                            {"validate_config",
+                             "Validate configuration"},
+                            {"commit_and_apply",
+                             "Commit and apply configuration"},
+                        },
+                        lifecycle)) {
+                throw ApiError(
+                    "A lifecycle operation is already active",
+                    409,
+                    nlohmann::json{
+                        {"error",
+                         "A lifecycle operation is already active"},
+                        {"active_operation_id", *active}}
+                        .dump());
+            }
+            ctx.lifecycle_operations->start_stage(
+                lifecycle.id, "validate_config");
+        }
+
+        try {
+            ctx.validate_candidate_config(prepared.config);
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->succeed_stage(
+                    lifecycle.id, "validate_config");
+                ctx.lifecycle_operations->start_stage(
+                    lifecycle.id, "commit_and_apply");
+            }
+        } catch (const ConfigValidationError& error) {
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->fail_stage(
+                    lifecycle.id,
+                    "validate_config",
+                    error.what());
+                ctx.lifecycle_operations->finish(
+                    lifecycle.id, error.what());
+            }
+            auto payload =
+                make_validation_error_json(error);
+            payload["saved"] = false;
+            payload["applied"] = false;
+            payload["rolled_back"] = false;
+            throw ApiError(
+                "Dry-run apply check failed",
+                400,
+                payload.dump());
+        } catch (const std::exception& error) {
+            if (ctx.lifecycle_operations) {
+                ctx.lifecycle_operations->fail_stage(
+                    lifecycle.id,
+                    "validate_config",
+                    error.what());
+                ctx.lifecycle_operations->finish(
+                    lifecycle.id, error.what());
+            }
+            throw ApiError(
+                "Dry-run apply check failed",
+                500,
+                nlohmann::json{
+                    {"error",
+                     std::string(
+                         "Dry-run apply check failed: ") +
+                         error.what()},
+                    {"saved", false},
+                    {"applied", false},
+                    {"rolled_back", false},
+                }
+                    .dump());
+        }
+
+        const bool includes_transports =
+            prepared.transport.has_value();
+        backup::PersistentLayout persistent_layout;
+        std::unique_ptr<RestoreTransaction> transaction;
+        std::string rollback_payload;
+        std::optional<std::string>
+            previous_transport_revision;
+        try {
+            persistent_layout = config_save_layout(
+                ctx.config_path, includes_transports);
+
+            std::vector<backup::FileReplacement>
+                replacements;
+            backup::FileReplacement config_replacement;
+            config_replacement.path = ctx.config_path;
+            config_replacement.content =
+                prepared.serialized;
+            config_replacement.max_content_bytes =
+                backup::kMaxSnapshotBytes;
+            replacements.push_back(
+                std::move(config_replacement));
+
+            if (prepared.transport.has_value()) {
+                const auto configured_transport_path =
+                    fs::path(
+                        prepared.transport->config_path)
+                        .lexically_normal();
+                if (configured_transport_path !=
+                    persistent_layout.transports
+                        .lexically_normal()) {
+                    throw std::runtime_error(
+                        "Transport transaction target does "
+                        "not match the managed transports "
+                        "configuration");
+                }
+                backup::FileReplacement
+                    transport_snapshot;
+                transport_snapshot.path =
+                    persistent_layout.transports;
+                // The transport manager owns the forward
+                // bytes. This replacement exists only to
+                // capture an exact rollback entry.
+                transport_snapshot.content.clear();
+                transport_snapshot.max_content_bytes =
+                    backup::kMaxSnapshotBytes;
+                replacements.push_back(
+                    std::move(transport_snapshot));
+            }
+
+            const auto mutations =
+                backup::snapshot_replacements(
+                    persistent_layout,
+                    std::move(replacements));
+            rollback_payload =
+                backup::make_operation_snapshot(
+                    mutations)
+                    .dump();
+            if (includes_transports) {
+                const auto transport_snapshot =
+                    std::find_if(
+                        mutations.begin(),
+                        mutations.end(),
+                        [](const backup::FileMutation&
+                               mutation) {
+                            return mutation.kind ==
+                                   backup::
+                                       PersistentTargetKind::
+                                           transports;
+                        });
+                if (transport_snapshot ==
+                        mutations.end() ||
+                    !transport_snapshot->before.existed) {
+                    throw ApiError(
+                        "Current transport configuration "
+                        "is unavailable for rollback",
+                        500);
+                }
+                previous_transport_revision =
+                    Sha256::hex(
+                        transport_snapshot->before.content);
+                if (prepared.transport->base_revision.empty() ||
+                    prepared.transport->base_revision !=
+                        *previous_transport_revision) {
+                    throw ApiError(
+                        "Transport manager state does not "
+                        "match the durable transport "
+                        "configuration",
+                        409,
+                        nlohmann::json{
+                            {"error",
+                             "Transport manager state does "
+                             "not match the durable "
+                             "transport configuration"},
+                            {"manager_revision",
+                             prepared.transport
+                                 ->base_revision},
+                            {"durable_revision",
+                             *previous_transport_revision},
+                            {"saved", false},
+                            {"applied", false},
+                            {"rolled_back", false},
+                        }
+                            .dump());
+                }
+            }
+
+            transaction =
+                std::make_unique<RestoreTransaction>(
+                    runtime_options.recovery_state_root,
+                    RestoreTransactionOperation::
+                        config_save);
+        } catch (...) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Cannot prepare configuration recovery "
+                "snapshot");
+            throw;
+        }
+
+        std::vector<RestoreJournalEffect> effects{
+            RestoreJournalEffect::files,
+        };
+        if (includes_transports) {
+            effects.push_back(
+                RestoreJournalEffect::
+                    transport_manager);
+        }
+        effects.push_back(RestoreJournalEffect::core);
+        try {
+            transaction->begin(
+                secure_transaction_id(),
+                rollback_payload,
+                std::move(effects));
+        } catch (const std::exception& error) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Cannot start configuration recovery "
+                "journal");
+            throw_recovery_required(
+                ctx,
+                std::string(
+                    "Cannot start the durable "
+                    "configuration recovery journal: ") +
+                    error.what(),
+                false,
+                false);
+        } catch (...) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Cannot start configuration recovery "
+                "journal");
+            throw_recovery_required(
+                ctx,
+                "Cannot start the durable configuration "
+                "recovery journal",
+                false,
+                false);
+        }
+
+        std::optional<std::string>
+            committed_transport_revision;
+        const auto rollback_transport =
+            [&prepared,
+             &previous_transport_revision]() {
+                if (!prepared.transport.has_value() ||
+                    !previous_transport_revision
+                         .has_value()) {
+                    return;
+                }
+                prepared.transport->restore_revision(
+                    *previous_transport_revision);
+            };
+
+        try {
+            inject_config_save_fault(
+                runtime_options,
+                ConfigSaveCheckpoint::wal_started);
+            (void)maintenance->reserve(
+                maintenance->base_generation());
+            inject_config_save_fault(
+                runtime_options,
+                ConfigSaveCheckpoint::
+                    generation_reserved);
+
+            if (prepared.transport.has_value()) {
+                committed_transport_revision =
+                    prepared.transport->mutate();
+                if (committed_transport_revision->empty()) {
+                    throw std::runtime_error(
+                        "Transport manager did not return "
+                        "the committed configuration "
+                        "revision");
+                }
+                inject_config_save_fault(
+                    runtime_options,
+                    ConfigSaveCheckpoint::
+                        transport_mutated);
+            }
+
+            write_config_file(
+                ctx.config_path, prepared.serialized);
+            inject_config_save_fault(
+                runtime_options,
+                ConfigSaveCheckpoint::config_written);
+
+            transaction->files_committed();
+            inject_config_save_fault(
+                runtime_options,
+                ConfigSaveCheckpoint::files_committed);
+
+            if (prepared.transport.has_value()) {
+                prepared.transport->verify_revision(
+                    *committed_transport_revision);
+                transaction->transports_ready();
+                inject_config_save_fault(
+                    runtime_options,
+                    ConfigSaveCheckpoint::
+                        transports_ready);
+            }
+        } catch (
+            const ConfigCommitNoMutationConflict&) {
+            // The CAS contract proves that this operation
+            // changed neither the transport file nor
+            // manager state. Restoring our older snapshot
+            // here would clobber the concurrent winner.
+            try {
+                transaction->complete_rollback();
+            } catch (const std::exception& error) {
+                mark_config_save_unknown_best_effort(
+                    runtime_options, *transaction);
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Cannot close the prepared "
+                    "configuration recovery journal");
+                throw_recovery_required(
+                    ctx,
+                    std::string(
+                        "Transport configuration changed "
+                        "before this operation mutated "
+                        "state, but its recovery journal "
+                        "could not be closed: ") +
+                        error.what(),
+                    false,
+                    false);
+            } catch (...) {
+                mark_config_save_unknown_best_effort(
+                    runtime_options, *transaction);
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Cannot close the prepared "
+                    "configuration recovery journal");
+                throw_recovery_required(
+                    ctx,
+                    "Transport configuration changed "
+                    "before this operation mutated state, "
+                    "but its recovery journal could not "
+                    "be closed",
+                    false,
+                    false);
+            }
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Transport configuration changed");
+            throw;
+        } catch (...) {
+            const auto original_failure =
+                std::current_exception();
+            std::string recovery_error;
+            if (!restore_exact_config_snapshot(
+                    runtime_options,
+                    persistent_layout,
+                    rollback_transport,
+                    recovery_error)) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Configuration file recovery failed");
+                throw_recovery_required(
+                    ctx,
+                    "Configuration write failed and exact "
+                    "recovery could not be proven",
+                    false,
+                    false,
+                    recovery_error);
+            }
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration write failed");
+            std::rethrow_exception(original_failure);
+        }
+
+        ConfigApplyResult apply_result;
+        try {
+            apply_result =
+                ctx.enqueue_apply_validated_config(
+                    prepared.config,
+                    prepared.serialized);
+            inject_config_save_fault(
+                runtime_options,
+                ConfigSaveCheckpoint::apply_returned);
+        } catch (const ApiError&) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration runtime apply was "
+                "interrupted");
+            throw_recovery_required(
+                ctx,
+                "Configuration runtime apply was "
+                "interrupted; runtime state is unknown",
+                false,
+                false);
+        } catch (const std::exception& error) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration runtime apply was "
+                "interrupted");
+            throw_recovery_required(
+                ctx,
+                std::string(
+                    "Configuration runtime apply was "
+                    "interrupted: ") +
+                    error.what(),
+                false,
+                false);
+        } catch (...) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration runtime apply was "
+                "interrupted");
+            throw_recovery_required(
+                ctx,
+                "Configuration runtime apply was "
+                "interrupted; runtime state is unknown",
+                false,
+                false);
+        }
+
+        if (!apply_result.error.empty() ||
+            !apply_result.applied) {
+            if (!apply_result.rolled_back) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Configuration runtime rollback was "
+                    "not proven");
+                throw_recovery_required(
+                    ctx,
+                    apply_result.error.empty()
+                        ? "Configuration was not applied "
+                          "and runtime rollback was not "
+                          "proven"
+                        : std::string(
+                              "Commit/apply failed: ") +
+                              apply_result.error,
+                    apply_result.applied,
+                    false);
+            }
+
+            std::string recovery_error;
+            if (!restore_exact_config_snapshot(
+                    runtime_options,
+                    persistent_layout,
+                    rollback_transport,
+                    recovery_error)) {
+                fail_lifecycle_best_effort(
+                    ctx,
+                    lifecycle,
+                    "Configuration file recovery failed");
+                throw_recovery_required(
+                    ctx,
+                    "Runtime rolled back, but exact "
+                    "persistent recovery could not be "
+                    "proven",
+                    apply_result.applied,
+                    true,
+                    recovery_error);
+            }
+
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration commit or apply failed");
+            throw ApiError(
+                "Commit/apply failed",
+                500,
+                nlohmann::json{
+                    {"error",
+                     apply_result.error.empty()
+                         ? "Configuration was not applied"
+                         : std::string(
+                               "Commit/apply failed: ") +
+                               apply_result.error},
+                    {"saved", false},
+                    {"applied", apply_result.applied},
+                    {"rolled_back", true},
+                    {"file_rolled_back", true},
+                    {"recovery_required", false},
+                }
+                    .dump());
+        }
+
+        try {
+            maintenance->verify_held();
+            transaction->core_applied();
+            inject_config_save_fault(
+                runtime_options,
+                ConfigSaveCheckpoint::core_applied);
+            transaction->commit();
+        } catch (const std::exception& error) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration recovery journal commit "
+                "failed");
+            throw_recovery_required(
+                ctx,
+                std::string(
+                    "Configuration applied, but its "
+                    "recovery journal could not be "
+                    "committed: ") +
+                    error.what(),
+                true,
+                false);
+        } catch (...) {
+            fail_lifecycle_best_effort(
+                ctx,
+                lifecycle,
+                "Configuration recovery journal commit "
+                "failed");
+            throw_recovery_required(
+                ctx,
+                "Configuration applied, but its recovery "
+                "journal could not be committed",
+                true,
+                false);
+        }
+
+        inject_config_save_fault(
+            runtime_options,
+            ConfigSaveCheckpoint::wal_committed);
+
+        nlohmann::json response = {
+            {"status", prepared.success_status},
+            {"message", prepared.success_message},
+            {"saved", true},
+            {"applied", true},
+            {"rolled_back", apply_result.rolled_back},
+            {"config_revision",
+             Sha256::hex(prepared.serialized)},
+        };
+        if (committed_transport_revision.has_value()) {
+            response["transport_revision"] =
+                *committed_transport_revision;
+        }
+        if (apply_result.apply_started_ts.has_value()) {
+            response["apply_started_ts"] =
+                *apply_result.apply_started_ts;
+        }
+        if (ctx.lifecycle_operations) {
+            ctx.lifecycle_operations->succeed_stage(
+                lifecycle.id, "commit_and_apply");
+            ctx.lifecycle_operations->finish(lifecycle.id);
+        }
+        config_operation.finish();
+        return response.dump();
+    } catch (const MaintenanceLockError& error) {
+        throw_maintenance_api_error(error);
+    }
+}
+
+} // namespace
+
+std::string commit_prepared_config(
+    ApiContext& ctx,
+    std::string maintenance_operation,
+    PrepareConfigCommit prepare) {
+    return commit_prepared_config_impl(
+        ctx,
+        std::move(maintenance_operation),
+        std::move(prepare),
+        [](const std::string& path,
+           const std::string& body) {
+            write_config_atomically(path, body);
+        },
+        ConfigSaveRuntimeOptions{});
+}
+
+#ifdef KEEN_PBR3_TESTING
+std::string commit_prepared_config_for_test(
+    ApiContext& ctx,
+    std::string maintenance_operation,
+    PrepareConfigCommit prepare,
+    ConfigFileWriterForTest write_config_file,
+    ConfigSaveTestOptions options) {
+    ConfigSaveRuntimeOptions runtime_options;
+    runtime_options.recovery_state_root =
+        options.recovery_state_root.empty()
+            ? fs::path(ctx.config_path).parent_path() /
+                  ".keen-pbr-recovery"
+            : std::move(options.recovery_state_root);
+    runtime_options.fault_injector =
+        std::move(options.fault_injector);
+    return commit_prepared_config_impl(
+        ctx,
+        std::move(maintenance_operation),
+        std::move(prepare),
+        std::move(write_config_file),
+        std::move(runtime_options));
+}
+#endif
+
 static void register_config_handler_impl(
     ApiServer& server,
     ApiContext& ctx,
@@ -385,382 +1051,31 @@ static void register_config_handler_impl(
         return nlohmann::json(resp).dump();
     });
 
-    // POST /api/config/save - dry-run check, persist staged config, apply immediately
+    // POST /api/config/save - persist the staged candidate through the shared
+    // durable commit coordinator used by composite transport creation.
     server.post(
         "/api/config/save",
         [&ctx,
          write_config_file = std::move(write_config_file),
          runtime_options = std::move(runtime_options)]()
             -> std::string {
-          try {
-            auto maintenance =
-                ctx.acquire_maintenance_lease("config-save");
-            ConfigOperationGuard config_operation(ctx);
-
-            const auto staged_snapshot =
-                ctx.get_staged_config_snapshot();
-
-            if (!staged_snapshot.has_value()) {
-                throw ApiError("No staged config to save", 400);
-            }
-
-            LifecycleOperationSnapshot lifecycle;
-            if (ctx.lifecycle_operations) {
-                if (const auto active = ctx.lifecycle_operations->begin(
-                        LifecycleOperationType::ApplyConfig,
-                        {{"validate_config", "Validate configuration"},
-                        {"commit_and_apply",
-                          "Commit and apply configuration"}},
-                        lifecycle)) {
-                    throw ApiError(
-                        "A lifecycle operation is already active",
-                        409,
-                        nlohmann::json{
-                            {"error",
-                             "A lifecycle operation is already active"},
-                            {"active_operation_id", *active}}
-                            .dump());
-                }
-                ctx.lifecycle_operations->start_stage(
-                    lifecycle.id, "validate_config");
-            }
-
-            // Phase 1: validation + dry-run apply check.
-            try {
-                ctx.validate_candidate_config(staged_snapshot->first);
-                if (ctx.lifecycle_operations) {
-                    ctx.lifecycle_operations->succeed_stage(
-                        lifecycle.id, "validate_config");
-                    ctx.lifecycle_operations->start_stage(
-                        lifecycle.id, "commit_and_apply");
-                }
-            } catch (const ConfigValidationError& e) {
-                if (ctx.lifecycle_operations) {
-                    ctx.lifecycle_operations->fail_stage(
-                        lifecycle.id, "validate_config", e.what());
-                    ctx.lifecycle_operations->finish(lifecycle.id, e.what());
-                }
-                nlohmann::json error_payload =
-                    make_validation_error_json(e);
-                error_payload["saved"] = false;
-                error_payload["applied"] = false;
-                error_payload["rolled_back"] = false;
-                throw ApiError(
-                    "Dry-run apply check failed",
-                    400,
-                    error_payload.dump());
-            } catch (const std::exception& e) {
-                if (ctx.lifecycle_operations) {
-                    ctx.lifecycle_operations->fail_stage(
-                        lifecycle.id, "validate_config", e.what());
-                    ctx.lifecycle_operations->finish(lifecycle.id, e.what());
-                }
-                nlohmann::json error_payload = {
-                    {"error",
-                     std::string("Dry-run apply check failed: ") + e.what()},
-                    {"saved", false},
-                    {"applied", false},
-                    {"rolled_back", false},
-                };
-                throw ApiError(
-                    "Dry-run apply check failed",
-                    500,
-                    error_payload.dump());
-            }
-
-            // Phase 2: exact persistent snapshot + crash journal + apply.
-            //
-            // RestoreTransaction is the sole owner of on-disk rollback. The
-            // runtime apply result is the sole source of truth about whether
-            // the old runtime was restored. Mixing a manual file rollback
-            // with an unknown runtime would make the next boot unsafe.
-            backup::PersistentLayout persistent_layout;
-            std::unique_ptr<RestoreTransaction> transaction;
-            std::string rollback_payload;
-            try {
-                persistent_layout =
-                    config_save_layout(ctx.config_path);
-                backup::FileReplacement replacement;
-                replacement.path = ctx.config_path;
-                replacement.content = staged_snapshot->second;
-                replacement.max_content_bytes =
-                    backup::kMaxSnapshotBytes;
-                const auto mutations =
-                    backup::snapshot_replacements(
-                        persistent_layout,
-                        {std::move(replacement)});
-                rollback_payload =
-                    backup::make_operation_snapshot(
-                        mutations)
-                        .dump();
-
-                transaction =
-                    std::make_unique<RestoreTransaction>(
-                        runtime_options.recovery_state_root,
-                        RestoreTransactionOperation::config_save);
-            } catch (...) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Cannot prepare configuration recovery snapshot");
-                throw;
-            }
-
-            try {
-                transaction->begin(
-                    secure_transaction_id(),
-                    rollback_payload,
-                    {
-                        RestoreJournalEffect::files,
-                        RestoreJournalEffect::core,
-                    });
-            } catch (const std::exception& error) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Cannot start configuration recovery journal");
-                throw_recovery_required(
-                    ctx,
-                    std::string(
-                        "Cannot start the durable configuration recovery "
-                        "journal: ") +
-                        error.what(),
-                    false,
-                    false);
-            } catch (...) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Cannot start configuration recovery journal");
-                throw_recovery_required(
-                    ctx,
-                    "Cannot start the durable configuration recovery journal",
-                    false,
-                    false);
-            }
-
-            // Failures before runtime apply can be recovered immediately and
-            // proven exactly from the immutable operation snapshot.
-            try {
-                inject_config_save_fault(
-                    runtime_options,
-                    ConfigSaveCheckpoint::wal_started);
-                (void)maintenance->reserve(
-                    maintenance->base_generation());
-                inject_config_save_fault(
-                    runtime_options,
-                    ConfigSaveCheckpoint::generation_reserved);
-
-                write_config_file(
-                    ctx.config_path, staged_snapshot->second);
-                inject_config_save_fault(
-                    runtime_options,
-                    ConfigSaveCheckpoint::config_written);
-
-                transaction->files_committed();
-                inject_config_save_fault(
-                    runtime_options,
-                    ConfigSaveCheckpoint::files_committed);
-            } catch (...) {
-                const auto original_failure =
-                    std::current_exception();
-                std::string recovery_error;
-                if (!restore_exact_config_snapshot(
-                        runtime_options,
-                        persistent_layout,
-                        recovery_error)) {
-                    fail_lifecycle_best_effort(
-                        ctx,
-                        lifecycle,
-                        "Configuration file recovery failed");
-                    throw_recovery_required(
-                        ctx,
-                        "Configuration write failed and exact recovery "
-                        "could not be proven",
-                        false,
-                        false,
-                        recovery_error);
-                }
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration write failed");
-                std::rethrow_exception(original_failure);
-            }
-
-            ConfigApplyResult apply_result;
-            try {
-                apply_result =
-                    ctx.enqueue_apply_validated_config(
-                        staged_snapshot->first,
-                        staged_snapshot->second);
-                inject_config_save_fault(
-                    runtime_options,
-                    ConfigSaveCheckpoint::apply_returned);
-            } catch (const ApiError&) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration runtime apply was interrupted");
-                throw_recovery_required(
-                    ctx,
-                    "Configuration runtime apply was interrupted; "
-                    "runtime state is unknown",
-                    false,
-                    false);
-            } catch (const std::exception& error) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration runtime apply was interrupted");
-                throw_recovery_required(
-                    ctx,
-                    std::string(
-                        "Configuration runtime apply was interrupted: ") +
-                        error.what(),
-                    false,
-                    false);
-            } catch (...) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration runtime apply was interrupted");
-                throw_recovery_required(
-                    ctx,
-                    "Configuration runtime apply was interrupted; "
-                    "runtime state is unknown",
-                    false,
-                    false);
-            }
-
-            if (!apply_result.error.empty() ||
-                !apply_result.applied) {
-                if (!apply_result.rolled_back) {
-                    fail_lifecycle_best_effort(
-                        ctx,
-                        lifecycle,
-                        "Configuration runtime rollback was not proven");
-                    throw_recovery_required(
-                        ctx,
-                        apply_result.error.empty()
-                            ? "Configuration was not applied and runtime "
-                              "rollback was not proven"
-                            : std::string(
-                                  "Commit/apply failed: ") +
-                                  apply_result.error,
-                        apply_result.applied,
-                        false);
-                }
-
-                std::string recovery_error;
-                if (!restore_exact_config_snapshot(
-                        runtime_options,
-                        persistent_layout,
-                        recovery_error)) {
-                    fail_lifecycle_best_effort(
-                        ctx,
-                        lifecycle,
-                        "Configuration file recovery failed");
-                    throw_recovery_required(
-                        ctx,
-                        "Runtime rolled back, but exact config-file "
-                        "recovery could not be proven",
-                        apply_result.applied,
-                        true,
-                        recovery_error);
-                }
-
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration commit or apply failed");
-                nlohmann::json error_payload = {
-                    {"error",
-                     apply_result.error.empty()
-                         ? "Configuration was not applied"
-                         : std::string("Commit/apply failed: ") +
-                               apply_result.error},
-                    {"saved", false},
-                    {"applied", apply_result.applied},
-                    {"rolled_back", true},
-                    {"file_rolled_back", true},
-                    {"recovery_required", false},
-                };
-                throw ApiError(
-                    "Commit/apply failed",
-                    500,
-                    error_payload.dump());
-            }
-
-            // After a successful runtime apply, any failure before the durable
-            // WAL commit has an unknown cross-layer state. Never roll back
-            // only the file; quiesce routing and leave the journal active for
-            // startup recovery.
-            try {
-                // reserve() proves ownership before the file mutation. The
-                // runtime apply may take long enough for a dead guardian to
-                // be reaped and a competing updater to acquire the lock, so
-                // prove ownership again at the durable cross-layer boundary.
-                maintenance->verify_held();
-                transaction->core_applied();
-                inject_config_save_fault(
-                    runtime_options,
-                    ConfigSaveCheckpoint::core_applied);
-                transaction->commit();
-            } catch (const std::exception& error) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration recovery journal commit failed");
-                throw_recovery_required(
-                    ctx,
-                    std::string(
-                        "Configuration applied, but its recovery journal "
-                        "could not be committed: ") +
-                        error.what(),
-                    true,
-                    false);
-            } catch (...) {
-                fail_lifecycle_best_effort(
-                    ctx,
-                    lifecycle,
-                    "Configuration recovery journal commit failed");
-                throw_recovery_required(
-                    ctx,
-                    "Configuration applied, but its recovery journal "
-                    "could not be committed",
-                    true,
-                    false);
-            }
-
-            // This is the durable cross-layer commit point. Nothing below may
-            // trigger a file rollback, even if lifecycle publication or HTTP
-            // response bookkeeping fails.
-            inject_config_save_fault(
-                runtime_options,
-                ConfigSaveCheckpoint::wal_committed);
-
-            nlohmann::json response = {
-                {"status", "ok"},
-                {"message", "Config saved and applied"},
-                {"saved", true},
-                {"applied", true},
-                {"rolled_back", apply_result.rolled_back},
-            };
-            if (apply_result.apply_started_ts.has_value()) {
-                response["apply_started_ts"] =
-                    *apply_result.apply_started_ts;
-            }
-            if (ctx.lifecycle_operations) {
-                ctx.lifecycle_operations->succeed_stage(
-                    lifecycle.id, "commit_and_apply");
-                ctx.lifecycle_operations->finish(lifecycle.id);
-            }
-            config_operation.finish();
-            return response.dump();
-          } catch (const MaintenanceLockError& error) {
-              throw_maintenance_api_error(error);
-          }
+            return commit_prepared_config_impl(
+                ctx,
+                "config-save",
+                [&ctx]() -> PreparedConfigCommit {
+                    const auto staged_snapshot =
+                        ctx.get_staged_config_snapshot();
+                    if (!staged_snapshot.has_value()) {
+                        throw ApiError(
+                            "No staged config to save", 400);
+                    }
+                    PreparedConfigCommit prepared;
+                    prepared.config = staged_snapshot->first;
+                    prepared.serialized = staged_snapshot->second;
+                    return prepared;
+                },
+                write_config_file,
+                runtime_options);
         });
 }
 

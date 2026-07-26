@@ -218,9 +218,23 @@ func (a *Admin) Revision() string {
 func (a *Admin) Specs() []transport.TransportSpec {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.redactedSpecsLocked()
+}
+
+// State returns one lock-consistent view of the redacted configuration and
+// its durable revision. It prevents a client from pairing transports from one
+// generation with the revision of another generation.
+func (a *Admin) State() ([]transport.TransportSpec, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.redactedSpecsLocked(), a.revision
+}
+
+func (a *Admin) redactedSpecsLocked() []transport.TransportSpec {
 	result := make([]transport.TransportSpec, len(a.config.Transports))
 	copy(result, a.config.Transports)
 	for i := range result {
+		result[i].BootstrapDNS = append([]string(nil), result[i].BootstrapDNS...)
 		result[i].Link = ""
 		result[i].OutboundJSON = ""
 		if result[i].VLESS != nil {
@@ -252,11 +266,61 @@ func (a *Admin) ExportSpecs() []transport.TransportSpec {
 func (a *Admin) Create(ctx context.Context, spec transport.TransportSpec) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.createLocked(ctx, spec)
+}
+
+// CreateIfRevision creates a transport only while expectedRevision still
+// identifies the durable configuration loaded by this Admin. Revision
+// comparison and mutation share the same lock, so two writers using the same
+// revision cannot both commit.
+func (a *Admin) CreateIfRevision(
+	ctx context.Context,
+	spec transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	err := a.createLocked(ctx, spec)
+	return a.revision, true, err
+}
+
+// ValidateCreateAtRevision performs the complete create validation without
+// changing the durable configuration, manager, or supervisor.
+func (a *Admin) ValidateCreateAtRevision(
+	spec transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != "" && expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	_, _, err := a.prepareCreateLocked(spec)
+	return a.revision, true, err
+}
+
+func (a *Admin) prepareCreateLocked(
+	spec transport.TransportSpec,
+) ([]transport.TransportSpec, transport.Transport, error) {
+	if a.index(spec.Tag) >= 0 {
+		return nil, nil, fmt.Errorf("transport %q already exists", spec.Tag)
+	}
 	nextSpecs := append(append([]transport.TransportSpec{}, a.config.Transports...), spec)
 	if err := transport.ValidateUniqueTunAddresses(nextSpecs); err != nil {
-		return err
+		return nil, nil, err
 	}
 	managed, err := transport.NewFromSpec(spec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
+	if err != nil {
+		return nil, nil, err
+	}
+	return nextSpecs, managed, nil
+}
+
+func (a *Admin) createLocked(ctx context.Context, spec transport.TransportSpec) error {
+	nextSpecs, managed, err := a.prepareCreateLocked(spec)
 	if err != nil {
 		return err
 	}
@@ -280,12 +344,54 @@ func (a *Admin) Create(ctx context.Context, spec transport.TransportSpec) error 
 func (a *Admin) Update(ctx context.Context, tag string, spec transport.TransportSpec) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.updateLocked(ctx, tag, spec)
+}
+
+// UpdateIfRevision updates a transport only while expectedRevision still
+// identifies the durable configuration loaded by this Admin.
+func (a *Admin) UpdateIfRevision(
+	ctx context.Context,
+	tag string,
+	spec transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	err := a.updateLocked(ctx, tag, spec)
+	return a.revision, true, err
+}
+
+// ValidateUpdateAtRevision performs the complete update validation and secret
+// preservation logic without changing durable or runtime state.
+func (a *Admin) ValidateUpdateAtRevision(
+	tag string,
+	spec transport.TransportSpec,
+	expectedRevision string,
+) (string, bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if expectedRevision != "" && expectedRevision != a.revision {
+		return a.revision, false, nil
+	}
+	_, _, _, _, err := a.prepareUpdateLocked(tag, spec)
+	return a.revision, true, err
+}
+
+func (a *Admin) prepareUpdateLocked(
+	tag string,
+	spec transport.TransportSpec,
+) (transport.TransportSpec, transport.TransportSpec, []transport.TransportSpec, transport.Transport, error) {
 	index := a.index(tag)
 	if index < 0 {
-		return fmt.Errorf("transport %q not found", tag)
+		return transport.TransportSpec{}, transport.TransportSpec{}, nil, nil,
+			fmt.Errorf("transport %q not found", tag)
 	}
 	if spec.Tag != tag {
-		return fmt.Errorf("transport tag cannot be changed")
+		return transport.TransportSpec{}, transport.TransportSpec{}, nil, nil,
+			fmt.Errorf("transport tag cannot be changed")
 	}
 	oldSpec := a.config.Transports[index]
 	if (spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality") &&
@@ -300,9 +406,17 @@ func (a *Admin) Update(ctx context.Context, tag string, spec transport.Transport
 	nextSpecs := append([]transport.TransportSpec{}, a.config.Transports...)
 	nextSpecs[index] = spec
 	if err := transport.ValidateUniqueTunAddresses(nextSpecs); err != nil {
-		return err
+		return transport.TransportSpec{}, transport.TransportSpec{}, nil, nil, err
 	}
 	managed, err := transport.NewFromSpec(spec, a.config.SingBoxBinary, a.config.RuntimeDir, a.config.HealthEndpoint())
+	if err != nil {
+		return transport.TransportSpec{}, transport.TransportSpec{}, nil, nil, err
+	}
+	return oldSpec, spec, nextSpecs, managed, nil
+}
+
+func (a *Admin) updateLocked(ctx context.Context, tag string, spec transport.TransportSpec) error {
+	oldSpec, spec, nextSpecs, managed, err := a.prepareUpdateLocked(tag, spec)
 	if err != nil {
 		return err
 	}

@@ -33,6 +33,11 @@
     "packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
 #endif
 
+#ifndef KEEN_PBR_TRANSPORT_INIT_PATH
+#define KEEN_PBR_TRANSPORT_INIT_PATH \
+    "packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager"
+#endif
+
 #ifndef KEEN_PBR_INSTALL_SCRIPT_PATH
 #define KEEN_PBR_INSTALL_SCRIPT_PATH "install.sh"
 #endif
@@ -50,6 +55,28 @@
 namespace {
 
 namespace fs = std::filesystem;
+
+std::string read_file(const fs::path& path);
+
+TEST_CASE(
+    "transport init consumes persistent transaction bypass before daemon start") {
+    const auto script =
+        read_file(KEEN_PBR_TRANSPORT_INIT_PATH);
+    const auto guard =
+        script.find("run_recovery_guard start");
+    const auto unset_flag =
+        script.find(
+            "unset KEEN_PBR_PERSISTENT_TRANSACTION",
+            guard);
+    const auto runtime =
+        script.find(". /opt/etc/init.d/rc.func");
+
+    REQUIRE(guard != std::string::npos);
+    REQUIRE(unset_flag != std::string::npos);
+    REQUIRE(runtime != std::string::npos);
+    CHECK(guard < unset_flag);
+    CHECK(unset_flag < runtime);
+}
 
 class TempDirectory {
 public:
@@ -978,6 +1005,44 @@ TEST_CASE("persistent recovery runs once before startup and requires clean state
     REQUIRE(run_startup_guard(root) == 0);
     CHECK(read_file(root / "recovery.log") ==
           "recover-persistent-state\n");
+}
+
+TEST_CASE("config-save recovery refuses a live transport manager") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    const auto active =
+        recovery_dir(root) / "config-save/active.json";
+    install_runtime_mocks(root);
+    write_file(active, "{}\n");
+    write_file(
+        root / "mock-bin/pidof",
+        "#!/bin/sh\n"
+        "[ \"${1:-}\" = transport-manager ] || exit 1\n"
+        "printf '%s\\n' 4242\n",
+        0700);
+
+    CHECK(run_startup_guard(root) == 1);
+    CHECK(fs::exists(active));
+    CHECK_FALSE(fs::exists(root / "recovery.log"));
+}
+
+TEST_CASE("persistent transaction bypass may restart the transport manager") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    const auto active =
+        recovery_dir(root) / "config-save/active.json";
+    install_runtime_mocks(root);
+    write_file(active, "{}\n");
+    write_file(
+        root / "mock-bin/pidof",
+        "#!/bin/sh\n"
+        "[ \"${1:-}\" = transport-manager ] || exit 1\n"
+        "printf '%s\\n' 4242\n",
+        0700);
+
+    CHECK(run_startup_guard(root, false, false, true) == 0);
+    CHECK(fs::exists(active));
+    CHECK_FALSE(fs::exists(root / "recovery.log"));
 }
 
 TEST_CASE("persistent recovery rejects two active journals before invoking CLI") {

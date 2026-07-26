@@ -47,6 +47,8 @@ import type {
   RuntimeOutboundsResponse,
   TransportActionRequest,
   TransportActionResponse,
+  TransportConfigApplyRequest,
+  TransportConfigApplyResponse,
   TransportConfigOperation,
   TransportConfigResponse,
   TransportSpec,
@@ -2345,6 +2347,118 @@ export const usePostTransportConfig = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostTransportConfigMutationOptions(options), queryClient);
+    }
+
+/**
+ * Creates one managed transport and the interface outbound that exposes it to keen-pbr as a single durable transaction. The server derives the outbound tag and interface from the transport, rejects an existing configuration draft or ownership collision, and rolls both resources back when either runtime cannot be committed. This endpoint currently supports creation with `linked_outbound.mode=ensure` only.
+
+ * @summary Atomically create a transport and its linked outgoing route
+ */
+export type postTransportConfigApplyResponse200 = {
+  data: TransportConfigApplyResponse
+  status: 200
+}
+
+export type postTransportConfigApplyResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postTransportConfigApplyResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postTransportConfigApplyResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postTransportConfigApplyResponse502 = {
+  data: ErrorResponse
+  status: 502
+}
+
+export type postTransportConfigApplyResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postTransportConfigApplyResponseSuccess = (postTransportConfigApplyResponse200) & {
+  headers: Headers;
+};
+export type postTransportConfigApplyResponseError = (postTransportConfigApplyResponse400 | postTransportConfigApplyResponse409 | postTransportConfigApplyResponse500 | postTransportConfigApplyResponse502 | postTransportConfigApplyResponse503) & {
+  headers: Headers;
+};
+
+export type postTransportConfigApplyResponse = (postTransportConfigApplyResponseSuccess | postTransportConfigApplyResponseError)
+
+export const getPostTransportConfigApplyUrl = () => {
+
+
+
+
+  return `/api/transports/config/apply`
+}
+
+export const postTransportConfigApply = async (transportConfigApplyRequest: TransportConfigApplyRequest, options?: RequestInit): Promise<postTransportConfigApplyResponse> => {
+
+  return apiFetch<postTransportConfigApplyResponse>(getPostTransportConfigApplyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      transportConfigApplyRequest,)
+  }
+);}
+
+
+
+
+export const getPostTransportConfigApplyMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportConfigApply>>, TError,{data: TransportConfigApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postTransportConfigApply>>, TError,{data: TransportConfigApplyRequest}, TContext> => {
+
+const mutationKey = ['postTransportConfigApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postTransportConfigApply>>, {data: TransportConfigApplyRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postTransportConfigApply(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostTransportConfigApplyMutationResult = NonNullable<Awaited<ReturnType<typeof postTransportConfigApply>>>
+    export type PostTransportConfigApplyMutationBody = TransportConfigApplyRequest
+    export type PostTransportConfigApplyMutationError = ErrorResponse
+
+    /**
+ * @summary Atomically create a transport and its linked outgoing route
+ */
+export const usePostTransportConfigApply = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postTransportConfigApply>>, TError,{data: TransportConfigApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postTransportConfigApply>>,
+        TError,
+        {data: TransportConfigApplyRequest},
+        TContext
+      > => {
+      return useMutation(getPostTransportConfigApplyMutationOptions(options), queryClient);
     }
 
 /**

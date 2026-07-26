@@ -30,6 +30,8 @@ import {
   type TransportStatus,
 } from "@/api/generated/model"
 import {
+  createLinkedTransportApplyRequest,
+  usePostTransportConfigApplyMutation,
   usePostTransportActionMutation,
   usePostTransportConfigMutation,
   usePostConfigMutation,
@@ -522,6 +524,7 @@ export function TransportsPage() {
       },
     },
   })
+  const configApplyMutation = usePostTransportConfigApplyMutation()
   const transferMutation = useMutation({
     mutationFn: async (file: File) => {
       const parsed = JSON.parse(await file.text()) as {
@@ -700,40 +703,6 @@ export function TransportsPage() {
     })
   }
 
-  // Creating the matching interface outbound right away is what turns a fresh
-  // transport into an actual route; doing it here saves a trip to Outbounds.
-  const createInterfaceOutbound = (spec: TransportSpec) => {
-    if (!keenConfig) return
-    const outbounds = keenConfig.outbounds ?? []
-    const existing = outbounds.find(
-      (outbound) =>
-        outbound.tag === spec.tag ||
-        (outbound.type === "interface" && outbound.interface === spec.interface)
-    )
-    if (existing) {
-      toast.error(
-        t("transports.form.outboundExists", {
-          tag: existing.display_name?.trim() || existing.tag,
-        })
-      )
-      return
-    }
-    bypassMutation.mutate({
-      data: {
-        ...keenConfig,
-        outbounds: [
-          ...outbounds,
-          {
-            type: "interface",
-            tag: spec.tag,
-            display_name: spec.display_name?.trim() || spec.tag,
-            interface: spec.interface,
-          },
-        ],
-      },
-    })
-  }
-
   const saveTransport = (
     spec: TransportSpec,
     options: { createOutbound: boolean }
@@ -747,25 +716,38 @@ export function TransportsPage() {
       })
       return
     }
-    configMutation.mutate(
-      {
-        data: editing
-          ? {
-              operation: TransportConfigOperationOperation.update,
-              tag: editing.tag,
-              transport: spec,
-            }
-          : {
-              operation: TransportConfigOperationOperation.create,
-              transport: spec,
-            },
-      },
-      {
-        onSuccess: () => {
-          if (!editing && options.createOutbound) createInterfaceOutbound(spec)
-        },
-      }
-    )
+
+    if (!editing && options.createOutbound) {
+      configApplyMutation.mutate(
+        { data: createLinkedTransportApplyRequest(spec) },
+        {
+          onSuccess: () => {
+            setDialogOpen(false)
+            setEditing(undefined)
+            toast.success(t("transports.configMessages.create"))
+          },
+          onError: (mutationError) => {
+            toast.error(getApiErrorMessage(mutationError), {
+              richColors: true,
+            })
+          },
+        }
+      )
+      return
+    }
+
+    configMutation.mutate({
+      data: editing
+        ? {
+            operation: TransportConfigOperationOperation.update,
+            tag: editing.tag,
+            transport: spec,
+          }
+        : {
+            operation: TransportConfigOperationOperation.create,
+            transport: spec,
+          },
+    })
   }
 
   return (
@@ -1095,9 +1077,7 @@ export function TransportsPage() {
                     chart: t("transports.traffic.chart"),
                   }}
                   locale={i18n.resolvedLanguage ?? i18n.language}
-                  traffic={
-                    runtimeInterfaceByName.get(item.interface)?.traffic
-                  }
+                  traffic={runtimeInterfaceByName.get(item.interface)?.traffic}
                 />
 
                 {expanded ? (
@@ -1242,7 +1222,7 @@ export function TransportsPage() {
             ...items.map((item) => item.tag),
           ]}
           initial={editing}
-          isPending={configMutation.isPending}
+          isPending={configMutation.isPending || configApplyMutation.isPending}
           nativeCandidates={nativeTransportCandidates}
           onOpenChange={setDialogOpen}
           onSubmit={saveTransport}

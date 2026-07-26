@@ -10,14 +10,22 @@ import {
   postConfigSave,
   postRoutingTest,
   postTransportAction,
+  postTransportConfigApply,
   postTransportConfig,
   usePostListsRefresh,
   usePostConfig,
   usePostConfigSave,
   usePostRoutingTest,
   usePostTransportAction,
+  usePostTransportConfigApply,
   usePostTransportConfig,
 } from "@/api/generated/keen-api"
+import {
+  TransportConfigApplyRequestOperation,
+  TransportLinkedOutboundEnsureMode,
+  type TransportConfigApplyRequest,
+  type TransportSpec,
+} from "@/api/generated/model"
 import {
   invalidationKeysAfterApplyConfigMutation,
   invalidationKeysAfterConfigMutation,
@@ -25,7 +33,7 @@ import {
   invalidationKeysAfterRuntimeActionMutation,
   queryKeys,
 } from "@/api/query-keys"
-import { apiFetch } from "@/api/client"
+import { apiFetch, type ApiError } from "@/api/client"
 
 type UsePostListsRefreshOptions = Parameters<typeof usePostListsRefresh>[0]
 type UsePostConfigOptions = Parameters<typeof usePostConfig>[0]
@@ -38,12 +46,61 @@ type UsePostTransportConfigOptions = Parameters<
   typeof usePostTransportConfig
 >[0]
 
+export function createLinkedTransportApplyRequest(
+  transport: TransportSpec
+): TransportConfigApplyRequest {
+  const displayName = transport.display_name?.trim()
+  return {
+    operation: TransportConfigApplyRequestOperation.create,
+    transport,
+    linked_outbound: {
+      mode: TransportLinkedOutboundEnsureMode.ensure,
+      display_name: displayName || undefined,
+    },
+  }
+}
+
+export const usePostTransportConfigApplyMutation = () => {
+  const queryClient = useQueryClient()
+
+  return usePostTransportConfigApply<ApiError>({
+    mutation: {
+      onSuccess: async () => {
+        await Promise.all([
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.transportConfig(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.transports(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.runtimeInterfaces(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.runtimeOutbounds(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.config(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.healthService(),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.healthRouting(),
+          }),
+        ])
+      },
+    },
+  })
+}
+
 export {
   postConfig,
   postConfigSave,
   postListsRefresh,
   postRoutingTest,
   postTransportAction,
+  postTransportConfigApply,
   postTransportConfig,
 }
 

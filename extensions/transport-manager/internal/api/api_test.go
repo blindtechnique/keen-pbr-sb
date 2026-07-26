@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	configpkg "github.com/infaprim/mykeenpbr/internal/config"
 	"github.com/infaprim/mykeenpbr/internal/transport"
 )
 
@@ -295,5 +298,187 @@ func TestTransportConfigRejectsUnknownFieldsAndMultipleValues(t *testing.T) {
 				t.Fatalf("got %d: %s", recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func newConditionalAdminHandler(
+	t *testing.T,
+) (http.Handler, *configpkg.Admin, *transport.Manager, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := configpkg.Config{
+		Listen:        "127.0.0.1:12122",
+		APIKey:        "secret",
+		SingBoxBinary: "/opt/bin/sing-box",
+		RuntimeDir:    filepath.Join(t.TempDir(), "runtime"),
+	}
+	if err := configpkg.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := configpkg.LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	supervisor := transport.NewSupervisor(manager)
+	admin := configpkg.NewAdminWithRevision(path, loaded, revision, manager, supervisor)
+	return New(manager, "secret", admin), admin, manager, path
+}
+
+func authenticatedRequest(method, target, body string) *http.Request {
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer secret")
+	return request
+}
+
+func TestTransportConfigStateIsRevisionConsistent(t *testing.T) {
+	handler, admin, _, _ := newConditionalAdminHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(
+		recorder,
+		authenticatedRequest(http.MethodGet, "/v1/config/transports/state", ""),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("state returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Revision   string                    `json:"revision"`
+		Transports []transport.TransportSpec `json:"transports"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Revision != admin.Revision() {
+		t.Fatalf("state revision %q does not match admin %q", response.Revision, admin.Revision())
+	}
+	if recorder.Header().Get("ETag") != `"`+response.Revision+`"` {
+		t.Fatalf("unexpected state ETag %q", recorder.Header().Get("ETag"))
+	}
+	if len(response.Transports) != 0 {
+		t.Fatalf("unexpected transports: %#v", response.Transports)
+	}
+}
+
+func TestConditionalTransportCreateRejectsStaleAndMalformedRevision(t *testing.T) {
+	handler, admin, _, _ := newConditionalAdminHandler(t)
+	initialRevision := admin.Revision()
+	body := `{"tag":"native_one","type":"native","interface":"nwg1"}`
+
+	create := authenticatedRequest(http.MethodPost, "/v1/config/transports", body)
+	create.Header.Set("If-Match", initialRevision)
+	createRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(createRecorder, create)
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("conditional create returned %d: %s", createRecorder.Code, createRecorder.Body.String())
+	}
+	var created map[string]string
+	if err := json.Unmarshal(createRecorder.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created["config_revision"] == "" || created["config_revision"] == initialRevision {
+		t.Fatalf("create did not return a new revision: %#v", created)
+	}
+
+	stale := authenticatedRequest(
+		http.MethodPost,
+		"/v1/config/transports",
+		`{"tag":"native_two","type":"native","interface":"nwg2"}`,
+	)
+	stale.Header.Set("If-Match", initialRevision)
+	staleRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(staleRecorder, stale)
+	if staleRecorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale create returned %d: %s", staleRecorder.Code, staleRecorder.Body.String())
+	}
+	if len(admin.Specs()) != 1 {
+		t.Fatalf("stale create mutated config: %#v", admin.Specs())
+	}
+
+	malformed := authenticatedRequest(
+		http.MethodPost,
+		"/v1/config/transports",
+		`{"tag":"native_three","type":"native","interface":"nwg3"}`,
+	)
+	malformed.Header.Set("If-Match", "not-a-revision")
+	malformedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(malformedRecorder, malformed)
+	if malformedRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("malformed revision returned %d: %s", malformedRecorder.Code, malformedRecorder.Body.String())
+	}
+	if len(admin.Specs()) != 1 {
+		t.Fatalf("malformed revision mutated config: %#v", admin.Specs())
+	}
+}
+
+func TestConditionalTransportUpdateUsesRevision(t *testing.T) {
+	handler, admin, _, _ := newConditionalAdminHandler(t)
+	if err := admin.Create(
+		context.Background(),
+		transport.TransportSpec{Tag: "native_one", Type: "native", Interface: "nwg1"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	revision := admin.Revision()
+	update := authenticatedRequest(
+		http.MethodPut,
+		"/v1/config/transports/native_one",
+		`{"tag":"native_one","display_name":"Дом","type":"native","interface":"nwg1"}`,
+	)
+	update.Header.Set("If-Match", `"`+revision+`"`)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, update)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("conditional update returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if admin.Specs()[0].DisplayName != "Дом" {
+		t.Fatalf("conditional update was not committed: %#v", admin.Specs())
+	}
+
+	stale := authenticatedRequest(
+		http.MethodPut,
+		"/v1/config/transports/native_one",
+		`{"tag":"native_one","display_name":"Резерв","type":"native","interface":"nwg1"}`,
+	)
+	stale.Header.Set("If-Match", revision)
+	staleRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(staleRecorder, stale)
+	if staleRecorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale update returned %d: %s", staleRecorder.Code, staleRecorder.Body.String())
+	}
+	if admin.Specs()[0].DisplayName != "Дом" {
+		t.Fatal("stale update changed transport")
+	}
+}
+
+func TestTransportValidationHasNoSideEffects(t *testing.T) {
+	handler, admin, manager, path := newConditionalAdminHandler(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := admin.Revision()
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/v1/config/transports/validate",
+		`{"tag":"native_one","type":"native","interface":"nwg1"}`,
+	)
+	request.Header.Set("If-Match", revision)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("validation returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("validation changed durable transports config")
+	}
+	if admin.Revision() != revision || len(admin.Specs()) != 0 {
+		t.Fatal("validation changed in-memory transport config")
+	}
+	if _, exists := manager.Get("native_one"); exists {
+		t.Fatal("validation registered a runtime transport")
 	}
 }

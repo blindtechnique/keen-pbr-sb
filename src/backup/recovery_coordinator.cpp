@@ -229,6 +229,12 @@ RecoveryCoordinator::RecoveryCoordinator(
     RecoveryCoordinatorLayout layout)
     : layout_(std::move(layout)) {}
 
+RecoveryCoordinator::RecoveryCoordinator(
+    RecoveryCoordinatorLayout layout,
+    RecoveryCoordinatorHooks hooks)
+    : layout_(std::move(layout)),
+      hooks_(std::move(hooks)) {}
+
 #ifdef KEEN_PBR3_TESTING
 RecoveryCoordinator::RecoveryCoordinator(
     RecoveryCoordinatorLayout layout,
@@ -420,6 +426,27 @@ RecoveryResult RecoveryCoordinator::recover() {
             std::string(
                 "Persistent rollback verification was interrupted: ") +
                 error.what(),
+            state.operation);
+    }
+
+    try {
+        if (hooks_.after_files_verified) {
+            hooks_.after_files_verified(
+                state.operation, active);
+        }
+    } catch (const std::exception& error) {
+        throw RecoveryCoordinatorError(
+            RecoveryErrorKind::retryable_io,
+            std::string(
+                "Persistent rollback runtime reconciliation was "
+                "interrupted: ") +
+                error.what(),
+            state.operation);
+    } catch (...) {
+        throw RecoveryCoordinatorError(
+            RecoveryErrorKind::retryable_io,
+            "Persistent rollback runtime reconciliation was "
+            "interrupted",
             state.operation);
     }
 

@@ -7,6 +7,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -38,5 +39,14 @@ int run_recover_persistent_state(
 // Production entry point used by main(). The default layout is derived from
 // the compiled-in configuration prefix (/opt for Keenetic, / otherwise).
 int run_recover_persistent_state_command();
+
+#ifdef KEEN_PBR3_TESTING
+// A config-save journal may include transports.json. Recovery intentionally
+// uses the conservative full managed-stack boundary because the lightweight
+// preflight does not parse the journal effects before checking /proc.
+std::vector<std::string>
+recovery_managed_process_names_for_testing(
+    backup::RecoveryOperation operation);
+#endif
 
 } // namespace keen_pbr3

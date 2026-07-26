@@ -199,6 +199,41 @@ TEST_CASE("safe_exec: child process receives devnull stdin") {
     CHECK(exit_code == 0);
 }
 
+TEST_CASE(
+    "safe_exec child environment override does not mutate daemon environment") {
+    constexpr const char* variable =
+        "KEEN_PBR_SAFE_EXEC_CHILD_ENV_TEST";
+    const char* before = std::getenv(variable);
+    const std::optional<std::string> original =
+        before == nullptr
+            ? std::nullopt
+            : std::optional<std::string>(before);
+
+    const int exit_code = safe_exec_with_environment(
+        {
+            "/bin/sh",
+            "-c",
+            "test \"$KEEN_PBR_SAFE_EXEC_CHILD_ENV_TEST\" "
+            "= child-only",
+        },
+        {{variable, "child-only"}},
+        true);
+
+    CHECK(exit_code == 0);
+    const char* after = std::getenv(variable);
+    if (original.has_value()) {
+        REQUIRE(after != nullptr);
+        CHECK(std::string(after) == *original);
+    } else {
+        CHECK(after == nullptr);
+    }
+    CHECK(
+        safe_exec_with_environment(
+            {"sh", "-c", "exit 0"},
+            {{variable, "must-not-run"}},
+            true) == -1);
+}
+
 TEST_CASE("safe_exec: timeout escalates to SIGKILL") {
     SafeExecTimeoutGuard guard;
     set_safe_exec_timeouts(std::chrono::milliseconds{100},

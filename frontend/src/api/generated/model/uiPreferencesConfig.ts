@@ -13,7 +13,8 @@ import type { PlainDnsTemplate } from './plainDnsTemplate';
  */
 export interface UiPreferencesConfig {
   /**
-     * Native Keenetic tunnel interface identifiers hidden from the UI.
+     * Native Keenetic tunnel interface identifiers hidden from ordinary service inventory cards. Hiding is reversible and does not delete, disable, or remove an interface from creation selectors.
+
      * @maxItems 128
      */
   hidden_native_interface_ids?: string[];

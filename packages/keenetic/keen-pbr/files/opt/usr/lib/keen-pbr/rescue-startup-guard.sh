@@ -135,13 +135,13 @@ fi
 [ "${KEEN_PBR_PERSISTENT_TRANSACTION:-0}" != "1" ] || exit 0
 
 # Recovery changes persistent files and is deliberately offline. A config-save
-# WAL owns only config.json, so only the core writer must be stopped. A backup
-# restore may own transports and nfqws data as well and therefore requires the
-# complete managed stack to be offline.
-managed_processes="keen-pbr"
-if [ -f "$BACKUP_RESTORE_ACTIVE" ]; then
-    managed_processes="keen-pbr transport-manager nfqws2 nfqws sing-box"
-fi
+# WAL may own both config.json and transports.json, while a backup restore may
+# own those files plus nfqws data. The shell guard does not parse untrusted WAL
+# effects before the C++ recovery coordinator verifies them, so both operations
+# conservatively require the complete managed stack to be offline. This avoids
+# restoring transports.json while transport-manager or a managed sing-box
+# process can still mutate or consume the interrupted generation.
+managed_processes="keen-pbr transport-manager nfqws2 nfqws sing-box"
 for process_name in $managed_processes; do
     if [ -n "$(pidof "$process_name" 2>/dev/null || true)" ]; then
         fail "keen-pbr persistent recovery requires stopped services; $process_name is running"

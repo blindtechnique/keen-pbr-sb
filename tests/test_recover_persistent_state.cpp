@@ -294,6 +294,25 @@ TEST_CASE("persistent recovery refuses to restore while affected runtime is acti
           "runtime_still_active");
 }
 
+TEST_CASE("config-save recovery uses the full managed runtime boundary") {
+    const std::vector<std::string> expected{
+        "keen-pbr",
+        "transport-manager",
+        "nfqws2",
+        "nfqws",
+        "sing-box",
+    };
+
+    CHECK(
+        recovery_managed_process_names_for_testing(
+            backup::RecoveryOperation::config_save) ==
+        expected);
+    CHECK(
+        recovery_managed_process_names_for_testing(
+            backup::RecoveryOperation::backup_restore) ==
+        expected);
+}
+
 TEST_CASE("persistent recovery rejects local UNKNOWN without acquiring maintenance") {
     RecoveryCommandTempDir directory;
     const auto layout = command_layout(directory.path);

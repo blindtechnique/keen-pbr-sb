@@ -56,6 +56,10 @@ esac
 case "${1:-}" in
     start)
         run_recovery_guard start || exit 1
+        # This flag authorizes only the guard bypass owned by an already
+        # durable transaction. Never leak it into transport-manager or its
+        # managed sing-box children.
+        unset KEEN_PBR_PERSISTENT_TRANSACTION
         ;;
 esac
 

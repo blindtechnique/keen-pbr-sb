@@ -351,6 +351,113 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "recovery hook reconciles runtime while the exact WAL is active") {
+    RecoveryTempDir temporary;
+    const auto layout = test_layout(temporary.path);
+    const auto config_before = valid_config_json();
+    const std::string transports_before =
+        "{\"revision\":\"before\"}\n";
+    write_binary(layout.persistent.config, config_before);
+    write_binary(
+        layout.persistent.transports, transports_before);
+    const auto payload = snapshot_payload(
+        exact_operation_snapshot(layout));
+    const std::vector<RestoreJournalEffect> effects{
+        RestoreJournalEffect::files,
+        RestoreJournalEffect::transport_manager,
+        RestoreJournalEffect::core,
+    };
+    RestoreJournal journal(operation_path(
+        layout,
+        backup::RecoveryOperation::config_save));
+    const auto active = journal.begin(
+        kConfigTransaction, payload, effects);
+    write_binary(
+        layout.persistent.config,
+        valid_config_json("interrupted"));
+    write_binary(
+        layout.persistent.transports,
+        "{\"revision\":\"interrupted\"}\n");
+
+    bool reconciled = false;
+    backup::RecoveryCoordinatorHooks hooks;
+    hooks.after_files_verified =
+        [&](backup::RecoveryOperation operation,
+            const RestoreJournalEntry& entry) {
+            CHECK(
+                operation ==
+                backup::RecoveryOperation::config_save);
+            CHECK(entry == active);
+            CHECK(journal.read_active() == active);
+            CHECK(
+                read_binary(layout.persistent.config) ==
+                config_before);
+            CHECK(
+                read_binary(layout.persistent.transports) ==
+                transports_before);
+            reconciled = true;
+        };
+    backup::RecoveryCoordinator coordinator(
+        layout, std::move(hooks));
+
+    const auto result = coordinator.recover();
+
+    CHECK(reconciled);
+    CHECK(
+        result.outcome ==
+        backup::RecoveryOutcome::rollback_completed);
+    CHECK_FALSE(journal.read_active().has_value());
+}
+
+TEST_CASE(
+    "recovery hook failure preserves the active WAL for retry") {
+    RecoveryTempDir temporary;
+    const auto layout = test_layout(temporary.path);
+    write_binary(
+        layout.persistent.config, valid_config_json());
+    write_binary(
+        layout.persistent.transports,
+        "{\"revision\":\"before\"}\n");
+    const auto payload = snapshot_payload(
+        exact_operation_snapshot(layout));
+    RestoreJournal journal(operation_path(
+        layout,
+        backup::RecoveryOperation::config_save));
+    const auto active = journal.begin(
+        kConfigTransaction,
+        payload,
+        {
+            RestoreJournalEffect::files,
+            RestoreJournalEffect::transport_manager,
+            RestoreJournalEffect::core,
+        });
+    write_binary(
+        layout.persistent.transports,
+        "{\"revision\":\"interrupted\"}\n");
+
+    backup::RecoveryCoordinatorHooks hooks;
+    hooks.after_files_verified =
+        [](backup::RecoveryOperation,
+           const RestoreJournalEntry&) {
+            throw std::runtime_error(
+                "transport manager did not converge");
+        };
+    backup::RecoveryCoordinator coordinator(
+        layout, std::move(hooks));
+
+    const auto error = expect_recovery_error(coordinator);
+
+    CHECK(
+        error.kind() ==
+        backup::RecoveryErrorKind::retryable_io);
+    CHECK(journal.read_active() == active);
+    CHECK(
+        read_binary(layout.persistent.transports) ==
+        "{\"revision\":\"before\"}\n");
+    CHECK_FALSE(coordinator.global_unknown_present());
+}
+
+TEST_CASE(
     "offline recovery is idempotent after interruption before completion") {
     RecoveryTempDir temporary;
     const auto layout = test_layout(temporary.path);

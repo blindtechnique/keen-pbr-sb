@@ -4,9 +4,7 @@
 #include "restore_transaction.hpp"
 
 #include <filesystem>
-#ifdef KEEN_PBR3_TESTING
 #include <functional>
-#endif
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -70,6 +68,17 @@ struct RecoveryCoordinatorLayout {
     PersistentLayout persistent;
 };
 
+struct RecoveryCoordinatorHooks {
+    // Runs only after the immutable rollback snapshot has been restored and
+    // verified byte-for-byte, while the durable active WAL still exists.
+    // Live callers may reconcile and verify affected runtimes here before the
+    // coordinator reaches the journal commit point. Throwing leaves the WAL
+    // active so a later offline retry remains authoritative.
+    std::function<void(
+        RecoveryOperation,
+        const RestoreJournalEntry&)> after_files_verified;
+};
+
 #ifdef KEEN_PBR3_TESTING
 struct RecoveryCoordinatorTestHooks {
     FileApplyHooks file_apply;
@@ -80,16 +89,20 @@ struct RecoveryCoordinatorTestHooks {
 };
 #endif
 
-// Performs offline, file-only crash recovery.
+// Performs offline crash recovery. With no hooks it is file-only.
 //
 // No live Config object, service, API context, or lifecycle state is consulted.
 // The immutable journal payload is parsed as a persistent operation snapshot,
 // applied with FileMutationTransaction, verified byte-for-byte (including
-// tombstones and metadata), and only then completed in the journal.
+// tombstones and metadata), then the optional runtime reconciliation hook runs,
+// and only after it succeeds is the journal completed.
 class RecoveryCoordinator {
 public:
     explicit RecoveryCoordinator(
         RecoveryCoordinatorLayout layout);
+    RecoveryCoordinator(
+        RecoveryCoordinatorLayout layout,
+        RecoveryCoordinatorHooks hooks);
 #ifdef KEEN_PBR3_TESTING
     RecoveryCoordinator(
         RecoveryCoordinatorLayout layout,
@@ -103,6 +116,7 @@ public:
 
 private:
     RecoveryCoordinatorLayout layout_;
+    RecoveryCoordinatorHooks hooks_;
 #ifdef KEEN_PBR3_TESTING
     RecoveryCoordinatorTestHooks test_hooks_;
 #endif

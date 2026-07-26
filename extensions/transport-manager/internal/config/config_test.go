@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/infaprim/mykeenpbr/internal/transport"
@@ -321,5 +322,156 @@ func TestLoadedAndCommittedRevisionTracksExactVisibleConfig(t *testing.T) {
 	}
 	if admin.Revision() == revision {
 		t.Fatal("revision did not change after committed update")
+	}
+}
+
+func TestConditionalCreateAllowsOnlyOneWriterPerRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := Config{
+		APIKey:        "secret",
+		SingBoxBinary: "/opt/bin/sing-box",
+		RuntimeDir:    filepath.Join(t.TempDir(), "runtime"),
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	supervisor := transport.NewSupervisor(manager)
+	admin := NewAdminWithRevision(path, loaded, revision, manager, supervisor)
+
+	type result struct {
+		revision string
+		matched  bool
+		err      error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, spec := range []transport.TransportSpec{
+		{Tag: "native_one", Type: "native", Interface: "nwg1"},
+		{Tag: "native_two", Type: "native", Interface: "nwg2"},
+	} {
+		spec := spec
+		go func() {
+			ready.Done()
+			<-start
+			nextRevision, matched, createErr := admin.CreateIfRevision(
+				context.Background(),
+				spec,
+				revision,
+			)
+			results <- result{revision: nextRevision, matched: matched, err: createErr}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	matchedCount := 0
+	staleCount := 0
+	for range 2 {
+		outcome := <-results
+		if outcome.err != nil {
+			t.Fatalf("conditional create failed: %v", outcome.err)
+		}
+		if outcome.matched {
+			matchedCount++
+			if outcome.revision == revision {
+				t.Fatal("winning writer did not advance revision")
+			}
+		} else {
+			staleCount++
+		}
+	}
+	if matchedCount != 1 || staleCount != 1 {
+		t.Fatalf("expected one winner and one stale writer, got matched=%d stale=%d", matchedCount, staleCount)
+	}
+
+	stored, storedRevision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Transports) != 1 {
+		t.Fatalf("both writers committed: %#v", stored.Transports)
+	}
+	if storedRevision != admin.Revision() {
+		t.Fatalf("durable revision %q differs from admin %q", storedRevision, admin.Revision())
+	}
+	if _, exists := manager.Get(stored.Transports[0].Tag); !exists {
+		t.Fatal("winning transport is not registered in runtime manager")
+	}
+}
+
+func TestValidateUpdatePreservesSecretsWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := Config{
+		APIKey:        "secret",
+		SingBoxBinary: "/opt/bin/sing-box",
+		RuntimeDir:    filepath.Join(t.TempDir(), "runtime"),
+		Transports: []transport.TransportSpec{{
+			Tag:          "proxy_one",
+			Type:         "sing-box",
+			Interface:    "kpbrproxy1",
+			OutboundJSON: `{"type":"vless","tag":"proxy_one","server":"example.com","server_port":443,"uuid":"11111111-1111-1111-1111-111111111111"}`,
+		}},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, err := LoadWithRevision(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	managed, err := transport.NewFromSpec(
+		loaded.Transports[0],
+		loaded.SingBoxBinary,
+		loaded.RuntimeDir,
+		loaded.HealthEndpoint(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Add(managed); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := transport.NewSupervisor(manager)
+	supervisor.Register(loaded.Transports[0])
+	admin := NewAdminWithRevision(path, loaded, revision, manager, supervisor)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	redactedUpdate := transport.TransportSpec{
+		Tag:         "proxy_one",
+		DisplayName: "Рабочий прокси",
+		Type:        "sing-box",
+		Interface:   "kpbrproxy1",
+	}
+	gotRevision, matched, err := admin.ValidateUpdateAtRevision(
+		"proxy_one",
+		redactedUpdate,
+		revision,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched || gotRevision != revision {
+		t.Fatalf("unexpected validation result matched=%t revision=%q", matched, gotRevision)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("update validation changed durable config")
+	}
+	if admin.Revision() != revision || admin.Specs()[0].DisplayName != "" {
+		t.Fatal("update validation changed in-memory config")
 	}
 }
