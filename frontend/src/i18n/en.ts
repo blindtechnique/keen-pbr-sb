@@ -134,6 +134,10 @@ export const enTranslation = {
     description: "Authenticate to open routing management.",
     username: "Username",
     password: "Password",
+    showPassword: "Show password",
+    hidePassword: "Hide password",
+    cannotSignIn: "Cannot sign in",
+    supportCenter: "Support center",
     signIn: "Sign in",
     signingIn: "Signing in…",
     signOut: "Sign out",
@@ -142,7 +146,7 @@ export const enTranslation = {
     unavailableTitle: "Unable to verify access",
     retry: "Try again",
     credentialsHint:
-      "Credentials are configured by the keen-pbr-sb installer. This is a separate local account; see README for details.",
+      "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
   },
   common: {
     updateStatus: {

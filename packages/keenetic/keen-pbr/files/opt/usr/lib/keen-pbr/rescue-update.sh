@@ -707,6 +707,7 @@ cleanup_process() {
 verify_runtime() {
     attempts=0
     stable=0
+    auth_body_file="$RESCUE_DIR/.auth-status.$$"
     listen=$(
         sed -n 's/.*"listen"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
             "$CONFIG_DIR/config.json" 2>/dev/null | head -n 1
@@ -720,24 +721,36 @@ verify_runtime() {
         if "$KEEN_PBR_INIT" check >/dev/null 2>&1 &&
            "$TRANSPORT_INIT" check >/dev/null 2>&1; then
             http_code=""
+            rm -f "$auth_body_file"
             if [ -x "$OPT_CURL" ]; then
-                http_code=$("$OPT_CURL" -sS -o /dev/null \
+                http_code=$("$OPT_CURL" -sS -o "$auth_body_file" \
                     -w '%{http_code}' --connect-timeout 2 \
                     --max-time 4 \
                     "$health_url" 2>/dev/null || true)
             elif command -v curl >/dev/null 2>&1; then
-                http_code=$(curl -sS -o /dev/null \
+                http_code=$(curl -sS -o "$auth_body_file" \
                     -w '%{http_code}' --connect-timeout 2 \
                     --max-time 4 \
                     "$health_url" 2>/dev/null || true)
             elif [ -x "$OPT_WGET" ]; then
-                "$OPT_WGET" -q -T 4 -O /dev/null "$health_url" 2>/dev/null &&
+                "$OPT_WGET" -q -T 4 -O "$auth_body_file" \
+                    "$health_url" 2>/dev/null &&
                     http_code=200
             elif command -v wget >/dev/null 2>&1; then
-                wget -q -T 4 -O /dev/null "$health_url" 2>/dev/null &&
+                wget -q -T 4 -O "$auth_body_file" \
+                    "$health_url" 2>/dev/null &&
                     http_code=200
             fi
-            if [ "$http_code" = "200" ]; then
+            auth_body=
+            [ ! -f "$auth_body_file" ] ||
+                auth_body=$(cat "$auth_body_file" 2>/dev/null || true)
+            rm -f "$auth_body_file"
+            case "$auth_body" in
+                *auth_misconfigured*) auth_healthy=0 ;;
+                *'"enabled"'*'"authenticated"'*) auth_healthy=1 ;;
+                *) auth_healthy=0 ;;
+            esac
+            if [ "$http_code" = "200" ] && [ "$auth_healthy" -eq 1 ]; then
                 stable=$((stable + 1))
                 [ "$stable" -lt 3 ] || return 0
             else
@@ -749,6 +762,7 @@ verify_runtime() {
         attempts=$((attempts + 1))
         sleep 2
     done
+    rm -f "$auth_body_file"
     return 1
 }
 

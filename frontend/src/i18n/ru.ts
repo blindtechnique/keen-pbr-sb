@@ -134,6 +134,10 @@ export const ruTranslation = {
     description: "Авторизуйтесь, чтобы открыть управление маршрутизацией.",
     username: "Имя пользователя",
     password: "Пароль",
+    showPassword: "Показать пароль",
+    hidePassword: "Скрыть пароль",
+    cannotSignIn: "Не могу войти",
+    supportCenter: "Центр поддержки",
     signIn: "Войти",
     signingIn: "Вход…",
     signOut: "Выйти",
@@ -142,7 +146,7 @@ export const ruTranslation = {
     unavailableTitle: "Не удалось проверить доступ",
     retry: "Повторить проверку",
     credentialsHint:
-      "Данные задаются установщиком keen-pbr-sb. Это отдельная локальная учётная запись; источник указан в README.",
+      "Используйте способ входа, выбранный в настройках keen-pbr-sb. При проверке через Keenetic вводятся данные его веб-конфигуратора.",
   },
   common: {
     updateStatus: {

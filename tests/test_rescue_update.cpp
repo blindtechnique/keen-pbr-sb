@@ -435,9 +435,25 @@ void install_runtime_mocks(const fs::path& root) {
         "[ ! -f \"$count_file\" ] || IFS= read -r count < \"$count_file\"\n"
         "count=$((count + 1))\n"
         "printf '%s\\n' \"$count\" > \"$count_file\"\n"
+        "output_file=\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -o) output_file=${2:-}; shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
         "if [ \"$count\" -le \"${KEEN_PBR_TEST_CURL_FAIL_CALLS:-0}\" ]; then\n"
+        "  [ -z \"$output_file\" ] || printf '%s\\n' "
+        "'{\"error\":\"unavailable\"}' > \"$output_file\"\n"
         "  printf 500\n"
         "else\n"
+        "  if [ \"${KEEN_PBR_TEST_AUTH_MISCONFIGURED:-0}\" = 1 ]; then\n"
+        "    body='{\"enabled\":true,\"authenticated\":false,"
+        "\"error\":\"auth_misconfigured\"}'\n"
+        "  else\n"
+        "    body='{\"enabled\":true,\"authenticated\":false}'\n"
+        "  fi\n"
+        "  [ -z \"$output_file\" ] || printf '%s\\n' \"$body\" > \"$output_file\"\n"
         "  printf 200\n"
         "fi\n",
         0700);
@@ -499,7 +515,8 @@ int run_script(const fs::path& root,
                bool package_upgrade = false,
                bool fail_pending_after_commit = false,
                bool persistent_transaction = false,
-               bool final_remove = false) {
+               bool final_remove = false,
+               bool auth_misconfigured = false) {
     const auto pid = ::fork();
     if (pid < 0)
         throw std::system_error(errno, std::generic_category(), "fork");
@@ -548,6 +565,8 @@ int run_script(const fs::path& root,
             ::setenv("KEEN_PBR_PERSISTENT_TRANSACTION", "1", 1);
         if (final_remove)
             ::setenv("KEEN_PBR_FINAL_REMOVE", "1", 1);
+        if (auth_misconfigured)
+            ::setenv("KEEN_PBR_TEST_AUTH_MISCONFIGURED", "1", 1);
         if (!stdout_path.empty()) {
             const int descriptor =
                 ::open(stdout_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -612,7 +631,8 @@ int run_rescue(const fs::path& root,
                int curl_fail_calls = 0,
                const std::string& stop_after_phase = {},
                bool fail_cleanup = false,
-               bool fail_pending_after_commit = false) {
+               bool fail_pending_after_commit = false,
+               bool auth_misconfigured = false) {
     return run_script(root,
                       KEEN_PBR_RESCUE_SCRIPT_PATH,
                       arguments,
@@ -629,7 +649,10 @@ int run_rescue(const fs::path& root,
                       false,
                       false,
                       false,
-                      fail_pending_after_commit);
+                      fail_pending_after_commit,
+                      false,
+                      false,
+                      auth_misconfigured);
 }
 
 int run_lock(const fs::path& root,
@@ -725,6 +748,23 @@ mode_t permissions(const fs::path& path) {
 }
 
 } // namespace
+
+TEST_CASE("runtime verification rejects a misconfigured authentication state") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    install_runtime_mocks(root);
+    write_file(config_dir(root) / "config.json",
+               R"({"api":{"listen":"0.0.0.0:12121"}})");
+
+    CHECK(run_rescue(root,
+                     {"verify"},
+                     0,
+                     0,
+                     {},
+                     false,
+                     false,
+                     true) == 1);
+}
 
 TEST_CASE("rescue stage publishes a complete private snapshot before pending state") {
     TempDirectory directory;

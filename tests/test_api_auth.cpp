@@ -9,11 +9,16 @@
 #include "../src/api/server.hpp"
 
 #include <atomic>
+#include <arpa/inet.h>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <thread>
 #include <unordered_set>
@@ -39,6 +44,29 @@ public:
 
     std::filesystem::path path;
 };
+
+std::string first_non_loopback_ipv4() {
+    ifaddrs* interfaces = nullptr;
+    if (::getifaddrs(&interfaces) != 0) return {};
+    std::string result;
+    for (const auto* current = interfaces; current != nullptr;
+         current = current->ifa_next) {
+        if (!current->ifa_addr ||
+            current->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        const auto* address =
+            &reinterpret_cast<const sockaddr_in*>(current->ifa_addr)->sin_addr;
+        std::array<char, INET_ADDRSTRLEN> text{};
+        if (::inet_ntop(AF_INET, address, text.data(), text.size()) &&
+            std::string_view{text.data()} != "127.0.0.1") {
+            result = text.data();
+            break;
+        }
+    }
+    ::freeifaddrs(interfaces);
+    return result;
+}
 
 class EnvironmentVariableGuard {
 public:
@@ -335,7 +363,7 @@ TEST_CASE("public auth status hides the configured Keenetic endpoint") {
     CHECK_FALSE(status.contains("keenetic_endpoint"));
 }
 
-TEST_CASE("Keenetic endpoint parser accepts only canonical loopback targets") {
+TEST_CASE("Keenetic endpoint parser accepts canonical local targets") {
     const auto ipv4_default =
         parse_keenetic_auth_endpoint("127.0.0.1");
     const auto ipv4_legacy =
@@ -360,6 +388,14 @@ TEST_CASE("Keenetic endpoint parser accepts only canonical loopback targets") {
     CHECK(ipv6_default->canonical == "[::1]:80");
     REQUIRE(ipv6_custom);
     CHECK(ipv6_custom->canonical == "[::1]:8080");
+
+    const auto interface_address = first_non_loopback_ipv4();
+    REQUIRE_FALSE(interface_address.empty());
+    const auto lan_endpoint =
+        parse_keenetic_auth_endpoint(interface_address + ":777");
+    REQUIRE(lan_endpoint);
+    CHECK(lan_endpoint->host == interface_address);
+    CHECK(lan_endpoint->port == 777);
 }
 
 TEST_CASE("Keenetic endpoint parser rejects SSRF and parser bypass forms") {
@@ -400,7 +436,7 @@ TEST_CASE("Keenetic endpoint parser rejects SSRF and parser bypass forms") {
     }
 }
 
-TEST_CASE("enabled Keenetic auth with a non-loopback endpoint fails closed") {
+TEST_CASE("enabled Keenetic auth with a non-local endpoint fails closed") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";
     write_text(

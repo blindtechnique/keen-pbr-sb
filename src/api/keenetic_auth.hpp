@@ -11,8 +11,10 @@ struct KeeneticAuthEndpoint {
     std::string canonical;
 };
 
-// Only a local firmware endpoint is accepted. In particular, DNS names,
-// alternate IPv4 spellings and URL components are rejected so this setting
+// Only a numeric address assigned to one of this router's own interfaces is
+// accepted. KeeneticOS may reject /auth through loopback, so the router's LAN
+// address must be supported without allowing arbitrary LAN hosts. DNS names,
+// alternate IP spellings and URL components remain rejected so this setting
 // cannot turn the privileged daemon into an SSRF proxy.
 std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
     const std::string& endpoint,

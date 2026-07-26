@@ -7,10 +7,69 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <arpa/inet.h>
+#include <array>
 #include <charconv>
+#include <cstring>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <string>
 
 namespace keen_pbr3 {
+namespace {
+
+bool address_belongs_to_local_interface(int family, const void* address) {
+    ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces) != 0) return false;
+
+    bool found = false;
+    for (const auto* current = interfaces; current != nullptr;
+         current = current->ifa_next) {
+        if (!current->ifa_addr || current->ifa_addr->sa_family != family) {
+            continue;
+        }
+        if (family == AF_INET) {
+            const auto* candidate =
+                &reinterpret_cast<const sockaddr_in*>(current->ifa_addr)
+                     ->sin_addr;
+            found = std::memcmp(candidate, address, sizeof(in_addr)) == 0;
+        } else if (family == AF_INET6) {
+            const auto* candidate =
+                &reinterpret_cast<const sockaddr_in6*>(current->ifa_addr)
+                     ->sin6_addr;
+            found = std::memcmp(candidate, address, sizeof(in6_addr)) == 0;
+        }
+        if (found) break;
+    }
+    freeifaddrs(interfaces);
+    return found;
+}
+
+bool is_canonical_local_ip_literal(const std::string& host,
+                                   int family,
+                                   std::string* error) {
+    std::array<unsigned char, sizeof(in6_addr)> address{};
+    if (inet_pton(family, host.c_str(), address.data()) != 1) {
+        if (error) *error = "endpoint host must be a numeric IP literal";
+        return false;
+    }
+
+    std::array<char, INET6_ADDRSTRLEN> canonical{};
+    if (!inet_ntop(family, address.data(), canonical.data(), canonical.size()) ||
+        host != canonical.data()) {
+        if (error) *error = "endpoint host must use canonical IP notation";
+        return false;
+    }
+    if (!address_belongs_to_local_interface(family, address.data())) {
+        if (error) {
+            *error = "endpoint address is not assigned to this router";
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
     const std::string& endpoint,
@@ -45,8 +104,10 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
             }
             port_text = suffix.substr(1);
         }
-        if (host != "::1") {
-            return reject("only the IPv6 loopback literal is allowed");
+        std::string address_error;
+        if (!is_canonical_local_ip_literal(host, AF_INET6, &address_error)) {
+            if (error) *error = address_error;
+            return std::nullopt;
         }
     } else {
         const auto colon = endpoint.find(':');
@@ -60,8 +121,10 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
             port_text = endpoint.substr(colon + 1);
             if (port_text.empty()) return reject("port is empty");
         }
-        if (host != "127.0.0.1") {
-            return reject("only the IPv4 loopback literal is allowed");
+        std::string address_error;
+        if (!is_canonical_local_ip_literal(host, AF_INET, &address_error)) {
+            if (error) *error = address_error;
+            return std::nullopt;
         }
     }
 
@@ -84,7 +147,7 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
     parsed.host = host;
     parsed.port = port;
     parsed.canonical =
-        host == "::1"
+        host.find(':') != std::string::npos
             ? "[" + host + "]:" + std::to_string(port)
             : host + ":" + std::to_string(port);
     if (error) error->clear();
