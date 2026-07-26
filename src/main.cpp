@@ -14,6 +14,7 @@
 #include <cpptrace/utils.hpp>
 #include <keen-pbr/version.hpp>
 
+#include "cmd/recover_persistent_state.hpp"
 #include "cmd/status.hpp"
 #include "crash/crash_diagnostics.hpp"
 #include "log/file_sink.hpp"
@@ -49,6 +50,7 @@ struct CliOptions {
     bool no_api{false};
     bool use_raw_prerouting{false};
     bool has_pid_file_override{false};
+    bool has_config_path_override{false};
     bool run_service{false};
     bool generate_resolver_config{false};
     std::string resolver_type;
@@ -58,6 +60,8 @@ struct CliOptions {
     bool run_status{false};
     bool run_test_routing{false};
     std::string test_routing_target;
+    bool recover_persistent_state{false};
+    bool recovery_incompatible_option{false};
     bool show_help{false};
     bool show_version{false};
 };
@@ -83,6 +87,7 @@ void print_usage(const char* argv0) {
               << "  generate-resolver-config <res>     Print generated resolver config to stdout and exit\n"
               << "                                     Resolvers: dnsmasq-ipset, dnsmasq-nftset\n"
               << "  resolver-config-hash               Print MD5 hash of domain-to-ipset mapping and exit\n"
+              << "  recover-persistent-state           Recover an interrupted persistent transaction and exit\n"
               << "  test-routing <ip-or-domain>        Test expected vs actual routing for an IP or domain\n";
 }
 
@@ -95,18 +100,21 @@ CliOptions parse_args(int argc, char* argv[]) {
                 std::exit(1);
             }
             opts.config_path = argv[++i];
+            opts.has_config_path_override = true;
         } else if (std::strcmp(argv[i], "--log-level") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --log-level requires an argument\n";
                 std::exit(1);
             }
             opts.log_level = argv[++i];
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--log-file") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --log-file requires an argument\n";
                 std::exit(1);
             }
             opts.log_file = argv[++i];
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--pid-file") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --pid-file requires an argument\n";
@@ -114,10 +122,13 @@ CliOptions parse_args(int argc, char* argv[]) {
             }
             opts.pid_file_override = argv[++i];
             opts.has_pid_file_override = true;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--no-api") == 0) {
             opts.no_api = true;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--use-raw-prerouting") == 0) {
             opts.use_raw_prerouting = true;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             opts.show_help = true;
         } else if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
@@ -138,8 +149,11 @@ CliOptions parse_args(int argc, char* argv[]) {
             opts.download_lists = true;
         } else if (std::strcmp(argv[i], "--reload") == 0) {
             opts.download_reload = true;
+            opts.recovery_incompatible_option = true;
         } else if (std::strcmp(argv[i], "resolver-config-hash") == 0) {
             opts.resolver_config_hash = true;
+        } else if (std::strcmp(argv[i], "recover-persistent-state") == 0) {
+            opts.recover_persistent_state = true;
         } else if (std::strcmp(argv[i], "test-routing") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: test-routing requires an IP address or domain argument\n";
@@ -230,9 +244,31 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
+        if (opts.recover_persistent_state) {
+            const bool combined_command =
+                opts.run_service || opts.run_status ||
+                opts.download_lists ||
+                opts.generate_resolver_config ||
+                opts.resolver_config_hash ||
+                opts.run_test_routing;
+            if (combined_command ||
+                opts.recovery_incompatible_option ||
+                opts.has_config_path_override) {
+                std::cerr
+                    << "recover-persistent-state: this offline command "
+                       "does not accept another command or --config\n";
+                return static_cast<int>(
+                    keen_pbr3::RecoverPersistentStateExitCode::blocked);
+            }
+            // This dispatch deliberately precedes logger/file-sink setup and
+            // any read or parse of the working configuration.
+            return keen_pbr3::run_recover_persistent_state_command();
+        }
+
         if (!opts.download_lists && !opts.generate_resolver_config &&
             !opts.resolver_config_hash && !opts.run_service && !opts.run_status &&
-            !opts.run_test_routing) {
+            !opts.run_test_routing &&
+            !opts.recover_persistent_state) {
             print_usage(argv[0]);
             return 0;
         }

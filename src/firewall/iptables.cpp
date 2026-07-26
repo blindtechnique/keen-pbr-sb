@@ -489,10 +489,15 @@ std::optional<bool> IptablesFirewall::dispatcher_chains_exist(bool ipv6) const {
         mangle_snapshot = mangle.stdout_output;
     }
 
-    return snapshot_contains_dispatcher_scaffold(
-               prerouting.stdout_output, "PREROUTING", prerouting_chain) &&
-           snapshot_contains_dispatcher_scaffold(
-               mangle_snapshot, "OUTPUT", OUTPUT_CHAIN_NAME);
+    const bool prerouting_present = snapshot_contains_dispatcher_scaffold(
+        prerouting.stdout_output, "PREROUTING", prerouting_chain);
+    const bool output_present = snapshot_contains_dispatcher_scaffold(
+        mangle_snapshot, "OUTPUT", OUTPUT_CHAIN_NAME);
+    const bool raw_conntrack_present =
+        !raw_prerouting ||
+        snapshot_contains_dispatcher_scaffold(
+            mangle_snapshot, "PREROUTING", RAW_CONNTRACK_CHAIN_NAME);
+    return prerouting_present && output_present && raw_conntrack_present;
 }
 
 bool IptablesFirewall::snapshot_contains_dispatcher_scaffold(
@@ -560,6 +565,9 @@ std::string IptablesFirewall::build_prefilter_lines(
     std::string lines;
     // The raw table runs before conntrack. Classify every forwarded packet
     // there instead of emitting a matcher that cannot be valid at this hook.
+    if (allow_conntrack) {
+        lines += build_conntrack_prefilter_lines(prefilter, chain);
+    }
     if (allow_conntrack && prefilter.skip_established_or_dnat) {
         lines += keen_pbr3::format(
             "-A {} -m conntrack --ctstate DNAT -j RETURN\n",
@@ -584,9 +592,33 @@ std::string IptablesFirewall::build_prefilter_lines(
     return lines;
 }
 
+std::string IptablesFirewall::build_conntrack_prefilter_lines(
+    const FirewallGlobalPrefilter& prefilter,
+    const std::string& chain) {
+    if (!prefilter.restore_conntrack_mark ||
+        prefilter.conntrack_mark_mask == 0) {
+        return {};
+    }
+
+    const std::string mask =
+        keen_pbr3::format("{:#x}", prefilter.conntrack_mark_mask);
+    return keen_pbr3::format(
+        "-A {} -m conntrack --ctdir ORIGINAL -m connmark ! --mark 0/{} "
+        "-j CONNMARK --restore-mark --nfmask {} --ctmask {}\n"
+        "-A {} -m conntrack --ctdir ORIGINAL -m connmark ! --mark 0/{} "
+        "-j RETURN\n",
+        chain,
+        mask,
+        mask,
+        mask,
+        chain,
+        mask);
+}
+
 std::vector<std::string> IptablesFirewall::build_rule_lines(
     const PendingRule& pr,
-    const FirewallGlobalPrefilter& prefilter) {
+    const FirewallGlobalPrefilter& prefilter,
+    bool allow_conntrack) {
     // OUTPUT-scoped rules live in KeenPbrOutput and match router-originated
     // packets, which never carry an input interface.
     const char* chain = pr.output ? OUTPUT_CHAIN_NAME : CHAIN_NAME;
@@ -616,6 +648,25 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
     }
     std::vector<std::string> lines;
     lines.reserve(iface_frags.size() * 2);
+    auto append_mark_and_save = [&](std::string mark_line) {
+        lines.push_back(mark_line);
+        if (!allow_conntrack || !prefilter.restore_conntrack_mark ||
+            prefilter.conntrack_mark_mask == 0) {
+            return;
+        }
+        const auto target = mark_line.find(" -j MARK ");
+        if (target == std::string::npos) {
+            return;
+        }
+        mark_line.replace(
+            target,
+            mark_line.size() - target,
+            keen_pbr3::format(
+                " -j CONNMARK --save-mark --nfmask {:#x} --ctmask {:#x}\n",
+                prefilter.conntrack_mark_mask,
+                prefilter.conntrack_mark_mask));
+        lines.push_back(std::move(mark_line));
+    };
     for (const auto proto : expand_l4_protos_for_iptables(pr.criteria)) {
         std::string pp = build_proto_port_fragment(proto,
                                                    pr.criteria.src_port,
@@ -630,7 +681,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         "-j MARK --set-xmark {:#x}/{:#x}",
                         pr.fwmark,
                         pr.fwmark_mask);
-                    lines.push_back(keen_pbr3::format(
+                    append_mark_and_save(keen_pbr3::format(
                         "-A {}{}{}{}{} {}\n",
                         chain,
                         iface_frag,
@@ -668,7 +719,7 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                         "-j MARK --set-xmark {:#x}/{:#x}",
                         pr.fwmark,
                         pr.fwmark_mask);
-                    lines.push_back(keen_pbr3::format(
+                    append_mark_and_save(keen_pbr3::format(
                         "-A {} -m set --match-set {} dst{}{}{}{} {}\n",
                         chain,
                         *pr.criteria.dst_set_name,
@@ -720,7 +771,8 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
     s += build_prefilter_lines(prefilter);
     for (const auto& pr : rules) {
         if (pr.ipv6 != ipv6 || pr.output) continue;
-        for (const auto& line : build_rule_lines(pr, prefilter)) {
+        for (const auto& line : build_rule_lines(
+                 pr, prefilter, /*allow_conntrack=*/true)) {
             s += line;
         }
     }
@@ -729,6 +781,7 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
     // prefilter is intentionally omitted (OUTPUT packets carry no in-iface).
     s += keen_pbr3::format(":{} - [0:0]\n-A OUTPUT -j {}\n",
                            OUTPUT_CHAIN_NAME, OUTPUT_CHAIN_NAME);
+    s += build_conntrack_prefilter_lines(prefilter, OUTPUT_CHAIN_NAME);
     if (prefilter.skip_marked_packets) {
         s += keen_pbr3::format(
             "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
@@ -736,7 +789,8 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
     }
     for (const auto& pr : rules) {
         if (pr.ipv6 != ipv6 || !pr.output) continue;
-        for (const auto& line : build_rule_lines(pr, prefilter)) {
+        for (const auto& line : build_rule_lines(
+                 pr, prefilter, /*allow_conntrack=*/true)) {
             s += line;
         }
     }
@@ -801,6 +855,7 @@ std::string IptablesFirewall::build_generation_ipt_script(
         }
     }
 
+    script += build_conntrack_prefilter_lines(prefilter, output_chain);
     if (prefilter.skip_marked_packets) {
         script += keen_pbr3::format(
             "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
@@ -810,7 +865,8 @@ std::string IptablesFirewall::build_generation_ipt_script(
         if (rule.ipv6 != ipv6) {
             continue;
         }
-        for (auto rule_line : build_rule_lines(rule, prefilter)) {
+        for (auto rule_line : build_rule_lines(
+                 rule, prefilter, /*allow_conntrack=*/true)) {
             script += retarget_line(std::move(rule_line));
         }
     }
@@ -853,7 +909,8 @@ std::string IptablesFirewall::build_raw_prerouting_script(
         if (rule.ipv6 || rule.output) {
             continue;
         }
-        for (auto line : build_rule_lines(rule, prefilter)) {
+        for (auto line : build_rule_lines(
+                 rule, prefilter, /*allow_conntrack=*/false)) {
             size_t position = 0;
             while ((position = line.find(CHAIN_NAME, position)) !=
                    std::string::npos) {
@@ -863,6 +920,42 @@ std::string IptablesFirewall::build_raw_prerouting_script(
             }
             script += line;
         }
+    }
+    script += "COMMIT\n";
+    return script;
+}
+
+std::string IptablesFirewall::build_raw_conntrack_script(
+    bool replace_active_chain,
+    const FirewallGlobalPrefilter& prefilter) {
+    std::string script = "*mangle\n";
+    if (replace_active_chain) {
+        script += keen_pbr3::format(
+            ":{} - [0:0]\n-F {}\n",
+            RAW_CONNTRACK_CHAIN_NAME,
+            RAW_CONNTRACK_CHAIN_NAME);
+    } else {
+        script += keen_pbr3::format(
+            ":{} - [0:0]\n"
+            "-A PREROUTING -j {}\n",
+            RAW_CONNTRACK_CHAIN_NAME,
+            RAW_CONNTRACK_CHAIN_NAME);
+    }
+
+    script += build_conntrack_prefilter_lines(
+        prefilter, RAW_CONNTRACK_CHAIN_NAME);
+    if (prefilter.restore_conntrack_mark &&
+        prefilter.conntrack_mark_mask != 0) {
+        const std::string mask =
+            keen_pbr3::format("{:#x}", prefilter.conntrack_mark_mask);
+        script += keen_pbr3::format(
+            "-A {} -m conntrack --ctdir ORIGINAL "
+            "-m mark ! --mark 0/{} "
+            "-j CONNMARK --save-mark --nfmask {} --ctmask {}\n",
+            RAW_CONNTRACK_CHAIN_NAME,
+            mask,
+            mask,
+            mask);
     }
     script += "COMMIT\n";
     return script;
@@ -896,6 +989,7 @@ std::string IptablesFirewall::build_output_generation_script(
             output_chain);
     }
 
+    script += build_conntrack_prefilter_lines(prefilter, output_chain);
     if (prefilter.skip_marked_packets) {
         script += keen_pbr3::format(
             "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
@@ -906,7 +1000,8 @@ std::string IptablesFirewall::build_output_generation_script(
         if (rule.ipv6 || !rule.output) {
             continue;
         }
-        for (auto line : build_rule_lines(rule, prefilter)) {
+        for (auto line : build_rule_lines(
+                 rule, prefilter, /*allow_conntrack=*/true)) {
             size_t position = 0;
             while ((position = line.find(OUTPUT_CHAIN_NAME, position)) !=
                    std::string::npos) {
@@ -1028,9 +1123,15 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         const std::string output_chain =
             generation_output_chain(target_v4_generation_);
         if (use_raw_prerouting_) {
-            // Publish OUTPUT first. If the raw-table transaction fails, the
-            // forwarded path is still on the previous generation and the
-            // daemon's normal failure cleanup removes the partial OUTPUT state.
+            // The small mangle companion restores/saves ctmark after
+            // conntrack attaches to packets classified in raw PREROUTING.
+            // Publish it before switching the raw generation; it is generic
+            // for both A/B generations.
+            pipe_to_cmd(
+                {"iptables-restore", "--noflush", "--counters"},
+                build_raw_conntrack_script(
+                    active_v4_generation_.has_value(),
+                    global_prefilter_));
             pipe_to_cmd(
                 {"iptables-restore", "--noflush", "--counters"},
                 build_output_generation_script(
@@ -1138,6 +1239,13 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
             use_raw_prerouting_ ? RAW_CHAIN_NAME : CHAIN_NAME);
         remove_chain(
             "iptables", "mangle", "OUTPUT", OUTPUT_CHAIN_NAME);
+        if (use_raw_prerouting_ || sweep_live_state) {
+            remove_chain(
+                "iptables",
+                "mangle",
+                "PREROUTING",
+                RAW_CONNTRACK_CHAIN_NAME);
+        }
 
         for (const auto generation : {FirewallSetGeneration::A,
                                       FirewallSetGeneration::B}) {

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <chrono>
+#include <deque>
+#include <optional>
 #include <vector>
 
 #include "netlink.hpp"
@@ -23,6 +26,24 @@ std::vector<RouteSpec> find_missing_live_routes(
     const std::vector<RouteSpec>& desired,
     const std::vector<DumpedRoute>& live);
 
+enum class RouteRepairLogDecision {
+    Info,
+    Warning,
+    Suppress,
+};
+
+struct RouteRepairRateState {
+    std::deque<std::chrono::steady_clock::time_point> recent_repairs;
+    std::optional<std::chrono::steady_clock::time_point> last_warning;
+};
+
+// A single successful repair is routine self-healing. Three repairs of the
+// same route inside five minutes indicate an external owner or a flapping
+// interface and deserve one warning, then silence for five minutes.
+RouteRepairLogDecision record_route_repair(
+    RouteRepairRateState& state,
+    std::chrono::steady_clock::time_point now);
+
 } // namespace route_table_detail
 
 // Manages installed kernel routes, tracking them for duplicate avoidance and cleanup.
@@ -30,7 +51,7 @@ std::vector<RouteSpec> find_missing_live_routes(
 class RouteTable {
 public:
     // If dry_run is true, add()/clear() only track specs and skip netlink ops.
-    explicit RouteTable(NetlinkManager& netlink, bool dry_run = false);
+    explicit RouteTable(RouteNetlinkOperations& netlink, bool dry_run = false);
     ~RouteTable();
 
     // Non-copyable
@@ -52,6 +73,11 @@ public:
     void add_missing(const std::vector<RouteSpec>& desired);
     void remove_obsolete(const std::vector<RouteSpec>& desired);
 
+    // Replace the tracked desired snapshot without mutating netlink. Existing
+    // kernel objects are observed, not claimed, until this process creates a
+    // replacement itself.
+    void adopt_desired(const std::vector<RouteSpec>& desired);
+
     // Remove all installed routes (shutdown cleanup).
     void clear();
 
@@ -62,12 +88,22 @@ public:
     const std::vector<RouteSpec>& get_routes() const { return routes_; }
 
 private:
-    NetlinkManager& netlink_;
+    struct RouteRepairRecord {
+        RouteSpec route;
+        route_table_detail::RouteRepairRateState rate;
+    };
+
+    RouteNetlinkOperations& netlink_;
     bool dry_run_{false};
     std::vector<RouteSpec> routes_;
+    std::vector<RouteSpec> owned_routes_;
+    std::vector<RouteRepairRecord> repair_records_;
 
     // Check if an identical route is already tracked.
     bool is_tracked(const RouteSpec& spec) const;
+    route_table_detail::RouteRepairLogDecision record_repair(
+        const RouteSpec& spec);
+    void forget_repair_record(const RouteSpec& spec);
 };
 
 } // namespace keen_pbr3

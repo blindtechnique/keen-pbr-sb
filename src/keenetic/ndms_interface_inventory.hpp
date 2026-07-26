@@ -37,6 +37,10 @@ struct NdmsTunnelInterface {
     NdmsInterfaceRole role{NdmsInterfaceRole::unknown};
     std::optional<bool> connected;
     std::optional<bool> link;
+    // SHA-256 of a strict allowlist of non-secret structural NDMS fields.
+    // Volatile live state, endpoints and credential-bearing fields never
+    // participate in this observation token.
+    std::string inventory_revision;
 };
 
 struct NdmsInterfaceMetadata {

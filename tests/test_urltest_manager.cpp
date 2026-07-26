@@ -79,6 +79,50 @@ private:
     std::atomic<bool> primary_available_{true};
 };
 
+class CoordinatedUrltestTransport final : public HttpTransport {
+public:
+    HttpTransportResponse perform(const HttpTransportRequest& request) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (request.fwmark == UrltestTransport::kPrimaryMark) {
+            primary_started_ = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this]() {
+                return release_primary_;
+            });
+        } else {
+            backup_started_ = true;
+            cv_.notify_all();
+        }
+
+        HttpTransportResponse response;
+        response.status_code = 204;
+        response.elapsed = std::chrono::milliseconds(1);
+        return response;
+    }
+
+    bool wait_for_both_candidates() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(1), [this]() {
+            return primary_started_ && backup_started_;
+        });
+    }
+
+    void release_primary() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            release_primary_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool primary_started_{false};
+    bool backup_started_{false};
+    bool release_primary_{false};
+};
+
 struct PendingCommit {
     std::string tag;
     std::uint64_t generation{0};
@@ -216,6 +260,43 @@ TEST_CASE("initial urltest probe commits through the controller callback") {
     REQUIRE(changes.size() == 2);
     CHECK(changes.back() == std::make_pair(std::string("automatic"),
                                            std::string("backup")));
+}
+
+TEST_CASE("urltest probes two candidates concurrently without changing priority order") {
+    auto transport = std::make_shared<CoordinatedUrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(2, 8);
+    CommitQueue commits;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [](const std::string&, const std::string&) {},
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+        });
+
+    manager.register_urltest(make_priority_urltest_outbound());
+
+    // The primary probe is deliberately held open. The backup must still
+    // start on the second bounded blocking worker instead of waiting for the
+    // primary timeout/retry sequence.
+    CHECK(transport->wait_for_both_candidates());
+    transport->release_primary();
+
+    auto initial = commits.pop();
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)));
+    // Parallel completion order must not affect declared-priority selection.
+    CHECK(manager.get_selected("automatic") == "primary");
 }
 
 TEST_CASE("urltest ignores a probe result from a previous registration") {

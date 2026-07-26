@@ -1,5 +1,7 @@
 #include "ndms_interface_inventory.hpp"
 
+#include "../crypto/sha256.hpp"
+
 #include <algorithm>
 #include <array>
 #include <initializer_list>
@@ -222,7 +224,31 @@ struct ParsedEntry {
     NdmsInterfaceRole role{NdmsInterfaceRole::unknown};
     std::optional<bool> connected;
     std::optional<bool> link;
+    std::string inventory_revision;
 };
+
+std::string inventory_revision(const nlohmann::json& entry) {
+    nlohmann::json structural = nlohmann::json::object();
+    for (const auto* field :
+         {"type",
+          "subtype",
+          "protocol",
+          "proxy-type",
+          "interface-name",
+          "description",
+          "role",
+          "mode",
+          "interface-role",
+          "mtu"}) {
+        const auto found = entry.find(field);
+        if (found != entry.end()) structural[field] = *found;
+    }
+    return Sha256::hex(structural.dump(
+        -1,
+        ' ',
+        false,
+        nlohmann::json::error_handler_t::replace));
+}
 
 } // namespace
 
@@ -281,6 +307,7 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
             parse_role(entry),
             boolean_field(entry, "connected"),
             boolean_field(entry, "link"),
+            inventory_revision(entry),
         });
     }
 
@@ -323,6 +350,7 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
             parsed.role,
             parsed.connected,
             parsed.link,
+            parsed.inventory_revision,
         });
     }
 

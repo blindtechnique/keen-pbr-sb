@@ -1,7 +1,10 @@
 import {
+  ChevronDownIcon,
   PencilIcon,
   PlusIcon,
   DownloadIcon,
+  EyeIcon,
+  EyeOffIcon,
   RefreshCwIcon,
   RotateCw,
   ShieldCheckIcon,
@@ -41,10 +44,14 @@ import {
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
+import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceCard } from "@/components/transports/native-interface-card"
+import { InterfaceTraffic } from "@/components/transports/interface-traffic"
+import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
+import { formatTransportPath } from "@/components/transports/transport-path"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -72,6 +79,11 @@ import {
   dedupeLegacyNativeTransports,
   mapNativeInterfaces,
 } from "@/lib/native-interfaces"
+import {
+  buildNativeTransportCandidates,
+  getHiddenNativeInterfaceIds,
+  updateHiddenNativeInterfacePreference,
+} from "@/lib/hidden-native-interfaces"
 
 type ProbeEntry = {
   success: boolean
@@ -203,12 +215,16 @@ function LatencyPill({
 
 export function TransportsPage() {
   const queryClient = useQueryClient()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [, navigate] = useLocation()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<TransportSpec | undefined>()
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
   const [transportExportPending, setTransportExportPending] = useState(false)
+  const [expandedTransportIds, setExpandedTransportIds] = useState(
+    () => new Set<string>()
+  )
+  const [showHiddenNative, setShowHiddenNative] = useState(false)
   const transportImportRef = useRef<HTMLInputElement>(null)
   const query = useGetTransports({
     query: {
@@ -222,6 +238,19 @@ export function TransportsPage() {
   )
   const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
+  const keenConfigQuery = useGetConfig()
+  const keenConfig = selectConfig(keenConfigQuery.data)
+  const hiddenNativeIds = getHiddenNativeInterfaceIds(keenConfig)
+  const runtimeInterfaceByName = useMemo(
+    () =>
+      new Map(
+        (runtimeInterfacesQuery.data?.status === 200
+          ? runtimeInterfacesQuery.data.data.interfaces
+          : []
+        ).map((runtimeInterface) => [runtimeInterface.name, runtimeInterface])
+      ),
+    [runtimeInterfacesQuery.data]
+  )
   const nativeInterfaces = useMemo(
     () =>
       mapNativeInterfaces(
@@ -239,6 +268,17 @@ export function TransportsPage() {
     () => dedupeLegacyNativeTransports(items, nativeInterfaces),
     [items, nativeInterfaces]
   )
+  const hiddenNativeCount = nativeInterfaces.filter((nativeInterface) =>
+    hiddenNativeIds.has(nativeInterface.id)
+  ).length
+  const nativeTransportCandidates = buildNativeTransportCandidates(
+    nativeInterfaces,
+    keenConfig
+  )
+  const displayedNativeInterfaces = nativeInterfaces.filter(
+    (nativeInterface) =>
+      showHiddenNative || !hiddenNativeIds.has(nativeInterface.id)
+  )
   const providerGroups = useMemo(
     () => groupTransports(managedItems, t("transports.tabs.other")),
     [managedItems, t]
@@ -249,15 +289,15 @@ export function TransportsPage() {
       label: group.label,
       count: group.items.length,
     }))
-    if (nativeInterfaces.length > 0) {
+    if (displayedNativeInterfaces.length > 0) {
       const keeneticTab = providerTabs.find((tab) => tab.value === "keenetic")
       if (keeneticTab) {
-        keeneticTab.count += nativeInterfaces.length
+        keeneticTab.count += displayedNativeInterfaces.length
       } else {
         providerTabs.push({
           value: "keenetic",
           label: "KeeneticOS",
-          count: nativeInterfaces.length,
+          count: displayedNativeInterfaces.length,
         })
       }
     }
@@ -267,12 +307,12 @@ export function TransportsPage() {
           {
             value: "all",
             label: t("transports.tabs.all"),
-            count: managedItems.length + nativeInterfaces.length,
+            count: managedItems.length + displayedNativeInterfaces.length,
           },
           ...providerTabs,
         ]
       : providerTabs
-  }, [managedItems.length, nativeInterfaces.length, providerGroups, t])
+  }, [displayedNativeInterfaces.length, managedItems.length, providerGroups, t])
   const transportTabValues =
     transportTabs.length > 0 ? transportTabs.map((tab) => tab.value) : ["all"]
   const [activeTransportTab, setActiveTransportTab] = useSectionTab(
@@ -286,8 +326,25 @@ export function TransportsPage() {
           ?.items ?? [])
   const visibleNativeInterfaces =
     activeTransportTab === "all" || activeTransportTab === "keenetic"
-      ? nativeInterfaces
+      ? displayedNativeInterfaces
       : []
+  const setTransportExpanded = (id: string, expanded: boolean) => {
+    setExpandedTransportIds((current) => {
+      const next = new Set(current)
+      if (expanded) {
+        next.add(id)
+      } else {
+        next.delete(id)
+      }
+      return next
+    })
+  }
+  const setNativeHidden = (id: string, hidden: boolean) => {
+    if (!keenConfig) return
+    preferenceMutation.mutate({
+      data: updateHiddenNativeInterfacePreference(keenConfig, id, hidden),
+    })
+  }
   const configQuery = useGetTransportConfig()
   const configured: TransportSpec[] =
     configQuery.data?.status === 200 ? configQuery.data.data : []
@@ -339,7 +396,6 @@ export function TransportsPage() {
     items.some((item) => item.protocol === "naive") &&
     naiveComponentQuery.data?.installed === false
   const error = getApiErrorMessage(query.error as ApiError | null)
-  const keenConfigQuery = useGetConfig()
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
   const probesQuery = useQuery<ProbesResponse>({
     queryKey: ["system-probes"],
@@ -383,7 +439,6 @@ export function TransportsPage() {
       }
     }
   }
-  const keenConfig = selectConfig(keenConfigQuery.data)
   const interfaceOutboundByInterface = new Map(
     (keenConfig?.outbounds ?? [])
       .filter(
@@ -428,6 +483,7 @@ export function TransportsPage() {
         sing_box_installed: boolean
         sing_box_binary: string
         tested_version: string
+        transport_api_version?: number
       }
     },
   })
@@ -581,6 +637,14 @@ export function TransportsPage() {
         }),
     },
   })
+  const preferenceMutation = usePostConfigMutation({
+    mutation: {
+      onError: (mutationError) =>
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        }),
+    },
+  })
 
   const addLoopProtection = (server: string) => {
     if (!keenConfig) return
@@ -647,7 +711,11 @@ export function TransportsPage() {
         (outbound.type === "interface" && outbound.interface === spec.interface)
     )
     if (existing) {
-      toast.error(t("transports.form.outboundExists", { tag: existing.tag }))
+      toast.error(
+        t("transports.form.outboundExists", {
+          tag: existing.display_name?.trim() || existing.tag,
+        })
+      )
       return
     }
     bypassMutation.mutate({
@@ -655,7 +723,12 @@ export function TransportsPage() {
         ...keenConfig,
         outbounds: [
           ...outbounds,
-          { type: "interface", tag: spec.tag, interface: spec.interface },
+          {
+            type: "interface",
+            tag: spec.tag,
+            display_name: spec.display_name?.trim() || spec.tag,
+            interface: spec.interface,
+          },
         ],
       },
     })
@@ -665,6 +738,15 @@ export function TransportsPage() {
     spec: TransportSpec,
     options: { createOutbound: boolean }
   ) => {
+    if (
+      spec.display_name &&
+      environmentQuery.data?.transport_api_version !== 2
+    ) {
+      toast.error(t("transports.form.backendUpdateRequired"), {
+        richColors: true,
+      })
+      return
+    }
     configMutation.mutate(
       {
         data: editing
@@ -818,52 +900,63 @@ export function TransportsPage() {
           value={activeTransportTab}
         />
       ) : null}
+      {hiddenNativeCount > 0 ? (
+        <div className="flex justify-end">
+          <Button
+            onClick={() => setShowHiddenNative((current) => !current)}
+            size="sm"
+            variant="ghost"
+          >
+            {showHiddenNative ? <EyeOffIcon /> : <EyeIcon />}
+            {showHiddenNative
+              ? t("transports.nativeInterface.hideHidden")
+              : t("transports.nativeInterface.showHidden", {
+                  count: hiddenNativeCount,
+                })}
+          </Button>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-2">
         {visibleItems.map((item) => {
           const boundOutbound = interfaceOutboundByInterface.get(item.interface)
+          const configuredSpec = configuredByTag.get(item.tag)
+          const displayName =
+            item.display_name?.trim() ||
+            configuredSpec?.display_name?.trim() ||
+            item.tag
+          const expandedId = `managed:${item.tag}`
+          const expanded = expandedTransportIds.has(expandedId)
+          const transportPath = formatTransportPath(item)
 
           return (
             <Card
               className="flex h-full min-w-0 flex-col overflow-hidden"
               key={item.tag}
+              size="sm"
             >
-              <CardHeader className="min-w-0">
+              <CardHeader className="min-w-0 max-sm:grid-cols-1">
                 <div className="min-w-0">
-                  <CardTitle className="truncate">{item.tag}</CardTitle>
-                  {/* Что за туннель и куда он ведёт — двумя словами. Тип
-                    («sing-box») говорит, кто его запускает, а не что внутри,
-                    поэтому впереди стоит протокол. */}
-                  <p className="mt-1 truncate text-sm text-muted-foreground">
-                    {describeTransport(
-                      item,
-                      transportLocation(
-                        configuredByTag.get(item.tag),
-                        locationOf(item.server)
-                      )
+                  <CardTitle
+                    className="leading-5 tracking-normal break-words"
+                    title={item.tag}
+                  >
+                    {displayName}
+                  </CardTitle>
+                  <TransportIdentity
+                    location={transportLocation(
+                      configuredSpec,
+                      locationOf(item.server)
                     )}
-                  </p>
+                    protocol={item.protocol || item.type}
+                  />
                 </div>
-                {/* Правый верхний угол — штатный слот карточки: CardHeader это
-                  сетка, и CardAction занимает в ней вторую колонку. Раньше
-                  тут стоял flex с justify-between, который спорил с сеткой и
-                  проигрывал, поэтому управление съезжало под заголовок. */}
-                <CardAction className="flex items-center gap-1">
-                  {item.state === "up" ? (
-                    <LatencyPill
-                      fallbackMs={transportLatencyByInterface.get(
-                        item.interface
-                      )}
-                      onRefresh={() => runProbeMutation.mutate()}
-                      probe={probeByInterface.get(item.interface)}
-                      refreshing={runProbeMutation.isPending}
-                      t={t}
-                    />
-                  ) : (
-                    <Badge size="xs" variant="secondary">
-                      {t(`transports.states.${item.state}`)}
-                    </Badge>
-                  )}
+                <CardAction className="flex items-center gap-1 max-sm:col-start-1 max-sm:row-start-auto max-sm:w-full max-sm:justify-self-stretch">
+                  <KeeneticStatus
+                    tone={item.state === "up" ? "success" : "neutral"}
+                  >
+                    {t(`transports.states.${item.state}`)}
+                  </KeeneticStatus>
                   {item.type !== "native" ? (
                     <Button
                       aria-label={t("transports.restart")}
@@ -905,12 +998,33 @@ export function TransportsPage() {
                       }
                     />
                   ) : null}
+                  <Button
+                    aria-expanded={expanded}
+                    aria-label={
+                      expanded
+                        ? t("transports.details.hide")
+                        : t("transports.details.show")
+                    }
+                    className="size-7 max-sm:ml-auto"
+                    onClick={() => setTransportExpanded(expandedId, !expanded)}
+                    size="icon"
+                    title={
+                      expanded
+                        ? t("transports.details.hide")
+                        : t("transports.details.show")
+                    }
+                    variant="ghost"
+                  >
+                    <ChevronDownIcon
+                      className={cn(
+                        "size-4 transition-transform",
+                        expanded && "rotate-180"
+                      )}
+                    />
+                  </Button>
                 </CardAction>
               </CardHeader>
               <CardContent className="flex min-w-0 flex-1 flex-col gap-1.5 text-sm">
-                {/* Три строки, всегда одни и те же и в одном порядке: только так
-                  соседние карточки стоят вровень. Всё необязательное ушло
-                  ниже, в строку значков, где отсутствие ничего не двигает. */}
                 <TransportField
                   label={t("transports.interface")}
                   value={item.interface}
@@ -925,20 +1039,26 @@ export function TransportsPage() {
                       : "—"
                   }
                 />
-                <TransportField
-                  label={t("transports.connection")}
-                  value={describeConnection(item) || "—"}
-                />
-
                 <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-                  {/* Слово «sing-box» убрано: других держателей туннелей у нас
-                    нет, и значок, одинаковый у всех, не различает ничего.
-                    Вместо него — то, чем соединение действительно отличается
-                    от соседнего: как именно завёрнут трафик. */}
-                  {item.network ? (
-                    <Badge size="xs" variant="outline">
-                      {transportName(item.network)}
+                  {transportPath ? (
+                    <Badge
+                      size="xs"
+                      title={`${t("transports.pathConfidence")}: ${transportPath.confidence}`}
+                      variant="outline"
+                    >
+                      {transportPath.text}
                     </Badge>
+                  ) : null}
+                  {item.state === "up" ? (
+                    <LatencyPill
+                      fallbackMs={transportLatencyByInterface.get(
+                        item.interface
+                      )}
+                      onRefresh={() => runProbeMutation.mutate()}
+                      probe={probeByInterface.get(item.interface)}
+                      refreshing={runProbeMutation.isPending}
+                      t={t}
+                    />
                   ) : null}
                   {dnsServersByInterface.has(item.interface) ? (
                     <Badge size="xs" variant="outline">
@@ -966,93 +1086,113 @@ export function TransportsPage() {
                   </p>
                 ) : null}
 
-                {item.type === "native" ? (
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {t("transports.nativeManagedExternally")}
-                  </p>
-                ) : null}
-                {/* Действия иконками и по углам: подписи к карандашу и
-                  корзине ничего не добавляли, а забирали две строки высоты
-                  на каждой карточке. */}
-                {/* Подвал прижат к низу: карточки в ряду тянутся до одной
-                  высоты, и без этого кнопки вставали на разных уровнях у
-                  соседей просто потому, что у одного транспорта строкой
-                  значков больше. */}
-                <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
-                  {item.server ? (
-                    <Button
-                      className="h-auto max-w-full text-left whitespace-normal"
-                      disabled={bypassMutation.isPending || !keenConfig}
-                      onClick={() => addLoopProtection(item.server!)}
-                      size="sm"
-                      variant="outline"
-                    >
-                      <ShieldCheckIcon />
-                      {t("transports.loopProtection.action")}
-                    </Button>
-                  ) : null}
-                  <Button
-                    className="h-auto max-w-full text-left whitespace-normal"
-                    disabled={!keenConfig || Boolean(boundOutbound)}
-                    onClick={() =>
-                      navigate(
-                        `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
-                      )
-                    }
-                    size="sm"
-                    title={
-                      boundOutbound
-                        ? t("transports.routing.alreadyBound", {
-                            tag: boundOutbound.tag,
-                          })
-                        : t("transports.routing.bindOutbound")
-                    }
-                    variant="outline"
-                  >
-                    <WorkflowIcon />
-                    {boundOutbound
-                      ? t("transports.routing.alreadyBound", {
-                          tag: boundOutbound.tag,
-                        })
-                      : t("transports.routing.bindOutbound")}
-                  </Button>
-                  {item.type !== "native" ? (
-                    <span className="ml-auto flex shrink-0 items-center gap-1">
+                <InterfaceTraffic
+                  labels={{
+                    receive: t("transports.traffic.receive"),
+                    transmit: t("transports.traffic.transmit"),
+                    received: t("transports.traffic.received"),
+                    transmitted: t("transports.traffic.transmitted"),
+                    chart: t("transports.traffic.chart"),
+                  }}
+                  locale={i18n.resolvedLanguage ?? i18n.language}
+                  traffic={
+                    runtimeInterfaceByName.get(item.interface)?.traffic
+                  }
+                />
+
+                {expanded ? (
+                  <>
+                    <div className="my-1 border-t" />
+                    <TransportField
+                      label={t("transports.connection")}
+                      value={
+                        describeConnection(item, transportPath?.text) || "—"
+                      }
+                    />
+                    {item.type === "native" ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t("transports.nativeManagedExternally")}
+                      </p>
+                    ) : null}
+                    <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
+                      {item.server ? (
+                        <Button
+                          className="h-auto max-w-full text-left whitespace-normal"
+                          disabled={bypassMutation.isPending || !keenConfig}
+                          onClick={() => addLoopProtection(item.server!)}
+                          size="sm"
+                          variant="outline"
+                        >
+                          <ShieldCheckIcon />
+                          {t("transports.loopProtection.action")}
+                        </Button>
+                      ) : null}
                       <Button
-                        aria-label={t("common.edit")}
-                        className="size-8"
-                        onClick={() => {
-                          const spec = configured.find(
-                            (entry) => entry.tag === item.tag
-                          )
-                          if (spec) {
-                            setEditing(spec)
-                            setDialogOpen(true)
-                          }
-                        }}
-                        size="icon"
-                        title={t("common.edit")}
-                        variant="ghost"
-                      >
-                        <PencilIcon className="size-4" />
-                      </Button>
-                      <Button
-                        aria-label={t("common.delete")}
-                        className="size-8 text-destructive hover:text-destructive"
+                        className="h-auto max-w-full text-left whitespace-normal"
+                        disabled={!keenConfig || Boolean(boundOutbound)}
                         onClick={() =>
-                          setDeleting(
-                            configured.find((entry) => entry.tag === item.tag)
+                          navigate(
+                            `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
                           )
                         }
-                        size="icon"
-                        title={t("common.delete")}
-                        variant="ghost"
+                        size="sm"
+                        title={
+                          boundOutbound
+                            ? t("transports.routing.alreadyBound", {
+                                tag: boundOutbound.tag,
+                              })
+                            : t("transports.routing.bindOutbound")
+                        }
+                        variant="outline"
                       >
-                        <TrashIcon className="size-4" />
+                        <WorkflowIcon />
+                        {boundOutbound
+                          ? t("transports.routing.alreadyBound", {
+                              tag: boundOutbound.tag,
+                            })
+                          : t("transports.routing.bindOutbound")}
                       </Button>
-                    </span>
-                  ) : null}
-                </div>
+                      {item.type !== "native" ? (
+                        <span className="ml-auto flex shrink-0 items-center gap-1">
+                          <Button
+                            aria-label={t("common.edit")}
+                            className="size-8"
+                            onClick={() => {
+                              const spec = configured.find(
+                                (entry) => entry.tag === item.tag
+                              )
+                              if (spec) {
+                                setEditing(spec)
+                                setDialogOpen(true)
+                              }
+                            }}
+                            size="icon"
+                            title={t("common.edit")}
+                            variant="ghost"
+                          >
+                            <PencilIcon className="size-4" />
+                          </Button>
+                          <Button
+                            aria-label={t("common.delete")}
+                            className="size-8 text-destructive hover:text-destructive"
+                            onClick={() =>
+                              setDeleting(
+                                configured.find(
+                                  (entry) => entry.tag === item.tag
+                                )
+                              )
+                            }
+                            size="icon"
+                            title={t("common.delete")}
+                            variant="ghost"
+                          >
+                            <TrashIcon className="size-4" />
+                          </Button>
+                        </span>
+                      ) : null}
+                    </div>
+                  </>
+                ) : null}
               </CardContent>
             </Card>
           )
@@ -1061,11 +1201,14 @@ export function TransportsPage() {
           const boundOutbound = nativeInterface.kernelName
             ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
             : undefined
+          const expandedId = `native:${nativeInterface.id}`
 
           return (
             <NativeInterfaceCard
               boundOutboundTag={boundOutbound?.tag}
+              expanded={expandedTransportIds.has(expandedId)}
               hasConfig={Boolean(keenConfig)}
+              hidden={hiddenNativeIds.has(nativeInterface.id)}
               key={`keenetic:${nativeInterface.id}`}
               latencyMs={
                 nativeInterface.kernelName
@@ -1073,10 +1216,16 @@ export function TransportsPage() {
                   : undefined
               }
               nativeInterface={nativeInterface}
+              onExpandedChange={(expanded) =>
+                setTransportExpanded(expandedId, expanded)
+              }
               onCreateRoute={(interfaceName) =>
                 navigate(
                   `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
                 )
+              }
+              onHiddenChange={(hidden) =>
+                setNativeHidden(nativeInterface.id, hidden)
               }
             />
           )
@@ -1084,8 +1233,17 @@ export function TransportsPage() {
       </div>
       {dialogOpen ? (
         <TransportConfigDialog
+          existingInterfaces={[
+            ...configured.map((spec) => spec.interface),
+            ...items.map((item) => item.interface),
+          ]}
+          existingTags={[
+            ...configured.map((spec) => spec.tag),
+            ...items.map((item) => item.tag),
+          ]}
           initial={editing}
           isPending={configMutation.isPending}
+          nativeCandidates={nativeTransportCandidates}
           onOpenChange={setDialogOpen}
           onSubmit={saveTransport}
           open
@@ -1114,17 +1272,30 @@ export function TransportsPage() {
   )
 }
 
-/** «VLESS · 🇳🇱» — протокол туннеля и страна сервера. */
-function describeTransport(
-  item: TransportStatus,
-  location?: ServerLocation
-): string {
-  const parts = [item.protocol ? item.protocol.toUpperCase() : item.type]
+function TransportIdentity({
+  protocol,
+  location,
+}: {
+  readonly protocol: string
+  readonly location?: ServerLocation
+}) {
   const flag = countryMark(location)
-  if (flag) {
-    parts.push(flag)
-  }
-  return parts.join(" · ")
+
+  return (
+    <div className="mt-1 flex h-6 min-w-0 items-center gap-1.5">
+      <TransportProtocolIcon protocol={protocol} />
+      {flag ? (
+        <span
+          aria-label={location?.country ?? location?.country_code ?? ""}
+          className="text-base leading-none"
+          role="img"
+          title={location?.country ?? location?.country_code ?? ""}
+        >
+          {flag}
+        </span>
+      ) : null}
+    </div>
+  )
 }
 
 function transportLocation(
@@ -1158,34 +1329,16 @@ function countryMark(location?: ServerLocation): string {
  * Ничего из этого не секрет, но без этих трёх вещей по карточке нельзя
  * понять, чем именно отличаются два внешне одинаковых транспорта.
  */
-/**
- * sing-box зовёт транспорты сокращениями, люди — словами. Незнакомое
- * оставляем как есть: чужое слово честнее выдуманного.
- */
-function transportName(network: string): string {
-  const names: Record<string, string> = {
-    tcp: "TCP",
-    udp: "UDP",
-    ws: "WebSocket",
-    websocket: "WebSocket",
-    grpc: "gRPC",
-    httpupgrade: "HTTPUpgrade",
-    xhttp: "XHTTP",
-    http: "HTTP",
-    h2: "HTTP",
-    quic: "QUIC",
-  }
-  return names[network.toLowerCase()] ?? network
-}
-
-function describeConnection(item: TransportStatus): string {
+function describeConnection(
+  item: TransportStatus,
+  pathDescription?: string
+): string {
   const parts: string[] = []
   if (item.security) {
     parts.push(item.security === "reality" ? "Reality" : "TLS")
   }
-  // tcp — это отсутствие обёртки, показывать его не о чем.
-  if (item.network && item.network !== "tcp") {
-    parts.push(transportName(item.network))
+  if (pathDescription) {
+    parts.push(pathDescription)
   }
   if (item.sni && item.sni !== item.server) {
     parts.push(`SNI ${item.sni}`)

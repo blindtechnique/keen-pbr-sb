@@ -11,12 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -38,6 +41,7 @@ func storeRoutingHealthSnapshot(cacheKey string, values map[string]routingHealth
 
 type TransportSpec struct {
 	Tag          string     `json:"tag"`
+	DisplayName  string     `json:"display_name,omitempty"`
 	Type         string     `json:"type"`
 	Interface    string     `json:"interface"`
 	AutoStart    bool       `json:"auto_start,omitempty"`
@@ -81,6 +85,7 @@ type SingBox struct {
 	protocol           string
 	security           string
 	sni                string
+	path               TransportPath
 	network            string
 }
 
@@ -123,7 +128,12 @@ func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...Routing
 	if protocol, ok := outbound["type"].(string); ok {
 		result.protocol = protocol
 	}
-	result.serverPort, result.security, result.sni, result.network = summariseOutbound(outbound)
+	summary := summariseOutbound(outbound)
+	result.serverPort = summary.port
+	result.security = summary.security
+	result.sni = summary.sni
+	result.path = summary.path
+	result.network = summary.legacyNetwork
 	if len(health) > 0 {
 		result.healthEndpoint = health[0]
 	}
@@ -133,6 +143,9 @@ func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...Routing
 func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...RoutingHealthEndpoint) (Transport, error) {
 	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
 		return nil, fmt.Errorf("invalid tag or interface")
+	}
+	if err := ValidateDisplayName(spec.DisplayName); err != nil {
+		return nil, err
 	}
 	if err := validateGeoSpec(spec); err != nil {
 		return nil, err
@@ -145,6 +158,48 @@ func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...Routin
 	default:
 		return nil, fmt.Errorf("unsupported type %q", spec.Type)
 	}
+}
+
+func ValidateDisplayName(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("display_name must be valid UTF-8")
+	}
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("display_name must contain a non-whitespace character")
+	}
+	if utf8.RuneCountInString(value) > 80 {
+		return fmt.Errorf("display_name must be at most 80 Unicode code points")
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return fmt.Errorf("display_name must not contain control characters")
+		}
+		if isBidirectionalControl(character) {
+			return fmt.Errorf("display_name must not contain bidirectional control characters")
+		}
+	}
+	return nil
+}
+
+func isBidirectionalControl(character rune) bool {
+	return character == '\u061c' ||
+		character == '\u200e' ||
+		character == '\u200f' ||
+		(character >= '\u202a' && character <= '\u202e') ||
+		(character >= '\u2066' && character <= '\u2069')
+}
+
+// RuntimeEquivalent reports whether only presentation metadata changed.
+// Such an update is persisted without taking a healthy tunnel down.
+func RuntimeEquivalent(left, right TransportSpec) bool {
+	left.DisplayName, right.DisplayName = "", ""
+	left.GeoMode, right.GeoMode = "", ""
+	left.CountryCode, right.CountryCode = "", ""
+	left.Country, right.Country = "", ""
+	return reflect.DeepEqual(left, right)
 }
 
 func validateGeoSpec(spec TransportSpec) error {
@@ -478,8 +533,8 @@ func (s *SingBox) Status(ctx context.Context) Status {
 			state = StateDegraded
 		}
 	}
-	status := Status{Tag: s.spec.Tag, Type: s.spec.Type, Interface: s.spec.Interface, Server: s.server,
-		ServerPort: s.serverPort, Protocol: s.protocol, Security: s.security, SNI: s.sni, Network: s.network,
+	status := Status{Tag: s.spec.Tag, DisplayName: s.spec.DisplayName, Type: s.spec.Type, Interface: s.spec.Interface, Server: s.server,
+		ServerPort: s.serverPort, Protocol: s.protocol, Security: s.security, SNI: s.sni, Path: s.path, Network: s.network,
 		State: state, PID: pid, Error: s.lastErr, UpdatedAt: s.updated}
 	s.mu.Unlock()
 	if state == StateUp {

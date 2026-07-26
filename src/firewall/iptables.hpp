@@ -71,6 +71,8 @@ public:
 private:
     static constexpr const char* CHAIN_NAME = "KeenPbrTable";
     static constexpr const char* RAW_CHAIN_NAME = "KeenPbrRaw";
+    static constexpr const char* RAW_CONNTRACK_CHAIN_NAME =
+        "KeenPbrRawCt";
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
@@ -124,6 +126,12 @@ private:
         bool replace_active_chain,
         const std::vector<PendingRule>& rules,
         const FirewallGlobalPrefilter& prefilter = {});
+    static std::string build_raw_conntrack_script(
+        bool replace_active_chain,
+        const FirewallGlobalPrefilter& prefilter = {});
+    static std::string build_conntrack_prefilter_lines(
+        const FirewallGlobalPrefilter& prefilter,
+        const std::string& chain);
     // Build early RETURN lines for the global prefilter.
     static std::string build_prefilter_lines(
         const FirewallGlobalPrefilter& prefilter,
@@ -138,7 +146,8 @@ private:
     // Build one or more iptables-restore lines for a queued rule.
     static std::vector<std::string> build_rule_lines(
         const PendingRule& pr,
-        const FirewallGlobalPrefilter& prefilter);
+        const FirewallGlobalPrefilter& prefilter,
+        bool allow_conntrack = true);
     bool ipv6_backend_available() const;
     // true  = chains and built-in jumps are present
     // false = a successful table snapshot confirms they are missing

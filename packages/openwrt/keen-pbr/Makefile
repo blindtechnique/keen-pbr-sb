@@ -53,11 +53,18 @@ ifneq ($(BUILD_VARIANT),headless)
 endif
 endef
 
+ifeq ($(CONFIG_x86_64)$(CONFIG_aarch64)$(CONFIG_arm),)
+  KEEN_PBR_ENABLE_LIBUNWIND:=OFF
+else
+  KEEN_PBR_ENABLE_LIBUNWIND:=$(if $(CONFIG_PACKAGE_libunwind),ON,OFF)
+endif
+
 CMAKE_OPTIONS += \
 	-DKEEN_PBR_DEFAULT_CONFIG_PATH:STRING=/etc/keen-pbr/config.json \
 	-DKEEN_PBR_RESOLVER_FALLBACK_CONFIG:STRING=/etc/keen-pbr/dnsmasq-fallback.conf \
 	-DKEEN_PBR_TARGET_OS:STRING=openwrt \
 	-DCMAKE_INSTALL_BINDIR:PATH=$(KEEN_PBR_CMAKE_INSTALL_BINDIR) \
+	-DKEEN_PBR_USE_LIBUNWIND=$(KEEN_PBR_ENABLE_LIBUNWIND) \
 	-DCMAKE_BUILD_TYPE=MinSizeRel
 
 ifneq ($(BUILD_VARIANT),headless)
@@ -78,7 +85,7 @@ define Package/keen-pbr
   CATEGORY:=Network
   TITLE:=Keen Policy-Based Routing (full)
   VERSION:=$(if $(CONFIG_USE_APK),$(PKG_VERSION)-r$(PKG_RELEASE),$(PKG_VERSION)-$(PKG_RELEASE))
-  DEPENDS:=+dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
+  DEPENDS:=+conntrack +dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +(x86_64||aarch64||arm):libunwind +zlib +libzstd
   VARIANT:=full
 endef
 
@@ -130,7 +137,7 @@ define Package/keen-pbr-headless
   CATEGORY:=Network
   TITLE:=Keen Policy-Based Routing (headless)
   VERSION:=$(if $(CONFIG_USE_APK),$(PKG_VERSION)-r$(PKG_RELEASE),$(PKG_VERSION)-$(PKG_RELEASE))
-  DEPENDS:=+dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +zlib +libzstd
+  DEPENDS:=+conntrack +dnsmasq-full +libatomic +libcurl +libnl-core +libnl-route +libstdcpp +(x86_64||aarch64||arm):libunwind +zlib +libzstd
   VARIANT:=headless
 endef
 

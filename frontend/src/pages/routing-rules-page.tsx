@@ -31,10 +31,13 @@ import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import { formatListReferenceLabels } from "@/lib/list-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import { getRuleEditHref } from "@/lib/rule-route"
 import {
   areRouteRulesSemanticallyEqual,
   getApiErrorMessage,
   getRouteRulesSemanticKey,
+  getRouteRuleDisplayName,
   getRoutingRuleRowId,
   reorderRules,
   setRouteRuleEnabled,
@@ -79,8 +82,8 @@ function RoutingRulesEditor({
     areRouteRulesSemanticallyEqual
   )
   const routeRules = rulesSession.value
-  const ruleRowIds = routeRules.map((_rule, index) =>
-    getRoutingRuleRowId(index)
+  const ruleRowIds = routeRules.map((rule, index) =>
+    getRoutingRuleRowId(rule, index)
   )
   const ruleSelection = useRowSelection(ruleRowIds)
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
@@ -101,10 +104,21 @@ function RoutingRulesEditor({
       ),
     [runtimeOutbounds]
   )
+  const outboundDisplayNames = useMemo(
+    () => createOutboundDisplayNameMap(loadedConfig?.outbounds ?? []),
+    [loadedConfig?.outbounds]
+  )
 
   const tableRows = routeRules.map((rule: RouteRule, index: number) => {
     const runtimeState = runtimeOutboundByTag.get(rule.outbound)
-    return getRouteRuleRow(rule, index, t, loadedConfig?.lists, runtimeState)
+    return getRouteRuleRow(
+      rule,
+      index,
+      t,
+      loadedConfig?.lists,
+      runtimeState,
+      outboundDisplayNames
+    )
   })
 
   const postConfigMutation = usePostConfigMutation({
@@ -186,7 +200,7 @@ function RoutingRulesEditor({
 
     const nextRules = routeRules.filter(
       (_rule, index) =>
-        !ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
+        !ruleSelection.selectedIds.has(getRoutingRuleRowId(_rule, index))
     )
     updateRules(nextRules, { clearSelection: true })
   }
@@ -212,7 +226,7 @@ function RoutingRulesEditor({
     }
 
     const nextRules = routeRules.map((rule, index) =>
-      ruleSelection.selectedIds.has(getRoutingRuleRowId(index))
+      ruleSelection.selectedIds.has(getRoutingRuleRowId(rule, index))
         ? { ...rule, enabled }
         : rule
     )
@@ -330,13 +344,18 @@ function RoutingRulesEditor({
                   <div className="flex items-center gap-2">
                     <Checkbox
                       aria-label={t("common.selection.selectRow", {
-                        rowLabel: `${t("pages.routingRules.title")} #${row.order}`,
+                        rowLabel: row.displayName,
                       })}
                       checked={ruleSelection.selectedIds.has(row.id)}
                       disabled={configMutationPending}
                       onCheckedChange={() => ruleSelection.toggleOne(row.id)}
                     />
-                    <span className="text-sm font-medium">#{row.order}</span>
+                    <span
+                      className="truncate text-sm font-medium"
+                      title={row.technicalId}
+                    >
+                      {row.displayName}
+                    </span>
                     <span className="truncate text-sm text-muted-foreground">
                       → {row.outbound}
                     </span>
@@ -358,7 +377,13 @@ function RoutingRulesEditor({
                         className="size-8"
                         disabled={configMutationPending || rulesSession.isDirty}
                         onClick={() =>
-                          navigate(`/routing-rules/${row.index}/edit`)
+                          navigate(
+                            getRuleEditHref(
+                              "routing-rules",
+                              routeRules[row.index],
+                              row.index
+                            )
+                          )
                         }
                         size="icon"
                         variant="ghost"
@@ -417,9 +442,17 @@ function RoutingRulesEditor({
                     )}
                   />
                 </div>,
-                <span className="font-medium" key={`${row.id}-order`}>
-                  #{row.order}
-                </span>,
+                <div className="min-w-0" key={`${row.id}-order`}>
+                  <span
+                    className="block truncate font-medium"
+                    title={row.technicalId}
+                  >
+                    {row.displayName}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    #{row.order}
+                  </span>
+                </div>,
                 <ul
                   className="list-disc space-y-1 pl-5 text-sm"
                   key={`${row.id}-conditions`}
@@ -450,7 +483,13 @@ function RoutingRulesEditor({
                       icon: <Pencil className="h-4 w-4" />,
                       label: t("common.edit"),
                       onClick: () =>
-                        navigate(`/routing-rules/${row.index}/edit`),
+                        navigate(
+                          getRuleEditHref(
+                            "routing-rules",
+                            routeRules[row.index],
+                            row.index
+                          )
+                        ),
                     },
                   ]}
                   key={`${row.id}-actions`}
@@ -465,7 +504,9 @@ function RoutingRulesEditor({
                 selectAllLabel: t("common.selection.selectAll"),
                 getRowLabel: (rowId) =>
                   t("common.selection.selectRow", {
-                    rowLabel: `${t("pages.routingRules.title")} #${Number(rowId) + 1}`,
+                    rowLabel:
+                      tableRows.find((row) => row.id === rowId)?.displayName ??
+                      rowId,
                   }),
               }}
             />
@@ -481,7 +522,8 @@ function getRouteRuleRow(
   index: number,
   t: (key: string) => string,
   lists: ConfigObject["lists"],
-  runtimeState?: RuntimeOutboundState
+  runtimeState?: RuntimeOutboundState,
+  outboundDisplayNames: ReadonlyMap<string, string> = new Map()
 ) {
   const conditions = [
     {
@@ -523,12 +565,14 @@ function getRouteRuleRow(
   )
 
   return {
-    id: getRoutingRuleRowId(index),
+    id: getRoutingRuleRowId(rule, index),
+    technicalId: rule.id ?? "",
+    displayName: getRouteRuleDisplayName(rule, index),
     enabled: rule.enabled ?? true,
     index,
     order: index + 1,
     conditions,
-    outbound: rule.outbound,
+    outbound: outboundDisplayNames.get(rule.outbound) ?? rule.outbound,
     runtimeState,
   }
 }

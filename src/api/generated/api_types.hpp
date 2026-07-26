@@ -141,7 +141,9 @@ namespace api {
 
     struct DnsRuleElement {
         std::optional<bool> allow_domain_rebinding;
+        std::optional<std::string> display_name;
         std::optional<bool> enabled;
+        std::optional<std::string> id;
         std::vector<std::string> list;
         std::string server;
     };
@@ -151,6 +153,7 @@ namespace api {
     struct DnsServerElement {
         std::optional<std::string> address;
         std::optional<std::string> detour;
+        std::optional<std::string> display_name;
         std::string tag;
         std::optional<DnsServerType> type;
     };
@@ -192,6 +195,8 @@ namespace api {
         std::optional<bool> enabled;
     };
 
+    enum class ConntrackOnSwitch : int { DELETE, PRESERVE };
+
     struct OutboundGroupElement {
         std::vector<std::string> outbounds;
         std::optional<int64_t> weight;
@@ -208,6 +213,8 @@ namespace api {
 
     struct OutboundElement {
         std::optional<CircuitBreakerConfig> circuit_breaker;
+        std::optional<ConntrackOnSwitch> conntrack_on_switch;
+        std::optional<std::string> display_name;
         std::optional<std::string> gateway;
         std::optional<std::string> gateway6;
         std::optional<std::string> interface;
@@ -227,8 +234,10 @@ namespace api {
     struct RouteRuleElement {
         std::optional<std::string> dest_addr;
         std::optional<std::string> dest_port;
+        std::optional<std::string> display_name;
         std::optional<int64_t> dscp;
         std::optional<bool> enabled;
+        std::optional<std::string> id;
         std::optional<std::vector<std::string>> list;
         std::string outbound;
         std::optional<std::string> proto;
@@ -241,6 +250,17 @@ namespace api {
         std::optional<std::vector<RouteRuleElement>> rules;
     };
 
+    struct PlainDnsTemplateElement {
+        std::string name;
+        std::string primary_ipv4;
+        std::optional<std::string> secondary_ipv4;
+    };
+
+    struct UiPreferences {
+        std::optional<std::vector<std::string>> hidden_native_interface_ids;
+        std::optional<std::vector<PlainDnsTemplateElement>> plain_dns_templates;
+    };
+
     struct ConfigObject {
         std::optional<ApiConfig> api;
         std::optional<Daemon> daemon;
@@ -251,6 +271,7 @@ namespace api {
         std::optional<ListsAutoupdate> lists_autoupdate;
         std::optional<std::vector<OutboundElement>> outbounds;
         std::optional<Route> route;
+        std::optional<UiPreferences> ui_preferences;
     };
 
     struct ListRefreshStateValue {
@@ -458,6 +479,16 @@ namespace api {
 
     enum class Kind : int { AMNEZIA_WIREGUARD, HTTPS_PROXY, HTTP_PROXY, IKE, L2_TP, OPENCONNECT, OPENVPN, SOCKS5_PROXY, SSTP, WIREGUARD };
 
+    enum class NdmsManagementBlockerElement : int { AUTOMATIC_BACKUP_UNAVAILABLE, KERNEL_IDENTITY_UNRESOLVED, OPTIMISTIC_REVISION_UNAVAILABLE, OWNERSHIP_UNKNOWN, ROLE_UNKNOWN, TYPED_RCI_UNAVAILABLE, UNSUPPORTED_KIND, UNSUPPORTED_ROLE };
+
+    struct NdmsInterfaceManagementReadiness {
+        std::vector<NdmsManagementBlockerElement> blockers;
+        bool candidate;
+        bool configuration_snapshot_available;
+        bool identity_stable;
+        std::string observed_revision;
+    };
+
     enum class Owner : int { KEENETIC };
 
     enum class Role : int { CLIENT, SERVER, UNKNOWN };
@@ -472,6 +503,7 @@ namespace api {
         Kind kind;
         std::string label;
         std::optional<bool> link;
+        NdmsInterfaceManagementReadiness management_readiness;
         Owner owner;
         Role role;
     };
@@ -585,6 +617,20 @@ namespace api {
 
     enum class RuntimeInterfaceInventoryStatusEnum : int { DOWN, UP };
 
+    struct RuntimeInterfaceTrafficPointElement {
+        int64_t age_ms;
+        int64_t rx_bits_per_second;
+        int64_t tx_bits_per_second;
+    };
+
+    struct Traffic {
+        std::vector<RuntimeInterfaceTrafficPointElement> history;
+        std::optional<int64_t> rx_bits_per_second;
+        int64_t rx_bytes;
+        std::optional<int64_t> tx_bits_per_second;
+        int64_t tx_bytes;
+    };
+
     struct RuntimeInterfaceInventoryEntry {
         std::optional<bool> admin_up;
         std::optional<bool> carrier;
@@ -593,6 +639,7 @@ namespace api {
         std::string name;
         std::optional<std::string> oper_state;
         RuntimeInterfaceInventoryStatusEnum status;
+        std::optional<Traffic> traffic;
     };
 
     struct RuntimeInterfaceInventoryResponse {
@@ -699,6 +746,7 @@ namespace api {
         std::optional<std::vector<std::string>> bootstrap_dns;
         std::optional<std::string> country;
         std::optional<std::string> country_code;
+        std::optional<std::string> display_name;
         std::optional<GeoMode> geo_mode;
         std::string interface;
         std::optional<std::string> link;
@@ -723,16 +771,33 @@ namespace api {
         std::string tag;
     };
 
+    enum class Confidence : int { AMBIGUOUS, DECLARED, DERIVED, UNKNOWN };
+
+    enum class Framing : int { GRPC, HTTP, HTTP2, HTTP_UPGRADE, QUIC, RAW, UNKNOWN, WEBSOCKET, WIREGUARD };
+
+    enum class PayloadNetwork : int { TCP, UDP };
+
+    enum class WireTransport : int { TCP, TCP_UDP, UDP, UNKNOWN };
+
+    struct TransportPath {
+        Confidence confidence;
+        Framing framing;
+        std::optional<std::vector<PayloadNetwork>> payload_networks;
+        WireTransport wire_transport;
+    };
+
     enum class Security : int { REALITY, TLS };
 
     enum class State : int { DEGRADED, DOWN, STARTING, UP };
 
     struct TransportStatus {
         bool desired_up;
+        std::optional<std::string> display_name;
         std::optional<std::string> error;
         std::string interface;
         std::optional<std::string> network;
         std::optional<std::string> next_retry_at;
+        std::optional<TransportPath> path;
         std::optional<int64_t> pid;
         std::optional<std::string> protocol;
         std::optional<int64_t> retry_count;
@@ -760,6 +825,7 @@ namespace api {
         std::optional<ConnectionQueryRequest> connection_query_request;
         std::optional<ConnectionRecord> connection_record;
         std::optional<ConnectionSort> connection_sort;
+        std::optional<ConntrackOnSwitch> conntrack_on_switch;
         std::optional<Daemon> daemon_config;
         std::optional<DependencyAnalysisRequest> dependency_analysis_request;
         std::optional<DependencyAnalysisResponse> dependency_analysis_response;
@@ -790,11 +856,14 @@ namespace api {
         std::optional<ListsAutoupdate> lists_autoupdate_config;
         std::optional<NdmsInterfaceCapabilities> ndms_interface_capabilities;
         std::optional<NdmsInterfaceInventoryResponse> ndms_interface_inventory_response;
+        std::optional<NdmsInterfaceManagementReadiness> ndms_interface_management_readiness;
         std::optional<Role> ndms_interface_role;
+        std::optional<NdmsManagementBlockerElement> ndms_management_blocker;
         std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
         std::optional<Kind> ndms_tunnel_kind;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
+        std::optional<PlainDnsTemplateElement> plain_dns_template;
         std::optional<PolicyRuleCheck> policy_rule_check;
         std::optional<ReloadResponse> reload_response;
         std::optional<ResolverConfigProbeStatus> resolver_config_probe_status;
@@ -816,6 +885,8 @@ namespace api {
         std::optional<RuntimeInterfaceInventoryStatusEnum> runtime_interface_inventory_status;
         std::optional<RuntimeInterfaceState> runtime_interface_state;
         std::optional<RuntimeInterfaceStatusEnum> runtime_interface_status;
+        std::optional<Traffic> runtime_interface_traffic;
+        std::optional<RuntimeInterfaceTrafficPointElement> runtime_interface_traffic_point;
         std::optional<RuntimeInventoryResponse> runtime_inventory_response;
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
@@ -830,8 +901,10 @@ namespace api {
         std::optional<TransportActionResponse> transport_action_response;
         std::optional<TransportConfigOperation> transport_config_operation;
         std::optional<TransportConfigResponse> transport_config_response;
+        std::optional<TransportPath> transport_path;
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
+        std::optional<UiPreferences> ui_preferences_config;
         std::optional<ValidationErrorElement> validation_error;
         std::optional<Vless> vless_reality_spec;
     };
@@ -896,6 +969,12 @@ namespace api {
 
     void from_json(const json & j, Route & x);
     void to_json(json & j, const Route & x);
+
+    void from_json(const json & j, PlainDnsTemplateElement & x);
+    void to_json(json & j, const PlainDnsTemplateElement & x);
+
+    void from_json(const json & j, UiPreferences & x);
+    void to_json(json & j, const UiPreferences & x);
 
     void from_json(const json & j, ConfigObject & x);
     void to_json(json & j, const ConfigObject & x);
@@ -966,6 +1045,9 @@ namespace api {
     void from_json(const json & j, NdmsInterfaceCapabilities & x);
     void to_json(json & j, const NdmsInterfaceCapabilities & x);
 
+    void from_json(const json & j, NdmsInterfaceManagementReadiness & x);
+    void to_json(json & j, const NdmsInterfaceManagementReadiness & x);
+
     void from_json(const json & j, NdmsTunnelInterfaceElement & x);
     void to_json(json & j, const NdmsTunnelInterfaceElement & x);
 
@@ -1004,6 +1086,12 @@ namespace api {
 
     void from_json(const json & j, RoutingTestResponse & x);
     void to_json(json & j, const RoutingTestResponse & x);
+
+    void from_json(const json & j, RuntimeInterfaceTrafficPointElement & x);
+    void to_json(json & j, const RuntimeInterfaceTrafficPointElement & x);
+
+    void from_json(const json & j, Traffic & x);
+    void to_json(json & j, const Traffic & x);
 
     void from_json(const json & j, RuntimeInterfaceInventoryEntry & x);
     void to_json(json & j, const RuntimeInterfaceInventoryEntry & x);
@@ -1056,6 +1144,9 @@ namespace api {
     void from_json(const json & j, TransportConfigResponse & x);
     void to_json(json & j, const TransportConfigResponse & x);
 
+    void from_json(const json & j, TransportPath & x);
+    void to_json(json & j, const TransportPath & x);
+
     void from_json(const json & j, TransportStatus & x);
     void to_json(json & j, const TransportStatus & x);
 
@@ -1070,6 +1161,9 @@ namespace api {
 
     void from_json(const json & j, DnsServerType & x);
     void to_json(json & j, const DnsServerType & x);
+
+    void from_json(const json & j, ConntrackOnSwitch & x);
+    void to_json(json & j, const ConntrackOnSwitch & x);
 
     void from_json(const json & j, SelectionMode & x);
     void to_json(json & j, const SelectionMode & x);
@@ -1124,6 +1218,9 @@ namespace api {
 
     void from_json(const json & j, Kind & x);
     void to_json(json & j, const Kind & x);
+
+    void from_json(const json & j, NdmsManagementBlockerElement & x);
+    void to_json(json & j, const NdmsManagementBlockerElement & x);
 
     void from_json(const json & j, Owner & x);
     void to_json(json & j, const Owner & x);
@@ -1184,6 +1281,18 @@ namespace api {
 
     void from_json(const json & j, TransportConfigResponseStatus & x);
     void to_json(json & j, const TransportConfigResponseStatus & x);
+
+    void from_json(const json & j, Confidence & x);
+    void to_json(json & j, const Confidence & x);
+
+    void from_json(const json & j, Framing & x);
+    void to_json(json & j, const Framing & x);
+
+    void from_json(const json & j, PayloadNetwork & x);
+    void to_json(json & j, const PayloadNetwork & x);
+
+    void from_json(const json & j, WireTransport & x);
+    void to_json(json & j, const WireTransport & x);
 
     void from_json(const json & j, Security & x);
     void to_json(json & j, const Security & x);
@@ -1289,7 +1398,9 @@ namespace api {
 
     inline void from_json(const json & j, DnsRuleElement& x) {
         x.allow_domain_rebinding = get_stack_optional<bool>(j, "allow_domain_rebinding");
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.id = get_stack_optional<std::string>(j, "id");
         x.list = j.at("list").get<std::vector<std::string>>();
         x.server = j.at("server").get<std::string>();
     }
@@ -1297,7 +1408,9 @@ namespace api {
     inline void to_json(json & j, const DnsRuleElement & x) {
         j = json::object();
         j["allow_domain_rebinding"] = x.allow_domain_rebinding;
+        j["display_name"] = x.display_name;
         j["enabled"] = x.enabled;
+        j["id"] = x.id;
         j["list"] = x.list;
         j["server"] = x.server;
     }
@@ -1305,6 +1418,7 @@ namespace api {
     inline void from_json(const json & j, DnsServerElement& x) {
         x.address = get_stack_optional<std::string>(j, "address");
         x.detour = get_stack_optional<std::string>(j, "detour");
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.tag = j.at("tag").get<std::string>();
         x.type = get_stack_optional<DnsServerType>(j, "type");
     }
@@ -1313,6 +1427,7 @@ namespace api {
         j = json::object();
         j["address"] = x.address;
         j["detour"] = x.detour;
+        j["display_name"] = x.display_name;
         j["tag"] = x.tag;
         j["type"] = x.type;
     }
@@ -1421,6 +1536,8 @@ namespace api {
 
     inline void from_json(const json & j, OutboundElement& x) {
         x.circuit_breaker = get_stack_optional<CircuitBreakerConfig>(j, "circuit_breaker");
+        x.conntrack_on_switch = get_stack_optional<ConntrackOnSwitch>(j, "conntrack_on_switch");
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.gateway = get_stack_optional<std::string>(j, "gateway");
         x.gateway6 = get_stack_optional<std::string>(j, "gateway6");
         x.interface = get_stack_optional<std::string>(j, "interface");
@@ -1440,6 +1557,8 @@ namespace api {
     inline void to_json(json & j, const OutboundElement & x) {
         j = json::object();
         j["circuit_breaker"] = x.circuit_breaker;
+        j["conntrack_on_switch"] = x.conntrack_on_switch;
+        j["display_name"] = x.display_name;
         j["gateway"] = x.gateway;
         j["gateway6"] = x.gateway6;
         j["interface"] = x.interface;
@@ -1459,8 +1578,10 @@ namespace api {
     inline void from_json(const json & j, RouteRuleElement& x) {
         x.dest_addr = get_stack_optional<std::string>(j, "dest_addr");
         x.dest_port = get_stack_optional<std::string>(j, "dest_port");
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.dscp = get_stack_optional<int64_t>(j, "dscp");
         x.enabled = get_stack_optional<bool>(j, "enabled");
+        x.id = get_stack_optional<std::string>(j, "id");
         x.list = get_stack_optional<std::vector<std::string>>(j, "list");
         x.outbound = j.at("outbound").get<std::string>();
         x.proto = get_stack_optional<std::string>(j, "proto");
@@ -1472,8 +1593,10 @@ namespace api {
         j = json::object();
         j["dest_addr"] = x.dest_addr;
         j["dest_port"] = x.dest_port;
+        j["display_name"] = x.display_name;
         j["dscp"] = x.dscp;
         j["enabled"] = x.enabled;
+        j["id"] = x.id;
         j["list"] = x.list;
         j["outbound"] = x.outbound;
         j["proto"] = x.proto;
@@ -1492,6 +1615,30 @@ namespace api {
         j["rules"] = x.rules;
     }
 
+    inline void from_json(const json & j, PlainDnsTemplateElement& x) {
+        x.name = j.at("name").get<std::string>();
+        x.primary_ipv4 = j.at("primary_ipv4").get<std::string>();
+        x.secondary_ipv4 = get_stack_optional<std::string>(j, "secondary_ipv4");
+    }
+
+    inline void to_json(json & j, const PlainDnsTemplateElement & x) {
+        j = json::object();
+        j["name"] = x.name;
+        j["primary_ipv4"] = x.primary_ipv4;
+        j["secondary_ipv4"] = x.secondary_ipv4;
+    }
+
+    inline void from_json(const json & j, UiPreferences& x) {
+        x.hidden_native_interface_ids = get_stack_optional<std::vector<std::string>>(j, "hidden_native_interface_ids");
+        x.plain_dns_templates = get_stack_optional<std::vector<PlainDnsTemplateElement>>(j, "plain_dns_templates");
+    }
+
+    inline void to_json(json & j, const UiPreferences & x) {
+        j = json::object();
+        j["hidden_native_interface_ids"] = x.hidden_native_interface_ids;
+        j["plain_dns_templates"] = x.plain_dns_templates;
+    }
+
     inline void from_json(const json & j, ConfigObject& x) {
         x.api = get_stack_optional<ApiConfig>(j, "api");
         x.daemon = get_stack_optional<Daemon>(j, "daemon");
@@ -1502,6 +1649,7 @@ namespace api {
         x.lists_autoupdate = get_stack_optional<ListsAutoupdate>(j, "lists_autoupdate");
         x.outbounds = get_stack_optional<std::vector<OutboundElement>>(j, "outbounds");
         x.route = get_stack_optional<Route>(j, "route");
+        x.ui_preferences = get_stack_optional<UiPreferences>(j, "ui_preferences");
     }
 
     inline void to_json(json & j, const ConfigObject & x) {
@@ -1515,6 +1663,7 @@ namespace api {
         j["lists_autoupdate"] = x.lists_autoupdate;
         j["outbounds"] = x.outbounds;
         j["route"] = x.route;
+        j["ui_preferences"] = x.ui_preferences;
     }
 
     inline void from_json(const json & j, ListRefreshStateValue& x) {
@@ -1885,6 +2034,23 @@ namespace api {
         j["can_hide"] = x.can_hide;
     }
 
+    inline void from_json(const json & j, NdmsInterfaceManagementReadiness& x) {
+        x.blockers = j.at("blockers").get<std::vector<NdmsManagementBlockerElement>>();
+        x.candidate = j.at("candidate").get<bool>();
+        x.configuration_snapshot_available = j.at("configuration_snapshot_available").get<bool>();
+        x.identity_stable = j.at("identity_stable").get<bool>();
+        x.observed_revision = j.at("observed_revision").get<std::string>();
+    }
+
+    inline void to_json(json & j, const NdmsInterfaceManagementReadiness & x) {
+        j = json::object();
+        j["blockers"] = x.blockers;
+        j["candidate"] = x.candidate;
+        j["configuration_snapshot_available"] = x.configuration_snapshot_available;
+        j["identity_stable"] = x.identity_stable;
+        j["observed_revision"] = x.observed_revision;
+    }
+
     inline void from_json(const json & j, NdmsTunnelInterfaceElement& x) {
         x.capabilities = j.at("capabilities").get<NdmsInterfaceCapabilities>();
         x.connected = get_stack_optional<bool>(j, "connected");
@@ -1895,6 +2061,7 @@ namespace api {
         x.kind = j.at("kind").get<Kind>();
         x.label = j.at("label").get<std::string>();
         x.link = get_stack_optional<bool>(j, "link");
+        x.management_readiness = j.at("management_readiness").get<NdmsInterfaceManagementReadiness>();
         x.owner = j.at("owner").get<Owner>();
         x.role = j.at("role").get<Role>();
     }
@@ -1910,6 +2077,7 @@ namespace api {
         j["kind"] = x.kind;
         j["label"] = x.label;
         j["link"] = x.link;
+        j["management_readiness"] = x.management_readiness;
         j["owner"] = x.owner;
         j["role"] = x.role;
     }
@@ -2120,6 +2288,36 @@ namespace api {
         j["warnings"] = x.warnings;
     }
 
+    inline void from_json(const json & j, RuntimeInterfaceTrafficPointElement& x) {
+        x.age_ms = j.at("age_ms").get<int64_t>();
+        x.rx_bits_per_second = j.at("rx_bits_per_second").get<int64_t>();
+        x.tx_bits_per_second = j.at("tx_bits_per_second").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const RuntimeInterfaceTrafficPointElement & x) {
+        j = json::object();
+        j["age_ms"] = x.age_ms;
+        j["rx_bits_per_second"] = x.rx_bits_per_second;
+        j["tx_bits_per_second"] = x.tx_bits_per_second;
+    }
+
+    inline void from_json(const json & j, Traffic& x) {
+        x.history = j.at("history").get<std::vector<RuntimeInterfaceTrafficPointElement>>();
+        x.rx_bits_per_second = get_stack_optional<int64_t>(j, "rx_bits_per_second");
+        x.rx_bytes = j.at("rx_bytes").get<int64_t>();
+        x.tx_bits_per_second = get_stack_optional<int64_t>(j, "tx_bits_per_second");
+        x.tx_bytes = j.at("tx_bytes").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const Traffic & x) {
+        j = json::object();
+        j["history"] = x.history;
+        j["rx_bits_per_second"] = x.rx_bits_per_second;
+        j["rx_bytes"] = x.rx_bytes;
+        j["tx_bits_per_second"] = x.tx_bits_per_second;
+        j["tx_bytes"] = x.tx_bytes;
+    }
+
     inline void from_json(const json & j, RuntimeInterfaceInventoryEntry& x) {
         x.admin_up = get_stack_optional<bool>(j, "admin_up");
         x.carrier = get_stack_optional<bool>(j, "carrier");
@@ -2128,6 +2326,7 @@ namespace api {
         x.name = j.at("name").get<std::string>();
         x.oper_state = get_stack_optional<std::string>(j, "oper_state");
         x.status = j.at("status").get<RuntimeInterfaceInventoryStatusEnum>();
+        x.traffic = get_stack_optional<Traffic>(j, "traffic");
     }
 
     inline void to_json(json & j, const RuntimeInterfaceInventoryEntry & x) {
@@ -2139,6 +2338,7 @@ namespace api {
         j["name"] = x.name;
         j["oper_state"] = x.oper_state;
         j["status"] = x.status;
+        j["traffic"] = x.traffic;
     }
 
     inline void from_json(const json & j, RuntimeInterfaceInventoryResponse& x) {
@@ -2313,6 +2513,7 @@ namespace api {
         x.bootstrap_dns = get_stack_optional<std::vector<std::string>>(j, "bootstrap_dns");
         x.country = get_stack_optional<std::string>(j, "country");
         x.country_code = get_stack_optional<std::string>(j, "country_code");
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.geo_mode = get_stack_optional<GeoMode>(j, "geo_mode");
         x.interface = j.at("interface").get<std::string>();
         x.link = get_stack_optional<std::string>(j, "link");
@@ -2330,6 +2531,7 @@ namespace api {
         j["bootstrap_dns"] = x.bootstrap_dns;
         j["country"] = x.country;
         j["country_code"] = x.country_code;
+        j["display_name"] = x.display_name;
         j["geo_mode"] = x.geo_mode;
         j["interface"] = x.interface;
         j["link"] = x.link;
@@ -2365,12 +2567,29 @@ namespace api {
         j["tag"] = x.tag;
     }
 
+    inline void from_json(const json & j, TransportPath& x) {
+        x.confidence = j.at("confidence").get<Confidence>();
+        x.framing = j.at("framing").get<Framing>();
+        x.payload_networks = get_stack_optional<std::vector<PayloadNetwork>>(j, "payload_networks");
+        x.wire_transport = j.at("wire_transport").get<WireTransport>();
+    }
+
+    inline void to_json(json & j, const TransportPath & x) {
+        j = json::object();
+        j["confidence"] = x.confidence;
+        j["framing"] = x.framing;
+        j["payload_networks"] = x.payload_networks;
+        j["wire_transport"] = x.wire_transport;
+    }
+
     inline void from_json(const json & j, TransportStatus& x) {
         x.desired_up = j.at("desired_up").get<bool>();
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.error = get_stack_optional<std::string>(j, "error");
         x.interface = j.at("interface").get<std::string>();
         x.network = get_stack_optional<std::string>(j, "network");
         x.next_retry_at = get_stack_optional<std::string>(j, "next_retry_at");
+        x.path = get_stack_optional<TransportPath>(j, "path");
         x.pid = get_stack_optional<int64_t>(j, "pid");
         x.protocol = get_stack_optional<std::string>(j, "protocol");
         x.retry_count = get_stack_optional<int64_t>(j, "retry_count");
@@ -2387,10 +2606,12 @@ namespace api {
     inline void to_json(json & j, const TransportStatus & x) {
         j = json::object();
         j["desired_up"] = x.desired_up;
+        j["display_name"] = x.display_name;
         j["error"] = x.error;
         j["interface"] = x.interface;
         j["network"] = x.network;
         j["next_retry_at"] = x.next_retry_at;
+        j["path"] = x.path;
         j["pid"] = x.pid;
         j["protocol"] = x.protocol;
         j["retry_count"] = x.retry_count;
@@ -2418,6 +2639,7 @@ namespace api {
         x.connection_query_request = get_stack_optional<ConnectionQueryRequest>(j, "ConnectionQueryRequest");
         x.connection_record = get_stack_optional<ConnectionRecord>(j, "ConnectionRecord");
         x.connection_sort = get_stack_optional<ConnectionSort>(j, "ConnectionSort");
+        x.conntrack_on_switch = get_stack_optional<ConntrackOnSwitch>(j, "ConntrackOnSwitch");
         x.daemon_config = get_stack_optional<Daemon>(j, "DaemonConfig");
         x.dependency_analysis_request = get_stack_optional<DependencyAnalysisRequest>(j, "DependencyAnalysisRequest");
         x.dependency_analysis_response = get_stack_optional<DependencyAnalysisResponse>(j, "DependencyAnalysisResponse");
@@ -2448,11 +2670,14 @@ namespace api {
         x.lists_autoupdate_config = get_stack_optional<ListsAutoupdate>(j, "ListsAutoupdateConfig");
         x.ndms_interface_capabilities = get_stack_optional<NdmsInterfaceCapabilities>(j, "NdmsInterfaceCapabilities");
         x.ndms_interface_inventory_response = get_stack_optional<NdmsInterfaceInventoryResponse>(j, "NdmsInterfaceInventoryResponse");
+        x.ndms_interface_management_readiness = get_stack_optional<NdmsInterfaceManagementReadiness>(j, "NdmsInterfaceManagementReadiness");
         x.ndms_interface_role = get_stack_optional<Role>(j, "NdmsInterfaceRole");
+        x.ndms_management_blocker = get_stack_optional<NdmsManagementBlockerElement>(j, "NdmsManagementBlocker");
         x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
         x.ndms_tunnel_kind = get_stack_optional<Kind>(j, "NdmsTunnelKind");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
+        x.plain_dns_template = get_stack_optional<PlainDnsTemplateElement>(j, "PlainDnsTemplate");
         x.policy_rule_check = get_stack_optional<PolicyRuleCheck>(j, "PolicyRuleCheck");
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
         x.resolver_config_probe_status = get_stack_optional<ResolverConfigProbeStatus>(j, "ResolverConfigProbeStatus");
@@ -2474,6 +2699,8 @@ namespace api {
         x.runtime_interface_inventory_status = get_stack_optional<RuntimeInterfaceInventoryStatusEnum>(j, "RuntimeInterfaceInventoryStatus");
         x.runtime_interface_state = get_stack_optional<RuntimeInterfaceState>(j, "RuntimeInterfaceState");
         x.runtime_interface_status = get_stack_optional<RuntimeInterfaceStatusEnum>(j, "RuntimeInterfaceStatus");
+        x.runtime_interface_traffic = get_stack_optional<Traffic>(j, "RuntimeInterfaceTraffic");
+        x.runtime_interface_traffic_point = get_stack_optional<RuntimeInterfaceTrafficPointElement>(j, "RuntimeInterfaceTrafficPoint");
         x.runtime_inventory_response = get_stack_optional<RuntimeInventoryResponse>(j, "RuntimeInventoryResponse");
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
@@ -2488,8 +2715,10 @@ namespace api {
         x.transport_action_response = get_stack_optional<TransportActionResponse>(j, "TransportActionResponse");
         x.transport_config_operation = get_stack_optional<TransportConfigOperation>(j, "TransportConfigOperation");
         x.transport_config_response = get_stack_optional<TransportConfigResponse>(j, "TransportConfigResponse");
+        x.transport_path = get_stack_optional<TransportPath>(j, "TransportPath");
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
+        x.ui_preferences_config = get_stack_optional<UiPreferences>(j, "UiPreferencesConfig");
         x.validation_error = get_stack_optional<ValidationErrorElement>(j, "ValidationError");
         x.vless_reality_spec = get_stack_optional<Vless>(j, "VlessRealitySpec");
     }
@@ -2509,6 +2738,7 @@ namespace api {
         j["ConnectionQueryRequest"] = x.connection_query_request;
         j["ConnectionRecord"] = x.connection_record;
         j["ConnectionSort"] = x.connection_sort;
+        j["ConntrackOnSwitch"] = x.conntrack_on_switch;
         j["DaemonConfig"] = x.daemon_config;
         j["DependencyAnalysisRequest"] = x.dependency_analysis_request;
         j["DependencyAnalysisResponse"] = x.dependency_analysis_response;
@@ -2539,11 +2769,14 @@ namespace api {
         j["ListsAutoupdateConfig"] = x.lists_autoupdate_config;
         j["NdmsInterfaceCapabilities"] = x.ndms_interface_capabilities;
         j["NdmsInterfaceInventoryResponse"] = x.ndms_interface_inventory_response;
+        j["NdmsInterfaceManagementReadiness"] = x.ndms_interface_management_readiness;
         j["NdmsInterfaceRole"] = x.ndms_interface_role;
+        j["NdmsManagementBlocker"] = x.ndms_management_blocker;
         j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
         j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
+        j["PlainDnsTemplate"] = x.plain_dns_template;
         j["PolicyRuleCheck"] = x.policy_rule_check;
         j["ReloadResponse"] = x.reload_response;
         j["ResolverConfigProbeStatus"] = x.resolver_config_probe_status;
@@ -2565,6 +2798,8 @@ namespace api {
         j["RuntimeInterfaceInventoryStatus"] = x.runtime_interface_inventory_status;
         j["RuntimeInterfaceState"] = x.runtime_interface_state;
         j["RuntimeInterfaceStatus"] = x.runtime_interface_status;
+        j["RuntimeInterfaceTraffic"] = x.runtime_interface_traffic;
+        j["RuntimeInterfaceTrafficPoint"] = x.runtime_interface_traffic_point;
         j["RuntimeInventoryResponse"] = x.runtime_inventory_response;
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
@@ -2579,8 +2814,10 @@ namespace api {
         j["TransportActionResponse"] = x.transport_action_response;
         j["TransportConfigOperation"] = x.transport_config_operation;
         j["TransportConfigResponse"] = x.transport_config_response;
+        j["TransportPath"] = x.transport_path;
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
+        j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
     }
@@ -2628,6 +2865,20 @@ namespace api {
             case DnsServerType::KEENETIC: j = "keenetic"; break;
             case DnsServerType::STATIC: j = "static"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"DnsServerType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ConntrackOnSwitch & x) {
+        if (j == "delete") x = ConntrackOnSwitch::DELETE;
+        else if (j == "preserve") x = ConntrackOnSwitch::PRESERVE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ConntrackOnSwitch\""); }
+    }
+
+    inline void to_json(json & j, const ConntrackOnSwitch & x) {
+        switch (x) {
+            case ConntrackOnSwitch::DELETE: j = "delete"; break;
+            case ConntrackOnSwitch::PRESERVE: j = "preserve"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ConntrackOnSwitch\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -2963,6 +3214,32 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, NdmsManagementBlockerElement & x) {
+        if (j == "automatic_backup_unavailable") x = NdmsManagementBlockerElement::AUTOMATIC_BACKUP_UNAVAILABLE;
+        else if (j == "kernel_identity_unresolved") x = NdmsManagementBlockerElement::KERNEL_IDENTITY_UNRESOLVED;
+        else if (j == "optimistic_revision_unavailable") x = NdmsManagementBlockerElement::OPTIMISTIC_REVISION_UNAVAILABLE;
+        else if (j == "ownership_unknown") x = NdmsManagementBlockerElement::OWNERSHIP_UNKNOWN;
+        else if (j == "role_unknown") x = NdmsManagementBlockerElement::ROLE_UNKNOWN;
+        else if (j == "typed_rci_unavailable") x = NdmsManagementBlockerElement::TYPED_RCI_UNAVAILABLE;
+        else if (j == "unsupported_kind") x = NdmsManagementBlockerElement::UNSUPPORTED_KIND;
+        else if (j == "unsupported_role") x = NdmsManagementBlockerElement::UNSUPPORTED_ROLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsManagementBlockerElement\""); }
+    }
+
+    inline void to_json(json & j, const NdmsManagementBlockerElement & x) {
+        switch (x) {
+            case NdmsManagementBlockerElement::AUTOMATIC_BACKUP_UNAVAILABLE: j = "automatic_backup_unavailable"; break;
+            case NdmsManagementBlockerElement::KERNEL_IDENTITY_UNRESOLVED: j = "kernel_identity_unresolved"; break;
+            case NdmsManagementBlockerElement::OPTIMISTIC_REVISION_UNAVAILABLE: j = "optimistic_revision_unavailable"; break;
+            case NdmsManagementBlockerElement::OWNERSHIP_UNKNOWN: j = "ownership_unknown"; break;
+            case NdmsManagementBlockerElement::ROLE_UNKNOWN: j = "role_unknown"; break;
+            case NdmsManagementBlockerElement::TYPED_RCI_UNAVAILABLE: j = "typed_rci_unavailable"; break;
+            case NdmsManagementBlockerElement::UNSUPPORTED_KIND: j = "unsupported_kind"; break;
+            case NdmsManagementBlockerElement::UNSUPPORTED_ROLE: j = "unsupported_role"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsManagementBlockerElement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, Owner & x) {
         if (j == "keenetic") x = Owner::KEENETIC;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"Owner\""); }
@@ -3246,6 +3523,84 @@ namespace api {
             case TransportConfigResponseStatus::DELETED: j = "deleted"; break;
             case TransportConfigResponseStatus::UPDATED: j = "updated"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"TransportConfigResponseStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Confidence & x) {
+        if (j == "ambiguous") x = Confidence::AMBIGUOUS;
+        else if (j == "declared") x = Confidence::DECLARED;
+        else if (j == "derived") x = Confidence::DERIVED;
+        else if (j == "unknown") x = Confidence::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Confidence\""); }
+    }
+
+    inline void to_json(json & j, const Confidence & x) {
+        switch (x) {
+            case Confidence::AMBIGUOUS: j = "ambiguous"; break;
+            case Confidence::DECLARED: j = "declared"; break;
+            case Confidence::DERIVED: j = "derived"; break;
+            case Confidence::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Confidence\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Framing & x) {
+        if (j == "grpc") x = Framing::GRPC;
+        else if (j == "http") x = Framing::HTTP;
+        else if (j == "http2") x = Framing::HTTP2;
+        else if (j == "http_upgrade") x = Framing::HTTP_UPGRADE;
+        else if (j == "quic") x = Framing::QUIC;
+        else if (j == "raw") x = Framing::RAW;
+        else if (j == "unknown") x = Framing::UNKNOWN;
+        else if (j == "websocket") x = Framing::WEBSOCKET;
+        else if (j == "wireguard") x = Framing::WIREGUARD;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Framing\""); }
+    }
+
+    inline void to_json(json & j, const Framing & x) {
+        switch (x) {
+            case Framing::GRPC: j = "grpc"; break;
+            case Framing::HTTP: j = "http"; break;
+            case Framing::HTTP2: j = "http2"; break;
+            case Framing::HTTP_UPGRADE: j = "http_upgrade"; break;
+            case Framing::QUIC: j = "quic"; break;
+            case Framing::RAW: j = "raw"; break;
+            case Framing::UNKNOWN: j = "unknown"; break;
+            case Framing::WEBSOCKET: j = "websocket"; break;
+            case Framing::WIREGUARD: j = "wireguard"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Framing\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, PayloadNetwork & x) {
+        if (j == "tcp") x = PayloadNetwork::TCP;
+        else if (j == "udp") x = PayloadNetwork::UDP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"PayloadNetwork\""); }
+    }
+
+    inline void to_json(json & j, const PayloadNetwork & x) {
+        switch (x) {
+            case PayloadNetwork::TCP: j = "tcp"; break;
+            case PayloadNetwork::UDP: j = "udp"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"PayloadNetwork\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, WireTransport & x) {
+        if (j == "tcp") x = WireTransport::TCP;
+        else if (j == "tcp_udp") x = WireTransport::TCP_UDP;
+        else if (j == "udp") x = WireTransport::UDP;
+        else if (j == "unknown") x = WireTransport::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"WireTransport\""); }
+    }
+
+    inline void to_json(json & j, const WireTransport & x) {
+        switch (x) {
+            case WireTransport::TCP: j = "tcp"; break;
+            case WireTransport::TCP_UDP: j = "tcp_udp"; break;
+            case WireTransport::UDP: j = "udp"; break;
+            case WireTransport::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"WireTransport\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

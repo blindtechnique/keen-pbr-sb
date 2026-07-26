@@ -21,7 +21,7 @@ func main() {
 	configPath := flag.String("config", "/opt/etc/keen-pbr/transports.json", "manager configuration file")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	cfg, configRevision, err := config.LoadWithRevision(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -43,7 +43,13 @@ func main() {
 		supervisor.Register(item)
 	}
 
-	admin := config.NewAdmin(*configPath, cfg, manager, supervisor)
+	admin := config.NewAdminWithRevision(
+		*configPath,
+		cfg,
+		configRevision,
+		manager,
+		supervisor,
+	)
 	handler := api.New(supervisor, cfg.APIKey, admin)
 	server := &http.Server{
 		Addr:              cfg.Listen,

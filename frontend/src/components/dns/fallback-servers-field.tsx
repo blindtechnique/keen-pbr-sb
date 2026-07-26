@@ -8,6 +8,10 @@ import {
   FieldHint,
   FieldLabel,
 } from "@/components/shared/field"
+import {
+  createDnsServerDisplayNameMap,
+  getDnsServerSearchText,
+} from "@/lib/dns-display"
 
 /**
  * Ordered list of DNS servers dnsmasq falls back to when no rule matches.
@@ -22,9 +26,12 @@ export function FallbackServersField({
   onChange: (fallback: string[]) => void
 }) {
   const { t } = useTranslation()
-  const serverTags = (config?.dns?.servers ?? [])
+  const servers = config?.dns?.servers ?? []
+  const serverTags = servers
     .map((server) => server.tag)
     .filter((tag): tag is string => Boolean(tag))
+  const displayNames = createDnsServerDisplayNameMap(servers)
+  const serversByTag = new Map(servers.map((server) => [server.tag, server]))
 
   return (
     <Field>
@@ -36,6 +43,13 @@ export function FallbackServersField({
           emptyMessage={t("pages.dnsRules.fallback.noneAvailable")}
           onChange={onChange}
           options={serverTags}
+          getSearchText={(tag) => {
+            const server = serversByTag.get(tag)
+            return server ? getDnsServerSearchText(server) : tag
+          }}
+          renderItem={(tag) => (
+            <span title={tag}>{displayNames.get(tag) ?? tag}</span>
+          )}
           placeholderDescription={t(
             "pages.dnsRules.fallback.placeholderDescription"
           )}

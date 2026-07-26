@@ -2,8 +2,11 @@
 
 #ifdef WITH_API
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <sys/epoll.h>
 #include <thread>
 
@@ -36,6 +39,19 @@ namespace keen_pbr3 {
 namespace {
 
 constexpr auto conntrack_publish_delay = std::chrono::milliseconds{500};
+constexpr auto interface_traffic_sample_interval = std::chrono::seconds{2};
+
+std::int64_t interface_traffic_timestamp_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::int64_t interface_traffic_api_integer(std::uint64_t value) {
+    constexpr auto maximum =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    return static_cast<std::int64_t>(std::min(value, maximum));
+}
 
 const char* config_operation_state_name(ConfigOperationState state) {
     switch (state) {
@@ -50,6 +66,124 @@ const char* config_operation_state_name(ConfigOperationState state) {
 }
 
 } // namespace
+
+void Daemon::sample_interface_traffic_now() {
+    if (!status_stream_ || !status_stream_->has_subscribers()) {
+        if (traffic_sampling_active_) {
+            interface_traffic_sampler_.clear_all();
+            traffic_sampled_interfaces_.clear();
+            traffic_sampling_active_ = false;
+        }
+        return;
+    }
+
+    std::set<std::string> target_interfaces;
+    {
+        std::lock_guard<std::mutex> lock(interface_traffic_targets_mutex_);
+        for (const auto& [source, interfaces] :
+             interface_traffic_targets_by_source_) {
+            (void)source;
+            target_interfaces.insert(
+                interfaces.begin(), interfaces.end());
+        }
+    }
+
+    if (target_interfaces.empty()) {
+        if (traffic_sampling_active_ ||
+            !traffic_sampled_interfaces_.empty()) {
+            interface_traffic_sampler_.clear_all();
+            traffic_sampled_interfaces_.clear();
+            traffic_sampling_active_ = false;
+        }
+        return;
+    }
+
+    const auto target_plan = plan_interface_traffic_targets(
+        target_interfaces, traffic_sampled_interfaces_);
+    nlohmann::json interfaces = nlohmann::json::array();
+    for (const auto& interface_name : target_plan.reported) {
+        if (target_plan.removed.find(interface_name) !=
+            target_plan.removed.end()) {
+            interface_traffic_sampler_.clear(interface_name);
+            interfaces.push_back(
+                nlohmann::json{
+                    {"name", interface_name},
+                    {"available", false},
+                    {"reset", false},
+                });
+            continue;
+        }
+
+        const auto result =
+            interface_traffic_sampler_.sample(interface_name);
+        const bool unavailable =
+            result.status ==
+                InterfaceTrafficSampler::SampleStatus::Unavailable ||
+            result.status ==
+                InterfaceTrafficSampler::SampleStatus::InvalidInterfaceName;
+        nlohmann::json entry{
+            {"name", interface_name},
+            {"available", !unavailable},
+            {"reset",
+             result.status ==
+                 InterfaceTrafficSampler::SampleStatus::CounterReset},
+        };
+        if (result.point) {
+            entry["rx_bytes"] =
+                interface_traffic_api_integer(result.point->rx_bytes);
+            entry["tx_bytes"] =
+                interface_traffic_api_integer(result.point->tx_bytes);
+            if (result.point->rx_bits_per_second) {
+                entry["rx_bits_per_second"] =
+                    interface_traffic_api_integer(
+                        *result.point->rx_bits_per_second);
+            }
+            if (result.point->tx_bits_per_second) {
+                entry["tx_bits_per_second"] =
+                    interface_traffic_api_integer(
+                        *result.point->tx_bits_per_second);
+            }
+        }
+        interfaces.push_back(std::move(entry));
+    }
+
+    traffic_sampled_interfaces_ = target_interfaces;
+    traffic_sampling_active_ = true;
+    status_stream_->publish_interface_traffic(
+        nlohmann::json{
+            {"sampled_at_unix_ms", interface_traffic_timestamp_ms()},
+            {"interfaces", std::move(interfaces)},
+        });
+}
+
+void Daemon::replace_interface_traffic_targets(
+    std::string source,
+    std::vector<std::string> interface_names) {
+    std::set<std::string> valid_names;
+    for (auto& name : interface_names) {
+        if (InterfaceTrafficSampler::is_valid_interface_name(name)) {
+            valid_names.insert(std::move(name));
+        }
+    }
+    std::lock_guard<std::mutex> lock(interface_traffic_targets_mutex_);
+    interface_traffic_targets_by_source_[std::move(source)] =
+        std::move(valid_names);
+}
+
+void Daemon::refresh_interface_traffic_config_targets(
+    const Config& config) {
+    replace_interface_traffic_targets(
+        "active-config", interface_traffic_targets_from_config(config));
+}
+
+void Daemon::schedule_interface_traffic_sampling() {
+    scheduler_->schedule_repeating(
+        interface_traffic_sample_interval,
+        [this]() {
+            sample_interface_traffic_now();
+        },
+        "interface-traffic-sample");
+}
 
 void Daemon::setup_conntrack_events() {
     conntrack_event_monitor_ = std::make_unique<ConntrackEventMonitor>();
@@ -219,9 +353,17 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     result->apply_started_ts = apply_started_ts;
     apply_started_ts_.store(apply_started_ts, std::memory_order_release);
 
+    const Config active_config = config_store_.active_config();
+    const bool refresh_remote_lists_after_apply =
+        remote_list_sources_changed(active_config, config);
+
     try {
-        *prepared = prepare_runtime_inputs(config, true);
-        *rollback_prepared = prepare_runtime_inputs(config_store_.active_config(), false);
+        *prepared = prepare_runtime_inputs(
+            config,
+            RemoteListPreparationMode::MissingOrInvalid);
+        *rollback_prepared = prepare_runtime_inputs(
+            active_config,
+            RemoteListPreparationMode::None);
     } catch (const std::exception& e) {
         result->error = e.what();
         Logger::instance().error("Prepare staged config task failed: {}", e.what());
@@ -233,12 +375,16 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
          result,
          prepared,
          rollback_prepared,
+         refresh_remote_lists_after_apply,
          saved_config_json = std::move(saved_config_json)]() mutable {
             try {
                 apply_prepared_runtime_inputs(std::move(*prepared));
                 result->applied = true;
                 result->rolled_back = false;
                 config_store_.clear_staged_if_matches(saved_config_json);
+                if (refresh_remote_lists_after_apply) {
+                    refresh_lists_and_maybe_reload_async("post-apply");
+                }
             } catch (const std::exception& e) {
                 result->error = e.what();
                 Logger::instance().error("Apply staged config task failed: {}", e.what());
@@ -521,7 +667,8 @@ void Daemon::setup_api() {
                 });
         },
         [this]() {
-            return build_runtime_interface_inventory_response_or_empty(netlink_);
+            return build_runtime_interface_inventory_response_or_empty(
+                netlink_, &interface_traffic_sampler_);
         },
         [this](const Config& config) {
             return build_list_refresh_state_map(config, list_service_.cache_manager());
@@ -580,6 +727,22 @@ void Daemon::setup_api() {
         return build_runtime_inventory(*api_ctx_);
     });
     api_ctx_->status_stream = status_stream_.get();
+    api_ctx_->emergency_quiesce_runtime_fn =
+        [this]() {
+            // The config-save handler already owns ConfigOperationState::Saving.
+            // Do not call the public stop callback here: it would try to acquire
+            // Reloading and reject the fail-closed stop as self-conflicting.
+            enqueue_control_task(
+                [this]() { stop_routing_runtime(); },
+                true,
+                "config-save-emergency-quiesce");
+        };
+    api_ctx_->replace_interface_traffic_targets_fn =
+        [this](std::string source, std::vector<std::string> names) {
+            replace_interface_traffic_targets(
+                std::move(source), std::move(names));
+        };
+    refresh_interface_traffic_config_targets(config_);
     lifecycle_operation_store_.set_publish_callback([this]() {
         if (status_stream_) status_stream_->reconcile();
     });
@@ -672,6 +835,7 @@ void Daemon::setup_api() {
     try {
         api_server_->start();
         Logger::instance().info("REST API listening on {}", listen_addr);
+        schedule_interface_traffic_sampling();
     } catch (const ApiError& e) {
         Logger::instance().error("REST API startup failed on {}: {}", listen_addr, e.what());
         throw;

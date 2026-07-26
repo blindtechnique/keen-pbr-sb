@@ -6,6 +6,23 @@ const t = (key: string, options?: Record<string, unknown>) =>
   `${key}:${String(options?.version ?? "")}`
 
 describe("notification collector", () => {
+  test("does not turn a successful managed-route repair into a warning", () => {
+    const notices = collectNotices(
+      [
+        "2026-07-25 21:00:00.000 [I] Restoring vanished managed route (dst=default, table=153, iface=mooo_vless, gw=(none), metric=1, protocol=186)",
+        "2026-07-25 21:00:01.000 [W] Managed route repair failed",
+      ],
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.text).toBe("Managed route repair failed")
+  })
+
   test("adds a stable version-specific nfqws2 update notice", () => {
     const notices = collectNotices(
       [],

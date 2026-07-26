@@ -34,7 +34,13 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import {
+  createDnsServerDisplayNameMap,
+  getDnsRuleDisplayName,
+  getDnsRuleTechnicalId,
+} from "@/lib/dns-display"
 import { formatListReferenceLabels } from "@/lib/list-display"
+import { getRuleEditHref } from "@/lib/rule-route"
 import {
   buildUpdatedConfigWithRules,
   getRuleDraft,
@@ -58,6 +64,11 @@ export function DnsRulesPage() {
         .filter(Boolean),
     [loadedConfig]
   )
+  const serverNames = useMemo(
+    () =>
+      createDnsServerDisplayNameMap(loadedConfig?.dns?.servers ?? []),
+    [loadedConfig?.dns?.servers]
+  )
 
   const listOptions = useMemo(
     () => Object.keys(loadedConfig?.lists ?? {}),
@@ -78,7 +89,15 @@ export function DnsRulesPage() {
   })
 
   const rules = loadedConfig?.dns?.rules ?? []
-  const ruleRowIds = rules.map((_rule, index) => String(index))
+  const ruleRowIds = rules.map((rule, index) =>
+    getDnsRuleTechnicalId(rule, index)
+  )
+  const ruleNames = new Map(
+    rules.map((rule, index) => [
+      getDnsRuleTechnicalId(rule, index),
+      getDnsRuleDisplayName(rule, index),
+    ])
+  )
   const ruleSelection = useRowSelection(ruleRowIds)
 
   const handleFallbackChange = (fallback: string[]) => {
@@ -186,7 +205,12 @@ export function DnsRulesPage() {
 
     persistDnsRules(
       rules
-        .filter((_rule, index) => !ruleSelection.selectedIds.has(String(index)))
+        .filter(
+          (rule, index) =>
+            !ruleSelection.selectedIds.has(
+              getDnsRuleTechnicalId(rule, index)
+            )
+        )
         .map((rule) => getRuleDraft(rule)),
       { clearSelection: true }
     )
@@ -200,7 +224,9 @@ export function DnsRulesPage() {
     persistDnsRules(
       rules.map((rule, index) => ({
         ...getRuleDraft(rule),
-        enabled: ruleSelection.selectedIds.has(String(index))
+        enabled: ruleSelection.selectedIds.has(
+          getDnsRuleTechnicalId(rule, index)
+        )
           ? enabled
           : (rule.enabled ?? true),
       }))
@@ -246,6 +272,14 @@ export function DnsRulesPage() {
                     emptyMessage={t("pages.dnsRules.fallback.noneAvailable")}
                     onChange={handleFallbackChange}
                     options={serverTags}
+                    renderItem={(serverTag) => (
+                      <span title={serverTag}>
+                        {serverNames.get(serverTag) ?? serverTag}
+                      </span>
+                    )}
+                    getSearchText={(serverTag) =>
+                      `${serverNames.get(serverTag) ?? serverTag} ${serverTag}`
+                    }
                     placeholderDescription={t(
                       "pages.dnsRules.fallback.placeholderDescription"
                     )}
@@ -316,6 +350,7 @@ export function DnsRulesPage() {
               <DataTable
                 headers={[
                   "",
+                  t("pages.dnsRules.headers.name"),
                   t("pages.dnsRules.headers.criteria"),
                   t("pages.dnsRules.headers.serverTag"),
                   t("pages.dnsRules.headers.allowDomainRebinding"),
@@ -342,6 +377,13 @@ export function DnsRulesPage() {
                       )}
                     />
                   </div>,
+                  <span
+                    className="font-medium"
+                    key={`name-${index}`}
+                    title={rule.id}
+                  >
+                    {getDnsRuleDisplayName(rule, index)}
+                  </span>,
                   <ul
                     className="list-disc space-y-1 pl-5 text-sm"
                     key={`criteria-${index}`}
@@ -357,7 +399,9 @@ export function DnsRulesPage() {
                     </li>
                   </ul>,
                   <span className="font-medium" key={`server-${index}`}>
-                    {rule.server}
+                    <span title={rule.server}>
+                      {serverNames.get(rule.server) ?? rule.server}
+                    </span>
                   </span>,
                   <Badge
                     key={`allow-domain-rebinding-${index}`}
@@ -375,7 +419,8 @@ export function DnsRulesPage() {
                         disabled: configMutationPending,
                         icon: <Pencil className="h-4 w-4" />,
                         label: t("common.edit"),
-                        onClick: () => navigate(`/dns-rules/${index}/edit`),
+                        onClick: () =>
+                          navigate(getRuleEditHref("dns-rules", rule, index)),
                       },
                     ]}
                     key={`actions-${index}`}
@@ -390,7 +435,7 @@ export function DnsRulesPage() {
                   selectAllLabel: t("common.selection.selectAll"),
                   getRowLabel: (rowId) =>
                     t("common.selection.selectRow", {
-                      rowLabel: `${t("pages.dnsRules.title")} #${Number(rowId) + 1}`,
+                      rowLabel: ruleNames.get(rowId) ?? rowId,
                     }),
                 }}
               />

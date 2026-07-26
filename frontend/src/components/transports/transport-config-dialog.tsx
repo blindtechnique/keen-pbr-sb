@@ -23,12 +23,21 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { countryOptions } from "@/data/countries"
+import { validateDisplayName } from "@/lib/display-name-validation"
+import {
+  formatNativeTransportCandidate,
+  type NativeTransportCandidate,
+} from "@/lib/hidden-native-interfaces"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { generateTransportIdentity } from "@/lib/technical-id"
 
 type Props = {
+  existingInterfaces?: readonly string[]
+  existingTags?: readonly string[]
   initial?: TransportSpec
   isPending: boolean
+  nativeCandidates?: readonly NativeTransportCandidate[]
   onOpenChange: (open: boolean) => void
   onSubmit: (spec: TransportSpec, options: { createOutbound: boolean }) => void
   open: boolean
@@ -56,12 +65,55 @@ export type TransportFormSubmission = {
   options: { createOutbound: boolean }
 }
 
+// Exported for focused form tests. Suggestions never mutate the form by
+// themselves: the user must explicitly accept one in the dialog.
+// eslint-disable-next-line react-refresh/only-export-components
+export function inferTransportAliasSuggestion(
+  sourceMode: SourceMode,
+  spec: Pick<TransportSpec, "link" | "outbound_json">
+): string | undefined {
+  if (sourceMode === "json") {
+    try {
+      const parsed = JSON.parse(spec.outbound_json?.trim() ?? "") as unknown
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "server" in parsed &&
+        typeof parsed.server === "string"
+      ) {
+        return normalizeEndpointSuggestion(parsed.server)
+      }
+    } catch {
+      return undefined
+    }
+    return undefined
+  }
+
+  const link = spec.link?.trim()
+  if (!link) {
+    return undefined
+  }
+
+  try {
+    return normalizeEndpointSuggestion(new URL(link).hostname)
+  } catch {
+    return undefined
+  }
+}
+
 // Exported for focused semantic-form tests; it has no module-level state.
 // eslint-disable-next-line react-refresh/only-export-components
 export function createTransportFormValue(
-  initial?: TransportSpec
+  initial?: TransportSpec,
+  identity?: { interfaceName: string; tag: string }
 ): TransportFormValue {
-  const spec = initial ? structuredClone(initial) : emptySpec()
+  const spec = initial
+    ? structuredClone(initial)
+    : {
+        ...emptySpec(),
+        interface: identity?.interfaceName ?? "",
+        tag: identity?.tag ?? "",
+      }
 
   return {
     spec,
@@ -90,6 +142,7 @@ export function normalizeTransportFormValue(
     .filter(Boolean)
   const normalizedSpec: TransportSpec = {
     ...spec,
+    display_name: spec.display_name?.trim() || undefined,
     auto_start: spec.auto_start ?? false,
     geo_mode: spec.geo_mode ?? "disabled",
     country_code:
@@ -106,6 +159,8 @@ export function normalizeTransportFormValue(
         link: undefined,
         outbound_json: undefined,
         mtu: undefined,
+        bootstrap_dns: undefined,
+        tun_address: undefined,
         vless: undefined,
       },
       options: { createOutbound: value.createOutbound && !editing },
@@ -158,8 +213,11 @@ export function normalizeTransportFormComparable(
 }
 
 export function TransportConfigDialog({
+  existingInterfaces = [],
+  existingTags = [],
   initial,
   isPending,
+  nativeCandidates = [],
   onOpenChange,
   onSubmit,
   open,
@@ -167,7 +225,15 @@ export function TransportConfigDialog({
 }: Props) {
   const { t, i18n } = useTranslation()
   const [baseline] = useState<TransportFormValue>(() =>
-    createTransportFormValue(initial)
+    createTransportFormValue(
+      initial,
+      initial
+        ? undefined
+        : generateTransportIdentity({
+            existingInterfaces,
+            existingTags,
+          })
+    )
   )
   const [spec, setSpec] = useState<TransportSpec>(() =>
     structuredClone(baseline.spec)
@@ -183,6 +249,18 @@ export function TransportConfigDialog({
   )
 
   const isSingBox = spec.type !== TransportSpecType.native
+  const aliasSuggestion = inferTransportAliasSuggestion(sourceMode, spec)
+  const displayNameError = validateDisplayName(spec.display_name ?? "")
+  const selectedNativeCandidate =
+    spec.type === TransportSpecType.native
+      ? nativeCandidates.find(
+          (candidate) => candidate.interfaceName === spec.interface
+        )
+      : undefined
+  const nativeSelectionInvalid =
+    spec.type === TransportSpecType.native &&
+    !initial &&
+    (!selectedNativeCandidate || !selectedNativeCandidate.selectable)
   const formValue: TransportFormValue = {
     spec,
     sourceMode,
@@ -250,40 +328,67 @@ export function TransportConfigDialog({
             onSubmit={submit}
           >
             <div className="grid min-h-0 content-start gap-4 overflow-y-auto px-5 py-5">
-              <Field label={t("transports.form.tag")}>
+              <Field label={t("transports.form.displayName")}>
                 <Input
-                  aria-describedby="transport-tag-hint"
-                  disabled={Boolean(initial)}
-                  maxLength={24}
+                  aria-invalid={Boolean(displayNameError)}
                   onChange={(event) =>
-                    setSpec({ ...spec, tag: event.target.value })
+                    setSpec({
+                      ...spec,
+                      display_name: event.target.value || undefined,
+                    })
                   }
-                  pattern="[a-z][a-z0-9_]{0,23}"
-                  placeholder="my_tunnel"
+                  placeholder={t("transports.form.displayNamePlaceholder")}
                   required
-                  title={t("transports.form.tagHint")}
-                  value={spec.tag}
+                  value={spec.display_name ?? ""}
                 />
-                <p
-                  className="text-xs text-muted-foreground"
-                  id="transport-tag-hint"
-                >
-                  {t("transports.form.tagHint")}
+                <p className="text-xs text-muted-foreground">
+                  {t("transports.form.displayNameHint")}
                 </p>
+                {displayNameError ? (
+                  <p className="text-xs text-destructive">
+                    {t("transports.form.displayNameInvalid")}
+                  </p>
+                ) : null}
+                {aliasSuggestion &&
+                aliasSuggestion !== spec.display_name?.trim() ? (
+                  <Button
+                    className="w-fit px-0"
+                    onClick={() =>
+                      setSpec({ ...spec, display_name: aliasSuggestion })
+                    }
+                    size="sm"
+                    type="button"
+                    variant="link"
+                  >
+                    {t("transports.form.useAliasSuggestion", {
+                      name: aliasSuggestion,
+                    })}
+                  </Button>
+                ) : null}
               </Field>
               <Field label={t("transports.form.type")}>
                 <select
                   className="h-9 rounded-md border bg-background px-3"
                   disabled={Boolean(initial)}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const nextType =
+                      event.target.value as TransportSpec["type"]
+                    const firstNative = nativeCandidates.find(
+                      (candidate) => candidate.selectable
+                    )
                     setSpec({
                       ...spec,
-                      type: event.target.value as TransportSpec["type"],
+                      type: nextType,
+                      interface:
+                        nextType === TransportSpecType.native
+                          ? (firstNative?.interfaceName ?? "")
+                          : baseline.spec.interface,
                     })
-                  }
+                  }}
                   value={spec.type}
                 >
-                  {initial?.type === TransportSpecType.native ? (
+                  {initial?.type === TransportSpecType.native ||
+                  nativeCandidates.length > 0 ? (
                     <option value={TransportSpecType.native}>
                       {t("transports.form.native")}
                     </option>
@@ -298,18 +403,100 @@ export function TransportConfigDialog({
                   ) : null}
                 </select>
               </Field>
-              <Field label={t("transports.form.interface")}>
-                <Input
-                  maxLength={15}
-                  onChange={(event) =>
-                    setSpec({ ...spec, interface: event.target.value })
-                  }
-                  pattern="[A-Za-z0-9_.-]{1,15}"
-                  placeholder="kpbr0"
-                  required
-                  value={spec.interface}
-                />
-              </Field>
+              {spec.type === TransportSpecType.native ? (
+                <Field label={t("transports.form.nativeInterface")}>
+                  <select
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    disabled={Boolean(initial)}
+                    onChange={(event) =>
+                      setSpec({ ...spec, interface: event.target.value })
+                    }
+                    required
+                    value={spec.interface}
+                  >
+                    <option disabled value="">
+                      {t("transports.form.nativeInterfacePlaceholder")}
+                    </option>
+                    {initial?.type === TransportSpecType.native &&
+                    !selectedNativeCandidate ? (
+                      <option value={spec.interface}>
+                        {spec.interface}
+                      </option>
+                    ) : null}
+                    {nativeCandidates.map((candidate) => (
+                      <option
+                        disabled={!candidate.selectable}
+                        key={candidate.id}
+                        value={
+                          candidate.interfaceName ??
+                          `unresolved:${candidate.id}`
+                        }
+                      >
+                        {formatNativeTransportCandidate(candidate, {
+                          hidden: t(
+                            "transports.form.nativeInterfaceHidden"
+                          ),
+                          unavailable: t(
+                            "transports.form.nativeInterfaceUnavailable"
+                          ),
+                        })}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    {t("transports.form.nativeInterfaceHint")}
+                  </p>
+                </Field>
+              ) : null}
+              <details className="rounded-md border px-3 py-2">
+                <summary className="cursor-pointer text-sm font-medium">
+                  {t("transports.form.technicalSettings")}
+                </summary>
+                <div className="grid gap-4 pt-4">
+                  <Field label={t("transports.form.tag")}>
+                    <Input
+                      aria-describedby="transport-tag-hint"
+                      disabled={Boolean(initial)}
+                      maxLength={24}
+                      onChange={(event) =>
+                        setSpec({ ...spec, tag: event.target.value })
+                      }
+                      pattern="[a-z][a-z0-9_]{0,23}"
+                      placeholder="my_tunnel"
+                      required
+                      title={t("transports.form.tagHint")}
+                      value={spec.tag}
+                    />
+                    <p
+                      className="text-xs text-muted-foreground"
+                      id="transport-tag-hint"
+                    >
+                      {t("transports.form.tagHint")}
+                    </p>
+                  </Field>
+                  <Field label={t("transports.form.interface")}>
+                    <Input
+                      maxLength={15}
+                      onChange={(event) =>
+                        setSpec({ ...spec, interface: event.target.value })
+                      }
+                      pattern="[A-Za-z0-9_.-]{1,15}"
+                      placeholder="kpbr0"
+                      readOnly={
+                        Boolean(initial) ||
+                        spec.type === TransportSpecType.native
+                      }
+                      required
+                      value={spec.interface}
+                    />
+                    {initial ? (
+                      <p className="text-xs text-muted-foreground">
+                        {t("transports.form.technicalIdentityImmutable")}
+                      </p>
+                    ) : null}
+                  </Field>
+                </div>
+              </details>
               <div className="flex items-center justify-between rounded-md border p-3">
                 <Label htmlFor="transport-auto-start">
                   {t("transports.form.autoStart")}
@@ -529,7 +716,15 @@ export function TransportConfigDialog({
               >
                 {t("common.cancel")}
               </Button>
-              <Button disabled={isPending || !isDirty} type="submit">
+              <Button
+                disabled={
+                  isPending ||
+                  !isDirty ||
+                  Boolean(displayNameError) ||
+                  nativeSelectionInvalid
+                }
+                type="submit"
+              >
                 {isPending
                   ? t("transports.form.saving")
                   : t("transports.form.save")}
@@ -578,4 +773,12 @@ function Field({ children, label }: { children: ReactNode; label: string }) {
       {children}
     </div>
   )
+}
+
+function normalizeEndpointSuggestion(value: string) {
+  const normalized = value.trim().replace(/^\[|\]$/g, "")
+  if (validateDisplayName(normalized)) {
+    return undefined
+  }
+  return normalized
 }

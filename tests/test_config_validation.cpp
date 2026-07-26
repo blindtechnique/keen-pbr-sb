@@ -85,6 +85,17 @@ static std::vector<ConfigValidationIssue> validate_issues(const std::string& jso
     }
 }
 
+static const ConfigValidationIssue* find_issue(
+    const std::vector<ConfigValidationIssue>& issues,
+    const std::string& path) {
+    for (const auto& issue : issues) {
+        if (issue.path == path) {
+            return &issue;
+        }
+    }
+    return nullptr;
+}
+
 // =============================================================================
 // List name: length validation
 // =============================================================================
@@ -194,6 +205,26 @@ TEST_CASE("list display_name rejects blank and ASCII control values") {
     CHECK(unicode_blank[0].path == "lists.ads.display_name");
 }
 
+TEST_CASE("display_name rejects C1 and bidirectional controls") {
+    const auto c1 = validate_issues(
+        list_config_json(
+            "ads",
+            R"({"display_name":"Ads\u0080list","domains":["example.com"]})"));
+    REQUIRE(c1.size() == 1);
+    CHECK(c1[0].path == "lists.ads.display_name");
+
+    const auto bidi = validate_issues(
+        list_config_json(
+            "ads",
+            R"({"display_name":"Safe\u202Etxt.exe","domains":["example.com"]})"));
+    REQUIRE(bidi.size() == 1);
+    CHECK(bidi[0].path == "lists.ads.display_name");
+
+    CHECK_NOTHROW(parse_test_config(list_config_json(
+        "family",
+        R"({"display_name":"Семья 👨‍👩‍👦","domains":["example.com"]})")));
+}
+
 TEST_CASE("list display_name limit counts Unicode code points") {
     std::string valid_alias;
     for (size_t index = 0; index < 80; ++index) valid_alias += "Я";
@@ -216,6 +247,173 @@ TEST_CASE("list display_name limit counts Unicode code points") {
     CHECK(issues[0].path == "lists.unicode.display_name");
 }
 
+TEST_CASE("legacy config without UI preferences remains valid") {
+    const auto config = parse_test_config(
+        R"({"lists":{"legacy":{"domains":["example.com"]}}})");
+    CHECK_FALSE(config.ui_preferences.has_value());
+}
+
+TEST_CASE("legacy config without aliases or stable rule ids round-trips") {
+    const auto parsed = parse_test_config(R"({
+        "lists":{"legacy":{"domains":["example.com"]}},
+        "outbounds":[
+            {"tag":"wan","type":"interface","interface":"eth0"}
+        ],
+        "route":{"rules":[
+            {"list":["legacy"],"outbound":"wan"}
+        ]},
+        "dns":{
+            "servers":[{"tag":"plain","address":"1.1.1.1"}],
+            "fallback":["plain"],
+            "rules":[{"list":["legacy"],"server":"plain"}]
+        }
+    })");
+
+    REQUIRE(parsed.lists.has_value());
+    CHECK_FALSE(parsed.lists->at("legacy").display_name.has_value());
+    REQUIRE(parsed.outbounds.has_value());
+    CHECK_FALSE(parsed.outbounds->front().display_name.has_value());
+    REQUIRE(parsed.route.has_value());
+    REQUIRE(parsed.route->rules.has_value());
+    CHECK_FALSE(parsed.route->rules->front().id.has_value());
+    CHECK_FALSE(parsed.route->rules->front().display_name.has_value());
+    REQUIRE(parsed.dns.has_value());
+    REQUIRE(parsed.dns->servers.has_value());
+    CHECK_FALSE(parsed.dns->servers->front().display_name.has_value());
+    REQUIRE(parsed.dns->rules.has_value());
+    CHECK_FALSE(parsed.dns->rules->front().id.has_value());
+    CHECK_FALSE(parsed.dns->rules->front().display_name.has_value());
+
+    const auto reparsed = parse_test_config(nlohmann::json(parsed).dump());
+    CHECK(reparsed.route->rules->front().outbound == "wan");
+    REQUIRE(reparsed.route->rules->front().list.has_value());
+    CHECK(reparsed.route->rules->front().list->front() == "legacy");
+    CHECK(reparsed.dns->rules->front().server == "plain");
+}
+
+TEST_CASE("UI preferences round-trip hidden native interfaces and plain DNS templates") {
+    const auto config = parse_test_config(R"({
+        "ui_preferences": {
+            "hidden_native_interface_ids": ["Wireguard0", "OpenVPN1"],
+            "plain_dns_templates": [
+                {
+                    "name": "Office DNS",
+                    "primary_ipv4": "192.0.2.53",
+                    "secondary_ipv4": "192.0.2.54"
+                }
+            ]
+        }
+    })");
+
+    REQUIRE(config.ui_preferences.has_value());
+    REQUIRE(config.ui_preferences->hidden_native_interface_ids.has_value());
+    CHECK(config.ui_preferences->hidden_native_interface_ids->size() == 2);
+    REQUIRE(config.ui_preferences->plain_dns_templates.has_value());
+    REQUIRE(config.ui_preferences->plain_dns_templates->size() == 1);
+    CHECK(config.ui_preferences->plain_dns_templates->front().name ==
+          "Office DNS");
+
+    const auto serialized = nlohmann::json(config);
+    CHECK(serialized.at("ui_preferences")
+              .at("plain_dns_templates")
+              .at(0)
+              .at("primary_ipv4") == "192.0.2.53");
+    CHECK_NOTHROW(parse_test_config(serialized.dump()));
+}
+
+TEST_CASE("hidden native interface preferences permit stale inventory ids") {
+    const auto config = parse_test_config(R"({
+        "ui_preferences": {
+            "hidden_native_interface_ids": ["FormerTunnel", "Wireguard0"]
+        }
+    })");
+
+    REQUIRE(config.ui_preferences.has_value());
+    REQUIRE(config.ui_preferences->hidden_native_interface_ids.has_value());
+    CHECK(*config.ui_preferences->hidden_native_interface_ids ==
+          std::vector<std::string>{"FormerTunnel", "Wireguard0"});
+
+    const auto reparsed = parse_test_config(nlohmann::json(config).dump());
+    REQUIRE(reparsed.ui_preferences.has_value());
+    REQUIRE(reparsed.ui_preferences->hidden_native_interface_ids.has_value());
+    CHECK(*reparsed.ui_preferences->hidden_native_interface_ids ==
+          std::vector<std::string>{"FormerTunnel", "Wireguard0"});
+}
+
+TEST_CASE("UI preferences reject invalid or duplicate hidden native interface ids") {
+    const auto invalid = validate_issues(R"({
+        "ui_preferences": {
+            "hidden_native_interface_ids": ["Wireguard0", "Wireguard0", " "]
+        }
+    })");
+
+    CHECK(find_issue(
+              invalid,
+              "ui_preferences.hidden_native_interface_ids[1]") != nullptr);
+    CHECK(find_issue(
+              invalid,
+              "ui_preferences.hidden_native_interface_ids[2]") != nullptr);
+}
+
+TEST_CASE("UI preferences enforce hidden native interface count bound") {
+    nlohmann::json json;
+    json["ui_preferences"]["hidden_native_interface_ids"] =
+        nlohmann::json::array();
+    for (size_t index = 0; index < 129; ++index) {
+        json["ui_preferences"]["hidden_native_interface_ids"].push_back(
+            "Tunnel" + std::to_string(index));
+    }
+
+    const auto issues = validate_issues(json.dump());
+    CHECK(find_issue(
+              issues,
+              "ui_preferences.hidden_native_interface_ids") != nullptr);
+}
+
+TEST_CASE("plain DNS templates require unique names and valid distinct IPv4 addresses") {
+    const auto issues = validate_issues(R"({
+        "ui_preferences": {
+            "plain_dns_templates": [
+                {
+                    "name": "Office DNS",
+                    "primary_ipv4": "192.0.2.53",
+                    "secondary_ipv4": "192.0.2.53"
+                },
+                {
+                    "name": "office dns",
+                    "primary_ipv4": "999.0.2.53"
+                }
+            ]
+        }
+    })");
+
+    CHECK(find_issue(
+              issues,
+              "ui_preferences.plain_dns_templates[0].secondary_ipv4") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "ui_preferences.plain_dns_templates[1].name") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "ui_preferences.plain_dns_templates[1].primary_ipv4") != nullptr);
+}
+
+TEST_CASE("plain DNS templates enforce count bound") {
+    nlohmann::json json;
+    json["ui_preferences"]["plain_dns_templates"] = nlohmann::json::array();
+    for (size_t index = 0; index < 33; ++index) {
+        json["ui_preferences"]["plain_dns_templates"].push_back({
+            {"name", "DNS " + std::to_string(index)},
+            {"primary_ipv4", "192.0.2." + std::to_string(index + 1)},
+        });
+    }
+
+    const auto issues = validate_issues(json.dump());
+    CHECK(find_issue(
+              issues,
+              "ui_preferences.plain_dns_templates") != nullptr);
+}
+
 TEST_CASE("list display_name is not a routing reference") {
     CHECK_NOTHROW(parse_test_config(R"({
         "lists":{"ai":{"display_name":"Сервисы ИИ","domains":["example.com"]}},
@@ -231,6 +429,73 @@ TEST_CASE("list display_name is not a routing reference") {
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "route.rules[0].list[0]");
     CHECK(issues[0].message.find("unknown list") != std::string::npos);
+}
+
+TEST_CASE("friendly names and stable rule ids round-trip independently") {
+    const auto parsed = parse_test_config(R"({
+        "lists":{
+            "ai":{"display_name":"Сервисы ИИ","domains":["example.com"]}
+        },
+        "outbounds":[
+            {"tag":"vpn","display_name":"Основной VPN","type":"interface","interface":"wg0"}
+        ],
+        "route":{"rules":[
+            {"id":"route_ai","display_name":"ИИ через VPN","list":["ai"],"outbound":"vpn"}
+        ]},
+        "dns":{
+            "servers":[
+                {"tag":"secure_dns","display_name":"Безопасный DNS","address":"1.1.1.1"}
+            ],
+            "fallback":["secure_dns"],
+            "rules":[
+                {"id":"dns_ai","display_name":"DNS для ИИ","list":["ai"],"server":"secure_dns"}
+            ]
+        }
+    })");
+
+    REQUIRE(parsed.outbounds.has_value());
+    REQUIRE(parsed.outbounds->at(0).display_name.has_value());
+    CHECK(*parsed.outbounds->at(0).display_name == "Основной VPN");
+    REQUIRE(parsed.route.has_value());
+    REQUIRE(parsed.route->rules.has_value());
+    REQUIRE(parsed.route->rules->at(0).id.has_value());
+    CHECK(*parsed.route->rules->at(0).id == "route_ai");
+    CHECK(*parsed.route->rules->at(0).display_name == "ИИ через VPN");
+    REQUIRE(parsed.dns->servers.has_value());
+    CHECK(*parsed.dns->servers->at(0).display_name == "Безопасный DNS");
+    REQUIRE(parsed.dns->rules.has_value());
+    CHECK(*parsed.dns->rules->at(0).id == "dns_ai");
+    CHECK(*parsed.dns->rules->at(0).display_name == "DNS для ИИ");
+
+    const auto reparsed = parse_test_config(nlohmann::json(parsed).dump());
+    REQUIRE(reparsed.route.has_value());
+    REQUIRE(reparsed.route->rules.has_value());
+    CHECK(*reparsed.route->rules->at(0).display_name == "ИИ через VPN");
+    CHECK(*reparsed.dns->rules->at(0).display_name == "DNS для ИИ");
+}
+
+TEST_CASE("stable routing and DNS rule ids must be unique") {
+    const auto route_issues = validate_issues(R"({
+        "lists":{"matched":{"domains":["example.test"]}},
+        "outbounds":[{"tag":"wan","type":"interface","interface":"eth0"}],
+        "route":{"rules":[
+            {"id":"same_rule","list":["matched"],"outbound":"wan"},
+            {"id":"same_rule","list":["matched"],"outbound":"wan"}
+        ]}
+    })");
+    CHECK(find_issue(route_issues, "route.rules[1].id") != nullptr);
+
+    const auto dns_issues = validate_issues(R"({
+        "dns":{
+            "servers":[{"tag":"dns","address":"1.1.1.1"}],
+            "fallback":["dns"],
+            "rules":[
+                {"id":"same_dns","list":[],"server":"dns"},
+                {"id":"same_dns","list":[],"server":"dns"}
+            ]
+        }
+    })");
+    CHECK(find_issue(dns_issues, "dns.rules[1].id") != nullptr);
 }
 
 // =============================================================================
@@ -310,6 +575,338 @@ TEST_CASE("urltest selection mode defaults to latency and accepts priority") {
              "outbound_groups":[{"outbounds":["vpn"]}]}
         ]
     })"), ConfigError);
+}
+
+TEST_CASE("conntrack_on_switch is accepted only for urltest outbounds") {
+    const auto preserve = parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "conntrack_on_switch":"preserve",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    REQUIRE(preserve.outbounds.has_value());
+    REQUIRE(preserve.outbounds->at(1).conntrack_on_switch.has_value());
+    CHECK(*preserve.outbounds->at(1).conntrack_on_switch ==
+          ConntrackOnSwitch::PRESERVE);
+
+    const auto delete_mode = parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "conntrack_on_switch":"delete",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    REQUIRE(delete_mode.outbounds.has_value());
+    REQUIRE(delete_mode.outbounds->at(1).conntrack_on_switch.has_value());
+    CHECK(*delete_mode.outbounds->at(1).conntrack_on_switch ==
+          ConntrackOnSwitch::DELETE);
+
+    const auto issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0",
+             "conntrack_on_switch":"preserve"}
+        ]
+    })");
+    CHECK(find_issue(issues, "outbounds.vpn.conntrack_on_switch") != nullptr);
+}
+
+TEST_CASE("conntrack delete mode rejects child marks shared with unrelated traffic") {
+    const auto direct_route_issues = validate_issues(R"({
+        "lists":{"matched":{"domains":["example.test"]}},
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "conntrack_on_switch":"delete",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ],
+        "route":{"rules":[
+            {"list":["matched"],"outbound":"vpn"}
+        ]}
+    })");
+    CHECK(find_issue(
+              direct_route_issues,
+              "outbounds.ut.conntrack_on_switch") != nullptr);
+
+    const auto shared_group_issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut1","type":"urltest","url":"https://example.test/x",
+             "conntrack_on_switch":"delete",
+             "outbound_groups":[{"outbounds":["vpn"]}]},
+            {"tag":"ut2","type":"urltest","url":"https://example.test/y",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    CHECK(find_issue(
+              shared_group_issues,
+              "outbounds.ut1.conntrack_on_switch") != nullptr);
+
+    const auto nested_group_issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"inner","type":"urltest","url":"https://example.test/inner",
+             "outbound_groups":[{"outbounds":["vpn"]}]},
+            {"tag":"outer","type":"urltest","url":"https://example.test/outer",
+             "conntrack_on_switch":"delete",
+             "outbound_groups":[{"outbounds":["inner"]}]}
+        ]
+    })");
+    CHECK(find_issue(
+              nested_group_issues,
+              "outbounds.outer.conntrack_on_switch") != nullptr);
+}
+
+TEST_CASE("urltest numeric fields reject unsafe lower bounds with exact paths") {
+    const auto issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"backup","type":"interface","interface":"wg1"},
+            {
+                "tag":"ut",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "interval_ms":0,
+                "probe_timeout_ms":0,
+                "tolerance_ms":-1,
+                "retry":{"attempts":0,"interval_ms":-1},
+                "circuit_breaker":{
+                    "failure_threshold":0,
+                    "success_threshold":0,
+                    "timeout_ms":-1,
+                    "half_open_max_requests":0
+                },
+                "outbound_groups":[
+                    {"weight":0,"outbounds":["vpn"]},
+                    {"weight":-1,"outbounds":["backup"]}
+                ]
+            }
+        ]
+    })");
+
+    CHECK(find_issue(issues, "outbounds.ut.interval_ms") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.probe_timeout_ms") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.tolerance_ms") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.retry.attempts") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.retry.interval_ms") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.failure_threshold") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.success_threshold") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.timeout_ms") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.half_open_max_requests") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.outbound_groups[0].weight") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.outbound_groups[1].weight") != nullptr);
+}
+
+TEST_CASE("urltest numeric fields reject values that overflow runtime types") {
+    const auto issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {
+                "tag":"ut",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "interval_ms":4294967296,
+                "probe_timeout_ms":4294967296,
+                "tolerance_ms":4294967296,
+                "retry":{"attempts":1001,"interval_ms":4294967296},
+                "circuit_breaker":{
+                    "failure_threshold":2147483648,
+                    "success_threshold":4294967296,
+                    "timeout_ms":4294967296,
+                    "half_open_max_requests":4294967296
+                },
+                "outbound_groups":[{"weight":4294967296,"outbounds":["vpn"]}]
+            }
+        ]
+    })");
+
+    CHECK(find_issue(issues, "outbounds.ut.interval_ms") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.probe_timeout_ms") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.tolerance_ms") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.retry.attempts") != nullptr);
+    CHECK(find_issue(issues, "outbounds.ut.retry.interval_ms") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.failure_threshold") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.success_threshold") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.timeout_ms") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.circuit_breaker.half_open_max_requests") != nullptr);
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.outbound_groups[0].weight") != nullptr);
+}
+
+TEST_CASE("urltest numeric validation preserves meaningful zero values") {
+    CHECK_NOTHROW(parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {
+                "tag":"ut",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "interval_ms":1,
+                "probe_timeout_ms":1,
+                "tolerance_ms":0,
+                "retry":{"attempts":1,"interval_ms":0},
+                "circuit_breaker":{
+                    "failure_threshold":1,
+                    "success_threshold":1,
+                    "timeout_ms":0,
+                    "half_open_max_requests":1
+                },
+                "outbound_groups":[{"weight":1,"outbounds":["vpn"]}]
+            }
+        ]
+    })"));
+}
+
+TEST_CASE("urltest rejects duplicate children within and across groups") {
+    const auto issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {
+                "tag":"ut",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[
+                    {"outbounds":["vpn","vpn"]},
+                    {"outbounds":["vpn"]}
+                ]
+            }
+        ]
+    })");
+
+    const auto* same_group =
+        find_issue(issues, "outbounds.ut.outbound_groups[0].outbounds[1]");
+    REQUIRE(same_group != nullptr);
+    CHECK(same_group->message.find(
+              "outbounds.ut.outbound_groups[0].outbounds[0]") !=
+          std::string::npos);
+
+    const auto* other_group =
+        find_issue(issues, "outbounds.ut.outbound_groups[1].outbounds[0]");
+    REQUIRE(other_group != nullptr);
+    CHECK(other_group->message.find(
+              "outbounds.ut.outbound_groups[0].outbounds[0]") !=
+          std::string::npos);
+}
+
+TEST_CASE("urltest permits blackhole fallback but rejects ignore child") {
+    const auto issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"drop","type":"blackhole"},
+            {"tag":"pass","type":"ignore"},
+            {
+                "tag":"ut",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["drop","pass"]}]
+            }
+        ]
+    })");
+
+    CHECK(find_issue(
+              issues,
+              "outbounds.ut.outbound_groups[0].outbounds[0]") == nullptr);
+    const auto* ignore_issue =
+        find_issue(issues, "outbounds.ut.outbound_groups[0].outbounds[1]");
+    REQUIRE(ignore_issue != nullptr);
+    CHECK(ignore_issue->message.find("not an interface") != std::string::npos);
+}
+
+TEST_CASE("outbound tags must be unique and report the duplicate index") {
+    const auto issues = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"vpn","type":"interface","interface":"wg1"}
+        ]
+    })");
+
+    const auto* duplicate = find_issue(issues, "outbounds[1].tag");
+    REQUIRE(duplicate != nullptr);
+    CHECK(duplicate->message.find("outbounds[0].tag") != std::string::npos);
+}
+
+TEST_CASE("urltest rejects self, mutual, and long cyclic references") {
+    const auto self_issues = validate_issues(R"({
+        "outbounds": [
+            {
+                "tag":"self",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["self"]}]
+            }
+        ]
+    })");
+    CHECK(find_issue(
+              self_issues,
+              "outbounds.self.outbound_groups[0].outbounds[0]") != nullptr);
+
+    const auto mutual_issues = validate_issues(R"({
+        "outbounds": [
+            {
+                "tag":"a",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["b"]}]
+            },
+            {
+                "tag":"b",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["a"]}]
+            }
+        ]
+    })");
+    CHECK(find_issue(
+              mutual_issues,
+              "outbounds.b.outbound_groups[0].outbounds[0]") != nullptr);
+
+    const auto long_issues = validate_issues(R"({
+        "outbounds": [
+            {
+                "tag":"a",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["b"]}]
+            },
+            {
+                "tag":"b",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["c"]}]
+            },
+            {
+                "tag":"c",
+                "type":"urltest",
+                "url":"https://example.test/generate_204",
+                "outbound_groups":[{"outbounds":["a"]}]
+            }
+        ]
+    })");
+    CHECK(find_issue(
+              long_issues,
+              "outbounds.c.outbound_groups[0].outbounds[0]") != nullptr);
 }
 
 TEST_CASE("dns detour: unknown outbound tag is rejected") {

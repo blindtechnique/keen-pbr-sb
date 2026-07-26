@@ -139,6 +139,8 @@ export const ruTranslation = {
     signOut: "Выйти",
     invalidCredentials: "Неверное имя пользователя или пароль.",
     unavailable: "Сервис авторизации недоступен.",
+    unavailableTitle: "Не удалось проверить доступ",
+    retry: "Повторить проверку",
     credentialsHint:
       "Данные задаются установщиком keen-pbr-sb. Это отдельная локальная учётная запись; источник указан в README.",
   },
@@ -324,6 +326,13 @@ export const ruTranslation = {
     latencyAge: "{{seconds}} с назад",
     latencyRefresh: "Измерить сейчас",
     latencyRefreshFailed: "Не удалось запустить проверку",
+    traffic: {
+      receive: "Приём",
+      transmit: "Передача",
+      received: "Принято",
+      transmitted: "Отправлено",
+      chart: "График приёма и передачи",
+    },
     dnsDetour: "DNS через этот туннель",
     singBoxMissing: {
       title: "sing-box не установлен",
@@ -345,6 +354,12 @@ export const ruTranslation = {
     interface: "Интерфейс",
     server: "Сервер",
     connection: "Соединение",
+    technicalTag: "Технический тег",
+    pathConfidence: "Источник определения",
+    details: {
+      show: "Показать подробности",
+      hide: "Скрыть подробности",
+    },
     loopProtection: {
       action: "Исключить сервер из туннеля",
       confirm:
@@ -392,6 +407,27 @@ export const ruTranslation = {
       latency: "Задержка",
       boundRoute: "Маршрут",
       routeNotConfigured: "Не настроен",
+      management: "Управление",
+      managementReadOnly: "Только просмотр",
+      managementUnsupported: "Не поддерживается",
+      managementReady: "Интерфейс готов к безопасному управлению.",
+      managementReadinessUnavailable:
+        "Установленный backend ещё не сообщает готовность управления.",
+      managementBlockers: {
+        unsupported_kind: "Редактирование этого типа пока не поддерживается",
+        unsupported_role:
+          "Серверные интерфейсы будут управляться в отдельном разделе",
+        role_unknown: "KeeneticOS не сообщил роль интерфейса",
+        kernel_identity_unresolved:
+          "Не удалось однозначно сопоставить интерфейс KeeneticOS и Linux",
+        typed_rci_unavailable:
+          "Типизированные команды KeeneticOS ещё не включены",
+        automatic_backup_unavailable:
+          "Полный резервный снимок интерфейса ещё недоступен",
+        ownership_unknown: "Не определено, кем создан и управляется интерфейс",
+        optimistic_revision_unavailable:
+          "Защита от перезаписи параллельных изменений ещё не включена",
+      },
       unknown: "Неизвестно",
       unresolved: "Не определён",
       routeNotClient:
@@ -402,6 +438,10 @@ export const ruTranslation = {
         "Маршрут можно создать только для присутствующего и включённого интерфейса ядра.",
       routeConfigUnavailable:
         "Маршрут нельзя создать, пока не загружена текущая конфигурация.",
+      hide: "Скрыть из панели",
+      restore: "Вернуть в панель",
+      showHidden: "Показать скрытые ({{count}})",
+      hideHidden: "Не показывать скрытые",
     },
     deleteTitle: "Удалить туннель или прокси?",
     deleteDescription:
@@ -423,8 +463,26 @@ export const ruTranslation = {
       tag: "Тег",
       tagHint:
         "От 1 до 24 символов: сначала строчная латинская буква, затем только a–z, 0–9 и подчёркивание. Например: my_tunnel.",
+      displayName: "Понятное название",
+      displayNamePlaceholder: "Например, Нидерланды - основной",
+      displayNameHint:
+        "Показывается в интерфейсе вместо технического тега. Тег не меняется, поэтому маршруты и резервирование продолжат работать.",
+      displayNameInvalid:
+        "Название должно содержать от 1 до 80 символов Unicode и не содержать управляющих знаков.",
+      useAliasSuggestion: "Использовать «{{name}}»",
+      technicalSettings: "Расширенные технические параметры",
+      technicalIdentityImmutable:
+        "После создания технический тег и имя интерфейса не меняются: на них ссылаются маршруты.",
+      backendUpdateRequired:
+        "Установленный backend не поддерживает псевдонимы туннелей. Установите собранный IPK этой версии, затем повторите сохранение.",
       type: "Тип",
       native: "Нативный интерфейс",
+      nativeInterface: "Интерфейс Keenetic",
+      nativeInterfacePlaceholder: "Выберите интерфейс Keenetic",
+      nativeInterfaceHidden: "скрытое",
+      nativeInterfaceUnavailable: "недоступно",
+      nativeInterfaceHint:
+        "Скрытые интерфейсы остаются в этом списке и помечаются отдельно. Для маршрута доступен только клиентский интерфейс с определённым системным именем.",
       singBox: "Подключение sing-box",
       singBoxLegacy: "sing-box (старый формат VLESS)",
       interface: "Имя интерфейса",
@@ -487,7 +545,7 @@ export const ruTranslation = {
       "Маршрутизация, туннели и сетевые сервисы Keenetic в одном интерфейсе.",
     openMenu: "Открыть меню",
     closeMenu: "Закрыть меню",
-    hideMenu: "Скрыть меню",
+    hideMenu: "Скрывать меню",
     showMenu: "Развернуть меню",
   },
   headerHealth: {
@@ -639,6 +697,7 @@ export const ruTranslation = {
       },
     },
     outbounds: {
+      liveTraffic: "Трафик активных туннелей и прокси",
       summary: {
         tunnels: "В туннели — списков: {{count}}",
         direct: "Напрямую — {{count}}",
@@ -648,6 +707,8 @@ export const ruTranslation = {
       idle: "Не используются: {{names}} — все исправны",
       hint: {
         table: "Трафик идёт напрямую через провайдера, мимо туннелей",
+        tableTunnel:
+          "Трафик идёт через таблицу туннеля или прокси {{protocol}}",
         blackhole: "Соединения не выпускаются наружу",
         ignore: "Трафик проходит без изменения маршрута",
         groupVia: "Идёт через {{active}}, запасной — {{backup}}",
@@ -835,6 +896,7 @@ export const ruTranslation = {
   },
   pages: {
     catalog: {
+      routeRuleName: "Каталог: {{count}} списков",
       title: "Каталог списков",
       description:
         "Готовые наборы доменов и правил. Выберите нужные и укажите, куда направлять их трафик.",
@@ -912,6 +974,31 @@ export const ruTranslation = {
           "Обычно достаточно «Основное». Подробные уровни нужны при разборе проблем и заметно увеличивают файл.",
         pathHint:
           "Файл: /opt/var/log/keen-pbr.log. При достижении мегабайта заводится новый, предыдущий сохраняется рядом.",
+        viewer: {
+          open: "Открыть журнал",
+          title: "Журнал keen-pbr-sb",
+          description:
+            "Последние строки рабочего журнала. Просмотр ничего не меняет на роутере.",
+          ariaLabel: "Содержимое журнала keen-pbr-sb",
+          refresh: "Обновить",
+          refreshing: "Обновляю…",
+          loading: "Загрузка журнала…",
+          empty: "Журнал пока пуст.",
+          failed: "Не удалось прочитать журнал",
+        },
+        diagnostics: {
+          download: "Скачать диагностику",
+          downloading: "Собираю диагностику…",
+          failed: "Не удалось собрать диагностику",
+          title: "Диагностический файл",
+          description:
+            "В файл войдут технические сведения о роутере и сервисе, состояния маршрутов, туннелей и последние строки журнала.",
+          trustWarning:
+            "Файл ничего не отправляет наружу и скачивается только на этот компьютер. Передавайте его только тому, кому доверяете: журнал может содержать адреса серверов и имена устройств.",
+          includeLists:
+            "Включить содержимое списков и URL подписок (по умолчанию они скрыты)",
+          confirm: "Скачать файл",
+        },
         levels: {
           error: "Только ошибки",
           warn: "Ошибки и предупреждения",
@@ -1115,7 +1202,7 @@ export const ruTranslation = {
         items: {
           serverPrefix: "DNS-сервер",
           serverSuffix: "будет удалён.",
-          dnsRule: "DNS-правило #{{number}} будет удалено.",
+          dnsRule: "DNS-правило «{{name}}» будет удалено.",
           fallback: "Fallback DNS будет изменён.",
         },
       },
@@ -1141,9 +1228,24 @@ export const ruTranslation = {
       back: "Назад к DNS-серверам",
       description: "Этот сервер будет доступен в DNS-правилах и как fallback.",
       cardDescription:
-        "Выберите тип DNS-сервера и необязательный маршрут для его запросов.",
+        "Выберите готового провайдера или укажите адрес своего DNS-сервера.",
       editCardTitle: "Изменить {{tag}}",
+      presets: {
+        label: "DNS-провайдер",
+        custom: "Свой сервер",
+        includeBackup: "Добавить резервный сервер",
+        includeBackupHint:
+          "Вторая запись с адресом {{address}} будет создана одновременно.",
+        backupDisplayName: "{{name}} - резервный",
+        saveCustom: "Сохранить как свой шаблон",
+        saveCustomHint:
+          "Шаблон сохранится в конфигурации keen-pbr-sb и попадёт в резервную копию.",
+      },
       fields: {
+        displayName: "Название",
+        displayNamePlaceholder: "Например, Домашний DNS",
+        displayNameHint:
+          "Это имя видно в интерфейсе. Технический идентификатор создаётся автоматически.",
         tag: "Название",
         tagHint: "Короткое название сервера для использования в DNS-правилах.",
         type: "Тип DNS",
@@ -1154,6 +1256,8 @@ export const ruTranslation = {
           static: "Plaintext DNS",
         },
         keeneticNotice: {
+          legacy:
+            "Это существующая запись встроенного DNS Keenetic. Она сохранена без изменений для совместимости.",
           description:
             "Для этого режима DNS-серверы нужно настроить в веб-интерфейсе Keenetic.",
           openLink: "Перейти к настройке",
@@ -1166,6 +1270,10 @@ export const ruTranslation = {
         addressPlaceholder: "1.1.1.1 или [2606:4700::1111]:53",
         addressHint:
           "IP-адрес сервера, напр. `1.1.1.1` или `[2606:4700::1111]:53`.",
+        secondaryAddress: "Резервный адрес шаблона",
+        secondaryAddressPlaceholder: "Например, 1.0.0.1",
+        secondaryAddressHint:
+          "Необязательный IPv4-адрес. Его можно одновременно создать как резервный DNS-сервер.",
         detour: "Делать запросы через маршрут",
         detourEmpty: "Не выбрано",
         detourPlaceholder: "Необязательный тег маршрута",
@@ -1173,12 +1281,18 @@ export const ruTranslation = {
           "Необязательно: отправлять DNS-запросы к этому серверу через конкретный маршрут (например, VPN).",
       },
       validation: {
+        displayNameRequired: "Введите понятное название DNS-сервера.",
+        displayNameTooLong: "Название должно быть не длиннее 80 символов.",
         tagRequired: "Название обязательно.",
         tagUnique: "Название должно быть уникальным.",
         typeRequired: "Тип DNS обязателен.",
         addressRequired: "Адрес обязателен.",
         addressInvalid:
           "Адрес должен быть корректным IPv4/IPv6 значением с необязательным портом.",
+        templateAddressInvalid:
+          "Для сохраняемого шаблона нужен корректный IPv4-адрес без порта.",
+        templateInvalid:
+          "Не удалось сохранить шаблон: проверьте название, IPv4-адреса и число сохранённых шаблонов.",
       },
       actions: {
         create: "Создать DNS-сервер",
@@ -1233,6 +1347,7 @@ export const ruTranslation = {
     routingRuleUpsert: {
       createTitle: "Создать правило маршрутизации",
       editTitle: "Изменить правило маршрутизации",
+      editCardTitle: "Изменить {{name}}",
       description:
         "Это правило направляет подходящий трафик в указанный маршрут.",
       cardDescription:
@@ -1253,6 +1368,11 @@ export const ruTranslation = {
         back: "Назад к правилам маршрутизации",
       },
       validation: {
+        displayNameRequired: "Введите понятное название правила.",
+        displayNameTooLong: "Название должно быть не длиннее 80 символов.",
+        technicalIdRequired: "Технический ID обязателен.",
+        duplicateTechnicalId:
+          'Правило с техническим ID "{{id}}" уже существует.',
         atLeastOneCondition:
           "Укажите хотя бы одно условие: список, DSCP, адрес источника/назначения или порт источника/назначения.",
         dscpRange: "DSCP должен быть целым числом от 1 до 63.",
@@ -1260,6 +1380,12 @@ export const ruTranslation = {
       },
       actions: { create: "Создать правило", save: "Сохранить правило" },
       fields: {
+        displayName: "Название",
+        displayNameHint:
+          "Понятное название правила, которое будет показано во всём интерфейсе.",
+        technicalId: "Технический ID",
+        technicalIdHint:
+          "Стабильный служебный идентификатор. Генерируется автоматически; вручную нужен только для точной интеграции.",
         lists: "Списки",
         listsPlaceholderDescription:
           "Добавьте один или несколько настроенных списков для этого правила.",
@@ -1345,7 +1471,7 @@ export const ruTranslation = {
           outboundSuffix: "будет удалён.",
           dependentOutboundPrefix: "Зависимая группа резервирования",
           dependentOutboundSuffix: "будет удалена.",
-          routingRule: "Правило маршрутизации #{{number}} будет удалено.",
+          routingRule: "Правило маршрутизации «{{name}}» будет удалено.",
           ruleDetail: "{{label}}: {{value}}",
           dnsDetour: 'DNS-сервер "{{server}}" будет изменён.',
           urltestGroupChanged:
@@ -1403,7 +1529,13 @@ export const ruTranslation = {
           "Для этого типа не нужны дополнительные поля, кроме названия.",
       },
       fields: {
-        tag: "Название",
+        displayName: "Название",
+        displayNameHint:
+          "Понятное название маршрута или группы резервирования, которое будет показано во всём интерфейсе.",
+        technicalId: "Технический ID",
+        technicalIdHint:
+          "Стабильный служебный идентификатор для правил и связей. Генерируется автоматически.",
+        tag: "Технический ID",
         tagHint:
           "Уникальное название маршрута. Используется в правилах и группах резервирования.",
         type: "Тип",
@@ -1453,6 +1585,9 @@ export const ruTranslation = {
         groupTitle: "Группа {{index}}",
         groupDescription:
           "Приоритет {{index}} - группы с более высоким приоритетом предпочтительнее.",
+        groupWeight: "Вес группы",
+        groupWeightHint:
+          "Меньший вес имеет более высокий приоритет. Пустое поле означает стандартный вес 1.",
         interfaceOutbounds: "Маршруты через интерфейс",
         addOutbound: "Добавить маршрут",
         noInterfaceOutbounds: "Маршруты через интерфейс не найдены.",
@@ -1473,11 +1608,25 @@ export const ruTranslation = {
           priority:
             "Всегда использует первый доступный маршрут первой рабочей группы и возвращается к нему после восстановления.",
         },
+        conntrackOnSwitch: "Активные соединения при переключении",
+        conntrackOnSwitchOptions: {
+          preserve: "Сохранить на прежнем маршруте",
+          delete: "Переподключить через новый маршрут",
+        },
+        conntrackOnSwitchHints: {
+          preserve:
+            "Уже открытые соединения продолжают идти прежним путём, новые используют выбранный маршрут. Это самый стабильный режим.",
+          delete:
+            "После успешного переключения сервис удаляет только соединения этой группы, чтобы приложения переподключились через новый маршрут.",
+        },
         probeUrl: "URL проверки",
         probeUrlHint:
           "Сервис загружает этот URL с заданным интервалом, чтобы проверить доступность интерфейса и измерить задержку.",
         interval: "Интервал (мс)",
         intervalHint: "Как часто запрашивать Probe URL (в миллисекундах).",
+        probeTimeout: "Таймаут проверки (мс)",
+        probeTimeoutHint:
+          "Максимальное время ожидания ответа для одной попытки проверки.",
         tolerance: "Допуск (мс)",
         toleranceHint:
           "Не переключать маршрут, если разница задержки не превышает это значение. Предотвращает флаппинг.",
@@ -1518,6 +1667,8 @@ export const ruTranslation = {
         },
       },
       validation: {
+        displayNameRequired: "Введите понятное название маршрута.",
+        displayNameTooLong: "Название должно быть не длиннее 80 символов.",
         tagRequired: "Тег обязателен.",
         duplicateTag: 'Тег маршрута "{{tag}}" уже существует.',
         missingReference:
@@ -1569,6 +1720,7 @@ export const ruTranslation = {
           "Правил пока нет - добавьте правило, чтобы направлять DNS-запросы по спискам через выбранный сервер.",
       },
       headers: {
+        name: "Название",
         criteria: "Условие",
         serverTag: "DNS-сервер",
         allowDomainRebinding: "Разрешение rebind",
@@ -1585,6 +1737,7 @@ export const ruTranslation = {
     dnsRuleUpsert: {
       createTitle: "Создать DNS-правило",
       editTitle: "Изменить DNS-правило",
+      editCardTitle: "Изменить {{name}}",
       description:
         "Это правило определяет, какой DNS-сервер использовать для доменов из конкретного списка.",
       cardDescription: "Укажите имена списков и DNS-сервер для этого правила.",
@@ -1593,6 +1746,12 @@ export const ruTranslation = {
           "DNS-правило сохранено в черновик. Примените новый конфиг, чтобы записать его.",
       },
       validation: {
+        displayNameRequired: "Введите понятное название DNS-правила.",
+        displayNameTooLong: "Название должно быть не длиннее 80 символов.",
+        technicalIdRequired: "Технический ID обязателен.",
+        duplicateTechnicalId:
+          'DNS-правило с техническим ID "{{id}}" уже существует.',
+        duplicateId: "Технический ID DNS-правила должен быть уникальным.",
         notFound: "Запрошенное DNS-правило не найдено.",
         fixErrors: "Исправьте ошибки валидации перед сохранением.",
         serverRequired: "Правило должно ссылаться на существующий DNS-сервер.",
@@ -1608,6 +1767,12 @@ export const ruTranslation = {
       },
       actions: { create: "Создать правило", save: "Сохранить правило" },
       fields: {
+        displayName: "Название",
+        displayNameHint:
+          "Понятное название DNS-правила, которое будет показано во всём интерфейсе.",
+        technicalId: "Технический ID",
+        technicalIdHint:
+          "Стабильный служебный идентификатор. Создаётся автоматически; вручную нужен только для точной интеграции.",
         serverTag: "DNS-сервер",
         selectServer: "Выберите DNS-сервер",
         dnsServers: "DNS-серверы",
@@ -1657,10 +1822,10 @@ export const ruTranslation = {
         items: {
           listPrefix: "Список",
           listSuffix: "будет удалён.",
-          routeRuleRemoved: "Правило маршрутизации #{{number}} будет удалено.",
-          routeRuleUpdated: "Правило маршрутизации #{{number}} будет изменено.",
-          dnsRuleRemoved: "DNS-правило #{{number}} будет удалено.",
-          dnsRuleUpdated: "DNS-правило #{{number}} будет изменено.",
+          routeRuleRemoved: "Правило маршрутизации «{{name}}» будет удалено.",
+          routeRuleUpdated: "Правило маршрутизации «{{name}}» будет изменено.",
+          dnsRuleRemoved: "DNS-правило «{{name}}» будет удалено.",
+          dnsRuleUpdated: "DNS-правило «{{name}}» будет изменено.",
         },
       },
       bulk: {
@@ -1734,7 +1899,7 @@ export const ruTranslation = {
       cardDescription:
         "Проверьте источник списка, TTL и содержимое перед сохранением.",
       simpleCardDescription:
-        "Укажите название, технический ID и источник списка. TTL и параметры загрузки доступны в расширенном редакторе.",
+        "Укажите понятное название и источник списка. Технический ID будет создан автоматически.",
       messages: {
         created:
           "Список сохранён в черновик. Примените новый конфиг, чтобы записать его.",
@@ -1756,7 +1921,7 @@ export const ruTranslation = {
       common: {
         title: "Параметры списка",
         description:
-          "Задайте понятное название и стабильный технический ID перед выбором источника.",
+          "Задайте понятное название и выберите источник. Служебный идентификатор создаётся автоматически.",
       },
       sourceSwitcher: {
         title: "Тип источника",
@@ -1808,7 +1973,7 @@ export const ruTranslation = {
       fields: {
         displayName: "Название",
         displayNameHint:
-          "Понятное название для интерфейса. Можно использовать Unicode; поле необязательно.",
+          "Понятное название списка, которое будет показано во всём интерфейсе.",
         technicalId: "Технический ID",
         technicalIdCreateHint:
           "Стабильный идентификатор для правил и ссылок: латинские строчные буквы, цифры и подчёркивание.",
@@ -1838,6 +2003,8 @@ export const ruTranslation = {
           "IP-адреса или диапазоны CIDR, по одному в строке. Напр. `93.184.216.34`, `10.0.0.0/8`.",
       },
       validation: {
+        displayNameRequired: "Введите понятное название списка.",
+        displayNameTooLong: "Название должно быть не длиннее 80 символов.",
         sourceRequired:
           "Заполните выбранный источник, чтобы список мог работать.",
         nameRequired: "Технический ID обязателен.",

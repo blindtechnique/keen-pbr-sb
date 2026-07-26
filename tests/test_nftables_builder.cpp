@@ -10,8 +10,11 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
+#include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 
 // NftablesBuilderTest must be in the same namespace as the friend declaration
 // (keen_pbr3::NftablesBuilderTest matches the friend class NftablesBuilderTest
@@ -90,6 +93,7 @@ public:
     std::string set_name;
     int family;
     bool direct = false;
+    bool output = false;
     enum Action { Mark, Drop, Pass } action;
     uint32_t fwmark;
     ProtoPortFilter filter;
@@ -97,7 +101,8 @@ public:
 
   static nlohmann::json build_rule_add_commands(
       FirewallGlobalPrefilter prefilter,
-      const std::vector<RuleDesc> &descs) {
+      const std::vector<RuleDesc> &descs,
+      bool register_merge = false) {
     std::vector<NftablesFirewall::PendingRule> rules;
     rules.reserve(descs.size());
     for (const auto &d : descs) {
@@ -111,13 +116,18 @@ public:
         pr.action = NftablesFirewall::PendingRule::Pass;
       }
       pr.fwmark = d.fwmark;
+      pr.output = d.output;
       pr.criteria = d.filter;
       if (!d.set_name.empty()) {
         pr.criteria.dst_set_name = d.set_name;
       }
       rules.push_back(std::move(pr));
     }
-    return NftablesFirewall::build_rule_add_commands(prefilter, rules);
+    return NftablesFirewall::build_rule_add_commands(
+        prefilter, rules,
+        register_merge
+            ? NftablesFirewall::MarkMergeMode::RegisterMerge
+            : NftablesFirewall::MarkMergeMode::LegacyConstant);
   }
 
   static nlohmann::json build_rule_add_commands_for_rule(
@@ -156,7 +166,9 @@ public:
                                              int family, uint32_t fwmark,
                                              ProtoPortFilter filter = {},
                                              uint32_t fwmark_mask = 0xFFFFFFFFu,
-                                             bool direct = false) {
+                                             bool direct = false,
+                                             uint32_t conntrack_mark_mask = 0,
+                                             bool register_merge = false) {
     NftablesFirewall::PendingRule pr;
     pr.family = family;
     pr.action = NftablesFirewall::PendingRule::Mark;
@@ -166,7 +178,11 @@ public:
     if (!direct && !set_name.empty()) {
       pr.criteria.dst_set_name = set_name;
     }
-    return NftablesFirewall::build_mark_rule_json(pr);
+    return NftablesFirewall::build_mark_rule_json(
+        pr, conntrack_mark_mask,
+        register_merge
+            ? NftablesFirewall::MarkMergeMode::RegisterMerge
+            : NftablesFirewall::MarkMergeMode::LegacyConstant);
   }
 
   static nlohmann::json build_drop_rule_json(const std::string &set_name,
@@ -220,6 +236,22 @@ public:
   static nlohmann::json build_elements_json(const std::string &set_name,
                                             const nlohmann::json &elems) {
     return NftablesFirewall::build_elements_json(set_name, elems);
+  }
+
+  static nlohmann::json build_register_merge_probe_document() {
+    return NftablesFirewall::build_register_merge_probe_document();
+  }
+
+  static bool resolve_register_merge_mode(
+      const std::function<bool()> &probe,
+      size_t repetitions) {
+    std::optional<NftablesFirewall::MarkMergeMode> cached;
+    NftablesFirewall::MarkMergeMode resolved =
+        NftablesFirewall::MarkMergeMode::LegacyConstant;
+    for (size_t i = 0; i < repetitions; ++i) {
+      resolved = NftablesFirewall::resolve_mark_merge_mode(cached, probe);
+    }
+    return resolved == NftablesFirewall::MarkMergeMode::RegisterMerge;
   }
 };
 
@@ -395,6 +427,179 @@ TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") 
   // Output-chain prefilter mirrors the skip-marked guard.
   CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
   CHECK(cmds[4]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
+}
+
+TEST_CASE("nft modern mark merge uses numeric direction and preserves foreign bits") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto cmds = T::build_rule_add_commands(
+      prefilter,
+      {mark_rule("myset", AF_INET, 0x00120000)},
+      /*register_merge=*/true);
+
+  REQUIRE(cmds.is_array());
+  REQUIRE(cmds.size() == 5);
+
+  const auto& restore = cmds[0]["add"]["rule"];
+  CHECK(restore["chain"] == "prerouting");
+  CHECK(restore["expr"][0]["match"]["left"]["ct"]["key"] == "direction");
+  CHECK(restore["expr"][0]["match"]["right"] == 0);
+  CHECK(restore["expr"][1]["match"]["left"]["&"][0]["ct"]["key"] == "mark");
+  CHECK(restore["expr"][1]["match"]["left"]["&"][1] == 0x00FF0000u);
+  const auto& restored_value = restore["expr"][2]["mangle"]["value"];
+  CHECK(restored_value["|"][0]["&"][0]["meta"]["key"] == "mark");
+  CHECK(restored_value["|"][0]["&"][1] == 0xFF00FFFFu);
+  CHECK(restored_value["|"][1]["&"][0]["ct"]["key"] == "mark");
+  CHECK(restored_value["|"][1]["&"][1] == 0x00FF0000u);
+
+  const auto& restored_return = cmds[1]["add"]["rule"];
+  CHECK(restored_return["chain"] == "prerouting");
+  CHECK(restored_return["expr"][0]["match"]["right"] == 0);
+  CHECK(restored_return["expr"][1]["match"]["left"]["&"][0]["meta"]["key"] ==
+        "mark");
+  CHECK(restored_return["expr"][3].contains("accept"));
+
+  const auto& classify = cmds[2]["add"]["rule"]["expr"];
+  REQUIRE(classify.size() == 5);
+  CHECK(classify[2]["mangle"]["key"]["meta"]["key"] == "mark");
+  const auto& saved_value = classify[3]["mangle"]["value"];
+  CHECK(classify[3]["mangle"]["key"]["ct"]["key"] == "mark");
+  CHECK(saved_value["|"][0]["&"][0]["ct"]["key"] == "mark");
+  CHECK(saved_value["|"][0]["&"][1] == 0xFF00FFFFu);
+  CHECK(saved_value["|"][1]["&"][0]["meta"]["key"] == "mark");
+  CHECK(saved_value["|"][1]["&"][1] == 0x00FF0000u);
+  CHECK(classify[4].contains("accept"));
+
+  CHECK(cmds[3]["add"]["rule"]["chain"] == "output");
+  CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
+}
+
+TEST_CASE("nft legacy mark merge uses constants and deduplicates restore marks") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto cmds = T::build_rule_add_commands(
+      prefilter,
+      {
+          mark_rule("first", AF_INET, 0x00120000),
+          mark_rule("duplicate", AF_INET, 0x00120000),
+          mark_rule("second", AF_INET, 0x00340000),
+      },
+      /*register_merge=*/false);
+
+  // Two unique restore marks followed by the three classification rules.
+  REQUIRE(cmds.size() == 5);
+  for (size_t i = 0; i < 2; ++i) {
+    const auto& restore = cmds[i]["add"]["rule"];
+    CHECK(restore["chain"] == "prerouting");
+    CHECK(restore["expr"][0]["match"]["right"] == 0);
+    CHECK(restore["expr"][1]["match"]["op"] == "==");
+    const auto& restored_value = restore["expr"][2]["mangle"]["value"];
+    CHECK(restored_value["|"][0]["&"][0]["meta"]["key"] == "mark");
+    CHECK(restored_value["|"][0]["&"][1] == 0xFF00FFFFu);
+    CHECK(restored_value["|"][1].is_number_unsigned());
+    CHECK(restore["expr"][4].contains("accept"));
+  }
+  CHECK(cmds[0]["add"]["rule"]["expr"][1]["match"]["right"] == 0x00120000u);
+  CHECK(cmds[0]["add"]["rule"]["expr"][2]["mangle"]["value"]["|"][1] ==
+        0x00120000u);
+  CHECK(cmds[1]["add"]["rule"]["expr"][1]["match"]["right"] == 0x00340000u);
+
+  const auto& saved_value =
+      cmds[2]["add"]["rule"]["expr"][3]["mangle"]["value"];
+  CHECK(cmds[2]["add"]["rule"]["expr"][3]["mangle"]["key"]["ct"]["key"] ==
+        "mark");
+  CHECK(saved_value["|"][0]["&"][0]["ct"]["key"] == "mark");
+  CHECK(saved_value["|"][0]["&"][1] == 0xFF00FFFFu);
+  CHECK(saved_value["|"][1] == 0x00120000u);
+}
+
+TEST_CASE("nft legacy restore deduplicates marks independently per chain") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  auto prerouting = mark_rule("lan", AF_INET, 0x00120000);
+  auto output_first = mark_rule("", AF_INET, 0x00340000);
+  output_first.output = true;
+  auto output_duplicate = output_first;
+
+  const auto cmds = T::build_rule_add_commands(
+      prefilter,
+      {prerouting, output_first, output_duplicate});
+
+  REQUIRE(cmds.size() == 5);
+  CHECK(cmds[0]["add"]["rule"]["chain"] == "prerouting");
+  CHECK(cmds[0]["add"]["rule"]["expr"][1]["match"]["right"] == 0x00120000u);
+  CHECK(cmds[1]["add"]["rule"]["chain"] == "prerouting");
+  CHECK(cmds[2]["add"]["rule"]["chain"] == "output");
+  CHECK(cmds[2]["add"]["rule"]["expr"][1]["match"]["right"] == 0x00340000u);
+  CHECK(cmds[3]["add"]["rule"]["chain"] == "output");
+  CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
+}
+
+TEST_CASE("nft skip-marked guards inspect only keen-pbr-owned mark bits") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.skip_marked_packets = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto cmds = T::build_rule_add_commands(
+      prefilter,
+      {mark_rule("myset", AF_INET, 0x00120000)});
+
+  REQUIRE(cmds.size() == 3);
+  for (const size_t index : {size_t{0}, size_t{2}}) {
+    const auto& match = cmds[index]["add"]["rule"]["expr"][0]["match"];
+    CHECK(match["left"]["&"][0]["meta"]["key"] == "mark");
+    CHECK(match["left"]["&"][1] == 0x00FF0000u);
+    CHECK(match["right"] == 0);
+  }
+}
+
+TEST_CASE("nft register-merge capability probe checks both merge directions") {
+  const auto doc = T::build_register_merge_probe_document();
+  REQUIRE(doc["nftables"].is_array());
+  REQUIRE(doc["nftables"].size() == 4);
+  const auto& expr = doc["nftables"][3]["add"]["rule"]["expr"];
+  REQUIRE(expr.size() == 2);
+  CHECK(expr[0]["mangle"]["key"]["meta"]["key"] == "mark");
+  CHECK(expr[0]["mangle"]["value"]["|"][1]["&"][0]["ct"]["key"] == "mark");
+  CHECK(expr[1]["mangle"]["key"]["ct"]["key"] == "mark");
+  CHECK(expr[1]["mangle"]["value"]["|"][1]["&"][0]["meta"]["key"] == "mark");
+}
+
+TEST_CASE("nft mark-merge capability result is cached for backend lifetime") {
+  int supported_calls = 0;
+  CHECK(T::resolve_register_merge_mode(
+      [&supported_calls] {
+        ++supported_calls;
+        return true;
+      },
+      3));
+  CHECK(supported_calls == 1);
+
+  int rejected_calls = 0;
+  CHECK_FALSE(T::resolve_register_merge_mode(
+      [&rejected_calls] {
+        ++rejected_calls;
+        return false;
+      },
+      3));
+  CHECK(rejected_calls == 1);
+}
+
+TEST_CASE("nft mark-merge capability errors fall back to legacy mode") {
+  int calls = 0;
+  CHECK_FALSE(T::resolve_register_merge_mode(
+      [&calls]() -> bool {
+        ++calls;
+        throw std::runtime_error("probe timed out");
+      },
+      2));
+  CHECK(calls == 1);
 }
 
 TEST_CASE("build_rule_add_commands: config-derived prefilter omits interface guard when inbound list is empty") {

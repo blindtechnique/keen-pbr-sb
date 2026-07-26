@@ -4,6 +4,50 @@
 # Do not report a final removal while the replacement package is being installed.
 [ "${PKG_UPGRADE:-0}" = "1" ] && exit 0
 
+ROOT=${KEEN_PBR_RESCUE_ROOT:-}
+case "$ROOT" in
+    ""|/*) ;;
+    *) echo "KEEN_PBR_RESCUE_ROOT must be an absolute path" >&2; exit 1 ;;
+esac
+
+RESCUE_DIR="${ROOT}/opt/var/lib/keen-pbr/rescue"
+RECOVERY_DIR="${ROOT}/opt/var/lib/keen-pbr/recovery"
+KEEP_GUARD=0
+
+# A final uninstall may remove the package, but it must not remove the only
+# early-boot barrier protecting an incomplete or UNKNOWN durable transaction.
+for state_path in \
+    "$RESCUE_DIR/pending" \
+    "$RESCUE_DIR/UNKNOWN" \
+    "$RECOVERY_DIR/UNKNOWN" \
+    "$RECOVERY_DIR/config-save/UNKNOWN" \
+    "$RECOVERY_DIR/backup-restore/UNKNOWN" \
+    "$RECOVERY_DIR/config-save/active.json" \
+    "$RECOVERY_DIR/backup-restore/active.json"; do
+    if [ -e "$state_path" ] || [ -L "$state_path" ]; then
+        KEEP_GUARD=1
+        break
+    fi
+done
+if [ -L "$RESCUE_DIR" ] ||
+   { [ -e "$RESCUE_DIR" ] && [ ! -d "$RESCUE_DIR" ]; } ||
+   [ -L "$RECOVERY_DIR" ] ||
+   { [ -e "$RECOVERY_DIR" ] && [ ! -d "$RECOVERY_DIR" ]; } ||
+   [ -L "$RECOVERY_DIR/config-save" ] ||
+   { [ -e "$RECOVERY_DIR/config-save" ] &&
+     [ ! -d "$RECOVERY_DIR/config-save" ]; } ||
+   [ -L "$RECOVERY_DIR/backup-restore" ] ||
+   { [ -e "$RECOVERY_DIR/backup-restore" ] &&
+     [ ! -d "$RECOVERY_DIR/backup-restore" ]; }; then
+    KEEP_GUARD=1
+fi
+
+if [ "$KEEP_GUARD" = "1" ]; then
+    echo "keen-pbr recovery state is not clean; preserving S00keen-pbr-rescue" >&2
+else
+    rm -f "${ROOT}/opt/etc/init.d/S00keen-pbr-rescue"
+fi
+
 cat <<'EOF'
 keen-pbr has been removed.
 dnsmasq fallback config from keen-pbr is no longer available.

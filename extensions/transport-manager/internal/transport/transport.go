@@ -18,20 +18,75 @@ const (
 	StateDegraded State = "degraded"
 )
 
+type WireTransport string
+
+const (
+	WireTransportTCP     WireTransport = "tcp"
+	WireTransportUDP     WireTransport = "udp"
+	WireTransportTCPUDP  WireTransport = "tcp_udp"
+	WireTransportUnknown WireTransport = "unknown"
+)
+
+type TransportFraming string
+
+const (
+	TransportFramingRaw         TransportFraming = "raw"
+	TransportFramingWebSocket   TransportFraming = "websocket"
+	TransportFramingHTTP        TransportFraming = "http"
+	TransportFramingHTTP2       TransportFraming = "http2"
+	TransportFramingGRPC        TransportFraming = "grpc"
+	TransportFramingHTTPUpgrade TransportFraming = "http_upgrade"
+	TransportFramingQUIC        TransportFraming = "quic"
+	TransportFramingWireGuard   TransportFraming = "wireguard"
+	TransportFramingUnknown     TransportFraming = "unknown"
+)
+
+type TransportPathConfidence string
+
+const (
+	TransportPathDeclared  TransportPathConfidence = "declared"
+	TransportPathDerived   TransportPathConfidence = "derived"
+	TransportPathAmbiguous TransportPathConfidence = "ambiguous"
+	TransportPathUnknown   TransportPathConfidence = "unknown"
+)
+
+// TransportPath deliberately separates the IP carrier from application
+// framing. A QUIC-based protocol is UDP on the wire even when it carries TCP
+// streams, while WebSocket is framing over TCP. Keeping those dimensions
+// separate prevents the UI from labelling Hysteria2/TUIC as TCP.
+type TransportPath struct {
+	WireTransport   WireTransport           `json:"wire_transport"`
+	Framing         TransportFraming        `json:"framing"`
+	PayloadNetworks []string                `json:"payload_networks,omitempty"`
+	Confidence      TransportPathConfidence `json:"confidence"`
+}
+
+func UnknownTransportPath() TransportPath {
+	return TransportPath{
+		WireTransport: WireTransportUnknown,
+		Framing:       TransportFramingUnknown,
+		Confidence:    TransportPathUnknown,
+	}
+}
+
 type Status struct {
-	Tag         string     `json:"tag"`
-	Type        string     `json:"type"`
-	Interface   string     `json:"interface"`
-	Server      string     `json:"server,omitempty"`
+	Tag         string `json:"tag"`
+	DisplayName string `json:"display_name,omitempty"`
+	Type        string `json:"type"`
+	Interface   string `json:"interface"`
+	Server      string `json:"server,omitempty"`
 	// Не секреты: порт, вид защиты, SNI и вид транспорта видны любому
 	// наблюдателю на линии, зато без них по карточке невозможно понять,
 	// куда и как именно уходит соединение.
-	ServerPort  int        `json:"server_port,omitempty"`
+	ServerPort int `json:"server_port,omitempty"`
 	// Протокол самого туннеля - vless, trojan, hysteria2 и прочие. Тип
 	// транспорта ("sing-box") говорит, кто его запускает, а не что внутри.
-	Protocol    string     `json:"protocol,omitempty"`
-	Security    string     `json:"security,omitempty"`
-	SNI         string     `json:"sni,omitempty"`
+	Protocol string        `json:"protocol,omitempty"`
+	Security string        `json:"security,omitempty"`
+	SNI      string        `json:"sni,omitempty"`
+	Path     TransportPath `json:"path"`
+	// Network is retained for one compatibility release. New clients must use
+	// Path because this legacy field historically mixed TCP/UDP and framing.
 	Network     string     `json:"network,omitempty"`
 	State       State      `json:"state"`
 	PID         int        `json:"pid,omitempty"`

@@ -65,6 +65,10 @@ public:
     // Check if a cached file exists for the given list name.
     bool has_cache(const std::string& name) const;
 
+    // Check that the cached body belongs to the current source and, for
+    // compiled SRS lists, was produced by the current decoder revision.
+    bool has_current_cache(const std::string& name, const std::string& url) const;
+
     // Path to the cached list file: <cache_dir>/<name>.txt
     std::filesystem::path cache_path(const std::string& name) const;
 

@@ -6,7 +6,14 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DependencyAnalysisTargetRequest } from "@/api/generated/model/dependencyAnalysisTargetRequest"
 import type { DependencyReference } from "@/api/generated/model/dependencyReference"
 import type { Dependency } from "@/lib/dependencies"
+import {
+  createDnsServerDisplayNameMap,
+  getDnsRuleDisplayName,
+} from "@/lib/dns-display"
 import { getListReferenceLabel } from "@/lib/list-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import { getRuleEditHref } from "@/lib/rule-route"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 
 const MAX_TARGETS_PER_REQUEST = 256
 
@@ -39,17 +46,35 @@ function configRelationshipFingerprint(
 
 function dependencyLabel(reference: DependencyReference, config: ConfigObject) {
   const index = Number(reference.dependent_id)
+  const outboundDisplayNames = createOutboundDisplayNameMap(
+    config.outbounds ?? []
+  )
+  const dnsServerDisplayNames = createDnsServerDisplayNameMap(
+    config.dns?.servers ?? []
+  )
   switch (reference.dependent_kind) {
     case "routing_rule": {
       const rule = Number.isInteger(index) ? config.route?.rules?.[index] : null
-      return rule ? `#${index + 1} → ${rule.outbound}` : `#${index + 1}`
+      return rule
+        ? `${getRouteRuleDisplayName(rule, index)} → ${
+            outboundDisplayNames.get(rule.outbound) ?? rule.outbound
+          }`
+        : `#${index + 1}`
     }
     case "dns_rule": {
       const rule = Number.isInteger(index) ? config.dns?.rules?.[index] : null
-      return rule ? `#${index + 1} → ${rule.server}` : `#${index + 1}`
+      return rule
+        ? `${getDnsRuleDisplayName(rule, index)} → ${
+            dnsServerDisplayNames.get(rule.server) ?? rule.server
+          }`
+        : `DNS ${index + 1}`
     }
     case "outbound_group":
-      return reference.dependent_id.split(":")[0] ?? reference.dependent_id
+      return (
+        outboundDisplayNames.get(reference.dependent_id.split(":")[0] ?? "") ??
+        reference.dependent_id.split(":")[0] ??
+        reference.dependent_id
+      )
     case "list":
       return getListReferenceLabel(reference.dependent_id, config.lists)
     default:
@@ -73,6 +98,27 @@ function dependencyKind(reference: DependencyReference): Dependency["kind"] {
   }
 }
 
+function dependencyHref(
+  reference: DependencyReference,
+  config: ConfigObject
+) {
+  const index = Number(reference.dependent_id)
+  if (!Number.isInteger(index) || index < 0) {
+    return reference.href
+  }
+  if (reference.dependent_kind === "routing_rule") {
+    const rule = config.route?.rules?.[index]
+    return rule
+      ? getRuleEditHref("routing-rules", rule, index)
+      : reference.href
+  }
+  if (reference.dependent_kind === "dns_rule") {
+    const rule = config.dns?.rules?.[index]
+    return rule ? getRuleEditHref("dns-rules", rule, index) : reference.href
+  }
+  return reference.href
+}
+
 export function mapDependencyReferences(
   config: ConfigObject,
   references: DependencyReference[]
@@ -85,7 +131,7 @@ export function mapDependencyReferences(
       {
         kind: dependencyKind(reference),
         label: dependencyLabel(reference, config),
-        href: reference.href,
+        href: dependencyHref(reference, config),
       },
     ])
   }

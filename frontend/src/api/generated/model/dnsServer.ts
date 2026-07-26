@@ -11,6 +11,13 @@ export interface DnsServer {
   /** Unique identifier for this DNS server. Must match `^[a-z][a-z0-9_]*$`, be at most 24 characters, and be unique within `dns.servers`.
    */
   tag: string;
+  /**
+     * Optional human-readable alias. DNS rules and fallback references continue to use the stable technical `tag`.
+
+     * @minLength 1
+     * @maxLength 80
+     */
+  display_name?: string;
   /** DNS server source type. */
   type?: DnsServerType;
   /** IPv4 or IPv6 address of the DNS server, with optional port. Required for `type=static`. Must be omitted for `type=keenetic`. Formats: "8.8.8.8", "8.8.8.8:5353", "::1", "[::1]:5353". Default port is 53.

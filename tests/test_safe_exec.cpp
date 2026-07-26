@@ -162,6 +162,24 @@ TEST_CASE("safe_exec_capture: output cap terminates a noisy child") {
     CHECK(std::chrono::steady_clock::now() - started_at < std::chrono::seconds(5));
 }
 
+TEST_CASE("safe_exec_capture: stderr is merged only when explicitly requested") {
+    const auto stdout_only = safe_exec_capture(
+        {"/bin/sh", "-c", "printf out; printf err >&2"},
+        /*suppress_stderr=*/true,
+        1024);
+    const auto combined = safe_exec_capture(
+        {"/bin/sh", "-c", "printf out; printf err >&2"},
+        /*suppress_stderr=*/false,
+        1024,
+        /*capture_stderr=*/true);
+
+    CHECK(stdout_only.exit_code == 0);
+    CHECK(stdout_only.stdout_output == "out");
+    CHECK(combined.exit_code == 0);
+    CHECK(combined.stdout_output.find("out") != std::string::npos);
+    CHECK(combined.stdout_output.find("err") != std::string::npos);
+}
+
 TEST_CASE("safe_exec: child process receives devnull stdin") {
     StdinGuard stdin_guard;
     REQUIRE(stdin_guard.saved_stdin >= 0);
@@ -237,6 +255,27 @@ TEST_CASE("safe_exec_pipe_stdin: failed command logs arguments and input") {
           std::string::npos);
     CHECK(log.find(input) != std::string::npos);
     CHECK(log.find("truncated=false") != std::string::npos);
+}
+
+TEST_CASE("safe_exec_pipe_stdin: capability probes can suppress expected failures") {
+    LoggerSinkGuard logger_sink_guard;
+    std::string log;
+    Logger::instance().set_sink([&log](const std::string& line) {
+        log += line;
+        log += '\n';
+    });
+
+    std::string stderr_output;
+    const int exit_code = safe_exec_pipe_stdin(
+        {"/bin/sh", "-c", "cat >/dev/null; printf 'unsupported\\n' >&2; exit 1"},
+        "{}",
+        &stderr_output,
+        SafeExecFailureLog::Suppressed);
+
+    CHECK(exit_code == 1);
+    CHECK(stderr_output == "unsupported");
+    CHECK(log.find("safe_exec_pipe_failed") == std::string::npos);
+    CHECK(log.find("safe_exec_pipe_input") == std::string::npos);
 }
 
 TEST_CASE("safe_exec_capture: ignored SIGTERM cannot hang capture") {

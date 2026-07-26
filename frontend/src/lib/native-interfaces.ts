@@ -4,6 +4,10 @@ import type {
   RuntimeInterfaceInventoryEntry,
   TransportStatus,
 } from "@/api/generated/model"
+import {
+  protocolForNdmsKind,
+  type InterfaceProtocolDisplay,
+} from "@/lib/interface-protocol"
 
 /**
  * The generated contract intentionally distinguishes the required logical
@@ -13,10 +17,7 @@ export type KeeneticNativeInterface = Readonly<NdmsTunnelInterface>
 
 export const NATIVE_TUNNEL_KIND_LABELS = {
   amnezia_wireguard: "AmneziaWG",
-  // KeeneticOS exposes both vanilla WireGuard and AmneziaWG through the same
-  // Wireguard/nwg family on current firmware. Do not claim a variant that the
-  // typed RCI response did not prove.
-  wireguard: "AWG/WG",
+  wireguard: "WireGuard",
   openvpn: "OpenVPN",
   ike: "IPsec / IKE",
   l2tp: "L2TP",
@@ -33,7 +34,7 @@ export interface NativeInterfaceModel {
   readonly label: string
   readonly logicalName: string
   readonly kernelName?: string
-  readonly protocol: string
+  readonly protocol: InterfaceProtocolDisplay
   readonly runtime?: RuntimeInterfaceInventoryEntry
   readonly live: boolean
   readonly connected?: boolean
@@ -108,7 +109,7 @@ export function mapNativeInterfaces(
         nativeTunnelKindLabel(nativeInterface.kind),
       logicalName,
       kernelName,
-      protocol: nativeTunnelKindLabel(nativeInterface.kind),
+      protocol: protocolForNdmsKind(nativeInterface.kind),
       runtime,
       live: runtime?.status === "up",
       connected: nativeInterface.connected,

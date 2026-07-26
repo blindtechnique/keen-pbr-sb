@@ -6,21 +6,28 @@ import type { RouteRule } from "@/api/generated/model/routeRule"
 import { buildListUsageByName } from "@/lib/list-usage"
 
 type ListUsageRuleType = "routing" | "dns"
+type ListUsageLabels = {
+  rule: (ruleIndex: number) => string
+  target: (target: string) => string
+}
 
 export function useListUsageSubtitle(
   rules: RouteRule[],
   ruleType: "routing",
-  excludeRuleIndex?: number
+  excludeRuleIndex?: number,
+  labels?: ListUsageLabels
 ): (listName: string) => string | undefined
 export function useListUsageSubtitle(
   rules: DnsRule[],
   ruleType: "dns",
-  excludeRuleIndex?: number
+  excludeRuleIndex?: number,
+  labels?: ListUsageLabels
 ): (listName: string) => string | undefined
 export function useListUsageSubtitle(
   rules: RouteRule[] | DnsRule[],
   ruleType: ListUsageRuleType,
-  excludeRuleIndex?: number
+  excludeRuleIndex?: number,
+  labels?: ListUsageLabels
 ) {
   const { t } = useTranslation()
   const usageByName = useMemo(() => {
@@ -49,11 +56,16 @@ export function useListUsageSubtitle(
       }
 
       const summary = usages
-        .map((usage) => `#${usage.ruleIndex + 1} → ${usage.target}`)
+        .map(
+          (usage) =>
+            `${labels?.rule(usage.ruleIndex) ?? `#${usage.ruleIndex + 1}`} → ${
+              labels?.target(usage.target) ?? usage.target
+            }`
+        )
         .join(", ")
 
       return t("common.listUsage.usedElsewhere", { summary })
     },
-    [t, usageByName]
+    [labels, t, usageByName]
   )
 }

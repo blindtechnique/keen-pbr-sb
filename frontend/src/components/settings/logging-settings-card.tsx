@@ -8,6 +8,7 @@ import {
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
+import { LogDiagnosticsTools } from "@/components/settings/log-diagnostics-tools"
 import {
   Card,
   CardContent,
@@ -69,9 +70,7 @@ function LoggingSettingsCardInner(
   const [draft, setDraft] = useState<LogSettingsDraft>({})
   const fileEnabled = draft.file_enabled ?? query.data?.file_enabled ?? true
   const level = draft.level ?? query.data?.level ?? "info"
-  const getSectionState = (
-    nextDraft = draft
-  ): SettingsSectionState => ({
+  const getSectionState = (nextDraft = draft): SettingsSectionState => ({
     dirty: Object.keys(nextDraft).length > 0,
     valid: true,
   })
@@ -103,21 +102,18 @@ function LoggingSettingsCardInner(
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      reset: () => {
-        setDraft({})
-        onStateChange({ dirty: false, valid: true })
-      },
-      save: async () => {
-        if (!getSectionState().dirty) {
-          return
-        }
-        await saveMutation.mutateAsync()
-      },
-    })
-  )
+  useImperativeHandle(ref, () => ({
+    reset: () => {
+      setDraft({})
+      onStateChange({ dirty: false, valid: true })
+    },
+    save: async () => {
+      if (!getSectionState().dirty) {
+        return
+      }
+      await saveMutation.mutateAsync()
+    },
+  }))
 
   return (
     <Card size="sm">
@@ -145,9 +141,7 @@ function LoggingSettingsCardInner(
           <Label>{t("pages.settings.logging.level")}</Label>
           <Select
             disabled={!fileEnabled}
-            onValueChange={(value) =>
-              updateDraft({ level: value ?? "info" })
-            }
+            onValueChange={(value) => updateDraft({ level: value ?? "info" })}
             value={level}
           >
             <SelectTrigger>
@@ -175,7 +169,46 @@ function LoggingSettingsCardInner(
         <p className="text-xs text-muted-foreground">
           {t("pages.settings.logging.pathHint")}
         </p>
-
+        <LogDiagnosticsTools
+          labels={{
+            openLogAction: t("pages.settings.logging.viewer.open"),
+            downloadDiagnosticsAction: t(
+              "pages.settings.logging.diagnostics.download"
+            ),
+            downloadingDiagnosticsAction: t(
+              "pages.settings.logging.diagnostics.downloading"
+            ),
+            logDialogTitle: t("pages.settings.logging.viewer.title"),
+            logDialogDescription: t(
+              "pages.settings.logging.viewer.description"
+            ),
+            logEditorAriaLabel: t("pages.settings.logging.viewer.ariaLabel"),
+            refreshLogAction: t("pages.settings.logging.viewer.refresh"),
+            refreshingLogAction: t("pages.settings.logging.viewer.refreshing"),
+            closeAction: t("common.close"),
+            logLoading: t("pages.settings.logging.viewer.loading"),
+            logEmpty: t("pages.settings.logging.viewer.empty"),
+            logLoadFailed: t("pages.settings.logging.viewer.failed"),
+            diagnosticsDownloadFailed: t(
+              "pages.settings.logging.diagnostics.failed"
+            ),
+            diagnosticsDialogTitle: t(
+              "pages.settings.logging.diagnostics.title"
+            ),
+            diagnosticsDialogDescription: t(
+              "pages.settings.logging.diagnostics.description"
+            ),
+            diagnosticsTrustWarning: t(
+              "pages.settings.logging.diagnostics.trustWarning"
+            ),
+            diagnosticsIncludeLists: t(
+              "pages.settings.logging.diagnostics.includeLists"
+            ),
+            diagnosticsConfirmAction: t(
+              "pages.settings.logging.diagnostics.confirm"
+            ),
+          }}
+        />
       </CardContent>
     </Card>
   )

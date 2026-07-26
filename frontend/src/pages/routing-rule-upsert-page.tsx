@@ -40,6 +40,9 @@ import {
   splitFormApiErrors,
 } from "@/lib/form-api-errors"
 import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
+import { sortOutboundsByDisplayName } from "@/lib/outbound-display"
+import { makeTechnicalId } from "@/lib/technical-id"
+import { resolveRuleRouteIndex } from "@/lib/rule-route"
 import {
   Select,
   SelectContent,
@@ -50,16 +53,20 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
-  emptyRouteRuleDraft,
+  createRouteRuleDraft,
   getFirstFieldError,
+  getRouteRuleDisplayName,
   normalizeRouteRuleDraft,
   protoOptions,
   toRouteRuleDraft,
 } from "@/pages/routing-rules-utils"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { getTagNameValidationError } from "@/lib/tag-name-validation"
 
 const ROUTING_RULE_FIELD_NAMES = {
+  id: "id",
+  displayName: "displayName",
   enabled: "enabled",
   list: "list",
   proto: "proto",
@@ -76,11 +83,11 @@ type RoutingRuleFieldName =
 
 export function RoutingRuleUpsertPage({
   mode,
-  ruleIndex,
+  ruleId,
   presentation = "page",
 }: {
   mode: "create" | "edit"
-  ruleIndex?: string
+  ruleId?: string
   presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
@@ -89,9 +96,10 @@ export function RoutingRuleUpsertPage({
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
   const rules = loadedConfig?.route?.rules ?? []
-  const parsedRuleIndex = Number(ruleIndex)
+  const parsedRuleIndex =
+    mode === "edit" ? resolveRuleRouteIndex(rules, ruleId) : -1
   const existingRule =
-    mode === "edit" && Number.isInteger(parsedRuleIndex) && parsedRuleIndex >= 0
+    mode === "edit" && parsedRuleIndex >= 0
       ? rules[parsedRuleIndex]
       : undefined
 
@@ -156,7 +164,11 @@ export function RoutingRuleUpsertPage({
       cardTitle={
         mode === "create"
           ? t("pages.routingRuleUpsert.createTitle")
-          : t("pages.routingRuleUpsert.editTitle")
+          : t("pages.routingRuleUpsert.editCardTitle", {
+              name: existingRule
+                ? getRouteRuleDisplayName(existingRule, parsedRuleIndex)
+                : "",
+            })
       }
       description={t("pages.routingRuleUpsert.description")}
       dirty={dirty}
@@ -169,7 +181,7 @@ export function RoutingRuleUpsertPage({
       }
     >
       <RoutingRuleForm
-        key={`${mode}:${ruleIndex ?? "new"}`}
+        key={`${mode}:${ruleId ?? "new"}`}
         existingRule={existingRule}
         loadedConfig={loadedConfig}
         mode={mode}
@@ -206,17 +218,25 @@ function RoutingRuleForm({
     Object.keys(loadedConfig.lists ?? {}),
     loadedConfig.lists
   )
-  const outbounds = (loadedConfig.outbounds ?? [])
-    .filter((outbound: Outbound): outbound is Outbound & { tag: string } =>
-      Boolean(outbound.tag)
+  const outbounds = sortOutboundsByDisplayName(
+    (loadedConfig.outbounds ?? []).filter(
+      (outbound: Outbound): outbound is Outbound & { tag: string } =>
+        Boolean(outbound.tag)
     )
-    .sort((left: Outbound, right: Outbound) =>
-      left.tag.localeCompare(right.tag)
-    )
+  )
   const listUsageSubtitle = useListUsageSubtitle(
     rules,
     "routing",
-    mode === "edit" ? parsedRuleIndex : undefined
+    mode === "edit" ? parsedRuleIndex : undefined,
+    {
+      rule: (index) =>
+        rules[index]
+          ? getRouteRuleDisplayName(rules[index], index)
+          : `#${index + 1}`,
+      target: (tag) =>
+        loadedConfig.outbounds?.find((outbound) => outbound.tag === tag)
+          ?.display_name?.trim() || tag,
+    }
   )
   const protoSelectItems = protoOptions.map((option) => ({
     value: option,
@@ -224,11 +244,28 @@ function RoutingRuleForm({
   }))
 
   const postConfigMutation = usePostConfigMutation()
-  const [initialDraft] = useState(() =>
-    mode === "edit" && existingRule
-      ? toRouteRuleDraft(existingRule)
-      : emptyRouteRuleDraft
-  )
+  const existingRuleIds = rules
+    .map((rule) => rule.id?.trim())
+    .filter((id): id is string => Boolean(id))
+  const [initialDraft] = useState(() => {
+    if (mode === "edit" && existingRule) {
+      const draft = toRouteRuleDraft(existingRule)
+      return draft.id
+        ? draft
+        : {
+            ...draft,
+            id: makeTechnicalId(
+              draft.displayName || `rule_${parsedRuleIndex + 1}`,
+              existingRuleIds,
+              { prefix: "rule" }
+            ),
+          }
+    }
+
+    return createRouteRuleDraft("", existingRuleIds)
+  })
+  const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
+    useState(false)
   const hasAdvancedConditions =
     Boolean(initialDraft.proto) ||
     Boolean(initialDraft.dscp) ||
@@ -245,7 +282,50 @@ function RoutingRuleForm({
     }),
     validators: {
       onSubmitAsync: async ({ value }) => {
-        const nextRule = normalizeRouteRuleDraft(value)
+        clearFormServerErrors(form)
+        const displayNameError = validateDisplayName(value.displayName, t)
+        if (displayNameError) {
+          setFormServerErrors(form, {
+            fields: {
+              [ROUTING_RULE_FIELD_NAMES.displayName]: displayNameError,
+            },
+          })
+          return {
+            fields: {
+              [ROUTING_RULE_FIELD_NAMES.displayName]: displayNameError,
+            },
+          }
+        }
+
+        const valueToPersist =
+          !value.id.trim()
+            ? {
+                ...value,
+                id: makeTechnicalId(value.displayName, existingRuleIds, {
+                  prefix: "rule",
+                }),
+              }
+            : value
+        const idError = validateRuleId(
+          valueToPersist.id,
+          existingRuleIds,
+          existingRule?.id,
+          t
+        )
+        if (idError) {
+          setFormServerErrors(form, {
+            fields: {
+              [ROUTING_RULE_FIELD_NAMES.id]: idError,
+            },
+          })
+          return {
+            fields: {
+              [ROUTING_RULE_FIELD_NAMES.id]: idError,
+            },
+          }
+        }
+
+        const nextRule = normalizeRouteRuleDraft(valueToPersist)
         const hasRuleCondition =
           (nextRule.list ?? []).length > 0 ||
           nextRule.dscp !== undefined ||
@@ -253,8 +333,6 @@ function RoutingRuleForm({
           Boolean(nextRule.dest_port) ||
           Boolean(nextRule.src_addr) ||
           Boolean(nextRule.dest_addr)
-
-        clearFormServerErrors(form)
 
         if (!hasRuleCondition) {
           return {
@@ -351,6 +429,101 @@ function RoutingRuleForm({
               {t("pages.routingRuleUpsert.advancedConditionsPresent")}
             </AlertDescription>
           </Alert>
+        ) : null}
+
+        <form.Field
+          name={ROUTING_RULE_FIELD_NAMES.displayName}
+          validators={{
+            onChange: ({ value }) => validateDisplayName(value, t),
+          }}
+        >
+          {(field) => {
+            const error = getFirstFieldError(field.state.meta.errors)
+
+            return (
+              <Field invalid={Boolean(error)}>
+                <FieldLabel htmlFor="routing-rule-display-name">
+                  {t("pages.routingRuleUpsert.fields.displayName")}
+                </FieldLabel>
+                <FieldContent>
+                  <Input
+                    aria-invalid={Boolean(error)}
+                    id="routing-rule-display-name"
+                    onBlur={field.handleBlur}
+                    onChange={(event) => {
+                      const nextDisplayName = event.target.value
+                      field.handleChange(nextDisplayName)
+                      if (
+                        mode === "create" &&
+                        (presentation === "dialog" ||
+                          !technicalIdManuallyEdited)
+                      ) {
+                        form.setFieldValue(
+                          ROUTING_RULE_FIELD_NAMES.id,
+                          makeTechnicalId(nextDisplayName, existingRuleIds, {
+                            prefix: "rule",
+                          })
+                        )
+                      }
+                    }}
+                    value={field.state.value}
+                  />
+                  <FieldHint
+                    description={t(
+                      "pages.routingRuleUpsert.fields.displayNameHint"
+                    )}
+                    error={error}
+                  />
+                </FieldContent>
+              </Field>
+            )
+          }}
+        </form.Field>
+
+        {presentation === "page" ? (
+          <form.Field
+            name={ROUTING_RULE_FIELD_NAMES.id}
+            validators={{
+              onChange: ({ value }) =>
+                validateRuleId(
+                  value,
+                  existingRuleIds,
+                  existingRule?.id,
+                  t
+                ),
+            }}
+          >
+            {(field) => {
+              const error = getFirstFieldError(field.state.meta.errors)
+
+              return (
+                <Field invalid={Boolean(error)}>
+                  <FieldLabel htmlFor="routing-rule-id">
+                    {t("pages.routingRuleUpsert.fields.technicalId")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Input
+                      aria-invalid={Boolean(error)}
+                      id="routing-rule-id"
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        setTechnicalIdManuallyEdited(true)
+                        field.handleChange(event.target.value)
+                      }}
+                      readOnly={mode === "edit" && Boolean(existingRule?.id)}
+                      value={field.state.value}
+                    />
+                    <FieldHint
+                      description={t(
+                        "pages.routingRuleUpsert.fields.technicalIdHint"
+                      )}
+                      error={error}
+                    />
+                  </FieldContent>
+                </Field>
+              )
+            }}
+          </form.Field>
         ) : null}
 
         <form.Field name={ROUTING_RULE_FIELD_NAMES.enabled}>
@@ -717,6 +890,14 @@ function resolveRoutingRuleFieldPath(
     return ROUTING_RULE_FIELD_NAMES.outbound
   }
 
+  if (/^route\.rules(?:\[\d+\]|\.\d+)?\.id$/.test(path)) {
+    return ROUTING_RULE_FIELD_NAMES.id
+  }
+
+  if (/^route\.rules(?:\[\d+\]|\.\d+)?\.display_name$/.test(path)) {
+    return ROUTING_RULE_FIELD_NAMES.displayName
+  }
+
   if (/^route\.rules(?:\[\d+\]|\.\d+)?\.(list|lists)$/.test(path)) {
     return ROUTING_RULE_FIELD_NAMES.list
   }
@@ -750,6 +931,36 @@ function resolveRoutingRuleFieldPath(
   }
 
   return undefined
+}
+
+function validateDisplayName(value: string, t: (key: string) => string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return t("pages.routingRuleUpsert.validation.displayNameRequired")
+  }
+
+  return [...trimmed].length > 80
+    ? t("pages.routingRuleUpsert.validation.displayNameTooLong")
+    : undefined
+}
+
+function validateRuleId(
+  value: string,
+  existingIds: readonly string[],
+  currentId: string | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+) {
+  const trimmed = value.trim()
+  return getTagNameValidationError(value, {
+    requiredError: t("pages.routingRuleUpsert.validation.technicalIdRequired"),
+    invalidError: t("common.validation.tagNamePattern"),
+    duplicateError:
+      existingIds.includes(trimmed) && trimmed !== currentId
+        ? t("pages.routingRuleUpsert.validation.duplicateTechnicalId", {
+            id: trimmed,
+          })
+        : null,
+  })
 }
 
 function validateDscp(value: string, t: (key: string) => string) {

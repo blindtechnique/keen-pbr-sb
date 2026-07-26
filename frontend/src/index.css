@@ -746,25 +746,55 @@
 }
 
 .dark .keen-mobile-menu-button {
-  background: var(--sidebar) !important;
-  color: #c2c2c2 !important;
+  background: #161c27 !important;
+  color: #949b9f !important;
 }
 
 .dark .keen-mobile-menu-button:hover,
 .dark .keen-mobile-menu-button:focus-visible,
 .dark .keen-mobile-menu-button[aria-expanded="true"] {
-  background: #0086cb !important;
-  color: #ffffff !important;
+  background: #2e3d57 !important;
+  color: #c2c2c2 !important;
 }
 
 @media (min-width: 768px) {
+  /* One continuous divider belongs to the sidebar shell, not to its
+     independently scrolling content and fixed footer. This keeps the
+     hairline joined to the header while the rail changes width. */
+  .keen-app-sidebar [data-slot="sidebar-inner"] {
+    position: relative;
+  }
+
+  .keen-app-sidebar [data-slot="sidebar-inner"]::after {
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 1px;
+    pointer-events: none;
+    background: var(--sidebar-border);
+    content: "";
+  }
+
+  .keen-app-sidebar .keen-sidebar-divider {
+    box-shadow: none;
+  }
+
   .keen-sidebar-toggle {
     position: relative;
     z-index: 1;
     isolation: isolate;
     overflow: visible;
+    box-sizing: border-box;
     border: 0 !important;
+    border-right: 1px solid var(--sidebar-border) !important;
+    background: transparent;
     box-shadow: none;
+  }
+
+  .keen-app-sidebar .keen-sidebar-toggle {
+    border-right: 0 !important;
   }
 
   .keen-sidebar-toggle::after {
@@ -784,16 +814,56 @@
     background: linear-gradient(to top, rgb(0 0 0 / 8%), transparent);
   }
 
-  .keen-sidebar-toggle [data-slot="button"],
-  .keen-sidebar-toggle [data-slot="button"]:hover,
-  .keen-sidebar-toggle [data-slot="button"]:focus-visible,
-  .keen-sidebar-toggle [data-slot="button"]:active {
+  .keen-sidebar-toggle-button {
+    position: relative;
+    width: 100%;
+    height: 64px;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 0 24px;
     border: 0 !important;
+    border-radius: 0;
     outline: 0 !important;
+    background: var(--sidebar) !important;
     background-clip: border-box !important;
     box-shadow: none !important;
+    color: var(--primary) !important;
+    font-size: 16px;
+    line-height: 23px;
+    font-weight: 700;
     transform: none !important;
     translate: none !important;
+    transition:
+      filter 60ms linear,
+      color 120ms linear;
+  }
+
+  .keen-sidebar-toggle-button:hover {
+    background: var(--sidebar) !important;
+    filter: brightness(95%);
+  }
+
+  .keen-sidebar-toggle-button:focus-visible {
+    background: var(--sidebar) !important;
+    filter: brightness(95%);
+  }
+
+  .keen-sidebar-toggle-button:active {
+    border: 0 !important;
+    outline: 0 !important;
+    box-shadow: none !important;
+    transform: none !important;
+  }
+
+  /* KeeneticOS keeps one quiet separator above the desktop menu toggle in
+     its dark palette: the inner 64 px control uses rgba(255,255,255,.1). */
+  .dark .keen-sidebar-toggle-button {
+    border-top: 1px solid rgb(255 255 255 / 10%) !important;
+  }
+
+  [data-collapsible="icon"] .keen-sidebar-toggle-button {
+    justify-content: center;
+    padding: 0;
   }
 }
 

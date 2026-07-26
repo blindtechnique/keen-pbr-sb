@@ -25,11 +25,6 @@ export function ListIdentityLabel({
       }
     >
       <span className="max-w-full truncate">{displayName}</span>
-      {hasDistinctDisplayName ? (
-        <span className="max-w-full truncate font-mono text-xs font-normal text-muted-foreground">
-          {technicalId}
-        </span>
-      ) : null}
     </span>
   )
 }

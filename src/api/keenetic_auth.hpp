@@ -1,8 +1,22 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 namespace keen_pbr3 {
+
+struct KeeneticAuthEndpoint {
+    std::string host;
+    int port{80};
+    std::string canonical;
+};
+
+// Only a local firmware endpoint is accepted. In particular, DNS names,
+// alternate IPv4 spellings and URL components are rejected so this setting
+// cannot turn the privileged daemon into an SSRF proxy.
+std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
+    const std::string& endpoint,
+    std::string* error = nullptr);
 
 // Validates a login against the router firmware instead of a local password.
 //

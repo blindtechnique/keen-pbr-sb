@@ -6,8 +6,14 @@ import type {
   RuntimeInterfaceState,
   RuntimeOutboundState,
 } from "@/api/generated/model"
+import { outboundTrafficBucket } from "@/components/overview/outbound-state-model"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
+import {
+  createOutboundDisplayNameMap,
+  getOutboundDisplayName,
+  getOutboundReferenceLabel,
+} from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 
 /**
@@ -31,6 +37,7 @@ export function OutboundStateList({
 }) {
   const { t } = useTranslation()
   const { protocolOf, protocolOfGroup } = useInterfaceProtocols()
+  const outboundDisplayNames = createOutboundDisplayNameMap(outbounds)
 
   const interfaceOfTag = (tag: string) =>
     outbounds.find((item) => item.tag === tag)?.interface ?? ""
@@ -46,9 +53,24 @@ export function OutboundStateList({
 
   const entries = outbounds.map((outbound) => {
     const runtime = runtimeByTag.get(outbound.tag)
+    const configuredProtocol =
+      outbound.type === "urltest"
+        ? protocolOfGroup(outbound, interfaceOfTag)
+        : protocolOf(outbound.interface ?? "")
+    const runtimeProtocols = (runtime?.interfaces ?? [])
+      .map((member) => protocolOf(member.interface_name))
+      .filter(Boolean)
+    const protocol = [
+      ...new Set(
+        configuredProtocol
+          ? [configuredProtocol, ...runtimeProtocols]
+          : runtimeProtocols
+      ),
+    ].join("+")
     return {
       outbound,
       runtime,
+      protocol,
       lists: listsByTag.get(outbound.tag) ?? 0,
       broken:
         runtime?.status === "degraded" || runtime?.status === "unavailable",
@@ -59,9 +81,8 @@ export function OutboundStateList({
   const totals = { tunnels: 0, direct: 0, blocked: 0 }
   for (const entry of entries) {
     if (entry.lists === 0) continue
-    if (entry.outbound.type === "blackhole") totals.blocked += entry.lists
-    else if (entry.outbound.type === "table") totals.direct += entry.lists
-    else totals.tunnels += entry.lists
+    const bucket = outboundTrafficBucket(entry.outbound, entry.protocol)
+    totals[bucket] += entry.lists
   }
 
   const important = entries
@@ -83,19 +104,18 @@ export function OutboundStateList({
         </Badge>
       </div>
 
-      {important.map(({ outbound, runtime, lists }) => {
-        const isGroup = outbound.type === "urltest"
+      {important.map(({ outbound, runtime, lists, protocol }) => {
         const members = runtime?.interfaces ?? []
-        const protocol = isGroup
-          ? protocolOfGroup(outbound, interfaceOfTag)
-          : protocolOf(outbound.interface ?? "")
 
         return (
           <div className="pt-1.5" key={outbound.tag}>
             <div className="flex min-w-0 items-center gap-2">
               <HealthDot status={runtime?.status} />
-              <span className="truncate text-sm font-medium">
-                {outbound.tag}
+              <span
+                className="truncate text-sm font-medium"
+                title={getOutboundReferenceLabel(outbound)}
+              >
+                {getOutboundDisplayName(outbound)}
               </span>
               {protocol ? (
                 <Badge
@@ -123,7 +143,13 @@ export function OutboundStateList({
               </span>
             </div>
             <p className="pl-4 text-xs text-muted-foreground">
-              {describeEntry(outbound, members, t)}
+              {describeEntry(
+                outbound,
+                members,
+                outboundDisplayNames,
+                protocol,
+                t
+              )}
             </p>
           </div>
         )
@@ -133,7 +159,9 @@ export function OutboundStateList({
         <p className="border-t pt-2 text-xs text-muted-foreground">
           {t("overview.outbounds.idle", {
             count: idle.length,
-            names: idle.map((entry) => entry.outbound.tag).join(", "),
+            names: idle
+              .map((entry) => getOutboundDisplayName(entry.outbound))
+              .join(", "),
           })}
         </p>
       ) : null}
@@ -149,10 +177,14 @@ export function OutboundStateList({
 function describeEntry(
   outbound: Outbound,
   members: RuntimeInterfaceState[],
+  outboundDisplayNames: ReadonlyMap<string, string>,
+  protocol: string,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
   if (outbound.type === "table") {
-    return t("overview.outbounds.hint.table")
+    return protocol
+      ? t("overview.outbounds.hint.tableTunnel", { protocol })
+      : t("overview.outbounds.hint.table")
   }
   if (outbound.type === "blackhole") {
     return t("overview.outbounds.hint.blackhole")
@@ -171,11 +203,14 @@ function describeEntry(
   }
   return backup
     ? t("overview.outbounds.hint.groupVia", {
-        active: active.outbound_tag,
-        backup: backup.outbound_tag,
+        active:
+          outboundDisplayNames.get(active.outbound_tag) ?? active.outbound_tag,
+        backup:
+          outboundDisplayNames.get(backup.outbound_tag) ?? backup.outbound_tag,
       })
     : t("overview.outbounds.hint.groupViaOnly", {
-        active: active.outbound_tag,
+        active:
+          outboundDisplayNames.get(active.outbound_tag) ?? active.outbound_tag,
       })
 }
 

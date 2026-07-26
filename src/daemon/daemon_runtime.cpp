@@ -1,5 +1,6 @@
 #include "daemon.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <future>
 #include <map>
@@ -172,6 +173,22 @@ void Daemon::stop_routing_runtime() {
 
     if (urltest_manager_) {
         urltest_manager_->clear();
+    }
+    const uint32_t owned_mark_mask =
+        fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
+    std::set<uint32_t> owned_marks;
+    for (const auto& [tag, mark] : outbound_marks_) {
+        (void)tag;
+        owned_marks.insert(mark);
+    }
+    for (const uint32_t mark : owned_marks) {
+        if (!conntrack_manager_.delete_mark(mark, owned_mark_mask)) {
+            log.warn(
+                "Best-effort conntrack cleanup failed while stopping routing "
+                "for mark {:#x}/{:#x}",
+                mark,
+                owned_mark_mask);
+        }
     }
     policy_rules_.clear();
     route_table_.clear();
@@ -349,13 +366,52 @@ void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
     post_control_task([this, urltest_tag, new_child_tag]() {
         auto& log = Logger::instance();
         log.info("Urltest '{}' selected outbound: '{}'", urltest_tag, new_child_tag);
+
+        std::optional<uint32_t> retired_mark;
+        const auto outbounds =
+            config_.outbounds.value_or(std::vector<Outbound>{});
+        const auto urltest_it = std::find_if(
+            outbounds.begin(),
+            outbounds.end(),
+            [&urltest_tag](const Outbound& outbound) {
+                return outbound.tag == urltest_tag &&
+                       outbound.type == OutboundType::URLTEST;
+            });
+        const auto& selections = firewall_state_.get_urltest_selections();
+        const auto old_selection_it = selections.find(urltest_tag);
+        if (urltest_it != outbounds.end() &&
+            urltest_it->conntrack_on_switch.value_or(
+                ConntrackOnSwitch::PRESERVE) == ConntrackOnSwitch::DELETE &&
+            old_selection_it != selections.end() &&
+            old_selection_it->second != new_child_tag) {
+            const auto old_mark_it =
+                outbound_marks_.find(old_selection_it->second);
+            if (old_mark_it != outbound_marks_.end()) {
+                retired_mark = old_mark_it->second;
+            }
+        }
+
         firewall_state_.set_urltest_selection(urltest_tag, new_child_tag);
+        bool runtime_rebuilt = false;
         try {
             reconcile_static_routing();
             apply_firewall(FirewallApplyMode::PreserveSets);
+            runtime_rebuilt = true;
             log.info("Routing and firewall rebuilt after urltest change.");
         } catch (const std::exception& e) {
             log.error("Error rebuilding routing/firewall after urltest change: {}", e.what());
+        }
+        if (runtime_rebuilt && retired_mark.has_value()) {
+            const uint32_t owned_mask =
+                fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
+            if (!conntrack_manager_.delete_mark(*retired_mark, owned_mask)) {
+                log.warn(
+                    "Failed to remove conntrack entries for retired urltest "
+                    "mark {:#x}/{:#x}; existing flows may stay on the previous "
+                    "path until they expire",
+                    *retired_mark,
+                    owned_mask);
+            }
         }
         // Publish the committed probe and the best live kernel state even when
         // firewall reconciliation failed. Otherwise the UI can retain the
@@ -653,6 +709,7 @@ void Daemon::commit_lists_refresh_async_result(
     std::uint64_t generation,
     std::optional<RemoteListsRefreshResult> refresh_result,
     std::string error,
+    std::string source,
     TraceId trace_id) {
     post_control_task(
         [this,
@@ -661,20 +718,22 @@ void Daemon::commit_lists_refresh_async_result(
          generation,
          refresh_result = std::move(refresh_result),
          error = std::move(error),
+         source = std::move(source),
          trace_id]() mutable {
             ScopedTraceContext trace_scope_inner(trace_id);
             remote_list_refresh_inflight_.store(false, std::memory_order_release);
 
             if (generation != runtime_generation_.load(std::memory_order_acquire)) {
                 Logger::instance().trace("lists_refresh_skip",
-                                         "source=autoupdate generation={} reason=stale_runtime",
+                                         "source={} generation={} reason=stale_runtime",
+                                         source,
                                          generation);
                 schedule_lists_autoupdate();
                 return;
             }
 
             if (!error.empty()) {
-                Logger::instance().error("Lists autoupdate failed: {}", error);
+                Logger::instance().error("Lists refresh ({}) failed: {}", source, error);
                 schedule_lists_autoupdate();
                 return;
             }
@@ -683,20 +742,24 @@ void Daemon::commit_lists_refresh_async_result(
             result.refresh_result = std::move(*refresh_result);
 
             if (!result.refresh_result.changed_lists.empty()) {
-                Logger::instance().info("Lists refresh (autoupdate): updated list(s): {}",
+                Logger::instance().info("Lists refresh ({}): updated list(s): {}",
+                                        source,
                                         format_list_names(result.refresh_result.changed_lists));
             } else if (!result.refresh_result.failed_lists.empty()) {
-                Logger::instance().warn("Lists refresh (autoupdate): failed list(s): {}",
+                Logger::instance().warn("Lists refresh ({}): failed list(s): {}",
+                                        source,
                                         format_list_names(result.refresh_result.failed_lists));
             } else {
                 Logger::instance().info(
-                    "Lists refresh (autoupdate): all checked list(s) are up-to-date.");
+                    "Lists refresh ({}): all checked list(s) are up-to-date.",
+                    source);
             }
 
             if (should_reload_runtime_after_list_refresh(runtime_active_snapshot,
                                                         result.refresh_result)) {
                 Logger::instance().info(
-                    "Lists refresh (autoupdate): relevant list(s) changed ({}), reloading runtime",
+                    "Lists refresh ({}): relevant list(s) changed ({}), reloading runtime",
+                    source,
                     format_list_names(result.refresh_result.relevant_changed_lists));
                 try {
                     bool rolled_back = false;
@@ -704,7 +767,9 @@ void Daemon::commit_lists_refresh_async_result(
                         config_snapshot, rolled_back, false);
                     result.reloaded = true;
                 } catch (const std::exception& e) {
-                    Logger::instance().error("Lists autoupdate reload failed: {}", e.what());
+                    Logger::instance().error("Lists refresh ({}) reload failed: {}",
+                                             source,
+                                             e.what());
                     schedule_lists_autoupdate();
                     return;
                 }
@@ -730,16 +795,17 @@ void Daemon::commit_lists_refresh_async_result(
         "lists-refresh-commit");
 }
 
-void Daemon::refresh_lists_and_maybe_reload_async() {
+void Daemon::refresh_lists_and_maybe_reload_async(std::string source) {
     auto& log = Logger::instance();
-    log.info("Lists autoupdate: checking for updated lists");
+    log.info("Lists refresh ({}): checking for updates", source);
 
     bool expected = false;
     if (!remote_list_refresh_inflight_.compare_exchange_strong(expected,
                                                                true,
                                                                std::memory_order_acq_rel)) {
         Logger::instance().trace("lists_refresh_skip",
-                                 "source=autoupdate reason=inflight");
+                                 "source={} reason=inflight",
+                                 source);
         return;
     }
 
@@ -750,9 +816,10 @@ void Daemon::refresh_lists_and_maybe_reload_async() {
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
     const auto generation = runtime_generation_.load(std::memory_order_acquire);
     const TraceId trace_id = ensure_trace_id();
+    const std::string executor_label = "lists-refresh-" + source;
 
     const bool enqueued = blocking_executor_.try_post(
-        "lists-autoupdate",
+        executor_label,
         [this,
          config_snapshot,
          marks_snapshot,
@@ -760,13 +827,15 @@ void Daemon::refresh_lists_and_maybe_reload_async() {
          relevant_lists,
          dns_relevant_lists,
          generation,
+         source,
          trace_id]() mutable {
             ScopedTraceContext trace_scope(trace_id);
             std::optional<RemoteListsRefreshResult> refresh_result;
             std::string error;
 
             Logger::instance().trace("lists_refresh_start",
-                                     "source=autoupdate generation={}",
+                                     "source={} generation={}",
+                                     source,
                                      generation);
             try {
                 {
@@ -789,6 +858,7 @@ void Daemon::refresh_lists_and_maybe_reload_async() {
                                               generation,
                                               std::move(refresh_result),
                                               std::move(error),
+                                              std::move(source),
                                               trace_id);
         },
         trace_id);
@@ -796,13 +866,14 @@ void Daemon::refresh_lists_and_maybe_reload_async() {
     if (!enqueued) {
         remote_list_refresh_inflight_.store(false, std::memory_order_release);
         Logger::instance().trace("lists_refresh_skip",
-                                 "source=autoupdate reason=executor_unavailable");
+                                 "source={} reason=executor_unavailable",
+                                 source);
         schedule_lists_autoupdate();
     }
 }
 
 PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
-                                                     bool refresh_remote_lists) {
+                                                     RemoteListPreparationMode list_mode) {
     TraceSpan span("prepare-runtime-inputs");
     validate_config(config);
 
@@ -812,13 +883,38 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
         config.fwmark.value_or(FwmarkConfig{}),
         config.outbounds.value_or(std::vector<Outbound>{}));
 
-    if (refresh_remote_lists) {
+    if (list_mode != RemoteListPreparationMode::None) {
         KPBR_SHARED_UNIQUE_LOCK(
             cache_write,
             resolver_cache_snapshot_mutex_);
-        (void)list_service_.refresh_remote_lists(
-            prepared.config,
-            prepared.outbound_marks);
+        if (list_mode == RemoteListPreparationMode::MissingOrInvalid) {
+            const auto result = list_service_.download_uncached(
+                prepared.config,
+                prepared.outbound_marks);
+            std::vector<std::string> unavailable_lists;
+            for (const auto& name : result.failed_lists) {
+                if (!prepared.config.lists) {
+                    unavailable_lists.push_back(name);
+                    continue;
+                }
+                const auto list = prepared.config.lists->find(name);
+                if (list == prepared.config.lists->end() ||
+                    !list->second.url.has_value() ||
+                    !list_service_.cache_manager().has_current_cache(
+                        name, *list->second.url)) {
+                    unavailable_lists.push_back(name);
+                }
+            }
+            if (!unavailable_lists.empty()) {
+                throw DaemonError(
+                    "Remote list cache is unavailable for the current source: " +
+                    format_list_names(unavailable_lists));
+            }
+        } else {
+            (void)list_service_.refresh_remote_lists(
+                prepared.config,
+                prepared.outbound_marks);
+        }
         prepared.remote_lists_refreshed = true;
     }
 
@@ -884,6 +980,9 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     }
     refresh_resolver_config_hash_actual_async();
     config_store_.replace_active(config_, outbound_marks_);
+#ifdef WITH_API
+    refresh_interface_traffic_config_targets(config_);
+#endif
     routing_runtime_active_ = true;
     transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
     publish_runtime_state();
@@ -906,7 +1005,10 @@ void Daemon::apply_config(Config config, bool refresh_remote_lists) {
         throw DaemonError("apply_config must run on the control/event-loop thread");
     }
 
-    apply_prepared_runtime_inputs(prepare_runtime_inputs(config, refresh_remote_lists));
+    apply_prepared_runtime_inputs(prepare_runtime_inputs(
+        config,
+        refresh_remote_lists ? RemoteListPreparationMode::RefreshAll
+                             : RemoteListPreparationMode::None));
 }
 
 void Daemon::apply_config_with_rollback(const Config& next_config,

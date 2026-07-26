@@ -73,6 +73,7 @@ generate: ## Regenerate src/api/generated/api_types.hpp from docs/openapi.yaml (
 	bash build_scripts/generate_api_types.sh
 
 test: ## Build and run unit tests (doctest)
+	sh -n install.sh
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON
 	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-tests crash-diagnostics-smoke
 	$(GCC_BUILD_DIR)/tests/keen-pbr-tests

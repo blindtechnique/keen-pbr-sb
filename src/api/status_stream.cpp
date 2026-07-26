@@ -14,6 +14,24 @@ std::string make_event_payload(const std::string& type,
     return nlohmann::json{{"type", type}, {"data", data}}.dump();
 }
 
+nlohmann::json interface_inventory_without_traffic(
+    const nlohmann::json& inventory) {
+    auto topology = inventory;
+    if (!topology.is_object()) {
+        return topology;
+    }
+    auto interfaces = topology.find("interfaces");
+    if (interfaces == topology.end() || !interfaces->is_array()) {
+        return topology;
+    }
+    for (auto& entry : *interfaces) {
+        if (entry.is_object()) {
+            entry.erase("traffic");
+        }
+    }
+    return topology;
+}
+
 } // namespace
 
 std::string make_named_sse_frame(const std::string& event,
@@ -46,7 +64,8 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
                 changed_frames.push_back(make_named_sse_frame(
                     "outbounds", make_event_payload("outbounds", outbounds)));
             }
-            if (interfaces != interfaces_) {
+            if (interface_inventory_without_traffic(interfaces) !=
+                interface_inventory_without_traffic(interfaces_)) {
                 changed_frames.push_back(make_named_sse_frame(
                     "interfaces", make_event_payload("interfaces", interfaces)));
             }
@@ -111,8 +130,11 @@ void StatusStream::reconcile() {
             frames.push_back(make_named_sse_frame(
                 "outbounds", make_event_payload("outbounds", outbounds)));
         }
-        if (interfaces != interfaces_) {
-            interfaces_ = interfaces;
+        const bool interface_topology_changed =
+            interface_inventory_without_traffic(interfaces) !=
+            interface_inventory_without_traffic(interfaces_);
+        interfaces_ = interfaces;
+        if (interface_topology_changed) {
             frames.push_back(make_named_sse_frame(
                 "interfaces", make_event_payload("interfaces", interfaces)));
         }
@@ -121,6 +143,31 @@ void StatusStream::reconcile() {
     for (const auto& frame : frames) {
         broadcaster_.publish(frame);
     }
+}
+
+void StatusStream::publish_interfaces(
+    api::RuntimeInterfaceInventoryResponse state) {
+    std::string frame;
+    {
+        KPBR_LOCK_GUARD(mutex_);
+        if (!initialized_) {
+            return;
+        }
+        nlohmann::json serialized = std::move(state);
+        if (serialized == interfaces_) {
+            return;
+        }
+        interfaces_ = std::move(serialized);
+        frame = make_named_sse_frame(
+            "interfaces", make_event_payload("interfaces", interfaces_));
+    }
+    broadcaster_.publish(frame);
+}
+
+void StatusStream::publish_interface_traffic(nlohmann::json state) {
+    broadcaster_.publish(make_named_sse_frame(
+        "interface_traffic",
+        make_event_payload("interface_traffic", state)));
 }
 
 void StatusStream::publish_connections(api::ConnectionEventState state) {
@@ -140,6 +187,10 @@ void StatusStream::publish_connections(api::ConnectionEventState state) {
 
 void StatusStream::close_all() {
     broadcaster_.close_all();
+}
+
+bool StatusStream::has_subscribers() {
+    return broadcaster_.active_subscriptions() != 0;
 }
 
 } // namespace keen_pbr3

@@ -44,6 +44,7 @@ using ApiConfig            = api::ApiConfig;
 using Outbound             = api::OutboundElement;
 using OutboundType         = api::OutboundType;  // enum: INTERFACE, TABLE, BLACKHOLE, IGNORE, URLTEST
 using UrltestSelectionMode = api::SelectionMode; // enum: LATENCY, PRIORITY
+using ConntrackOnSwitch    = api::ConntrackOnSwitch;
 using OutboundGroup        = api::OutboundGroupElement;
 using RetryConfig          = api::Retry;
 using CircuitBreakerConfig = api::CircuitBreakerConfig;
@@ -57,6 +58,8 @@ using RouteConfig          = api::Route;
 using FwmarkConfig         = api::Fwmark;
 using IprouteConfig        = api::Iproute;
 using ListsAutoupdateConfig = api::ListsAutoupdate;
+using PlainDnsTemplate      = api::PlainDnsTemplateElement;
+using UiPreferencesConfig   = api::UiPreferences;
 // Note: DnsRule.list (not .lists) and RouteRule.list (not .lists) match JSON keys.
 
 constexpr std::size_t kDefaultMaxFileSizeBytes = std::size_t{8} * 1024U * 1024U; // 8 MiB
@@ -84,11 +87,12 @@ FirewallBackendPreference firewall_backend_preference(const Config& config);
 
 // --- Fwmark allocation ---
 
-// Maps outbound tag to its assigned fwmark value
+// Maps every routable outbound tag, including urltest selectors, to its
+// assigned fwmark value. Blackhole and ignore outbounds do not consume marks.
 using OutboundMarkMap = std::map<std::string, uint32_t>;
 
-// Validates fwmark.mask and assigns sequential fwmarks to interface and table
-// outbounds. Blackhole, ignore, and urltest outbounds do NOT get marks.
+// Validates fwmark.mask and assigns sequential fwmarks to interface, table,
+// and urltest outbounds. Blackhole and ignore outbounds do not get marks.
 // Throws ConfigError if mask is invalid or too many outbounds for the mark space.
 OutboundMarkMap allocate_outbound_marks(const FwmarkConfig& fwmark_cfg,
                                          const std::vector<Outbound>& outbounds);

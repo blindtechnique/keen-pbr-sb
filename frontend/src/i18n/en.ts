@@ -139,6 +139,8 @@ export const enTranslation = {
     signOut: "Sign out",
     invalidCredentials: "Invalid username or password.",
     unavailable: "The authentication service is unavailable.",
+    unavailableTitle: "Unable to verify access",
+    retry: "Try again",
     credentialsHint:
       "Credentials are configured by the keen-pbr-sb installer. This is a separate local account; see README for details.",
   },
@@ -323,6 +325,13 @@ export const enTranslation = {
     latencyAge: "{{seconds}}s ago",
     latencyRefresh: "Measure now",
     latencyRefreshFailed: "Could not start the check",
+    traffic: {
+      receive: "Receive",
+      transmit: "Transmit",
+      received: "Received",
+      transmitted: "Sent",
+      chart: "Receive and transmit chart",
+    },
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
       title: "sing-box is not installed",
@@ -344,6 +353,12 @@ export const enTranslation = {
     interface: "Interface",
     server: "Server",
     connection: "Connection",
+    technicalTag: "Technical tag",
+    pathConfidence: "Detection source",
+    details: {
+      show: "Show details",
+      hide: "Hide details",
+    },
     loopProtection: {
       action: "Exclude server from tunnel",
       confirm:
@@ -391,6 +406,26 @@ export const enTranslation = {
       latency: "Latency",
       boundRoute: "Route",
       routeNotConfigured: "Not configured",
+      management: "Management",
+      managementReadOnly: "Read only",
+      managementUnsupported: "Not supported",
+      managementReady: "The interface is ready for safe management.",
+      managementReadinessUnavailable:
+        "The installed backend does not report management readiness yet.",
+      managementBlockers: {
+        unsupported_kind: "Editing this interface type is not supported yet",
+        unsupported_role:
+          "Server interfaces will be managed in a separate section",
+        role_unknown: "KeeneticOS did not report the interface role",
+        kernel_identity_unresolved:
+          "The KeeneticOS and Linux interface identities could not be matched safely",
+        typed_rci_unavailable: "Typed KeeneticOS commands are not enabled yet",
+        automatic_backup_unavailable:
+          "A complete restorable interface snapshot is not available yet",
+        ownership_unknown: "The interface owner has not been established",
+        optimistic_revision_unavailable:
+          "Concurrent-change protection is not enabled yet",
+      },
       unknown: "Unknown",
       unresolved: "Not resolved",
       routeNotClient:
@@ -401,6 +436,10 @@ export const enTranslation = {
         "A route can only be created while the kernel interface is present and enabled.",
       routeConfigUnavailable:
         "A route cannot be created until the current configuration is loaded.",
+      hide: "Hide from the panel",
+      restore: "Restore to the panel",
+      showHidden: "Show hidden ({{count}})",
+      hideHidden: "Stop showing hidden interfaces",
     },
     deleteTitle: "Delete tunnel or proxy?",
     deleteDescription:
@@ -422,8 +461,26 @@ export const enTranslation = {
       tag: "Tag",
       tagHint:
         "1–24 characters: start with a lowercase Latin letter, then use only a–z, 0–9 and underscore. Example: my_tunnel.",
+      displayName: "Friendly name",
+      displayNamePlaceholder: "For example, Netherlands - primary",
+      displayNameHint:
+        "Shown in the interface instead of the technical tag. The tag stays unchanged, so routes and failover keep working.",
+      displayNameInvalid:
+        "Use 1 to 80 Unicode code points and no control characters.",
+      useAliasSuggestion: "Use “{{name}}”",
+      technicalSettings: "Advanced technical settings",
+      technicalIdentityImmutable:
+        "The technical tag and interface name cannot change after creation because routes reference them.",
+      backendUpdateRequired:
+        "The installed backend does not support tunnel aliases. Install this version's IPK, then save again.",
       type: "Type",
       native: "Native interface",
+      nativeInterface: "Keenetic interface",
+      nativeInterfacePlaceholder: "Select a Keenetic interface",
+      nativeInterfaceHidden: "hidden",
+      nativeInterfaceUnavailable: "unavailable",
+      nativeInterfaceHint:
+        "Hidden interfaces remain in this list and are clearly marked. Only a client interface with a resolved system name can be routed.",
       singBox: "sing-box connection",
       singBoxLegacy: "sing-box (legacy VLESS configuration)",
       interface: "Interface name",
@@ -486,7 +543,7 @@ export const enTranslation = {
       "Routing, tunnels, and Keenetic network services in one interface.",
     openMenu: "Open menu",
     closeMenu: "Close menu",
-    hideMenu: "Hide menu",
+    hideMenu: "Collapse menu",
     showMenu: "Expand menu",
   },
   headerHealth: {
@@ -635,6 +692,7 @@ export const enTranslation = {
       },
     },
     outbounds: {
+      liveTraffic: "Active tunnel and proxy traffic",
       summary: {
         tunnels: "Into tunnels - {{count}} lists",
         direct: "Direct - {{count}}",
@@ -644,6 +702,8 @@ export const enTranslation = {
       idle: "Unused: {{names}} - all healthy",
       hint: {
         table: "Traffic goes straight through the provider, past the tunnels",
+        tableTunnel:
+          "Traffic follows a {{protocol}} tunnel or proxy routing table",
         blackhole: "Connections are not let out",
         ignore: "Traffic passes without changing its route",
         groupVia: "Going through {{active}}, {{backup}} on standby",
@@ -825,6 +885,7 @@ export const enTranslation = {
   },
   pages: {
     catalog: {
+      routeRuleName: "Catalog: {{count}} lists",
       title: "List catalogue",
       description:
         "Ready-made sets of domains and rules. Pick the ones you want and say where their traffic should go.",
@@ -902,6 +963,31 @@ export const enTranslation = {
           "Normal is enough day to day. The detailed levels are for investigating a problem and grow the file noticeably.",
         pathHint:
           "File: /opt/var/log/keen-pbr.log. A new one starts at one megabyte and the previous is kept alongside.",
+        viewer: {
+          open: "Open log",
+          title: "keen-pbr-sb log",
+          description:
+            "The latest service log lines. Viewing them does not change the router.",
+          ariaLabel: "keen-pbr-sb log contents",
+          refresh: "Refresh",
+          refreshing: "Refreshing…",
+          loading: "Loading log…",
+          empty: "The log is empty.",
+          failed: "Could not read the log",
+        },
+        diagnostics: {
+          download: "Download diagnostics",
+          downloading: "Collecting diagnostics…",
+          failed: "Could not collect diagnostics",
+          title: "Diagnostics file",
+          description:
+            "The file includes technical router and service details, route and tunnel state, and the latest log lines.",
+          trustWarning:
+            "Nothing is uploaded: the file is downloaded only to this computer. Share it only with someone you trust because logs may contain server addresses and device names.",
+          includeLists:
+            "Include list contents and subscription URLs (hidden by default)",
+          confirm: "Download file",
+        },
         levels: {
           error: "Errors only",
           warn: "Errors and warnings",
@@ -1100,7 +1186,7 @@ export const enTranslation = {
         items: {
           serverPrefix: "DNS server",
           serverSuffix: "will be deleted.",
-          dnsRule: "DNS rule #{{number}} will be deleted.",
+          dnsRule: "DNS rule “{{name}}” will be deleted.",
           fallback: "Fallback DNS will be changed.",
         },
       },
@@ -1127,9 +1213,24 @@ export const enTranslation = {
       description:
         "This server will be available in your DNS rules and as a fallback.",
       cardDescription:
-        "Choose the DNS server type and an optional route for its queries.",
+        "Choose a ready-made provider or enter your own DNS server address.",
       editCardTitle: "Edit {{tag}}",
+      presets: {
+        label: "DNS provider",
+        custom: "Custom server",
+        includeBackup: "Add the backup server",
+        includeBackupHint:
+          "A second entry using {{address}} will be created in the same change.",
+        backupDisplayName: "{{name}} - backup",
+        saveCustom: "Save as a custom template",
+        saveCustomHint:
+          "The template is stored in the keen-pbr-sb configuration and included in backups.",
+      },
       fields: {
+        displayName: "Name",
+        displayNamePlaceholder: "For example, Home DNS",
+        displayNameHint:
+          "This name is shown in the interface. The technical identifier is generated automatically.",
         tag: "Name",
         tagHint: "A short name for this server, used in DNS rules.",
         type: "DNS type",
@@ -1140,6 +1241,8 @@ export const enTranslation = {
           static: "Plaintext DNS",
         },
         keeneticNotice: {
+          legacy:
+            "This is an existing Keenetic built-in DNS entry. It is preserved unchanged for compatibility.",
           description:
             "Configure DNS servers in the Keenetic web interface for this mode.",
           openLink: "Go to settings",
@@ -1152,6 +1255,10 @@ export const enTranslation = {
         addressPlaceholder: "1.1.1.1 or [2606:4700::1111]:53",
         addressHint:
           "The server's IP address, e.g. `1.1.1.1` or `[2606:4700::1111]:53`.",
+        secondaryAddress: "Template backup address",
+        secondaryAddressPlaceholder: "For example, 1.0.0.1",
+        secondaryAddressHint:
+          "Optional IPv4 address. It can be created as a backup DNS server in the same change.",
         detour: "Make requests via route",
         detourEmpty: "Not selected",
         detourPlaceholder: "Optional route tag",
@@ -1159,12 +1266,18 @@ export const enTranslation = {
           "Optional: send DNS queries for this server through a specific route (e.g. a VPN).",
       },
       validation: {
+        displayNameRequired: "Enter a readable DNS server name.",
+        displayNameTooLong: "The name must not exceed 80 characters.",
         tagRequired: "Name is required.",
         tagUnique: "Name must be unique.",
         typeRequired: "DNS type is required.",
         addressRequired: "Address is required.",
         addressInvalid:
           "Address must be a valid IPv4/IPv6 value with an optional port.",
+        templateAddressInvalid:
+          "A saved template requires a valid IPv4 address without a port.",
+        templateInvalid:
+          "The template could not be saved. Check its name, IPv4 addresses, and the number of saved templates.",
       },
       actions: {
         create: "Create DNS server",
@@ -1218,6 +1331,7 @@ export const enTranslation = {
     routingRuleUpsert: {
       createTitle: "Create routing rule",
       editTitle: "Edit routing rule",
+      editCardTitle: "Edit {{name}}",
       description: "This rule directs matching traffic to the specified route.",
       cardDescription:
         "Choose lists and a route, then optionally narrow by protocol, ports, and addresses.",
@@ -1236,6 +1350,11 @@ export const enTranslation = {
         back: "Back to routing rules",
       },
       validation: {
+        displayNameRequired: "Enter a readable rule name.",
+        displayNameTooLong: "The name must not exceed 80 characters.",
+        technicalIdRequired: "Technical ID is required.",
+        duplicateTechnicalId:
+          'A rule with technical ID "{{id}}" already exists.',
         atLeastOneCondition:
           "Specify at least one condition: list, DSCP, source/destination address, or source/destination port.",
         dscpRange: "DSCP must be an integer between 1 and 63.",
@@ -1243,6 +1362,12 @@ export const enTranslation = {
       },
       actions: { create: "Create rule", save: "Save rule" },
       fields: {
+        displayName: "Name",
+        displayNameHint:
+          "A readable rule name shown throughout the interface.",
+        technicalId: "Technical ID",
+        technicalIdHint:
+          "A stable internal identifier. It is generated automatically and only needs manual control for exact integrations.",
         lists: "Lists",
         listsPlaceholderDescription:
           "Add one or more configured list names to match for this rule.",
@@ -1326,7 +1451,7 @@ export const enTranslation = {
           outboundSuffix: "will be deleted.",
           dependentOutboundPrefix: "Dependent failover target",
           dependentOutboundSuffix: "will be deleted.",
-          routingRule: "Routing rule #{{number}} will be removed.",
+          routingRule: "Routing rule “{{name}}” will be removed.",
           ruleDetail: "{{label}}: {{value}}",
           dnsDetour: 'DNS server "{{server}}" will be changed.',
           urltestGroupChanged:
@@ -1383,7 +1508,13 @@ export const enTranslation = {
           "No additional fields are required for this type beyond the route tag.",
       },
       fields: {
-        tag: "Name",
+        displayName: "Name",
+        displayNameHint:
+          "A readable route or failover group name shown throughout the interface.",
+        technicalId: "Technical ID",
+        technicalIdHint:
+          "A stable internal identifier used by rules and references. It is generated automatically.",
+        tag: "Technical ID",
         tagHint:
           "A unique name for this route. Referenced in traffic rules and failover groups.",
         type: "Type",
@@ -1431,6 +1562,9 @@ export const enTranslation = {
         groupTitle: "Group {{index}}",
         groupDescription:
           "Priority {{index}} - higher priority groups are preferred.",
+        groupWeight: "Group weight",
+        groupWeightHint:
+          "Lower weights have higher priority. Leave empty to use the default weight of 1.",
         interfaceOutbounds: "Interface routes",
         addOutbound: "Add route",
         noInterfaceOutbounds: "No interface routes found.",
@@ -1451,11 +1585,25 @@ export const enTranslation = {
           priority:
             "Always uses the first healthy route in the first healthy group and returns to it after recovery.",
         },
+        conntrackOnSwitch: "Established connections on switch",
+        conntrackOnSwitchOptions: {
+          preserve: "Keep on the previous route",
+          delete: "Reconnect through the new route",
+        },
+        conntrackOnSwitchHints: {
+          preserve:
+            "Existing flows stay on their original path while new flows use the selected route. This is the safest default.",
+          delete:
+            "After a successful switch, only flows owned by this group are removed so applications reconnect through the new route.",
+        },
         probeUrl: "Probe URL",
         probeUrlHint:
           "The service fetches this URL at the configured interval to verify the interface is alive and measure latency.",
         interval: "Interval (ms)",
         intervalHint: "How often to request the Probe URL (in milliseconds).",
+        probeTimeout: "Probe timeout (ms)",
+        probeTimeoutHint:
+          "Maximum time to wait for one probe attempt to complete.",
         tolerance: "Tolerance (ms)",
         toleranceHint:
           "Do not switch routes unless the latency difference exceeds this value. Prevents flapping.",
@@ -1494,6 +1642,8 @@ export const enTranslation = {
         },
       },
       validation: {
+        displayNameRequired: "Enter a readable route name.",
+        displayNameTooLong: "The name must not exceed 80 characters.",
         tagRequired: "Tag is required.",
         duplicateTag: 'Route tag "{{tag}}" already exists.',
         missingReference:
@@ -1543,6 +1693,7 @@ export const enTranslation = {
           "No rules yet - add a rule to route DNS lookups for specific lists through a chosen server.",
       },
       headers: {
+        name: "Name",
         criteria: "Match",
         serverTag: "DNS server",
         allowDomainRebinding: "Domain rebinding",
@@ -1559,11 +1710,18 @@ export const enTranslation = {
     dnsRuleUpsert: {
       createTitle: "Create DNS rule",
       editTitle: "Edit DNS rule",
+      editCardTitle: "Edit {{name}}",
       description:
         "This rule defines which DNS server to use for domains in a specific list.",
       cardDescription: "Set the list names and DNS server for this rule.",
       messages: { saved: "DNS rule staged. Apply new config to persist it." },
       validation: {
+        displayNameRequired: "Enter a readable DNS rule name.",
+        displayNameTooLong: "The name must not exceed 80 characters.",
+        technicalIdRequired: "Technical ID is required.",
+        duplicateTechnicalId:
+          'A DNS rule with technical ID "{{id}}" already exists.',
+        duplicateId: "DNS rule technical IDs must be unique.",
         notFound: "The requested DNS rule was not found.",
         fixErrors: "Fix validation errors before saving.",
         serverRequired: "Rule must reference an existing DNS server.",
@@ -1579,6 +1737,12 @@ export const enTranslation = {
       },
       actions: { create: "Create rule", save: "Save rule" },
       fields: {
+        displayName: "Name",
+        displayNameHint:
+          "A readable DNS rule name shown throughout the interface.",
+        technicalId: "Technical ID",
+        technicalIdHint:
+          "A stable internal identifier. It is generated automatically and only needs manual control for exact integrations.",
         serverTag: "DNS server",
         selectServer: "Select DNS server",
         dnsServers: "DNS servers",
@@ -1628,10 +1792,10 @@ export const enTranslation = {
         items: {
           listPrefix: "List",
           listSuffix: "will be deleted.",
-          routeRuleRemoved: "Routing rule #{{number}} will be deleted.",
-          routeRuleUpdated: "Routing rule #{{number}} will be changed.",
-          dnsRuleRemoved: "DNS rule #{{number}} will be deleted.",
-          dnsRuleUpdated: "DNS rule #{{number}} will be changed.",
+          routeRuleRemoved: "Routing rule “{{name}}” will be deleted.",
+          routeRuleUpdated: "Routing rule “{{name}}” will be changed.",
+          dnsRuleRemoved: "DNS rule “{{name}}” will be deleted.",
+          dnsRuleUpdated: "DNS rule “{{name}}” will be changed.",
         },
       },
       bulk: {
@@ -1703,7 +1867,7 @@ export const enTranslation = {
       cardDescription:
         "Review the list source, TTL, and matching entries before saving.",
       simpleCardDescription:
-        "Enter a display name, technical ID, and list source. TTL and download options stay in the advanced editor.",
+        "Enter a readable name and choose the list source. The technical ID is generated automatically.",
       messages: {
         created: "List staged. Apply new config to persist it.",
         updated: "List changes staged. Apply new config to persist them.",
@@ -1722,7 +1886,7 @@ export const enTranslation = {
       common: {
         title: "List settings",
         description:
-          "Set a readable display name and stable technical ID before choosing the source.",
+          "Set a readable name and choose the source. The internal identifier is generated automatically.",
       },
       sourceSwitcher: {
         title: "Source type",
@@ -1774,7 +1938,7 @@ export const enTranslation = {
       fields: {
         displayName: "Display name",
         displayNameHint:
-          "A readable name shown in the interface. Unicode is supported; this field is optional.",
+          "A readable list name shown throughout the interface.",
         technicalId: "Technical ID",
         technicalIdCreateHint:
           "Stable identifier used in rules and references: lowercase Latin letters, digits, and underscores.",
@@ -1804,6 +1968,8 @@ export const enTranslation = {
           "IP addresses or CIDR ranges, one per line. E.g. `93.184.216.34`, `10.0.0.0/8`.",
       },
       validation: {
+        displayNameRequired: "Enter a readable list name.",
+        displayNameTooLong: "The name must not exceed 80 characters.",
         sourceRequired: "Fill in the selected source so the list can be used.",
         nameRequired: "Technical ID is required.",
         duplicateName: "A list with this technical ID already exists.",

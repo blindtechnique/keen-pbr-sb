@@ -10,6 +10,7 @@ const STATUS_EVENT_NAMES = [
   "service",
   "outbounds",
   "interfaces",
+  "interface_traffic",
   "connections",
 ] as const
 

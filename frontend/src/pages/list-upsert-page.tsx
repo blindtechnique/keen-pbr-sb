@@ -67,10 +67,12 @@ import { cn } from "@/lib/utils"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { makeTechnicalId } from "@/lib/technical-id"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   NO_DNS_RULE,
   buildUpdatedConfigForListUpsert,
+  createListDraft,
   getDraftFromMapEntry,
   normalizeListDraftForComparison,
   normalizeQuickSetupForComparison,
@@ -261,7 +263,14 @@ function ListForm({
   const dnsServerTags = (loadedConfig.dns?.servers ?? []).map(
     (server) => server.tag
   )
-  const [baselineDraft] = useState(draft)
+  const [baselineDraft] = useState<ListDraft>(() => {
+    if (mode !== "create" || draft.name.trim()) {
+      return draft
+    }
+    return { ...createListDraft(), ...draft }
+  })
+  const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
+    useState(false)
   const [initialQuickSetup] = useState<QuickSetup>(() => ({
     createRouteRule: false,
     routeOutbound: "",
@@ -286,11 +295,53 @@ function ListForm({
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
+        const displayNameError = getDisplayNameError(value.displayName, t)
+        if (displayNameError) {
+          setFormServerErrors(form, {
+            fields: {
+              [LIST_FIELD_NAMES.displayName]: displayNameError,
+            },
+          })
+          return {
+            fields: {
+              [LIST_FIELD_NAMES.displayName]: displayNameError,
+            },
+          }
+        }
+
+        const valueToPersist =
+          mode === "create" && !value.name.trim()
+            ? {
+                ...value,
+                name: makeTechnicalId(value.displayName, existingListNames, {
+                  prefix: "list",
+                }),
+              }
+            : value
+        const nameError = getListNameError(
+          valueToPersist.name,
+          existingListNames,
+          isCreate ? undefined : draft.name,
+          t
+        )
+        if (nameError) {
+          setFormServerErrors(form, {
+            fields: {
+              [LIST_FIELD_NAMES.name]: nameError,
+            },
+          })
+          return {
+            fields: {
+              [LIST_FIELD_NAMES.name]: nameError,
+            },
+          }
+        }
+
         if (
           presentation === "dialog" &&
           mode === "create" &&
           !activeSourceGroups.some((group) =>
-            isSourceGroupPopulated(group, value)
+            isSourceGroupPopulated(group, valueToPersist)
           )
         ) {
           toast.error(t("pages.listUpsert.validation.sourceRequired"), {
@@ -321,7 +372,7 @@ function ListForm({
         const updatedConfig = buildUpdatedConfigForListUpsert(
           loadedConfig,
           mode,
-          value,
+          valueToPersist,
           listId,
           mode === "create" ? quickSetup : undefined,
           mode === "edit" ? dnsServerForList : undefined
@@ -347,7 +398,10 @@ function ListForm({
             error: apiError,
             fieldNames: Object.values(LIST_FIELD_NAMES),
             resolvePath: (path) =>
-              resolveListFieldPath(path, value.name || baselineDraft.name),
+              resolveListFieldPath(
+                path,
+                valueToPersist.name || baselineDraft.name
+              ),
           })
 
           setFormServerErrors(form, {
@@ -467,7 +521,13 @@ function ListForm({
         </CardHeader>
         <CardContent>
           <FieldGroup>
-            <form.Field name={LIST_FIELD_NAMES.displayName}>
+            <form.Field
+              name={LIST_FIELD_NAMES.displayName}
+              validators={{
+                onChange: ({ value }) =>
+                  getDisplayNameError(value, t) ?? undefined,
+              }}
+            >
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
 
@@ -481,9 +541,24 @@ function ListForm({
                         aria-invalid={Boolean(error)}
                         id="list-display-name"
                         onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
+                        onChange={(event) => {
+                          const nextDisplayName = event.target.value
+                          field.handleChange(nextDisplayName)
+                          if (
+                            mode === "create" &&
+                            (presentation === "dialog" ||
+                              !technicalIdManuallyEdited)
+                          ) {
+                            form.setFieldValue(
+                              LIST_FIELD_NAMES.name,
+                              makeTechnicalId(
+                                nextDisplayName,
+                                existingListNames,
+                                { prefix: "list" }
+                              )
+                            )
+                          }
+                        }}
                         value={field.state.value}
                       />
                       <FieldHint
@@ -498,50 +573,55 @@ function ListForm({
               }}
             </form.Field>
 
-            <form.Field
-              name={LIST_FIELD_NAMES.name}
-              validators={{
-                onChange: ({ value }) =>
-                  getListNameError(
-                    value,
-                    existingListNames,
-                    isCreate ? undefined : draft.name,
-                    t
-                  ) ?? undefined,
-              }}
-            >
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
+            {presentation === "page" ? (
+              <form.Field
+                name={LIST_FIELD_NAMES.name}
+                validators={{
+                  onChange: ({ value }) =>
+                    getListNameError(
+                      value,
+                      existingListNames,
+                      isCreate ? undefined : draft.name,
+                      t
+                    ) ?? undefined,
+                }}
+              >
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
 
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor="list-name">
-                      {t("pages.listUpsert.fields.technicalId")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        disabled={!isCreate}
-                        id="list-name"
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor="list-name">
+                        {t("pages.listUpsert.fields.technicalId")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          disabled={!isCreate}
+                          id="list-name"
+                          onBlur={field.handleBlur}
+                      onChange={(event) =>
+                        {
+                          setTechnicalIdManuallyEdited(true)
                           field.handleChange(event.target.value)
                         }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          isCreate
-                            ? "pages.listUpsert.fields.technicalIdCreateHint"
-                            : "pages.listUpsert.fields.technicalIdEditHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+                      }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            isCreate
+                              ? "pages.listUpsert.fields.technicalIdCreateHint"
+                              : "pages.listUpsert.fields.technicalIdEditHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+            ) : null}
 
             {presentation === "page" ? (
               <form.Field
@@ -1047,6 +1127,16 @@ function isSourceGroupPopulated(group: ListSourceGroup, draft: ListDraft) {
 function getFirstFieldError(errors: unknown[]) {
   const firstError = errors[0]
   return typeof firstError === "string" ? firstError : null
+}
+
+function getDisplayNameError(value: string, t: (key: string) => string) {
+  const normalized = value.trim()
+  if (!normalized) {
+    return t("pages.listUpsert.validation.displayNameRequired")
+  }
+  return [...normalized].length > 80
+    ? t("pages.listUpsert.validation.displayNameTooLong")
+    : null
 }
 
 function getListNameError(

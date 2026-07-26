@@ -36,14 +36,12 @@ describe("list display helpers", () => {
   })
 
   test("formats references without changing their technical ids", () => {
-    expect(getListReferenceLabel("ai_services", lists)).toBe(
-      "AI-сервисы (ai_services)"
-    )
+    expect(getListReferenceLabel("ai_services", lists)).toBe("AI-сервисы")
     expect(getListReferenceLabel("privacy", lists)).toBe("privacy")
     expect(getListReferenceLabel("missing", lists)).toBe("missing")
     expect(
       formatListReferenceLabels(["ai_services", "privacy", "missing"], lists)
-    ).toBe("AI-сервисы (ai_services), privacy, missing")
+    ).toBe("AI-сервисы, privacy, missing")
   })
 
   test("keeps duplicate display names distinguishable and deterministically sorted", () => {

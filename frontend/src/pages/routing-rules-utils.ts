@@ -2,8 +2,11 @@ import type { ApiError } from "@/api/client"
 import type { RouteRule } from "@/api/generated/model/routeRule"
 import { getApiErrorMessage as getSharedApiErrorMessage } from "@/lib/api-errors"
 import { stableJsonStringify } from "@/lib/semantic-json"
+import { makeTechnicalId } from "@/lib/technical-id"
 
 export type RouteRuleDraft = {
+  id: string
+  displayName: string
   enabled: boolean
   list: string[]
   outbound: string
@@ -17,8 +20,9 @@ export type RouteRuleDraft = {
 
 export const protoOptions = ["", "tcp", "udp", "tcp/udp"] as const
 
-export function getRoutingRuleRowId(index: number) {
-  return String(index)
+export function getRoutingRuleRowId(rule: RouteRule, index: number) {
+  const stableId = rule.id?.trim()
+  return stableId ? `id:${stableId}` : `index:${index}`
 }
 
 function normalizeRouteRulesForComparison(rules: readonly RouteRule[]) {
@@ -41,6 +45,8 @@ export function areRouteRulesSemanticallyEqual(
 }
 
 export const emptyRouteRuleDraft: RouteRuleDraft = {
+  id: "",
+  displayName: "",
   enabled: true,
   list: [],
   outbound: "",
@@ -50,6 +56,23 @@ export const emptyRouteRuleDraft: RouteRuleDraft = {
   dest_port: "",
   src_addr: "",
   dest_addr: "",
+}
+
+export function createRouteRuleDraft(
+  displayName = "",
+  existingIds: Iterable<string> = []
+): RouteRuleDraft {
+  return {
+    ...emptyRouteRuleDraft,
+    displayName,
+    id: displayName
+      ? makeTechnicalId(displayName, existingIds, { prefix: "rule" })
+      : "",
+  }
+}
+
+export function getRouteRuleDisplayName(rule: RouteRule, index: number) {
+  return rule.display_name?.trim() || `#${index + 1}`
 }
 
 export function getRuleDetails(rule: RouteRule) {
@@ -66,6 +89,8 @@ export function getRuleDetails(rule: RouteRule) {
 
 export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
   return {
+    id: rule.id ?? "",
+    displayName: rule.display_name ?? "",
     enabled: rule.enabled ?? true,
     list: rule.list ?? [],
     outbound: rule.outbound,
@@ -80,6 +105,8 @@ export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
 
 export function normalizeRouteRuleDraft(draft: RouteRuleDraft): RouteRule {
   return {
+    id: trimToUndefined(draft.id),
+    display_name: trimToUndefined(draft.displayName),
     enabled: draft.enabled,
     list: draft.list,
     outbound: draft.outbound,

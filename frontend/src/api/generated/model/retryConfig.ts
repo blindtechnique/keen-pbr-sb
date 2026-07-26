@@ -7,7 +7,15 @@
  */
 
 export interface RetryConfig {
+  /**
+     * @minimum 1
+     * @maximum 1000
+     */
   attempts?: number;
-  /** Delay between retry attempts in milliseconds. */
+  /**
+     * Delay between retry attempts in milliseconds.
+     * @minimum 0
+     * @maximum 4294967295
+     */
   interval_ms?: number;
 }

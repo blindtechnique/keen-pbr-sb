@@ -1,5 +1,64 @@
 #!/bin/sh
 
+RESCUE_STARTUP_GUARD=/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
+[ ! -x /opt/etc/init.d/S00keen-pbr-rescue ] ||
+    RESCUE_STARTUP_GUARD=/opt/etc/init.d/S00keen-pbr-rescue
+
+recovery_state_present_or_unsafe() {
+    [ -L /opt/var/lib/keen-pbr/rescue ] ||
+    { [ -e /opt/var/lib/keen-pbr/rescue ] &&
+      [ ! -d /opt/var/lib/keen-pbr/rescue ]; } ||
+    [ -L /opt/var/lib/keen-pbr/recovery ] ||
+    { [ -e /opt/var/lib/keen-pbr/recovery ] &&
+      [ ! -d /opt/var/lib/keen-pbr/recovery ]; } ||
+    [ -L /opt/var/lib/keen-pbr/recovery/config-save ] ||
+    { [ -e /opt/var/lib/keen-pbr/recovery/config-save ] &&
+      [ ! -d /opt/var/lib/keen-pbr/recovery/config-save ]; } ||
+    [ -L /opt/var/lib/keen-pbr/recovery/backup-restore ] ||
+    { [ -e /opt/var/lib/keen-pbr/recovery/backup-restore ] &&
+      [ ! -d /opt/var/lib/keen-pbr/recovery/backup-restore ]; } ||
+    [ -e /opt/var/lib/keen-pbr/rescue/pending ] ||
+    [ -L /opt/var/lib/keen-pbr/rescue/pending ] ||
+    [ -e /opt/var/lib/keen-pbr/rescue/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/rescue/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/config-save/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/config-save/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/backup-restore/UNKNOWN ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/backup-restore/UNKNOWN ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/config-save/active.json ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/config-save/active.json ] ||
+    [ -e /opt/var/lib/keen-pbr/recovery/backup-restore/active.json ] ||
+    [ -L /opt/var/lib/keen-pbr/recovery/backup-restore/active.json ]
+}
+
+run_recovery_guard() {
+    action=$1
+    if [ -x "$RESCUE_STARTUP_GUARD" ]; then
+        "$RESCUE_STARTUP_GUARD" "$action"
+        return $?
+    fi
+    if recovery_state_present_or_unsafe; then
+        echo "keen-pbr rescue guard is unavailable; refusing transport-manager startup" >&2
+        return 1
+    fi
+    return 0
+}
+
+case "${1:-}" in
+    restart|restartall)
+        "$0" stop || exit 1
+        set -- start
+        ;;
+esac
+
+case "${1:-}" in
+    start)
+        run_recovery_guard start || exit 1
+        ;;
+esac
+
 ENABLED=yes
 PROCS=transport-manager
 ARGS="-config /opt/etc/keen-pbr/transports.json"

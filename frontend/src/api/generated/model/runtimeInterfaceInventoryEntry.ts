@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { RuntimeInterfaceInventoryStatus } from './runtimeInterfaceInventoryStatus';
+import type { RuntimeInterfaceTraffic } from './runtimeInterfaceTraffic';
 
 export interface RuntimeInterfaceInventoryEntry {
   /** System interface name. */
@@ -21,4 +22,5 @@ export interface RuntimeInterfaceInventoryEntry {
   ipv4_addresses?: string[];
   /** Best-effort IPv6 addresses in CIDR form. */
   ipv6_addresses?: string[];
+  traffic?: RuntimeInterfaceTraffic;
 }

@@ -1,5 +1,4 @@
-import { ExternalLink } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
@@ -7,8 +6,9 @@ import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsServer } from "@/api/generated/model/dnsServer"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
+import type { PlainDnsTemplate } from "@/api/generated/model/plainDnsTemplate"
 import { usePostConfigMutation } from "@/api/mutations"
-import { useGetConfig, useGetHealthService } from "@/api/queries"
+import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import {
   Field,
@@ -27,14 +27,19 @@ import { ServerValidationAlert } from "@/components/shared/server-validation-ale
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+  DnsPresetPicker,
+} from "@/components/dns/dns-preset-picker"
+import {
+  findSavedDnsTemplate,
+  type DnsPresetSelection,
+} from "@/components/dns/dns-preset-selection"
+import {
+  findDnsPresetByAddress,
+  getDnsPreset,
+  type DnsPresetId,
+} from "@/data/dns-presets"
 import i18n from "@/i18n"
 import {
   applyFormApiErrors,
@@ -43,17 +48,21 @@ import {
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { makeTechnicalId } from "@/lib/technical-id"
 import {
   buildUpdatedConfigForDnsServerUpsert,
   getDnsServerDraft,
   normalizeDnsAddress,
+  normalizePlainDnsTemplateAddress,
   normalizeDnsServerDraftForComparison,
+  withSavedPlainDnsTemplate,
   type DnsServerDraft,
 } from "@/pages/dns-server-upsert-utils"
 import { useForm } from "@tanstack/react-form"
 import { useStore } from "@tanstack/react-store"
 
 const DNS_SERVER_FIELD_NAMES = {
+  displayName: "displayName",
   tag: "tag",
   type: "type",
   address: "address",
@@ -76,23 +85,18 @@ export function DnsServerUpsertPage({
   const [, navigate] = useLocation()
   const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
-  const serviceHealthQuery = useGetHealthService()
   const config = selectConfig(configQuery.data)
   const dnsServers = config?.dns?.servers ?? []
-  const serviceHealth =
-    serviceHealthQuery.data?.status === 200
-      ? serviceHealthQuery.data.data
-      : undefined
-  const supportsKeeneticDns = serviceHealth?.os_type === "keenetic"
 
   const existingServer =
     mode === "edit"
       ? dnsServers.find((server) => server.tag === serverTag)
       : undefined
-  const initialDraft = useMemo(
-    () => getDnsServerDraft(existingServer),
-    [existingServer]
-  )
+  const existingDisplayName =
+    existingServer?.display_name ??
+    findDnsPresetByAddress(existingServer?.address)?.name ??
+    existingServer?.tag
+  const initialDraft = getDnsServerDraft(existingServer)
 
   if (mode === "edit" && !existingServer && !configQuery.isLoading) {
     return (
@@ -102,6 +106,7 @@ export function DnsServerUpsertPage({
         description={t("pages.dnsServerUpsert.missingDescription")}
         onClose={() => navigate("/dns-servers")}
         presentation={presentation}
+        showAdvancedEditor={false}
         title={t("pages.dnsServerUpsert.editTitle")}
       >
         <div className="flex justify-end">
@@ -120,13 +125,15 @@ export function DnsServerUpsertPage({
         mode === "create"
           ? t("pages.dnsServerUpsert.createTitle")
           : t("pages.dnsServerUpsert.editCardTitle", {
-              tag: existingServer?.tag ?? t("pages.dnsServerUpsert.editTitle"),
+              tag:
+                existingDisplayName ?? t("pages.dnsServerUpsert.editTitle"),
             })
       }
       description={t("pages.dnsServerUpsert.description")}
       dirty={dirty}
       onClose={() => navigate("/dns-servers")}
       presentation={presentation}
+      showAdvancedEditor={false}
       title={
         mode === "create"
           ? t("pages.dnsServerUpsert.createTitle")
@@ -140,9 +147,7 @@ export function DnsServerUpsertPage({
         mode={mode}
         onDirtyChange={setDirty}
         onSaved={() => navigate("/dns-servers")}
-        presentation={presentation}
         serverTag={serverTag}
-        supportsKeeneticDns={supportsKeeneticDns}
       />
     </UpsertPage>
   )
@@ -155,8 +160,6 @@ function DnsServerForm({
   initialDraft,
   onDirtyChange,
   onSaved,
-  presentation,
-  supportsKeeneticDns,
 }: {
   mode: "create" | "edit"
   serverTag?: string
@@ -164,40 +167,90 @@ function DnsServerForm({
   initialDraft: DnsServerDraft
   onDirtyChange: (dirty: boolean) => void
   onSaved: () => void
-  presentation: UpsertPagePresentation
-  supportsKeeneticDns: boolean
 }) {
   const { t } = useTranslation()
   const close = useUpsertPageClose()
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null)
   const [baselineDraft] = useState(initialDraft)
-  const showTypeSelector =
-    supportsKeeneticDns || baselineDraft.type === DnsServerType.keenetic
-  const dnsTypeSelectItems = [
-    {
-      value: DnsServerType.static,
-      label: t("pages.dnsServerUpsert.fields.typeOptions.static"),
-    },
-    {
-      value: DnsServerType.keenetic,
-      label: t("pages.dnsServerUpsert.fields.typeOptions.keenetic"),
-    },
-  ]
+  const initialPreset = findDnsPresetByAddress(initialDraft.address)
+  const [presetSelection, setPresetSelection] =
+    useState<DnsPresetSelection>(
+      initialPreset?.id ?? "custom"
+    )
+  const [includeBackup, setIncludeBackup] = useState(
+    mode === "create" && Boolean(initialPreset)
+  )
+  const [customSecondaryAddress, setCustomSecondaryAddress] = useState("")
+  const [saveCustomTemplate, setSaveCustomTemplate] = useState(false)
+  const configServers = config?.dns?.servers ?? []
+  const savedTemplates = config?.ui_preferences?.plain_dns_templates ?? []
+  const normalizedCustomSecondaryAddress =
+    normalizePlainDnsTemplateAddress(customSecondaryAddress)
+  const customSecondaryInvalid =
+    customSecondaryAddress.trim().length > 0 &&
+    !normalizedCustomSecondaryAddress
   const form = useForm({
     defaultValues: baselineDraft,
     onSubmit: ({ value }) => {
       if (!config) {
         return
       }
+      if (presetSelection === "custom" && customSecondaryInvalid) {
+        setApiErrorMessage(
+          t("pages.dnsServerUpsert.validation.templateAddressInvalid")
+        )
+        return
+      }
 
-      const updatedConfig = buildUpdatedConfigForDnsServerUpsert(
+      const selectedPreset = resolveDnsTemplateSelection(
+        presetSelection,
+        savedTemplates
+      )
+      const backupAddress =
+        presetSelection === "custom"
+          ? normalizedCustomSecondaryAddress
+          : selectedPreset?.secondaryAddress
+      const backupDraft =
+        mode === "create" && includeBackup && backupAddress
+          ? {
+              displayName: t(
+                "pages.dnsServerUpsert.presets.backupDisplayName",
+                { name: value.displayName.trim() }
+              ),
+              tag: makeTechnicalId(
+                `${value.tag}_backup`,
+                configServers.map((server) => server.tag),
+                { prefix: "dns" }
+              ),
+              address: backupAddress,
+            }
+          : undefined
+      let updatedConfig = buildUpdatedConfigForDnsServerUpsert(
         config,
         mode,
         value,
-        serverTag
+        serverTag,
+        backupDraft
       )
       if (!updatedConfig) {
         return
+      }
+      if (
+        mode === "create" &&
+        presetSelection === "custom" &&
+        saveCustomTemplate
+      ) {
+        updatedConfig = withSavedPlainDnsTemplate(updatedConfig, {
+          name: value.displayName,
+          primary_ipv4: value.address,
+          ...(backupAddress ? { secondary_ipv4: backupAddress } : {}),
+        })
+        if (!updatedConfig) {
+          setApiErrorMessage(
+            t("pages.dnsServerUpsert.validation.templateInvalid")
+          )
+          return
+        }
       }
 
       setApiErrorMessage(null)
@@ -214,12 +267,16 @@ function DnsServerForm({
           | undefined
       )?.unmapped ?? []
   )
-  const isDirty = useStore(form.store, (state) =>
+  const formIsDirty = useStore(form.store, (state) =>
     isSemanticallyDirty(state.values, baselineDraft, {
       equals: semanticJsonEqual,
       normalize: normalizeDnsServerDraftForComparison,
     })
   )
+  const isDirty =
+    formIsDirty ||
+    customSecondaryAddress.trim().length > 0 ||
+    saveCustomTemplate
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -249,7 +306,49 @@ function DnsServerForm({
     onDirtyChange(isDirty)
   }, [isDirty, onDirtyChange])
 
-  const configServers = config?.dns?.servers ?? []
+  const selectPreset = (selection: DnsPresetSelection) => {
+    setPresetSelection(selection)
+    form.setFieldValue(DNS_SERVER_FIELD_NAMES.type, DnsServerType.static)
+
+    if (selection === "custom") {
+      setIncludeBackup(false)
+      setCustomSecondaryAddress("")
+      setSaveCustomTemplate(false)
+      form.setFieldValue(DNS_SERVER_FIELD_NAMES.displayName, "")
+      form.setFieldValue(DNS_SERVER_FIELD_NAMES.address, "")
+      form.setFieldValue(
+        DNS_SERVER_FIELD_NAMES.tag,
+        makeTechnicalId(
+          "dns",
+          configServers.map((server) => server.tag),
+          { prefix: "dns" }
+        )
+      )
+      return
+    }
+
+    const preset = resolveDnsTemplateSelection(selection, savedTemplates)
+    if (!preset) {
+      return
+    }
+
+    setIncludeBackup(Boolean(preset.secondaryAddress))
+    setCustomSecondaryAddress("")
+    setSaveCustomTemplate(false)
+    form.setFieldValue(
+      DNS_SERVER_FIELD_NAMES.displayName,
+      preset.name
+    )
+    form.setFieldValue(DNS_SERVER_FIELD_NAMES.address, preset.primaryAddress)
+    form.setFieldValue(
+      DNS_SERVER_FIELD_NAMES.tag,
+      makeTechnicalId(
+        preset.technicalSeed,
+        configServers.map((server) => server.tag),
+        { prefix: "dns" }
+      )
+    )
+  }
 
   return (
     <form
@@ -262,6 +361,55 @@ function DnsServerForm({
     >
       <FieldGroup>
         <form.Field
+          name={DNS_SERVER_FIELD_NAMES.displayName}
+          validators={{
+            onChange: ({ value }) => getDisplayNameError(value),
+          }}
+        >
+          {(field) => {
+            const error = getFirstFieldError(field.state.meta.errors)
+            return (
+              <Field invalid={Boolean(error)}>
+                <FieldLabel htmlFor="dns-server-display-name">
+                  {t("pages.dnsServerUpsert.fields.displayName")}
+                </FieldLabel>
+                <FieldContent>
+                  <Input
+                    aria-invalid={Boolean(error)}
+                    id="dns-server-display-name"
+                    maxLength={80}
+                    onBlur={field.handleBlur}
+                    onChange={(event) => {
+                      field.handleChange(event.target.value)
+                      if (mode === "create") {
+                        form.setFieldValue(
+                          DNS_SERVER_FIELD_NAMES.tag,
+                          makeTechnicalId(
+                            event.target.value,
+                            configServers.map((server) => server.tag),
+                            { prefix: "dns" }
+                          )
+                        )
+                      }
+                    }}
+                    placeholder={t(
+                      "pages.dnsServerUpsert.fields.displayNamePlaceholder"
+                    )}
+                    value={field.state.value}
+                  />
+                  <FieldHint
+                    description={t(
+                      "pages.dnsServerUpsert.fields.displayNameHint"
+                    )}
+                    error={error}
+                  />
+                </FieldContent>
+              </Field>
+            )
+          }}
+        </form.Field>
+
+        <form.Field
           name={DNS_SERVER_FIELD_NAMES.tag}
           validators={{
             onChange: ({ value }) =>
@@ -273,86 +421,26 @@ function DnsServerForm({
           }}
         >
           {(field) => {
-            const error = getFirstFieldError(field.state.meta.errors)
-
             return (
-              <Field invalid={Boolean(error)}>
-                <FieldLabel htmlFor="dns-server-tag">
-                  {t("pages.dnsServerUpsert.fields.tag")}
-                </FieldLabel>
-                <FieldContent>
-                  <Input
-                    aria-invalid={Boolean(error)}
-                    id="dns-server-tag"
-                    onBlur={field.handleBlur}
-                    onChange={(event) => field.handleChange(event.target.value)}
-                    readOnly={mode === "edit"}
-                    value={field.state.value}
-                  />
-                  <FieldHint
-                    description={t("pages.dnsServerUpsert.fields.tagHint")}
-                    error={error}
-                  />
-                </FieldContent>
-              </Field>
+              <input
+                name={field.name}
+                readOnly
+                type="hidden"
+                value={field.state.value}
+              />
             )
           }}
         </form.Field>
 
-        <form.Field
-          name={DNS_SERVER_FIELD_NAMES.type}
-          validators={{
-            onChange: ({ value }) => getDnsTypeError(value) ?? undefined,
-          }}
-        >
-          {(field) => {
-            const error = getFirstFieldError(field.state.meta.errors)
-
-            if (!showTypeSelector) {
-              return null
-            }
-
-            return (
-              <Field invalid={Boolean(error)}>
-                <FieldLabel>
-                  {t("pages.dnsServerUpsert.fields.type")}
-                </FieldLabel>
-                <FieldContent>
-                  <Select
-                    items={dnsTypeSelectItems}
-                    onValueChange={(value) =>
-                      field.handleChange(
-                        (value ??
-                          DnsServerType.static) as DnsServerDraft["type"]
-                      )
-                    }
-                    value={field.state.value}
-                  >
-                    <SelectTrigger aria-invalid={Boolean(error)}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        <SelectItem value={DnsServerType.static}>
-                          {t("pages.dnsServerUpsert.fields.typeOptions.static")}
-                        </SelectItem>
-                        <SelectItem value={DnsServerType.keenetic}>
-                          {t(
-                            "pages.dnsServerUpsert.fields.typeOptions.keenetic"
-                          )}
-                        </SelectItem>
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldHint
-                    description={t("pages.dnsServerUpsert.fields.typeHint")}
-                    error={error}
-                  />
-                </FieldContent>
-              </Field>
-            )
-          }}
-        </form.Field>
+        {mode === "create" ? (
+          <DnsPresetPicker
+            customLabel={t("pages.dnsServerUpsert.presets.custom")}
+            label={t("pages.dnsServerUpsert.presets.label")}
+            onValueChange={selectPreset}
+            savedTemplates={savedTemplates}
+            value={presetSelection}
+          />
+        ) : null}
 
         <form.Subscribe selector={(state) => state.values.type}>
           {(type) => {
@@ -364,41 +452,10 @@ function DnsServerForm({
                   <Field>
                     <FieldContent>
                       <Alert>
-                        <AlertDescription className="space-y-2">
-                          <p className="flex flex-wrap items-center gap-2">
-                            <span>
-                              {t(
-                                "pages.dnsServerUpsert.fields.keeneticNotice.description"
-                              )}
-                            </span>
-                            <Button
-                              onClick={() =>
-                                window.open(
-                                  "http://my.keenetic.net/internet-filter/dns-configuration",
-                                  "_blank",
-                                  "noopener,noreferrer"
-                                )
-                              }
-                              size="sm"
-                              type="button"
-                              variant="outline"
-                            >
-                              {t(
-                                "pages.dnsServerUpsert.fields.keeneticNotice.openLink"
-                              )}
-                              <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
-                            </Button>
-                          </p>
-                          <p>
-                            {t(
-                              "pages.dnsServerUpsert.fields.keeneticNotice.navigation"
-                            )}
-                          </p>
-                          <p>
-                            {t(
-                              "pages.dnsServerUpsert.fields.keeneticNotice.dotDohOnly"
-                            )}
-                          </p>
+                        <AlertDescription>
+                          {t(
+                            "pages.dnsServerUpsert.fields.keeneticNotice.legacy"
+                          )}
                         </AlertDescription>
                       </Alert>
                     </FieldContent>
@@ -432,9 +489,22 @@ function DnsServerForm({
                             aria-invalid={Boolean(error)}
                             id="dns-server-address"
                             onBlur={field.handleBlur}
-                            onChange={(event) =>
+                            onChange={(event) => {
                               field.handleChange(event.target.value)
-                            }
+                              if (
+                                mode === "create" &&
+                                presetSelection === "custom"
+                              ) {
+                                form.setFieldValue(
+                                  DNS_SERVER_FIELD_NAMES.tag,
+                                  makeTechnicalId(
+                                    `dns_${event.target.value}`,
+                                    configServers.map((server) => server.tag),
+                                    { prefix: "dns" }
+                                  )
+                                )
+                              }
+                            }}
                             placeholder={t(
                               "pages.dnsServerUpsert.fields.addressPlaceholder"
                             )}
@@ -452,46 +522,144 @@ function DnsServerForm({
                   }}
                 </form.Field>
 
-                {presentation === "page" ? (
-                  <form.Field name={DNS_SERVER_FIELD_NAMES.detour}>
-                    {(field) => {
-                      if (isKeeneticDns) {
-                        return null
-                      }
-
-                      return (
-                        <Field>
-                          <FieldLabel>
-                            {t("pages.dnsServerUpsert.fields.detour")}
-                          </FieldLabel>
-                          <FieldContent>
-                            <OutboundSelect
-                              allowEmpty
-                              emptyLabel={t(
-                                "pages.dnsServerUpsert.fields.detourEmpty"
-                              )}
-                              onValueChange={field.handleChange}
-                              outbounds={config?.outbounds ?? []}
-                              placeholder={t(
-                                "pages.routingRuleUpsert.fields.selectOutbound"
-                              )}
-                              value={field.state.value}
-                            />
-                            <FieldHint
-                              description={t(
-                                "pages.dnsServerUpsert.fields.detourHint"
-                              )}
-                            />
-                          </FieldContent>
-                        </Field>
-                      )
-                    }}
-                  </form.Field>
+                {mode === "create" && presetSelection === "custom" ? (
+                  <>
+                    <Field
+                      invalid={customSecondaryInvalid}
+                    >
+                      <FieldLabel htmlFor="dns-server-secondary-address">
+                        {t(
+                          "pages.dnsServerUpsert.fields.secondaryAddress"
+                        )}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={customSecondaryInvalid}
+                          id="dns-server-secondary-address"
+                          onChange={(event) => {
+                            setCustomSecondaryAddress(event.target.value)
+                            if (!event.target.value.trim()) {
+                              setIncludeBackup(false)
+                            }
+                          }}
+                          placeholder={t(
+                            "pages.dnsServerUpsert.fields.secondaryAddressPlaceholder"
+                          )}
+                          value={customSecondaryAddress}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.dnsServerUpsert.fields.secondaryAddressHint"
+                          )}
+                          error={
+                            customSecondaryInvalid
+                              ? t(
+                                  "pages.dnsServerUpsert.validation.templateAddressInvalid"
+                                )
+                              : null
+                          }
+                        />
+                      </FieldContent>
+                    </Field>
+                    <label
+                      className="flex cursor-pointer items-start gap-3"
+                      htmlFor="dns-server-save-template"
+                    >
+                      <Checkbox
+                        checked={saveCustomTemplate}
+                        id="dns-server-save-template"
+                        onCheckedChange={(checked) =>
+                          setSaveCustomTemplate(checked === true)
+                        }
+                      />
+                      <span className="space-y-0.5">
+                        <span className="block text-sm font-medium">
+                          {t(
+                            "pages.dnsServerUpsert.presets.saveCustom"
+                          )}
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          {t(
+                            "pages.dnsServerUpsert.presets.saveCustomHint"
+                          )}
+                        </span>
+                      </span>
+                    </label>
+                  </>
                 ) : null}
+
+                <form.Field name={DNS_SERVER_FIELD_NAMES.detour}>
+                  {(field) => {
+                    if (isKeeneticDns) {
+                      return null
+                    }
+
+                    return (
+                      <Field>
+                        <FieldLabel>
+                          {t("pages.dnsServerUpsert.fields.detour")}
+                        </FieldLabel>
+                        <FieldContent>
+                          <OutboundSelect
+                            allowEmpty
+                            emptyLabel={t(
+                              "pages.dnsServerUpsert.fields.detourEmpty"
+                            )}
+                            onValueChange={field.handleChange}
+                            outbounds={config?.outbounds ?? []}
+                            placeholder={t(
+                              "pages.routingRuleUpsert.fields.selectOutbound"
+                            )}
+                            value={field.state.value}
+                          />
+                          <FieldHint
+                            description={t(
+                              "pages.dnsServerUpsert.fields.detourHint"
+                            )}
+                          />
+                        </FieldContent>
+                      </Field>
+                    )
+                  }}
+                </form.Field>
               </>
             )
           }}
         </form.Subscribe>
+
+        {mode === "create" &&
+        (presetSelection !== "custom" ||
+          customSecondaryAddress.trim().length > 0) ? (
+          <label
+            className="flex cursor-pointer items-start gap-3"
+            htmlFor="dns-server-include-backup"
+          >
+            <Checkbox
+              checked={includeBackup}
+              disabled={
+                presetSelection === "custom" && customSecondaryInvalid
+              }
+              id="dns-server-include-backup"
+              onCheckedChange={(checked) => setIncludeBackup(checked === true)}
+            />
+            <span className="space-y-0.5">
+              <span className="block text-sm font-medium">
+                {t("pages.dnsServerUpsert.presets.includeBackup")}
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {t("pages.dnsServerUpsert.presets.includeBackupHint", {
+                  address:
+                    presetSelection === "custom"
+                      ? customSecondaryAddress
+                      : resolveDnsTemplateSelection(
+                          presetSelection,
+                          savedTemplates
+                        )?.secondaryAddress,
+                })}
+              </span>
+            </span>
+          </label>
+        ) : null}
       </FieldGroup>
 
       {apiErrorMessage ? (
@@ -515,7 +683,8 @@ function DnsServerForm({
                 postConfigMutation.isPending ||
                 !config ||
                 !isDirty ||
-                !canSubmit
+                !canSubmit ||
+                customSecondaryInvalid
               }
               size="xl"
               type="submit"
@@ -529,6 +698,44 @@ function DnsServerForm({
       </div>
     </form>
   )
+}
+
+type ResolvedDnsTemplate = {
+  name: string
+  primaryAddress: string
+  secondaryAddress?: string
+  technicalSeed: string
+}
+
+function resolveDnsTemplateSelection(
+  selection: DnsPresetSelection,
+  savedTemplates: PlainDnsTemplate[]
+): ResolvedDnsTemplate | undefined {
+  if (selection === "custom") {
+    return undefined
+  }
+  if (selection.startsWith("saved:")) {
+    const template = findSavedDnsTemplate(selection, savedTemplates)
+    if (!template) {
+      return undefined
+    }
+    return {
+      name: template.name,
+      primaryAddress: template.primary_ipv4,
+      secondaryAddress: template.secondary_ipv4,
+      technicalSeed: template.name,
+    }
+  }
+
+  const preset = getDnsPreset(selection as DnsPresetId)
+  return preset
+    ? {
+        name: preset.name,
+        primaryAddress: preset.primaryAddress,
+        secondaryAddress: preset.secondaryAddress,
+        technicalSeed: preset.id,
+      }
+    : undefined
 }
 
 function getFirstFieldError(errors: unknown[]) {
@@ -554,15 +761,6 @@ function getTagError(value: string, servers: DnsServer[], editingTag?: string) {
   )
 }
 
-function getDnsTypeError(value: string) {
-  const t = i18n.t.bind(i18n)
-  if (value === DnsServerType.static || value === DnsServerType.keenetic) {
-    return undefined
-  }
-
-  return t("pages.dnsServerUpsert.validation.typeRequired")
-}
-
 function getAddressError(value: string) {
   const t = i18n.t.bind(i18n)
   if (!value.trim()) {
@@ -573,6 +771,18 @@ function getAddressError(value: string) {
     return t("pages.dnsServerUpsert.validation.addressInvalid")
   }
 
+  return undefined
+}
+
+function getDisplayNameError(value: string) {
+  const t = i18n.t.bind(i18n)
+  const normalized = value.trim()
+  if (!normalized) {
+    return t("pages.dnsServerUpsert.validation.displayNameRequired")
+  }
+  if (normalized.length > 80) {
+    return t("pages.dnsServerUpsert.validation.displayNameTooLong")
+  }
   return undefined
 }
 
@@ -592,6 +802,10 @@ function resolveDnsServerFieldPath(
 
   if (path === `dns.servers.${normalizedTag}.tag`) {
     return DNS_SERVER_FIELD_NAMES.tag
+  }
+
+  if (path === `dns.servers.${normalizedTag}.display_name`) {
+    return DNS_SERVER_FIELD_NAMES.displayName
   }
 
   if (path === `dns.servers.${normalizedTag}.type`) {

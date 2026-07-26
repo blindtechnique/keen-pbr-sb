@@ -32,10 +32,34 @@ describe("native Keenetic interfaces", () => {
       label: "Office VPN",
       logicalName: "Wireguard0",
       kernelName: "nwg0",
-      protocol: "AmneziaWG",
+      protocol: {
+        kind: "amneziawg",
+        label: "AWG",
+        evidence: "ndms-kind",
+        exact: true,
+      },
       live: false,
       connected: true,
       link: true,
+    })
+  })
+
+  test("uses the authoritative typed kind instead of an ambiguous kernel guess", () => {
+    const [mapped] = mapNativeInterfaces(
+      [
+        nativeInterface({
+          firmware_interface_name: "Wireguard2",
+          kernel_name: "nwg2",
+          kind: "wireguard",
+        }),
+      ],
+      []
+    )
+    expect(mapped.protocol).toEqual({
+      kind: "wireguard",
+      label: "WG",
+      evidence: "ndms-kind",
+      exact: true,
     })
   })
 
@@ -187,6 +211,18 @@ function nativeInterface(
       can_delete: false,
       can_hide: false,
       backup_required: true,
+    },
+    management_readiness: {
+      candidate: true,
+      identity_stable: true,
+      observed_revision: "ndms-v1-test",
+      configuration_snapshot_available: false,
+      blockers: [
+        "typed_rci_unavailable",
+        "automatic_backup_unavailable",
+        "ownership_unknown",
+        "optimistic_revision_unavailable",
+      ],
     },
     ...overrides,
   }

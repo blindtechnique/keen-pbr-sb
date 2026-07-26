@@ -2,6 +2,8 @@
 
 #include "runtime/lifecycle_operation.hpp"
 
+#include <stdexcept>
+
 using namespace keen_pbr3;
 
 TEST_CASE("lifecycle operation serializes mutations and preserves terminal state") {
@@ -47,4 +49,57 @@ TEST_CASE("lifecycle store callback runs after snapshot publication") {
         {{"stop", "Stop"}},
         operation));
     CHECK(observed);
+}
+
+TEST_CASE("lifecycle publish failure does not strand active operation") {
+    LifecycleOperationStore store;
+    LifecycleOperationCoordinator coordinator(store);
+    bool fail_once = true;
+    store.set_publish_callback([&] {
+        if (!fail_once) return;
+        fail_once = false;
+        throw std::runtime_error("injected publication failure");
+    });
+
+    LifecycleOperationSnapshot failed;
+    CHECK_THROWS_AS(
+        coordinator.begin(
+            LifecycleOperationType::ApplyConfig,
+            {{"validate", "Validate"}},
+            failed),
+        std::runtime_error);
+
+    LifecycleOperationSnapshot recovered;
+    CHECK_FALSE(coordinator.begin(
+        LifecycleOperationType::ApplyConfig,
+        {{"validate", "Validate"}},
+        recovered));
+    coordinator.finish(recovered.id);
+}
+
+TEST_CASE("lifecycle terminal publish failure releases active operation") {
+    LifecycleOperationStore store;
+    LifecycleOperationCoordinator coordinator(store);
+    LifecycleOperationSnapshot operation;
+    REQUIRE_FALSE(coordinator.begin(
+        LifecycleOperationType::ApplyConfig,
+        {{"validate", "Validate"}},
+        operation));
+
+    bool fail_once = true;
+    store.set_publish_callback([&] {
+        if (!fail_once) return;
+        fail_once = false;
+        throw std::runtime_error(
+            "injected terminal publication failure");
+    });
+    CHECK_THROWS_AS(
+        coordinator.finish(operation.id), std::runtime_error);
+
+    LifecycleOperationSnapshot recovered;
+    CHECK_FALSE(coordinator.begin(
+        LifecycleOperationType::ApplyConfig,
+        {{"validate", "Validate"}},
+        recovered));
+    coordinator.finish(recovered.id);
 }

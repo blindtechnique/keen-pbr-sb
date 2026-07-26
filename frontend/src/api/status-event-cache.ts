@@ -10,9 +10,14 @@ import {
 } from "@/api/generated/keen-api"
 import type {
   HealthResponse,
+  RuntimeInterfaceInventoryEntry,
   RuntimeInterfaceInventoryResponse,
+  RuntimeInterfaceTraffic,
+  RuntimeInterfaceTrafficSample,
+  RuntimeInterfaceTrafficUpdate,
   RuntimeOutboundsResponse,
   StatusEventInterfaces,
+  StatusEventInterfaceTraffic,
   StatusEventConnections,
   StatusEventOutbounds,
   StatusEventService,
@@ -24,7 +29,12 @@ type StatusEvent =
   | StatusEventService
   | StatusEventOutbounds
   | StatusEventInterfaces
+  | StatusEventInterfaceTraffic
   | StatusEventConnections
+
+const MAX_TRAFFIC_HISTORY_POINTS = 120
+const DEFAULT_TRAFFIC_SAMPLE_INTERVAL_MS = 2_000
+const MAX_TRAFFIC_SAMPLE_GAP_MS = 60_000
 
 function response<T>(data: T) {
   return { data, status: 200 as const, headers: new Headers() }
@@ -56,6 +66,16 @@ export function applyStatusEvent(
       getGetRuntimeInterfacesQueryKey(),
       response(data)
     )
+  const mergeInterfaceTraffic = (data: RuntimeInterfaceTrafficUpdate) =>
+    queryClient.setQueryData<getRuntimeInterfacesResponseSuccess>(
+      getGetRuntimeInterfacesQueryKey(),
+      (current) =>
+        current
+          ? response(
+              applyInterfaceTrafficUpdate(current.data, data)
+            )
+          : current
+    )
 
   switch (event?.type) {
     case "snapshot":
@@ -72,6 +92,9 @@ export function applyStatusEvent(
     case "interfaces":
       setInterfaces(event.data)
       break
+    case "interface_traffic":
+      mergeInterfaceTraffic(event.data)
+      break
     case "connections":
       void queryClient.invalidateQueries({ queryKey: ["connections"] })
       break
@@ -79,4 +102,87 @@ export function applyStatusEvent(
       return false
   }
   return true
+}
+
+export function applyInterfaceTrafficUpdate(
+  inventory: RuntimeInterfaceInventoryResponse,
+  update: RuntimeInterfaceTrafficUpdate
+): RuntimeInterfaceInventoryResponse {
+  const samples = new Map(
+    update.interfaces.map((sample) => [sample.name, sample])
+  )
+
+  return {
+    ...inventory,
+    interfaces: inventory.interfaces.map((entry) => {
+      const sample = samples.get(entry.name)
+      return sample
+        ? mergeInterfaceTrafficEntry(entry, sample, update.sampled_at_unix_ms)
+        : entry
+    }),
+  }
+}
+
+function mergeInterfaceTrafficEntry(
+  entry: RuntimeInterfaceInventoryEntry,
+  sample: RuntimeInterfaceTrafficSample,
+  sampledAtUnixMs: number
+): RuntimeInterfaceInventoryEntry {
+  if (!sample.available) {
+    const withoutTraffic = { ...entry }
+    delete withoutTraffic.traffic
+    return withoutTraffic
+  }
+  if (sample.rx_bytes === undefined || sample.tx_bytes === undefined) {
+    return entry
+  }
+
+  const previous = entry.traffic
+  const elapsedMs = trafficSampleElapsedMs(
+    previous?.sampled_at_unix_ms,
+    sampledAtUnixMs
+  )
+  const history =
+    sample.reset || !previous
+      ? []
+      : previous.history.map((point) => ({
+          ...point,
+          age_ms: point.age_ms + elapsedMs,
+        }))
+  history.push({
+    age_ms: 0,
+    rx_bits_per_second: sample.rx_bits_per_second ?? 0,
+    tx_bits_per_second: sample.tx_bits_per_second ?? 0,
+  })
+
+  const traffic: RuntimeInterfaceTraffic = {
+    sampled_at_unix_ms: sampledAtUnixMs,
+    rx_bytes: sample.rx_bytes,
+    tx_bytes: sample.tx_bytes,
+    history: history.slice(-MAX_TRAFFIC_HISTORY_POINTS),
+  }
+  if (sample.rx_bits_per_second !== undefined) {
+    traffic.rx_bits_per_second = sample.rx_bits_per_second
+  }
+  if (sample.tx_bits_per_second !== undefined) {
+    traffic.tx_bits_per_second = sample.tx_bits_per_second
+  }
+
+  return { ...entry, traffic }
+}
+
+function trafficSampleElapsedMs(
+  previousSampledAtUnixMs: number | undefined,
+  sampledAtUnixMs: number
+): number {
+  if (
+    previousSampledAtUnixMs === undefined ||
+    sampledAtUnixMs <= previousSampledAtUnixMs
+  ) {
+    return DEFAULT_TRAFFIC_SAMPLE_INTERVAL_MS
+  }
+  return Math.min(
+    sampledAtUnixMs - previousSampledAtUnixMs,
+    MAX_TRAFFIC_SAMPLE_GAP_MS
+  )
 }

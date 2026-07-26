@@ -57,7 +57,7 @@ describe("routing diagnostics helpers", () => {
     ])
   })
 
-  test("shows a list alias while preserving the technical reference", () => {
+  test("shows a list alias while preserving the technical reference in data", () => {
     expect(
       getRuleConditions(
         {
@@ -71,7 +71,7 @@ describe("routing diagnostics helpers", () => {
           },
         }
       )
-    ).toEqual([{ key: "lists", value: "Работа (work)" }])
+    ).toEqual([{ key: "lists", value: "Работа" }])
   })
 })
 

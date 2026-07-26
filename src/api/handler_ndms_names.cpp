@@ -4,6 +4,7 @@
 
 #include "../http/http_client.hpp"
 #include "../keenetic/ndms_interface_inventory.hpp"
+#include "../keenetic/ndms_interface_management.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -113,6 +114,48 @@ api::Role api_interface_role(NdmsInterfaceRole role) {
     return api::Role::UNKNOWN;
 }
 
+api::NdmsManagementBlockerElement api_management_blocker(
+    NdmsInterfaceManagementBlocker blocker) {
+    switch (blocker) {
+    case NdmsInterfaceManagementBlocker::unsupported_kind:
+        return api::NdmsManagementBlockerElement::UNSUPPORTED_KIND;
+    case NdmsInterfaceManagementBlocker::unsupported_role:
+        return api::NdmsManagementBlockerElement::UNSUPPORTED_ROLE;
+    case NdmsInterfaceManagementBlocker::role_unknown:
+        return api::NdmsManagementBlockerElement::ROLE_UNKNOWN;
+    case NdmsInterfaceManagementBlocker::kernel_identity_unresolved:
+        return api::NdmsManagementBlockerElement::
+            KERNEL_IDENTITY_UNRESOLVED;
+    case NdmsInterfaceManagementBlocker::typed_rci_unavailable:
+        return api::NdmsManagementBlockerElement::TYPED_RCI_UNAVAILABLE;
+    case NdmsInterfaceManagementBlocker::automatic_backup_unavailable:
+        return api::NdmsManagementBlockerElement::
+            AUTOMATIC_BACKUP_UNAVAILABLE;
+    case NdmsInterfaceManagementBlocker::ownership_unknown:
+        return api::NdmsManagementBlockerElement::OWNERSHIP_UNKNOWN;
+    case NdmsInterfaceManagementBlocker::optimistic_revision_unavailable:
+        return api::NdmsManagementBlockerElement::
+            OPTIMISTIC_REVISION_UNAVAILABLE;
+    }
+    throw std::runtime_error("unsupported NDMS management blocker");
+}
+
+api::NdmsInterfaceManagementReadiness api_management_readiness(
+    const NdmsTunnelInterface& tunnel) {
+    const auto readiness = assess_ndms_interface_management(tunnel);
+    api::NdmsInterfaceManagementReadiness result{};
+    result.candidate = readiness.candidate;
+    result.identity_stable = readiness.identity_stable;
+    result.observed_revision = readiness.observed_revision;
+    result.configuration_snapshot_available =
+        readiness.configuration_snapshot_available;
+    result.blockers.reserve(readiness.blockers.size());
+    for (const auto blocker : readiness.blockers) {
+        result.blockers.push_back(api_management_blocker(blocker));
+    }
+    return result;
+}
+
 api::NdmsInterfaceInventoryResponse typed_inventory(
     const NdmsInterfaceCatalog& catalog) {
     api::NdmsInterfaceInventoryResponse response{};
@@ -143,12 +186,15 @@ api::NdmsInterfaceInventoryResponse typed_inventory(
         item.capabilities.can_delete = false;
         item.capabilities.can_hide = false;
         item.capabilities.backup_required = true;
+        item.management_readiness = api_management_readiness(tunnel);
         response.interfaces.push_back(std::move(item));
     }
     return response;
 }
 
 using RuntimeInterfaceNamesFn = std::function<std::vector<std::string>()>;
+using TrafficInterfacesObserver =
+    std::function<void(std::vector<std::string>)>;
 
 NdmsInterfaceCatalog catalog_for_response(
     NdmsCatalogCache& cache,
@@ -167,7 +213,8 @@ NdmsInterfaceCatalog catalog_for_response(
 void register_ndms_names_routes(
     ApiServer& server,
     NdmsCatalogCache& cache,
-    RuntimeInterfaceNamesFn runtime_interface_names_fn) {
+    RuntimeInterfaceNamesFn runtime_interface_names_fn,
+    TrafficInterfacesObserver traffic_interfaces_observer = {}) {
     server.get(
         "/api/system/interface-names",
         [&cache, runtime_interface_names_fn]() -> std::string {
@@ -184,12 +231,22 @@ void register_ndms_names_routes(
 
     server.get(
         "/api/system/ndms/interfaces",
-        [&cache, runtime_interface_names_fn]() -> std::string {
-            return nlohmann::json(
-                       typed_inventory(catalog_for_response(
-                           cache,
-                           runtime_interface_names_fn)))
-                .dump();
+        [&cache,
+         runtime_interface_names_fn,
+         traffic_interfaces_observer]() -> std::string {
+            const auto catalog =
+                catalog_for_response(cache, runtime_interface_names_fn);
+            if (traffic_interfaces_observer) {
+                std::vector<std::string> interface_names;
+                interface_names.reserve(catalog.tunnels.size());
+                for (const auto& tunnel : catalog.tunnels) {
+                    if (tunnel.kernel_name) {
+                        interface_names.push_back(*tunnel.kernel_name);
+                    }
+                }
+                traffic_interfaces_observer(std::move(interface_names));
+            }
+            return nlohmann::json(typed_inventory(catalog)).dump();
         });
 }
 
@@ -280,6 +337,10 @@ void register_ndms_names_handler(ApiServer& server, ApiContext& ctx) {
                 names.push_back(interface.name);
             }
             return names;
+        },
+        [&ctx](std::vector<std::string> names) {
+            ctx.replace_interface_traffic_targets(
+                "native-tunnels", std::move(names));
         });
 }
 

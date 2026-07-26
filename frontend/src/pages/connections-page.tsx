@@ -13,6 +13,8 @@ import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
+import { formatLastSeen } from "./connections-utils"
+
 type DeviceGroup = {
   key: string
   name: string
@@ -21,7 +23,6 @@ type DeviceGroup = {
   activeCount: number
   lastSeen: number
 }
-
 export function ConnectionsPage() {
   const { t } = useTranslation()
   const [filter, setFilter] = useState("")
@@ -92,6 +93,7 @@ export function ConnectionsPage() {
   }, [connections])
 
   const totalConnections = query.data?.pages[0]?.total ?? connections.length
+  const snapshotAt = query.data?.pages[0]?.snapshot_at ?? 0
 
   const toggle = (key: string) => {
     setExpanded((current) => {
@@ -166,7 +168,12 @@ export function ConnectionsPage() {
               {isOpen ? (
                 <div className="space-y-1 pb-3 pl-7">
                   {group.connections.map((item) => (
-                    <SessionRow item={item} key={item.id} t={t} />
+                    <SessionRow
+                      item={item}
+                      key={item.id}
+                      snapshotAt={snapshotAt}
+                      t={t}
+                    />
                   ))}
                 </div>
               ) : null}
@@ -200,12 +207,13 @@ export function ConnectionsPage() {
     </div>
   )
 }
-
 function SessionRow({
   item,
+  snapshotAt,
   t,
 }: {
   item: ConnectionRecord
+  snapshotAt: number
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const [primaryDomain, ...otherDomains] = item.destination_domains
@@ -235,7 +243,7 @@ function SessionRow({
         >
           {item.active
             ? t("connections.age.live")
-            : formatLastSeen(item.last_seen, t)}
+            : formatLastSeen(item.last_seen, snapshotAt, t)}
         </span>
         <span className="text-xs text-muted-foreground">
           {item.protocol.toUpperCase()}
@@ -246,28 +254,4 @@ function SessionRow({
       </div>
     </div>
   )
-}
-
-/**
- * Only closed connections get an age. While one is live the age is always
- * "a moment ago" and says nothing, so the word "active" carries more.
- */
-function formatLastSeen(
-  lastSeen: number,
-  t: (key: string, options?: Record<string, unknown>) => string
-): string {
-  if (!lastSeen) {
-    return ""
-  }
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - lastSeen)
-  if (seconds < 10) {
-    return t("connections.age.now")
-  }
-  if (seconds < 60) {
-    return t("connections.age.seconds", { count: seconds })
-  }
-  if (seconds < 3600) {
-    return t("connections.age.minutes", { count: Math.floor(seconds / 60) })
-  }
-  return t("connections.age.hours", { count: Math.floor(seconds / 3600) })
 }

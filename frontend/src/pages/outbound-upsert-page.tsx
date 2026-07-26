@@ -49,13 +49,18 @@ import {
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { getInterfaceSearchText } from "@/lib/runtime-interfaces"
+import { getOutboundDisplayName } from "@/lib/outbound-display"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { makeTechnicalId } from "@/lib/technical-id"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import {
-  mapStrictEnforcementToOption,
+  createDefaultOutboundDraft,
+  mapOutboundToDraft,
   normalizeOutboundDraftForPersistence,
   normalizeOutboundGroups,
+  type ConntrackOnSwitchMode,
   type OutboundDraft,
+  type OutboundGroupDraft,
   type StrictEnforcementOption,
   type UrltestSelectionMode,
 } from "@/pages/outbound-upsert-utils"
@@ -70,17 +75,20 @@ import {
 } from "@/components/ui/select"
 
 const OUTBOUND_FIELD_NAMES = {
+  displayName: "displayName",
   tag: "tag",
   type: "type",
   interfaceName: "interfaceName",
   gateway: "gateway",
   gateway6: "gateway6",
   table: "table",
-  outbounds: "outbounds",
+  outboundGroups: "outboundGroups",
   probeUrl: "probeUrl",
   interval: "interval",
+  probeTimeout: "probeTimeout",
   tolerance: "tolerance",
   selectionMode: "selectionMode",
+  conntrackOnSwitch: "conntrackOnSwitch",
   retryAttempts: "retryAttempts",
   retryInterval: "retryInterval",
   circuitBreakerFailures: "circuitBreakerFailures",
@@ -93,26 +101,7 @@ const OUTBOUND_FIELD_NAMES = {
 type OutboundFieldName =
   (typeof OUTBOUND_FIELD_NAMES)[keyof typeof OUTBOUND_FIELD_NAMES]
 
-const sampleNewOutbound: OutboundDraft = {
-  tag: "",
-  type: "interface",
-  interfaceName: "",
-  gateway: "",
-  gateway6: "",
-  table: "",
-  outbounds: [[]],
-  probeUrl: "https://www.gstatic.com/generate_204",
-  interval: "180000",
-  tolerance: "100",
-  selectionMode: "latency",
-  retryAttempts: "3",
-  retryInterval: "1000",
-  circuitBreakerFailures: "5",
-  circuitBreakerSuccesses: "2",
-  circuitBreakerTimeout: "30000",
-  circuitBreakerHalfOpen: "1",
-  strictEnforcement: "default",
-}
+const sampleNewOutbound = createDefaultOutboundDraft()
 
 const strictOptions = [
   "default",
@@ -124,6 +113,11 @@ const urltestSelectionModes = [
   "latency",
   "priority",
 ] as const satisfies readonly UrltestSelectionMode[]
+
+const conntrackOnSwitchModes = [
+  "preserve",
+  "delete",
+] as const satisfies readonly ConntrackOnSwitchMode[]
 
 const outboundTypeOptions: Outbound["type"][] = [
   "interface",
@@ -209,7 +203,15 @@ export function OutboundUpsertPage({
       cardTitle={
         mode === "create"
           ? t("pages.outboundUpsert.createTitle")
-          : t("pages.outboundUpsert.editCardTitle", { tag: draft.tag })
+          : t("pages.outboundUpsert.editCardTitle", {
+              tag: getOutboundDisplayName(
+                findOutboundByTag(loadedConfig, draft.tag) ?? {
+                  type: draft.type,
+                  tag: draft.tag,
+                  display_name: draft.displayName,
+                }
+              ),
+            })
       }
       description={t("pages.outboundUpsert.description")}
       dirty={dirty}
@@ -228,6 +230,7 @@ export function OutboundUpsertPage({
         mode={mode}
         onDirtyChange={setDirty}
         outboundId={outboundId}
+        presentation={presentation}
       />
     </UpsertPage>
   )
@@ -260,6 +263,7 @@ function OutboundForm({
   onDirtyChange,
   onSaved,
   outboundId,
+  presentation = "page",
 }: {
   mode: "create" | "edit"
   draft: OutboundDraft
@@ -268,12 +272,16 @@ function OutboundForm({
   onDirtyChange?: (dirty: boolean) => void
   onSaved?: () => void
   outboundId?: string
+  presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
   const close = useUpsertPageClose()
   const existingOutbounds = selectOutbounds(loadedConfig)
+  const [initialDraft] = useState<OutboundDraft>(() => draft)
+  const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
+    useState(false)
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const runtimeInterfaces =
     runtimeInterfacesQuery.data?.status === 200
@@ -291,7 +299,7 @@ function OutboundForm({
   const groupMemberCandidates = existingOutbounds.filter(
     (item) =>
       (item.type === "interface" || item.type === "urltest") &&
-      item.tag !== draft.tag
+      item.tag !== initialDraft.tag
   )
   const interfaceOutboundByTag = new Map(
     groupMemberCandidates.map((item) => [item.tag, item])
@@ -302,11 +310,11 @@ function OutboundForm({
     label: getStrictOptionLabel(option, t),
   }))
   const [baselinePayload] = useState(() =>
-    normalizeOutboundDraftForPersistence(draft)
+    normalizeOutboundDraftForPersistence(initialDraft)
   )
 
   const form = useForm({
-    defaultValues: draft,
+    defaultValues: initialDraft,
     validationLogic: revalidateLogic({
       mode: "submit",
       modeAfterSubmission: "change",
@@ -314,26 +322,51 @@ function OutboundForm({
     validators: {
       onSubmitAsync: async ({ value }) => {
         clearFormServerErrors(form)
-        const duplicateTagError = validateTagUniqueness(
-          existingOutbounds,
-          value.tag,
-          mode === "edit" ? outboundId : undefined,
-          t
-        )
-        if (duplicateTagError) {
+        const displayNameError = getDisplayNameError(value.displayName, t)
+        if (displayNameError) {
           setFormServerErrors(form, {
             fields: {
-              [OUTBOUND_FIELD_NAMES.tag]: duplicateTagError,
+              [OUTBOUND_FIELD_NAMES.displayName]: displayNameError,
             },
           })
           return {
             fields: {
-              [OUTBOUND_FIELD_NAMES.tag]: duplicateTagError,
+              [OUTBOUND_FIELD_NAMES.displayName]: displayNameError,
             },
           }
         }
 
-        const payload = normalizeOutboundDraftForPersistence(value)
+        const valueToPersist =
+          mode === "create" && !value.tag.trim()
+            ? {
+                ...value,
+                tag: makeTechnicalId(
+                  value.displayName,
+                  existingOutbounds.map((outbound) => outbound.tag),
+                  { prefix: "outbound" }
+                ),
+              }
+            : value
+        const tagError = getOutboundTagError(
+          valueToPersist.tag,
+          existingOutbounds,
+          mode === "edit" ? outboundId : undefined,
+          t
+        )
+        if (tagError) {
+          setFormServerErrors(form, {
+            fields: {
+              [OUTBOUND_FIELD_NAMES.tag]: tagError,
+            },
+          })
+          return {
+            fields: {
+              [OUTBOUND_FIELD_NAMES.tag]: tagError,
+            },
+          }
+        }
+
+        const payload = normalizeOutboundDraftForPersistence(valueToPersist)
         const nextOutbounds =
           mode === "create"
             ? [...existingOutbounds, payload]
@@ -381,7 +414,7 @@ function OutboundForm({
             error: error as ApiError,
             fieldNames: Object.values(OUTBOUND_FIELD_NAMES),
             resolvePath: (path) =>
-              resolveOutboundFieldPath(path, payload.tag || draft.tag),
+              resolveOutboundFieldPath(path, payload.tag || initialDraft.tag),
           })
 
           setFormServerErrors(form, {
@@ -433,6 +466,7 @@ function OutboundForm({
   const isBlackhole = outboundType === "blackhole"
   const isIgnore = outboundType === "ignore"
   const isUrltest = outboundType === "urltest"
+  const displayNameId = useId()
   const tagId = useId()
   const interfaceId = useId()
   const gatewayId = useId()
@@ -440,7 +474,9 @@ function OutboundForm({
   const tableId = useId()
   const probeUrlId = useId()
   const intervalId = useId()
+  const probeTimeoutId = useId()
   const toleranceId = useId()
+  const groupWeightId = useId()
   const retryAttemptsId = useId()
   const retryIntervalId = useId()
   const circuitBreakerFailuresId = useId()
@@ -466,35 +502,48 @@ function OutboundForm({
 
       <FieldGroup>
         <form.Field
-          name={OUTBOUND_FIELD_NAMES.tag}
+          name={OUTBOUND_FIELD_NAMES.displayName}
           validators={{
             onChange: ({ value }) =>
-              getOutboundTagError(
-                value,
-                existingOutbounds,
-                mode === "edit" ? outboundId : undefined,
-                t
-              ) ?? undefined,
+              getDisplayNameError(value, t) ?? undefined,
           }}
         >
           {(field) => {
             const error = getFirstFieldError(field.state.meta.errors)
             return (
               <Field invalid={Boolean(error)}>
-                <FieldLabel htmlFor={tagId}>
-                  {t("pages.outboundUpsert.fields.tag")}
+                <FieldLabel htmlFor={displayNameId}>
+                  {t("pages.outboundUpsert.fields.displayName")}
                 </FieldLabel>
                 <FieldContent>
                   <Input
                     aria-invalid={Boolean(error)}
-                    id={tagId}
+                    id={displayNameId}
                     onBlur={field.handleBlur}
-                    onChange={(event) => field.handleChange(event.target.value)}
-                    readOnly={mode === "edit"}
+                    onChange={(event) => {
+                      const nextDisplayName = event.target.value
+                      field.handleChange(nextDisplayName)
+                      if (
+                        mode === "create" &&
+                        (presentation === "dialog" ||
+                          !technicalIdManuallyEdited)
+                      ) {
+                        form.setFieldValue(
+                          OUTBOUND_FIELD_NAMES.tag,
+                          makeTechnicalId(
+                            nextDisplayName,
+                            existingOutbounds.map((outbound) => outbound.tag),
+                            { prefix: "outbound" }
+                          )
+                        )
+                      }
+                    }}
                     value={field.state.value}
                   />
                   <FieldHint
-                    description={t("pages.outboundUpsert.fields.tagHint")}
+                    description={t(
+                      "pages.outboundUpsert.fields.displayNameHint"
+                    )}
                     error={error ?? null}
                   />
                 </FieldContent>
@@ -502,6 +551,51 @@ function OutboundForm({
             )
           }}
         </form.Field>
+
+        {presentation === "page" ? (
+          <form.Field
+            name={OUTBOUND_FIELD_NAMES.tag}
+            validators={{
+              onChange: ({ value }) =>
+                getOutboundTagError(
+                  value,
+                  existingOutbounds,
+                  mode === "edit" ? outboundId : undefined,
+                  t
+                ) ?? undefined,
+            }}
+          >
+            {(field) => {
+              const error = getFirstFieldError(field.state.meta.errors)
+              return (
+                <Field invalid={Boolean(error)}>
+                  <FieldLabel htmlFor={tagId}>
+                    {t("pages.outboundUpsert.fields.technicalId")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Input
+                      aria-invalid={Boolean(error)}
+                      id={tagId}
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        setTechnicalIdManuallyEdited(true)
+                        field.handleChange(event.target.value)
+                      }}
+                      readOnly={mode === "edit"}
+                      value={field.state.value}
+                    />
+                    <FieldHint
+                      description={t(
+                        "pages.outboundUpsert.fields.technicalIdHint"
+                      )}
+                      error={error ?? null}
+                    />
+                  </FieldContent>
+                </Field>
+              )
+            }}
+          </form.Field>
+        ) : null}
 
         <form.Field name={OUTBOUND_FIELD_NAMES.type}>
           {(field) => {
@@ -519,7 +613,7 @@ function OutboundForm({
                     }))}
                     onValueChange={(value) =>
                       field.handleChange(
-                        (value as Outbound["type"]) ?? draft.type
+                        (value as Outbound["type"]) ?? initialDraft.type
                       )
                     }
                     value={field.state.value}
@@ -713,7 +807,7 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
-        <form.Field name={OUTBOUND_FIELD_NAMES.outbounds}>
+        <form.Field name={OUTBOUND_FIELD_NAMES.outboundGroups}>
           {(field) => {
             const error = getFirstFieldError(field.state.meta.errors)
             const groups = normalizeOutboundGroups(field.state.value)
@@ -734,7 +828,7 @@ function OutboundForm({
                         "pages.outboundUpsert.urltest.groupDescription",
                         { index: index + 1 }
                       )}
-                      key={`${index}-${group.join(",")}`}
+                      key={`${index}-${group.outbounds.join(",")}`}
                       onMoveDown={() =>
                         field.handleChange(moveGroup(groups, index, index + 1))
                       }
@@ -756,70 +850,112 @@ function OutboundForm({
                         index: index + 1,
                       })}
                     >
-                      <Field invalid={Boolean(error)}>
-                        <FieldLabel>
-                          {t("pages.outboundUpsert.urltest.interfaceOutbounds")}
-                        </FieldLabel>
-                        <FieldContent>
-                          {interfaceOutboundOptions.length ? (
-                            <MultiSelectList
-                              error={error}
-                              name={OUTBOUND_FIELD_NAMES.outbounds}
-                              addLabel={t(
-                                "pages.outboundUpsert.urltest.addOutbound"
-                              )}
-                              emptyMessage={t(
-                                "pages.outboundUpsert.urltest.noInterfaceOutbounds"
-                              )}
-                              groupLabel={t(
-                                "pages.outboundUpsert.urltest.interfaceOutbounds"
-                              )}
-                              onChange={(nextOutbounds) =>
+                      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_10rem]">
+                        <Field invalid={Boolean(error)}>
+                          <FieldLabel>
+                            {t(
+                              "pages.outboundUpsert.urltest.interfaceOutbounds"
+                            )}
+                          </FieldLabel>
+                          <FieldContent>
+                            {interfaceOutboundOptions.length ? (
+                              <MultiSelectList
+                                error={error}
+                                name={OUTBOUND_FIELD_NAMES.outboundGroups}
+                                addLabel={t(
+                                  "pages.outboundUpsert.urltest.addOutbound"
+                                )}
+                                emptyMessage={t(
+                                  "pages.outboundUpsert.urltest.noInterfaceOutbounds"
+                                )}
+                                groupLabel={t(
+                                  "pages.outboundUpsert.urltest.interfaceOutbounds"
+                                )}
+                                onChange={(nextOutbounds) =>
+                                  field.handleChange(
+                                    groups.map((item, itemIndex) =>
+                                      itemIndex === index
+                                        ? {
+                                            ...item,
+                                            outbounds: nextOutbounds,
+                                          }
+                                        : item
+                                    )
+                                  )
+                                }
+                                options={interfaceOutboundOptions}
+                                getSearchText={(tag) =>
+                                  getInterfaceOutboundSearchText(
+                                    tag,
+                                    interfaceOutboundByTag.get(tag)?.interface,
+                                    runtimeInterfaceByName
+                                  )
+                                }
+                                renderItem={(tag) => (
+                                  <OutboundInterfaceLabel
+                                    interfaceName={
+                                      interfaceOutboundByTag.get(tag)?.interface
+                                    }
+                                    runtimeInterface={runtimeInterfaceByName.get(
+                                      interfaceOutboundByTag.get(tag)
+                                        ?.interface ?? ""
+                                    )}
+                                    t={t}
+                                    tag={tag}
+                                  />
+                                )}
+                                unavailable={getUnavailableOutbounds(
+                                  groups,
+                                  index
+                                )}
+                                value={group.outbounds}
+                              />
+                            ) : (
+                              <div className="rounded-lg border border-border p-3 text-sm text-muted-foreground md:text-xs">
+                                {t(
+                                  "pages.outboundUpsert.urltest.addInterfaceOutboundsFirst"
+                                )}
+                              </div>
+                            )}
+                            {interfaceOutboundOptions.length ? (
+                              <FieldHint error={error ?? null} />
+                            ) : null}
+                          </FieldContent>
+                        </Field>
+
+                        <Field>
+                          <FieldLabel htmlFor={`${groupWeightId}-${index}`}>
+                            {t("pages.outboundUpsert.urltest.groupWeight")}
+                          </FieldLabel>
+                          <FieldContent>
+                            <Input
+                              id={`${groupWeightId}-${index}`}
+                              inputMode="numeric"
+                              onChange={(event) =>
                                 field.handleChange(
                                   groups.map((item, itemIndex) =>
-                                    itemIndex === index ? nextOutbounds : item
+                                    itemIndex === index
+                                      ? {
+                                          ...item,
+                                          weight: event.target.value,
+                                        }
+                                      : item
                                   )
                                 )
                               }
-                              options={interfaceOutboundOptions}
-                              getSearchText={(tag) =>
-                                getInterfaceOutboundSearchText(
-                                  tag,
-                                  interfaceOutboundByTag.get(tag)?.interface,
-                                  runtimeInterfaceByName
-                                )
-                              }
-                              renderItem={(tag) => (
-                                <OutboundInterfaceLabel
-                                  interfaceName={
-                                    interfaceOutboundByTag.get(tag)?.interface
-                                  }
-                                  runtimeInterface={runtimeInterfaceByName.get(
-                                    interfaceOutboundByTag.get(tag)
-                                      ?.interface ?? ""
-                                  )}
-                                  t={t}
-                                  tag={tag}
-                                />
-                              )}
-                              unavailable={getUnavailableOutbounds(
-                                groups,
-                                index
-                              )}
-                              value={group}
+                              placeholder="1"
+                              step="1"
+                              type="number"
+                              value={group.weight}
                             />
-                          ) : (
-                            <div className="rounded-lg border border-border p-3 text-sm text-muted-foreground md:text-xs">
-                              {t(
-                                "pages.outboundUpsert.urltest.addInterfaceOutboundsFirst"
+                            <FieldHint
+                              description={t(
+                                "pages.outboundUpsert.urltest.groupWeightHint"
                               )}
-                            </div>
-                          )}
-                          {interfaceOutboundOptions.length ? (
-                            <FieldHint error={error ?? null} />
-                          ) : null}
-                        </FieldContent>
-                      </Field>
+                            />
+                          </FieldContent>
+                        </Field>
+                      </div>
                     </OrderedGroupCard>
                   ))}
                   <div className="flex justify-start">
@@ -827,10 +963,13 @@ function OutboundForm({
                       onClick={() =>
                         field.handleChange([
                           ...groups,
-                          getNextAvailableOutbounds(
-                            interfaceOutboundOptions,
-                            groups
-                          ),
+                          {
+                            outbounds: getNextAvailableOutbounds(
+                              interfaceOutboundOptions,
+                              groups
+                            ),
+                            weight: "",
+                          },
                         ])
                       }
                       type="button"
@@ -899,6 +1038,52 @@ function OutboundForm({
               )}
             </form.Field>
 
+            <form.Field name={OUTBOUND_FIELD_NAMES.conntrackOnSwitch}>
+              {(field) => (
+                <Field>
+                  <FieldLabel>
+                    {t("pages.outboundUpsert.urltest.conntrackOnSwitch")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Select
+                      items={conntrackOnSwitchModes.map((mode) => ({
+                        value: mode,
+                        label: t(
+                          `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
+                        ),
+                      }))}
+                      onValueChange={(value) =>
+                        field.handleChange(
+                          (value as ConntrackOnSwitchMode | null) ?? "preserve"
+                        )
+                      }
+                      value={field.state.value}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {conntrackOnSwitchModes.map((mode) => (
+                            <SelectItem key={mode} value={mode}>
+                              {t(
+                                `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldHint
+                      description={t(
+                        `pages.outboundUpsert.urltest.conntrackOnSwitchHints.${field.state.value}`
+                      )}
+                    />
+                  </FieldContent>
+                </Field>
+              )}
+            </form.Field>
+
             <form.Field name={OUTBOUND_FIELD_NAMES.probeUrl}>
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
@@ -950,6 +1135,39 @@ function OutboundForm({
                       <FieldHint
                         description={t(
                           "pages.outboundUpsert.urltest.intervalHint"
+                        )}
+                        error={error ?? null}
+                      />
+                    </FieldContent>
+                  </Field>
+                )
+              }}
+            </form.Field>
+
+            <form.Field name={OUTBOUND_FIELD_NAMES.probeTimeout}>
+              {(field) => {
+                const error = getFirstFieldError(field.state.meta.errors)
+                return (
+                  <Field invalid={Boolean(error)}>
+                    <FieldLabel htmlFor={probeTimeoutId}>
+                      {t("pages.outboundUpsert.urltest.probeTimeout")}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Input
+                        aria-invalid={Boolean(error)}
+                        id={probeTimeoutId}
+                        inputMode="numeric"
+                        onBlur={field.handleBlur}
+                        onChange={(event) =>
+                          field.handleChange(event.target.value)
+                        }
+                        step="1"
+                        type="number"
+                        value={field.state.value}
+                      />
+                      <FieldHint
+                        description={t(
+                          "pages.outboundUpsert.urltest.probeTimeoutHint"
                         )}
                         error={error ?? null}
                       />
@@ -1280,44 +1498,6 @@ function getOutboundTagError(
   })
 }
 
-function mapOutboundToDraft(outbound: Outbound): OutboundDraft {
-  return {
-    tag: outbound.tag,
-    type: outbound.type,
-    interfaceName: outbound.interface ?? "",
-    gateway: outbound.gateway ?? "",
-    gateway6: outbound.gateway6 ?? "",
-    table: outbound.table?.toString() ?? "",
-    outbounds:
-      outbound.outbound_groups?.map((group) => [...group.outbounds]) ??
-      sampleNewOutbound.outbounds,
-    probeUrl: outbound.url ?? sampleNewOutbound.probeUrl,
-    interval: outbound.interval_ms?.toString() ?? sampleNewOutbound.interval,
-    tolerance: outbound.tolerance_ms?.toString() ?? sampleNewOutbound.tolerance,
-    selectionMode: outbound.selection_mode ?? sampleNewOutbound.selectionMode,
-    retryAttempts:
-      outbound.retry?.attempts?.toString() ?? sampleNewOutbound.retryAttempts,
-    retryInterval:
-      outbound.retry?.interval_ms?.toString() ??
-      sampleNewOutbound.retryInterval,
-    circuitBreakerFailures:
-      outbound.circuit_breaker?.failure_threshold?.toString() ??
-      sampleNewOutbound.circuitBreakerFailures,
-    circuitBreakerSuccesses:
-      outbound.circuit_breaker?.success_threshold?.toString() ??
-      sampleNewOutbound.circuitBreakerSuccesses,
-    circuitBreakerTimeout:
-      outbound.circuit_breaker?.timeout_ms?.toString() ??
-      sampleNewOutbound.circuitBreakerTimeout,
-    circuitBreakerHalfOpen:
-      outbound.circuit_breaker?.half_open_max_requests?.toString() ??
-      sampleNewOutbound.circuitBreakerHalfOpen,
-    strictEnforcement: mapStrictEnforcementToOption(
-      outbound.strict_enforcement
-    ),
-  }
-}
-
 function getOutboundDraft(
   config: ConfigObject | undefined,
   outboundId?: string
@@ -1330,21 +1510,31 @@ function getOutboundDraft(
   return outbound ? mapOutboundToDraft(outbound) : null
 }
 
-function moveGroup(groups: string[][], fromIndex: number, toIndex: number) {
+function moveGroup(
+  groups: OutboundGroupDraft[],
+  fromIndex: number,
+  toIndex: number
+) {
   const next = [...groups]
   const [moved] = next.splice(fromIndex, 1)
   next.splice(toIndex, 0, moved)
   return next
 }
 
-function getUnavailableOutbounds(groups: string[][], currentIndex: number) {
+function getUnavailableOutbounds(
+  groups: OutboundGroupDraft[],
+  currentIndex: number
+) {
   return groups
     .filter((_, index) => index !== currentIndex)
-    .flatMap((group) => group)
+    .flatMap((group) => group.outbounds)
 }
 
-function getNextAvailableOutbounds(options: string[], groups: string[][]) {
-  const used = new Set(groups.flatMap((group) => group))
+function getNextAvailableOutbounds(
+  options: string[],
+  groups: OutboundGroupDraft[]
+) {
+  const used = new Set(groups.flatMap((group) => group.outbounds))
   const next = options.find((option) => !used.has(option))
   return next ? [next] : []
 }
@@ -1392,6 +1582,20 @@ function validateTagUniqueness(
     : null
 }
 
+function getDisplayNameError(
+  value: string,
+  t: (key: string) => string
+): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return t("pages.outboundUpsert.validation.displayNameRequired")
+  }
+
+  return [...trimmed].length > 80
+    ? t("pages.outboundUpsert.validation.displayNameTooLong")
+    : null
+}
+
 function validateUrltestGroupReferences(
   outbounds: Outbound[],
   t: (key: string, options?: Record<string, unknown>) => string
@@ -1436,6 +1640,10 @@ function resolveOutboundFieldPath(
     return OUTBOUND_FIELD_NAMES.tag
   }
 
+  if (path === `${prefix}.display_name`) {
+    return OUTBOUND_FIELD_NAMES.displayName
+  }
+
   if (path === `${prefix}.type`) {
     return OUTBOUND_FIELD_NAMES.type
   }
@@ -1459,10 +1667,10 @@ function resolveOutboundFieldPath(
   if (
     path === `${prefix}.outbound_groups` ||
     new RegExp(
-      `^${prefix.replaceAll(".", "\\.")}\\.outbound_groups(?:\\[\\d+\\])?(?:\\.outbounds)?$`
+      `^${prefix.replaceAll(".", "\\.")}\\.outbound_groups(?:\\[\\d+\\])?(?:\\.(?:outbounds|weight))?$`
     ).test(path)
   ) {
-    return OUTBOUND_FIELD_NAMES.outbounds
+    return OUTBOUND_FIELD_NAMES.outboundGroups
   }
 
   if (path === `${prefix}.url`) {
@@ -1471,6 +1679,10 @@ function resolveOutboundFieldPath(
 
   if (path === `${prefix}.interval_ms`) {
     return OUTBOUND_FIELD_NAMES.interval
+  }
+
+  if (path === `${prefix}.probe_timeout_ms`) {
+    return OUTBOUND_FIELD_NAMES.probeTimeout
   }
 
   if (path === `${prefix}.tolerance_ms`) {

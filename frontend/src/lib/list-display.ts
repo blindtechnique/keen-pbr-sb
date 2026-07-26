@@ -22,10 +22,7 @@ export function getListReferenceLabel(
   technicalId: string,
   lists: ConfigObject["lists"]
 ): string {
-  const displayName = getListDisplayName(technicalId, lists)
-  return displayName === technicalId
-    ? technicalId
-    : `${displayName} (${technicalId})`
+  return getListDisplayName(technicalId, lists)
 }
 
 export function formatListReferenceLabels(

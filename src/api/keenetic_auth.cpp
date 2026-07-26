@@ -5,48 +5,91 @@
 #include "../log/logger.hpp"
 
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
+#include <charconv>
 #include <string>
 
 namespace keen_pbr3 {
 
-namespace {
+std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
+    const std::string& endpoint,
+    std::string* error) {
+    const auto reject = [&](const char* message)
+        -> std::optional<KeeneticAuthEndpoint> {
+        if (error) *error = message;
+        return std::nullopt;
+    };
+    if (endpoint.empty()) return reject("endpoint is empty");
+    for (const unsigned char character : endpoint) {
+        if (character <= 0x20U || character == 0x7fU) {
+            return reject("endpoint contains whitespace or control characters");
+        }
+    }
+    if (endpoint.find_first_of("/?#@\\") != std::string::npos) {
+        return reject("endpoint must not contain URL components");
+    }
 
-struct ParsedEndpoint {
     std::string host;
-    int port{80};
-};
-
-ParsedEndpoint parse_endpoint(const std::string& endpoint) {
-    ParsedEndpoint parsed;
-    std::string rest = endpoint;
-
-    const auto scheme = rest.find("://");
-    if (scheme != std::string::npos) {
-        rest = rest.substr(scheme + 3);
-    }
-    const auto slash = rest.find('/');
-    if (slash != std::string::npos) {
-        rest = rest.substr(0, slash);
-    }
-    const auto colon = rest.rfind(':');
-    if (colon != std::string::npos) {
-        parsed.host = rest.substr(0, colon);
-        try {
-            parsed.port = std::stoi(rest.substr(colon + 1));
-        } catch (const std::exception&) {
-            parsed.port = 80;
+    std::string port_text;
+    if (endpoint.front() == '[') {
+        const auto close = endpoint.find(']');
+        if (close == std::string::npos || close == 1) {
+            return reject("invalid bracketed IPv6 endpoint");
+        }
+        host = endpoint.substr(1, close - 1);
+        const auto suffix = endpoint.substr(close + 1);
+        if (!suffix.empty()) {
+            if (suffix.front() != ':' || suffix.size() == 1) {
+                return reject("invalid bracketed IPv6 port");
+            }
+            port_text = suffix.substr(1);
+        }
+        if (host != "::1") {
+            return reject("only the IPv6 loopback literal is allowed");
         }
     } else {
-        parsed.host = rest;
+        const auto colon = endpoint.find(':');
+        if (colon == std::string::npos) {
+            host = endpoint;
+        } else {
+            if (endpoint.find(':', colon + 1) != std::string::npos) {
+                return reject("IPv6 endpoints must be bracketed");
+            }
+            host = endpoint.substr(0, colon);
+            port_text = endpoint.substr(colon + 1);
+            if (port_text.empty()) return reject("port is empty");
+        }
+        if (host != "127.0.0.1") {
+            return reject("only the IPv4 loopback literal is allowed");
+        }
     }
-    if (parsed.host.empty()) {
-        parsed.host = "127.0.0.1";
+
+    int port = 80;
+    if (!port_text.empty()) {
+        unsigned int parsed_port = 0;
+        const auto parsed = std::from_chars(
+            port_text.data(),
+            port_text.data() + port_text.size(),
+            parsed_port);
+        if (parsed.ec != std::errc{} ||
+            parsed.ptr != port_text.data() + port_text.size() ||
+            parsed_port == 0 || parsed_port > 65535U) {
+            return reject("port must be between 1 and 65535");
+        }
+        port = static_cast<int>(parsed_port);
     }
+
+    KeeneticAuthEndpoint parsed;
+    parsed.host = host;
+    parsed.port = port;
+    parsed.canonical =
+        host == "::1"
+            ? "[" + host + "]:" + std::to_string(port)
+            : host + ":" + std::to_string(port);
+    if (error) error->clear();
     return parsed;
 }
-
-} // namespace
 
 KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
                                                const std::string& username,
@@ -57,8 +100,15 @@ KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
         return result;
     }
 
-    const ParsedEndpoint target = parse_endpoint(endpoint);
-    httplib::Client client(target.host, target.port);
+    std::string endpoint_error;
+    const auto target =
+        parse_keenetic_auth_endpoint(endpoint, &endpoint_error);
+    if (!target) {
+        result.reachable = false;
+        result.error = "invalid Keenetic endpoint";
+        return result;
+    }
+    httplib::Client client(target->host, target->port);
     client.set_connection_timeout(3);
     client.set_read_timeout(5);
     client.set_keep_alive(true);
@@ -69,14 +119,16 @@ KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
         result.reachable = false;
         result.error = "router web interface is unreachable";
         Logger::instance().error(
-            "Keenetic auth: cannot reach {}:{} — {}", target.host, target.port,
+            "Keenetic auth: cannot reach {}:{} — {}", target->host, target->port,
             httplib::to_string(challenge_response.error()));
         return result;
     }
 
-    // Some builds answer 200 when the account has no password configured.
+    // A 200 response means the router did not issue a challenge. There is no
+    // credential proof in that response, so accepting it would turn a router
+    // with disabled web authentication into a bypass for keen-pbr-sb.
     if (challenge_response->status == 200) {
-        result.authenticated = true;
+        result.error = "router authentication is not enabled";
         return result;
     }
 
@@ -102,7 +154,10 @@ KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
     }
 
     const std::string body =
-        R"({"login":")" + username + R"(","password":")" + answer + R"("})";
+        nlohmann::json{
+            {"login", username},
+            {"password", answer},
+        }.dump();
     auto login_response = client.Post("/auth", headers, body, "application/json");
     if (!login_response) {
         result.reachable = false;

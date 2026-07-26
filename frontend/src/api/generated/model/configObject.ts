@@ -14,6 +14,7 @@ import type { IprouteConfig } from './iprouteConfig';
 import type { ListsAutoupdateConfig } from './listsAutoupdateConfig';
 import type { Outbound } from './outbound';
 import type { RouteConfig } from './routeConfig';
+import type { UiPreferencesConfig } from './uiPreferencesConfig';
 
 /**
  * keen-pbr configuration file.
@@ -29,4 +30,5 @@ export interface ConfigObject {
   fwmark?: FwmarkConfig;
   iproute?: IprouteConfig;
   lists_autoupdate?: ListsAutoupdateConfig;
+  ui_preferences?: UiPreferencesConfig;
 }

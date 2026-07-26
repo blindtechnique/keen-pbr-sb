@@ -12,6 +12,7 @@
 #include "../src/api/handler_transports.hpp"
 #include "../src/api/server.hpp"
 #include "../src/api/sse_broadcaster.hpp"
+#include "../src/util/display_name.hpp"
 
 namespace keen_pbr3 {
 
@@ -63,10 +64,16 @@ TEST_CASE("transports handler proxies authenticated companion response") {
         response.set_content(
             nlohmann::json::array({
                 {{"tag", "reality"},
+                 {"display_name", std::string(80, 'A')},
                  {"type", "sing-box-vless-reality"},
                  {"interface", "tun-reality"},
                  {"state", "up"},
-                 {"updated_at", "2026-07-17T18:00:00Z"}},
+                 {"updated_at", "2026-07-17T18:00:00Z"},
+                 {"desired_up", true},
+                 {"path",
+                  {{"wire_transport", "tcp"},
+                   {"framing", "raw"},
+                   {"confidence", "derived"}}}},
             }).dump(),
             "application/json");
     });
@@ -91,6 +98,7 @@ TEST_CASE("transports handler proxies authenticated companion response") {
         response.set_content(
             nlohmann::json::array({
                 {{"tag", "native_one"},
+                 {"display_name", "Домашний туннель"},
                  {"type", "native"},
                  {"interface", "nwg1"}},
             }).dump(),
@@ -133,6 +141,13 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     api_config.listen = "127.0.0.1:" + std::to_string(api_port);
     ApiServer server(api_config);
     auto context = make_transports_test_context(broadcaster, config_path);
+    std::string traffic_target_source;
+    std::vector<std::string> traffic_targets;
+    context.replace_interface_traffic_targets_fn =
+        [&](std::string source, std::vector<std::string> interfaces) {
+            traffic_target_source = std::move(source);
+            traffic_targets = std::move(interfaces);
+        };
     register_transports_handler(server, context);
     server.start();
 
@@ -157,6 +172,21 @@ TEST_CASE("transports handler proxies authenticated companion response") {
               {"interface", "nwg2"}}},
         }.dump(),
         "application/json");
+    std::string overlong_display_name;
+    for (std::size_t index = 0; index < 81; ++index) {
+        overlong_display_name += "🚀";
+    }
+    const auto invalid_alias_response = client.Post(
+        "/api/transports/config",
+        nlohmann::json{
+            {"operation", "create"},
+            {"transport",
+             {{"tag", "native_two"},
+              {"display_name", overlong_display_name},
+              {"type", "native"},
+              {"interface", "nwg2"}}},
+        }.dump(),
+        "application/json");
 
     server.stop();
     companion.stop();
@@ -169,6 +199,8 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     REQUIRE(body.size() == 1);
     CHECK(body[0]["tag"] == "reality");
     CHECK(body[0]["interface"] == "tun-reality");
+    CHECK(traffic_target_source == "managed-transports");
+    CHECK(traffic_targets == std::vector<std::string>{"tun-reality"});
     REQUIRE(action_response != nullptr);
     CHECK(action_response->status == 200);
     const auto action_body = nlohmann::json::parse(action_response->body);
@@ -178,9 +210,26 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     REQUIRE(config_response != nullptr);
     CHECK(config_response->status == 200);
     CHECK(nlohmann::json::parse(config_response->body)[0]["tag"] == "native_one");
+    CHECK(nlohmann::json::parse(config_response->body)[0]["display_name"] ==
+          "Домашний туннель");
     REQUIRE(create_response != nullptr);
     CHECK(create_response->status == 200);
     CHECK(nlohmann::json::parse(create_response->body)["status"] == "created");
+    REQUIRE(invalid_alias_response != nullptr);
+    CHECK(invalid_alias_response->status == 400);
+}
+
+TEST_CASE("transport aliases use Unicode code points and reject controls") {
+    std::string eighty_code_points;
+    for (std::size_t index = 0; index < 80; ++index) {
+        eighty_code_points += "🚀";
+    }
+    CHECK(display_name::is_valid(eighty_code_points));
+    CHECK_FALSE(display_name::is_valid(eighty_code_points + "🚀"));
+    CHECK_FALSE(display_name::is_valid("safe\u202etxt.exe"));
+    CHECK_FALSE(display_name::is_valid(std::string{"bad\xFFname", 8}));
+    CHECK(display_name::is_valid("", true));
+    CHECK_FALSE(display_name::is_valid(""));
 }
 
 } // namespace keen_pbr3

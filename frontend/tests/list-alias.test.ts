@@ -4,6 +4,7 @@ import type { ConfigObject } from "../src/api/generated/model/configObject"
 import { semanticJsonEqual } from "../src/lib/semantic-json"
 import {
   buildUpdatedConfigForListUpsert,
+  createListDraft,
   getDraftFromMapEntry,
   getListConfigFromDraft,
   normalizeListDraftForComparison,
@@ -22,6 +23,12 @@ const baselineDraft: ListDraft = {
 }
 
 describe("list aliases", () => {
+  test("derives a collision-safe technical ID from the readable name", () => {
+    expect(createListDraft("Нейросети", ["neyroseti"]).name).toBe(
+      "neyroseti_2"
+    )
+  })
+
   test("reads and persists a trimmed Unicode display name", () => {
     const draft = getDraftFromMapEntry("ai_services", {
       display_name: "Нейросети 🌐",
@@ -89,6 +96,54 @@ describe("list aliases", () => {
     expect(list?.display_name).toBe("Новое название")
     expect(updated.route?.rules?.[0]?.list).toEqual(["ai_services"])
     expect(updated.dns?.rules?.[0]?.list).toEqual(["ai_services"])
+  })
+
+  test("quick setup gives the generated routing rule an alias and stable ID", () => {
+    const updated = buildUpdatedConfigForListUpsert(
+      { route: { rules: [] } },
+      "create",
+      {
+        ...baselineDraft,
+        displayName: "Нейросети",
+      },
+      undefined,
+      {
+        createRouteRule: true,
+        routeOutbound: "proxy",
+        createDnsRule: false,
+        dnsServer: "",
+      }
+    )
+
+    expect(updated.route?.rules?.[0]).toMatchObject({
+      id: "neyroseti",
+      display_name: "Нейросети",
+      outbound: "proxy",
+    })
+  })
+
+  test("quick setup gives the generated DNS rule an alias and stable ID", () => {
+    const updated = buildUpdatedConfigForListUpsert(
+      { dns: { rules: [] } },
+      "create",
+      {
+        ...baselineDraft,
+        displayName: "Нейросети",
+      },
+      undefined,
+      {
+        createRouteRule: false,
+        routeOutbound: "",
+        createDnsRule: true,
+        dnsServer: "cloudflare",
+      }
+    )
+
+    expect(updated.dns?.rules?.[0]).toMatchObject({
+      id: "neyroseti",
+      display_name: "Нейросети",
+      server: "cloudflare",
+    })
   })
 
   test("treats whitespace-only aliases as unchanged and real edits as dirty", () => {

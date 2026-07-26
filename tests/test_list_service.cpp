@@ -409,6 +409,94 @@ TEST_CASE("download_uncached: preserves cached lists and tracks DNS-relevant cha
     std::filesystem::remove_all(temp_dir);
 }
 
+TEST_CASE("download_uncached: changed URL invalidates a cache with the same list name") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/old.txt", HttpResponse{200, "OK", "old.example\n"}},
+        {"/new.txt", HttpResponse{200, "OK", "new.example\n"}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/old.txt");
+    Config config;
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto first =
+        service.download_uncached(config, OutboundMarkMap{});
+    CHECK(first.changed_lists == std::vector<std::string>{"remote"});
+
+    remote.url = server.url("/new.txt");
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+    const auto second =
+        service.download_uncached(config, OutboundMarkMap{});
+    CHECK(second.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(second.cached_lists.empty());
+
+    std::ifstream refreshed(service.cache_manager().cache_path("remote"));
+    REQUIRE(refreshed.good());
+    CHECK(std::string(std::istreambuf_iterator<char>(refreshed), {}) ==
+          "new.example\n");
+
+    const auto third =
+        service.download_uncached(config, OutboundMarkMap{});
+    CHECK(third.refreshed_lists.empty());
+    CHECK(third.cached_lists == std::vector<std::string>{"remote"});
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("remote_list_sources_changed ignores non-source list edits") {
+    ListConfig remote;
+    remote.url = "https://example.com/list.txt";
+    remote.detour = "vpn";
+    remote.display_name = "Old name";
+    remote.ttl_ms = 1000;
+    remote.domains = std::vector<std::string>{"old.example"};
+
+    Config current;
+    current.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    remote.display_name = "New name";
+    remote.ttl_ms = 2000;
+    remote.domains = std::vector<std::string>{"new.example"};
+    Config next;
+    next.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+    ApiConfig api;
+    api.listen = "127.0.0.1:12121";
+    next.api = api;
+
+    CHECK_FALSE(remote_list_sources_changed(current, next));
+}
+
+TEST_CASE("remote_list_sources_changed detects URL detour and membership changes") {
+    ListConfig remote;
+    remote.url = "https://example.com/list.txt";
+    remote.detour = "vpn-a";
+
+    Config current;
+    current.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    Config changed_url = current;
+    changed_url.lists->at("remote").url = "https://example.com/new.txt";
+    CHECK(remote_list_sources_changed(current, changed_url));
+
+    Config changed_detour = current;
+    changed_detour.lists->at("remote").detour = "vpn-b";
+    CHECK(remote_list_sources_changed(current, changed_detour));
+
+    Config removed = current;
+    removed.lists = std::map<std::string, ListConfig>{};
+    CHECK(remote_list_sources_changed(current, removed));
+
+    Config added = removed;
+    added.lists = current.lists;
+    CHECK(remote_list_sources_changed(removed, added));
+}
+
 TEST_CASE("refresh_remote_lists: failed curl request logs clear transport error") {
     CurlGlobalGuard curl_guard;
     LoggerCapture logs;

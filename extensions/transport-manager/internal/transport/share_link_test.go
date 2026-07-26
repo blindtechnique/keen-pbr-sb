@@ -86,3 +86,192 @@ func TestRejectsUnsupportedLink(t *testing.T) {
 		t.Fatal("expected unsupported link to fail")
 	}
 }
+
+func TestSummariseOutboundSeparatesCarrierAndFraming(t *testing.T) {
+	tests := []struct {
+		name       string
+		outbound   map[string]any
+		wire       WireTransport
+		framing    TransportFraming
+		legacy     string
+		confidence TransportPathConfidence
+	}{
+		{
+			name:       "vless raw",
+			outbound:   map[string]any{"type": "vless"},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingRaw,
+			legacy:     "tcp",
+			confidence: TransportPathDerived,
+		},
+		{
+			name: "vless websocket",
+			outbound: map[string]any{
+				"type":      "vless",
+				"transport": map[string]any{"type": "ws"},
+			},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingWebSocket,
+			legacy:     "ws",
+			confidence: TransportPathDeclared,
+		},
+		{
+			name: "vmess grpc",
+			outbound: map[string]any{
+				"type":      "vmess",
+				"transport": map[string]any{"type": "grpc"},
+			},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingGRPC,
+			legacy:     "grpc",
+			confidence: TransportPathDeclared,
+		},
+		{
+			name: "trojan http upgrade",
+			outbound: map[string]any{
+				"type":      "trojan",
+				"transport": map[string]any{"type": "httpupgrade"},
+			},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingHTTPUpgrade,
+			legacy:     "httpupgrade",
+			confidence: TransportPathDeclared,
+		},
+		{
+			name:       "anytls raw",
+			outbound:   map[string]any{"type": "anytls"},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingRaw,
+			legacy:     "tcp",
+			confidence: TransportPathDerived,
+		},
+		{
+			name: "vless quic",
+			outbound: map[string]any{
+				"type":      "vless",
+				"transport": map[string]any{"type": "quic"},
+			},
+			wire:       WireTransportUDP,
+			framing:    TransportFramingQUIC,
+			legacy:     "quic",
+			confidence: TransportPathDeclared,
+		},
+		{
+			name:       "hysteria one",
+			outbound:   map[string]any{"type": "hysteria"},
+			wire:       WireTransportUDP,
+			framing:    TransportFramingQUIC,
+			legacy:     "quic",
+			confidence: TransportPathDerived,
+		},
+		{
+			name:       "hysteria two",
+			outbound:   map[string]any{"type": "hysteria2"},
+			wire:       WireTransportUDP,
+			framing:    TransportFramingQUIC,
+			legacy:     "quic",
+			confidence: TransportPathDerived,
+		},
+		{
+			name:       "tuic",
+			outbound:   map[string]any{"type": "tuic"},
+			wire:       WireTransportUDP,
+			framing:    TransportFramingQUIC,
+			legacy:     "quic",
+			confidence: TransportPathDerived,
+		},
+		{
+			name:       "naive http2",
+			outbound:   map[string]any{"type": "naive"},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingHTTP2,
+			legacy:     "h2",
+			confidence: TransportPathDerived,
+		},
+		{
+			name:       "naive quic",
+			outbound:   map[string]any{"type": "naive", "quic": true},
+			wire:       WireTransportUDP,
+			framing:    TransportFramingQUIC,
+			legacy:     "quic",
+			confidence: TransportPathDeclared,
+		},
+		{
+			name:       "shadowsocks ambiguous",
+			outbound:   map[string]any{"type": "shadowsocks"},
+			wire:       WireTransportTCPUDP,
+			framing:    TransportFramingRaw,
+			legacy:     "tcp_udp",
+			confidence: TransportPathAmbiguous,
+		},
+		{
+			name:       "socks ambiguous",
+			outbound:   map[string]any{"type": "socks"},
+			wire:       WireTransportTCPUDP,
+			framing:    TransportFramingRaw,
+			legacy:     "tcp_udp",
+			confidence: TransportPathAmbiguous,
+		},
+		{
+			name:       "wireguard",
+			outbound:   map[string]any{"type": "wireguard"},
+			wire:       WireTransportUDP,
+			framing:    TransportFramingWireGuard,
+			legacy:     "wireguard",
+			confidence: TransportPathDerived,
+		},
+		{
+			name:       "http proxy",
+			outbound:   map[string]any{"type": "http"},
+			wire:       WireTransportTCP,
+			framing:    TransportFramingHTTP,
+			legacy:     "http",
+			confidence: TransportPathDerived,
+		},
+		{
+			name:       "unknown is not guessed",
+			outbound:   map[string]any{"type": "ssh"},
+			wire:       WireTransportUnknown,
+			framing:    TransportFramingUnknown,
+			legacy:     "",
+			confidence: TransportPathUnknown,
+		},
+		{
+			name: "unknown framing keeps compatibility value",
+			outbound: map[string]any{
+				"type":      "vless",
+				"transport": map[string]any{"type": "future-stream"},
+			},
+			wire:       WireTransportUnknown,
+			framing:    TransportFramingUnknown,
+			legacy:     "future-stream",
+			confidence: TransportPathUnknown,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			summary := summariseOutbound(test.outbound)
+			if summary.path.WireTransport != test.wire ||
+				summary.path.Framing != test.framing ||
+				summary.path.Confidence != test.confidence ||
+				summary.legacyNetwork != test.legacy {
+				t.Fatalf("unexpected summary: %#v", summary)
+			}
+		})
+	}
+}
+
+func TestSummariseOutboundKeepsPayloadNetworksSeparate(t *testing.T) {
+	summary := summariseOutbound(map[string]any{
+		"type":    "hysteria2",
+		"network": "tcp",
+	})
+	if summary.path.WireTransport != WireTransportUDP {
+		t.Fatalf("Hysteria2 carrier must stay UDP: %#v", summary.path)
+	}
+	if len(summary.path.PayloadNetworks) != 1 ||
+		summary.path.PayloadNetworks[0] != "tcp" {
+		t.Fatalf("unexpected payload networks: %#v", summary.path.PayloadNetworks)
+	}
+}

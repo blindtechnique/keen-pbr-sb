@@ -68,13 +68,19 @@ struct FirewallGlobalPrefilter {
     std::optional<std::vector<std::string>> inbound_interfaces;
     bool skip_established_or_dnat{false};
     bool skip_marked_packets{false};
+    // Restore only the keen-pbr-owned portion of the conntrack mark before
+    // classifying a packet. RAW PREROUTING deliberately disables this because
+    // it runs before conntrack; mangle PREROUTING/OUTPUT and IPv6 can use it.
+    bool restore_conntrack_mark{false};
+    uint32_t conntrack_mark_mask{0};
 
     bool has_inbound_interfaces() const {
         return inbound_interfaces.has_value() && !inbound_interfaces->empty();
     }
 
     bool empty() const {
-        return !skip_established_or_dnat && !skip_marked_packets && !has_inbound_interfaces();
+        return !skip_established_or_dnat && !skip_marked_packets
+            && !restore_conntrack_mark && !has_inbound_interfaces();
     }
 };
 

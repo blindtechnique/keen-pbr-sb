@@ -26,14 +26,22 @@ bool nft_ipv6_supported() {
         "    ip6 saddr ::1 accept\n"
         "  }\n"
         "}\n";
-    return safe_exec_pipe_stdin({"nft", "-c", "-f", "-"}, kProbeRuleset) == 0;
+    return safe_exec_pipe_stdin(
+               {"nft", "-c", "-f", "-"},
+               kProbeRuleset,
+               nullptr,
+               SafeExecFailureLog::Suppressed) == 0;
 }
 
 bool iptables_ipv6_supported() {
     static constexpr const char* kProbeRuleset = "*mangle\nCOMMIT\n";
     return safe_exec({"ip6tables", "-t", "mangle", "-S"},
                      /*suppress_output=*/true) == 0
-        && safe_exec_pipe_stdin({"ip6tables-restore", "--test"}, kProbeRuleset) == 0;
+        && safe_exec_pipe_stdin(
+               {"ip6tables-restore", "--test"},
+               kProbeRuleset,
+               nullptr,
+               SafeExecFailureLog::Suppressed) == 0;
 }
 
 bool firewall_ipv6_supported(const Config& config) {

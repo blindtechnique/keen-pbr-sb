@@ -73,6 +73,39 @@ def make_ipk(
             "opt/etc/keen-pbr/config.json": (b"{}", 0o600),
             "opt/etc/keen-pbr/transports.json": (config, 0o600),
             "opt/usr/share/keen-pbr/frontend/index.html": (b"<!doctype html>", 0o644),
+            "opt/usr/share/keen-pbr/nfqws-blobs/ACTIVE_DISCORD_UDP.bin": (
+                b"discord",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-blobs/quic_initial_steamcommunity_com.bin": (
+                b"steam",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-blobs/stun.bin": (b"stun", 0o644),
+            "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_4pda_to.bin": (
+                b"4pda",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_max_ru.bin": (
+                b"max",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/ver9 E max plus/nfqws2.conf": (
+                b"NFQWS_ARGS=\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/ver9 E max plus/required-blobs.txt": (
+                b"tls_clienthello_max_ru.bin\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/ver10 H2 hybrid plus/nfqws2.conf": (
+                b"NFQWS_ARGS=\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/ver10 H2 hybrid plus/required-blobs.txt": (
+                b"tls_clienthello_4pda_to.bin\n",
+                0o644,
+            ),
         }
     )
     conffiles = ("\n".join(sorted(VALIDATOR.REQUIRED_CONFFILES)) + "\n").encode()

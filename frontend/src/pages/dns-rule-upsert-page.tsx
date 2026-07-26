@@ -31,7 +31,13 @@ import {
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import { useListUsageSubtitle } from "@/hooks/use-list-usage-subtitle"
+import {
+  createDnsServerDisplayNameMap,
+  getDnsRuleDisplayName,
+  getDnsServerDisplayName,
+} from "@/lib/dns-display"
 import {
   clearFormServerErrors,
   setFormServerErrors,
@@ -40,6 +46,9 @@ import {
 import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
+import { getTagNameValidationError } from "@/lib/tag-name-validation"
+import { makeTechnicalId } from "@/lib/technical-id"
+import { resolveRuleRouteIndex } from "@/lib/rule-route"
 import {
   Select,
   SelectContent,
@@ -51,6 +60,7 @@ import {
 } from "@/components/ui/select"
 import {
   buildUpdatedConfigWithRules,
+  createDnsRuleDraft,
   type DnsRuleDraft,
   getRuleDraft,
   normalizeDnsRuleDraft,
@@ -58,6 +68,8 @@ import {
 } from "@/pages/dns-rules-utils"
 
 const DNS_RULE_FIELD_NAMES = {
+  id: "rule.id",
+  displayName: "rule.displayName",
   enabled: "rule.enabled",
   server: "rule.server",
   lists: "rule.lists",
@@ -69,11 +81,11 @@ type DnsRuleFieldName =
 
 export function DnsRuleUpsertPage({
   mode,
-  ruleIndex,
+  ruleId,
   presentation = "page",
 }: {
   mode: "create" | "edit"
-  ruleIndex?: string
+  ruleId?: string
   presentation?: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
@@ -83,9 +95,10 @@ export function DnsRuleUpsertPage({
 
   const loadedConfig = selectConfig(configQuery.data)
   const rules = loadedConfig?.dns?.rules ?? []
-  const parsedRuleIndex = Number(ruleIndex)
+  const parsedRuleIndex =
+    mode === "edit" ? resolveRuleRouteIndex(rules, ruleId) : -1
   const existingRule =
-    mode === "edit" && Number.isInteger(parsedRuleIndex) && parsedRuleIndex >= 0
+    mode === "edit" && parsedRuleIndex >= 0
       ? rules[parsedRuleIndex]
       : undefined
 
@@ -142,7 +155,9 @@ export function DnsRuleUpsertPage({
       cardTitle={
         mode === "create"
           ? t("pages.dnsRuleUpsert.createTitle")
-          : t("pages.dnsRuleUpsert.editTitle")
+          : t("pages.dnsRuleUpsert.editCardTitle", {
+              name: getDnsRuleDisplayName(existingRule, parsedRuleIndex),
+            })
       }
       description={t("pages.dnsRuleUpsert.description")}
       dirty={dirty}
@@ -155,7 +170,7 @@ export function DnsRuleUpsertPage({
       }
     >
       <DnsRuleForm
-        key={`${mode}:${ruleIndex ?? "new"}`}
+        key={`${mode}:${ruleId ?? "new"}`}
         existingRule={existingRule}
         loadedConfig={loadedConfig}
         mode={mode}
@@ -185,16 +200,18 @@ function DnsRuleForm({
   presentation: UpsertPagePresentation
   rules: DnsRule[]
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
   const close = useUpsertPageClose()
-  const serverTags = (loadedConfig.dns?.servers ?? [])
+  const dnsServers = loadedConfig.dns?.servers ?? []
+  const serverTags = dnsServers
     .map((server) => server.tag)
     .filter(Boolean)
-  const serverSelectItems = serverTags.map((serverTag) => ({
-    value: serverTag,
-    label: serverTag,
+  const serverNames = createDnsServerDisplayNameMap(dnsServers)
+  const serverSelectItems = dnsServers.map((server) => ({
+    value: server.tag,
+    label: getDnsServerDisplayName(server),
   }))
   const listOptions = sortListIdsByDisplayName(
     Object.keys(loadedConfig.lists ?? {}),
@@ -203,25 +220,85 @@ function DnsRuleForm({
   const listUsageSubtitle = useListUsageSubtitle(
     rules,
     "dns",
-    mode === "edit" ? parsedRuleIndex : undefined
+    mode === "edit" ? parsedRuleIndex : undefined,
+    {
+      rule: (index) => getDnsRuleDisplayName(rules[index], index),
+      target: (tag) => serverNames.get(tag) ?? tag,
+    }
   )
   const postConfigMutation = usePostConfigMutation()
-  const [baselineDraft] = useState<DnsRuleDraft>(() =>
-    mode === "edit" && existingRule
-      ? getRuleDraft(existingRule)
-      : {
-          enabled: true,
-          server: serverTags[0] ?? "",
-          lists: [],
-          allowDomainRebinding: false,
-        }
-  )
+  const existingRuleIds = rules
+    .map((rule) => rule.id?.trim())
+    .filter((id): id is string => Boolean(id))
+  const [baselineDraft] = useState<DnsRuleDraft>(() => {
+    if (mode === "edit" && existingRule) {
+      const draft = getRuleDraft(existingRule)
+      const displayName =
+        draft.displayName || getDnsRuleDisplayName(existingRule, parsedRuleIndex)
+      return {
+        ...draft,
+        displayName,
+        id:
+          draft.id ||
+          makeTechnicalId(displayName, existingRuleIds, {
+            prefix: "dns_rule",
+          }),
+      }
+    }
+
+    return {
+      ...createDnsRuleDraft("", existingRuleIds),
+      server: serverTags[0] ?? "",
+    }
+  })
+  const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
+    useState(false)
   const form = useForm({
     defaultValues: {
       rule: baselineDraft,
     },
     validators: {
       onSubmitAsync: async ({ value }) => {
+        clearFormServerErrors(form)
+        const displayNameError = validateDisplayName(value.rule.displayName, t)
+        if (displayNameError) {
+          setFormServerErrors(form, {
+            fields: {
+              [DNS_RULE_FIELD_NAMES.displayName]: displayNameError,
+            },
+          })
+          return {
+            fields: {
+              [DNS_RULE_FIELD_NAMES.displayName]: displayNameError,
+            },
+          }
+        }
+
+        const valueToPersist = !value.rule.id.trim()
+          ? {
+              ...value.rule,
+              id: makeTechnicalId(
+                value.rule.displayName,
+                existingRuleIds,
+                { prefix: "dns_rule" }
+              ),
+            }
+          : value.rule
+        const idError = validateRuleId(
+          valueToPersist.id,
+          existingRuleIds,
+          existingRule?.id,
+          t
+        )
+        if (idError) {
+          setFormServerErrors(form, {
+            fields: { [DNS_RULE_FIELD_NAMES.id]: idError },
+          })
+          return {
+            fields: { [DNS_RULE_FIELD_NAMES.id]: idError },
+          }
+        }
+
         const nextRules = rules.map((rule) => getRuleDraft(rule))
 
         if (mode === "edit") {
@@ -232,12 +309,10 @@ function DnsRuleForm({
             return undefined
           }
 
-          nextRules[parsedRuleIndex] = value.rule
+          nextRules[parsedRuleIndex] = valueToPersist
         } else {
-          nextRules.push(value.rule)
+          nextRules.push(valueToPersist)
         }
-
-        clearFormServerErrors(form)
 
         const validation = validateRules(nextRules, serverTags, listOptions)
         if (Object.keys(validation).length > 0) {
@@ -249,6 +324,9 @@ function DnsRuleForm({
           }
 
           const fieldErrors: Record<string, string> = {}
+          if (currentError.id) {
+            fieldErrors[DNS_RULE_FIELD_NAMES.id] = currentError.id
+          }
           if (currentError.server) {
             fieldErrors[DNS_RULE_FIELD_NAMES.server] = currentError.server
           }
@@ -335,6 +413,100 @@ function DnsRuleForm({
       }}
     >
       <FieldGroup>
+        <form.Field
+          name={DNS_RULE_FIELD_NAMES.displayName}
+          validators={{
+            onChange: ({ value }) => validateDisplayName(value, t),
+          }}
+        >
+          {(field) => {
+            const error = getFirstFieldError(field.state.meta.errors)
+            return (
+              <Field invalid={Boolean(error)}>
+                <FieldLabel htmlFor="dns-rule-display-name">
+                  {t("pages.dnsRuleUpsert.fields.displayName")}
+                </FieldLabel>
+                <FieldContent>
+                  <Input
+                    aria-invalid={Boolean(error)}
+                    id="dns-rule-display-name"
+                    maxLength={80}
+                    onBlur={field.handleBlur}
+                    onChange={(event) => {
+                      const displayName = event.target.value
+                      field.handleChange(displayName)
+                      if (
+                        mode === "create" &&
+                        (presentation === "dialog" ||
+                          !technicalIdManuallyEdited)
+                      ) {
+                        form.setFieldValue(
+                          DNS_RULE_FIELD_NAMES.id,
+                          makeTechnicalId(displayName, existingRuleIds, {
+                            prefix: "dns_rule",
+                          })
+                        )
+                      }
+                    }}
+                    value={field.state.value}
+                  />
+                  <FieldHint
+                    description={t(
+                      "pages.dnsRuleUpsert.fields.displayNameHint"
+                    )}
+                    error={error}
+                  />
+                </FieldContent>
+              </Field>
+            )
+          }}
+        </form.Field>
+
+        {presentation === "page" ? (
+          <form.Field
+            name={DNS_RULE_FIELD_NAMES.id}
+            validators={{
+              onChange: ({ value }) =>
+                validateRuleId(
+                  value,
+                  existingRuleIds,
+                  existingRule?.id,
+                  t
+                ),
+            }}
+          >
+            {(field) => {
+              const error = getFirstFieldError(field.state.meta.errors)
+              return (
+                <Field invalid={Boolean(error)}>
+                  <FieldLabel htmlFor="dns-rule-id">
+                    {t("pages.dnsRuleUpsert.fields.technicalId")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Input
+                      aria-invalid={Boolean(error)}
+                      id="dns-rule-id"
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        setTechnicalIdManuallyEdited(true)
+                        field.handleChange(event.target.value)
+                      }}
+                      readOnly={mode === "edit" && Boolean(existingRule?.id)}
+                      value={field.state.value}
+                    />
+                    <FieldHint
+                      description={t(
+                        "pages.dnsRuleUpsert.fields.technicalIdHint"
+                      )}
+                      error={error}
+                    />
+                  </FieldContent>
+                </Field>
+              )
+            }}
+          </form.Field>
+        ) : null}
+
         <form.Field name={DNS_RULE_FIELD_NAMES.enabled}>
           {(field) => (
             <Field>
@@ -385,11 +557,24 @@ function DnsRuleForm({
                         <SelectLabel>
                           {t("pages.dnsRuleUpsert.fields.dnsServers")}
                         </SelectLabel>
-                        {serverTags.map((serverTag) => (
-                          <SelectItem key={serverTag} value={serverTag}>
-                            {serverTag}
+                        {dnsServers
+                          .slice()
+                          .sort((left, right) =>
+                            getDnsServerDisplayName(left).localeCompare(
+                              getDnsServerDisplayName(right),
+                              i18n.language
+                            )
+                          )
+                          .map((server) => (
+                          <SelectItem
+                            key={server.tag}
+                            value={server.tag}
+                          >
+                            <span title={server.tag}>
+                              {serverNames.get(server.tag) ?? server.tag}
+                            </span>
                           </SelectItem>
-                        ))}
+                          ))}
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -526,6 +711,14 @@ function resolveDnsRuleFieldPath(path: string): DnsRuleFieldName | undefined {
     return DNS_RULE_FIELD_NAMES.server
   }
 
+  if (/^dns\.rules(?:\[\d+\]|\.\d+)?\.id$/.test(path)) {
+    return DNS_RULE_FIELD_NAMES.id
+  }
+
+  if (/^dns\.rules(?:\[\d+\]|\.\d+)?\.display_name$/.test(path)) {
+    return DNS_RULE_FIELD_NAMES.displayName
+  }
+
   if (/^dns\.rules(?:\[\d+\]|\.\d+)?\.(list|lists)$/.test(path)) {
     return DNS_RULE_FIELD_NAMES.lists
   }
@@ -535,4 +728,34 @@ function resolveDnsRuleFieldPath(path: string): DnsRuleFieldName | undefined {
   }
 
   return undefined
+}
+
+function validateDisplayName(value: string, t: (key: string) => string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return t("pages.dnsRuleUpsert.validation.displayNameRequired")
+  }
+
+  return [...trimmed].length > 80
+    ? t("pages.dnsRuleUpsert.validation.displayNameTooLong")
+    : undefined
+}
+
+function validateRuleId(
+  value: string,
+  existingIds: readonly string[],
+  currentId: string | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+) {
+  const trimmed = value.trim()
+  return getTagNameValidationError(value, {
+    requiredError: t("pages.dnsRuleUpsert.validation.technicalIdRequired"),
+    invalidError: t("common.validation.tagNamePattern"),
+    duplicateError:
+      existingIds.includes(trimmed) && trimmed !== currentId
+        ? t("pages.dnsRuleUpsert.validation.duplicateTechnicalId", {
+            id: trimmed,
+          })
+        : null,
+  })
 }

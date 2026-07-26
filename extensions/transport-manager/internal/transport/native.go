@@ -20,5 +20,13 @@ func (n *Native) Status(context.Context) Status {
 	} else {
 		message = err.Error()
 	}
-	return Status{Tag: n.tag, Type: "native", Interface: n.iface, State: state, Error: message, UpdatedAt: time.Now().UTC()}
+	return Status{
+		Tag:       n.tag,
+		Type:      "native",
+		Interface: n.iface,
+		Path:      UnknownTransportPath(),
+		State:     state,
+		Error:     message,
+		UpdatedAt: time.Now().UTC(),
+	}
 }

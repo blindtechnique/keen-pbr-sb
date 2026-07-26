@@ -46,8 +46,13 @@ std::vector<RuleState> apply_runtime_firewall(
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
     firewall.set_clear_dynamic_sets_on_apply(
         config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
-    firewall.set_global_prefilter(build_firewall_global_prefilter(config));
-    firewall.set_fwmark_mask(fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
+    auto prefilter = build_firewall_global_prefilter(config);
+    prefilter.restore_conntrack_mark = true;
+    prefilter.conntrack_mark_mask =
+        fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));
+    firewall.set_global_prefilter(std::move(prefilter));
+    firewall.set_fwmark_mask(
+        fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{})));
     firewall.prepare_apply(mode);
 
     const auto& all_outbounds = config.outbounds.value_or(std::vector<Outbound>{});

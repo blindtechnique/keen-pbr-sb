@@ -51,6 +51,24 @@ struct RouteSpec {
     uint8_t protocol{KEEN_PBR_GENERATED_ROUTE_PROTOCOL};
 };
 
+enum class RouteAddResult {
+    Created,
+    AlreadyPresent,
+};
+
+struct DumpedRoute;
+
+// Small testable surface used by RouteTable.  Returning whether the kernel
+// object was created is essential: cleanup must never delete a route that
+// predated this process.
+class RouteNetlinkOperations {
+public:
+    virtual ~RouteNetlinkOperations() = default;
+    virtual RouteAddResult add_route(const RouteSpec& spec) = 0;
+    virtual void delete_route(const RouteSpec& spec) = 0;
+    virtual std::vector<DumpedRoute> dump_routes(int family = 0) = 0;
+};
+
 // Represents a policy routing rule (ip rule)
 struct RuleSpec {
     uint32_t fwmark{0};         // Firewall mark to match
@@ -58,6 +76,20 @@ struct RuleSpec {
     uint32_t table{0};          // Routing table to use
     uint32_t priority{0};       // Rule priority (lower = higher priority)
     int family{0};              // AF_INET or AF_INET6 (0 = both)
+};
+
+enum class RuleAddResult {
+    Created,
+    AlreadyPresent,
+};
+
+// PolicyRuleManager expands family=0 into two concrete operations so it can
+// roll IPv4 back if the matching IPv6 install fails.
+class RuleNetlinkOperations {
+public:
+    virtual ~RuleNetlinkOperations() = default;
+    virtual RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) = 0;
+    virtual void delete_rule_for_family(const RuleSpec& spec, int family) = 0;
 };
 
 // A route dumped from the kernel (read-only snapshot)
@@ -93,7 +125,8 @@ struct DumpedInterface {
 };
 
 // Low-level netlink route and policy rule management via libnl
-class NetlinkManager {
+class NetlinkManager : public RouteNetlinkOperations,
+                       public RuleNetlinkOperations {
 public:
     NetlinkManager();
     ~NetlinkManager();
@@ -105,17 +138,17 @@ public:
     NetlinkManager& operator=(NetlinkManager&&) = delete;
 
     // Route operations
-    void add_route(const RouteSpec& spec);
-    void delete_route(const RouteSpec& spec);
+    RouteAddResult add_route(const RouteSpec& spec) override;
+    void delete_route(const RouteSpec& spec) override;
     void flush_routes_in_table(uint32_t table_id, int family = 0);
 
     // Policy rule operations
-    void add_rule(const RuleSpec& spec);
-    void delete_rule(const RuleSpec& spec);
+    RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) override;
+    void delete_rule_for_family(const RuleSpec& spec, int family) override;
 
     // Dump all routes in a specific routing table from the kernel.
     // family: 0 (AF_UNSPEC) to get both IPv4 and IPv6 routes.
-    std::vector<DumpedRoute> dump_routes(int family = 0);
+    std::vector<DumpedRoute> dump_routes(int family = 0) override;
     std::vector<DumpedRoute> dump_routes_in_table(uint32_t table_id,
                                                    int family = 0);
 

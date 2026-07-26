@@ -4,6 +4,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react"
 import { useTranslation } from "react-i18next"
@@ -20,8 +21,10 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-
-type AuthStatus = { enabled: boolean; authenticated: boolean }
+import {
+  parseAuthStatus,
+  type AuthStatus,
+} from "@/lib/auth-status"
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { t } = useTranslation()
@@ -30,14 +33,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [password, setPassword] = useState("")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState("")
+  const [statusUnavailable, setStatusUnavailable] = useState(false)
+  const hasTrustedStatus = useRef(false)
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch("/api/auth/status", { cache: "no-store" })
       if (!response.ok) throw new Error(String(response.status))
-      setStatus((await response.json()) as AuthStatus)
+      const nextStatus = parseAuthStatus(await response.json())
+      if (!nextStatus) {
+        throw new Error("invalid auth status")
+      }
+      hasTrustedStatus.current = true
+      setStatusUnavailable(false)
+      setStatus(nextStatus)
     } catch {
-      setStatus({ enabled: false, authenticated: true })
+      if (!hasTrustedStatus.current) {
+        setStatusUnavailable(true)
+      }
     }
   }, [])
 
@@ -70,11 +83,35 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
   }
 
-  if (!status) {
+  if (!status && !statusUnavailable) {
     return (
       <div className="grid min-h-screen place-items-center">
         <LoaderCircleIcon className="size-7 animate-spin text-muted-foreground" />
       </div>
+    )
+  }
+  if (!status) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-background p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>{t("auth.unavailableTitle")}</CardTitle>
+            <CardDescription>{t("auth.unavailable")}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              className="w-full"
+              onClick={() => {
+                setStatusUnavailable(false)
+                void refresh()
+              }}
+              type="button"
+            >
+              {t("auth.retry")}
+            </Button>
+          </CardContent>
+        </Card>
+      </main>
     )
   }
   if (!status.enabled || status.authenticated) return children

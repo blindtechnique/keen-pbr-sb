@@ -3,9 +3,11 @@
 #include "firewall.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -55,6 +57,14 @@ public:
     FirewallBackend backend() const override;
 
 private:
+    enum class MarkMergeMode : uint8_t {
+        LegacyConstant,
+        RegisterMerge,
+    };
+    using CapabilityProbe = std::function<bool()>;
+
+    explicit NftablesFirewall(CapabilityProbe capability_probe);
+
     static constexpr const char* TABLE_NAME = "KeenPbrTable";
     static constexpr const char* CHAIN_NAME = "prerouting";
     static constexpr const char* OUTPUT_CHAIN_NAME = "output";
@@ -78,7 +88,9 @@ private:
     nlohmann::json build_apply_document(const LiveTableState& live_state,
                                         bool emit_full_table,
                                         bool destructive_apply,
-                                        bool clear_dynamic_sets);
+                                        bool clear_dynamic_sets,
+                                        MarkMergeMode mark_merge_mode =
+                                            MarkMergeMode::LegacyConstant);
 
     // Describes an nftables named set to be created.
     struct PendingSet {
@@ -126,9 +138,13 @@ private:
     // Build all prerouting rule add-commands, including global prefilter rules.
     static nlohmann::json build_rule_add_commands(
         const FirewallGlobalPrefilter& prefilter,
-        const std::vector<PendingRule>& rules);
+        const std::vector<PendingRule>& rules,
+        MarkMergeMode mark_merge_mode = MarkMergeMode::LegacyConstant);
     // Build the JSON rule object for a meta mark set action matching a named set.
-    static nlohmann::json build_mark_rule_json(const PendingRule& pr);
+    static nlohmann::json build_mark_rule_json(
+        const PendingRule& pr,
+        uint32_t conntrack_mark_mask = 0,
+        MarkMergeMode mark_merge_mode = MarkMergeMode::LegacyConstant);
     // Build the JSON rule object for a drop verdict matching a named set.
     static nlohmann::json build_drop_rule_json(const PendingRule& pr);
     // Build the JSON rule object for a pass-through verdict matching a named set.
@@ -158,6 +174,12 @@ private:
                                  uint32_t fwmark,
                                  const FirewallRuleCriteria& criteria,
                                  bool output_scope = false);
+    static nlohmann::json build_register_merge_probe_document();
+    static bool probe_register_merge_capability();
+    static MarkMergeMode resolve_mark_merge_mode(
+        std::optional<MarkMergeMode>& cached_mode,
+        const CapabilityProbe& capability_probe);
+    MarkMergeMode mark_merge_mode();
 
     // Sets queued for creation, flushed by apply().
     std::vector<PendingSet> pending_sets_;
@@ -176,6 +198,8 @@ private:
     bool dns_redirect_requested_ = false;
     bool router_origin_snat_requested_ = false;
     std::vector<std::string> snat_interfaces_;
+    CapabilityProbe mark_merge_capability_probe_;
+    std::optional<MarkMergeMode> mark_merge_mode_;
 
 #ifdef KEEN_PBR3_TESTING
     friend class NftablesBuilderTest;

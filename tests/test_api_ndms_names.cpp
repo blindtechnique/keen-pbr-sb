@@ -272,6 +272,21 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
     CHECK(inventory["interfaces"][0]["capabilities"]["can_hide"] == false);
     CHECK(inventory["interfaces"][0]["capabilities"]["backup_required"] ==
           true);
+    const auto& readiness =
+        inventory["interfaces"][0]["management_readiness"];
+    CHECK(readiness["candidate"] == true);
+    CHECK(readiness["identity_stable"] == true);
+    CHECK(readiness["configuration_snapshot_available"] == false);
+    CHECK(
+        readiness["observed_revision"].get<std::string>().rfind(
+            "ndms-v1-",
+            0) == 0);
+    CHECK(readiness["blockers"] ==
+          nlohmann::json::array(
+              {"typed_rci_unavailable",
+               "automatic_backup_unavailable",
+               "ownership_unknown",
+               "optimistic_revision_unavailable"}));
 }
 
 } // namespace keen_pbr3

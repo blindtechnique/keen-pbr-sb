@@ -1,5 +1,12 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import { getDnsRuleDisplayName } from "@/lib/dns-display"
 import { getListReferenceLabel } from "@/lib/list-display"
+import {
+  createOutboundDisplayNameMap,
+  getOutboundDisplayName,
+} from "@/lib/outbound-display"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
+import { getRuleEditHref } from "@/lib/rule-route"
 
 export type DependencyKind =
   | "routingRule"
@@ -29,6 +36,9 @@ export function findBrokenReferences(
   if (!config) return []
   const found = new Map<string, BrokenReference>()
   const outbounds = new Set((config.outbounds ?? []).map((item) => item.tag))
+  const outboundDisplayNames = createOutboundDisplayNameMap(
+    config.outbounds ?? []
+  )
   const lists = new Set(Object.keys(config.lists ?? {}))
   const dnsServers = new Set(
     (config.dns?.servers ?? []).map((item) => item.tag).filter(Boolean)
@@ -39,16 +49,16 @@ export function findBrokenReferences(
     if (!outbounds.has(rule.outbound)) {
       add({
         id: `route:${index}:outbound:${rule.outbound}`,
-        label: `Правило #${index + 1} → ${rule.outbound}`,
-        href: `/routing-rules/${index}/edit`,
+        label: `${getRouteRuleDisplayName(rule, index)} → ${rule.outbound}`,
+        href: getRuleEditHref("routing-rules", rule, index),
       })
     }
     for (const list of rule.list ?? []) {
       if (!lists.has(list)) {
         add({
           id: `route:${index}:list:${list}`,
-          label: `Правило #${index + 1} → список ${list}`,
-          href: `/routing-rules/${index}/edit`,
+          label: `${getRouteRuleDisplayName(rule, index)} → список ${getListReferenceLabel(list, config.lists)}`,
+          href: getRuleEditHref("routing-rules", rule, index),
         })
       }
     }
@@ -57,16 +67,16 @@ export function findBrokenReferences(
     if (!dnsServers.has(rule.server)) {
       add({
         id: `dns:${index}:server:${rule.server}`,
-        label: `DNS-правило #${index + 1} → ${rule.server}`,
-        href: `/dns-rules/${index}/edit`,
+        label: `${getDnsRuleDisplayName(rule, index)} → ${rule.server}`,
+        href: getRuleEditHref("dns-rules", rule, index),
       })
     }
     for (const list of rule.list ?? []) {
       if (!lists.has(list)) {
         add({
           id: `dns:${index}:list:${list}`,
-          label: `DNS-правило #${index + 1} → список ${list}`,
-          href: `/dns-rules/${index}/edit`,
+          label: `${getDnsRuleDisplayName(rule, index)} → список ${getListReferenceLabel(list, config.lists)}`,
+          href: getRuleEditHref("dns-rules", rule, index),
         })
       }
     }
@@ -78,7 +88,9 @@ export function findBrokenReferences(
       if (!outbounds.has(member)) {
         add({
           id: `outbound:${outbound.tag}:member:${member}`,
-          label: `${outbound.tag} → ${member}`,
+          label: `${getOutboundDisplayName(outbound)} → ${
+            outboundDisplayNames.get(member) ?? member
+          }`,
           href: `/outbounds/${outbound.tag}/edit`,
         })
       }
@@ -88,7 +100,9 @@ export function findBrokenReferences(
     if (list.detour && !outbounds.has(list.detour)) {
       add({
         id: `list:${name}:detour:${list.detour}`,
-        label: `Список ${getListReferenceLabel(name, config.lists)} → ${list.detour}`,
+        label: `Список ${getListReferenceLabel(name, config.lists)} → ${
+          outboundDisplayNames.get(list.detour) ?? list.detour
+        }`,
         href: `/lists/${name}/edit`,
       })
     }

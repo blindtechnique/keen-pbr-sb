@@ -7,12 +7,28 @@
  */
 
 export interface CircuitBreakerConfig {
-  /** Number of consecutive failures before opening the circuit. */
+  /**
+     * Number of consecutive failures before opening the circuit.
+     * @minimum 1
+     * @maximum 2147483647
+     */
   failure_threshold?: number;
-  /** Number of consecutive successes in half-open state to close the circuit. */
+  /**
+     * Number of consecutive successes in half-open state to close the circuit.
+     * @minimum 1
+     * @maximum 4294967295
+     */
   success_threshold?: number;
-  /** Time in milliseconds before the circuit transitions from open to half-open. */
+  /**
+     * Time in milliseconds before the circuit transitions from open to half-open.
+     * @minimum 0
+     * @maximum 4294967295
+     */
   timeout_ms?: number;
-  /** Maximum number of probe requests allowed in half-open state. */
+  /**
+     * Maximum number of probe requests allowed in half-open state.
+     * @minimum 1
+     * @maximum 4294967295
+     */
   half_open_max_requests?: number;
 }

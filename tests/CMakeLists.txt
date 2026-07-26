@@ -12,6 +12,9 @@ add_executable(keen-pbr-tests
   test_test_routing.cpp
   test_keenetic_dns.cpp
   test_ndms_interface_inventory.cpp
+  test_ndms_interface_management.cpp
+  test_ndms_rci_observation.cpp
+  test_ndms_rci_restorable_snapshot.cpp
   test_dns_probe_server.cpp
   test_list_set_usage.cpp
   test_list_service.cpp
@@ -33,11 +36,24 @@ add_executable(keen-pbr-tests
   test_api_dependency_analysis.cpp
   test_connection_query.cpp
   test_conntrack_event_monitor.cpp
+  test_conntrack_manager.cpp
+  test_interface_traffic_sampler.cpp
   test_api_status_events.cpp
   test_api_transports.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
+  test_api_auth.cpp
+  test_api_config.cpp
   test_backup_restore.cpp
+  test_persistent_snapshot.cpp
+  test_backup_restore_journal.cpp
+  test_restore_transaction.cpp
+  test_recovery_coordinator.cpp
+  test_recover_persistent_state.cpp
+  test_maintenance_lock.cpp
+  test_update_lock_protocol.cpp
+  test_rescue_update.cpp
+  test_rescue_integrity.cpp
   test_api_static.cpp
   test_resolver_health.cpp
   test_system_resolver_hook.cpp
@@ -54,10 +70,18 @@ add_executable(keen-pbr-tests
   test_runtime_state_machine.cpp
   test_urltest_manager.cpp
   test_port_spec_util.cpp
+  test_policy_rule.cpp
+  test_route_table.cpp
   test_pid_file.cpp
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
   ../src/config/config_writer.cpp
+  ../src/backup/persistent_snapshot.cpp
+  ../src/backup/restore_journal.cpp
+  ../src/backup/restore_transaction.cpp
+  ../src/backup/recovery_coordinator.cpp
+  ../src/cmd/recover_persistent_state.cpp
+  ../src/update/maintenance_lock.cpp
   ../src/config/dependency_analysis.cpp
   ../src/crash/crash_diagnostics.cpp
   ../src/config/routing_state.cpp
@@ -85,6 +109,8 @@ add_executable(keen-pbr-tests
   ../src/ipc/control_client.cpp
   ../src/ipc/resolver_fallback.cpp
   ../src/connections/conntrack_event_monitor.cpp
+  ../src/runtime/conntrack_manager.cpp
+  ../src/runtime/interface_traffic_sampler.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_streamer.cpp
@@ -102,6 +128,9 @@ add_executable(keen-pbr-tests
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/keenetic/ndms_interface_management.cpp
+  ../src/keenetic/ndms_rci_observation.cpp
+  ../src/keenetic/ndms_rci_restorable_snapshot.cpp
   ../src/health/url_tester.cpp
   ../src/health/circuit_breaker.cpp
   ../src/health/routing_health_checker.cpp
@@ -125,6 +154,125 @@ add_executable(keen-pbr-tests
   ../src/routing/routing_verifier.cpp
   ../src/routing/target.cpp
 )
+
+# Keep the package-rescue suite independently buildable. It intentionally has
+# no daemon/API dependencies, so recovery invariants remain testable even when
+# an unrelated in-progress backend change temporarily breaks the monolithic
+# unit-test target.
+add_executable(keen-pbr-rescue-tests
+  test_main.cpp
+  test_rescue_update.cpp
+  test_rescue_integrity.cpp
+)
+set_target_properties(keen-pbr-rescue-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-rescue-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_compile_definitions(keen-pbr-rescue-tests PRIVATE
+  KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
+  KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
+  KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+  KEEN_PBR_INSTALL_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/install.sh"
+  KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
+)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-rescue-tests PRIVATE stdc++fs)
+endif()
+add_test(NAME keen-pbr-rescue-tests COMMAND keen-pbr-rescue-tests)
+
+# Keep the restore journal independently buildable. It deliberately has no
+# API, lifecycle, or startup dependencies, so crash-boundary tests remain
+# runnable while handler and startup integration is still under development.
+add_executable(keen-pbr-backup-restore-journal-tests
+  test_main.cpp
+  test_backup_restore_journal.cpp
+  test_restore_transaction.cpp
+  ../src/backup/restore_journal.cpp
+  ../src/backup/restore_transaction.cpp
+  ../src/config/config_writer.cpp
+)
+set_target_properties(keen-pbr-backup-restore-journal-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_compile_definitions(
+  keen-pbr-backup-restore-journal-tests PRIVATE KEEN_PBR3_TESTING
+)
+target_include_directories(keen-pbr-backup-restore-journal-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+  ${CMAKE_SOURCE_DIR}/third_party/nlohmann_json/include
+)
+target_link_libraries(
+  keen-pbr-backup-restore-journal-tests PRIVATE
+  nlohmann_json::nlohmann_json
+)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(
+    keen-pbr-backup-restore-journal-tests PRIVATE stdc++fs
+  )
+endif()
+add_test(
+  NAME keen-pbr-backup-restore-journal-tests
+  COMMAND keen-pbr-backup-restore-journal-tests
+)
+
+# Keep the C++ protocol-3 guardian client independently buildable. Handler and
+# startup integration intentionally depend on this target only after its
+# process-lifetime and CAS boundaries are proven in isolation.
+add_executable(keen-pbr-maintenance-lock-tests
+  test_main.cpp
+  test_maintenance_lock.cpp
+  ../src/update/maintenance_lock.cpp
+)
+set_target_properties(keen-pbr-maintenance-lock-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_compile_definitions(keen-pbr-maintenance-lock-tests PRIVATE
+  KEEN_PBR3_TESTING
+  KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+)
+target_include_directories(keen-pbr-maintenance-lock-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+add_test(
+  NAME keen-pbr-maintenance-lock-tests
+  COMMAND keen-pbr-maintenance-lock-tests
+)
+
+# Keep the shell wire protocol independently testable. These tests exercise
+# publication races and hostile on-disk metadata without any daemon linkage.
+add_executable(keen-pbr-update-lock-protocol-tests
+  test_main.cpp
+  test_update_lock_protocol.cpp
+)
+set_target_properties(keen-pbr-update-lock-protocol-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_compile_definitions(keen-pbr-update-lock-protocol-tests PRIVATE
+  KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+)
+target_include_directories(keen-pbr-update-lock-protocol-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-update-lock-protocol-tests PRIVATE stdc++fs)
+endif()
+add_test(
+  NAME keen-pbr-update-lock-protocol-tests
+  COMMAND keen-pbr-update-lock-protocol-tests
+)
+
 set_target_properties(keen-pbr-tests PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED YES
@@ -134,6 +282,11 @@ set_target_properties(keen-pbr-tests PROPERTIES
 target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR3_TESTING
   KEEN_PBR_DEFAULT_CONFIG_PATH="${KEEN_PBR_DEFAULT_CONFIG_PATH}"
+  KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
+  KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
+  KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
+  KEEN_PBR_INSTALL_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/install.sh"
+  KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
 )
 
 # Reuse include paths from the main target so generated headers such as
@@ -198,6 +351,7 @@ if(WITH_API)
   target_sources(keen-pbr-tests PRIVATE
     ../src/api/server.cpp
     ../src/api/connection_query.cpp
+    ../src/api/auth_runtime.cpp
     ../src/api/keenetic_auth.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/api/status_stream.cpp
@@ -209,6 +363,7 @@ if(WITH_API)
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
+    ../src/api/handler_config.cpp
     ../src/api/handler_backup.cpp
     ../src/health/runtime_interface_inventory.cpp
   )

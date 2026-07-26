@@ -189,6 +189,13 @@ public:
     };
   }
 
+  static std::string build_raw_conntrack_script(
+      bool replace_active,
+      const FirewallGlobalPrefilter& prefilter = {}) {
+    return IptablesFirewall::build_raw_conntrack_script(
+        replace_active, prefilter);
+  }
+
   static std::pair<std::string, std::string> generation_set_names() {
     IptablesFirewall fw;
     fw.prepare_apply(FirewallApplyMode::Destructive);
@@ -590,6 +597,85 @@ TEST_CASE("build_ipt_script: global prefilter RETURN lines are emitted before ro
   CHECK(dnat_pos < marked_pos);
   CHECK(marked_pos < iface_pos);
   CHECK(iface_pos < mark_pos);
+}
+
+TEST_CASE("build_ipt_script: restores and saves only keen-pbr conntrack mark bits") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto s = T::build_ipt_script(
+      false,
+      {mark_rule("myset", false, 0x00120000)},
+      prefilter);
+
+  const std::string restore =
+      "-A KeenPbrTable -m conntrack --ctdir ORIGINAL "
+      "-m connmark ! --mark 0/0xff0000 "
+      "-j CONNMARK --restore-mark --nfmask 0xff0000 --ctmask 0xff0000\n";
+  const std::string restored_return =
+      "-A KeenPbrTable -m conntrack --ctdir ORIGINAL "
+      "-m connmark ! --mark 0/0xff0000 -j RETURN\n";
+  const std::string classify =
+      "-A KeenPbrTable -m set --match-set myset dst "
+      "-j MARK --set-xmark 0x120000/0xffffffff\n";
+  const std::string persist =
+      "-A KeenPbrTable -m set --match-set myset dst "
+      "-j CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000\n";
+
+  const auto restore_pos = s.find(restore);
+  const auto return_pos = s.find(restored_return);
+  const auto classify_pos = s.find(classify);
+  const auto persist_pos = s.find(persist);
+  REQUIRE(restore_pos != std::string::npos);
+  REQUIRE(return_pos != std::string::npos);
+  REQUIRE(classify_pos != std::string::npos);
+  REQUIRE(persist_pos != std::string::npos);
+  CHECK(restore_pos < return_pos);
+  CHECK(return_pos < classify_pos);
+  CHECK(classify_pos < persist_pos);
+  CHECK(s.find("--ctdir REPLY") == std::string::npos);
+}
+
+TEST_CASE("raw PREROUTING never references conntrack state or CONNMARK") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto [raw, output] =
+      T::build_raw_generation_scripts(false, prefilter);
+
+  CHECK(raw.find("CONNMARK") == std::string::npos);
+  CHECK(raw.find("--ctdir") == std::string::npos);
+  CHECK(output.find(
+            "CONNMARK --restore-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+  CHECK(output.find(
+            "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+}
+
+TEST_CASE("raw PREROUTING uses a mangle conntrack companion for flow stickiness") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto first = T::build_raw_conntrack_script(false, prefilter);
+  CHECK(first.find(":KeenPbrRawCt - [0:0]") != std::string::npos);
+  CHECK(first.find("-A PREROUTING -j KeenPbrRawCt") !=
+        std::string::npos);
+  CHECK(first.find(
+            "CONNMARK --restore-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+  CHECK(first.find(
+            "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000") !=
+        std::string::npos);
+  CHECK(first.find("--ctdir REPLY") == std::string::npos);
+
+  const auto replace = T::build_raw_conntrack_script(true, prefilter);
+  CHECK(replace.find("-F KeenPbrRawCt") != std::string::npos);
+  CHECK(replace.find("-A PREROUTING -j KeenPbrRawCt") ==
+        std::string::npos);
 }
 
 TEST_CASE("build_ipt_script: skip_marked_packets prefilter can be disabled") {

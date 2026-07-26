@@ -71,7 +71,13 @@ std::optional<std::string> LifecycleOperationCoordinator::begin(
     created.started_at = now_seconds();
     created.stages = std::move(stages);
     active_ = created;
-    store_.publish(created);
+    try {
+        store_.publish(created);
+    } catch (...) {
+        // An observer failure must not strand the single-flight coordinator.
+        active_.reset();
+        throw;
+    }
     return std::nullopt;
 }
 
@@ -142,16 +148,27 @@ void LifecycleOperationCoordinator::skip_stage(const std::string& id,
 }
 
 void LifecycleOperationCoordinator::finish(const std::string& id, std::string error) {
-    mutate(id, [&](auto& operation) {
-        if (!error.empty()) operation.error = std::move(error);
-        for (auto& stage : operation.stages) {
-            if (stage.status == LifecycleOperationStatus::Pending)
-                stage.status = LifecycleOperationStatus::Skipped;
-        }
-        operation.result = operation.error.empty() ? LifecycleOperationResult::Succeeded
-                                                   : LifecycleOperationResult::Failed;
-        operation.finished_at = now_seconds();
-    });
+    try {
+        mutate(id, [&](auto& operation) {
+            if (!error.empty()) operation.error = std::move(error);
+            for (auto& stage : operation.stages) {
+                if (stage.status == LifecycleOperationStatus::Pending)
+                    stage.status = LifecycleOperationStatus::Skipped;
+            }
+            operation.result =
+                operation.error.empty()
+                    ? LifecycleOperationResult::Succeeded
+                    : LifecycleOperationResult::Failed;
+            operation.finished_at = now_seconds();
+        });
+    } catch (...) {
+        // mutate() updates active_ before publishing. Even when a status
+        // observer rejects the terminal publication, recovery must be able to
+        // start another lifecycle operation.
+        KPBR_LOCK_GUARD(mutex_);
+        if (active_ && active_->id == id) active_.reset();
+        throw;
+    }
     KPBR_LOCK_GUARD(mutex_);
     if (active_ && active_->id == id) active_.reset();
 }

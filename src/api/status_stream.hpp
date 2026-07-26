@@ -26,8 +26,14 @@ public:
     SseBroadcaster::SubscriptionPtr subscribe();
     void unsubscribe(const SseBroadcaster::SubscriptionPtr& subscription);
     void reconcile();
+    void publish_interfaces(api::RuntimeInterfaceInventoryResponse state);
+    // High-frequency interface counters are deliberately kept out of the
+    // cached full inventory. The caller supplies a compact JSON object whose
+    // schema is owned by the status stream rather than the REST OpenAPI model.
+    void publish_interface_traffic(nlohmann::json state);
     void publish_connections(api::ConnectionEventState state);
     void close_all();
+    bool has_subscribers();
 
 private:
     SnapshotBuilder builder_;

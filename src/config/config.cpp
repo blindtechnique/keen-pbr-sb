@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "addr_spec.hpp"
 #include "routing_state.hpp"
+#include "../util/display_name.hpp"
 #include "../util/system_info.hpp"
 
 #include <algorithm>
@@ -182,107 +183,177 @@ bool parse_uint_in_range(const std::string& raw, int min_value, int max_value, i
 constexpr size_t IPSET_MAX_NAME = 31;
 constexpr size_t IPSET_PREFIX_LEN = 7; // len("kpbr4d_")
 constexpr size_t MAX_TAG_LEN = IPSET_MAX_NAME - IPSET_PREFIX_LEN; // 24
-constexpr size_t MAX_LIST_DISPLAY_NAME_CODE_POINTS = 80;
+constexpr size_t MAX_HIDDEN_NATIVE_INTERFACE_IDS = 128;
+constexpr size_t MAX_NATIVE_INTERFACE_ID_CODE_POINTS = 128;
+constexpr size_t MAX_PLAIN_DNS_TEMPLATES = 32;
 
-bool contains_ascii_control(const std::string& value) {
-    return std::any_of(
-        value.begin(), value.end(), [](unsigned char character) {
-            return character < 0x20U || character == 0x7FU;
-        });
-}
-
-bool is_unicode_whitespace(uint32_t code_point) {
-    return (code_point >= 0x09U && code_point <= 0x0DU) ||
-           code_point == 0x20U || code_point == 0x85U ||
-           code_point == 0xA0U || code_point == 0x1680U ||
-           (code_point >= 0x2000U && code_point <= 0x200AU) ||
-           code_point == 0x2028U || code_point == 0x2029U ||
-           code_point == 0x202FU || code_point == 0x205FU ||
-           code_point == 0x3000U;
-}
-
-struct Utf8Summary {
-    size_t code_points{0};
-    bool has_non_whitespace{false};
-};
-
-std::optional<Utf8Summary> summarize_utf8(const std::string& value) {
-    Utf8Summary summary;
-    for (size_t offset = 0; offset < value.size();) {
-        const auto first = static_cast<unsigned char>(value[offset]);
-        size_t length = 0;
-        uint32_t code_point = 0;
-        if (first <= 0x7FU) {
-            length = 1;
-            code_point = first;
-        } else if (first >= 0xC2U && first <= 0xDFU) {
-            length = 2;
-            code_point = first & 0x1FU;
-        } else if (first >= 0xE0U && first <= 0xEFU) {
-            length = 3;
-            code_point = first & 0x0FU;
-        } else if (first >= 0xF0U && first <= 0xF4U) {
-            length = 4;
-            code_point = first & 0x07U;
-        } else {
-            return std::nullopt;
-        }
-
-        if (offset + length > value.size()) return std::nullopt;
-        for (size_t index = 1; index < length; ++index) {
-            const auto continuation =
-                static_cast<unsigned char>(value[offset + index]);
-            if ((continuation & 0xC0U) != 0x80U) return std::nullopt;
-            code_point = (code_point << 6U) | (continuation & 0x3FU);
-        }
-
-        if (length == 3) {
-            const auto second =
-                static_cast<unsigned char>(value[offset + 1]);
-            if ((first == 0xE0U && second < 0xA0U) ||
-                (first == 0xEDU && second > 0x9FU)) {
-                return std::nullopt;
-            }
-        } else if (length == 4) {
-            const auto second =
-                static_cast<unsigned char>(value[offset + 1]);
-            if ((first == 0xF0U && second < 0x90U) ||
-                (first == 0xF4U && second > 0x8FU)) {
-                return std::nullopt;
-            }
-        }
-
-        offset += length;
-        ++summary.code_points;
-        summary.has_non_whitespace =
-            summary.has_non_whitespace || !is_unicode_whitespace(code_point);
-    }
-    return summary;
-}
-
-void validate_list_display_name(
+void validate_display_name(
     std::vector<ConfigValidationIssue>& issues,
     const std::string& path,
+    const std::string& kind,
     const std::optional<std::string>& display_name) {
     if (!display_name.has_value()) return;
-    if (contains_ascii_control(*display_name)) {
-        add_issue(issues, path,
-                  "List display name must not contain ASCII control characters");
-        return;
+    switch (keen_pbr3::display_name::validate(*display_name, false)) {
+        case keen_pbr3::display_name::ValidationError::none:
+            return;
+        case keen_pbr3::display_name::ValidationError::invalid_utf8:
+            add_issue(issues, path, kind + " must be valid UTF-8");
+            return;
+        case keen_pbr3::display_name::ValidationError::ascii_control:
+            add_issue(
+                issues, path,
+                kind + " must not contain ASCII control characters");
+            return;
+        case keen_pbr3::display_name::ValidationError::c1_or_bidirectional_control:
+            add_issue(
+                issues, path,
+                kind +
+                    " must not contain C1 or bidirectional control characters");
+            return;
+        case keen_pbr3::display_name::ValidationError::whitespace_only:
+            add_issue(
+                issues, path,
+                kind + " must contain a non-whitespace character");
+            return;
+        case keen_pbr3::display_name::ValidationError::too_long:
+            add_issue(
+                issues, path,
+                kind + " must not exceed " +
+                    std::to_string(keen_pbr3::display_name::MAX_CODE_POINTS) +
+                    " Unicode code points");
+            return;
+    }
+}
+
+std::string ascii_lower_copy(std::string value) {
+    std::transform(
+        value.begin(), value.end(), value.begin(), [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+    return value;
+}
+
+void validate_ui_preferences(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::optional<UiPreferencesConfig>& preferences) {
+    if (!preferences.has_value()) return;
+
+    const auto hidden_ids =
+        preferences->hidden_native_interface_ids.value_or(
+            std::vector<std::string>{});
+    if (hidden_ids.size() > MAX_HIDDEN_NATIVE_INTERFACE_IDS) {
+        add_issue(
+            issues,
+            "ui_preferences.hidden_native_interface_ids",
+            "ui_preferences.hidden_native_interface_ids must not contain more than " +
+                std::to_string(MAX_HIDDEN_NATIVE_INTERFACE_IDS) + " entries");
     }
 
-    const auto summary = summarize_utf8(*display_name);
-    if (!summary.has_value()) {
-        add_issue(issues, path, "List display name must be valid UTF-8");
-    } else if (!summary->has_non_whitespace) {
-        add_issue(issues, path,
-                  "List display name must contain a non-whitespace character");
-    } else if (summary->code_points > MAX_LIST_DISPLAY_NAME_CODE_POINTS) {
+    std::set<std::string> seen_hidden_ids;
+    for (size_t index = 0; index < hidden_ids.size(); ++index) {
+        const auto& interface_id = hidden_ids[index];
+        const std::string path =
+            "ui_preferences.hidden_native_interface_ids[" +
+            std::to_string(index) + "]";
+        const auto summary = display_name::summarize_utf8(interface_id);
+        if (!summary.has_value()) {
+            add_issue(issues, path, path + " must be valid UTF-8");
+        } else if (!summary->has_non_whitespace ||
+                   trim_copy(interface_id) != interface_id) {
+            add_issue(
+                issues,
+                path,
+                path + " must be a non-blank identifier without surrounding whitespace");
+        } else if (summary->code_points >
+                   MAX_NATIVE_INTERFACE_ID_CODE_POINTS) {
+            add_issue(
+                issues,
+                path,
+                path + " must not exceed " +
+                    std::to_string(MAX_NATIVE_INTERFACE_ID_CODE_POINTS) +
+                    " Unicode code points");
+        } else if (summary->has_ascii_control) {
+            add_issue(issues, path, path + " must not contain control characters");
+        }
+
+        if (!seen_hidden_ids.insert(interface_id).second) {
+            add_issue(
+                issues, path,
+                path + " duplicates native interface id '" + interface_id + "'");
+        }
+    }
+
+    const auto templates =
+        preferences->plain_dns_templates.value_or(
+            std::vector<PlainDnsTemplate>{});
+    if (templates.size() > MAX_PLAIN_DNS_TEMPLATES) {
         add_issue(
-            issues, path,
-            "List display name must not exceed " +
-                std::to_string(MAX_LIST_DISPLAY_NAME_CODE_POINTS) +
-                " Unicode code points");
+            issues,
+            "ui_preferences.plain_dns_templates",
+            "ui_preferences.plain_dns_templates must not contain more than " +
+                std::to_string(MAX_PLAIN_DNS_TEMPLATES) + " entries");
+    }
+
+    std::set<std::string> seen_names;
+    std::set<std::string> seen_definitions;
+    for (size_t index = 0; index < templates.size(); ++index) {
+        const auto& dns_template = templates[index];
+        const std::string path =
+            "ui_preferences.plain_dns_templates[" +
+            std::to_string(index) + "]";
+
+        validate_display_name(
+            issues,
+            path + ".name",
+            "Plain DNS template name",
+            std::optional<std::string>{dns_template.name});
+        if (trim_copy(dns_template.name) != dns_template.name) {
+            add_issue(
+                issues,
+                path + ".name",
+                "Plain DNS template name must not contain surrounding whitespace");
+        }
+
+        if (!is_valid_ipv4_address(dns_template.primary_ipv4)) {
+            add_issue(
+                issues,
+                path + ".primary_ipv4",
+                "Plain DNS template primary_ipv4 must be a valid IPv4 address");
+        }
+        if (dns_template.secondary_ipv4.has_value() &&
+            !is_valid_ipv4_address(*dns_template.secondary_ipv4)) {
+            add_issue(
+                issues,
+                path + ".secondary_ipv4",
+                "Plain DNS template secondary_ipv4 must be a valid IPv4 address");
+        }
+        if (dns_template.secondary_ipv4.has_value() &&
+            *dns_template.secondary_ipv4 == dns_template.primary_ipv4) {
+            add_issue(
+                issues,
+                path + ".secondary_ipv4",
+                "Plain DNS template secondary_ipv4 must differ from primary_ipv4");
+        }
+
+        const std::string normalized_name =
+            ascii_lower_copy(trim_copy(dns_template.name));
+        if (!seen_names.insert(normalized_name).second) {
+            add_issue(
+                issues,
+                path + ".name",
+                "Plain DNS template name '" + dns_template.name +
+                    "' is duplicated");
+        }
+
+        const std::string definition =
+            dns_template.primary_ipv4 + "|" +
+            dns_template.secondary_ipv4.value_or("");
+        if (!seen_definitions.insert(definition).second) {
+            add_issue(
+                issues,
+                path,
+                "Plain DNS template duplicates an existing resolver definition");
+        }
     }
 }
 
@@ -830,8 +901,107 @@ Config parse_config(const std::string& json_str) {
     return cfg;
 }
 
+namespace {
+
+constexpr int64_t kMaxUrltestUint32Value =
+    static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+constexpr int64_t kMaxUrltestGroupWeight =
+    static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+constexpr int64_t kMaxUrltestRetryAttempts = 1000;
+constexpr int64_t kMaxCircuitFailureThreshold =
+    static_cast<int64_t>(std::numeric_limits<int>::max());
+
+void validate_optional_integer_range(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::string& path,
+    const std::optional<int64_t>& value,
+    int64_t minimum,
+    int64_t maximum) {
+    if (!value.has_value()) {
+        return;
+    }
+
+    if (*value < minimum || *value > maximum) {
+        add_issue(
+            issues,
+            path,
+            path + " must be between " + std::to_string(minimum) + " and " +
+                std::to_string(maximum));
+    }
+}
+
+struct UrltestReference {
+    std::string target_tag;
+    std::string path;
+};
+
+void validate_urltest_cycles(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::map<std::string, std::vector<UrltestReference>>& graph) {
+    enum class VisitState {
+        unvisited,
+        visiting,
+        visited,
+    };
+
+    std::map<std::string, VisitState> states;
+    for (const auto& [tag, unused] : graph) {
+        (void)unused;
+        states.emplace(tag, VisitState::unvisited);
+    }
+
+    struct VisitFrame {
+        std::string tag;
+        size_t next_reference{0};
+    };
+
+    for (const auto& [tag, unused] : graph) {
+        (void)unused;
+        if (states[tag] != VisitState::unvisited) {
+            continue;
+        }
+
+        states[tag] = VisitState::visiting;
+        std::vector<VisitFrame> stack{{tag, 0}};
+        while (!stack.empty()) {
+            auto& frame = stack.back();
+            const auto& references = graph.at(frame.tag);
+            if (frame.next_reference >= references.size()) {
+                states[frame.tag] = VisitState::visited;
+                stack.pop_back();
+                continue;
+            }
+
+            const auto& reference = references[frame.next_reference++];
+            const auto state_it = states.find(reference.target_tag);
+            if (state_it == states.end()) {
+                continue;
+            }
+
+            if (state_it->second == VisitState::visiting) {
+                add_issue(
+                    issues,
+                    reference.path,
+                    "Urltest outbound '" + frame.tag +
+                        "' creates a cyclic reference to urltest outbound '" +
+                        reference.target_tag + "'");
+                continue;
+            }
+
+            if (state_it->second == VisitState::unvisited) {
+                state_it->second = VisitState::visiting;
+                stack.push_back({reference.target_tag, 0});
+            }
+        }
+    }
+}
+
+} // namespace
+
 void validate_config(const Config& cfg) {
     std::vector<ConfigValidationIssue> issues;
+
+    validate_ui_preferences(issues, cfg.ui_preferences);
 
     if (cfg.daemon && cfg.daemon->firewall_verify_max_bytes.has_value() &&
         *cfg.daemon->firewall_verify_max_bytes < 0) {
@@ -865,8 +1035,11 @@ void validate_config(const Config& cfg) {
     for (const auto& [name, list_cfg] : cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
         const std::string list_path = name.empty() ? "lists" : "lists." + name;
         validate_tag(issues, list_path, "List name", name);
-        validate_list_display_name(
-            issues, list_path + ".display_name", list_cfg.display_name);
+        validate_display_name(
+            issues,
+            list_path + ".display_name",
+            "List display name",
+            list_cfg.display_name);
 
         const bool has_url = list_cfg.url.has_value();
         const bool has_file = list_cfg.file.has_value();
@@ -882,8 +1055,45 @@ void validate_config(const Config& cfg) {
     }
 
     const auto& outbounds = cfg.outbounds.value_or(std::vector<Outbound>{});
+    std::map<std::string, const Outbound*> outbounds_by_tag;
+    std::map<std::string, size_t> first_outbound_indexes;
+    std::map<std::string, std::vector<UrltestReference>> urltest_graph;
+    for (size_t outbound_index = 0; outbound_index < outbounds.size();
+         ++outbound_index) {
+        const auto& outbound = outbounds[outbound_index];
+        const auto [first_index_it, inserted] =
+            first_outbound_indexes.emplace(outbound.tag, outbound_index);
+        if (!inserted) {
+            const std::string path =
+                "outbounds[" + std::to_string(outbound_index) + "].tag";
+            add_issue(
+                issues,
+                path,
+                path + " duplicates outbound tag '" + outbound.tag +
+                    "' first declared at outbounds[" +
+                    std::to_string(first_index_it->second) + "].tag");
+        }
+
+        outbounds_by_tag.emplace(outbound.tag, &outbound);
+        if (outbound.type == OutboundType::URLTEST) {
+            urltest_graph.emplace(outbound.tag, std::vector<UrltestReference>{});
+        }
+    }
+
     for (const auto& ob : outbounds) {
         validate_tag(issues, "outbounds." + ob.tag + ".tag", "Outbound tag", ob.tag);
+        validate_display_name(
+            issues,
+            "outbounds." + ob.tag + ".display_name",
+            "Outbound display name",
+            ob.display_name);
+        if (ob.type != OutboundType::URLTEST &&
+            ob.conntrack_on_switch.has_value()) {
+            add_issue(
+                issues,
+                "outbounds." + ob.tag + ".conntrack_on_switch",
+                "conntrack_on_switch is only valid for urltest outbounds");
+        }
 
         if (ob.type == OutboundType::INTERFACE) {
             const std::string iface = trim_copy(ob.interface.value_or(""));
@@ -917,6 +1127,68 @@ void validate_config(const Config& cfg) {
                       "Urltest URL must use the http or https scheme");
         }
 
+        const std::string outbound_path = "outbounds." + ob.tag;
+        validate_optional_integer_range(
+            issues,
+            outbound_path + ".interval_ms",
+            ob.interval_ms,
+            1,
+            kMaxUrltestUint32Value);
+        validate_optional_integer_range(
+            issues,
+            outbound_path + ".probe_timeout_ms",
+            ob.probe_timeout_ms,
+            1,
+            kMaxUrltestUint32Value);
+        validate_optional_integer_range(
+            issues,
+            outbound_path + ".tolerance_ms",
+            ob.tolerance_ms,
+            0,
+            kMaxUrltestUint32Value);
+
+        if (ob.retry.has_value()) {
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".retry.attempts",
+                ob.retry->attempts,
+                1,
+                kMaxUrltestRetryAttempts);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".retry.interval_ms",
+                ob.retry->interval_ms,
+                0,
+                kMaxUrltestUint32Value);
+        }
+
+        if (ob.circuit_breaker.has_value()) {
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.failure_threshold",
+                ob.circuit_breaker->failure_threshold,
+                1,
+                kMaxCircuitFailureThreshold);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.success_threshold",
+                ob.circuit_breaker->success_threshold,
+                1,
+                kMaxUrltestUint32Value);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.timeout_ms",
+                ob.circuit_breaker->timeout_ms,
+                0,
+                kMaxUrltestUint32Value);
+            validate_optional_integer_range(
+                issues,
+                outbound_path + ".circuit_breaker.half_open_max_requests",
+                ob.circuit_breaker->half_open_max_requests,
+                1,
+                kMaxUrltestUint32Value);
+        }
+
         if (!ob.outbound_groups.has_value() || ob.outbound_groups->empty()) {
             add_issue(issues, "outbounds." + ob.tag + ".outbound_groups",
                       "Urltest outbound '" + ob.tag +
@@ -924,6 +1196,7 @@ void validate_config(const Config& cfg) {
             continue;
         }
 
+        std::map<std::string, std::string> first_child_paths;
         for (size_t group_index = 0; group_index < ob.outbound_groups->size(); ++group_index) {
             const auto& group = ob.outbound_groups->at(group_index);
             const std::string group_path =
@@ -935,55 +1208,94 @@ void validate_config(const Config& cfg) {
                               "' outbound_group has empty 'outbounds' array");
             }
 
-            for (const auto& ref_tag : group.outbounds) {
-                bool found = false;
-                for (const auto& target : outbounds) {
-                    if (target.tag != ref_tag) {
-                        continue;
-                    }
+            validate_optional_integer_range(
+                issues,
+                group_path + ".weight",
+                group.weight,
+                1,
+                kMaxUrltestGroupWeight);
 
-                    found = true;
-                    // A group may also nest another group: routing follows the
-                    // chain of selections down to a leaf interface.
-                    if (target.type != OutboundType::INTERFACE &&
-                        target.type != OutboundType::TABLE &&
-                        target.type != OutboundType::BLACKHOLE &&
-                        target.type != OutboundType::URLTEST) {
-                        add_issue(
-                            issues,
-                            group_path + ".outbounds",
-                            "Urltest outbound '" + ob.tag +
-                                "' references outbound '" + ref_tag +
-                                "' which is not an interface, table, blackhole, "
-                                "or urltest outbound");
-                    }
-                    if (target.type == OutboundType::URLTEST && target.tag == ob.tag) {
-                        add_issue(issues,
-                                  group_path + ".outbounds",
-                                  "Urltest outbound '" + ob.tag +
-                                      "' cannot reference itself");
-                    }
-                    break;
-                }
+            for (size_t child_index = 0; child_index < group.outbounds.size();
+                 ++child_index) {
+                const auto& ref_tag = group.outbounds[child_index];
+                const std::string child_path =
+                    group_path + ".outbounds[" + std::to_string(child_index) + "]";
 
-                if (!found) {
+                auto [first_path_it, inserted] =
+                    first_child_paths.emplace(ref_tag, child_path);
+                if (!inserted) {
                     add_issue(
                         issues,
-                        group_path + ".outbounds",
+                        child_path,
+                        "Urltest outbound '" + ob.tag + "' repeats outbound '" +
+                            ref_tag + "' first declared at " + first_path_it->second);
+                }
+
+                const auto target_it = outbounds_by_tag.find(ref_tag);
+                if (target_it == outbounds_by_tag.end()) {
+                    add_issue(
+                        issues,
+                        child_path,
                         "Urltest outbound '" + ob.tag +
                             "' references unknown outbound tag '" + ref_tag + "'");
+                    continue;
+                }
+
+                const auto& target = *target_it->second;
+                // A group may also nest another group: routing follows the
+                // chain of selections down to a leaf interface.
+                if (target.type != OutboundType::INTERFACE &&
+                    target.type != OutboundType::TABLE &&
+                    target.type != OutboundType::BLACKHOLE &&
+                    target.type != OutboundType::URLTEST) {
+                    add_issue(
+                        issues,
+                        child_path,
+                        "Urltest outbound '" + ob.tag +
+                            "' references outbound '" + ref_tag +
+                            "' which is not an interface, table, blackhole, "
+                            "or urltest outbound");
+                }
+
+                if (target.type == OutboundType::URLTEST) {
+                    urltest_graph[ob.tag].push_back({ref_tag, child_path});
                 }
             }
         }
     }
+    validate_urltest_cycles(issues, urltest_graph);
 
     const auto list_names = collect_list_names(cfg);
     const auto outbound_tags = collect_outbound_tags(outbounds);
     const auto& route_rules =
         cfg.route.value_or(RouteConfig{}).rules.value_or(std::vector<RouteRule>{});
+    std::map<std::string, size_t> first_route_rule_ids;
     for (size_t rule_index = 0; rule_index < route_rules.size(); ++rule_index) {
         const auto& rule = route_rules[rule_index];
         const std::string rule_path = "route.rules[" + std::to_string(rule_index) + "]";
+
+        if (rule.id.has_value()) {
+            validate_tag(
+                issues,
+                rule_path + ".id",
+                "Route rule id",
+                *rule.id);
+            const auto [first_it, inserted] =
+                first_route_rule_ids.emplace(*rule.id, rule_index);
+            if (!inserted) {
+                add_issue(
+                    issues,
+                    rule_path + ".id",
+                    "Route rule id '" + *rule.id +
+                        "' duplicates route.rules[" +
+                        std::to_string(first_it->second) + "].id");
+            }
+        }
+        validate_display_name(
+            issues,
+            rule_path + ".display_name",
+            "Route rule display name",
+            rule.display_name);
 
         validate_required_reference(issues,
                                     outbound_tags,
@@ -1053,6 +1365,11 @@ void validate_config(const Config& cfg) {
         size_t keenetic_servers_count = 0;
         for (const auto& srv : dns_servers) {
             validate_tag(issues, "dns.servers." + srv.tag + ".tag", "DNS server tag", srv.tag);
+            validate_display_name(
+                issues,
+                "dns.servers." + srv.tag + ".display_name",
+                "DNS server display name",
+                srv.display_name);
             if (!dns_server_tags.insert(srv.tag).second) {
                 add_issue(issues, "dns.servers." + srv.tag + ".tag",
                           "Duplicate DNS server tag \"" + srv.tag + "\"");
@@ -1175,10 +1492,33 @@ void validate_config(const Config& cfg) {
         }
 
         const auto dns_rules = cfg.dns->rules.value_or(std::vector<DnsRule>{});
+        std::map<std::string, size_t> first_dns_rule_ids;
         for (size_t rule_index = 0; rule_index < dns_rules.size(); ++rule_index) {
             const auto& rule = dns_rules[rule_index];
             const std::string rule_path = "dns.rules[" + std::to_string(rule_index) + "]";
 
+            if (rule.id.has_value()) {
+                validate_tag(
+                    issues,
+                    rule_path + ".id",
+                    "DNS rule id",
+                    *rule.id);
+                const auto [first_it, inserted] =
+                    first_dns_rule_ids.emplace(*rule.id, rule_index);
+                if (!inserted) {
+                    add_issue(
+                        issues,
+                        rule_path + ".id",
+                        rule_path + ".id duplicates DNS rule id '" +
+                            *rule.id + "' first declared at dns.rules[" +
+                            std::to_string(first_it->second) + "].id");
+                }
+            }
+            validate_display_name(
+                issues,
+                rule_path + ".display_name",
+                "DNS rule display name",
+                rule.display_name);
             validate_required_reference(issues,
                                         dns_server_tags,
                                         rule_path + ".server",
@@ -1208,6 +1548,99 @@ void validate_config(const Config& cfg) {
     } else {
         add_issue(issues, "dns.system_resolver",
                   "dns.system_resolver must be present");
+    }
+
+    // Deleting conntrack entries by a selected child's fwmark is safe only
+    // when that mark belongs exclusively to one urltest selector. Otherwise a
+    // failover could also terminate unrelated flows routed directly through
+    // the same child. Preserve mode has no such ownership restriction.
+    std::map<std::string, std::set<std::string>> urltest_parents_by_child;
+    for (const auto& outbound : outbounds) {
+        if (outbound.type != OutboundType::URLTEST ||
+            !outbound.outbound_groups.has_value()) {
+            continue;
+        }
+        for (const auto& group : *outbound.outbound_groups) {
+            for (const auto& child_tag : group.outbounds) {
+                urltest_parents_by_child[child_tag].insert(outbound.tag);
+            }
+        }
+    }
+
+    std::set<std::string> directly_routed_outbounds;
+    for (const auto& rule : route_rules) {
+        directly_routed_outbounds.insert(rule.outbound);
+    }
+
+    std::set<std::string> direct_dns_detours;
+    if (cfg.dns.has_value()) {
+        for (const auto& server :
+             cfg.dns->servers.value_or(std::vector<DnsServer>{})) {
+            if (server.detour.has_value()) {
+                direct_dns_detours.insert(*server.detour);
+            }
+        }
+    }
+
+    for (const auto& outbound : outbounds) {
+        if (outbound.type != OutboundType::URLTEST ||
+            outbound.conntrack_on_switch.value_or(
+                ConntrackOnSwitch::PRESERVE) != ConntrackOnSwitch::DELETE ||
+            !outbound.outbound_groups.has_value()) {
+            continue;
+        }
+
+        const std::string mode_path =
+            "outbounds." + outbound.tag + ".conntrack_on_switch";
+        std::set<std::string> checked_children;
+        for (const auto& group : *outbound.outbound_groups) {
+            for (const auto& child_tag : group.outbounds) {
+                if (!checked_children.insert(child_tag).second) {
+                    continue;
+                }
+
+                const auto child_it = outbounds_by_tag.find(child_tag);
+                if (child_it != outbounds_by_tag.end() &&
+                    child_it->second->type == OutboundType::URLTEST) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='delete' does not support nested "
+                        "urltest child '" + child_tag +
+                            "'; use 'preserve' for nested selectors");
+                }
+
+                const auto parents_it =
+                    urltest_parents_by_child.find(child_tag);
+                if (parents_it != urltest_parents_by_child.end() &&
+                    parents_it->second.size() > 1) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='delete' requires exclusive child "
+                        "marks, but outbound '" + child_tag +
+                            "' is shared by multiple urltest selectors");
+                }
+                if (directly_routed_outbounds.count(child_tag) > 0) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='delete' cannot use child '" +
+                            child_tag +
+                            "' because a routing rule also references it "
+                            "directly");
+                }
+                if (direct_dns_detours.count(child_tag) > 0) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='delete' cannot use child '" +
+                            child_tag +
+                            "' because a DNS server also references it "
+                            "directly");
+                }
+            }
+        }
     }
 
     if (!issues.empty()) {
@@ -1248,22 +1681,34 @@ OutboundMarkMap allocate_outbound_marks(const FwmarkConfig& fwmark_cfg,
 
     const uint32_t max_marks = fwmark_mask_mark_capacity(mask);
 
+    std::vector<const Outbound*> routable_outbounds;
+    routable_outbounds.reserve(outbounds.size());
+    for (const auto& outbound : outbounds) {
+        if (outbound.type == OutboundType::INTERFACE ||
+            outbound.type == OutboundType::TABLE ||
+            outbound.type == OutboundType::URLTEST) {
+            routable_outbounds.push_back(&outbound);
+        }
+    }
+    std::sort(
+        routable_outbounds.begin(),
+        routable_outbounds.end(),
+        [](const Outbound* lhs, const Outbound* rhs) {
+            return lhs->tag < rhs->tag;
+        });
+
     OutboundMarkMap mark_map;
     uint32_t current_mark = start;
     uint32_t count = 0;
 
-    for (const auto& ob : outbounds) {
-        if (ob.type != OutboundType::INTERFACE &&
-            ob.type != OutboundType::TABLE &&
-            ob.type != OutboundType::URLTEST) continue;
-
+    for (const auto* outbound : routable_outbounds) {
         if (count >= max_marks) {
             throw ConfigError(
                 "Too many routable outbounds: maximum " + std::to_string(max_marks) +
                 " supported with current fwmark.mask");
         }
 
-        mark_map[ob.tag] = current_mark;
+        mark_map[outbound->tag] = current_mark;
         current_mark += step;
         ++count;
     }

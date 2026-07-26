@@ -588,6 +588,16 @@ components:
         data:
           $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
 
+    StatusEventInterfaceTraffic:
+      type: object
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          enum: [interface_traffic]
+        data:
+          $ref: "#/components/schemas/RuntimeInterfaceTrafficUpdate"
+
     ConnectionEventState:
       type: object
       required: [revision, changed_at, available]
@@ -620,6 +630,15 @@ components:
       properties:
         tag:
           type: string
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias of at most 80 Unicode code points.
+            It must be valid UTF-8, contain a non-whitespace character, and
+            contain no ASCII, C1, or bidirectional control characters. The
+            technical tag remains the stable identity.
         type:
           type: string
         interface:
@@ -640,9 +659,12 @@ components:
         sni:
           type: string
           description: Server name presented during the TLS handshake.
+        path:
+          $ref: "#/components/schemas/TransportPath"
         network:
           type: string
-          description: Carrier inside the connection - tcp, ws, grpc, http.
+          deprecated: true
+          description: Legacy mixed carrier/framing field. New clients use path.
         state:
           type: string
           enum: [down, starting, up, degraded]
@@ -662,6 +684,30 @@ components:
         next_retry_at:
           type: string
           format: date-time
+
+    TransportPath:
+      type: object
+      required: [wire_transport, framing, confidence]
+      properties:
+        wire_transport:
+          type: string
+          enum: [tcp, udp, tcp_udp, unknown]
+          description: IP transport used between the router and the remote endpoint.
+        framing:
+          type: string
+          enum: [raw, websocket, http, http2, grpc, http_upgrade, quic, wireguard, unknown]
+          description: Application framing layered on top of the wire transport.
+        payload_networks:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [tcp, udp]
+          description: User traffic families explicitly allowed by the outbound, when declared.
+        confidence:
+          type: string
+          enum: [declared, derived, ambiguous, unknown]
+          description: Whether the path came from config, protocol semantics, or could not be proven.
 
     TransportActionRequest:
       type: object
@@ -692,6 +738,15 @@ components:
         tag:
           type: string
           pattern: "^[a-z][a-z0-9_]{0,23}$"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias of at most 80 Unicode code points.
+            It must be valid UTF-8, contain a non-whitespace character, and
+            contain no ASCII, C1, or bidirectional control characters. It never
+            replaces the stable technical tag.
         type:
           type: string
           enum: [native, sing-box, sing-box-vless-reality]
@@ -885,10 +940,14 @@ components:
       properties:
         attempts:
           type: integer
+          minimum: 1
+          maximum: 1000
           default: 3
           example: 3
         interval_ms:
           type: integer
+          minimum: 0
+          maximum: 4294967295
           description: Delay between retry attempts in milliseconds.
           default: 1000
           example: 1000
@@ -898,21 +957,29 @@ components:
       properties:
         failure_threshold:
           type: integer
+          minimum: 1
+          maximum: 2147483647
           description: Number of consecutive failures before opening the circuit.
           default: 5
           example: 5
         success_threshold:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: Number of consecutive successes in half-open state to close the circuit.
           default: 2
           example: 2
         timeout_ms:
           type: integer
+          minimum: 0
+          maximum: 4294967295
           description: Time in milliseconds before the circuit transitions from open to half-open.
           default: 30000
           example: 30000
         half_open_max_requests:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: Maximum number of probe requests allowed in half-open state.
           default: 1
           example: 1
@@ -923,6 +990,8 @@ components:
       properties:
         weight:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: Relative weight for selecting this group when multiple groups are healthy.
           default: 1
           example: 1
@@ -950,6 +1019,14 @@ components:
             Unique identifier for this outbound. Must match
             `^[a-z][a-z0-9_]*$` and be at most 24 characters.
           example: "vpn"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. Runtime references,
+            marks and routing tables continue to use the stable technical `tag`.
+          example: "Основной VPN"
         interface:
           type: string
           description: >
@@ -985,6 +1062,8 @@ components:
           example: "https://www.gstatic.com/generate_204"
         interval_ms:
           type: integer
+          minimum: 1
+          maximum: 4294967295
           description: >
             Interval between probes in milliseconds. Used with `urltest` outbound type.
           default: 180000
@@ -992,6 +1071,8 @@ components:
         probe_timeout_ms:
           type: integer
           nullable: true
+          minimum: 1
+          maximum: 4294967295
           description: >
             Timeout for each individual urltest probe attempt in milliseconds.
             Used with `urltest` outbound type. When omitted or null, the daemon
@@ -999,6 +1080,8 @@ components:
           example: 5000
         tolerance_ms:
           type: integer
+          minimum: 0
+          maximum: 4294967295
           description: >
             Latency tolerance in milliseconds; outbounds within this range of the
             best are considered equivalent. Used with `urltest` outbound type.
@@ -1015,6 +1098,15 @@ components:
             returns to it after recovery. When omitted, `latency` is used.
           default: latency
           example: "priority"
+        conntrack_on_switch:
+          $ref: "#/components/schemas/ConntrackOnSwitch"
+          default: preserve
+          description: >
+            URLTEST handling for already established flows when the selected
+            child changes. `preserve` keeps existing flows on their original
+            path while new flows use the new child. `delete` removes only
+            conntrack entries owned by this selector after the replacement
+            route is active. It never performs a global conntrack flush.
         outbound_groups:
           type: array
           description: >
@@ -1027,6 +1119,10 @@ components:
           $ref: "#/components/schemas/RetryConfig"
         circuit_breaker:
           $ref: "#/components/schemas/CircuitBreakerConfig"
+
+    ConntrackOnSwitch:
+      type: string
+      enum: [preserve, delete]
 
     ListConfig:
       type: object
@@ -1093,6 +1189,14 @@ components:
             `^[a-z][a-z0-9_]*$`, be at most 24 characters, and be unique
             within `dns.servers`.
           example: "vpn-dns"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias. DNS rules and fallback references
+            continue to use the stable technical `tag`.
+          example: "Cloudflare через VPN"
         type:
           type: string
           description: DNS server source type.
@@ -1116,6 +1220,22 @@ components:
       type: object
       required: [list, server]
       properties:
+        id:
+          type: string
+          pattern: "^[a-z][a-z0-9_]*$"
+          maxLength: 24
+          description: >
+            Optional stable technical identifier. New clients generate it
+            automatically; legacy rules without an id remain valid.
+          example: "dr_h4n8k2p6"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. It does not affect
+            matching or rule ordering.
+          example: "DNS для сервисов ИИ"
         enabled:
           type: boolean
           nullable: true
@@ -1222,6 +1342,22 @@ components:
       type: object
       required: [outbound]
       properties:
+        id:
+          type: string
+          pattern: "^[a-z][a-z0-9_]*$"
+          maxLength: 24
+          description: >
+            Optional stable technical identifier. New clients generate it
+            automatically; legacy rules without an id remain valid.
+          example: "rr_k7p2m4x9"
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: >
+            Optional human-readable alias shown by clients. It does not affect
+            matching or rule ordering.
+          example: "Сервисы ИИ через VPN"
         enabled:
           type: boolean
           nullable: true
@@ -1338,6 +1474,56 @@ components:
             Required when `enabled` is `true`. Validated even when `enabled` is `false`.
           example: "0 4 * * 0"
 
+    PlainDnsTemplate:
+      type: object
+      required: [name, primary_ipv4]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Human-readable name shown next to the built-in DNS templates.
+          example: "Office DNS"
+        primary_ipv4:
+          type: string
+          format: ipv4
+          minLength: 7
+          maxLength: 15
+          description: Primary plain DNS resolver IPv4 address.
+          example: "192.0.2.53"
+        secondary_ipv4:
+          type: string
+          format: ipv4
+          minLength: 7
+          maxLength: 15
+          description: Optional secondary plain DNS resolver IPv4 address.
+          example: "192.0.2.54"
+
+    UiPreferencesConfig:
+      type: object
+      description: >
+        Server-persisted presentation preferences. They are part of the normal
+        configuration so backup, restore, import, and export preserve them.
+      properties:
+        hidden_native_interface_ids:
+          type: array
+          maxItems: 128
+          uniqueItems: true
+          description: >
+            Native Keenetic tunnel interface identifiers hidden from ordinary
+            service inventory cards. Hiding is reversible and does not delete,
+            disable, or remove an interface from creation selectors.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        plain_dns_templates:
+          type: array
+          maxItems: 32
+          description: User-defined plain IPv4 DNS templates.
+          items:
+            $ref: "#/components/schemas/PlainDnsTemplate"
+
     ConfigObject:
       type: object
       description: keen-pbr configuration file.
@@ -1365,6 +1551,8 @@ components:
           $ref: "#/components/schemas/IprouteConfig"
         lists_autoupdate:
           $ref: "#/components/schemas/ListsAutoupdateConfig"
+        ui_preferences:
+          $ref: "#/components/schemas/UiPreferencesConfig"
       example:
         daemon:
           pid_file: "/var/run/keen-pbr.pid"
@@ -1857,6 +2045,110 @@ components:
         - up: interface is administratively up
         - down: interface is not administratively up
 
+    RuntimeInterfaceTrafficPoint:
+      type: object
+      required: [age_ms, rx_bits_per_second, tx_bits_per_second]
+      properties:
+        age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Age relative to the newest retained point.
+        rx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+
+    RuntimeInterfaceTraffic:
+      type: object
+      required: [rx_bytes, tx_bytes, history]
+      properties:
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Unix timestamp of the newest traffic sample. Older daemons and
+            initial snapshots may omit it; clients then use the sampling
+            interval until the first compact traffic event arrives.
+        rx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Kernel receive counter since this interface was created.
+        tx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Kernel transmit counter since this interface was created.
+        rx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Current receive rate when at least two samples exist.
+        tx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Current transmit rate when at least two samples exist.
+        history:
+          type: array
+          maxItems: 120
+          description: >
+            Bounded in-memory series. It is never persisted to the router disk.
+          items:
+            $ref: "#/components/schemas/RuntimeInterfaceTrafficPoint"
+
+    RuntimeInterfaceTrafficSample:
+      type: object
+      required: [name, available, reset]
+      properties:
+        name:
+          type: string
+          description: Kernel interface name.
+        available:
+          type: boolean
+          description: Whether both kernel counters were readable.
+        reset:
+          type: boolean
+          description: >
+            Whether the kernel counters moved backwards because the interface
+            was recreated. Clients must start a new graph segment.
+        rx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        rx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_bits_per_second:
+          type: integer
+          format: int64
+          minimum: 0
+
+    RuntimeInterfaceTrafficUpdate:
+      type: object
+      required: [sampled_at_unix_ms, interfaces]
+      properties:
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Unix timestamp shared by this compact sampling batch.
+        interfaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeInterfaceTrafficSample"
+
     RuntimeInterfaceInventoryEntry:
       type: object
       required: [name, status]
@@ -1891,6 +2183,8 @@ components:
             type: string
           description: Best-effort IPv6 addresses in CIDR form.
           example: ["fe80::1/64"]
+        traffic:
+          $ref: "#/components/schemas/RuntimeInterfaceTraffic"
 
     RuntimeInterfaceInventoryResponse:
       type: object
@@ -1946,6 +2240,57 @@ components:
         backup_required:
           type: boolean
 
+    NdmsManagementBlocker:
+      type: string
+      enum:
+        - unsupported_kind
+        - unsupported_role
+        - role_unknown
+        - kernel_identity_unresolved
+        - typed_rci_unavailable
+        - automatic_backup_unavailable
+        - ownership_unknown
+        - optimistic_revision_unavailable
+
+    NdmsInterfaceManagementReadiness:
+      title: NdmsInterfaceManagementReadiness
+      type: object
+      required:
+        - candidate
+        - identity_stable
+        - observed_revision
+        - configuration_snapshot_available
+        - blockers
+      properties:
+        candidate:
+          type: boolean
+          description: >
+            True only for an allowlisted WG/AWG client that may enter the
+            future managed-interface workflow. It does not authorize mutation;
+            servers use a separate future workflow.
+        identity_stable:
+          type: boolean
+          description: >
+            True when both the logical NDMS identity and an observed kernel
+            interface resolve without heuristics outside the strict allowlist.
+        observed_revision:
+          type: string
+          description: >
+            Opaque digest of a strict non-secret allowlist from the read-only
+            NDMS inventory. It is groundwork for concurrency checks, not a
+            replacement for a full configuration revision.
+        configuration_snapshot_available:
+          type: boolean
+          enum: [false]
+          description: >
+            Remains false until a typed, restorable NDMS configuration snapshot
+            is implemented. The status inventory is deliberately not treated as
+            a backup.
+        blockers:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsManagementBlocker"
+
     NdmsTunnelInterface:
       type: object
       required:
@@ -1957,6 +2302,7 @@ components:
         - role
         - owner
         - capabilities
+        - management_readiness
       properties:
         id:
           type: string
@@ -1984,6 +2330,8 @@ components:
           type: boolean
         capabilities:
           $ref: "#/components/schemas/NdmsInterfaceCapabilities"
+        management_readiness:
+          $ref: "#/components/schemas/NdmsInterfaceManagementReadiness"
 
     NdmsInterfaceInventoryResponse:
       type: object

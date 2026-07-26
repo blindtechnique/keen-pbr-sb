@@ -1,7 +1,7 @@
 #pragma once
 
-// Small self-contained SHA-256. Only used to answer the Keenetic web
-// authentication challenge, so a full crypto dependency is not worth pulling in.
+// Small self-contained SHA-256 for short internal digests and the Keenetic web
+// authentication challenge, avoiding a full crypto dependency.
 
 #include <array>
 #include <cstdint>

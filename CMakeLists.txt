@@ -82,6 +82,15 @@ set(KEEN_PBR_RESOLVER_FALLBACK_CONFIG "${CMAKE_INSTALL_FULL_SYSCONFDIR}/keen-pbr
   "Static dnsmasq config emitted when the daemon resolver stream is unavailable")
 set(KEEN_PBR_TARGET_OS "linux" CACHE STRING
   "Compile-time target OS identity exposed via /api/health/service (for example: openwrt, keenetic, debian)")
+set(_keen_pbr_use_libunwind_default ON)
+if(KEEN_PBR_TARGET_OS STREQUAL "keenetic" OR
+   (KEEN_PBR_TARGET_OS STREQUAL "openwrt" AND
+    NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|aarch64|arm.*)$"))
+  set(_keen_pbr_use_libunwind_default OFF)
+endif()
+option(KEEN_PBR_USE_LIBUNWIND
+  "Attempt to find and use external libunwind for crash diagnostics"
+  ${_keen_pbr_use_libunwind_default})
 
 # Dependencies
 find_package(PkgConfig REQUIRED)
@@ -99,45 +108,48 @@ else()
   message(STATUS "Using CMake libcurl target: ${CURL_LIBRARY_RELEASE}")
 endif()
 add_library(keen_pbr_libunwind INTERFACE)
-set(_keen_pbr_saved_find_library_suffixes "${CMAKE_FIND_LIBRARY_SUFFIXES}")
-set(_keen_pbr_prefer_static_libunwind ${KEEN_PBR_STATIC_LIBUNWIND})
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  # GNU libstdc++ exception unwinding can break when a static libunwind archive
-  # is linked into the final executable. Prefer the shared library when available.
-  set(_keen_pbr_prefer_static_libunwind OFF)
-endif()
-if(_keen_pbr_prefer_static_libunwind)
-  set(CMAKE_FIND_LIBRARY_SUFFIXES ".a" ".so" ".so.8")
-endif()
-unset(LIBUNWIND_LIBRARY CACHE)
-unset(LIBUNWIND_INCLUDE_DIR CACHE)
-unset(LIBUNWIND CACHE)
-unset(LIBUNWIND_INCLUDE_DIRS CACHE)
-set(_keen_pbr_libunwind_include_hints
-  "$ENV{STAGING_DIR}/usr/include"
-  "$ENV{STAGING_DIR}/include"
-)
-set(_keen_pbr_libunwind_library_hints
-  "$ENV{STAGING_DIR}/usr/lib"
-  "$ENV{STAGING_DIR}/lib"
-)
-find_path(LIBUNWIND_INCLUDE_DIR
-  NAMES libunwind.h libunwind/libunwind.h
-  HINTS ${_keen_pbr_libunwind_include_hints}
-  PATH_SUFFIXES libunwind
-)
-find_library(LIBUNWIND_LIBRARY
-  NAMES unwind libunwind libunwind.so.8
-  HINTS ${_keen_pbr_libunwind_library_hints}
-)
 set(KEEN_PBR_HAS_LIBUNWIND OFF)
-if(LIBUNWIND_INCLUDE_DIR AND LIBUNWIND_LIBRARY)
-  set(KEEN_PBR_HAS_LIBUNWIND ON)
-  get_filename_component(LIBUNWIND_LIBRARY_DIR "${LIBUNWIND_LIBRARY}" DIRECTORY)
-  list(APPEND CMAKE_INCLUDE_PATH "${LIBUNWIND_INCLUDE_DIR}")
-  list(APPEND CMAKE_LIBRARY_PATH "${LIBUNWIND_LIBRARY_DIR}")
-  set(LIBUNWIND "${LIBUNWIND_LIBRARY}" CACHE FILEPATH "libunwind library path shared with cpptrace" FORCE)
-  set(LIBUNWIND_INCLUDE_DIRS "${LIBUNWIND_INCLUDE_DIR}" CACHE PATH "libunwind include path shared with cpptrace" FORCE)
+if(KEEN_PBR_USE_LIBUNWIND)
+  set(_keen_pbr_saved_find_library_suffixes "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+  set(_keen_pbr_prefer_static_libunwind ${KEEN_PBR_STATIC_LIBUNWIND})
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # GNU libstdc++ exception unwinding can break when a static libunwind
+    # archive is linked into the final executable. Prefer the shared library.
+    set(_keen_pbr_prefer_static_libunwind OFF)
+  endif()
+  if(_keen_pbr_prefer_static_libunwind)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a" ".so" ".so.8")
+  endif()
+  unset(LIBUNWIND_LIBRARY CACHE)
+  unset(LIBUNWIND_INCLUDE_DIR CACHE)
+  unset(LIBUNWIND CACHE)
+  unset(LIBUNWIND_INCLUDE_DIRS CACHE)
+  set(_keen_pbr_libunwind_include_hints
+    "$ENV{STAGING_DIR}/usr/include"
+    "$ENV{STAGING_DIR}/include"
+  )
+  set(_keen_pbr_libunwind_library_hints
+    "$ENV{STAGING_DIR}/usr/lib"
+    "$ENV{STAGING_DIR}/lib"
+  )
+  find_path(LIBUNWIND_INCLUDE_DIR
+    NAMES libunwind.h libunwind/libunwind.h
+    HINTS ${_keen_pbr_libunwind_include_hints}
+    PATH_SUFFIXES libunwind
+  )
+  find_library(LIBUNWIND_LIBRARY
+    NAMES unwind libunwind libunwind.so.8
+    HINTS ${_keen_pbr_libunwind_library_hints}
+  )
+  if(LIBUNWIND_INCLUDE_DIR AND LIBUNWIND_LIBRARY)
+    set(KEEN_PBR_HAS_LIBUNWIND ON)
+    get_filename_component(LIBUNWIND_LIBRARY_DIR "${LIBUNWIND_LIBRARY}" DIRECTORY)
+    list(APPEND CMAKE_INCLUDE_PATH "${LIBUNWIND_INCLUDE_DIR}")
+    list(APPEND CMAKE_LIBRARY_PATH "${LIBUNWIND_LIBRARY_DIR}")
+    set(LIBUNWIND "${LIBUNWIND_LIBRARY}" CACHE FILEPATH "libunwind library path shared with cpptrace" FORCE)
+    set(LIBUNWIND_INCLUDE_DIRS "${LIBUNWIND_INCLUDE_DIR}" CACHE PATH "libunwind include path shared with cpptrace" FORCE)
+  endif()
+  set(CMAKE_FIND_LIBRARY_SUFFIXES "${_keen_pbr_saved_find_library_suffixes}")
 endif()
 find_library(LIBRESOLV resolv)
 find_library(LIBATOMIC atomic)
@@ -158,6 +170,8 @@ if(KEEN_PBR_HAS_LIBUNWIND)
   target_include_directories(keen_pbr_libunwind INTERFACE "${LIBUNWIND_INCLUDE_DIR}")
   target_link_libraries(keen_pbr_libunwind INTERFACE "${LIBUNWIND_LIBRARY}")
   message(STATUS "Using libunwind library: ${LIBUNWIND_LIBRARY}")
+elseif(NOT KEEN_PBR_USE_LIBUNWIND)
+  message(STATUS "External libunwind disabled; using compiler _Unwind backend")
 else()
   message(STATUS "libunwind headers/library not found; falling back to compiler _Unwind backend")
 endif()
@@ -228,7 +242,15 @@ set(SOURCES
   src/http/http_transport.cpp
   src/http/curl_runtime.cpp
   src/keenetic/ndms_interface_inventory.cpp
+  src/keenetic/ndms_interface_management.cpp
+  src/keenetic/ndms_rci_observation.cpp
+  src/keenetic/ndms_rci_restorable_snapshot.cpp
   src/crash/crash_diagnostics.cpp
+  src/backup/persistent_snapshot.cpp
+  src/backup/restore_journal.cpp
+  src/backup/restore_transaction.cpp
+  src/backup/recovery_coordinator.cpp
+  src/update/maintenance_lock.cpp
   src/config/config.cpp
   src/config/config_writer.cpp
   src/config/dependency_analysis.cpp
@@ -241,6 +263,9 @@ set(SOURCES
   src/lists/srs_decoder.cpp
   src/cache/cache_manager.cpp
   src/connections/conntrack_event_monitor.cpp
+  src/runtime/conntrack_manager.cpp
+  src/runtime/interface_traffic_sampler.cpp
+  src/cmd/recover_persistent_state.cpp
   src/cmd/status.cpp
   src/cmd/test_routing.cpp
   src/routing/target.cpp
@@ -304,6 +329,7 @@ set(SOURCES
 if(WITH_API)
   list(APPEND SOURCES
     src/api/server.cpp
+    src/api/auth_runtime.cpp
     src/api/keenetic_auth.cpp
     src/api/connection_query.cpp
     src/api/handlers.cpp

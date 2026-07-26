@@ -72,12 +72,70 @@ describe("backend dependency mapping", () => {
           [
             {
               kind: "list",
-              label: "AI-сервисы (ai)",
+              label: "AI-сервисы",
               href: "/lists/ai/edit",
             },
           ],
         ],
       ])
     )
+  })
+
+  test("rewrites rule dependency links to stable ids", () => {
+    const config: ConfigObject = {
+      route: {
+        rules: [
+          {
+            id: "route_ai",
+            display_name: "AI через VPN",
+            list: ["ai"],
+            outbound: "vpn",
+          },
+        ],
+      },
+      dns: {
+        rules: [
+          {
+            id: "dns_ai",
+            display_name: "DNS для AI",
+            list: ["ai"],
+            server: "secure_dns",
+          },
+        ],
+      },
+    }
+    const references: DependencyReference[] = [
+      {
+        target: { kind: "list", id: "ai", cascaded: false },
+        dependent_kind: "routing_rule",
+        dependent_id: "0",
+        relation: "uses_list",
+        consequence: "delete",
+        path: "route.rules[0].list",
+        href: "/routing-rules/0/edit",
+      },
+      {
+        target: { kind: "list", id: "ai", cascaded: false },
+        dependent_kind: "dns_rule",
+        dependent_id: "0",
+        relation: "uses_list",
+        consequence: "delete",
+        path: "dns.rules[0].list",
+        href: "/dns-rules/0/edit",
+      },
+    ]
+
+    expect(mapDependencyReferences(config, references).get("list:ai")).toEqual([
+      {
+        kind: "routingRule",
+        label: "AI через VPN → vpn",
+        href: "/routing-rules/route_ai/edit",
+      },
+      {
+        kind: "dnsRule",
+        label: "DNS для AI → secure_dns",
+        href: "/dns-rules/dns_ai/edit",
+      },
+    ])
   })
 })

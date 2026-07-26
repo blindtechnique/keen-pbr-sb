@@ -56,6 +56,7 @@ update_feeds() {
 
 install_required_feed_packages() {
     local packages="
+        conntrack
         dnsmasq-full
         libatomic
         libcurl
@@ -73,6 +74,7 @@ install_required_feed_packages() {
 
 bash "$WORKSPACE/build_scripts/ensure-frontend-dist.sh" "$WORKSPACE" "$FRONTEND_DIST"
 
+rm -rf "$SDK_DIR/package/keen-pbr"
 cp -r "$WORKSPACE/packages/openwrt/keen-pbr" "$SDK_DIR/package/"
 cp "$WORKSPACE/version.mk" "$SDK_DIR/package/keen-pbr/version.mk"
 
@@ -85,6 +87,14 @@ install_required_feed_packages
 
 cp "$WORKSPACE/packages/openwrt/packages.config" .config
 make defconfig
+
+for package in keen-pbr keen-pbr-headless; do
+    if ! grep -Eq "^CONFIG_PACKAGE_${package}=(m|y)$" .config; then
+        echo "[build-openwrt-package] Required package is not selected after defconfig: $package" >&2
+        exit 1
+    fi
+done
+
 make package/keen-pbr/compile V=s "-j$(nproc)" \
     KEEN_PBR_SRC="$WORKSPACE" \
     KEEN_PBR_FRONTEND_DIST="$FRONTEND_DIST" \

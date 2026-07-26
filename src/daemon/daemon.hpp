@@ -27,6 +27,8 @@
 #include "../routing/policy_rule.hpp"
 #include "../routing/route_table.hpp"
 #include "../runtime/lifecycle_operation.hpp"
+#include "../runtime/conntrack_manager.hpp"
+#include "../runtime/interface_traffic_sampler.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
@@ -54,6 +56,42 @@ class SseBroadcaster;
 class StatusStream;
 struct ConfigApplyResult;
 struct ListRefreshOperationResult;
+
+struct InterfaceTrafficTargetPlan {
+    std::set<std::string> reported;
+    std::set<std::string> removed;
+};
+
+inline InterfaceTrafficTargetPlan plan_interface_traffic_targets(
+    const std::set<std::string>& active,
+    const std::set<std::string>& previously_sampled) {
+    InterfaceTrafficTargetPlan plan;
+    plan.reported = active;
+    plan.reported.insert(
+        previously_sampled.begin(), previously_sampled.end());
+    for (const auto& name : previously_sampled) {
+        if (active.find(name) == active.end()) {
+            plan.removed.insert(name);
+        }
+    }
+    return plan;
+}
+
+inline std::vector<std::string> interface_traffic_targets_from_config(
+    const Config& config) {
+    std::vector<std::string> interface_names;
+    if (!config.outbounds) {
+        return interface_names;
+    }
+    interface_names.reserve(config.outbounds->size());
+    for (const auto& outbound : *config.outbounds) {
+        if (outbound.type == OutboundType::INTERFACE &&
+            outbound.interface) {
+            interface_names.push_back(*outbound.interface);
+        }
+    }
+    return interface_names;
+}
 #endif
 
 class DaemonError : public std::runtime_error {
@@ -79,6 +117,12 @@ struct PreparedRuntimeInputs {
     Config config;
     OutboundMarkMap outbound_marks;
     bool remote_lists_refreshed{false};
+};
+
+enum class RemoteListPreparationMode {
+    None,
+    MissingOrInvalid,
+    RefreshAll,
 };
 
 struct ResolverGenerationSnapshot {
@@ -194,7 +238,8 @@ private:
     void apply_config(Config config, bool refresh_remote_lists = true);
     void apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared);
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
-                                                bool refresh_remote_lists = true);
+                                                  RemoteListPreparationMode list_mode =
+                                                      RemoteListPreparationMode::RefreshAll);
     void apply_config_with_rollback(const Config& next_config,
                                     bool& rolled_back,
                                     bool refresh_remote_lists = true);
@@ -221,12 +266,13 @@ private:
         const std::set<std::string>* target_lists = nullptr,
         std::string_view source = "service");
     void refresh_lists_and_maybe_reload();
-    void refresh_lists_and_maybe_reload_async();
+    void refresh_lists_and_maybe_reload_async(std::string source = "autoupdate");
     void commit_lists_refresh_async_result(Config config_snapshot,
                                            bool runtime_active_snapshot,
                                            std::uint64_t generation,
                                            std::optional<RemoteListsRefreshResult> refresh_result,
                                            std::string error,
+                                           std::string source,
                                            TraceId trace_id);
 
     // PID file management
@@ -265,6 +311,12 @@ private:
     void handle_conntrack_events(uint32_t events);
     void publish_conntrack_revision();
     void teardown_conntrack_events();
+    void schedule_interface_traffic_sampling();
+    void sample_interface_traffic_now();
+    void replace_interface_traffic_targets(
+        std::string source,
+        std::vector<std::string> interface_names);
+    void refresh_interface_traffic_config_targets(const Config& config);
 #endif
 
     // DNS probe integration
@@ -360,6 +412,7 @@ private:
     RouteTable route_table_;
     PolicyRuleManager policy_rules_;
     FirewallState firewall_state_;
+    ConntrackManager conntrack_manager_;
     URLTester url_tester_;
     // Latency for every interface outbound, including native tunnels the
     // firmware owns and standalone outbounds urltest never looks at.
@@ -401,6 +454,12 @@ private:
     std::unique_ptr<SseBroadcaster> dns_test_broadcaster_;
     std::unique_ptr<StatusStream> status_stream_;
     std::unique_ptr<ConntrackEventMonitor> conntrack_event_monitor_;
+    InterfaceTrafficSampler interface_traffic_sampler_;
+    std::mutex interface_traffic_targets_mutex_;
+    std::map<std::string, std::set<std::string>>
+        interface_traffic_targets_by_source_;
+    std::set<std::string> traffic_sampled_interfaces_;
+    bool traffic_sampling_active_{false};
     std::uint64_t conntrack_revision_{0};
     int conntrack_publish_task_id_{-1};
 #endif

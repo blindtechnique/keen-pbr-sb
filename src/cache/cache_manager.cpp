@@ -352,6 +352,22 @@ bool CacheManager::has_cache(const std::string& name) const {
     return std::filesystem::exists(cache_path(name));
 }
 
+bool CacheManager::has_current_cache(const std::string& name,
+                                     const std::string& url) const {
+    if (!has_cache(name)) {
+        return false;
+    }
+
+    const CacheMetadata metadata = load_metadata(name);
+    if (!metadata.url.has_value() || *metadata.url != url) {
+        return false;
+    }
+
+    return !is_srs_rule_set_url(url) ||
+           (metadata.srs_decoder_revision.has_value() &&
+            *metadata.srs_decoder_revision == kSrsDecoderRevision);
+}
+
 std::filesystem::path CacheManager::cache_path(const std::string& name) const {
     return cache_dir_ / (name + ".txt");
 }

@@ -5,7 +5,7 @@ import { type LucideIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
-import { KeeneticMenuIcon } from "@/components/layout/keenetic-menu-icons"
+import { SidebarToggleButton } from "@/components/layout/sidebar-toggle-button"
 import { Button } from "@/components/ui/button"
 import {
   Sheet,
@@ -107,19 +107,14 @@ export function NavMain({ items }: { items: NavItem[] }) {
               ))}
             </nav>
             <div className="keen-sidebar-toggle h-16 shrink-0 bg-sidebar">
-              <Button
-                aria-label={t("brand.showMenu")}
-                className="h-16 w-full justify-start gap-3 rounded-none bg-sidebar px-6 text-[16px] leading-[23px] font-bold text-primary hover:bg-sidebar-accent hover:text-primary"
+              <SidebarToggleButton
+                expanded={false}
+                label={t("brand.showMenu")}
                 onClick={() => {
                   setOpenGroup(null)
                   setOpen(true)
                 }}
-                title={t("brand.showMenu")}
-                variant="ghost"
-              >
-                <KeeneticMenuIcon className="shrink-0" />
-                <span>{t("brand.showMenu")}</span>
-              </Button>
+              />
             </div>
           </div>
         </SheetContent>
@@ -162,7 +157,7 @@ function CollapsedNavigationRail({
                   type="button"
                   variant="ghost"
                 >
-                  {Icon ? <Icon className="size-5" /> : null}
+                  {Icon ? <Icon className="size-6" strokeWidth={2.5} /> : null}
                 </Button>
               </SidebarMenuItem>
             )

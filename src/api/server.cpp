@@ -2,29 +2,33 @@
 
 #include "server.hpp"
 
+#include "auth_runtime.hpp"
 #include "keenetic_auth.hpp"
 
+#include "../config/config_writer.hpp"
 #include "../log/logger.hpp"
 #include "../log/trace.hpp"
 #include "../util/traced_mutex.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <httplib.h>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <mutex>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
+#include <fcntl.h>
+#include <sys/random.h>
+#include <unistd.h>
 
 namespace keen_pbr3 {
 
@@ -285,6 +289,7 @@ bool is_regular_file_or_gzip(const std::filesystem::path& path) {
 
 struct WebAuthConfig {
     bool enabled{false};
+    bool misconfigured{false};
     // "local" checks auth.json, "keenetic" asks the router firmware instead.
     std::string provider{"local"};
     std::string keenetic_endpoint{"127.0.0.1:80"};
@@ -295,12 +300,41 @@ struct WebAuthConfig {
     bool uses_router_account() const { return provider == "keenetic"; }
 };
 
+WebAuthConfig misconfigured_web_auth(const std::string& message) {
+    WebAuthConfig config;
+    // A present but unusable auth file must never silently disable
+    // authentication. Keep the API closed and leave recovery to the local
+    // installer/SSH path.
+    config.enabled = true;
+    config.misconfigured = true;
+    Logger::instance().error("Web authentication is misconfigured: {}", message);
+    return config;
+}
+
 WebAuthConfig load_web_auth_config() {
     const char* configured = std::getenv("KEEN_PBR_AUTH_FILE");
     const std::filesystem::path path = configured && *configured
         ? configured : "/opt/etc/keen-pbr/auth.json";
+
+    std::error_code status_error;
+    const auto status = std::filesystem::symlink_status(path, status_error);
+    if (status_error) {
+        if (status_error ==
+            std::make_error_code(std::errc::no_such_file_or_directory)) {
+            return {};
+        }
+        return misconfigured_web_auth("cannot inspect auth.json");
+    }
+    if (!std::filesystem::exists(status)) return {};
+    if (!std::filesystem::is_regular_file(status)) {
+        return misconfigured_web_auth(
+            "auth.json is not a regular file");
+    }
+
     std::ifstream input(path);
-    if (!input) return {};
+    if (!input) {
+        return misconfigured_web_auth("cannot read auth.json");
+    }
     try {
         const auto document = nlohmann::json::parse(input);
         WebAuthConfig config;
@@ -312,15 +346,41 @@ WebAuthConfig load_web_auth_config() {
         config.password = document.value("password", std::string{});
         const auto ttl = document.value("session_ttl_seconds", 604800);
         if (ttl >= 300 && ttl <= 2592000) config.session_ttl = std::chrono::seconds(ttl);
-        if (config.enabled && !config.uses_router_account() &&
+        if (config.provider != "local" &&
+            config.provider != "keenetic") {
+            if (config.enabled) {
+                return misconfigured_web_auth(
+                    "auth.json contains an unknown provider");
+            }
+            config.provider = "local";
+        }
+        if (config.uses_router_account()) {
+            const auto endpoint =
+                parse_keenetic_auth_endpoint(config.keenetic_endpoint);
+            if (!endpoint) {
+                if (config.enabled) {
+                    return misconfigured_web_auth(
+                        "auth.json contains an invalid Keenetic endpoint");
+                }
+                // A disabled stale value is not an authentication boundary.
+                // Replace it in memory so a later settings request cannot
+                // accidentally expose or reuse it.
+                config.keenetic_endpoint = "127.0.0.1:80";
+            } else {
+                config.keenetic_endpoint = endpoint->canonical;
+            }
+        }
+        if (config.enabled &&
+            !config.uses_router_account() &&
             (config.username.empty() || config.password.empty())) {
-            Logger::instance().error("Web authentication is enabled without credentials");
-            return {};
+            return misconfigured_web_auth(
+                "local authentication is enabled without credentials");
         }
         return config;
     } catch (const std::exception& error) {
-        Logger::instance().error("Failed to parse auth.json: {}", error.what());
-        return {};
+        Logger::instance().error(
+            "Failed to parse auth.json: {}", error.what());
+        return misconfigured_web_auth("auth.json is invalid");
     }
 }
 
@@ -335,14 +395,53 @@ bool constant_time_equal(const std::string& left, const std::string& right) {
     return difference == 0;
 }
 
-std::string random_session_token() {
-    std::random_device random;
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
-    for (size_t index = 0; index < 32; ++index) {
-        output << std::setw(2) << (random() & 0xffU);
+std::optional<std::string> random_session_token() {
+    std::array<unsigned char, 32> bytes{};
+    std::size_t offset = 0;
+    bool use_urandom = false;
+
+    while (offset < bytes.size()) {
+        const auto received = ::getrandom(
+            bytes.data() + offset, bytes.size() - offset, 0);
+        if (received > 0) {
+            offset += static_cast<std::size_t>(received);
+            continue;
+        }
+        if (received < 0 && errno == EINTR) continue;
+        if (received < 0 && errno == ENOSYS) {
+            use_urandom = true;
+            break;
+        }
+        return std::nullopt;
     }
-    return output.str();
+
+    if (use_urandom) {
+        const int descriptor =
+            ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        if (descriptor < 0) return std::nullopt;
+        offset = 0;
+        while (offset < bytes.size()) {
+            const auto received = ::read(
+                descriptor, bytes.data() + offset,
+                bytes.size() - offset);
+            if (received > 0) {
+                offset += static_cast<std::size_t>(received);
+                continue;
+            }
+            if (received < 0 && errno == EINTR) continue;
+            (void)::close(descriptor);
+            return std::nullopt;
+        }
+        if (::close(descriptor) != 0) return std::nullopt;
+    }
+
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string token(bytes.size() * 2, '0');
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        token[index * 2] = hex[bytes[index] >> 4U];
+        token[index * 2 + 1] = hex[bytes[index] & 0x0fU];
+    }
+    return token;
 }
 
 std::string cookie_value(const httplib::Request& request, const std::string& name) {
@@ -393,6 +492,10 @@ bool valid_local_transport_manager_request(const httplib::Request& request) {
     }
 }
 
+bool is_sensitive_backup_path(const std::string& path) {
+    return path == "/api/backup" || path.rfind("/api/backup/", 0) == 0;
+}
+
 } // namespace
 
 struct ApiServer::Impl {
@@ -406,9 +509,21 @@ struct ApiServer::Impl {
     TracedMutex state_mutex;
     std::condition_variable_any startup_cv;
     std::string listen_error_message;
+    std::mutex auth_update_mutex;
+    std::mutex auth_mutex;
     WebAuthConfig auth;
-    std::mutex sessions_mutex;
-    std::unordered_map<std::string, std::chrono::system_clock::time_point> sessions;
+    AuthSessionRegistry sessions;
+    AuthLoginRateLimiter login_rate_limiter;
+
+    WebAuthConfig auth_snapshot() {
+        std::lock_guard lock(auth_mutex);
+        return auth;
+    }
+
+    void replace_auth(WebAuthConfig replacement) {
+        std::lock_guard lock(auth_mutex);
+        auth = std::move(replacement);
+    }
 };
 
 ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) {
@@ -416,6 +531,12 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     // before cpp-httplib buffers them and bound slow/stalled clients. Backup
     // restore applies a stricter aggregate limit in its own handler.
     impl_->server.set_payload_max_length(16U * 1024U * 1024U);
+    impl_->server.set_default_headers({
+        {"X-Content-Type-Options", "nosniff"},
+        {"X-Frame-Options", "SAMEORIGIN"},
+        {"Referrer-Policy", "no-referrer"},
+        {"Permissions-Policy", "camera=(), microphone=(), geolocation=()"},
+    });
     impl_->server.set_read_timeout(15);
     impl_->server.set_write_timeout(30);
     impl_->server.set_keep_alive_timeout(20);
@@ -441,27 +562,51 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         throw ApiError("Port out of range: " + port_str);
     }
 
-    impl_->auth = load_web_auth_config();
+    impl_->replace_auth(load_web_auth_config());
     impl_->server.Get("/api/auth/status", [state = impl_.get()](const httplib::Request& req,
                                                                   httplib::Response& res) {
-        bool authenticated = !state->auth.enabled;
-        if (state->auth.enabled) {
+        const auto auth = state->auth_snapshot();
+        bool authenticated = !auth.enabled;
+        if (auth.enabled) {
             const auto token = cookie_value(req, "keen_pbr_session");
-            std::lock_guard lock(state->sessions_mutex);
-            const auto session = state->sessions.find(token);
-            authenticated = session != state->sessions.end() &&
-                            session->second > std::chrono::system_clock::now();
+            authenticated = state->sessions.contains(token);
         }
-        res.set_content(nlohmann::json{{"enabled", state->auth.enabled},
-                                       {"provider", state->auth.provider},
-                                       {"keenetic_endpoint", state->auth.keenetic_endpoint},
-                                       {"authenticated", authenticated}}.dump(),
-                        "application/json");
+        nlohmann::json response{
+            {"enabled", auth.enabled},
+            {"provider", auth.provider},
+            {"authenticated", authenticated},
+        };
+        if (auth.misconfigured) {
+            response["error"] = "auth_misconfigured";
+        } else if (authenticated && auth.enabled &&
+                   auth.uses_router_account()) {
+            response["keenetic_endpoint"] =
+                auth.keenetic_endpoint;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(response.dump(), "application/json");
     });
     impl_->server.Post("/api/auth/login", [state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
-        if (!state->auth.enabled) {
+        const auto auth = state->auth_snapshot();
+        res.set_header("Cache-Control", "no-store");
+        if (auth.misconfigured) {
+            res.status = 503;
+            res.set_content(
+                R"({"error":"auth_misconfigured"})",
+                "application/json");
+            return;
+        }
+        if (!auth.enabled) {
             res.set_content(R"({"authenticated":true})", "application/json");
+            return;
+        }
+        if (!state->login_rate_limiter.allow(req.remote_addr)) {
+            res.status = 429;
+            res.set_header("Retry-After", "60");
+            res.set_content(
+                R"({"error":"too many login attempts"})",
+                "application/json");
             return;
         }
         try {
@@ -469,10 +614,11 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const auto username = body.value("username", std::string{});
             const auto password = body.value("password", std::string{});
 
-            if (state->auth.uses_router_account()) {
+            if (auth.uses_router_account()) {
                 const auto verdict = verify_keenetic_credentials(
-                    state->auth.keenetic_endpoint, username, password);
+                    auth.keenetic_endpoint, username, password);
                 if (!verdict.authenticated) {
+                    state->login_rate_limiter.record_failure(req.remote_addr);
                     // A router that cannot be reached is an outage, not a typo.
                     res.status = verdict.reachable ? 401 : 503;
                     res.set_content(
@@ -483,22 +629,37 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         "application/json");
                     return;
                 }
-            } else if (!constant_time_equal(username, state->auth.username) ||
-                       !constant_time_equal(password, state->auth.password)) {
+            } else if (!constant_time_equal(username, auth.username) ||
+                       !constant_time_equal(password, auth.password)) {
+                state->login_rate_limiter.record_failure(req.remote_addr);
                 res.status = 401;
                 res.set_content(R"({"error":"invalid credentials"})", "application/json");
                 return;
             }
+            state->login_rate_limiter.record_success(req.remote_addr);
             const auto token = random_session_token();
-            {
-                std::lock_guard lock(state->sessions_mutex);
-                state->sessions[token] = std::chrono::system_clock::now() + state->auth.session_ttl;
+            if (!token) {
+                Logger::instance().error(
+                    "Cannot obtain secure entropy for a web session");
+                res.status = 503;
+                res.set_content(
+                    R"({"error":"secure session creation failed"})",
+                    "application/json");
+                return;
             }
-            res.set_header("Set-Cookie", "keen_pbr_session=" + token +
+            if (!state->sessions.insert(*token, auth.session_ttl)) {
+                res.status = 503;
+                res.set_content(
+                    R"({"error":"session limit reached"})",
+                    "application/json");
+                return;
+            }
+            res.set_header("Set-Cookie", "keen_pbr_session=" + *token +
                            "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
-                           std::to_string(state->auth.session_ttl.count()));
+                           std::to_string(auth.session_ttl.count()));
             res.set_content(R"({"authenticated":true})", "application/json");
         } catch (const std::exception&) {
+            state->login_rate_limiter.record_failure(req.remote_addr);
             res.status = 400;
             res.set_content(R"({"error":"invalid login request"})", "application/json");
         }
@@ -508,6 +669,10 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->server.Post("/api/auth/settings", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
         try {
+            // Keep the file replacement, reload and in-memory replacement in
+            // one order when two administrators save at the same time.
+            std::lock_guard update_lock(state->auth_update_mutex);
+            const auto current_auth = state->auth_snapshot();
             const auto body = nlohmann::json::parse(req.body);
             const auto provider = body.value("provider", std::string{"local"});
             if (provider != "local" && provider != "keenetic") {
@@ -520,17 +685,28 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             document["enabled"] = body.value("enabled", true);
             document["provider"] = provider;
             document["session_ttl_seconds"] =
-                static_cast<long long>(state->auth.session_ttl.count());
+                static_cast<long long>(
+                    current_auth.session_ttl.count());
 
             if (provider == "keenetic") {
-                const auto endpoint =
+                const auto endpoint_text =
                     body.value("keenetic_endpoint", std::string{"127.0.0.1:80"});
+                const auto endpoint =
+                    parse_keenetic_auth_endpoint(endpoint_text);
+                if (!endpoint) {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"invalid Keenetic endpoint"})",
+                        "application/json");
+                    return;
+                }
                 const auto username = body.value("username", std::string{});
                 const auto password = body.value("password", std::string{});
                 // Refuse to lock the user out: the credentials must work first.
                 if (!username.empty() || !password.empty()) {
                     const auto verdict =
-                        verify_keenetic_credentials(endpoint, username, password);
+                        verify_keenetic_credentials(
+                            endpoint->canonical, username, password);
                     if (!verdict.authenticated) {
                         res.status = verdict.reachable ? 401 : 503;
                         res.set_content(
@@ -539,7 +715,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         return;
                     }
                 }
-                document["keenetic_endpoint"] = endpoint;
+                document["keenetic_endpoint"] = endpoint->canonical;
             } else {
                 const auto username = body.value("username", std::string{});
                 const auto password = body.value("password", std::string{});
@@ -557,25 +733,38 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const char* configured = std::getenv("KEEN_PBR_AUTH_FILE");
             const std::filesystem::path path = configured && *configured
                 ? configured : "/opt/etc/keen-pbr/auth.json";
-            std::ofstream output(path, std::ios::trunc);
-            if (!output) {
+            AtomicFileWriteOptions write_options;
+            write_options.default_file_mode = 0600;
+            write_options.file_mode = static_cast<mode_t>(0600);
+            try {
+                write_file_atomically(
+                    path.string(),
+                    document.dump() + "\n",
+                    write_options);
+            } catch (const std::exception& error) {
+                Logger::instance().error(
+                    "Cannot write auth.json atomically: {}",
+                    error.what());
                 res.status = 500;
                 res.set_content(R"({"error":"cannot write auth.json"})", "application/json");
                 return;
             }
-            output << document.dump() << "\n";
-            output.close();
-            std::filesystem::permissions(path,
-                                         std::filesystem::perms::owner_read |
-                                             std::filesystem::perms::owner_write,
-                                         std::filesystem::perm_options::replace);
 
-            state->auth = load_web_auth_config();
-            {
-                // Existing sessions belong to the previous mode.
-                std::lock_guard lock(state->sessions_mutex);
+            const auto replacement = load_web_auth_config();
+            if (replacement.misconfigured) {
+                // The file on disk is now authoritative. Never keep an older
+                // disabled/insecure in-memory mode after a failed reload.
+                state->replace_auth(replacement);
                 state->sessions.clear();
+                res.status = 500;
+                res.set_content(
+                    R"({"error":"auth_misconfigured"})",
+                    "application/json");
+                return;
             }
+            state->replace_auth(replacement);
+            // Existing sessions belong to the previous mode.
+            state->sessions.clear();
             res.set_content(R"({"saved":true})", "application/json");
         } catch (const std::exception& error) {
             res.status = 400;
@@ -587,35 +776,31 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->server.Post("/api/auth/logout", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
         const auto token = cookie_value(req, "keen_pbr_session");
-        {
-            std::lock_guard lock(state->sessions_mutex);
-            state->sessions.erase(token);
-        }
+        state->sessions.erase(token);
         res.set_header("Set-Cookie", "keen_pbr_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+        res.set_header("Cache-Control", "no-store");
         res.set_content(R"({"authenticated":false})", "application/json");
     });
     impl_->server.set_pre_routing_handler([state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
+        // Backup payloads contain credentials and complete routing state.
+        // Set this before authentication so both successful responses and
+        // rejected requests are excluded from browser and intermediary caches.
+        if (is_sensitive_backup_path(req.path)) {
+            res.set_header("Cache-Control", "no-store");
+        }
+
         if (valid_local_transport_manager_request(req)) {
             return httplib::Server::HandlerResponse::Unhandled;
         }
-        if (!state->auth.enabled || req.path.rfind("/api/", 0) != 0 ||
+        const auto auth = state->auth_snapshot();
+        if (!auth.enabled || req.path.rfind("/api/", 0) != 0 ||
             req.path == "/api/auth/status" || req.path == "/api/auth/login" ||
             req.path == "/api/auth/logout") {
             return httplib::Server::HandlerResponse::Unhandled;
         }
         const auto token = cookie_value(req, "keen_pbr_session");
-        bool valid = false;
-        {
-            std::lock_guard lock(state->sessions_mutex);
-            const auto now = std::chrono::system_clock::now();
-            for (auto it = state->sessions.begin(); it != state->sessions.end();) {
-                if (it->second <= now) it = state->sessions.erase(it);
-                else ++it;
-            }
-            const auto session = state->sessions.find(token);
-            valid = session != state->sessions.end();
-        }
+        const bool valid = state->sessions.contains(token);
         if (valid) return httplib::Server::HandlerResponse::Unhandled;
         res.status = 401;
         res.set_content(R"({"error":"authentication required"})", "application/json");

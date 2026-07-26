@@ -1072,10 +1072,10 @@ TEST_CASE("config validation: self-referencing urltest is rejected") {
     })"));
 }
 
-// Two groups pointing at each other must terminate as well: the depth guard
-// stops the walk even though neither references itself directly.
-TEST_CASE("populate_routing_state: mutually referencing urltests terminate") {
-    auto cfg = parse_minimal_config(R"({
+// Two groups pointing at each other are rejected before runtime state is built.
+// The depth guard remains defence-in-depth for already loaded legacy state.
+TEST_CASE("config validation: mutually referencing urltests are rejected") {
+    CHECK_THROWS(parse_minimal_config(R"({
         "daemon":{"strict_enforcement":false},
         "iproute":{"table_start":100},
         "outbounds":[
@@ -1084,25 +1084,41 @@ TEST_CASE("populate_routing_state: mutually referencing urltests terminate") {
             {"tag":"second","type":"urltest","url":"https://example.org",
              "outbound_groups":[{"outbounds":["first"]}]}
         ]
+    })"));
+}
+
+TEST_CASE("outbound marks stay stable when independent entries are reordered") {
+    const auto first = parse_minimal_config(R"({
+        "outbounds":[
+            {"tag":"zeta","type":"interface","interface":"wg0"},
+            {"tag":"ignored","type":"ignore"},
+            {"tag":"alpha","type":"table","table":200},
+            {"tag":"selector","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["zeta","alpha"]}]}
+        ]
     })");
-    auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}),
-                                         cfg.outbounds.value_or(std::vector<Outbound>{}));
+    const auto second = parse_minimal_config(R"({
+        "outbounds":[
+            {"tag":"selector","type":"urltest","url":"https://example.org",
+             "outbound_groups":[{"outbounds":["zeta","alpha"]}]},
+            {"tag":"alpha","type":"table","table":200},
+            {"tag":"ignored","type":"ignore"},
+            {"tag":"zeta","type":"interface","interface":"wg0"}
+        ]
+    })");
 
-    NetlinkManager netlink;
-    RouteTable routes(netlink, true);
-    PolicyRuleManager rules(netlink, true);
-    std::map<std::string, std::string> selections{
-        {"first", "second"},
-        {"second", "first"},
-    };
+    const auto first_marks = allocate_outbound_marks(
+        first.fwmark.value_or(FwmarkConfig{}),
+        first.outbounds.value_or(std::vector<Outbound>{}));
+    const auto second_marks = allocate_outbound_marks(
+        second.fwmark.value_or(FwmarkConfig{}),
+        second.outbounds.value_or(std::vector<Outbound>{}));
 
-    populate_routing_state(cfg, marks, routes, rules,
-                           [](const Outbound&) { return true; }, &selections);
-
-    // No interface can be reached, so only the kill-switch stays.
-    for (const auto& route : routes.get_routes()) {
-        CHECK(route.unreachable);
-    }
+    CHECK(first_marks == second_marks);
+    CHECK(first_marks.size() == 3);
+    CHECK(first_marks.at("alpha") < first_marks.at("selector"));
+    CHECK(first_marks.at("selector") < first_marks.at("zeta"));
+    CHECK(first_marks.count("ignored") == 0);
 }
 
 TEST_CASE("routing state managers reconcile without destructive clear") {

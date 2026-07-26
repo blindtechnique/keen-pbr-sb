@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 func outboundFromSpec(spec TransportSpec) (map[string]any, error) {
@@ -437,41 +439,192 @@ func integerValue(value any) (int, error) {
 	return strconv.Atoi(stringValue(value))
 }
 
-// summariseOutbound достаёт из готового sing-box outbound то, что можно
-// показать человеку: порт, вид защиты, SNI и вид транспорта. Секретов здесь
-// нет — ни uuid, ни паролей, ни ключей Reality; всё перечисленное и так
-// видно любому, кто смотрит на линию.
-func summariseOutbound(outbound map[string]any) (port int, security, sni, network string) {
+type outboundSummary struct {
+	port          int
+	security      string
+	sni           string
+	path          TransportPath
+	legacyNetwork string
+}
+
+// summariseOutbound extracts only non-secret connection metadata and keeps
+// the carrier, framing and payload networks separate. Previously every
+// outbound without a V2Ray `transport` object was labelled TCP, which is
+// incorrect for QUIC-based Hysteria/TUIC and for Naive QUIC.
+func summariseOutbound(outbound map[string]any) outboundSummary {
+	result := outboundSummary{path: UnknownTransportPath()}
 	switch value := outbound["server_port"].(type) {
 	case int:
-		port = value
+		result.port = value
 	case float64:
-		port = int(value)
+		result.port = int(value)
 	}
 
 	if tls, ok := outbound["tls"].(map[string]any); ok {
 		if enabled, _ := tls["enabled"].(bool); enabled {
-			security = "tls"
+			result.security = "tls"
 			if reality, ok := tls["reality"].(map[string]any); ok {
 				if on, _ := reality["enabled"].(bool); on {
-					security = "reality"
+					result.security = "reality"
 				}
 			}
 		}
 		if name, ok := tls["server_name"].(string); ok {
-			sni = name
+			result.sni = name
 		}
 	}
 
-	// Отсутствие секции transport в sing-box означает обычный TCP.
-	network = "tcp"
+	protocol := strings.ToLower(strings.TrimSpace(stringValue(outbound["type"])))
+	result.path = transportPathForOutbound(protocol, outbound)
+	result.legacyNetwork = legacyNetworkForPath(result.path)
+	if result.legacyNetwork == "" {
+		if rawTransport, ok := outbound["transport"].(map[string]any); ok {
+			result.legacyNetwork =
+				strings.ToLower(strings.TrimSpace(stringValue(rawTransport["type"])))
+		}
+	}
+	return result
+}
+
+func transportPathForOutbound(protocol string, outbound map[string]any) TransportPath {
+	payloadNetworks := payloadNetworksFromOutbound(outbound)
+
 	if transport, ok := outbound["transport"].(map[string]any); ok {
-		if name, ok := transport["type"].(string); ok && name != "" {
-			network = name
+		switch strings.ToLower(strings.TrimSpace(stringValue(transport["type"]))) {
+		case "ws", "websocket":
+			return declaredTransportPath(WireTransportTCP, TransportFramingWebSocket, payloadNetworks)
+		case "grpc":
+			return declaredTransportPath(WireTransportTCP, TransportFramingGRPC, payloadNetworks)
+		case "http", "h2":
+			return declaredTransportPath(WireTransportTCP, TransportFramingHTTP, payloadNetworks)
+		case "httpupgrade", "http-upgrade":
+			return declaredTransportPath(WireTransportTCP, TransportFramingHTTPUpgrade, payloadNetworks)
+		case "quic":
+			return declaredTransportPath(WireTransportUDP, TransportFramingQUIC, payloadNetworks)
+		default:
+			return TransportPath{
+				WireTransport:   WireTransportUnknown,
+				Framing:         TransportFramingUnknown,
+				PayloadNetworks: payloadNetworks,
+				Confidence:      TransportPathUnknown,
+			}
 		}
 	}
 
-	return port, security, sni, network
+	switch protocol {
+	case "hysteria", "hysteria2", "tuic":
+		return derivedTransportPath(WireTransportUDP, TransportFramingQUIC, payloadNetworks)
+	case "naive":
+		if enabled, _ := outbound["quic"].(bool); enabled {
+			return declaredTransportPath(WireTransportUDP, TransportFramingQUIC, payloadNetworks)
+		}
+		return derivedTransportPath(WireTransportTCP, TransportFramingHTTP2, payloadNetworks)
+	case "wireguard":
+		return derivedTransportPath(WireTransportUDP, TransportFramingWireGuard, payloadNetworks)
+	case "vless", "vmess", "trojan", "anytls":
+		return derivedTransportPath(WireTransportTCP, TransportFramingRaw, payloadNetworks)
+	case "http", "https":
+		return derivedTransportPath(WireTransportTCP, TransportFramingHTTP, payloadNetworks)
+	case "shadowsocks", "socks":
+		return TransportPath{
+			WireTransport:   WireTransportTCPUDP,
+			Framing:         TransportFramingRaw,
+			PayloadNetworks: payloadNetworks,
+			Confidence:      TransportPathAmbiguous,
+		}
+	default:
+		return TransportPath{
+			WireTransport:   WireTransportUnknown,
+			Framing:         TransportFramingUnknown,
+			PayloadNetworks: payloadNetworks,
+			Confidence:      TransportPathUnknown,
+		}
+	}
+}
+
+func declaredTransportPath(
+	wire WireTransport,
+	framing TransportFraming,
+	payloadNetworks []string,
+) TransportPath {
+	return TransportPath{
+		WireTransport:   wire,
+		Framing:         framing,
+		PayloadNetworks: payloadNetworks,
+		Confidence:      TransportPathDeclared,
+	}
+}
+
+func derivedTransportPath(
+	wire WireTransport,
+	framing TransportFraming,
+	payloadNetworks []string,
+) TransportPath {
+	return TransportPath{
+		WireTransport:   wire,
+		Framing:         framing,
+		PayloadNetworks: payloadNetworks,
+		Confidence:      TransportPathDerived,
+	}
+}
+
+func payloadNetworksFromOutbound(outbound map[string]any) []string {
+	values := make([]string, 0, 2)
+	add := func(raw string) {
+		for _, candidate := range strings.FieldsFunc(strings.ToLower(raw), func(character rune) bool {
+			return character == ',' || character == '/' || character == '+' || unicode.IsSpace(character)
+		}) {
+			if candidate != "tcp" && candidate != "udp" {
+				continue
+			}
+			if !slices.Contains(values, candidate) {
+				values = append(values, candidate)
+			}
+		}
+	}
+
+	switch network := outbound["network"].(type) {
+	case string:
+		add(network)
+	case []string:
+		for _, value := range network {
+			add(value)
+		}
+	case []any:
+		for _, value := range network {
+			add(stringValue(value))
+		}
+	}
+	return values
+}
+
+func legacyNetworkForPath(path TransportPath) string {
+	switch path.Framing {
+	case TransportFramingWebSocket:
+		return "ws"
+	case TransportFramingHTTP:
+		return "http"
+	case TransportFramingHTTP2:
+		return "h2"
+	case TransportFramingGRPC:
+		return "grpc"
+	case TransportFramingHTTPUpgrade:
+		return "httpupgrade"
+	case TransportFramingQUIC:
+		return "quic"
+	case TransportFramingWireGuard:
+		return "wireguard"
+	case TransportFramingRaw:
+		switch path.WireTransport {
+		case WireTransportTCP:
+			return "tcp"
+		case WireTransportUDP:
+			return "udp"
+		case WireTransportTCPUDP:
+			return "tcp_udp"
+		}
+	}
+	return ""
 }
 
 // parseNaiveLink разбирает ссылку вида naive+https://user:password@host:443.

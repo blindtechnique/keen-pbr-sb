@@ -14,9 +14,11 @@ declare -A dockerfiles=(
   [nftables]="tests/firewall_it/docker/Dockerfile.nftables"
 )
 
-for backend in iptables nftables; do
-  docker build -t "${images[$backend]}" -f "$repo_root/${dockerfiles[$backend]}" "$repo_root"
-done
+if [[ "${KEEN_PBR_FIREWALL_IT_SKIP_BUILD:-0}" != "1" ]]; then
+  for backend in iptables nftables; do
+    docker build -t "${images[$backend]}" -f "$repo_root/${dockerfiles[$backend]}" "$repo_root"
+  done
+fi
 
 run_case() {
   local container="$1"

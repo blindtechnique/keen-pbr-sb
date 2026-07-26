@@ -41,6 +41,7 @@ export function UpsertPage({
   dirty = false,
   onClose,
   presentation = "page",
+  showAdvancedEditor = true,
 }: {
   title: string
   description: string
@@ -50,6 +51,7 @@ export function UpsertPage({
   dirty?: boolean
   onClose?: () => void
   presentation?: UpsertPagePresentation
+  showAdvancedEditor?: boolean
 }) {
   const { t } = useTranslation()
   const [location, navigate] = useLocation()
@@ -138,22 +140,24 @@ export function UpsertPage({
                   </DialogTitle>
                   <DialogDescription>{cardDescription}</DialogDescription>
                 </div>
-                <Button
-                  aria-label={t("common.openAdvancedEditor")}
-                  disabled={dirty || mutationPending}
-                  onClick={() => navigate(`${location}?view=page`)}
-                  size={isMobile ? "icon-sm" : "sm"}
-                  title={
-                    dirty || mutationPending
-                      ? t("common.unsavedChanges.advancedEditorDisabled")
-                      : t("common.openAdvancedEditor")
-                  }
-                  type="button"
-                  variant="outline"
-                >
-                  <Maximize2Icon />
-                  {isMobile ? null : t("common.openAdvancedEditor")}
-                </Button>
+                {showAdvancedEditor ? (
+                  <Button
+                    aria-label={t("common.openAdvancedEditor")}
+                    disabled={dirty || mutationPending}
+                    onClick={() => navigate(`${location}?view=page`)}
+                    size={isMobile ? "icon-sm" : "sm"}
+                    title={
+                      dirty || mutationPending
+                        ? t("common.unsavedChanges.advancedEditorDisabled")
+                        : t("common.openAdvancedEditor")
+                    }
+                    type="button"
+                    variant="outline"
+                  >
+                    <Maximize2Icon />
+                    {isMobile ? null : t("common.openAdvancedEditor")}
+                  </Button>
+                ) : null}
               </div>
             </DialogHeader>
             <div className="upsert-dialog-body min-h-0 overflow-y-auto px-5 pt-5">

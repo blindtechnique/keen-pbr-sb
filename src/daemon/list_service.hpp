@@ -68,6 +68,7 @@ RemoteListTargetSelection select_remote_list_targets(
 std::set<std::string> collect_relevant_list_names(const Config& config);
 std::set<std::string> collect_dns_relevant_list_names(const Config& config);
 std::string format_list_names(const std::vector<std::string>& list_names);
+bool remote_list_sources_changed(const Config& current, const Config& next);
 
 bool should_reload_runtime_after_list_refresh(
     bool routing_runtime_active,

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -33,6 +35,10 @@ type TransportAdmin interface {
 
 type TransportConfigExporter interface {
 	ExportSpecs() []transport.TransportSpec
+}
+
+type TransportConfigRevisionProvider interface {
+	Revision() string
 }
 
 func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Handler {
@@ -77,8 +83,8 @@ func (a *API) createConfig(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
 		return
 	}
-	var spec transport.TransportSpec
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&spec); err != nil {
+	spec, err := decodeTransportSpec(w, r)
+	if err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport JSON"})
 		return
 	}
@@ -94,8 +100,8 @@ func (a *API) updateConfig(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport admin unavailable"})
 		return
 	}
-	var spec transport.TransportSpec
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&spec); err != nil {
+	spec, err := decodeTransportSpec(w, r)
+	if err != nil {
 		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport JSON"})
 		return
 	}
@@ -104,6 +110,25 @@ func (a *API) updateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusOK, map[string]string{"status": "updated", "tag": spec.Tag})
+}
+
+func decodeTransportSpec(w http.ResponseWriter, r *http.Request) (transport.TransportSpec, error) {
+	var spec transport.TransportSpec
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&spec); err != nil {
+		return transport.TransportSpec{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return transport.TransportSpec{}, errors.New("multiple JSON values")
+		}
+		return transport.TransportSpec{}, err
+	}
+	if err := transport.ValidateDisplayName(spec.DisplayName); err != nil {
+		return transport.TransportSpec{}, err
+	}
+	return spec, nil
 }
 
 func (a *API) deleteConfig(w http.ResponseWriter, r *http.Request) {
@@ -134,10 +159,16 @@ func (a *API) auth(next http.Handler) http.Handler {
 }
 
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {
-	write(w, http.StatusOK, map[string]string{"status": "ok"})
+	response := map[string]string{"status": "ok"}
+	if provider, ok := a.admin.(TransportConfigRevisionProvider); ok {
+		response["config_revision"] = provider.Revision()
+	}
+	write(w, http.StatusOK, response)
 }
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
-	write(w, http.StatusOK, a.manager.Statuses(r.Context()))
+	statuses := a.manager.Statuses(r.Context())
+	a.decorateStatuses(statuses)
+	write(w, http.StatusOK, statuses)
 }
 func (a *API) status(w http.ResponseWriter, r *http.Request) {
 	status, err := a.manager.Status(r.Context(), r.PathValue("tag"))
@@ -145,7 +176,22 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	write(w, http.StatusOK, status)
+	statuses := []transport.Status{status}
+	a.decorateStatuses(statuses)
+	write(w, http.StatusOK, statuses[0])
+}
+
+func (a *API) decorateStatuses(statuses []transport.Status) {
+	if a.admin == nil {
+		return
+	}
+	displayNameByTag := make(map[string]string)
+	for _, spec := range a.admin.Specs() {
+		displayNameByTag[spec.Tag] = spec.DisplayName
+	}
+	for index := range statuses {
+		statuses[index].DisplayName = displayNameByTag[statuses[index].Tag]
+	}
 }
 func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	var err error

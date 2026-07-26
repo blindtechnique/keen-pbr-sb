@@ -8,13 +8,16 @@
 #include "../config/config.hpp"
 #include "../health/routing_health.hpp"
 #include "../runtime/lifecycle_operation.hpp"
+#include "../update/maintenance_lock.hpp"
 #include "sse_broadcaster.hpp"
 #include "status_stream.hpp"
 #include "server.hpp"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,7 +66,10 @@ struct ListRefreshOperationResult {
 
 // Context struct holding thread-safe accessors to daemon runtime state.
 struct ApiContext {
-    const std::string& config_path;
+    // Own the path. Tests and embedders often construct the context from a
+    // temporary path string; retaining a reference here would leave the API
+    // with a dangling recovery target.
+    std::string config_path;
     SseBroadcaster& dns_test_broadcaster;
 
     std::function<Config()> get_visible_config_fn;
@@ -91,6 +97,15 @@ struct ApiContext {
     std::function<ListRefreshOperationResult(std::optional<std::string>)> refresh_lists_fn;
     StatusStream* status_stream{nullptr};
     LifecycleOperationCoordinator* lifecycle_operations{nullptr};
+    std::function<void(std::string, std::vector<std::string>)>
+        replace_interface_traffic_targets_fn;
+    std::function<int(const std::string&)> restart_restore_service_fn;
+    std::function<std::unique_ptr<MaintenanceLease>(std::string)>
+        maintenance_lease_factory_fn;
+    // Fail-closed stop used while a save operation already owns the config
+    // operation state. Production wiring must not try to acquire a second
+    // Reloading operation, otherwise the emergency stop self-deadlocks.
+    std::function<void()> emergency_quiesce_runtime_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -165,6 +180,17 @@ struct ApiContext {
         stop_runtime_fn();
     }
 
+    void emergency_quiesce_runtime() const {
+        if (emergency_quiesce_runtime_fn) {
+            emergency_quiesce_runtime_fn();
+            return;
+        }
+        // Tests and embedders predating the dedicated callback keep the safe
+        // behavior, provided their stop callback does not re-enter the config
+        // operation state machine.
+        stop_runtime_fn();
+    }
+
     void restart_runtime() const {
         restart_runtime_fn();
     }
@@ -172,6 +198,30 @@ struct ApiContext {
     ListRefreshOperationResult refresh_lists(
         const std::optional<std::string>& requested_name) const {
         return refresh_lists_fn(requested_name);
+    }
+
+    void replace_interface_traffic_targets(
+        std::string source,
+        std::vector<std::string> interface_names) const {
+        if (replace_interface_traffic_targets_fn) {
+            replace_interface_traffic_targets_fn(
+                std::move(source), std::move(interface_names));
+        }
+    }
+
+    std::unique_ptr<MaintenanceLease> acquire_maintenance_lease(
+        std::string operation) const {
+        if (!maintenance_lease_factory_fn) {
+            return std::make_unique<MaintenanceCoordinator>(
+                std::move(operation));
+        }
+        auto lease =
+            maintenance_lease_factory_fn(std::move(operation));
+        if (!lease) {
+            throw std::runtime_error(
+                "Maintenance lease factory returned no lease");
+        }
+        return lease;
     }
 };
 

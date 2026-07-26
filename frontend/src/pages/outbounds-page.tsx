@@ -47,7 +47,16 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import {
+  createDnsServerDisplayNameMap,
+  getDnsServerDisplayName,
+} from "@/lib/dns-display"
 import { formatListReferenceLabels } from "@/lib/list-display"
+import {
+  createOutboundDisplayNameMap,
+  getOutboundDisplayName,
+} from "@/lib/outbound-display"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildUpdatedConfigForOutboundsDelete,
   getOutboundDeleteImpact,
@@ -116,6 +125,10 @@ export function OutboundsPage() {
         )
       ),
     [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, t]
+  )
+  const outboundDisplayNames = useMemo(
+    () => createOutboundDisplayNameMap(selectOutbounds(loadedConfig)),
+    [loadedConfig]
   )
   const dependencyTargets = useMemo(
     () =>
@@ -363,6 +376,7 @@ export function OutboundsPage() {
                   onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
                   onToggleSelected={() => outboundSelection.toggleOne(item.id)}
                   outbound={item.outbound}
+                  outboundDisplayNames={outboundDisplayNames}
                   protocol={
                     item.outbound.type === "urltest"
                       ? protocolOfGroup(item.outbound, interfaceOfTag)
@@ -370,7 +384,7 @@ export function OutboundsPage() {
                   }
                   runtimeState={item.runtimeState}
                   selectLabel={t("common.selection.selectRow", {
-                    rowLabel: item.id,
+                    rowLabel: getOutboundDisplayName(item.outbound),
                   })}
                   selected={outboundSelection.selectedIds.has(item.id)}
                   dependencies={dependenciesByTag.get(item.id) ?? []}
@@ -420,13 +434,18 @@ function getOutboundDeleteImpactItems(
 ) {
   const items: DeleteImpactItem[] = []
   const requestedTagSet = new Set(requestedTags)
+  const outboundNames = createOutboundDisplayNameMap(config?.outbounds ?? [])
+  const dnsServerNames = createDnsServerDisplayNameMap(
+    config?.dns?.servers ?? []
+  )
 
   for (const tag of requestedTags) {
+    const outbound = config?.outbounds?.find((item) => item.tag === tag)
     items.push({
       label: (
         <>
           {t("pages.outbounds.deleteDialog.items.outboundPrefix")}{" "}
-          <strong>{tag}</strong>{" "}
+          <strong>{outbound ? getOutboundDisplayName(outbound) : tag}</strong>{" "}
           {t("pages.outbounds.deleteDialog.items.outboundSuffix")}
         </>
       ),
@@ -438,11 +457,12 @@ function getOutboundDeleteImpactItems(
       continue
     }
 
+    const outbound = config?.outbounds?.find((item) => item.tag === tag)
     items.push({
       label: (
         <>
           {t("pages.outbounds.deleteDialog.items.dependentOutboundPrefix")}{" "}
-          <strong>{tag}</strong>{" "}
+          <strong>{outbound ? getOutboundDisplayName(outbound) : tag}</strong>{" "}
           {t("pages.outbounds.deleteDialog.items.dependentOutboundSuffix")}
         </>
       ),
@@ -450,26 +470,36 @@ function getOutboundDeleteImpactItems(
   }
 
   for (const index of impact.routeRuleIndexes) {
+    const rule = config?.route?.rules?.[index]
     items.push({
       label: t("pages.outbounds.deleteDialog.items.routingRule", {
-        number: index + 1,
+        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
       }),
       details: getRouteRuleImpactDetails(
-        config?.route?.rules?.[index],
+        rule,
         config?.lists,
+        config?.outbounds,
         t
       ),
     })
   }
 
   for (const server of impact.dnsServerDetours) {
+    const dnsServer = config?.dns?.servers?.find(
+      (item) => item.tag === server
+    )
     items.push({
-      label: t("pages.outbounds.deleteDialog.items.dnsDetour", { server }),
+      label: t("pages.outbounds.deleteDialog.items.dnsDetour", {
+        server: dnsServer
+          ? getDnsServerDisplayName(dnsServer)
+          : (dnsServerNames.get(server) ?? server),
+      }),
       details: [
         formatDetail(
           t("pages.dnsServers.headers.outbound"),
           formatValueTransition(
-            config?.dns?.servers?.find((item) => item.tag === server)?.detour ??
+            outboundNames.get(dnsServer?.detour ?? "") ??
+              dnsServer?.detour ??
               t("common.noneShort"),
             t("common.noneShort")
           )
@@ -492,18 +522,27 @@ function getOutboundDeleteImpactItems(
       label: isRemoved
         ? t("pages.outbounds.deleteDialog.items.urltestGroupRemoved", {
             group: membership.groupIndex + 1,
-            outbound: membership.outboundTag,
+            outbound:
+              outboundNames.get(membership.outboundTag) ??
+              membership.outboundTag,
           })
         : t("pages.outbounds.deleteDialog.items.urltestGroupChanged", {
             group: membership.groupIndex + 1,
-            outbound: membership.outboundTag,
+            outbound:
+              outboundNames.get(membership.outboundTag) ??
+              membership.outboundTag,
           }),
       details: [
         formatDetail(
           t("pages.outbounds.deleteDialog.items.groupOutbounds"),
           isRemoved
-            ? formatListValue(group?.outbounds ?? [], t)
-            : formatTransition(group?.outbounds ?? [], remainingTags, t)
+            ? formatListValue(group?.outbounds ?? [], t, outboundNames)
+            : formatTransition(
+                group?.outbounds ?? [],
+                remainingTags,
+                t,
+                outboundNames
+              )
         ),
       ],
     })
@@ -515,6 +554,7 @@ function getOutboundDeleteImpactItems(
 function getRouteRuleImpactDetails(
   rule: RouteRule | undefined,
   lists: ConfigObject["lists"],
+  outbounds: Outbound[] | undefined,
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -524,7 +564,9 @@ function getRouteRuleImpactDetails(
   const details = [
     {
       label: t("pages.routingRules.headers.outbound"),
-      value: rule.outbound,
+      value:
+        outbounds?.find((outbound) => outbound.tag === rule.outbound)
+          ?.display_name ?? rule.outbound,
     },
     {
       label: t("pages.routingRules.criteriaLabels.lists"),
@@ -584,11 +626,12 @@ function formatDetail(label: string, value: ReactNode) {
 function formatTransition(
   before: string[],
   after: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
+  t: (key: string, options?: Record<string, unknown>) => string,
+  displayNames?: ReadonlyMap<string, string>
 ) {
   return formatValueTransition(
-    formatListValue(before, t),
-    formatListValue(after, t)
+    formatListValue(before, t, displayNames),
+    formatListValue(after, t, displayNames)
   )
 }
 
@@ -608,9 +651,12 @@ function ChangeValue({ after, before }: { after: string; before: string }) {
 
 function formatListValue(
   values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
+  t: (key: string, options?: Record<string, unknown>) => string,
+  displayNames?: ReadonlyMap<string, string>
 ) {
-  return values.length > 0 ? values.join(", ") : t("common.noneShort")
+  return values.length > 0
+    ? values.map((value) => displayNames?.get(value) ?? value).join(", ")
+    : t("common.noneShort")
 }
 
 function mapOutboundToItem(

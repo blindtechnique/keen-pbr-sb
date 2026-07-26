@@ -2,6 +2,7 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsRule } from "@/api/generated/model/dnsRule"
 import type { ListConfig } from "@/api/generated/model/listConfig"
 import { withListDisplayName } from "@/lib/list-display"
+import { makeTechnicalId } from "@/lib/technical-id"
 
 export type ListDraft = {
   displayName: string
@@ -22,6 +23,24 @@ export type QuickSetup = {
 }
 
 export const NO_DNS_RULE = "__none__"
+
+export function createListDraft(
+  displayName = "",
+  existingNames: Iterable<string> = []
+): ListDraft {
+  return {
+    displayName,
+    name: displayName
+      ? makeTechnicalId(displayName, existingNames, { prefix: "list" })
+      : "",
+    ttlMs: "7200000",
+    detour: "",
+    domains: "",
+    ipCidrs: "",
+    url: "",
+    file: "",
+  }
+}
 
 export function getDraftFromMapEntry(
   name: string | undefined,
@@ -64,11 +83,20 @@ export function buildUpdatedConfigForListUpsert(
     lists: nextLists,
   }
   if (quickSetup?.createRouteRule && quickSetup.routeOutbound) {
+    const routeRuleDisplayName =
+      nextDraft.displayName.trim() || resolvedName
+    const existingRuleIds = (config.route?.rules ?? [])
+      .map((rule) => rule.id)
+      .filter((id): id is string => Boolean(id))
     updated.route = {
       ...(config.route ?? {}),
       rules: [
         ...(config.route?.rules ?? []),
         {
+          id: makeTechnicalId(routeRuleDisplayName, existingRuleIds, {
+            prefix: "rule",
+          }),
+          display_name: routeRuleDisplayName,
           enabled: true,
           list: [resolvedName],
           outbound: quickSetup.routeOutbound,
@@ -77,11 +105,20 @@ export function buildUpdatedConfigForListUpsert(
     }
   }
   if (quickSetup?.createDnsRule && quickSetup.dnsServer) {
+    const dnsRuleDisplayName =
+      nextDraft.displayName.trim() || resolvedName
+    const existingDnsRuleIds = (config.dns?.rules ?? [])
+      .map((rule) => rule.id)
+      .filter((id): id is string => Boolean(id))
     updated.dns = {
       ...(config.dns ?? {}),
       rules: [
         ...(config.dns?.rules ?? []),
         {
+          id: makeTechnicalId(dnsRuleDisplayName, existingDnsRuleIds, {
+            prefix: "dns_rule",
+          }),
+          display_name: dnsRuleDisplayName,
           enabled: true,
           list: [resolvedName],
           server: quickSetup.dnsServer,

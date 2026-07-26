@@ -2,10 +2,14 @@
 
 #include "handler_transports.hpp"
 
+#include "../util/display_name.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <httplib.h>
+#include <initializer_list>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 
 namespace keen_pbr3 {
@@ -30,6 +34,87 @@ bool valid_transport_tag(const std::string& tag) {
         }
     }
     return true;
+}
+
+bool string_in(const nlohmann::json& value,
+               std::initializer_list<const char*> allowed) {
+    if (!value.is_string()) return false;
+    const auto text = value.get<std::string>();
+    for (const auto* candidate : allowed) {
+        if (text == candidate) return true;
+    }
+    return false;
+}
+
+bool valid_transport_path(const nlohmann::json& path) {
+    if (!path.is_object() ||
+        !path.contains("wire_transport") ||
+        !string_in(path["wire_transport"], {"tcp", "udp", "tcp_udp", "unknown"}) ||
+        !path.contains("framing") ||
+        !string_in(path["framing"],
+                   {"raw",
+                    "websocket",
+                    "http",
+                    "http2",
+                    "grpc",
+                    "http_upgrade",
+                    "quic",
+                    "wireguard",
+                    "unknown"}) ||
+        !path.contains("confidence") ||
+        !string_in(path["confidence"],
+                   {"declared", "derived", "ambiguous", "unknown"})) {
+        return false;
+    }
+
+    if (!path.contains("payload_networks")) return true;
+    if (!path["payload_networks"].is_array()) return false;
+    std::set<std::string> seen;
+    for (const auto& network : path["payload_networks"]) {
+        if (!string_in(network, {"tcp", "udp"}) ||
+            !seen.insert(network.get<std::string>()).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool valid_transport_status(const nlohmann::json& status) {
+    if (!status.is_object() ||
+        !status.contains("tag") ||
+        !status["tag"].is_string() ||
+        !valid_transport_tag(status["tag"].get<std::string>()) ||
+        !status.contains("type") ||
+        !status["type"].is_string() ||
+        status["type"].get_ref<const std::string&>().empty() ||
+        !status.contains("interface") ||
+        !status["interface"].is_string() ||
+        status["interface"].get_ref<const std::string&>().empty() ||
+        !status.contains("state") ||
+        !string_in(status["state"], {"down", "starting", "up", "degraded"}) ||
+        !status.contains("updated_at") ||
+        !status["updated_at"].is_string() ||
+        !status.contains("desired_up") ||
+        !status["desired_up"].is_boolean()) {
+        return false;
+    }
+    if (status.contains("display_name") &&
+        (!status["display_name"].is_string() ||
+         !display_name::is_valid(
+             status["display_name"].get_ref<const std::string&>()))) {
+        return false;
+    }
+    return !status.contains("path") || valid_transport_path(status["path"]);
+}
+
+bool valid_transport_spec_display_name(const nlohmann::json& spec,
+                                       bool allow_empty) {
+    if (!spec.is_object()) return false;
+    if (!spec.contains("display_name")) return true;
+    return spec["display_name"].is_string() &&
+           display_name::is_valid(
+               spec["display_name"].get_ref<const std::string&>(),
+               allow_empty);
 }
 
 TransportManagerEndpoint load_endpoint(const std::string& keen_pbr_config_path) {
@@ -90,7 +175,11 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
         const bool installed = std::filesystem::is_regular_file(binary, ec);
         return nlohmann::json{{"sing_box_installed", installed},
                               {"sing_box_binary", binary},
-                              {"tested_version", "1.13.14"}}
+                              {"tested_version", "1.13.14"},
+                              // Prevent a newer preview bundle from reporting
+                              // false success when an older companion silently
+                              // drops fields such as display_name.
+                              {"transport_api_version", 2}}
             .dump();
     });
 
@@ -122,6 +211,21 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
         if (!body.is_array()) {
             throw ApiError("transport manager returned an invalid response", 502);
         }
+        for (const auto& status : body) {
+            if (!valid_transport_status(status)) {
+                throw ApiError(
+                    "transport manager returned an invalid status item",
+                    502);
+            }
+        }
+        std::vector<std::string> traffic_interfaces;
+        traffic_interfaces.reserve(body.size());
+        for (const auto& status : body) {
+            traffic_interfaces.push_back(
+                status.at("interface").get<std::string>());
+        }
+        ctx.replace_interface_traffic_targets(
+            "managed-transports", std::move(traffic_interfaces));
         return body.dump();
     });
 
@@ -197,6 +301,13 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
             if (!body.is_array()) {
                 throw ApiError("transport manager returned an invalid config response", 502);
             }
+            for (const auto& spec : body) {
+                if (!valid_transport_spec_display_name(spec, false)) {
+                    throw ApiError(
+                        "transport manager returned an invalid transport alias",
+                        502);
+                }
+            }
             return body.dump();
         } catch (const nlohmann::json::exception&) {
             throw ApiError("transport manager returned malformed JSON", 502);
@@ -224,6 +335,13 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
             const auto body = nlohmann::json::parse(response->body);
             if (!body.is_array()) {
                 throw ApiError("transport manager returned an invalid export response", 502);
+            }
+            for (const auto& spec : body) {
+                if (!valid_transport_spec_display_name(spec, false)) {
+                    throw ApiError(
+                        "transport manager returned an invalid transport alias",
+                        502);
+                }
             }
             return body.dump();
         } catch (const nlohmann::json::exception&) {
@@ -257,6 +375,13 @@ void register_transports_handler(ApiServer& server, ApiContext& ctx) {
         if ((operation == "create" || operation == "update") &&
             (!request.contains("transport") || !request["transport"].is_object())) {
             throw ApiError("transport object is required", 400);
+        }
+        if ((operation == "create" || operation == "update") &&
+            !valid_transport_spec_display_name(request["transport"], true)) {
+            throw ApiError(
+                "transport display_name must be valid UTF-8, contain at most 80 "
+                "Unicode code points, and contain no control characters",
+                400);
         }
         if (operation != "create" && operation != "update" && operation != "delete") {
             throw ApiError("unsupported transport config operation", 400);

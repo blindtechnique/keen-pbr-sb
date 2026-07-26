@@ -108,6 +108,24 @@ std::string format_list_names(const std::vector<std::string>& list_names) {
     return out.str();
 }
 
+bool remote_list_sources_changed(const Config& current, const Config& next) {
+    using RemoteListSource = std::pair<std::string, std::string>;
+    const auto sources = [](const Config& config) {
+        std::map<std::string, RemoteListSource> result;
+        for (const auto& [name, list] : config_lists(config)) {
+            if (!list.url.has_value()) {
+                continue;
+            }
+            result.emplace(
+                name,
+                RemoteListSource{*list.url, list.detour.value_or("")});
+        }
+        return result;
+    };
+
+    return sources(current) != sources(next);
+}
+
 bool should_reload_runtime_after_list_refresh(bool routing_runtime_active,
                                               const RemoteListsRefreshResult& refresh_result) {
     return routing_runtime_active && refresh_result.any_relevant_changed();
@@ -208,7 +226,8 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
             if (target_lists && target_lists->count(name) == 0) {
                 continue;
             }
-            if (only_uncached && cache_manager_.has_cache(name)) {
+            if (only_uncached &&
+                cache_manager_.has_current_cache(name, *list_cfg.url)) {
                 result.cached_lists.push_back(name);
                 continue;
             }

@@ -31,6 +31,7 @@ public:
     void unsubscribe(const SubscriptionPtr& subscription);
     void publish(const std::string& message);
     void close_all();
+    size_t active_subscriptions();
 
 private:
     void compact_locked() REQUIRES(mutex_);

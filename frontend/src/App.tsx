@@ -155,10 +155,10 @@ function DnsServerEditorRoute({
 
 function RoutingRuleEditorRoute({
   mode,
-  ruleIndex,
+  ruleId,
 }: {
   mode: "create" | "edit"
-  ruleIndex?: string
+  ruleId?: string
 }) {
   const presentation = useEditorPresentation()
 
@@ -167,7 +167,7 @@ function RoutingRuleEditorRoute({
       <RoutingRuleUpsertPage
         mode={mode}
         presentation="page"
-        ruleIndex={ruleIndex}
+        ruleId={ruleId}
       />
     )
   }
@@ -178,7 +178,7 @@ function RoutingRuleEditorRoute({
       <RoutingRuleUpsertPage
         mode={mode}
         presentation="dialog"
-        ruleIndex={ruleIndex}
+        ruleId={ruleId}
       />
     </>
   )
@@ -186,10 +186,10 @@ function RoutingRuleEditorRoute({
 
 function DnsRuleEditorRoute({
   mode,
-  ruleIndex,
+  ruleId,
 }: {
   mode: "create" | "edit"
-  ruleIndex?: string
+  ruleId?: string
 }) {
   const presentation = useEditorPresentation()
 
@@ -198,7 +198,7 @@ function DnsRuleEditorRoute({
       <DnsRuleUpsertPage
         mode={mode}
         presentation="page"
-        ruleIndex={ruleIndex}
+        ruleId={ruleId}
       />
     )
   }
@@ -209,7 +209,7 @@ function DnsRuleEditorRoute({
       <DnsRuleUpsertPage
         mode={mode}
         presentation="dialog"
-        ruleIndex={ruleIndex}
+        ruleId={ruleId}
       />
     </>
   )
@@ -297,11 +297,11 @@ function App() {
             <Route path="/dns-rules/create">
               <DnsRuleEditorRoute mode="create" />
             </Route>
-            <Route path="/dns-rules/:ruleIndex/edit">
+            <Route path="/dns-rules/:ruleId/edit">
               {(params) => (
                 <DnsRuleEditorRoute
                   mode="edit"
-                  ruleIndex={params.ruleIndex}
+                  ruleId={decodeURIComponent(params.ruleId)}
                 />
               )}
             </Route>
@@ -309,11 +309,11 @@ function App() {
             <Route path="/routing-rules/create">
               <RoutingRuleEditorRoute mode="create" />
             </Route>
-            <Route path="/routing-rules/:ruleIndex/edit">
+            <Route path="/routing-rules/:ruleId/edit">
               {(params) => (
                 <RoutingRuleEditorRoute
                   mode="edit"
-                  ruleIndex={params.ruleIndex}
+                  ruleId={decodeURIComponent(params.ruleId)}
                 />
               )}
             </Route>

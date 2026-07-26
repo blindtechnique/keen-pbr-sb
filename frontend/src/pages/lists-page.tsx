@@ -52,10 +52,15 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
+  createDnsServerDisplayNameMap,
+  getDnsRuleDisplayName,
+} from "@/lib/dns-display"
+import {
   formatListReferenceLabels,
   getListDisplayName,
   getListReferenceLabel,
 } from "@/lib/list-display"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildUpdatedConfigForListsDelete,
   getListDeleteImpact,
@@ -414,16 +419,12 @@ export function ListsPage() {
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex min-w-0 items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">
+                      <p
+                        className="truncate text-sm font-medium"
+                        title={getListAccessibleLabel(list)}
+                      >
                         {list.displayName}
                       </p>
-                      {list.technicalId ? (
-                        <p className="truncate text-xs text-muted-foreground">
-                          {t("pages.lists.technicalId", {
-                            id: list.technicalId,
-                          })}
-                        </p>
-                      ) : null}
                       <p className="truncate text-xs text-muted-foreground">
                         {list.locationLabel}
                       </p>
@@ -491,7 +492,10 @@ export function ListsPage() {
               ]}
               rows={tableRows.map((list) => [
                 <div className="space-y-1" key={`${list.id}-name`}>
-                  <div className="flex items-center gap-2 font-medium">
+                  <div
+                    className="flex items-center gap-2 font-medium"
+                    title={getListAccessibleLabel(list)}
+                  >
                     {list.displayName}
                     {list.locationIcon === "external" ? (
                       <a
@@ -505,13 +509,6 @@ export function ListsPage() {
                       </a>
                     ) : null}
                   </div>
-                  {list.technicalId ? (
-                    <div className="text-sm text-muted-foreground md:text-xs">
-                      {t("pages.lists.technicalId", {
-                        id: list.technicalId,
-                      })}
-                    </div>
-                  ) : null}
                   <div className="text-sm text-muted-foreground md:text-xs">
                     {list.locationLabel}
                   </div>
@@ -659,7 +656,7 @@ function getListDeleteImpactItems(
     const rule = config?.route?.rules?.[index]
     items.push({
       label: t("pages.lists.deleteDialog.items.routeRuleRemoved", {
-        number: index + 1,
+        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
       }),
       details: getRouteRuleDetails(
         rule,
@@ -678,7 +675,7 @@ function getListDeleteImpactItems(
     const rule = config?.route?.rules?.[index]
     items.push({
       label: t("pages.lists.deleteDialog.items.routeRuleUpdated", {
-        number: index + 1,
+        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
       }),
       details: getRouteRuleDetails(
         rule,
@@ -694,9 +691,15 @@ function getListDeleteImpactItems(
     const rule = config?.dns?.rules?.[index]
     items.push({
       label: t("pages.lists.deleteDialog.items.dnsRuleRemoved", {
-        number: index + 1,
+        name: getDnsRuleDisplayName(rule, index),
       }),
-      details: getDnsRuleDetails(rule, deletedListIds, true, config?.lists, t),
+      details: getDnsRuleDetails(
+        rule,
+        deletedListIds,
+        true,
+        config,
+        t
+      ),
     })
   }
 
@@ -707,9 +710,15 @@ function getListDeleteImpactItems(
     const rule = config?.dns?.rules?.[index]
     items.push({
       label: t("pages.lists.deleteDialog.items.dnsRuleUpdated", {
-        number: index + 1,
+        name: getDnsRuleDisplayName(rule, index),
       }),
-      details: getDnsRuleDetails(rule, deletedListIds, false, config?.lists, t),
+      details: getDnsRuleDetails(
+        rule,
+        deletedListIds,
+        false,
+        config,
+        t
+      ),
     })
   }
 
@@ -780,7 +789,7 @@ function getDnsRuleDetails(
   rule: DnsRule | undefined,
   deletedListIds: ReadonlySet<string>,
   isRemoved: boolean,
-  lists: ConfigObject["lists"],
+  config: ConfigObject | undefined,
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -788,15 +797,21 @@ function getDnsRuleDetails(
   }
 
   const afterLists = rule.list.filter((name) => !deletedListIds.has(name))
+  const dnsServerNames = createDnsServerDisplayNameMap(
+    config?.dns?.servers ?? []
+  )
 
   return [
     formatDetail(
       t("pages.dnsRules.criteriaLabels.lists"),
       isRemoved
-        ? formatListValue(rule.list, lists, t)
-        : formatTransition(rule.list, afterLists, lists, t)
+        ? formatListValue(rule.list, config?.lists, t)
+        : formatTransition(rule.list, afterLists, config?.lists, t)
     ),
-    formatDetail(t("pages.dnsRules.headers.serverTag"), rule.server),
+    formatDetail(
+      t("pages.dnsRules.headers.serverTag"),
+      dnsServerNames.get(rule.server) ?? rule.server
+    ),
   ]
 }
 

@@ -6,6 +6,8 @@ import type { ConfigObject, RoutingTestResponse } from "@/api/generated/model"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Checkbox } from "@/components/ui/checkbox"
 import { getListReferenceLabel } from "@/lib/list-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   Table,
   TableBody,
@@ -27,9 +29,11 @@ const emptyRuleDiagnostics: RoutingTestResponse["rule_diagnostics"] = []
 export function RoutingDiagnosticsResult({
   diagnostics,
   lists,
+  outbounds,
 }: {
   diagnostics: RoutingTestResponse
   lists?: ConfigObject["lists"]
+  outbounds?: ConfigObject["outbounds"]
 }) {
   const { t } = useTranslation()
   const [showAllRules, setShowAllRules] = useState(false)
@@ -41,6 +45,7 @@ export function RoutingDiagnosticsResult({
   const ipRows = diagnostics.is_domain
     ? diagnostics.resolved_ips
     : [diagnostics.target]
+  const outboundDisplayNames = createOutboundDisplayNameMap(outbounds ?? [])
 
   return (
     <div className="space-y-4">
@@ -83,9 +88,12 @@ export function RoutingDiagnosticsResult({
                     >
                       <div className="space-y-1 py-1">
                         <div className="font-semibold">
-                          #{rule.rule_index + 1}
+                          {getRouteRuleDisplayName(rule.rule, rule.rule_index)}
                         </div>
-                        <div>{rule.outbound}</div>
+                        <div title={rule.outbound}>
+                          {outboundDisplayNames.get(rule.outbound) ??
+                            rule.outbound}
+                        </div>
                         <div className="text-xs text-muted-foreground">
                           {rule.interface_name || t("common.noneShort")}
                         </div>

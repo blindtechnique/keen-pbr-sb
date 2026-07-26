@@ -3,10 +3,47 @@ package transport
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestValidateDisplayName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "empty stays optional"},
+		{name: "unicode alias", value: "Основной туннель"},
+		{name: "eighty code points", value: strings.Repeat("я", 80)},
+		{name: "eighty supplementary code points", value: strings.Repeat("🚀", 80)},
+		{name: "emoji joiner sequence", value: "Семья 👨‍👩‍👦"},
+		{name: "ascii whitespace", value: " \t\n", wantErr: true},
+		{name: "unicode whitespace", value: "\u00a0\u3000", wantErr: true},
+		{name: "control", value: "VPN\u0000", wantErr: true},
+		{name: "C1 control", value: "VPN\u0085", wantErr: true},
+		{name: "bidirectional override", value: "safe\u202etxt.exe", wantErr: true},
+		{name: "bidirectional isolate", value: "safe\u2066name", wantErr: true},
+		{name: "invalid UTF-8", value: string([]byte{0xff, 'a'}), wantErr: true},
+		{name: "eighty one code points", value: strings.Repeat("я", 81), wantErr: true},
+		{name: "eighty one supplementary code points", value: strings.Repeat("🚀", 81), wantErr: true},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateDisplayName(test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ValidateDisplayName(%q) error = %v, wantErr = %v", test.value, err, test.wantErr)
+			}
+		})
+	}
+}
 
 type fakeTransport struct {
 	tag     string

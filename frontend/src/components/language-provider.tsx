@@ -7,6 +7,11 @@ import i18n, {
   LANGUAGE_STORAGE_KEY,
   type Language,
 } from "@/i18n"
+import {
+  safeStorageGet,
+  safeStorageMatches,
+  safeStorageSet,
+} from "@/lib/safe-storage"
 
 type LanguageProviderProps = {
   children: React.ReactNode
@@ -30,7 +35,10 @@ export function LanguageProvider({
   ...props
 }: LanguageProviderProps) {
   const [language, setLanguageState] = React.useState<Language>(() => {
-    const storedLanguage = localStorage.getItem(storageKey)
+    const storedLanguage = safeStorageGet(
+      () => window.localStorage,
+      storageKey
+    )
     if (isLanguage(storedLanguage)) {
       return storedLanguage
     }
@@ -45,7 +53,7 @@ export function LanguageProvider({
 
   const setLanguage = React.useCallback(
     (nextLanguage: Language) => {
-      localStorage.setItem(storageKey, nextLanguage)
+      safeStorageSet(() => window.localStorage, storageKey, nextLanguage)
       setLanguageState(nextLanguage)
     },
     [storageKey]
@@ -66,7 +74,7 @@ export function LanguageProvider({
       }
 
       setLanguageState(nextLanguage)
-      localStorage.setItem(storageKey, nextLanguage)
+      safeStorageSet(() => window.localStorage, storageKey, nextLanguage)
     }
 
     i18n.on("languageChanged", handleLanguageChanged)
@@ -78,7 +86,12 @@ export function LanguageProvider({
 
   React.useEffect(() => {
     const handleStorageChange = (event: StorageEvent) => {
-      if (event.storageArea !== localStorage) {
+      if (
+        !safeStorageMatches(
+          () => window.localStorage,
+          event.storageArea
+        )
+      ) {
         return
       }
 

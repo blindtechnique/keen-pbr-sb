@@ -9,6 +9,7 @@ import {
   useGetConfig,
   useGetHealthRouting,
   useGetHealthService,
+  useGetRuntimeInterfaces,
   useGetRuntimeOutbounds,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
@@ -30,6 +31,7 @@ import { RouterInfoCard } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { SystemStatusSummary } from "@/components/overview/system-status-summary"
+import { ActiveInterfaceTraffic } from "@/components/overview/active-interface-traffic"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
 export function OverviewPage() {
@@ -44,6 +46,7 @@ export function OverviewPage() {
       refetchIntervalInBackground: false,
     },
   })
+  const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
 
   const serviceHealth =
@@ -72,6 +75,19 @@ export function OverviewPage() {
       ),
     [runtimeOutbounds]
   )
+  const runtimeInterfaceByName = useMemo(
+    () =>
+      new Map(
+        (runtimeInterfacesQuery.data?.status === 200
+          ? runtimeInterfacesQuery.data.data.interfaces
+          : []
+        ).map((runtimeInterface) => [
+          runtimeInterface.name,
+          runtimeInterface,
+        ])
+      ),
+    [runtimeInterfacesQuery.data]
+  )
   const configIsDraft =
     configQuery.data?.status === 200 ? configQuery.data.data.is_draft : false
 
@@ -92,12 +108,11 @@ export function OverviewPage() {
     <div className="space-y-3">
       <SystemStatusSummary
         configIsDraft={configIsDraft}
-        dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
-        dnsStatus={dnsCheckStatus}
         listCount={Object.keys(loadedConfig?.lists ?? {}).length}
+        outbounds={runtimeOutbounds}
         routingOverall={routingHealth?.overall}
         ruleCount={loadedConfig?.route?.rules?.length ?? 0}
-        serviceStatus={serviceHealth?.status}
+        service={serviceHealth}
       />
 
       <RouterInfoCard />
@@ -127,11 +142,19 @@ export function OverviewPage() {
             </Empty>
           ) : null}
           {(loadedConfig?.outbounds ?? []).length > 0 ? (
-            <OutboundStateList
-              outbounds={loadedConfig?.outbounds ?? []}
-              rules={loadedConfig?.route?.rules ?? []}
-              runtimeByTag={runtimeOutboundByTag}
-            />
+            <>
+              <OutboundStateList
+                outbounds={loadedConfig?.outbounds ?? []}
+                rules={loadedConfig?.route?.rules ?? []}
+                runtimeByTag={runtimeOutboundByTag}
+              />
+              <ActiveInterfaceTraffic
+                outbounds={loadedConfig?.outbounds ?? []}
+                rules={loadedConfig?.route?.rules ?? []}
+                runtimeByTag={runtimeOutboundByTag}
+                runtimeInterfaceByName={runtimeInterfaceByName}
+              />
+            </>
           ) : null}
         </SectionCard>
 
@@ -140,7 +163,10 @@ export function OverviewPage() {
         </div>
       </div>
 
-      <RoutingTestPanel lists={loadedConfig?.lists} />
+      <RoutingTestPanel
+        lists={loadedConfig?.lists}
+        outbounds={loadedConfig?.outbounds}
+      />
 
       <div className="grid gap-3 xl:grid-cols-3">
         <DnsCheckWidget

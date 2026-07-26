@@ -109,6 +109,12 @@ void SseBroadcaster::close_all() {
     Logger::instance().trace("sse_close_all", "closed={}", active.size());
 }
 
+size_t SseBroadcaster::active_subscriptions() {
+    KPBR_LOCK_GUARD(mutex_);
+    compact_locked();
+    return subscriptions_.size();
+}
+
 void SseBroadcaster::compact_locked() {
     auto out = subscriptions_.begin();
     for (auto it = subscriptions_.begin(); it != subscriptions_.end(); ++it) {

@@ -39,6 +39,10 @@ FEED_PKG_DIR=$(find package -type d -path '*/keen-pbr' | grep '/package/feeds/' 
 cp "$WORKSPACE/version.mk" "$FEED_PKG_DIR/version.mk"
 cat "$WORKSPACE/packages/keenetic/packages.config" >> .config
 make defconfig
+if ! grep -Eq '^CONFIG_PACKAGE_keen-pbr=(m|y)$' .config; then
+    echo "[build-keenetic-package] Required package is not selected after defconfig: keen-pbr" >&2
+    exit 1
+fi
 make package/keen-pbr/compile V=s "-j$KEEN_PBR_JOBS" \
     KEEN_PBR_SRC="$WORKSPACE" \
     KEEN_PBR_FRONTEND_DIST="$FRONTEND_DIST" \

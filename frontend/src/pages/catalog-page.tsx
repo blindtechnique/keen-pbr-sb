@@ -22,6 +22,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import { withListDisplayName } from "@/lib/list-display"
+import {
+  createOutboundDisplayNameMap,
+} from "@/lib/outbound-display"
+import { makeTechnicalId } from "@/lib/technical-id"
 import { cn } from "@/lib/utils"
 
 /**
@@ -97,6 +101,10 @@ export function CatalogPage() {
         .filter((outbound) => outbound.type !== "blackhole")
         .map((outbound) => outbound.tag),
     [config]
+  )
+  const outboundDisplayNames = useMemo(
+    () => createOutboundDisplayNameMap(config?.outbounds ?? []),
+    [config?.outbounds]
   )
 
   const effectiveDestination = destination || outboundTags[0] || ""
@@ -236,7 +244,18 @@ export function CatalogPage() {
       // Nothing to route: a list with no rule simply stays unused, which is
       // what "leave it on the direct connection" means here.
     } else if (effectiveDestination) {
+      const ruleDisplayName =
+        added.length === 1
+          ? (nextConfig.lists?.[added[0]]?.display_name ?? added[0])
+          : t("pages.catalog.routeRuleName", { count: added.length })
+      const existingRuleIds = (nextConfig.route?.rules ?? [])
+        .map((rule) => rule.id)
+        .filter((id): id is string => Boolean(id))
       const rule: RouteRule = {
+        id: makeTechnicalId(ruleDisplayName, existingRuleIds, {
+          prefix: "rule",
+        }),
+        display_name: ruleDisplayName,
         list: added,
         outbound: effectiveDestination,
       }
@@ -298,7 +317,7 @@ export function CatalogPage() {
             <option value="">{t("pages.catalog.directly")}</option>
             {outboundTags.map((tag) => (
               <option key={tag} value={tag}>
-                {tag}
+                {outboundDisplayNames.get(tag) ?? tag}
               </option>
             ))}
           </select>
@@ -411,7 +430,7 @@ export function CatalogPage() {
           >
             {outboundTags.map((tag) => (
               <option key={tag} value={tag}>
-                {tag}
+                {outboundDisplayNames.get(tag) ?? tag}
               </option>
             ))}
             <option value={DIRECT}>{t("pages.catalog.directly")}</option>

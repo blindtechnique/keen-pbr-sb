@@ -5,7 +5,12 @@ import {
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
-import type { DnsCheckStatus } from "@/hooks/use-dns-check"
+import type {
+  HealthResponse,
+  RuntimeOutboundState,
+} from "@/api/generated/model"
+import { useStatusEventConnectionState } from "@/api/status-event-connection"
+import { getHeaderHealthTone } from "@/components/layout/header-health-state"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
@@ -13,37 +18,48 @@ type SummaryTone = "healthy" | "waiting" | "degraded"
 
 export function SystemStatusSummary({
   configIsDraft,
-  dnsProbeEnabled,
-  dnsStatus,
   listCount,
+  outbounds,
   routingOverall,
   ruleCount,
-  serviceStatus,
+  service,
 }: {
   configIsDraft: boolean
-  dnsProbeEnabled: boolean
-  dnsStatus: DnsCheckStatus
   listCount: number
+  outbounds?: readonly RuntimeOutboundState[]
   routingOverall?: string
   ruleCount: number
-  serviceStatus?: string
+  service?: HealthResponse
 }) {
   const { t } = useTranslation()
-  const dnsFailed =
-    dnsProbeEnabled &&
-    (dnsStatus === "browser-fail" || dnsStatus === "sse-fail")
-  const dnsWaiting =
-    dnsProbeEnabled && (dnsStatus === "idle" || dnsStatus === "checking")
+  const statusEvents = useStatusEventConnectionState()
+  const sharedHealthTone = getHeaderHealthTone({
+    outbounds,
+    service,
+    statusEvents,
+  })
   const serviceFailed =
-    serviceStatus !== undefined && serviceStatus !== "running"
+    service?.status === "stopped" ||
+    service?.runtime_state === "stopped" ||
+    service?.runtime_state === "broken"
+  const dnsFailed =
+    service?.resolver_live_status === "degraded" ||
+    service?.resolver_live_status === "unavailable" ||
+    service?.resolver_config_probe_status === "missing_txt" ||
+    service?.resolver_config_probe_status === "invalid_txt" ||
+    service?.resolver_config_probe_status === "query_failed"
+  const dnsWaiting =
+    !service ||
+    service.resolver_live_status !== "healthy" ||
+    service.resolver_config_sync_state !== "converged"
   const routingFailed =
     routingOverall !== undefined && routingOverall !== "ok"
-  const waiting =
-    serviceStatus === undefined || routingOverall === undefined || dnsWaiting
   const tone: SummaryTone =
-    serviceFailed || routingFailed || dnsFailed
+    routingFailed || sharedHealthTone === "failed"
       ? "degraded"
-      : waiting
+      : sharedHealthTone === "attention" ||
+          routingOverall === undefined ||
+          configIsDraft
         ? "waiting"
         : "healthy"
 
@@ -74,7 +90,7 @@ export function SystemStatusSummary({
         <Badge
           size="xs"
           variant={
-            serviceStatus === undefined
+            service === undefined
               ? "secondary"
               : serviceFailed
                 ? "destructive"
@@ -95,20 +111,14 @@ export function SystemStatusSummary({
         >
           {t("overview.summary.routing")}
         </Badge>
-        {dnsProbeEnabled ? (
-          <Badge
-            size="xs"
-            variant={
-              dnsFailed
-                ? "destructive"
-                : dnsWaiting
-                  ? "warning"
-                  : "success"
-            }
-          >
-            DNS
-          </Badge>
-        ) : null}
+        <Badge
+          size="xs"
+          variant={
+            dnsFailed ? "destructive" : dnsWaiting ? "warning" : "success"
+          }
+        >
+          DNS
+        </Badge>
         <Badge size="xs" variant="secondary">
           {t("overview.summary.configuration", {
             lists: listCount,

@@ -27,6 +27,10 @@ REQUIRED_EXECUTABLES = {
     "opt/etc/init.d/S79transport-manager",
     "opt/etc/init.d/S80keen-pbr",
     "opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh",
+    "opt/usr/lib/keen-pbr/self-update.sh",
+    "opt/usr/lib/keen-pbr/rescue-update.sh",
+    "opt/usr/lib/keen-pbr/rescue-startup-guard.sh",
+    "opt/usr/lib/keen-pbr/update-lock.sh",
 }
 REQUIRED_FILES = REQUIRED_EXECUTABLES | {
     "opt/etc/keen-pbr/config.json",

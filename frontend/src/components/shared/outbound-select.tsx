@@ -7,6 +7,11 @@ import { useGetRuntimeOutbounds } from "@/api/queries"
 import { RuntimeOutboundStatusLabel } from "@/components/shared/runtime-outbound-state"
 import { Badge } from "@/components/ui/badge"
 import {
+  getOutboundDisplayName,
+  getOutboundReferenceLabel,
+  sortOutboundsByDisplayName,
+} from "@/lib/outbound-display"
+import {
   Select,
   SelectContent,
   SelectGroup,
@@ -60,6 +65,14 @@ export function OutboundSelect({
     placeholder ?? t("pages.routingRuleUpsert.fields.selectOutbound")
   const resolvedGroupLabel =
     groupLabel ?? t("pages.routingRuleUpsert.fields.configuredOutbounds")
+  const outboundByTag = useMemo(
+    () => new Map(outbounds.map((outbound) => [outbound.tag, outbound])),
+    [outbounds]
+  )
+  const sortedOutbounds = useMemo(
+    () => sortOutboundsByDisplayName(outbounds),
+    [outbounds]
+  )
 
   return (
     <Select
@@ -78,7 +91,12 @@ export function OutboundSelect({
               <RuntimeOutboundStatusLabel
                 runtimeState={runtimeOutboundsByTag.get(selected)}
                 t={t}
-                title={selected}
+                title={getOutboundDisplayName(
+                  outboundByTag.get(selected) ?? {
+                    tag: selected,
+                    type: "interface",
+                  }
+                )}
               />
             )
           }}
@@ -94,7 +112,7 @@ export function OutboundSelect({
               </span>
             </SelectItem>
           ) : null}
-          {outbounds.map((outbound) => (
+          {sortedOutbounds.map((outbound) => (
             <SelectItem key={outbound.tag} value={outbound.tag}>
               <OutboundSelectOption
                 outbound={outbound}
@@ -123,8 +141,16 @@ function OutboundSelectOption({
       <RuntimeOutboundStatusLabel
         runtimeState={runtimeState}
         t={t}
-        title={outbound.tag}
+        title={getOutboundDisplayName(outbound)}
       />
+      {getOutboundDisplayName(outbound) !== outbound.tag ? (
+        <span
+          className="sr-only"
+          title={getOutboundReferenceLabel(outbound)}
+        >
+          {outbound.tag}
+        </span>
+      ) : null}
       <span className="flex shrink-0 items-center gap-2">
         <Badge size="xs" variant="outline">
           {outbound.type}

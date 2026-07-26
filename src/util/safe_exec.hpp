@@ -52,6 +52,11 @@ struct SafeExecTimeouts {
     std::chrono::milliseconds kill_grace{std::chrono::seconds{2}};
 };
 
+enum class SafeExecFailureLog {
+    Enabled,
+    Suppressed,
+};
+
 inline std::atomic<std::int64_t>& safe_exec_timeout_ms_storage() {
     static std::atomic<std::int64_t> value{30000};
     return value;
@@ -180,7 +185,10 @@ inline void log_failed_pipe_input(const std::string& command,
 // Execute a command with arguments directly via fork()+execvp(), bypassing
 // the shell entirely. This prevents shell injection attacks.
 // Returns the process exit code (0-255), or -1 on fork/exec failure.
-inline int safe_exec(const std::vector<std::string>& args, bool suppress_output = false) {
+inline int safe_exec_with_timeouts(
+    const std::vector<std::string>& args,
+    bool suppress_output,
+    const SafeExecTimeouts& timeouts) {
     if (args.empty()) return -1;
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
@@ -225,7 +233,6 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
     }
 
     prepare_parent_process_group(pid);
-    const SafeExecTimeouts timeouts = safe_exec_timeouts();
     const ChildWaitResult wait_result = wait_for_child_until(
         pid, started_at + timeouts.timeout, timeouts.kill_grace);
     if (wait_result.timed_out) {
@@ -263,6 +270,12 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
     return -1;
 }
 
+inline int safe_exec(const std::vector<std::string>& args,
+                     bool suppress_output = false) {
+    return safe_exec_with_timeouts(
+        args, suppress_output, safe_exec_timeouts());
+}
+
 // Execute a command with arguments, piping input data to its stdin.
 // Returns the process exit code (0-255), or -1 on fork/exec/pipe failure.
 //
@@ -272,7 +285,9 @@ inline int safe_exec(const std::vector<std::string>& args, bool suppress_output 
 // nobody was reading.
 inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                 const std::string& input,
-                                std::string* stderr_out = nullptr) {
+                                std::string* stderr_out = nullptr,
+                                SafeExecFailureLog failure_log =
+                                    SafeExecFailureLog::Enabled) {
     if (args.empty()) return -1;
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
@@ -455,12 +470,14 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         wait_result = wait_for_child_until(pid, deadline, timeouts.kill_grace);
     }
     if (wait_result.timed_out) {
-        Logger::instance().error(
-            "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
-            "means the firmware is holding the xtables lock; the operation will "
-            "be retried.",
-            command, timeouts.timeout.count());
-        log_failed_pipe_input(command, input);
+        if (failure_log == SafeExecFailureLog::Enabled) {
+            Logger::instance().error(
+                "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
+                "means the firmware is holding the xtables lock; the operation will "
+                "be retried.",
+                command, timeouts.timeout.count());
+            log_failed_pipe_input(command, input);
+        }
         return -1;
     }
     status = wait_result.status;
@@ -471,7 +488,9 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
                                  errno);
-        log_failed_pipe_input(command, input);
+        if (failure_log == SafeExecFailureLog::Enabled) {
+            log_failed_pipe_input(command, input);
+        }
         return -1;
     }
     const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -484,7 +503,7 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                      command,
                                      exit_code,
                                      duration_ms);
-        } else {
+        } else if (failure_log == SafeExecFailureLog::Enabled) {
             Logger::instance().error(
                 "safe_exec_pipe_failed cmd={} exit_code={} duration_ms={}",
                 command,
@@ -494,27 +513,32 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         }
         return exit_code;
     }
-    Logger::instance().error(
-        "safe_exec_pipe_failed cmd={} duration_ms={} reason=abnormal_exit",
-        command,
-        duration_ms);
-    log_failed_pipe_input(command, input);
+    if (failure_log == SafeExecFailureLog::Enabled) {
+        Logger::instance().error(
+            "safe_exec_pipe_failed cmd={} duration_ms={} reason=abnormal_exit",
+            command,
+            duration_ms);
+        log_failed_pipe_input(command, input);
+    }
     return -1;
 }
 
-// Execute a command with arguments and capture its stdout output.
-// Returns stdout, exit status and whether capture exceeded max_bytes.
+// Execute a command with arguments and capture its output. Existing callers
+// capture stdout only; security-sensitive callers may explicitly merge stderr
+// into the bounded capture so a non-zero exit cannot lose its diagnostic.
 inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
                                            bool suppress_stderr = false,
-                                           size_t max_bytes = 0) {
+                                           size_t max_bytes = 0,
+                                           bool capture_stderr = false) {
     ExecCaptureResult result;
     if (args.empty()) return result;
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
     Logger::instance().trace("safe_exec_capture_start",
-                             "cmd={} suppress_stderr={} max_bytes={}",
+                             "cmd={} suppress_stderr={} capture_stderr={} max_bytes={}",
                              command,
                              suppress_stderr ? "true" : "false",
+                             capture_stderr ? "true" : "false",
                              max_bytes);
 
     std::vector<const char*> argv;
@@ -557,7 +581,9 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         }
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
-        if (suppress_stderr) {
+        if (capture_stderr) {
+            dup2(pipefd[1], STDERR_FILENO);
+        } else if (suppress_stderr) {
             const int devnull = open("/dev/null", O_WRONLY);
             if (devnull >= 0) {
                 dup2(devnull, STDERR_FILENO);

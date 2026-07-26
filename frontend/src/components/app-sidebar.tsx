@@ -5,10 +5,7 @@ import { LayoutGridIcon, ShieldIcon, WaypointsIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { AppBrandHeader } from "@/components/layout/app-brand-header"
-import {
-  KeeneticMenuArrowIcon,
-  KeeneticMenuIcon,
-} from "@/components/layout/keenetic-menu-icons"
+import { SidebarToggleButton } from "@/components/layout/sidebar-toggle-button"
 import { MobileMenuControls } from "@/components/layout/top-bar-controls"
 import { NavMain } from "@/components/nav-main"
 import {
@@ -18,7 +15,6 @@ import {
   SidebarHeader,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar-context"
-import { Button } from "@/components/ui/button"
 
 export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
   const { isMobile, state, toggleSidebar } = useSidebar()
@@ -92,7 +88,7 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
   }
 
   return (
-    <Sidebar className="z-40" collapsible="icon" {...props}>
+    <Sidebar className="keen-app-sidebar z-40" collapsible="icon" {...props}>
       {!isMobile ? (
         <SidebarHeader className="keen-sidebar-brand relative z-20 h-16 w-[264px] min-w-[264px] justify-center bg-card py-0 pr-4 pl-8">
           <AppBrandHeader />
@@ -112,22 +108,11 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
         </SidebarFooter>
       ) : (
         <SidebarFooter className="keen-sidebar-toggle h-16 shrink-0 bg-sidebar p-0">
-          <Button
-            aria-label={collapsed ? t("brand.showMenu") : t("brand.hideMenu")}
-            className="h-16 w-full justify-start gap-3 rounded-none bg-sidebar px-6 text-[16px] leading-[23px] font-bold text-primary group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 hover:bg-sidebar-accent hover:text-primary"
+          <SidebarToggleButton
+            expanded={!collapsed}
+            label={collapsed ? t("brand.showMenu") : t("brand.hideMenu")}
             onClick={toggleSidebar}
-            title={collapsed ? t("brand.showMenu") : t("brand.hideMenu")}
-            variant="ghost"
-          >
-            {collapsed ? (
-              <KeeneticMenuIcon className="shrink-0" />
-            ) : (
-              <KeeneticMenuArrowIcon className="ml-0.5 shrink-0" />
-            )}
-            <span className="group-data-[collapsible=icon]:hidden">
-              {t("brand.hideMenu")}
-            </span>
-          </Button>
+          />
         </SidebarFooter>
       )}
     </Sidebar>

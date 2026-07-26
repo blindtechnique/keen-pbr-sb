@@ -30,9 +30,15 @@ import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import { formatListReferenceLabels } from "@/lib/list-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
+import {
+  createDnsServerDisplayNameMap,
+  getDnsRuleDisplayName,
+} from "@/lib/dns-display"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { findDnsPresetByAddress } from "@/data/dns-presets"
 import {
   buildUpdatedConfigForDnsServersDelete,
   getDnsServerDeleteImpact,
@@ -110,6 +116,10 @@ function DnsServersEditor({
   }
   const visibleDeleteRequest = deleteRequest ?? deletePreview
   const dnsServers = useMemo(() => config?.dns?.servers ?? [], [config])
+  const outboundNames = useMemo(
+    () => createOutboundDisplayNameMap(config?.outbounds ?? []),
+    [config?.outbounds]
+  )
   const serverRowIds = dnsServers.map((server) => server.tag)
   const serverSelection = useRowSelection(serverRowIds)
 
@@ -252,8 +262,19 @@ function DnsServersEditor({
               t("pages.dnsServers.headers.actions"),
             ]}
             rows={dnsServers.map((server) => [
-              <div className="font-medium" key={`${server.tag}-tag`}>
-                {server.tag}
+              <div
+                className="font-medium"
+                key={`${server.tag}-tag`}
+                title={
+                  server.display_name ||
+                  findDnsPresetByAddress(server.address)
+                    ? server.tag
+                    : undefined
+                }
+              >
+                {server.display_name ??
+                  findDnsPresetByAddress(server.address)?.name ??
+                  server.tag}
               </div>,
               <span
                 className="text-sm text-muted-foreground"
@@ -267,7 +288,9 @@ function DnsServersEditor({
                 key={`${server.tag}-detour`}
                 variant={server.detour ? "outline" : "secondary"}
               >
-                {server.detour || t("pages.dnsServers.none")}
+                {server.detour
+                  ? (outboundNames.get(server.detour) ?? server.detour)
+                  : t("pages.dnsServers.none")}
               </Badge>,
               <ActionButtons
                 actions={[
@@ -292,7 +315,15 @@ function DnsServersEditor({
               onToggleAll: serverSelection.setAllVisible,
               selectAllLabel: t("common.selection.selectAll"),
               getRowLabel: (rowId) =>
-                t("common.selection.selectRow", { rowLabel: rowId }),
+                t("common.selection.selectRow", {
+                  rowLabel:
+                    dnsServers.find((server) => server.tag === rowId)
+                      ?.display_name ??
+                    findDnsPresetByAddress(
+                      dnsServers.find((server) => server.tag === rowId)?.address
+                    )?.name ??
+                    rowId,
+                }),
             }}
           />
         </div>
@@ -300,7 +331,12 @@ function DnsServersEditor({
       <DeleteImpactDialog
         confirmLabel={t("pages.dnsServers.deleteDialog.confirm")}
         description={t("pages.dnsServers.deleteDialog.description", {
-          tags: visibleDeleteRequest?.tags.join(", ") ?? "",
+          tags: visibleDeleteRequest
+            ? formatDnsServerNames(
+                visibleDeleteRequest.config,
+                visibleDeleteRequest.tags
+              )
+            : "",
         })}
         impactItems={
           visibleDeleteRequest
@@ -333,13 +369,16 @@ function getDnsServerDeleteImpactItems(
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   const items: DeleteImpactItem[] = []
+  const serverDisplayNames = createDnsServerDisplayNameMap(
+    config?.dns?.servers ?? []
+  )
 
   for (const tag of serverTags) {
     items.push({
       label: (
         <>
           {t("pages.dnsServers.deleteDialog.items.serverPrefix")}{" "}
-          <strong>{tag}</strong>{" "}
+          <strong>{serverDisplayNames.get(tag) ?? tag}</strong>{" "}
           {t("pages.dnsServers.deleteDialog.items.serverSuffix")}
         </>
       ),
@@ -349,9 +388,9 @@ function getDnsServerDeleteImpactItems(
   for (const index of impact.matchingRuleIndexes) {
     items.push({
       label: t("pages.dnsServers.deleteDialog.items.dnsRule", {
-        number: index + 1,
+        name: getDnsRuleDisplayName(config?.dns?.rules?.[index], index),
       }),
-      details: getDnsRuleDetails(config?.dns?.rules?.[index], config?.lists, t),
+      details: getDnsRuleDetails(config?.dns?.rules?.[index], config, t),
     })
   }
 
@@ -365,9 +404,10 @@ function getDnsServerDeleteImpactItems(
           <ChangeValue
             after={formatListValue(
               fallback.filter((tag) => !serverTags.includes(tag)),
-              t
+              t,
+              serverDisplayNames
             )}
-            before={formatListValue(fallback, t)}
+            before={formatListValue(fallback, t, serverDisplayNames)}
           />
         ),
       ],
@@ -379,7 +419,7 @@ function getDnsServerDeleteImpactItems(
 
 function getDnsRuleDetails(
   rule: DnsRule | undefined,
-  lists: ConfigObject["lists"],
+  config: ConfigObject | undefined,
   t: (key: string, options?: Record<string, unknown>) => string
 ) {
   if (!rule) {
@@ -389,9 +429,14 @@ function getDnsRuleDetails(
   return [
     formatDetail(
       t("pages.dnsRules.criteriaLabels.lists"),
-      formatListReferenceLabels(rule.list, lists)
+      formatListReferenceLabels(rule.list, config?.lists)
     ),
-    formatDetail(t("pages.dnsRules.headers.serverTag"), rule.server),
+    formatDetail(
+      t("pages.dnsRules.headers.serverTag"),
+      createDnsServerDisplayNameMap(config?.dns?.servers ?? []).get(
+        rule.server
+      ) ?? rule.server
+    ),
   ]
 }
 
@@ -405,9 +450,19 @@ function formatDetail(label: string, value: ReactNode) {
 
 function formatListValue(
   values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string
+  t: (key: string, options?: Record<string, unknown>) => string,
+  displayNames?: ReadonlyMap<string, string>
 ) {
-  return values.length > 0 ? values.join(", ") : t("common.noneShort")
+  return values.length > 0
+    ? values.map((value) => displayNames?.get(value) ?? value).join(", ")
+    : t("common.noneShort")
+}
+
+function formatDnsServerNames(config: ConfigObject, tags: string[]) {
+  const displayNames = createDnsServerDisplayNameMap(
+    config.dns?.servers ?? []
+  )
+  return tags.map((tag) => displayNames.get(tag) ?? tag).join(", ")
 }
 
 function ChangeValue({ after, before }: { after: string; before: string }) {

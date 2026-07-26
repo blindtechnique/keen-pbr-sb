@@ -12,6 +12,10 @@ import type { Dependency } from "@/lib/dependencies"
 import { Checkbox } from "@/components/ui/checkbox"
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
 import { useInterfaceNames } from "@/hooks/use-interface-names"
+import {
+  getOutboundDisplayName,
+  getOutboundReferenceLabel,
+} from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 
 /**
@@ -35,6 +39,7 @@ export function OutboundCard({
   onToggleSelected,
   onEdit,
   selectLabel,
+  outboundDisplayNames,
 }: {
   outbound: Outbound
   runtimeState?: RuntimeOutboundState
@@ -51,6 +56,7 @@ export function OutboundCard({
   onToggleSelected: () => void
   onEdit: () => void
   selectLabel: string
+  outboundDisplayNames?: ReadonlyMap<string, string>
 }) {
   const { t } = useTranslation()
   const { labelFor } = useInterfaceNames()
@@ -74,8 +80,11 @@ export function OutboundCard({
           onCheckedChange={onToggleSelected}
         />
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="truncate text-sm font-medium text-foreground">
-            {outbound.tag}
+          <span
+            className="truncate text-sm font-medium text-foreground"
+            title={getOutboundReferenceLabel(outbound)}
+          >
+            {getOutboundDisplayName(outbound)}
           </span>
           {protocol ? (
             <Badge className="font-mono text-[10px]" size="xs" variant="outline">
@@ -130,7 +139,11 @@ export function OutboundCard({
       </p>
 
       {outbound.type === "urltest" ? (
-        <MemberChain members={runtimeState?.interfaces ?? []} t={t} />
+        <MemberChain
+          displayNames={outboundDisplayNames}
+          members={runtimeState?.interfaces ?? []}
+          t={t}
+        />
       ) : null}
 
       {/* Что сломается, если это удалить — видно до удаления, а не из
@@ -145,9 +158,11 @@ export function OutboundCard({
 
 /** Порядок обхода в группе резервирования, слева направо. */
 function MemberChain({
+  displayNames,
   members,
   t,
 }: {
+  displayNames?: ReadonlyMap<string, string>
   members: RuntimeInterfaceState[]
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
@@ -170,7 +185,9 @@ function MemberChain({
                 : "bg-muted text-muted-foreground"
             )}
           >
-            {member.outbound_tag}
+            <span title={member.outbound_tag}>
+              {displayNames?.get(member.outbound_tag) ?? member.outbound_tag}
+            </span>
             {typeof member.latency_ms === "number" ? (
               <span className="tabular-nums opacity-70">
                 {t("transports.latencyValue", { value: member.latency_ms })}

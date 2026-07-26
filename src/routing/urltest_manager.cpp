@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -20,6 +22,18 @@ struct TestCandidate {
     uint32_t timeout_ms{0};
     RetryConfig retry;
 };
+
+struct ProbeBatch {
+    explicit ProbeBatch(std::size_t worker_count)
+        : workers_remaining(worker_count) {}
+
+    std::mutex mutex;
+    std::map<std::string, URLTestResult> results;
+    std::size_t workers_remaining{0};
+    bool aborted{false};
+};
+
+constexpr std::size_t kMaxConcurrentUrltestCandidates = 2;
 
 std::chrono::seconds normalize_interval_seconds(const Outbound& outbound) {
     auto interval = std::chrono::seconds(outbound.interval_ms.value_or(180000) / 1000);
@@ -262,90 +276,134 @@ bool UrltestManager::queue_probe_unlocked(const std::string& tag,
                              reason,
                              candidates.size());
 
-    const bool enqueued = blocking_executor_.try_post(
-        "urltest:" + tag,
-        [this,
-         tag,
-         probe_generation,
-         reason,
-         candidates_for_probe = candidates,
-         trace_id]() mutable {
-            ScopedTraceContext trace_scope(trace_id);
-            std::map<std::string, URLTestResult> results;
-            results.clear();
+    const std::size_t worker_count = std::max<std::size_t>(
+        1,
+        std::min(kMaxConcurrentUrltestCandidates, candidates.size()));
+    auto batch = std::make_shared<ProbeBatch>(worker_count);
+    auto candidates_for_probe =
+        std::make_shared<const std::vector<TestCandidate>>(std::move(candidates));
 
-            for (const auto& candidate : candidates_for_probe) {
+    for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
+        const bool enqueued = blocking_executor_.try_post(
+            "urltest:" + tag,
+            [this,
+             tag,
+             probe_generation,
+             reason,
+             candidates_for_probe,
+             batch,
+             worker_index,
+             worker_count,
+             trace_id]() mutable {
+                ScopedTraceContext trace_scope(trace_id);
+                bool stale_probe = false;
+
+                for (std::size_t index = worker_index;
+                     index < candidates_for_probe->size();
+                     index += worker_count) {
+                    const auto& candidate = candidates_for_probe->at(index);
+                    {
+                        KPBR_SHARED_LOCK(lock, mutex_);
+                        if (!is_probe_current(tag, probe_generation)) {
+                            Logger::instance().trace(
+                                "urltest_probe_abort",
+                                "tag={} generation={} child={} trigger={} reason=stale_probe",
+                                tag,
+                                probe_generation,
+                                candidate.child_tag,
+                                reason);
+                            stale_probe = true;
+                            break;
+                        }
+                    }
+
+                    const auto started_at = std::chrono::steady_clock::now();
+                    Logger::instance().trace(
+                        "urltest_candidate_start",
+                        "tag={} generation={} child={} fwmark={} trigger={}",
+                        tag,
+                        probe_generation,
+                        candidate.child_tag,
+                        candidate.fwmark,
+                        reason);
+
+                    auto result = tester_.test(candidate.url,
+                                               candidate.fwmark,
+                                               candidate.timeout_ms,
+                                               candidate.retry);
+
+                    const auto duration_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - started_at)
+                            .count();
+                    Logger::instance().trace(
+                        "urltest_candidate_end",
+                        "tag={} generation={} child={} success={} latency_ms={} duration_ms={} error={}",
+                        tag,
+                        probe_generation,
+                        candidate.child_tag,
+                        result.success ? "true" : "false",
+                        result.latency_ms,
+                        duration_ms,
+                        result.error.empty() ? std::string("-") : result.error);
+
+                    std::lock_guard<std::mutex> batch_lock(batch->mutex);
+                    batch->results.emplace(candidate.child_tag, std::move(result));
+                }
+
+                std::map<std::string, URLTestResult> completed_results;
+                bool commit_results = false;
                 {
-                    KPBR_SHARED_LOCK(lock, mutex_);
-                    if (!is_probe_current(tag, probe_generation)) {
-                        Logger::instance().trace(
-                            "urltest_probe_abort",
-                            "tag={} generation={} child={} trigger={} reason=stale_probe",
-                            tag,
-                            probe_generation,
-                            candidate.child_tag,
-                            reason);
-                        return;
+                    std::lock_guard<std::mutex> batch_lock(batch->mutex);
+                    batch->aborted = batch->aborted || stale_probe;
+                    if (--batch->workers_remaining == 0 && !batch->aborted) {
+                        completed_results = std::move(batch->results);
+                        commit_results = true;
                     }
                 }
 
-                const auto started_at = std::chrono::steady_clock::now();
-                Logger::instance().trace("urltest_candidate_start",
-                                         "tag={} generation={} child={} fwmark={} trigger={}",
-                                         tag,
-                                         probe_generation,
-                                         candidate.child_tag,
-                                         candidate.fwmark,
-                                         reason);
+                if (commit_results && on_commit_) {
+                    on_commit_(tag,
+                               probe_generation,
+                               std::move(completed_results),
+                               trace_id);
+                }
+            },
+            trace_id);
 
-                auto result = tester_.test(candidate.url,
-                                           candidate.fwmark,
-                                           candidate.timeout_ms,
-                                           candidate.retry);
+        if (enqueued) {
+            continue;
+        }
 
-                const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - started_at).count();
-                Logger::instance().trace("urltest_candidate_end",
-                                         "tag={} generation={} child={} success={} latency_ms={} duration_ms={} error={}",
-                                         tag,
-                                         probe_generation,
-                                         candidate.child_tag,
-                                         result.success ? "true" : "false",
-                                         result.latency_ms,
-                                         duration_ms,
-                                         result.error.empty() ? std::string("-") : result.error);
+        {
+            std::lock_guard<std::mutex> batch_lock(batch->mutex);
+            batch->aborted = true;
+        }
 
-                results.emplace(candidate.child_tag, std::move(result));
-            }
-
-            if (on_commit_) {
-                on_commit_(tag, probe_generation, std::move(results), trace_id);
-            }
-        },
-        trace_id);
-
-    if (enqueued) {
-        return true;
-    }
-
-    KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
-    auto it = states_.find(tag);
-    if (it != states_.end() && it->second.generation == probe_generation) {
-        it->second.probe_inflight = false;
-        for (const auto& candidate : candidates) {
-            auto cb_it = it->second.circuit_breakers.find(candidate.child_tag);
-            if (cb_it != it->second.circuit_breakers.end()) {
-                cb_it->second.end_request(candidate.child_tag);
+        KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+        auto it = states_.find(tag);
+        if (it != states_.end() && it->second.generation == probe_generation) {
+            it->second.probe_inflight = false;
+            it->second.generation = generation_++;
+            for (const auto& candidate : *candidates_for_probe) {
+                auto cb_it =
+                    it->second.circuit_breakers.find(candidate.child_tag);
+                if (cb_it != it->second.circuit_breakers.end()) {
+                    cb_it->second.end_request(candidate.child_tag);
+                }
             }
         }
+
+        Logger::instance().trace(
+            "urltest_probe_skip",
+            "tag={} generation={} trigger={} reason=executor_unavailable",
+            tag,
+            probe_generation,
+            reason);
+        return false;
     }
 
-    Logger::instance().trace("urltest_probe_skip",
-                             "tag={} generation={} trigger={} reason=executor_unavailable",
-                             tag,
-                             probe_generation,
-                             reason);
-    return false;
+    return true;
 }
 
 std::string UrltestManager::select_outbound(const std::string& tag) {

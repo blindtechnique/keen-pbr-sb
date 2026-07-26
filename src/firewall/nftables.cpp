@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <sys/socket.h>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -46,7 +47,117 @@ bool needs_family_specific_rule(const FirewallRuleCriteria& criteria) {
 
 } // namespace
 
-NftablesFirewall::NftablesFirewall() = default;
+NftablesFirewall::NftablesFirewall()
+    : NftablesFirewall([] {
+          return NftablesFirewall::probe_register_merge_capability();
+      }) {}
+
+NftablesFirewall::NftablesFirewall(CapabilityProbe capability_probe)
+    : mark_merge_capability_probe_(std::move(capability_probe)) {}
+
+nlohmann::json NftablesFirewall::build_register_merge_probe_document() {
+    constexpr const char* probe_table = "KeenPbrMarkProbe";
+    constexpr const char* probe_chain = "probe";
+    constexpr uint32_t owned_mask = 0x00FF0000u;
+    constexpr uint32_t inverse_mask = ~owned_mask;
+
+    nlohmann::json doc;
+    auto& commands = doc["nftables"];
+    commands = nlohmann::json::array();
+    commands.push_back({{"metainfo", {{"json_schema_version", 1}}}});
+    commands.push_back({{"add", {{"table", {
+        {"family", "inet"},
+        {"name", probe_table}
+    }}}}});
+    commands.push_back({{"add", {{"chain", {
+        {"family", "inet"},
+        {"table", probe_table},
+        {"name", probe_chain}
+    }}}}});
+
+    nlohmann::json expr = nlohmann::json::array();
+    expr.push_back({{"mangle", {
+        {"key", {{"meta", {{"key", "mark"}}}}},
+        {"value", {{"|", nlohmann::json::array({
+            {{"&", nlohmann::json::array({
+                {{"meta", {{"key", "mark"}}}},
+                inverse_mask
+            })}},
+            {{"&", nlohmann::json::array({
+                {{"ct", {{"key", "mark"}}}},
+                owned_mask
+            })}}
+        })}}}
+    }}});
+    expr.push_back({{"mangle", {
+        {"key", {{"ct", {{"key", "mark"}}}}},
+        {"value", {{"|", nlohmann::json::array({
+            {{"&", nlohmann::json::array({
+                {{"ct", {{"key", "mark"}}}},
+                inverse_mask
+            })}},
+            {{"&", nlohmann::json::array({
+                {{"meta", {{"key", "mark"}}}},
+                owned_mask
+            })}}
+        })}}}
+    }}});
+    commands.push_back({{"add", {{"rule", {
+        {"family", "inet"},
+        {"table", probe_table},
+        {"chain", probe_chain},
+        {"expr", expr}
+    }}}}});
+    return doc;
+}
+
+bool NftablesFirewall::probe_register_merge_capability() {
+    std::string error_output;
+    const int status = safe_exec_pipe_stdin(
+        {"nft", "-c", "-j", "-f", "-"},
+        build_register_merge_probe_document().dump(),
+        &error_output,
+        SafeExecFailureLog::Suppressed);
+    if (status != 0) {
+        Logger::instance().verbose(
+            "nft register-mark merge is unavailable; using constant fallback: {}",
+            error_output.empty()
+                ? keen_pbr3::format("nft check exited with status {}", status)
+                : error_output);
+        return false;
+    }
+    return true;
+}
+
+NftablesFirewall::MarkMergeMode NftablesFirewall::resolve_mark_merge_mode(
+    std::optional<MarkMergeMode>& cached_mode,
+    const CapabilityProbe& capability_probe) {
+    if (cached_mode.has_value()) {
+        return *cached_mode;
+    }
+
+    bool register_merge = false;
+    try {
+        register_merge = capability_probe && capability_probe();
+    } catch (const std::exception& e) {
+        Logger::instance().warn(
+            "nft mark-merge capability probe failed; using constant fallback: {}",
+            e.what());
+    } catch (...) {
+        Logger::instance().warn(
+            "nft mark-merge capability probe failed; using constant fallback");
+    }
+    cached_mode = register_merge
+        ? MarkMergeMode::RegisterMerge
+        : MarkMergeMode::LegacyConstant;
+    return *cached_mode;
+}
+
+NftablesFirewall::MarkMergeMode NftablesFirewall::mark_merge_mode() {
+    return resolve_mark_merge_mode(
+        mark_merge_mode_,
+        mark_merge_capability_probe_);
+}
 
 void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
     pending_sets_.clear();
@@ -481,8 +592,135 @@ nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
 
 nlohmann::json NftablesFirewall::build_rule_add_commands(
     const FirewallGlobalPrefilter& prefilter,
-    const std::vector<PendingRule>& rules) {
+    const std::vector<PendingRule>& rules,
+    MarkMergeMode mark_merge_mode) {
     nlohmann::json commands = nlohmann::json::array();
+
+    const auto append_conntrack_restore =
+        [&commands, &prefilter, &rules, mark_merge_mode](
+            const char* chain,
+            bool output_scope) {
+            if (!prefilter.restore_conntrack_mark ||
+                prefilter.conntrack_mark_mask == 0) {
+                return;
+            }
+
+            const uint32_t mask = prefilter.conntrack_mark_mask;
+            const uint32_t inverse_mask = ~mask;
+
+            if (mark_merge_mode == MarkMergeMode::RegisterMerge) {
+                nlohmann::json restore_expr = nlohmann::json::array();
+                restore_expr.push_back({{"match", {
+                    {"op", "=="},
+                    {"left", {{"ct", {{"key", "direction"}}}}},
+                    {"right", 0}
+                }}});
+                restore_expr.push_back({{"match", {
+                    {"op", "!="},
+                    {"left", {{"&", nlohmann::json::array({
+                        {{"ct", {{"key", "mark"}}}},
+                        mask
+                    })}}},
+                    {"right", 0}
+                }}});
+                restore_expr.push_back({{"mangle", {
+                    {"key", {{"meta", {{"key", "mark"}}}}},
+                    {"value", {{"|", nlohmann::json::array({
+                        {{"&", nlohmann::json::array({
+                            {{"meta", {{"key", "mark"}}}},
+                            inverse_mask
+                        })}},
+                        {{"&", nlohmann::json::array({
+                            {{"ct", {{"key", "mark"}}}},
+                            mask
+                        })}}
+                    })}}}
+                }}});
+                commands.push_back({{"add", {{"rule", {
+                    {"family", "inet"},
+                    {"table", TABLE_NAME},
+                    {"chain", chain},
+                    {"expr", restore_expr}
+                }}}}});
+
+                nlohmann::json restored_expr = nlohmann::json::array();
+                restored_expr.push_back({{"match", {
+                    {"op", "=="},
+                    {"left", {{"ct", {{"key", "direction"}}}}},
+                    {"right", 0}
+                }}});
+                restored_expr.push_back({{"match", {
+                    {"op", "!="},
+                    {"left", {{"&", nlohmann::json::array({
+                        {{"meta", {{"key", "mark"}}}},
+                        mask
+                    })}}},
+                    {"right", 0}
+                }}});
+                restored_expr.push_back({{"counter", nullptr}});
+                restored_expr.push_back({{"accept", nullptr}});
+                commands.push_back({{"add", {{"rule", {
+                    {"family", "inet"},
+                    {"table", TABLE_NAME},
+                    {"chain", chain},
+                    {"expr", restored_expr}
+                }}}}});
+                return;
+            }
+
+            // Older nftables accepts only a constant as the right operand of
+            // a binary expression used as a mangle value. Emit one rule per
+            // unique owned mark so both packet-mark and ctmark foreign bits
+            // survive without a register-to-register merge.
+            std::set<uint32_t> owned_marks;
+            for (const auto& rule : rules) {
+                if (rule.output != output_scope ||
+                    rule.action != PendingRule::Mark) {
+                    continue;
+                }
+                const uint32_t owned_mark = rule.fwmark & mask;
+                if (owned_mark != 0) {
+                    owned_marks.insert(owned_mark);
+                }
+            }
+
+            for (const uint32_t owned_mark : owned_marks) {
+                nlohmann::json restore_expr = nlohmann::json::array();
+                restore_expr.push_back({{"match", {
+                    {"op", "=="},
+                    {"left", {{"ct", {{"key", "direction"}}}}},
+                    {"right", 0}
+                }}});
+                restore_expr.push_back({{"match", {
+                    {"op", "=="},
+                    {"left", {{"&", nlohmann::json::array({
+                        {{"ct", {{"key", "mark"}}}},
+                        mask
+                    })}}},
+                    {"right", owned_mark}
+                }}});
+                restore_expr.push_back({{"mangle", {
+                    {"key", {{"meta", {{"key", "mark"}}}}},
+                    {"value", {{"|", nlohmann::json::array({
+                        {{"&", nlohmann::json::array({
+                            {{"meta", {{"key", "mark"}}}},
+                            inverse_mask
+                        })}},
+                        owned_mark
+                    })}}}
+                }}});
+                restore_expr.push_back({{"counter", nullptr}});
+                restore_expr.push_back({{"accept", nullptr}});
+                commands.push_back({{"add", {{"rule", {
+                    {"family", "inet"},
+                    {"table", TABLE_NAME},
+                    {"chain", chain},
+                    {"expr", restore_expr}
+                }}}}});
+            }
+        };
+
+    append_conntrack_restore(CHAIN_NAME, /*output_scope=*/false);
 
     if (prefilter.skip_established_or_dnat) {
         nlohmann::json dnat_expr = nlohmann::json::array();
@@ -503,9 +741,16 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
 
     if (prefilter.skip_marked_packets) {
         nlohmann::json marked_expr = nlohmann::json::array();
+        nlohmann::json mark_value = {{"meta", {{"key", "mark"}}}};
+        if (prefilter.conntrack_mark_mask != 0) {
+            mark_value = {{"&", nlohmann::json::array({
+                {{"meta", {{"key", "mark"}}}},
+                prefilter.conntrack_mark_mask
+            })}};
+        }
         marked_expr.push_back({{"match", {
             {"op", "!="},
-            {"left", {{"meta", {{"key", "mark"}}}}},
+            {"left", mark_value},
             {"right", 0}
         }}});
         marked_expr.push_back({{"counter", nullptr}});
@@ -549,7 +794,12 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
     for (const auto& pr : rules) {
         if (pr.output) continue;
         if (pr.action == PendingRule::Mark) {
-            commands.push_back(build_mark_rule_json(pr));
+            commands.push_back(build_mark_rule_json(
+                pr,
+                prefilter.restore_conntrack_mark
+                    ? prefilter.conntrack_mark_mask
+                    : 0,
+                mark_merge_mode));
         } else if (pr.action == PendingRule::Drop) {
             commands.push_back(build_drop_rule_json(pr));
         } else {
@@ -557,13 +807,22 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
         }
     }
 
+    append_conntrack_restore(OUTPUT_CHAIN_NAME, /*output_scope=*/true);
+
     // Output-chain prefilter: skip already-marked packets. The DNAT and
     // inbound-interface guards do not apply to router-originated traffic.
     if (prefilter.skip_marked_packets) {
         nlohmann::json marked_expr = nlohmann::json::array();
+        nlohmann::json mark_value = {{"meta", {{"key", "mark"}}}};
+        if (prefilter.conntrack_mark_mask != 0) {
+            mark_value = {{"&", nlohmann::json::array({
+                {{"meta", {{"key", "mark"}}}},
+                prefilter.conntrack_mark_mask
+            })}};
+        }
         marked_expr.push_back({{"match", {
             {"op", "!="},
-            {"left", {{"meta", {{"key", "mark"}}}}},
+            {"left", mark_value},
             {"right", 0}
         }}});
         marked_expr.push_back({{"counter", nullptr}});
@@ -579,7 +838,12 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
     for (const auto& pr : rules) {
         if (!pr.output) continue;
         if (pr.action == PendingRule::Mark) {
-            commands.push_back(build_mark_rule_json(pr));
+            commands.push_back(build_mark_rule_json(
+                pr,
+                prefilter.restore_conntrack_mark
+                    ? prefilter.conntrack_mark_mask
+                    : 0,
+                mark_merge_mode));
         } else if (pr.action == PendingRule::Drop) {
             commands.push_back(build_drop_rule_json(pr));
         } else {
@@ -673,7 +937,10 @@ nlohmann::json NftablesFirewall::build_dscp_match_exprs(const std::string& ip_pr
     return exprs;
 }
 
-nlohmann::json NftablesFirewall::build_mark_rule_json(const PendingRule& pr) {
+nlohmann::json NftablesFirewall::build_mark_rule_json(
+    const PendingRule& pr,
+    uint32_t conntrack_mark_mask,
+    MarkMergeMode mark_merge_mode) {
     std::string ip_proto = (pr.family == AF_INET6) ? "ip6" : "ip";
     nlohmann::json expr = nlohmann::json::array();
     if (pr.criteria.dst_set_name.has_value()) {
@@ -709,6 +976,33 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(const PendingRule& pr) {
                 })}},
                 pr.fwmark
             })}}}
+        }}});
+    }
+    if (conntrack_mark_mask != 0) {
+        nlohmann::json saved_value;
+        if (mark_merge_mode == MarkMergeMode::RegisterMerge) {
+            saved_value = {{"|", nlohmann::json::array({
+                {{"&", nlohmann::json::array({
+                    {{"ct", {{"key", "mark"}}}},
+                    static_cast<uint32_t>(~conntrack_mark_mask)
+                })}},
+                {{"&", nlohmann::json::array({
+                    {{"meta", {{"key", "mark"}}}},
+                    conntrack_mark_mask
+                })}}
+            })}};
+        } else {
+            saved_value = {{"|", nlohmann::json::array({
+                {{"&", nlohmann::json::array({
+                    {{"ct", {{"key", "mark"}}}},
+                    static_cast<uint32_t>(~conntrack_mark_mask)
+                })}},
+                pr.fwmark & conntrack_mark_mask
+            })}};
+        }
+        expr.push_back({{"mangle", {
+            {"key", {{"ct", {{"key", "mark"}}}}},
+            {"value", saved_value}
         }}});
     }
     expr.push_back({{"accept", nullptr}});
@@ -878,7 +1172,8 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
 nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live_state,
                                                       bool emit_full_table,
                                                       bool destructive_apply,
-                                                      bool clear_dynamic_sets) {
+                                                      bool clear_dynamic_sets,
+                                                      MarkMergeMode mark_merge_mode) {
     nlohmann::json doc;
     auto& arr = doc["nftables"];
     arr = nlohmann::json::array();
@@ -970,7 +1265,8 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     }
 
     // Rules
-    for (const auto& cmd : build_rule_add_commands(global_prefilter_, pending_rules_)) {
+    for (const auto& cmd : build_rule_add_commands(
+             global_prefilter_, pending_rules_, mark_merge_mode)) {
         arr.push_back(cmd);
     }
 
@@ -1001,6 +1297,7 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 }
 
 void NftablesFirewall::apply(FirewallApplyMode mode) {
+    const MarkMergeMode active_mark_merge_mode = mark_merge_mode();
     const LiveTableState live_state = read_live_table_state();
     const bool emit_full_table = !live_state.table_exists;
     const bool destructive_apply = mode == FirewallApplyMode::Destructive;
@@ -1008,7 +1305,8 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
         destructive_apply && clear_dynamic_sets_on_apply();
     nlohmann::json doc =
         build_apply_document(
-            live_state, emit_full_table, destructive_apply, clear_dynamic_sets);
+            live_state, emit_full_table, destructive_apply, clear_dynamic_sets,
+            active_mark_merge_mode);
 
     std::string json_str = doc.dump();
     Logger::instance().verbose("nft json:\n{}", json_str);
@@ -1024,7 +1322,8 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
         doc = build_apply_document(
             LiveTableState{}, /*emit_full_table=*/true,
             /*destructive_apply=*/false,
-            /*clear_dynamic_sets=*/false);
+            /*clear_dynamic_sets=*/false,
+            active_mark_merge_mode);
         json_str = doc.dump();
         Logger::instance().verbose("nft recovery json:\n{}", json_str);
         error_output.clear();

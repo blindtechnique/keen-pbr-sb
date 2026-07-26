@@ -6,6 +6,7 @@ import {
 } from "../src/api/generated/model"
 import {
   createTransportFormValue,
+  inferTransportAliasSuggestion,
   normalizeTransportFormComparable,
   normalizeTransportFormValue,
 } from "../src/components/transports/transport-config-dialog"
@@ -25,6 +26,55 @@ const singBoxTransport: TransportSpec = {
 }
 
 describe("transport form semantics", () => {
+  test("uses the preallocated technical identity for a new transport", () => {
+    const value = createTransportFormValue(undefined, {
+      interfaceName: "kpbrabcd1234",
+      tag: "tr_abcd1234",
+    })
+
+    expect(value.spec.tag).toBe("tr_abcd1234")
+    expect(value.spec.interface).toBe("kpbrabcd1234")
+  })
+
+  test("suggests an endpoint alias without mutating the transport", () => {
+    const value = createTransportFormValue(undefined, {
+      interfaceName: "kpbrabcd1234",
+      tag: "tr_abcd1234",
+    })
+    value.spec.link =
+      "vless://00000000-0000-0000-0000-000000000000@nl.example.net:443"
+
+    expect(inferTransportAliasSuggestion("link", value.spec)).toBe(
+      "nl.example.net"
+    )
+    expect(value.spec.display_name).toBeUndefined()
+  })
+
+  test("does not silently save or truncate an alias suggestion", () => {
+    const value = createTransportFormValue(undefined, {
+      interfaceName: "kpbrabcd1234",
+      tag: "tr_abcd1234",
+    })
+    value.spec.outbound_json = JSON.stringify({
+      server: `${"🚀".repeat(80)}.example`,
+    })
+
+    expect(inferTransportAliasSuggestion("json", value.spec)).toBeUndefined()
+    expect(value.spec.display_name).toBeUndefined()
+  })
+
+  test("suggests the server from outbound JSON", () => {
+    expect(
+      inferTransportAliasSuggestion("json", {
+        outbound_json: JSON.stringify({
+          type: "hysteria2",
+          server: "203.0.113.20",
+          server_port: 443,
+        }),
+      })
+    ).toBe("203.0.113.20")
+  })
+
   test("opens an existing JSON transport in JSON mode", () => {
     const value = createTransportFormValue(singBoxTransport)
 
@@ -83,11 +133,13 @@ describe("transport form semantics", () => {
   test("drops inactive sing-box source data", () => {
     const value = createTransportFormValue(singBoxTransport)
     value.spec.link = "vless://replacement"
+    value.spec.display_name = "  Основной VLESS  "
     value.sourceMode = "link"
 
     const submission = normalizeTransportFormValue(value, true)
 
     expect(submission.spec.link).toBe("vless://replacement")
+    expect(submission.spec.display_name).toBe("Основной VLESS")
     expect(submission.spec.outbound_json).toBeUndefined()
     expect(submission.options.createOutbound).toBe(false)
   })
@@ -96,6 +148,7 @@ describe("transport form semantics", () => {
     const value = createTransportFormValue({
       ...singBoxTransport,
       type: TransportSpecType.native,
+      tun_address: "10.77.0.1/30",
     })
 
     const submission = normalizeTransportFormValue(value, true)
@@ -103,5 +156,7 @@ describe("transport form semantics", () => {
     expect(submission.spec.link).toBeUndefined()
     expect(submission.spec.outbound_json).toBeUndefined()
     expect(submission.spec.mtu).toBeUndefined()
+    expect(submission.spec.bootstrap_dns).toBeUndefined()
+    expect(submission.spec.tun_address).toBeUndefined()
   })
 })

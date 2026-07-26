@@ -4,6 +4,9 @@
 
 # keen-pbr-sb
 
+Текущий порядок разработки и принятые архитектурные решения собраны в
+[roadmap релизов 12-14](docs/ROADMAP.ru.md).
+
 **Выборочная маршрутизация для Keenetic и Netcraze - с нативными VPN, sing-box-транспортами, DNS, резервированием и nfqws2 в одной панели.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)

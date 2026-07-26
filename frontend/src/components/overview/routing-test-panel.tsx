@@ -24,7 +24,13 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { RoutingDiagnosticsResult } from "./routing-diagnostics-result"
 import { sanitizeRoutingTarget } from "./sanitize-routing-target"
 
-export function RoutingTestPanel({ lists }: { lists?: ConfigObject["lists"] }) {
+export function RoutingTestPanel({
+  lists,
+  outbounds,
+}: {
+  lists?: ConfigObject["lists"]
+  outbounds?: ConfigObject["outbounds"]
+}) {
   const { t } = useTranslation()
   const [testTarget, setTestTarget] = useState("")
   const [routingInputError, setRoutingInputError] = useState<string | null>(
@@ -136,6 +142,7 @@ export function RoutingTestPanel({ lists }: { lists?: ConfigObject["lists"] }) {
         <RoutingDiagnosticsResult
           diagnostics={routingDiagnostics}
           lists={lists}
+          outbounds={outbounds}
         />
       ) : null}
     </SectionCard>

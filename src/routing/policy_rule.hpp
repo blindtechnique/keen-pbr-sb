@@ -11,7 +11,7 @@ namespace keen_pbr3 {
 class PolicyRuleManager {
 public:
     // If dry_run is true, add()/clear() only track specs and skip netlink ops.
-    explicit PolicyRuleManager(NetlinkManager& netlink, bool dry_run = false);
+    explicit PolicyRuleManager(RuleNetlinkOperations& netlink, bool dry_run = false);
     ~PolicyRuleManager();
 
     // Non-copyable
@@ -31,6 +31,10 @@ public:
     void add_missing(const std::vector<RuleSpec>& desired);
     void remove_obsolete(const std::vector<RuleSpec>& desired);
 
+    // Adopt an independently reconciled desired snapshot without taking
+    // ownership of pre-existing kernel rules.
+    void adopt_desired(const std::vector<RuleSpec>& desired);
+
     // Remove all installed policy rules (shutdown cleanup).
     void clear();
 
@@ -41,9 +45,11 @@ public:
     const std::vector<RuleSpec>& get_rules() const { return rules_; }
 
 private:
-    NetlinkManager& netlink_;
+    RuleNetlinkOperations& netlink_;
     bool dry_run_{false};
     std::vector<RuleSpec> rules_;
+    // Concrete-family rules created by this process and safe to delete.
+    std::vector<RuleSpec> owned_rules_;
 
     // Check if an identical rule is already tracked.
     bool is_tracked(const RuleSpec& spec) const;

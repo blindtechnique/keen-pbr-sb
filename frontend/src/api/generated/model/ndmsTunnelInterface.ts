@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { NdmsInterfaceCapabilities } from './ndmsInterfaceCapabilities';
+import type { NdmsInterfaceManagementReadiness } from './ndmsInterfaceManagementReadiness';
 import type { NdmsInterfaceRole } from './ndmsInterfaceRole';
 import type { NdmsTunnelInterfaceOwner } from './ndmsTunnelInterfaceOwner';
 import type { NdmsTunnelKind } from './ndmsTunnelKind';
@@ -24,4 +25,5 @@ export interface NdmsTunnelInterface {
   connected?: boolean;
   link?: boolean;
   capabilities: NdmsInterfaceCapabilities;
+  management_readiness: NdmsInterfaceManagementReadiness;
 }

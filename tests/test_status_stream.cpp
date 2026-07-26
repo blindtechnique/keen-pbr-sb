@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 #include "api/status_stream.hpp"
+#include "daemon/daemon.hpp"
 
 #include <string>
 #include <vector>
@@ -53,6 +54,7 @@ TEST_CASE("status stream queues one snapshot before changes") {
     auto current = make_snapshot();
     StatusStream stream([&] { return current; });
     auto subscription = stream.subscribe();
+    CHECK(stream.has_subscribers());
 
     const auto first = pop(subscription);
     CHECK(first.rfind("event: snapshot\n", 0) == 0);
@@ -61,6 +63,36 @@ TEST_CASE("status stream queues one snapshot before changes") {
     current.service.version = "2";
     stream.reconcile();
     CHECK(pop(subscription).rfind("event: service\n", 0) == 0);
+}
+
+TEST_CASE("status stream reports when no live subscribers remain") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    CHECK_FALSE(stream.has_subscribers());
+
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    CHECK(stream.has_subscribers());
+
+    stream.unsubscribe(subscription);
+    CHECK_FALSE(stream.has_subscribers());
+}
+
+TEST_CASE("status stream reconnect starts with a fresh current snapshot") {
+    auto current = make_snapshot("1", 0);
+    StatusStream stream([&] { return current; });
+    auto first = stream.subscribe();
+    REQUIRE(first);
+    (void)pop(first);
+    stream.unsubscribe(first);
+
+    current = make_snapshot("2", 1);
+    auto reconnected = stream.subscribe();
+    REQUIRE(reconnected);
+    const auto snapshot = pop(reconnected);
+    CHECK(snapshot.rfind("event: snapshot\n", 0) == 0);
+    CHECK(snapshot.find("\"version\":\"2\"") != std::string::npos);
+    CHECK(snapshot.find("\"tag\":\"outbound0\"") != std::string::npos);
 }
 
 TEST_CASE("status stream suppresses identical data and names changed datasets") {
@@ -78,6 +110,125 @@ TEST_CASE("status stream suppresses identical data and names changed datasets") 
     CHECK(pop(subscription).rfind("event: service\n", 0) == 0);
     CHECK(pop(subscription).rfind("event: outbounds\n", 0) == 0);
     CHECK(queued(subscription) == 0);
+}
+
+TEST_CASE("status stream publishes changed interface statistics only once") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    (void)pop(subscription);
+
+    api::RuntimeInterfaceInventoryResponse interfaces;
+    api::RuntimeInterfaceInventoryEntry entry;
+    entry.name = "wg0";
+    entry.status = api::RuntimeInterfaceInventoryStatusEnum::UP;
+    interfaces.interfaces.push_back(entry);
+
+    stream.publish_interfaces(interfaces);
+    CHECK(pop(subscription).rfind("event: interfaces\n", 0) == 0);
+    stream.publish_interfaces(std::move(interfaces));
+    CHECK(queued(subscription) == 0);
+}
+
+TEST_CASE("status stream publishes compact interface traffic independently") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    (void)pop(subscription);
+
+    stream.publish_interface_traffic(
+        nlohmann::json{
+            {"sampled_at_unix_ms", 1'234},
+            {"interfaces",
+             nlohmann::json::array({
+                 {
+                     {"name", "wg0"},
+                     {"available", true},
+                     {"reset", false},
+                     {"rx_bytes", 100},
+                     {"tx_bytes", 200},
+                     {"rx_bits_per_second", 800},
+                     {"tx_bits_per_second", 1'600},
+                 },
+             })},
+        });
+
+    const auto frame = pop(subscription);
+    CHECK(frame.rfind("event: interface_traffic\n", 0) == 0);
+    CHECK(frame.find("\"type\":\"interface_traffic\"") !=
+          std::string::npos);
+    CHECK(frame.find("\"sampled_at_unix_ms\":1234") !=
+          std::string::npos);
+    CHECK(frame.find("\"history\"") == std::string::npos);
+}
+
+TEST_CASE("interface traffic target delta reports removal exactly once") {
+    const std::set<std::string> initial{"nwg2", "wg0"};
+    const auto unchanged =
+        plan_interface_traffic_targets(initial, initial);
+    CHECK(unchanged.reported == initial);
+    CHECK(unchanged.removed.empty());
+
+    const std::set<std::string> reduced{"wg0"};
+    const auto removed =
+        plan_interface_traffic_targets(reduced, initial);
+    CHECK(removed.reported == initial);
+    CHECK(removed.removed == std::set<std::string>{"nwg2"});
+
+    // The daemon stores the active set after publishing this delta. The next
+    // cycle must therefore stop reporting the removed interface.
+    const auto next =
+        plan_interface_traffic_targets(reduced, reduced);
+    CHECK(next.reported == reduced);
+    CHECK(next.removed.empty());
+}
+
+TEST_CASE("active config contributes only concrete interface outbounds") {
+    Config config;
+    Outbound interface;
+    interface.tag = "wg";
+    interface.type = OutboundType::INTERFACE;
+    interface.interface = "nwg2";
+
+    Outbound missing_name;
+    missing_name.tag = "missing";
+    missing_name.type = OutboundType::INTERFACE;
+
+    Outbound selector;
+    selector.tag = "failover";
+    selector.type = OutboundType::URLTEST;
+    selector.interface = "must-not-be-sampled";
+
+    config.outbounds =
+        std::vector<Outbound>{interface, missing_name, selector};
+    CHECK(
+        interface_traffic_targets_from_config(config) ==
+        std::vector<std::string>{"nwg2"});
+}
+
+TEST_CASE("status stream does not resend full inventory for traffic-only changes") {
+    auto current = make_snapshot();
+    api::RuntimeInterfaceInventoryEntry interface;
+    interface.name = "wg0";
+    interface.status = api::RuntimeInterfaceInventoryStatusEnum::UP;
+    interface.admin_up = true;
+    api::Traffic traffic;
+    traffic.rx_bytes = 100;
+    traffic.tx_bytes = 200;
+    current.interfaces.interfaces.push_back(interface);
+    current.interfaces.interfaces.front().traffic = traffic;
+
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    (void)pop(subscription);
+
+    current.interfaces.interfaces.front().traffic->rx_bytes = 150;
+    stream.reconcile();
+    CHECK(queued(subscription) == 0);
+
+    current.interfaces.interfaces.front().admin_up = false;
+    stream.reconcile();
+    CHECK(pop(subscription).rfind("event: interfaces\n", 0) == 0);
 }
 
 TEST_CASE("status stream closes slow and shutdown subscribers") {
