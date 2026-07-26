@@ -1014,6 +1014,18 @@ export const enTranslation = {
         providerLocalHint:
           "Login and password are stored in auth.json on the router.",
         endpoint: "Router web interface address",
+        endpointMode: "Router address discovery",
+        endpointModeAuto: "Automatically via NDMS (recommended)",
+        endpointModeManual: "Enter manually",
+        endpointModeAutoHint:
+          "Keenetic reports its local address and port through NDMS. Currently detected: {{endpoint}}.",
+        endpointModeManualHint:
+          "Use only a local address assigned to the router itself.",
+        endpointFallbackAdvanced: "Advanced settings",
+        endpointFallback: "Fallback address",
+        endpointFallbackHint:
+          "Optional. Used only while the local NDMS service is temporarily unavailable.",
+        endpointUnavailable: "temporarily unavailable",
         username: "Username",
         password: "Password",
         verifyHint:

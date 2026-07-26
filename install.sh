@@ -651,43 +651,6 @@ set_sing_box_path() {
     /opt/etc/init.d/S79transport-manager restart
 }
 
-canonicalize_keenetic_auth_endpoint() {
-    value=$1
-    case "$value" in
-        127.0.0.1)
-            host=127.0.0.1
-            port=80
-            ;;
-        127.0.0.1:*)
-            host=127.0.0.1
-            port=${value#127.0.0.1:}
-            ;;
-        '[::1]')
-            host='[::1]'
-            port=80
-            ;;
-        '[::1]:'*)
-            host='[::1]'
-            port=${value#'[::1]:'}
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-
-    case "$port" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    # Strip leading zeroes without relying on shell arithmetic parsing octal.
-    normalized_port=$(printf '%s\n' "$port" | sed 's/^0*//')
-    [ -n "$normalized_port" ] || normalized_port=0
-    [ "$normalized_port" -ge 1 ] 2>/dev/null || return 1
-    [ "$normalized_port" -le 65535 ] 2>/dev/null || return 1
-
-    CANONICAL_KEENETIC_AUTH_ENDPOINT="${host}:${normalized_port}"
-    return 0
-}
-
 configure_web_auth() {
     auth_file=/opt/etc/keen-pbr/auth.json
     if [ -f "$auth_file" ]; then
@@ -713,14 +676,11 @@ configure_web_auth() {
     case "$router_auth" in
         n|N|no|NO) ;;
         *)
-            endpoint=$(ask "Адрес веб-интерфейса роутера (по умолчанию 127.0.0.1:80):" "127.0.0.1:80")
-            canonicalize_keenetic_auth_endpoint "$endpoint" ||
-                die "разрешён только локальный адрес 127.0.0.1 или [::1] с портом 1..65535"
             umask 077
-            printf '{"enabled":true,"provider":"keenetic","keenetic_endpoint":"%s","session_ttl_seconds":604800}\n' \
-                "$CANONICAL_KEENETIC_AUTH_ENDPOINT" > "$auth_file"
+            printf '%s\n' '{"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"auto","session_ttl_seconds":604800}' > "$auth_file"
             chmod 0600 "$auth_file"
             /opt/etc/init.d/S80keen-pbr restart
+            say "Адрес и порт веб-интерфейса будут безопасно определены через локальный NDMS RCI."
             say "Вход в keen-pbr-sb теперь выполняется логином и паролем администратора роутера."
             return 0
             ;;

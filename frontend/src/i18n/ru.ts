@@ -1024,6 +1024,18 @@ export const ruTranslation = {
           "Логин и пароль проверяются самой прошивкой Keenetic. keen-pbr-sb пароль не хранит.",
         providerLocalHint: "Логин и пароль хранятся в auth.json на роутере.",
         endpoint: "Адрес веб-интерфейса роутера",
+        endpointMode: "Определение адреса роутера",
+        endpointModeAuto: "Автоматически через NDMS (рекомендуется)",
+        endpointModeManual: "Указать вручную",
+        endpointModeAutoHint:
+          "Keenetic сообщает собственный локальный адрес и порт через NDMS. Сейчас определено: {{endpoint}}.",
+        endpointModeManualHint:
+          "Используйте только локальный адрес, назначенный самому роутеру.",
+        endpointFallbackAdvanced: "Расширенные настройки",
+        endpointFallback: "Резервный адрес",
+        endpointFallbackHint:
+          "Необязательно. Используется только если локальный NDMS временно недоступен.",
+        endpointUnavailable: "пока недоступно",
         username: "Логин",
         password: "Пароль",
         verifyHint:

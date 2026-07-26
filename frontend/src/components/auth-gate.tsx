@@ -181,8 +181,19 @@ export function AuthGate({ children }: { children: ReactNode }) {
         body: JSON.stringify({ username, password }),
       })
       if (!response.ok) {
-        setError(t("auth.invalidCredentials"))
-        setShowCredentialsHelp(true)
+        const body = await response.json().catch(() => null)
+        const endpointUnavailable =
+          response.status === 503 &&
+          body &&
+          typeof body === "object" &&
+          "error" in body &&
+          body.error === "auth_endpoint_unavailable"
+        setError(
+          endpointUnavailable
+            ? t("auth.unavailable")
+            : t("auth.invalidCredentials")
+        )
+        setShowCredentialsHelp(!endpointUnavailable)
         return
       }
       setPassword("")

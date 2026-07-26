@@ -436,12 +436,32 @@ TEST_CASE("Keenetic endpoint parser rejects SSRF and parser bypass forms") {
     }
 }
 
-TEST_CASE("enabled Keenetic auth with a non-local endpoint fails closed") {
+TEST_CASE("auto Keenetic auth treats an invalid fallback as unavailable") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";
     write_text(
         auth_path,
         R"({"enabled":true,"provider":"keenetic","keenetic_endpoint":"192.0.2.10:80"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto status = get_auth_status(client);
+    CHECK(status.at("enabled").get<bool>());
+    CHECK_FALSE(status.at("authenticated").get<bool>());
+    CHECK(status.at("error") == "auth_endpoint_unavailable");
+}
+
+TEST_CASE("manual Keenetic auth rejects an invalid local endpoint") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"keenetic","keenetic_endpoint_mode":"manual","keenetic_endpoint":"192.0.2.10:80"})");
     EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
 
@@ -511,6 +531,7 @@ TEST_CASE("Keenetic login serializes an adversarial username as JSON data") {
         "secret");
 
     CHECK(result.authenticated);
+    CHECK(result.endpoint_verified);
     REQUIRE(received.has_value());
     CHECK(received->at("login") == username);
     CHECK(received->contains("password"));
@@ -533,6 +554,7 @@ TEST_CASE("Keenetic login fails closed when router sends no challenge") {
 
     CHECK(result.reachable);
     CHECK_FALSE(result.authenticated);
+    CHECK_FALSE(result.endpoint_verified);
     CHECK(result.error == "router authentication is not enabled");
 }
 

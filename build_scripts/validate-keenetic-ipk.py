@@ -103,9 +103,11 @@ def read_ar(path: Path) -> dict[str, bytes]:
     return members
 
 
-def validated_member_name(name: str, archive_name: str) -> str:
+def validated_member_name(name: str, archive_name: str) -> str | None:
     if "\\" in name:
         raise ValidationError(f"{archive_name} contains unsafe member path: {name}")
+    if name in (".", "./"):
+        return None
     path = PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts:
         raise ValidationError(f"{archive_name} contains unsafe member path: {name}")
@@ -121,6 +123,12 @@ def indexed_tar_members(
     entries: dict[str, tarfile.TarInfo] = {}
     for item in archive.getmembers():
         name = validated_member_name(item.name, archive_name)
+        if name is None:
+            if not item.isdir():
+                raise ValidationError(
+                    f"{archive_name} contains non-directory root member"
+                )
+            continue
         if name in entries:
             raise ValidationError(f"{archive_name} contains duplicate member: {name}")
         entries[name] = item
@@ -135,6 +143,12 @@ def read_ipk(path: Path) -> dict[str, bytes]:
             members: dict[str, bytes] = {}
             for item in archive.getmembers():
                 name = validated_member_name(item.name, "outer IPK archive")
+                if name is None:
+                    if not item.isdir():
+                        raise ValidationError(
+                            "outer IPK archive contains non-directory root member"
+                        )
+                    continue
                 if not item.isfile():
                     continue
                 stream = archive.extractfile(item)

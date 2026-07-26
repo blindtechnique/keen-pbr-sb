@@ -355,10 +355,12 @@ target_compile_definitions(keen-pbr-tests PRIVATE USE_KEENETIC_API)
 if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
+    test_ndms_web_endpoint.cpp
     ../src/api/server.cpp
     ../src/api/connection_query.cpp
     ../src/api/auth_runtime.cpp
     ../src/api/keenetic_auth.cpp
+    ../src/keenetic/ndms_web_endpoint.cpp
     ../src/api/sse_broadcaster.cpp
     ../src/api/status_stream.cpp
     ../src/api/health_response.cpp

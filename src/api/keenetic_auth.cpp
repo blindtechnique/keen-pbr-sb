@@ -154,6 +154,20 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
     return parsed;
 }
 
+bool probe_keenetic_auth_challenge(const std::string& endpoint) {
+    const auto target = parse_keenetic_auth_endpoint(endpoint);
+    if (!target) return false;
+
+    httplib::Client client(target->host, target->port);
+    client.set_connection_timeout(1);
+    client.set_read_timeout(1);
+    client.set_keep_alive(false);
+    const auto response = client.Get("/auth");
+    if (!response || response->status != 401) return false;
+    return !response->get_header_value("X-NDM-Realm").empty() &&
+           !response->get_header_value("X-NDM-Challenge").empty();
+}
+
 KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
                                                const std::string& username,
                                                const std::string& password) {
@@ -201,6 +215,7 @@ KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
         result.error = "router did not provide an authentication challenge";
         return result;
     }
+    result.endpoint_verified = true;
 
     const std::string md5_digest =
         crypto::md5_hex(username + ":" + realm + ":" + password);

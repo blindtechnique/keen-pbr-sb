@@ -30,8 +30,16 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
 struct KeeneticAuthResult {
     bool authenticated{false};
     bool reachable{true};
+    // Set only after /auth returned the Keenetic realm and challenge. A
+    // reachable unrelated service on a stale port must still trigger NDMS
+    // rediscovery, while a wrong password must not.
+    bool endpoint_verified{false};
     std::string error;
 };
+
+// Proves that a candidate router-local address actually serves the Keenetic
+// authentication challenge. No credentials are sent.
+bool probe_keenetic_auth_challenge(const std::string& endpoint);
 
 KeeneticAuthResult verify_keenetic_credentials(const std::string& endpoint,
                                                const std::string& username,

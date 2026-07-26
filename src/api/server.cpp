@@ -6,6 +6,7 @@
 #include "keenetic_auth.hpp"
 
 #include "../config/config_writer.hpp"
+#include "../keenetic/ndms_web_endpoint.hpp"
 #include "../log/logger.hpp"
 #include "../log/trace.hpp"
 #include "../util/traced_mutex.hpp"
@@ -290,15 +291,29 @@ bool is_regular_file_or_gzip(const std::filesystem::path& path) {
 struct WebAuthConfig {
     bool enabled{false};
     bool misconfigured{false};
+    bool endpoint_unavailable{false};
     // "local" checks auth.json, "keenetic" asks the router firmware instead.
     std::string provider{"local"};
-    std::string keenetic_endpoint{"127.0.0.1:80"};
+    std::string keenetic_endpoint;
+    std::string keenetic_endpoint_mode{"auto"};
+    bool keenetic_endpoint_from_ndms{false};
     std::string username;
     std::string password;
     std::chrono::seconds session_ttl{std::chrono::hours(24 * 7)};
 
     bool uses_router_account() const { return provider == "keenetic"; }
 };
+
+std::optional<KeeneticAuthEndpoint> discover_keenetic_auth_endpoint(
+    std::string* error = nullptr) {
+    const auto endpoint = discover_ndms_web_endpoint(
+        [](const NdmsWebEndpoint& candidate) {
+            return probe_keenetic_auth_challenge(candidate.canonical);
+        },
+        error);
+    if (!endpoint) return std::nullopt;
+    return parse_keenetic_auth_endpoint(endpoint->canonical, error);
+}
 
 WebAuthConfig misconfigured_web_auth(const std::string& message) {
     WebAuthConfig config;
@@ -341,7 +356,9 @@ WebAuthConfig load_web_auth_config() {
         config.enabled = document.value("enabled", false);
         config.provider = document.value("provider", std::string{"local"});
         config.keenetic_endpoint =
-            document.value("keenetic_endpoint", std::string{"127.0.0.1:80"});
+            document.value("keenetic_endpoint", std::string{});
+        config.keenetic_endpoint_mode =
+            document.value("keenetic_endpoint_mode", std::string{"auto"});
         config.username = document.value("username", std::string{});
         config.password = document.value("password", std::string{});
         const auto ttl = document.value("session_ttl_seconds", 604800);
@@ -355,19 +372,42 @@ WebAuthConfig load_web_auth_config() {
             config.provider = "local";
         }
         if (config.uses_router_account()) {
-            const auto endpoint =
-                parse_keenetic_auth_endpoint(config.keenetic_endpoint);
-            if (!endpoint) {
+            if (config.keenetic_endpoint_mode != "auto" &&
+                config.keenetic_endpoint_mode != "manual") {
                 if (config.enabled) {
                     return misconfigured_web_auth(
-                        "auth.json contains an invalid Keenetic endpoint");
+                        "auth.json contains an invalid Keenetic endpoint mode");
                 }
-                // A disabled stale value is not an authentication boundary.
-                // Replace it in memory so a later settings request cannot
-                // accidentally expose or reuse it.
-                config.keenetic_endpoint = "127.0.0.1:80";
+                config.keenetic_endpoint_mode = "auto";
+            }
+
+            const auto fallback = config.keenetic_endpoint.empty()
+                                      ? std::optional<KeeneticAuthEndpoint>{}
+                                      : parse_keenetic_auth_endpoint(
+                                            config.keenetic_endpoint);
+            if (config.keenetic_endpoint_mode == "manual") {
+                if (!fallback) {
+                    if (config.enabled) {
+                        return misconfigured_web_auth(
+                            "auth.json contains an invalid manual Keenetic endpoint");
+                    }
+                    config.keenetic_endpoint.clear();
+                } else {
+                    config.keenetic_endpoint = fallback->canonical;
+                }
+            } else if (config.enabled) {
+                // Do not block daemon startup on NDMS HTTP probes. A verified
+                // last-known-good endpoint is usable immediately; when it is
+                // absent or stale, the first rate-limited login refreshes it.
+                if (fallback) {
+                    config.keenetic_endpoint = fallback->canonical;
+                } else {
+                    config.keenetic_endpoint.clear();
+                    config.endpoint_unavailable = true;
+                }
             } else {
-                config.keenetic_endpoint = endpoint->canonical;
+                config.keenetic_endpoint =
+                    fallback ? fallback->canonical : std::string{};
             }
         }
         if (config.enabled &&
@@ -510,7 +550,9 @@ struct ApiServer::Impl {
     std::condition_variable_any startup_cv;
     std::string listen_error_message;
     std::mutex auth_update_mutex;
+    std::mutex auth_endpoint_discovery_mutex;
     std::mutex auth_mutex;
+    std::chrono::steady_clock::time_point auth_endpoint_retry_after{};
     WebAuthConfig auth;
     AuthSessionRegistry sessions;
     AuthLoginRateLimiter login_rate_limiter;
@@ -523,6 +565,40 @@ struct ApiServer::Impl {
     void replace_auth(WebAuthConfig replacement) {
         std::lock_guard lock(auth_mutex);
         auth = std::move(replacement);
+    }
+
+    std::optional<WebAuthConfig> refresh_keenetic_endpoint_from_ndms(
+        const std::string& failed_endpoint) {
+        // Only one request may query RCI at a time. Requests queued behind a
+        // successful refresh reuse that result; failed discovery has a short
+        // backoff so an unauthenticated client cannot occupy all HTTP workers.
+        std::lock_guard discovery_lock(auth_endpoint_discovery_mutex);
+        {
+            const auto current = auth_snapshot();
+            if (!current.endpoint_unavailable &&
+                current.keenetic_endpoint != failed_endpoint) {
+                return current;
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < auth_endpoint_retry_after) return std::nullopt;
+
+        const auto endpoint = discover_keenetic_auth_endpoint();
+        if (!endpoint) {
+            auth_endpoint_retry_after = now + std::chrono::seconds(10);
+            return std::nullopt;
+        }
+
+        std::lock_guard auth_lock(auth_mutex);
+        if (!auth.uses_router_account() ||
+            auth.keenetic_endpoint_mode != "auto") {
+            return std::nullopt;
+        }
+        auth.keenetic_endpoint = endpoint->canonical;
+        auth.keenetic_endpoint_from_ndms = true;
+        auth.endpoint_unavailable = false;
+        auth_endpoint_retry_after = {};
+        return auth;
     }
 };
 
@@ -565,7 +641,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->replace_auth(load_web_auth_config());
     impl_->server.Get("/api/auth/status", [state = impl_.get()](const httplib::Request& req,
                                                                   httplib::Response& res) {
-        const auto auth = state->auth_snapshot();
+        auto auth = state->auth_snapshot();
         bool authenticated = !auth.enabled;
         if (auth.enabled) {
             const auto token = cookie_value(req, "keen_pbr_session");
@@ -578,17 +654,22 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         };
         if (auth.misconfigured) {
             response["error"] = "auth_misconfigured";
-        } else if (authenticated && auth.enabled &&
-                   auth.uses_router_account()) {
+        } else if (auth.endpoint_unavailable) {
+            response["error"] = "auth_endpoint_unavailable";
+        } else if (authenticated && auth.uses_router_account()) {
             response["keenetic_endpoint"] =
                 auth.keenetic_endpoint;
+            response["keenetic_endpoint_mode"] =
+                auth.keenetic_endpoint_mode;
+            response["keenetic_endpoint_source"] =
+                auth.keenetic_endpoint_from_ndms ? "ndms" : "fallback";
         }
         res.set_header("Cache-Control", "no-store");
         res.set_content(response.dump(), "application/json");
     });
     impl_->server.Post("/api/auth/login", [state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
-        const auto auth = state->auth_snapshot();
+        auto auth = state->auth_snapshot();
         res.set_header("Cache-Control", "no-store");
         if (auth.misconfigured) {
             res.status = 503;
@@ -615,8 +696,40 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const auto password = body.value("password", std::string{});
 
             if (auth.uses_router_account()) {
-                const auto verdict = verify_keenetic_credentials(
+                if (auth.endpoint_unavailable &&
+                    auth.keenetic_endpoint_mode == "auto") {
+                    const auto refreshed =
+                        state->refresh_keenetic_endpoint_from_ndms(
+                            auth.keenetic_endpoint);
+                    if (refreshed) auth = *refreshed;
+                }
+                if (auth.endpoint_unavailable) {
+                    res.status = 503;
+                    res.set_content(
+                        R"({"error":"auth_endpoint_unavailable"})",
+                        "application/json");
+                    return;
+                }
+                auto verdict = verify_keenetic_credentials(
                     auth.keenetic_endpoint, username, password);
+                if (!verdict.authenticated &&
+                    !verdict.endpoint_verified &&
+                    auth.keenetic_endpoint_mode == "auto") {
+                    // LAN address or the firmware HTTP port may have changed
+                    // after this daemon started. Refresh only on an actual
+                    // connection failure; wrong passwords never fan out into
+                    // additional RCI calls.
+                    const auto refreshed =
+                        state->refresh_keenetic_endpoint_from_ndms(
+                            auth.keenetic_endpoint);
+                    if (refreshed) {
+                        auth = *refreshed;
+                        verdict = verify_keenetic_credentials(
+                            auth.keenetic_endpoint,
+                            username,
+                            password);
+                    }
+                }
                 if (!verdict.authenticated) {
                     state->login_rate_limiter.record_failure(req.remote_addr);
                     // A router that cannot be reached is an outage, not a typo.
@@ -682,40 +795,120 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             }
 
             nlohmann::json document;
-            document["enabled"] = body.value("enabled", true);
+            const bool requested_enabled = body.value("enabled", true);
+            document["enabled"] = requested_enabled;
             document["provider"] = provider;
             document["session_ttl_seconds"] =
                 static_cast<long long>(
                     current_auth.session_ttl.count());
 
             if (provider == "keenetic") {
-                const auto endpoint_text =
-                    body.value("keenetic_endpoint", std::string{"127.0.0.1:80"});
-                const auto endpoint =
-                    parse_keenetic_auth_endpoint(endpoint_text);
-                if (!endpoint) {
+                const auto endpoint_mode = body.contains(
+                                                   "keenetic_endpoint_mode")
+                                               ? body.value(
+                                                     "keenetic_endpoint_mode",
+                                                     std::string{"auto"})
+                                               : current_auth.uses_router_account()
+                                                     ? current_auth
+                                                           .keenetic_endpoint_mode
+                                                     : std::string{"auto"};
+                if (endpoint_mode != "auto" &&
+                    endpoint_mode != "manual") {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"invalid Keenetic endpoint mode"})",
+                        "application/json");
+                    return;
+                }
+                const auto endpoint_text = body.contains("keenetic_endpoint")
+                                               ? body.value(
+                                                     "keenetic_endpoint",
+                                                     std::string{})
+                                               : current_auth.uses_router_account()
+                                                     ? current_auth
+                                                           .keenetic_endpoint
+                                                     : std::string{};
+                const auto fallback =
+                    endpoint_text.empty()
+                        ? std::optional<KeeneticAuthEndpoint>{}
+                        : parse_keenetic_auth_endpoint(endpoint_text);
+                if (!endpoint_text.empty() && !fallback) {
                     res.status = 400;
                     res.set_content(
                         R"({"error":"invalid Keenetic endpoint"})",
                         "application/json");
                     return;
                 }
-                const auto username = body.value("username", std::string{});
-                const auto password = body.value("password", std::string{});
-                // Refuse to lock the user out: the credentials must work first.
-                if (!username.empty() || !password.empty()) {
-                    const auto verdict =
-                        verify_keenetic_credentials(
-                            endpoint->canonical, username, password);
-                    if (!verdict.authenticated) {
-                        res.status = verdict.reachable ? 401 : 503;
+                std::optional<KeeneticAuthEndpoint> endpoint;
+                if (!requested_enabled) {
+                    endpoint = fallback;
+                } else if (endpoint_mode == "manual") {
+                    endpoint = fallback;
+                    if (!endpoint) {
+                        res.status = 400;
                         res.set_content(
-                            nlohmann::json{{"error", verdict.error}}.dump(),
+                            R"({"error":"manual Keenetic endpoint is required"})",
                             "application/json");
                         return;
                     }
+                } else {
+                    endpoint = discover_keenetic_auth_endpoint();
+                    if (!endpoint) endpoint = fallback;
                 }
-                document["keenetic_endpoint"] = endpoint->canonical;
+                const auto username = body.value("username", std::string{});
+                const auto password = body.value("password", std::string{});
+                if (requested_enabled) {
+                    if (!endpoint ||
+                        !probe_keenetic_auth_challenge(endpoint->canonical)) {
+                        res.status = 503;
+                        res.set_content(
+                            R"({"error":"auth_endpoint_unavailable"})",
+                            "application/json");
+                        return;
+                    }
+                    const bool switching_to_router =
+                        !current_auth.enabled ||
+                        !current_auth.uses_router_account();
+                    const bool credentials_supplied =
+                        !username.empty() || !password.empty();
+                    if (switching_to_router && !credentials_supplied) {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"router credentials are required before enabling authentication"})",
+                            "application/json");
+                        return;
+                    }
+                    if (credentials_supplied) {
+                        if (username.empty() || password.empty()) {
+                            res.status = 400;
+                            res.set_content(
+                                R"({"error":"username and password are required"})",
+                                "application/json");
+                            return;
+                        }
+                        const auto verdict =
+                            verify_keenetic_credentials(
+                                endpoint->canonical, username, password);
+                        if (!verdict.authenticated) {
+                            res.status = verdict.reachable ? 401 : 503;
+                            res.set_content(
+                                nlohmann::json{{"error", verdict.error}}.dump(),
+                                "application/json");
+                            return;
+                        }
+                    }
+                }
+                document["keenetic_endpoint_mode"] = endpoint_mode;
+                // Persist an explicit manual fallback, or the successfully
+                // discovered endpoint as a last-known-good value for a future
+                // transient RCI outage.
+                if (fallback) {
+                    document["keenetic_endpoint"] =
+                        fallback->canonical;
+                } else if (endpoint) {
+                    document["keenetic_endpoint"] =
+                        endpoint->canonical;
+                }
             } else {
                 const auto username = body.value("username", std::string{});
                 const auto password = body.value("password", std::string{});

@@ -245,6 +245,7 @@ set(SOURCES
   src/keenetic/ndms_interface_management.cpp
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
+  src/keenetic/ndms_web_endpoint.cpp
   src/crash/crash_diagnostics.cpp
   src/backup/persistent_snapshot.cpp
   src/backup/restore_journal.cpp

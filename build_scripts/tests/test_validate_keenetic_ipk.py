@@ -16,9 +16,16 @@ VALIDATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDATOR)
 
 
-def tar_archive(files: dict[str, tuple[bytes, int]]) -> bytes:
+def tar_archive(
+    files: dict[str, tuple[bytes, int]], root_name: str | None = None
+) -> bytes:
     result = io.BytesIO()
     with tarfile.open(fileobj=result, mode="w:gz") as archive:
+        if root_name is not None:
+            root = tarfile.TarInfo(root_name)
+            root.type = tarfile.DIRTYPE
+            root.mode = 0o755
+            archive.addfile(root)
         for name, (content, mode) in files.items():
             info = tarfile.TarInfo(f"./{name}")
             info.size = len(content)
@@ -49,7 +56,10 @@ def ar_archive(members: dict[str, bytes]) -> bytes:
 
 
 def make_ipk(
-    path: Path, transport_binary: bytes | None = None, outer_tar: bool = False
+    path: Path,
+    transport_binary: bytes | None = None,
+    outer_tar: bool = False,
+    data_root_name: str | None = None,
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -126,7 +136,7 @@ def make_ipk(
     members = {
         "debian-binary": (b"2.0\n", 0o644),
         "control.tar.gz": (control, 0o644),
-        "data.tar.gz": (tar_archive(files), 0o644),
+        "data.tar.gz": (tar_archive(files, root_name=data_root_name), 0o644),
     }
     if outer_tar:
         path.write_bytes(tar_archive(members))
@@ -140,6 +150,14 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             package = Path(directory) / "keen-pbr.ipk"
             make_ipk(package)
             VALIDATOR.validate(package, "aarch64")
+
+    def test_accepts_standard_data_archive_root_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for index, root_name in enumerate((".", "./")):
+                with self.subTest(root_name=root_name):
+                    package = Path(directory) / f"keen-pbr-{index}.ipk"
+                    make_ipk(package, data_root_name=root_name)
+                    VALIDATOR.validate(package, "aarch64")
 
     def test_rejects_wrong_transport_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

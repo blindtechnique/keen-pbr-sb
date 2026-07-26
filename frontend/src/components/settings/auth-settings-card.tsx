@@ -35,12 +35,15 @@ type AuthStatus = {
   enabled: boolean
   provider?: "local" | "keenetic"
   keenetic_endpoint?: string
+  keenetic_endpoint_mode?: "auto" | "manual"
+  keenetic_endpoint_source?: "ndms" | "fallback"
   authenticated: boolean
 }
 
 type AuthDraft = {
   enabled: boolean
   provider: "local" | "keenetic"
+  endpointMode: "auto" | "manual"
   endpoint: string
 }
 
@@ -79,7 +82,11 @@ function AuthSettingsCardInner(
     draft.provider ??
     (statusQuery.data?.provider === "local" ? "local" : "keenetic")
   const endpoint =
-    draft.endpoint ?? statusQuery.data?.keenetic_endpoint ?? "127.0.0.1:80"
+    draft.endpoint ?? statusQuery.data?.keenetic_endpoint ?? ""
+  const endpointMode =
+    draft.endpointMode ??
+    statusQuery.data?.keenetic_endpoint_mode ??
+    "auto"
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -89,6 +96,7 @@ function AuthSettingsCardInner(
         body: JSON.stringify({
           enabled,
           provider,
+          keenetic_endpoint_mode: endpointMode,
           keenetic_endpoint: endpoint,
           username,
           password,
@@ -125,13 +133,28 @@ function AuthSettingsCardInner(
       Object.keys(nextDraft).length > 0 ||
       nextUsername.length > 0 ||
       nextPassword.length > 0
-    const credentialsRequired = nextProvider === "local" && nextEnabled
+    const credentialsRequired =
+      nextEnabled &&
+      (nextProvider === "local" ||
+        (nextProvider === "keenetic" &&
+          (!statusQuery.data?.enabled ||
+            statusQuery.data?.provider !== "keenetic")))
+    const nextEndpointMode =
+      nextDraft.endpointMode ??
+      statusQuery.data?.keenetic_endpoint_mode ??
+      "auto"
+    const manualEndpointMissing =
+      nextProvider === "keenetic" &&
+      nextEnabled &&
+      nextEndpointMode === "manual" &&
+      (nextDraft.endpoint ?? endpoint).trim().length === 0
     return {
       dirty,
       valid:
         !dirty ||
-        !credentialsRequired ||
-        (nextUsername.length > 0 && nextPassword.length > 0),
+        ((!credentialsRequired ||
+          (nextUsername.length > 0 && nextPassword.length > 0)) &&
+          !manualEndpointMissing),
     }
   }
 
@@ -235,18 +258,80 @@ function AuthSettingsCardInner(
             </div>
 
             {provider === "keenetic" ? (
-              <div className="grid gap-1.5">
-                <Label htmlFor="auth-endpoint">
-                  {t("pages.settings.auth.endpoint")}
-                </Label>
-                <Input
-                  id="auth-endpoint"
-                  onChange={(event) =>
-                    updateDraft({ endpoint: event.target.value })
-                  }
-                  placeholder="127.0.0.1:80"
-                  value={endpoint}
-                />
+              <div className="grid gap-3">
+                <div className="grid gap-1.5">
+                  <Label>{t("pages.settings.auth.endpointMode")}</Label>
+                  <Select
+                    onValueChange={(value) =>
+                      updateDraft({
+                        endpointMode:
+                          value === "manual" ? "manual" : "auto",
+                      })
+                    }
+                    value={endpointMode}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="auto">
+                          {t("pages.settings.auth.endpointModeAuto")}
+                        </SelectItem>
+                        <SelectItem value="manual">
+                          {t("pages.settings.auth.endpointModeManual")}
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {endpointMode === "auto"
+                      ? t("pages.settings.auth.endpointModeAutoHint", {
+                          endpoint:
+                            statusQuery.data?.keenetic_endpoint ??
+                            t("pages.settings.auth.endpointUnavailable"),
+                        })
+                      : t("pages.settings.auth.endpointModeManualHint")}
+                  </p>
+                </div>
+
+                {endpointMode === "manual" ? (
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="auth-endpoint">
+                      {t("pages.settings.auth.endpoint")}
+                    </Label>
+                    <Input
+                      id="auth-endpoint"
+                      onChange={(event) =>
+                        updateDraft({ endpoint: event.target.value })
+                      }
+                      placeholder="192.168.1.1:80"
+                      value={endpoint}
+                    />
+                  </div>
+                ) : (
+                  <details className="text-sm">
+                    <summary className="cursor-pointer text-muted-foreground">
+                      {t("pages.settings.auth.endpointFallbackAdvanced")}
+                    </summary>
+                    <div className="mt-3 grid gap-1.5">
+                      <Label htmlFor="auth-endpoint-fallback">
+                        {t("pages.settings.auth.endpointFallback")}
+                      </Label>
+                      <Input
+                        id="auth-endpoint-fallback"
+                        onChange={(event) =>
+                          updateDraft({ endpoint: event.target.value })
+                        }
+                        placeholder="192.168.1.1:80"
+                        value={endpoint}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {t("pages.settings.auth.endpointFallbackHint")}
+                      </p>
+                    </div>
+                  </details>
+                )}
               </div>
             ) : null}
 

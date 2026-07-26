@@ -1,6 +1,7 @@
 export type AuthStatus = Readonly<{
   enabled: boolean
   authenticated: boolean
+  error?: string
 }>
 
 export function parseAuthStatus(value: unknown): AuthStatus | null {
@@ -17,5 +18,9 @@ export function parseAuthStatus(value: unknown): AuthStatus | null {
   return {
     enabled: value.enabled,
     authenticated: value.authenticated,
+    error:
+      "error" in value && typeof value.error === "string"
+        ? value.error
+        : undefined,
   }
 }
