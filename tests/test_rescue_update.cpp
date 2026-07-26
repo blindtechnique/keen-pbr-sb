@@ -448,10 +448,10 @@ void install_runtime_mocks(const fs::path& root) {
         "  printf 500\n"
         "else\n"
         "  if [ \"${KEEN_PBR_TEST_AUTH_MISCONFIGURED:-0}\" = 1 ]; then\n"
-        "    body='{\"enabled\":true,\"authenticated\":false,"
+        "    body='{\"authenticated\":false,\"enabled\":true,"
         "\"error\":\"auth_misconfigured\"}'\n"
         "  else\n"
-        "    body='{\"enabled\":true,\"authenticated\":false}'\n"
+        "    body='{\"authenticated\":false,\"enabled\":true}'\n"
         "  fi\n"
         "  [ -z \"$output_file\" ] || printf '%s\\n' \"$body\" > \"$output_file\"\n"
         "  printf 200\n"
@@ -748,6 +748,16 @@ mode_t permissions(const fs::path& path) {
 }
 
 } // namespace
+
+TEST_CASE("runtime verification accepts a healthy authentication status") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    install_runtime_mocks(root);
+    write_file(config_dir(root) / "config.json",
+               R"({"api":{"listen":"0.0.0.0:12121"}})");
+
+    CHECK(run_rescue(root, {"verify"}) == 0);
+}
 
 TEST_CASE("runtime verification rejects a misconfigured authentication state") {
     TempDirectory directory;

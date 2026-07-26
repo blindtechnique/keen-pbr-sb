@@ -747,7 +747,12 @@ verify_runtime() {
             rm -f "$auth_body_file"
             case "$auth_body" in
                 *auth_misconfigured*) auth_healthy=0 ;;
-                *'"enabled"'*'"authenticated"'*) auth_healthy=1 ;;
+                *'"enabled"'*)
+                    case "$auth_body" in
+                        *'"authenticated"'*) auth_healthy=1 ;;
+                        *) auth_healthy=0 ;;
+                    esac
+                    ;;
                 *) auth_healthy=0 ;;
             esac
             if [ "$http_code" = "200" ] && [ "$auth_healthy" -eq 1 ]; then
