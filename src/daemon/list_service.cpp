@@ -3,6 +3,7 @@
 #include "../log/logger.hpp"
 
 #include <sstream>
+#include <tuple>
 
 namespace keen_pbr3 {
 
@@ -28,6 +29,23 @@ std::string refresh_flight_key(const Config& config,
     key["dns_relevant"] = dns_relevant_lists ? nlohmann::json(*dns_relevant_lists)
                                                : nlohmann::json(nullptr);
     return key.dump();
+}
+
+std::vector<std::optional<std::string>> list_download_detours(
+    const ListConfig& list_config) {
+    std::vector<std::optional<std::string>> detours;
+    if (list_config.detour.has_value()) {
+        detours.emplace_back(*list_config.detour);
+    }
+    for (const auto& fallback :
+         list_config.fallback_detours.value_or(
+             std::vector<std::string>{})) {
+        detours.emplace_back(fallback);
+    }
+    if (detours.empty()) {
+        detours.emplace_back(std::nullopt);
+    }
+    return detours;
 }
 } // namespace
 
@@ -109,7 +127,8 @@ std::string format_list_names(const std::vector<std::string>& list_names) {
 }
 
 bool remote_list_sources_changed(const Config& current, const Config& next) {
-    using RemoteListSource = std::pair<std::string, std::string>;
+    using RemoteListSource =
+        std::tuple<std::string, std::string, std::vector<std::string>>;
     const auto sources = [](const Config& config) {
         std::map<std::string, RemoteListSource> result;
         for (const auto& [name, list] : config_lists(config)) {
@@ -118,7 +137,11 @@ bool remote_list_sources_changed(const Config& current, const Config& next) {
             }
             result.emplace(
                 name,
-                RemoteListSource{*list.url, list.detour.value_or("")});
+                RemoteListSource{
+                    *list.url,
+                    list.detour.value_or(""),
+                    list.fallback_detours.value_or(
+                        std::vector<std::string>{})});
         }
         return result;
     };
@@ -143,7 +166,16 @@ std::map<std::string, api::ListRefreshStateValue> build_list_refresh_state_map(
 
         api::ListRefreshStateValue state;
         const auto metadata = cache_manager.load_metadata(name);
-        state.last_updated = metadata.download_time;
+        if (metadata.url.has_value() &&
+            *metadata.url == *list_cfg.url) {
+            state.last_updated = metadata.download_time;
+        }
+        if (metadata.last_refresh_url.has_value() &&
+            *metadata.last_refresh_url == *list_cfg.url) {
+            state.last_attempt = metadata.last_refresh_attempt;
+            state.last_error = metadata.last_refresh_error;
+            state.last_detour = metadata.last_refresh_detour;
+        }
         refresh_state.emplace(name, std::move(state));
     }
 
@@ -234,28 +266,78 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
 
             result.refreshed_lists.push_back(name);
 
-            uint32_t fwmark = 0;
-            if (list_cfg.detour.has_value()) {
-                auto it = outbound_marks.find(*list_cfg.detour);
-                if (it != outbound_marks.end()) {
-                    fwmark = it->second;
-                } else {
-                    Logger::instance().warn("List '{}': detour outbound '{}' not found, "
-                                            "using default routing",
-                                            name,
-                                            *list_cfg.detour);
+            CacheDownloadResult download_result;
+            bool attempted = false;
+            for (const auto& detour : list_download_detours(list_cfg)) {
+                uint32_t fwmark = 0;
+                if (detour.has_value()) {
+                    const auto mark_it = outbound_marks.find(*detour);
+                    if (mark_it == outbound_marks.end()) {
+                        Logger::instance().warn(
+                            "List '{}': configured download outbound '{}' "
+                            "has no routing mark; refusing an implicit direct "
+                            "fallback",
+                            name,
+                            *detour);
+                        continue;
+                    }
+                    fwmark = mark_it->second;
+                }
+
+                attempted = true;
+                download_result = cache_manager_.download(
+                    name,
+                    *list_cfg.url,
+                    CacheDownloadOptions{fwmark, detour});
+                if (!download_result.failed()) {
+                    break;
+                }
+
+                Logger::instance().warn(
+                    "List '{}': refresh through {} failed: {}",
+                    name,
+                    detour.value_or("the system default route"),
+                    download_result.error_message.empty()
+                        ? std::string("unknown error")
+                        : download_result.error_message);
+                if (!download_result.retryable) {
+                    break;
                 }
             }
 
-            const auto download_result = cache_manager_.download(name, *list_cfg.url, CacheDownloadOptions{fwmark});
-
-            if (download_result.failed()) {
+            if (!attempted || download_result.failed()) {
+                const std::string failure_message =
+                    !attempted
+                        ? std::string(
+                              "no configured download outbound has a routing "
+                              "mark")
+                        : (download_result.error_message.empty()
+                               ? std::string("unknown error")
+                               : download_result.error_message);
+                if (!attempted) {
+                    try {
+                        cache_manager_.record_refresh_failure(
+                            name, *list_cfg.url, failure_message);
+                    } catch (const std::exception& error) {
+                        Logger::instance().warn(
+                            "List '{}': could not persist refresh failure "
+                            "status: {}",
+                            name,
+                            error.what());
+                    }
+                }
+                if (only_uncached &&
+                    cache_manager_.has_usable_same_source_cache(
+                        name, *list_cfg.url)) {
+                    result.cached_lists.push_back(name);
+                    result.legacy_cached_lists.push_back(name);
+                    continue;
+                }
                 result.failed_lists.push_back(name);
                 Logger::instance().warn("List '{}': failed to refresh {}: {}",
                                         name,
                                         *list_cfg.url,
-                                        download_result.error_message.empty() ? std::string("unknown error")
-                                                                              : download_result.error_message);
+                                        failure_message);
                 continue;
             }
 
@@ -277,6 +359,12 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
             if (dns_relevant_lists && dns_relevant_lists->count(name) > 0) {
                 result.dns_relevant_changed_lists.push_back(name);
             }
+        }
+        if (!result.legacy_cached_lists.empty()) {
+            Logger::instance().warn(
+                "Remote SRS refresh failed; continuing with validated "
+                "same-source cache from an older decoder revision: {}",
+                format_list_names(result.legacy_cached_lists));
         }
     } catch (...) {
         std::unique_lock<std::mutex> lock(refresh_mutex_);

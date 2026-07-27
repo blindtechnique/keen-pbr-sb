@@ -684,6 +684,77 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "config save restores the file without quiescing an unchanged runtime") {
+    constexpr int api_port = 18259;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:18259");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+    const Config staged = make_valid_config("127.0.0.1:18260");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    std::size_t stop_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    context.enqueue_apply_validated_config_fn =
+        [&](Config, std::string) {
+            ++apply_calls;
+            ConfigApplyResult result;
+            result.error = "remote list preparation failed";
+            result.runtime_unchanged = true;
+            return result;
+        };
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++stop_calls; };
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string& path, const std::string& body) {
+            write_config_atomically(path, body);
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/save", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 500);
+    const auto payload =
+        nlohmann::json::parse(response->body);
+    CHECK(payload.at("applied") == false);
+    CHECK(payload.at("rolled_back") == false);
+    CHECK(payload.at("runtime_unchanged") == true);
+    CHECK(payload.at("file_rolled_back") == true);
+    CHECK(payload.at("recovery_required") == false);
+    CHECK(read_text(config_path) == original_json);
+    CHECK(apply_calls == 1U);
+    CHECK(stop_calls == 0U);
+    CHECK(maintenance->active_leases == 0U);
+}
+
+TEST_CASE(
     "config save releases maintenance after post-apply lifecycle fault") {
     constexpr int api_port = 18241;
     ConfigApiTempDir directory;

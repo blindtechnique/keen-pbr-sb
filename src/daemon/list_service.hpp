@@ -19,6 +19,7 @@ namespace keen_pbr3 {
 struct RemoteListsRefreshResult {
     std::vector<std::string> refreshed_lists;
     std::vector<std::string> cached_lists;
+    std::vector<std::string> legacy_cached_lists;
     std::vector<std::string> changed_lists;
     std::vector<std::string> unchanged_lists;
     std::vector<std::string> relevant_changed_lists;

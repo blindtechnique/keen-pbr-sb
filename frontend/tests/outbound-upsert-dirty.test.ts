@@ -140,9 +140,19 @@ describe("outbound editor persisted normalization", () => {
       outboundGroups: [{ outbounds: ["primary"], weight: "" }],
       conntrackOnSwitch: "delete",
     })
+    const reconnectOnlyOnFailure = normalizeOutboundDraftForPersistence({
+      ...baselineDraft,
+      type: "urltest",
+      outboundGroups: [{ outbounds: ["primary"], weight: "" }],
+      selectionMode: "priority",
+      conntrackOnSwitch: "delete_on_failure",
+    })
 
     expect(preserve.conntrack_on_switch).toBeUndefined()
     expect(reconnect.conntrack_on_switch).toBe("delete")
+    expect(reconnectOnlyOnFailure.conntrack_on_switch).toBe(
+      "delete_on_failure"
+    )
     expect(semanticJsonEqual(reconnect, preserve)).toBe(false)
   })
 

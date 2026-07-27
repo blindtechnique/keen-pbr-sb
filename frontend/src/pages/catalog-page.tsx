@@ -5,8 +5,6 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import type { ApiError } from "@/api/client"
-import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { RouteRule } from "@/api/generated/model/routeRule"
 import {
   useConfigMutationPending,
   usePostConfigMutation,
@@ -17,16 +15,30 @@ import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
-import { withListDisplayName } from "@/lib/list-display"
 import {
   createOutboundDisplayNameMap,
 } from "@/lib/outbound-display"
-import { makeTechnicalId } from "@/lib/technical-id"
 import { cn } from "@/lib/utils"
+import {
+  applyCatalogAddDraft,
+  createCatalogAddDraft,
+  sanitizeCatalogListId,
+  type CatalogAddDraft,
+  type CatalogPreset,
+} from "@/pages/catalog-add"
 
 /**
  * Ready-made lists borrowed from the awg-manager catalogue.
@@ -35,23 +47,10 @@ import { cn } from "@/lib/utils"
  * currently contains rather than a curated copy - the copy we kept by hand
  * went stale within days.
  */
-type Preset = {
-  id: string
-  name: string
-  category?: string
-  engines?: {
-    dns?: { domains?: string[] }
-    singbox?: {
-      action?: string
-      ruleSets?: { tag?: string; url?: string }[]
-    }
-  }
-}
-
 type CatalogResponse = {
   source?: string
   updated_at?: number
-  presets?: Preset[]
+  presets?: CatalogPreset[]
   url?: string
   detour?: string
   error?: string
@@ -68,7 +67,7 @@ const CATEGORY_ORDER = [
 ]
 
 const DIRECT = "__direct__"
-const EMPTY_PRESETS: readonly Preset[] = []
+const EMPTY_PRESETS: readonly CatalogPreset[] = []
 
 export function CatalogPage() {
   const { t } = useTranslation()
@@ -92,6 +91,7 @@ export function CatalogPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [destination, setDestination] = useState("")
   const [sourceDetour, setSourceDetour] = useState<string | null>(null)
+  const [addDraft, setAddDraft] = useState<CatalogAddDraft | null>(null)
 
   // Only outbounds that can actually carry traffic: urltest groups and
   // interfaces both qualify, blackhole does not.
@@ -189,85 +189,39 @@ export function CatalogPage() {
     })
   }
 
-  const handleAdd = () => {
+  const openAddDialog = () => {
     if (!config || selected.size === 0) {
       return
     }
 
-    const nextConfig: ConfigObject = {
-      ...config,
-      lists: { ...(config.lists ?? {}) },
-      route: {
-        ...(config.route ?? {}),
-        rules: [...(config.route?.rules ?? [])],
-      },
-    }
+    setAddDraft(
+      createCatalogAddDraft({
+        config,
+        destination: effectiveDestination,
+        directDestination: DIRECT,
+        combinedDisplayName: t("pages.catalog.routeRuleName", {
+          count: selected.size,
+        }),
+        presets,
+        selectedIds: selected,
+        sourceDetour: effectiveSourceDetour,
+      })
+    )
+  }
 
-    const added: string[] = []
-
-    for (const preset of presets) {
-      if (!selected.has(preset.id)) {
-        continue
-      }
-
-      const name = listNameFor(preset.id, nextConfig.lists ?? {})
-      const url = preset.engines?.singbox?.ruleSets?.[0]?.url
-      const domains = preset.engines?.dns?.domains
-
-      // A preset carries either a compiled rule set or a plain domain list;
-      // taking the URL when present keeps the entry small and updatable.
-      const entry = withListDisplayName(
-        url
-          ? {
-              url,
-              ...(effectiveSourceDetour
-                ? { detour: effectiveSourceDetour }
-                : {}),
-            }
-          : { domains: domains ?? [] },
-        preset.name
-      )
-
-      if (!url && (!domains || domains.length === 0)) {
-        continue
-      }
-
-      nextConfig.lists![name] = entry
-      added.push(name)
-    }
-
-    if (added.length === 0) {
+  const confirmAdd = () => {
+    if (!config || !addDraft) {
       return
     }
-
-    if (effectiveDestination === DIRECT) {
-      // Nothing to route: a list with no rule simply stays unused, which is
-      // what "leave it on the direct connection" means here.
-    } else if (effectiveDestination) {
-      const ruleDisplayName =
-        added.length === 1
-          ? (nextConfig.lists?.[added[0]]?.display_name ?? added[0])
-          : t("pages.catalog.routeRuleName", { count: added.length })
-      const existingRuleIds = (nextConfig.route?.rules ?? [])
-        .map((rule) => rule.id)
-        .filter((id): id is string => Boolean(id))
-      const rule: RouteRule = {
-        id: makeTechnicalId(ruleDisplayName, existingRuleIds, {
-          prefix: "rule",
-        }),
-        display_name: ruleDisplayName,
-        list: added,
-        outbound: effectiveDestination,
-      }
-      nextConfig.route!.rules = [...(nextConfig.route!.rules ?? []), rule]
-    }
-
+    const nextConfig = applyCatalogAddDraft(config, addDraft)
+    const addedCount = addDraft.lists.length
     postConfigMutation.mutate(
       { data: nextConfig },
       {
         onSuccess: () => {
           setSelected(new Set())
-          toast.success(t("pages.catalog.added", { count: added.length }))
+          setAddDraft(null)
+          toast.success(t("pages.catalog.added", { count: addedCount }))
         },
         onError: (error) =>
           toast.error(getApiErrorMessage(error as ApiError), {
@@ -373,7 +327,7 @@ export function CatalogPage() {
           const url = preset.engines?.singbox?.ruleSets?.[0]?.url
           const domains = preset.engines?.dns?.domains?.length ?? 0
           const blocks = preset.engines?.singbox?.action === "reject"
-          const already = existingNames.has(sanitize(preset.id))
+          const already = existingNames.has(sanitizeCatalogListId(preset.id))
 
           return (
             <label
@@ -437,37 +391,135 @@ export function CatalogPage() {
           </select>
           <Button
             disabled={selected.size === 0 || configMutationPending}
-            onClick={handleAdd}
+            onClick={openAddDialog}
           >
             {t("pages.catalog.add")}
           </Button>
         </div>
       </BottomActionBar>
+
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open && !configMutationPending) {
+            setAddDraft(null)
+          }
+        }}
+        open={addDraft !== null}
+      >
+        <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>{t("pages.catalog.naming.title")}</DialogTitle>
+            <DialogDescription>
+              {t("pages.catalog.naming.description")}
+            </DialogDescription>
+          </DialogHeader>
+          {addDraft ? (
+            <div className="space-y-5">
+              <div className="space-y-3">
+                {addDraft.lists.map((proposal, index) => (
+                  <div className="space-y-1.5" key={proposal.technicalId}>
+                    <Label htmlFor={`catalog-list-name-${index}`}>
+                      {t("pages.catalog.naming.listName")}
+                    </Label>
+                    <Input
+                      id={`catalog-list-name-${index}`}
+                      maxLength={80}
+                      onChange={(event) =>
+                        setAddDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                lists: current.lists.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? {
+                                        ...item,
+                                        displayName: event.target.value,
+                                      }
+                                    : item
+                                ),
+                              }
+                            : current
+                        )
+                      }
+                      value={proposal.displayName}
+                    />
+                  </div>
+                ))}
+              </div>
+              {addDraft.routeRule ? (
+                <div className="space-y-1.5 border-t border-border pt-4">
+                  <Label htmlFor="catalog-route-rule-name">
+                    {t("pages.catalog.naming.routeRuleName")}
+                  </Label>
+                  <Input
+                    id="catalog-route-rule-name"
+                    maxLength={80}
+                    onChange={(event) =>
+                      setAddDraft((current) =>
+                        current?.routeRule
+                          ? {
+                              ...current,
+                              routeRule: {
+                                ...current.routeRule,
+                                displayName: event.target.value,
+                              },
+                            }
+                          : current
+                      )
+                    }
+                    value={addDraft.routeRule.displayName}
+                  />
+                </div>
+              ) : null}
+              {addDraft.dnsRule ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="catalog-dns-rule-name">
+                    {t("pages.catalog.naming.dnsRuleName")}
+                  </Label>
+                  <Input
+                    id="catalog-dns-rule-name"
+                    maxLength={80}
+                    onChange={(event) =>
+                      setAddDraft((current) =>
+                        current?.dnsRule
+                          ? {
+                              ...current,
+                              dnsRule: {
+                                ...current.dnsRule,
+                                displayName: event.target.value,
+                              },
+                            }
+                          : current
+                      )
+                    }
+                    value={addDraft.dnsRule.displayName}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("pages.catalog.naming.dnsRuleHint", {
+                      server: addDraft.dnsRule.server,
+                    })}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              disabled={configMutationPending}
+              onClick={() => setAddDraft(null)}
+              variant="outline"
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={configMutationPending}
+              onClick={confirmAdd}
+            >
+              {t("pages.catalog.naming.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
-}
-
-// List names are restricted to ^[a-z][a-z0-9_]*$ and 24 characters, which the
-// catalogue ids do not always satisfy.
-function sanitize(id: string): string {
-  const cleaned = id
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-  const prefixed = /^[a-z]/.test(cleaned) ? cleaned : `l_${cleaned}`
-  return prefixed.slice(0, 24)
-}
-
-function listNameFor(id: string, existing: Record<string, unknown>): string {
-  const base = sanitize(id)
-  if (!(base in existing)) {
-    return base
-  }
-  for (let suffix = 2; suffix < 100; suffix += 1) {
-    const candidate = `${base.slice(0, 21)}_${suffix}`
-    if (!(candidate in existing)) {
-      return candidate
-    }
-  }
-  return base
 }

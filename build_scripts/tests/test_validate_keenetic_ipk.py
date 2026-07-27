@@ -60,6 +60,7 @@ def make_ipk(
     transport_binary: bytes | None = None,
     outer_tar: bool = False,
     data_root_name: str | None = None,
+    control_depends: str = "conntrack, dnsmasq",
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -121,7 +122,14 @@ def make_ipk(
     conffiles = ("\n".join(sorted(VALIDATOR.REQUIRED_CONFFILES)) + "\n").encode()
     control = tar_archive(
         {
-            "control": (b"Package: keen-pbr\nVersion: 1\n", 0o644),
+            "control": (
+                (
+                    "Package: keen-pbr\n"
+                    "Version: 1\n"
+                    f"Depends: {control_depends}\n"
+                ).encode(),
+                0o644,
+            ),
             "conffiles": (conffiles, 0o644),
             "postinst": (
                 b"#!/bin/sh\n"
@@ -204,6 +212,16 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             package.write_bytes(ar_archive(members))
             with self.assertRaisesRegex(
                 VALIDATOR.ValidationError, "postinst"
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_package_without_conntrack_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            make_ipk(package, control_depends="dnsmasq, iptables")
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "missing package dependencies: conntrack",
             ):
                 VALIDATOR.validate(package, "aarch64")
 

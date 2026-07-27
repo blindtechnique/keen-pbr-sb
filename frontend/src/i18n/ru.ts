@@ -1,12 +1,13 @@
 export const ruTranslation = {
   nfqws: {
+    repository: "Открыть официальный репозиторий nfqws2",
     description:
       "Управление nfqws2, стратегиями, конфигурацией, списками, Lua-скриптами и журналами.",
     refresh: "Обновить",
     service: "Служба nfqws2",
     version: "Установленная версия: {{version}}",
     running: "Работает",
-    stopped: "Остановлена",
+    stopped: "Не работает",
     start: "Запустить",
     stop: "Остановить",
     restart: "Перезапустить",
@@ -130,9 +131,9 @@ export const ruTranslation = {
       "Для каждого импортированного правила необходимо выбрать существующий маршрут или резервирование.",
   },
   auth: {
-    title: "Вход в веб-конфигуратор",
+    title: "Вход в keen-pbr-sb",
     description: "Авторизуйтесь, чтобы открыть управление маршрутизацией.",
-    otherManagement: "Другие возможности управления",
+    otherManagement: "Свободный доступ в интернет",
     username: "Имя пользователя",
     password: "Пароль",
     showPassword: "Показать пароль",
@@ -669,7 +670,9 @@ export const ruTranslation = {
       badgeTransitioning: "Выполняется",
       restart: "Перезапустить",
       restartRequested: "Перезапуск запрошен",
+      restartComplete: "Перезапуск завершён: маршрутизация и DNS готовы",
       restartFailed: "Не удалось перезапустить",
+      restartFailedDetail: "Перезапуск завершился ошибкой: {{error}}",
       switchFailed: "Не удалось переключить",
       title: "Службы",
       singbox: "sing-box",
@@ -705,6 +708,10 @@ export const ruTranslation = {
     },
     outbounds: {
       liveTraffic: "Трафик активных туннелей и прокси",
+      connected: "Подключено",
+      connectedFor: "Подключено {{duration}}",
+      disconnected: "Отключено",
+      dayShort: "д.",
       summary: {
         tunnels: "В туннели — списков: {{count}}",
         direct: "Напрямую — {{count}}",
@@ -928,6 +935,17 @@ export const ruTranslation = {
       routeTo: "Направить в",
       add: "Добавить",
       added: "Добавлено списков: {{count}}",
+      naming: {
+        title: "Названия добавляемых элементов",
+        description:
+          "Мы предлагаем понятные названия из каталога. Их можно изменить или удалить перед добавлением.",
+        listName: "Название списка",
+        routeRuleName: "Название правила маршрутизации",
+        dnsRuleName: "Название DNS-правила",
+        dnsRuleHint:
+          "DNS-правило будет создано для сервера {{server}}, который использует выбранный маршрут.",
+        confirm: "Добавить",
+      },
       categories: {
         all: "Все",
         ai: "AI",
@@ -1028,8 +1046,8 @@ export const ruTranslation = {
         providerLocalHint: "Логин и пароль хранятся в auth.json на роутере.",
         endpoint: "Адрес веб-интерфейса роутера",
         endpointMode: "Определение адреса роутера",
-        endpointModeAuto: "Автоматически через NDMS (рекомендуется)",
-        endpointModeManual: "Указать вручную",
+        endpointModeAuto: "Автоматически через NDMS",
+        endpointModeManual: "Вручную",
         endpointModeAutoHint:
           "Keenetic сообщает собственный локальный адрес и порт через NDMS. Сейчас определено: {{endpoint}}.",
         endpointModeManualHint:
@@ -1493,6 +1511,9 @@ export const ruTranslation = {
           routingRule: "Правило маршрутизации «{{name}}» будет удалено.",
           ruleDetail: "{{label}}: {{value}}",
           dnsDetour: 'DNS-сервер "{{server}}" будет изменён.',
+          listDownloadRoutes:
+            'Маршруты загрузки списка "{{list}}" будут изменены.',
+          downloadRoutes: "Маршруты загрузки",
           urltestGroupChanged:
             'Группа #{{group}} в резервировании "{{outbound}}" будет изменена.',
           urltestGroupRemoved:
@@ -1630,11 +1651,14 @@ export const ruTranslation = {
         conntrackOnSwitch: "Активные соединения при переключении",
         conntrackOnSwitchOptions: {
           preserve: "Сохранить на прежнем маршруте",
+          delete_on_failure: "Переподключать только при отказе",
           delete: "Переподключить через новый маршрут",
         },
         conntrackOnSwitchHints: {
           preserve:
             "Уже открытые соединения продолжают идти прежним путём, новые используют выбранный маршрут. Это самый стабильный режим.",
+          delete_on_failure:
+            "При отказе выхода его соединения удаляются и приложения сразу переподключаются через резервный. При возврате к основному старые соединения сохраняются, а новые идут через основной.",
           delete:
             "После успешного переключения сервис удаляет только соединения этой группы, чтобы приложения переподключились через новый маршрут.",
         },
@@ -1877,7 +1901,11 @@ export const ruTranslation = {
           "Не удалось обновить {{count}} списков: {{names}}. Подробности смотрите в логах.",
         refreshFailedMore: "ещё {{count}}",
       },
-      lastUpdated: "Последнее обновление: {{value}}",
+      lastUpdated: "Обновлён: {{value}}",
+      lastRefreshFailed:
+        "Не удалось обновить {{value}}: {{message}}",
+      lastRefreshFailedVia:
+        "Не удалось обновить {{value}} через {{detour}}: {{message}}",
       technicalId: "Технический ID: {{id}}",
       neverUpdated: "Ещё не обновлялся",
       noStats: "-",
@@ -2008,6 +2036,15 @@ export const ruTranslation = {
         detourPlaceholder: "Необязательный тег маршрута",
         detourHint:
           "Необязательный маршрут для загрузки этого списка по удалённому URL.",
+        fallbackDetours: "Резервные маршруты загрузки",
+        fallbackDetoursAdd: "Добавить резервный маршрут",
+        fallbackDetoursEmpty: "Доступных резервных маршрутов нет",
+        fallbackDetoursLimit: "Можно выбрать не больше трёх резервных маршрутов",
+        fallbackDetoursPlaceholder: "Резервные маршруты не выбраны",
+        fallbackDetoursPlaceholderDescription:
+          "При ошибке загрузки они будут проверены по порядку.",
+        fallbackDetoursHint:
+          "Используются только при сетевой или HTTP-ошибке основного маршрута. Прямое подключение автоматически не добавляется.",
         url: "Удалённый URL",
         urlHint:
           "Необязательно: обычный текстовый список или `.srs` версии 1-5. Объединяется с остальным содержимым; для `.srs` установка sing-box не требуется.",

@@ -20,6 +20,34 @@ TEST_CASE("build_system_resolver_reload_args: returns hook and reload as separat
     CHECK(args[1] == "reload");
 }
 
+TEST_CASE("runtime stop followed by start reactivates the resolver helper") {
+    Config cfg;
+    cfg.dns = DnsConfig{};
+    cfg.dns->system_resolver = api::SystemResolver{};
+
+    const auto stop_args =
+        build_system_resolver_hook_args(cfg, "deactivate");
+    const auto start_args =
+        build_system_resolver_hook_args(
+            cfg, runtime_start_resolver_action());
+
+    REQUIRE(stop_args.size() == 2);
+    REQUIRE(start_args.size() == 2);
+    CHECK(stop_args[1] == "deactivate");
+    CHECK(start_args[1] == "activate");
+}
+
+TEST_CASE("runtime restart retries only a transient resolver activation race") {
+    CHECK(runtime_restart_should_retry(
+        "System resolver activation hook failed"));
+    CHECK(runtime_restart_should_retry(
+        "Routing runtime restart failed: System resolver activation hook failed"));
+    CHECK_FALSE(runtime_restart_should_retry(
+        "Failed to install routing policy"));
+    CHECK_FALSE(runtime_restart_should_retry(
+        "System resolver deactivate hook failed"));
+}
+
 TEST_CASE("execute_system_resolver_reload_hook: succeeds for zero exit code") {
     Config cfg;
     cfg.dns = DnsConfig{};

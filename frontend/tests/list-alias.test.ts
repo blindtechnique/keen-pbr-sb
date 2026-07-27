@@ -16,6 +16,7 @@ const baselineDraft: ListDraft = {
   name: "ai_services",
   ttlMs: "7200000",
   detour: "",
+  fallbackDetours: [],
   domains: "",
   ipCidrs: "",
   url: "https://example.test/ai.srs",
@@ -55,6 +56,36 @@ describe("list aliases", () => {
 
     expect(config.display_name).toBeUndefined()
     expect(Object.hasOwn(config, "display_name")).toBe(false)
+  })
+
+  test("round-trips ordered fallback download routes", () => {
+    const draft = getDraftFromMapEntry("ai_services", {
+      url: "https://example.test/ai.srs",
+      detour: "primary",
+      fallback_detours: ["backup_a", "backup_b"],
+    })
+
+    expect(draft?.fallbackDetours).toEqual(["backup_a", "backup_b"])
+    expect(
+      getListConfigFromDraft({
+        ...baselineDraft,
+        detour: "primary",
+        fallbackDetours: ["backup_a", "backup_b"],
+      })
+    ).toMatchObject({
+      detour: "primary",
+      fallback_detours: ["backup_a", "backup_b"],
+    })
+  })
+
+  test("does not persist fallback routes without a primary route", () => {
+    const config = getListConfigFromDraft({
+      ...baselineDraft,
+      detour: "",
+      fallbackDetours: ["backup_a"],
+    })
+
+    expect(config.fallback_detours).toBeUndefined()
   })
 
   test("keeps the technical ID immutable while editing an alias", () => {

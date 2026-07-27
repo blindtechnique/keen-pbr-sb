@@ -79,6 +79,10 @@ struct HttpResponse {
     std::string body;
     bool not_modified_when_conditional{false};
     std::vector<std::string> headers;
+    size_t fail_first_requests{0};
+    int transient_status{503};
+    std::string transient_reason{"Service Unavailable"};
+    size_t fail_after_requests{0};
 };
 
 class TestHttpServer {
@@ -133,6 +137,12 @@ public:
         return "http://127.0.0.1:" + std::to_string(port_) + path;
     }
 
+    size_t request_count(const std::string& path) const {
+        std::lock_guard<std::mutex> lock(request_counts_mutex_);
+        const auto it = request_counts_.find(path);
+        return it == request_counts_.end() ? 0 : it->second;
+    }
+
 private:
     void serve() {
         while (running_.load()) {
@@ -172,12 +182,24 @@ private:
         }
 
         HttpResponse response;
+        size_t request_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(request_counts_mutex_);
+            request_count = ++request_counts_[path];
+        }
         auto it = routes_.find(path);
         if (it != routes_.end()) {
             response = it->second;
         } else {
             response.status = 404;
             response.reason = "Not Found";
+        }
+        if (request_count <= response.fail_first_requests ||
+            (response.fail_after_requests > 0 &&
+             request_count > response.fail_after_requests)) {
+            response.status = response.transient_status;
+            response.reason = response.transient_reason;
+            response.body.clear();
         }
         if (response.not_modified_when_conditional &&
             (request.find("\r\nIf-None-Match:") != std::string::npos ||
@@ -200,6 +222,8 @@ private:
     }
 
     std::map<std::string, HttpResponse> routes_;
+    mutable std::mutex request_counts_mutex_;
+    std::map<std::string, size_t> request_counts_;
     int listen_fd_{-1};
     uint16_t port_{0};
     std::atomic<bool> running_{true};
@@ -302,13 +326,18 @@ TEST_CASE("should_reload_runtime_after_list_refresh: only relevant changes reloa
     CHECK_FALSE(should_reload_runtime_after_list_refresh(true, refresh_result));
 }
 
-TEST_CASE("build_list_refresh_state_map: URL-backed lists expose last_updated metadata only") {
+TEST_CASE("build_list_refresh_state_map exposes successful and failed refresh metadata") {
     const auto temp_dir = make_temp_dir();
     CacheManager cache_manager(temp_dir);
     cache_manager.ensure_dir();
 
     CacheMetadata metadata;
+    metadata.url = "https://example.com/remote.txt";
     metadata.download_time = "2026-04-05T12:34:56Z";
+    metadata.last_refresh_url = "https://example.com/remote.txt";
+    metadata.last_refresh_attempt = "2026-04-06T12:00:00Z";
+    metadata.last_refresh_error = "HTTP 403";
+    metadata.last_refresh_detour = "backup";
     cache_manager.save_metadata("remote", metadata);
 
     Config config;
@@ -330,7 +359,42 @@ TEST_CASE("build_list_refresh_state_map: URL-backed lists expose last_updated me
     CHECK(remote_it != refresh_state.end());
     REQUIRE(remote_it->second.last_updated.has_value());
     CHECK(*remote_it->second.last_updated == "2026-04-05T12:34:56Z");
+    CHECK(remote_it->second.last_attempt ==
+          std::optional<std::string>{"2026-04-06T12:00:00Z"});
+    CHECK(remote_it->second.last_error ==
+          std::optional<std::string>{"HTTP 403"});
+    CHECK(remote_it->second.last_detour ==
+          std::optional<std::string>{"backup"});
     CHECK(refresh_state.find("local") == refresh_state.end());
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("build_list_refresh_state_map ignores metadata from an old URL") {
+    const auto temp_dir = make_temp_dir();
+    CacheManager cache_manager(temp_dir);
+    cache_manager.ensure_dir();
+
+    CacheMetadata metadata;
+    metadata.url = "https://old.example/list.txt";
+    metadata.download_time = "2026-04-05T12:34:56Z";
+    metadata.last_refresh_url = "https://old.example/list.txt";
+    metadata.last_refresh_attempt = "2026-04-06T12:00:00Z";
+    metadata.last_refresh_error = "HTTP 403";
+    cache_manager.save_metadata("remote", metadata);
+
+    ListConfig remote;
+    remote.url = "https://new.example/list.txt";
+    Config config;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto refresh_state =
+        build_list_refresh_state_map(config, cache_manager);
+    REQUIRE(refresh_state.count("remote") == 1);
+    CHECK_FALSE(refresh_state.at("remote").last_updated.has_value());
+    CHECK_FALSE(refresh_state.at("remote").last_attempt.has_value());
+    CHECK_FALSE(refresh_state.at("remote").last_error.has_value());
 
     std::filesystem::remove_all(temp_dir);
 }
@@ -365,6 +429,157 @@ TEST_CASE("refresh_remote_lists: failed HTTP list logs status and refresh contin
     CHECK(service.cache_manager().has_cache("ok"));
     CHECK_FALSE(service.cache_manager().has_cache("bad"));
     CHECK(logs.contains("List 'bad': failed to refresh " + *bad.url + ": HTTP 404"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists retries network failures through ordered fallbacks") {
+    CurlGlobalGuard curl_guard;
+    HttpResponse response;
+    response.body = "example.com\n";
+    response.fail_first_requests = 1;
+    response.transient_status = 403;
+    response.transient_reason = "Forbidden";
+    TestHttpServer server({{"/fallback.txt", response}});
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/fallback.txt");
+    remote.detour = "primary";
+    remote.fallback_detours =
+        std::vector<std::string>{"backup", "unused"};
+    Config config;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result = service.refresh_remote_lists(
+        config,
+        OutboundMarkMap{{"primary", 0}, {"backup", 0}, {"unused", 0}});
+
+    CHECK(result.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(result.failed_lists.empty());
+    CHECK(server.request_count("/fallback.txt") == 2);
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.last_refresh_detour ==
+          std::optional<std::string>{"backup"});
+    CHECK_FALSE(metadata.last_refresh_error.has_value());
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists records an unrouteable explicit detour chain") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/marked.txt", HttpResponse{200, "OK", "example.com\n"}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    const std::string url = server.url("/marked.txt");
+    ListConfig remote;
+    remote.url = url;
+    Config config;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto initial =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(initial.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(server.request_count("/marked.txt") == 1);
+    const auto successful =
+        service.cache_manager().load_metadata("remote").download_time;
+    REQUIRE(successful.has_value());
+
+    config.lists->at("remote").detour = "primary";
+    config.lists->at("remote").fallback_detours =
+        std::vector<std::string>{"backup"};
+    const auto failed =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+
+    CHECK(failed.failed_lists == std::vector<std::string>{"remote"});
+    CHECK(server.request_count("/marked.txt") == 1);
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.download_time == successful);
+    CHECK(metadata.last_refresh_url == std::optional<std::string>{url});
+    REQUIRE(metadata.last_refresh_attempt.has_value());
+    REQUIRE(metadata.last_refresh_error.has_value());
+    CHECK(metadata.last_refresh_error->find("routing mark") !=
+          std::string::npos);
+    CHECK_FALSE(metadata.last_refresh_detour.has_value());
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists does not retry local SRS decode failures") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/invalid.srs", HttpResponse{200, "OK", "not-an-srs"}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/invalid.srs");
+    remote.detour = "primary";
+    remote.fallback_detours = std::vector<std::string>{"backup"};
+    Config config;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result = service.refresh_remote_lists(
+        config, OutboundMarkMap{{"primary", 0}, {"backup", 0}});
+
+    CHECK(result.failed_lists == std::vector<std::string>{"remote"});
+    CHECK(server.request_count("/invalid.srs") == 1);
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.last_refresh_detour ==
+          std::optional<std::string>{"primary"});
+    REQUIRE(metadata.last_refresh_error.has_value());
+    CHECK(metadata.last_refresh_error->find("SRS") != std::string::npos);
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("failed refresh preserves the last successful timestamp") {
+    CurlGlobalGuard curl_guard;
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    HttpResponse response;
+    response.body = "example.com\n";
+    response.fail_after_requests = 1;
+    TestHttpServer server({{"/stable.txt", response}});
+    const std::string url = server.url("/stable.txt");
+    ListConfig remote;
+    remote.url = url;
+    Config config;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+    const auto first =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(first.changed_lists ==
+          std::vector<std::string>{"remote"});
+
+    const auto successful =
+        service.cache_manager().load_metadata("remote").download_time;
+    REQUIRE(successful.has_value());
+
+    const auto failed =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+    CHECK(failed.failed_lists == std::vector<std::string>{"remote"});
+
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.download_time == successful);
+    REQUIRE(metadata.last_refresh_attempt.has_value());
+    REQUIRE(metadata.last_refresh_error.has_value());
 
     std::filesystem::remove_all(temp_dir);
 }
@@ -488,6 +703,11 @@ TEST_CASE("remote_list_sources_changed detects URL detour and membership changes
     changed_detour.lists->at("remote").detour = "vpn-b";
     CHECK(remote_list_sources_changed(current, changed_detour));
 
+    Config changed_fallback = current;
+    changed_fallback.lists->at("remote").fallback_detours =
+        std::vector<std::string>{"vpn-c"};
+    CHECK(remote_list_sources_changed(current, changed_fallback));
+
     Config removed = current;
     removed.lists = std::map<std::string, ListConfig>{};
     CHECK(remote_list_sources_changed(current, removed));
@@ -516,6 +736,82 @@ TEST_CASE("refresh_remote_lists: failed curl request logs clear transport error"
     CHECK(result.failed_lists == std::vector<std::string>{"remote"});
     CHECK(logs.contains("List 'remote': failed to refresh http://127.0.0.1:1/missing.txt:"));
     CHECK_FALSE(logs.contains("HTTP request failed:"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE(
+    "download_uncached uses a validated same-source legacy SRS cache when refresh fails") {
+    CurlGlobalGuard curl_guard;
+    LoggerCapture logs;
+
+    const auto temp_dir = make_temp_dir();
+    const std::string url =
+        "http://127.0.0.1:1/unavailable.srs";
+    {
+        CacheManager cache_manager(temp_dir);
+        cache_manager.ensure_dir();
+        std::ofstream cached(cache_manager.cache_path("remote"));
+        REQUIRE(cached.good());
+        cached << "example.com\n"
+               << "*.example.net\n"
+               << "192.0.2.0/24\n";
+        CacheMetadata metadata;
+        metadata.url = url;
+        cache_manager.save_metadata("remote", metadata);
+    }
+
+    ListService service(temp_dir);
+    service.ensure_dir();
+    ListConfig remote;
+    remote.url = url;
+    Config config;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result =
+        service.download_uncached(config, OutboundMarkMap{});
+
+    CHECK(result.failed_lists.empty());
+    CHECK(result.cached_lists ==
+          std::vector<std::string>{"remote"});
+    CHECK(result.legacy_cached_lists ==
+          std::vector<std::string>{"remote"});
+    CHECK(logs.contains(
+        "continuing with validated same-source cache from an older "
+        "decoder revision: remote"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("legacy SRS fallback never accepts another source or malformed text") {
+    const auto temp_dir = make_temp_dir();
+    CacheManager cache_manager(temp_dir);
+    cache_manager.ensure_dir();
+
+    CacheMetadata metadata;
+    metadata.url = "https://old.example/list.srs";
+    cache_manager.save_metadata("remote", metadata);
+    {
+        std::ofstream cached(cache_manager.cache_path("remote"));
+        REQUIRE(cached.good());
+        cached << "example.com\n";
+    }
+
+    CHECK_FALSE(cache_manager.has_usable_same_source_cache(
+        "remote", "https://new.example/list.srs"));
+    CHECK(cache_manager.has_usable_same_source_cache(
+        "remote", "https://old.example/list.srs"));
+
+    {
+        std::ofstream malformed(
+            cache_manager.cache_path("remote"),
+            std::ios::trunc);
+        REQUIRE(malformed.good());
+        malformed << "not/a/valid/list/entry\n";
+    }
+    CHECK_FALSE(cache_manager.has_usable_same_source_cache(
+        "remote", "https://old.example/list.srs"));
 
     std::filesystem::remove_all(temp_dir);
 }

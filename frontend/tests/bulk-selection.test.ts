@@ -15,6 +15,10 @@ import {
   buildUpdatedConfigForListsDelete,
   listDeletesAltersRoutingOrDnsRefs,
 } from "../src/pages/lists-utils"
+import {
+  buildUpdatedConfigForOutboundsDelete,
+  getOutboundDeleteImpact,
+} from "../src/pages/outbounds-utils"
 
 describe("row selection helpers", () => {
   test("prunes ids that are no longer visible", () => {
@@ -147,5 +151,114 @@ describe("bulk list delete helpers", () => {
         outbound: "vpn",
       },
     ])
+  })
+})
+
+describe("bulk outbound delete helpers", () => {
+  test("clears a deleted primary list detour and its whole fallback chain", () => {
+    const config: ConfigObject = {
+      outbounds: [
+        { tag: "primary", type: "interface", interface: "tun0" },
+        { tag: "backup_a", type: "interface", interface: "tun1" },
+        { tag: "backup_b", type: "interface", interface: "tun2" },
+      ],
+      lists: {
+        remote: {
+          url: "https://example.test/list.txt",
+          detour: "primary",
+          fallback_detours: ["backup_a", "backup_b"],
+        },
+      },
+    }
+
+    const impact = getOutboundDeleteImpact(config, ["primary"])
+    expect(impact.listDownloadRoutes).toEqual([
+      {
+        listName: "remote",
+        before: ["primary", "backup_a", "backup_b"],
+        after: [],
+      },
+    ])
+    expect(
+      buildUpdatedConfigForOutboundsDelete(config, ["primary"]).lists
+    ).toEqual({
+      remote: {
+        url: "https://example.test/list.txt",
+      },
+    })
+  })
+
+  test("removes only deleted fallback list detours and reports the transition", () => {
+    const config: ConfigObject = {
+      outbounds: [
+        { tag: "primary", type: "interface", interface: "tun0" },
+        { tag: "backup_a", type: "interface", interface: "tun1" },
+        { tag: "backup_b", type: "interface", interface: "tun2" },
+      ],
+      lists: {
+        remote: {
+          url: "https://example.test/list.txt",
+          detour: "primary",
+          fallback_detours: ["backup_a", "backup_b"],
+        },
+      },
+    }
+
+    const impact = getOutboundDeleteImpact(config, ["backup_a"])
+    expect(impact.listDownloadRoutes).toEqual([
+      {
+        listName: "remote",
+        before: ["primary", "backup_a", "backup_b"],
+        after: ["primary", "backup_b"],
+      },
+    ])
+    expect(
+      buildUpdatedConfigForOutboundsDelete(config, ["backup_a"]).lists
+    ).toEqual({
+      remote: {
+        url: "https://example.test/list.txt",
+        detour: "primary",
+        fallback_detours: ["backup_b"],
+      },
+    })
+  })
+
+  test("uses cascaded urltest deletion when cleaning list detours", () => {
+    const config: ConfigObject = {
+      outbounds: [
+        { tag: "leaf", type: "interface", interface: "tun0" },
+        {
+          tag: "automatic",
+          type: "urltest",
+          url: "https://example.test/ping",
+          outbound_groups: [{ outbounds: ["leaf"] }],
+        },
+        { tag: "backup", type: "interface", interface: "tun1" },
+      ],
+      lists: {
+        remote: {
+          url: "https://example.test/list.txt",
+          detour: "automatic",
+          fallback_detours: ["backup"],
+        },
+      },
+    }
+
+    const impact = getOutboundDeleteImpact(config, ["leaf"])
+    expect(impact.deletedOutboundTags).toEqual(["leaf", "automatic"])
+    expect(impact.listDownloadRoutes).toEqual([
+      {
+        listName: "remote",
+        before: ["automatic", "backup"],
+        after: [],
+      },
+    ])
+    expect(
+      buildUpdatedConfigForOutboundsDelete(config, ["leaf"]).lists
+    ).toEqual({
+      remote: {
+        url: "https://example.test/list.txt",
+      },
+    })
   })
 })

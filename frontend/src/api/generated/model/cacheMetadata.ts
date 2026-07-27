@@ -11,6 +11,10 @@ export interface CacheMetadata {
   last_modified?: string;
   url?: string;
   download_time?: string;
+  last_refresh_attempt?: string;
+  last_refresh_error?: string;
+  last_refresh_url?: string;
+  last_refresh_detour?: string;
   srs_decoder_revision?: number;
   ips?: number;
   cidrs?: number;

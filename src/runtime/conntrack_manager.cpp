@@ -28,7 +28,8 @@ ConntrackManager::ConntrackManager(CommandRunner runner)
                 args,
                 /*suppress_stderr=*/false,
                 kMaxDiagnosticBytes,
-                /*capture_stderr=*/true);
+                /*capture_stderr=*/true,
+                /*drain_after_limit=*/true);
             return CommandResult{result.exit_code, result.stdout_output};
         };
     }
@@ -58,20 +59,35 @@ uint32_t ConntrackManager::save_selected_mark(uint32_t ctmark,
     return (ctmark & ~owned_mask) | (nfmark & owned_mask);
 }
 
-bool ConntrackManager::delete_mark(uint32_t mark, uint32_t owned_mask) const {
+ConntrackCleanupResult ConntrackManager::delete_mark(
+    uint32_t mark,
+    uint32_t owned_mask) const {
     const std::string selector =
         std::to_string(mark) + "/" + std::to_string(owned_mask);
     const auto delete_family = [this, &selector](const char* family) {
         const auto result =
             runner_({"conntrack", "-D", "-f", family, "--mark", selector});
-        return result.exit_code == 0 || is_empty_delete_result(result);
+        if (result.exit_code == 127) {
+            return ConntrackCleanupResult::CommandUnavailable;
+        }
+        return result.exit_code == 0 || is_empty_delete_result(result)
+                   ? ConntrackCleanupResult::Succeeded
+                   : ConntrackCleanupResult::Failed;
     };
 
-    // Always attempt both families. A failure in one family must not prevent
-    // cleanup of the other one.
-    const bool ipv4 = delete_family("ipv4");
-    const bool ipv6 = delete_family("ipv6");
-    return ipv4 && ipv6;
+    const auto ipv4 = delete_family("ipv4");
+    if (ipv4 == ConntrackCleanupResult::CommandUnavailable) {
+        return ipv4;
+    }
+    // A family-specific failure must not prevent cleanup of the other family.
+    const auto ipv6 = delete_family("ipv6");
+    if (ipv6 == ConntrackCleanupResult::CommandUnavailable) {
+        return ipv6;
+    }
+    return ipv4 == ConntrackCleanupResult::Succeeded &&
+                   ipv6 == ConntrackCleanupResult::Succeeded
+               ? ConntrackCleanupResult::Succeeded
+               : ConntrackCleanupResult::Failed;
 }
 
 } // namespace keen_pbr3

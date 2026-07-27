@@ -1,12 +1,13 @@
 export const enTranslation = {
   nfqws: {
+    repository: "Open the official nfqws2 repository",
     description:
       "Manage nfqws2, strategies, configuration, lists, Lua scripts and logs.",
     refresh: "Refresh",
     service: "nfqws2 service",
     version: "Installed version: {{version}}",
     running: "Running",
-    stopped: "Stopped",
+    stopped: "Not running",
     start: "Start",
     stop: "Stop",
     restart: "Restart",
@@ -130,9 +131,9 @@ export const enTranslation = {
       "Every imported rule must be mapped to an existing route or failover target.",
   },
   auth: {
-    title: "Web configurator sign-in",
+    title: "Sign in to keen-pbr-sb",
     description: "Authenticate to open routing management.",
-    otherManagement: "Other management options",
+    otherManagement: "Open internet access",
     username: "Username",
     password: "Password",
     showPassword: "Show password",
@@ -664,7 +665,9 @@ export const enTranslation = {
       badgeTransitioning: "In progress",
       restart: "Restart",
       restartRequested: "Restart requested",
+      restartComplete: "Restart complete: routing and DNS are ready",
       restartFailed: "Restart failed",
+      restartFailedDetail: "Restart failed: {{error}}",
       switchFailed: "Could not switch the service",
       title: "Services",
       singbox: "sing-box",
@@ -700,6 +703,10 @@ export const enTranslation = {
     },
     outbounds: {
       liveTraffic: "Active tunnel and proxy traffic",
+      connected: "Connected",
+      connectedFor: "Connected {{duration}}",
+      disconnected: "Disconnected",
+      dayShort: "d",
       summary: {
         tunnels: "Into tunnels - {{count}} lists",
         direct: "Direct - {{count}}",
@@ -917,6 +924,17 @@ export const enTranslation = {
       routeTo: "Route to",
       add: "Add",
       added: "Lists added: {{count}}",
+      naming: {
+        title: "Names for the new items",
+        description:
+          "The catalogue suggests friendly names. Edit or clear them before adding.",
+        listName: "List name",
+        routeRuleName: "Routing rule name",
+        dnsRuleName: "DNS rule name",
+        dnsRuleHint:
+          "A DNS rule will be created for {{server}}, which uses the selected route.",
+        confirm: "Add",
+      },
       categories: {
         all: "All",
         ai: "AI",
@@ -1018,8 +1036,8 @@ export const enTranslation = {
           "Login and password are stored in auth.json on the router.",
         endpoint: "Router web interface address",
         endpointMode: "Router address discovery",
-        endpointModeAuto: "Automatically via NDMS (recommended)",
-        endpointModeManual: "Enter manually",
+        endpointModeAuto: "Automatically via NDMS",
+        endpointModeManual: "Manually",
         endpointModeAutoHint:
           "Keenetic reports its local address and port through NDMS. Currently detected: {{endpoint}}.",
         endpointModeManualHint:
@@ -1472,6 +1490,9 @@ export const enTranslation = {
           routingRule: "Routing rule “{{name}}” will be removed.",
           ruleDetail: "{{label}}: {{value}}",
           dnsDetour: 'DNS server "{{server}}" will be changed.',
+          listDownloadRoutes:
+            'List "{{list}}" download routes will be changed.',
+          downloadRoutes: "Download routes",
           urltestGroupChanged:
             'Group #{{group}} in failover target "{{outbound}}" will be changed.',
           urltestGroupRemoved:
@@ -1606,11 +1627,14 @@ export const enTranslation = {
         conntrackOnSwitch: "Established connections on switch",
         conntrackOnSwitchOptions: {
           preserve: "Keep on the previous route",
+          delete_on_failure: "Reconnect only after failure",
           delete: "Reconnect through the new route",
         },
         conntrackOnSwitchHints: {
           preserve:
             "Existing flows stay on their original path while new flows use the selected route. This is the safest default.",
+          delete_on_failure:
+            "When the selected exit fails, its flows are removed so applications reconnect through the backup. On return to the preferred exit, existing backup flows are preserved and only new flows use the preferred route.",
           delete:
             "After a successful switch, only flows owned by this group are removed so applications reconnect through the new route.",
         },
@@ -1844,7 +1868,11 @@ export const enTranslation = {
           "{{count}} lists were not updated: {{names}}. See logs for details.",
         refreshFailedMore: "+{{count}} more",
       },
-      lastUpdated: "Last updated: {{value}}",
+      lastUpdated: "Updated: {{value}}",
+      lastRefreshFailed:
+        "Update failed at {{value}}: {{message}}",
+      lastRefreshFailedVia:
+        "Update failed at {{value}} via {{detour}}: {{message}}",
       technicalId: "Technical ID: {{id}}",
       neverUpdated: "Never updated",
       noStats: "-",
@@ -1971,6 +1999,15 @@ export const enTranslation = {
         detourPlaceholder: "Optional route tag",
         detourHint:
           "Optional route to use when downloading this list from a remote URL.",
+        fallbackDetours: "Fallback download routes",
+        fallbackDetoursAdd: "Add a fallback route",
+        fallbackDetoursEmpty: "No fallback routes are available",
+        fallbackDetoursLimit: "Up to three fallback routes can be selected",
+        fallbackDetoursPlaceholder: "No fallback routes selected",
+        fallbackDetoursPlaceholderDescription:
+          "They are tried in order if the download fails.",
+        fallbackDetoursHint:
+          "Used only after a network or HTTP failure on the primary route. A direct connection is never added automatically.",
         url: "Remote URL",
         urlHint:
           "Optional: a plain-text list or an `.srs` file in format version 1-5. It is merged with the other content; sing-box is not required for `.srs`.",

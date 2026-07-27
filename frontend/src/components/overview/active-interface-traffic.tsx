@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
@@ -6,8 +6,14 @@ import type {
   RouteRule,
   RuntimeInterfaceInventoryEntry,
   RuntimeOutboundState,
+  TransportStatus,
 } from "@/api/generated/model"
-import { collectActiveTrafficPaths } from "@/components/overview/active-interface-traffic-model"
+import {
+  collectActiveTrafficPaths,
+  formatConnectionDuration,
+  interfaceConnectionState,
+} from "@/components/overview/active-interface-traffic-model"
+import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
@@ -18,6 +24,7 @@ export function ActiveInterfaceTraffic({
   rules,
   runtimeByTag,
   runtimeInterfaceByName,
+  transports,
 }: {
   readonly outbounds: readonly Outbound[]
   readonly rules: readonly RouteRule[]
@@ -26,12 +33,14 @@ export function ActiveInterfaceTraffic({
     string,
     RuntimeInterfaceInventoryEntry
   >
+  readonly transports: readonly TransportStatus[]
 }) {
   const { i18n, t } = useTranslation()
   const { protocolOf } = useInterfaceProtocols()
-  const [hiddenCharts, setHiddenCharts] = useState<ReadonlySet<string>>(
-    () => new Set()
-  )
+  const [expandedInterfaces, setExpandedInterfaces] = useState<
+    ReadonlySet<string>
+  >(() => new Set())
+  const nowUnixMs = useSecondTicker()
   const paths = collectActiveTrafficPaths(
     outbounds,
     rules,
@@ -50,44 +59,65 @@ export function ActiveInterfaceTraffic({
       <div className="grid gap-3 lg:grid-cols-2">
         {paths.map((path) => {
           const protocol = protocolOf(path.interfaceName)
-          const chartVisible = !hiddenCharts.has(path.interfaceName)
+          const expanded = expandedInterfaces.has(path.interfaceName)
           const chartId = `dashboard-traffic-${safeDomId(path.interfaceName)}`
+          const runtimeInterface = runtimeInterfaceByName.get(
+            path.interfaceName
+          )
+          const connection = interfaceConnectionState(
+            path.interfaceName,
+            runtimeInterface?.status === "up",
+            transports
+          )
+          const connectedSeconds =
+            connection.connectedAtUnixMs === undefined
+              ? undefined
+              : Math.max(
+                  0,
+                  Math.floor((nowUnixMs - connection.connectedAtUnixMs) / 1_000)
+                )
           return (
             <div className="min-w-0" key={path.interfaceName}>
-              <div className="flex min-w-0 items-start justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-2 pt-1">
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <span className="truncate text-sm font-medium">
                     {path.label}
                   </span>
-                  {protocol ? (
-                    <Badge
-                      className="shrink-0 font-mono text-[10px]"
-                      size="xs"
-                      variant="outline"
-                    >
-                      {protocol}
-                    </Badge>
-                  ) : null}
+                  <KeeneticStatus
+                    className="shrink-0"
+                    tone={connection.connected ? "success" : "neutral"}
+                  >
+                    {connection.connected
+                      ? connectedSeconds === undefined
+                        ? t("overview.outbounds.connected")
+                        : t("overview.outbounds.connectedFor", {
+                            duration: formatConnectionDuration(
+                              connectedSeconds,
+                              t("overview.outbounds.dayShort")
+                            ),
+                          })
+                      : t("overview.outbounds.disconnected")}
+                  </KeeneticStatus>
                 </div>
                 <button
                   aria-controls={chartId}
                   aria-label={
-                    chartVisible
+                    expanded
                       ? t("transports.traffic.hideChart")
                       : t("transports.traffic.showChart")
                   }
-                  aria-pressed={chartVisible}
+                  aria-expanded={expanded}
                   className={cn(
                     "grid size-8 shrink-0 place-items-center rounded-[4px] border bg-success/15 text-foreground transition-[border-color,background-color] outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    chartVisible ? "border-success" : "border-success/15"
+                    expanded ? "border-success" : "border-success/15"
                   )}
                   onClick={() =>
-                    setHiddenCharts((current) =>
+                    setExpandedInterfaces((current) =>
                       toggledSet(current, path.interfaceName)
                     )
                   }
                   title={
-                    chartVisible
+                    expanded
                       ? t("transports.traffic.hideChart")
                       : t("transports.traffic.showChart")
                   }
@@ -96,23 +126,32 @@ export function ActiveInterfaceTraffic({
                   <TrafficChartToggleIcon />
                 </button>
               </div>
-              <div id={chartId}>
-                <InterfaceTraffic
-                  className="mt-1"
-                  labels={{
-                    receive: t("transports.traffic.receive"),
-                    transmit: t("transports.traffic.transmit"),
-                    received: t("transports.traffic.received"),
-                    transmitted: t("transports.traffic.transmitted"),
-                    chart: t("transports.traffic.chart"),
-                  }}
-                  locale={i18n.resolvedLanguage ?? i18n.language}
-                  showChart={chartVisible}
-                  traffic={
-                    runtimeInterfaceByName.get(path.interfaceName)?.traffic
-                  }
-                />
-              </div>
+              {expanded ? (
+                <div id={chartId}>
+                  {protocol ? (
+                    <Badge
+                      className="mt-2 shrink-0 font-mono text-[10px]"
+                      size="xs"
+                      variant="outline"
+                    >
+                      {protocol}
+                    </Badge>
+                  ) : null}
+                  <InterfaceTraffic
+                    className="mt-1"
+                    labels={{
+                      receive: t("transports.traffic.receive"),
+                      transmit: t("transports.traffic.transmit"),
+                      received: t("transports.traffic.received"),
+                      transmitted: t("transports.traffic.transmitted"),
+                      chart: t("transports.traffic.chart"),
+                    }}
+                    locale={i18n.resolvedLanguage ?? i18n.language}
+                    showChart
+                    traffic={runtimeInterface?.traffic}
+                  />
+                </div>
+              ) : null}
             </div>
           )
         })}
@@ -150,4 +189,15 @@ function toggledSet(
 
 function safeDomId(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/g, "-")
+}
+
+function useSecondTicker(): number {
+  const [nowUnixMs, setNowUnixMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowUnixMs(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  return nowUnixMs
 }

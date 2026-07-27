@@ -27,11 +27,13 @@ static std::string current_time_iso() {
 }
 
 CacheDownloadResult download_failed(std::string message,
-                                    std::optional<long> http_status_code = std::nullopt) {
+                                    std::optional<long> http_status_code = std::nullopt,
+                                    bool retryable = false) {
     CacheDownloadResult result;
     result.status = CacheDownloadStatus::Failed;
     result.error_message = std::move(message);
     result.http_status_code = http_status_code;
+    result.retryable = retryable;
     return result;
 }
 
@@ -57,6 +59,48 @@ std::size_t saturating_multiply(std::size_t value, std::size_t multiplier) {
         return std::numeric_limits<std::size_t>::max();
     }
     return value * multiplier;
+}
+
+bool is_usable_converted_cache(const std::filesystem::path& path,
+                               std::size_t max_file_size_bytes) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error || !std::filesystem::is_regular_file(status)) {
+        return false;
+    }
+    const auto file_size = std::filesystem::file_size(path, error);
+    if (error || file_size > max_file_size_bytes) {
+        return false;
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+
+    EntryCounter entries;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.size() > 4096U) {
+            return false;
+        }
+        const auto first = std::find_if_not(
+            line.begin(), line.end(),
+            [](unsigned char value) { return std::isspace(value) != 0; });
+        const auto last = std::find_if_not(
+            line.rbegin(), line.rend(),
+            [](unsigned char value) { return std::isspace(value) != 0; })
+                              .base();
+        if (first == line.end() || first >= last || *first == '#') {
+            continue;
+        }
+        const std::string_view value(
+            &*first, static_cast<std::size_t>(last - first));
+        if (!ListParser::classify_entry(value, entries)) {
+            return false;
+        }
+    }
+    return input.eof();
 }
 
 SrsDecodeLimits srs_decode_limits(std::size_t max_file_size_bytes) {
@@ -229,6 +273,19 @@ void CacheManager::set_max_file_size(size_t bytes) {
     http_client_.set_max_response_size(bytes);
 }
 
+void CacheManager::record_refresh_failure(
+    const std::string& name,
+    const std::string& url,
+    const std::string& error_message,
+    const std::optional<std::string>& detour) {
+    CacheMetadata metadata = load_metadata(name);
+    metadata.last_refresh_attempt = current_time_iso();
+    metadata.last_refresh_error = error_message;
+    metadata.last_refresh_url = url;
+    metadata.last_refresh_detour = detour;
+    save_metadata(name, metadata);
+}
+
 CacheDownloadResult CacheManager::download(const std::string& name,
                                            const std::string& url,
                                            const CacheDownloadOptions& options) {
@@ -245,6 +302,24 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         std::filesystem::is_regular_file(cache_path(name), cache_error);
     const bool use_conditionals =
         same_source && current_srs_revision && cached_body_exists;
+    const auto failed_attempt =
+        [this, &name, &url, &options](
+            std::string message,
+            std::optional<long> http_status_code = std::nullopt,
+            bool retryable = false) {
+            auto result =
+                download_failed(
+                    std::move(message), http_status_code, retryable);
+            try {
+                record_refresh_failure(
+                    name, url, result.error_message, options.detour);
+            } catch (...) {
+                // Refresh status is diagnostic metadata. Never replace the
+                // original download error or make a usable cache unavailable
+                // merely because that status could not be persisted.
+            }
+            return result;
+        };
 
     ConditionalDownloadResult result;
     try {
@@ -255,19 +330,37 @@ CacheDownloadResult CacheManager::download(const std::string& name,
             HttpRequestOptions{options.fwmark});
     } catch (const HttpError& e) {
         if (e.status_code() > 0) {
-            return download_failed("HTTP " + std::to_string(e.status_code()), e.status_code());
+            return failed_attempt(
+                "HTTP " + std::to_string(e.status_code()),
+                e.status_code(),
+                true);
         }
-        return download_failed(clean_download_error_message(e));
+        return failed_attempt(
+            clean_download_error_message(e), std::nullopt, true);
     } catch (const std::exception& e) {
-        return download_failed(e.what());
+        return failed_attempt(e.what(), std::nullopt, true);
     }
 
     if (result.not_modified && !use_conditionals) {
-        return download_failed(
+        return failed_attempt(
             "HTTP 304 received without a matching local cache validator",
             304);
     }
     if (result.not_modified) {
+        const std::string successful_at = current_time_iso();
+        existing.download_time = successful_at;
+        existing.last_refresh_attempt = successful_at;
+        existing.last_refresh_error.reset();
+        existing.last_refresh_url = url;
+        existing.last_refresh_detour = options.detour;
+        try {
+            save_metadata(name, existing);
+        } catch (const std::exception& error) {
+            return failed_attempt(
+                std::string("failed to persist cache metadata: ") +
+                error.what());
+        }
+
         CacheDownloadResult not_modified;
         not_modified.status = CacheDownloadStatus::NotModified;
         return not_modified;
@@ -282,12 +375,16 @@ CacheDownloadResult CacheManager::download(const std::string& name,
 
     {
         std::ofstream ofs(srs ? tmp_srs : tmp_path, std::ios::binary);
-        if (!ofs) return download_failed("failed to open temporary cache file for writing");
+        if (!ofs) {
+            return failed_attempt(
+                "failed to open temporary cache file for writing");
+        }
         ofs << result.body;
         if (!ofs) {
             std::filesystem::remove(tmp_path);
             std::filesystem::remove(tmp_srs);
-            return download_failed("failed to write temporary cache file");
+            return failed_attempt(
+                "failed to write temporary cache file");
         }
     }
 
@@ -301,15 +398,19 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         std::filesystem::remove(tmp_srs);
         if (conversion_error.has_value()) {
             std::filesystem::remove(tmp_path);
-            return download_failed(*conversion_error);
+            return failed_attempt(*conversion_error);
         }
     }
 
+    const std::string successful_at = current_time_iso();
     CacheMetadata meta;
     meta.etag = result.etag;
     meta.last_modified = result.last_modified;
     meta.url = url;
-    meta.download_time = current_time_iso();
+    meta.download_time = successful_at;
+    meta.last_refresh_attempt = successful_at;
+    meta.last_refresh_url = url;
+    meta.last_refresh_detour = options.detour;
     if (srs) {
         meta.srs_decoder_revision = kSrsDecoderRevision;
     }
@@ -319,13 +420,15 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         if (!ofs) {
             std::filesystem::remove(tmp_path);
             std::filesystem::remove(tmp_srs);
-            return download_failed("failed to open temporary cache metadata for writing");
+            return failed_attempt(
+                "failed to open temporary cache metadata for writing");
         }
         ofs << nlohmann::json(meta).dump(2) << '\n';
         if (!ofs) {
             std::filesystem::remove(tmp_path);
             std::filesystem::remove(tmp_meta);
-            return download_failed("failed to write temporary cache metadata");
+            return failed_attempt(
+                "failed to write temporary cache metadata");
         }
     }
 
@@ -337,7 +440,7 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     } catch (const std::exception& e) {
         std::filesystem::remove(tmp_path);
         std::filesystem::remove(tmp_meta);
-        return download_failed(e.what());
+        return failed_attempt(e.what());
     }
 
     CacheDownloadResult updated;
@@ -366,6 +469,17 @@ bool CacheManager::has_current_cache(const std::string& name,
     return !is_srs_rule_set_url(url) ||
            (metadata.srs_decoder_revision.has_value() &&
             *metadata.srs_decoder_revision == kSrsDecoderRevision);
+}
+
+bool CacheManager::has_usable_same_source_cache(
+    const std::string& name,
+    const std::string& url) const {
+    const CacheMetadata metadata = load_metadata(name);
+    if (!metadata.url.has_value() || *metadata.url != url) {
+        return false;
+    }
+    return is_usable_converted_cache(
+        cache_path(name), max_file_size_bytes_);
 }
 
 std::filesystem::path CacheManager::cache_path(const std::string& name) const {

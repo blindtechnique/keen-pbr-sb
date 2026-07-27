@@ -26,10 +26,28 @@ struct UrltestState {
     std::uint64_t generation{0};
 };
 
-// Callback invoked when the selected outbound changes for a urltest.
-// Parameters: (urltest_tag, new_child_outbound_tag)
+enum class UrltestSelectionChangeReason {
+    initial,
+    previous_unhealthy,
+    healthy_rebalance,
+};
+
+struct UrltestSelectionChange {
+    std::string urltest_tag;
+    std::uint64_t probe_generation{0};
+    std::string previous_child_tag;
+    std::string new_child_tag;
+    UrltestSelectionChangeReason reason{
+        UrltestSelectionChangeReason::initial};
+};
+
+// Callback invoked when the selected outbound changes for a urltest. The
+// immutable transition reason is computed from the same locked probe
+// generation which committed the selection, so the daemon never has to infer
+// failover versus recovery from a later, potentially changed snapshot.
 // Guaranteed to be called without any UrltestManager lock held.
-using UrltestChangeCallback = std::function<void(const std::string&, const std::string&)>;
+using UrltestChangeCallback =
+    std::function<void(const UrltestSelectionChange&)>;
 using UrltestCommitCallback = std::function<void(const std::string&,
                                                  std::uint64_t,
                                                  std::map<std::string, URLTestResult>,
@@ -55,7 +73,9 @@ public:
     // Register a urltest outbound, queue the initial URL test, and schedule
     // periodic retests. A successful initial selection invokes on_change_
     // asynchronously when its probe result is committed.
-    void register_urltest(const Outbound& ut);
+    void register_urltest(
+        const Outbound& ut,
+        std::string initial_selected_outbound = {});
 
     // Run tests immediately for a specific urltest outbound (e.g. on SIGUSR1).
     // Invokes on_change_ if the selection changes.
@@ -70,6 +90,13 @@ public:
     // Return a state snapshot for API/status reporting.
     // Returns std::nullopt if the tag is not registered.
     std::optional<UrltestState> get_state(const std::string& urltest_tag) const;
+
+    // Align the manager's transition cursor with the child which is actually
+    // applied in the kernel. This is used after a failed transactional switch;
+    // probe health/results remain intact and the next probe can retry from the
+    // applied path.
+    bool synchronize_selected(const std::string& urltest_tag,
+                              const std::string& selected_outbound);
 
     // Cancel all scheduled tasks and unregister all outbounds.
     void clear();

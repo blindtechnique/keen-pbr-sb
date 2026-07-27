@@ -12,4 +12,5 @@ export type ConntrackOnSwitch = typeof ConntrackOnSwitch[keyof typeof ConntrackO
 export const ConntrackOnSwitch = {
   preserve: 'preserve',
   delete: 'delete',
+  delete_on_failure: 'delete_on_failure',
 } as const;

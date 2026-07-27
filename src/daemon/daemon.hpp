@@ -43,6 +43,7 @@ namespace keen_pbr3 {
 class Firewall;
 class Scheduler;
 class UrltestManager;
+struct UrltestSelectionChange;
 class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
@@ -228,9 +229,11 @@ private:
     void setup_static_routing();
     void reconcile_static_routing();
     void apply_firewall(FirewallApplyMode mode = FirewallApplyMode::Destructive);
+    void normalize_urltest_selections();
     void register_urltest_outbounds();
-    void handle_urltest_selection_change(const std::string& urltest_tag,
-                                         const std::string& new_child_tag);
+    void handle_urltest_selection_change(
+        const UrltestSelectionChange& change,
+        std::uint64_t expected_runtime_generation);
     void commit_urltest_probe_results(const std::string& urltest_tag,
                                       std::uint64_t probe_generation,
                                       std::map<std::string, URLTestResult> results,
@@ -248,8 +251,10 @@ private:
     void stop_routing_runtime();
     void restart_routing_runtime();
     bool routing_runtime_active() const;
+    void warn_conntrack_unavailable_once();
     bool run_system_resolver_hook(std::string_view action,
                                   bool manage_ipc_gate = true);
+    bool run_system_resolver_hook_stream(std::string_view action);
     bool run_system_resolver_hook_reload();
     bool wait_for_resolver_stream_epoch(std::uint64_t expected_epoch,
                                         std::chrono::milliseconds timeout);
@@ -413,6 +418,7 @@ private:
     PolicyRuleManager policy_rules_;
     FirewallState firewall_state_;
     ConntrackManager conntrack_manager_;
+    bool conntrack_unavailable_warning_emitted_{false};
     URLTester url_tester_;
     // Latency for every interface outbound, including native tunnels the
     // firmware owns and standalone outbounds urltest never looks at.

@@ -155,7 +155,9 @@ export function normalizeOutboundDraftForPersistence(
       selection_mode:
         draft.selectionMode === "priority" ? "priority" : undefined,
       conntrack_on_switch:
-        draft.conntrackOnSwitch === "delete" ? "delete" : undefined,
+        draft.conntrackOnSwitch === "preserve"
+          ? undefined
+          : draft.conntrackOnSwitch,
       outbound_groups: normalizeOutboundGroups(draft.outboundGroups).map(
         (group) => ({
           outbounds: group.outbounds,

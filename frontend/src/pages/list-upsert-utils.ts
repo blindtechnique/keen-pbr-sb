@@ -9,6 +9,7 @@ export type ListDraft = {
   name: string
   ttlMs: string
   detour: string
+  fallbackDetours: string[]
   domains: string
   ipCidrs: string
   url: string
@@ -35,6 +36,7 @@ export function createListDraft(
       : "",
     ttlMs: "7200000",
     detour: "",
+    fallbackDetours: [],
     domains: "",
     ipCidrs: "",
     url: "",
@@ -55,6 +57,7 @@ export function getDraftFromMapEntry(
     name,
     ttlMs: String(listConfig.ttl_ms ?? 0),
     detour: listConfig.detour ?? "",
+    fallbackDetours: listConfig.fallback_detours ?? [],
     domains: (listConfig.domains ?? []).join("\n"),
     ipCidrs: (listConfig.ip_cidrs ?? []).join("\n"),
     url: listConfig.url ?? "",
@@ -208,6 +211,12 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
 
   if (trimmedDetour) {
     listConfig.detour = trimmedDetour
+    const fallbackDetours = draft.fallbackDetours
+      .map((detour) => detour.trim())
+      .filter((detour) => detour && detour !== trimmedDetour)
+    if (fallbackDetours.length > 0) {
+      listConfig.fallback_detours = [...new Set(fallbackDetours)]
+    }
   }
 
   return withListDisplayName(listConfig, draft.displayName)

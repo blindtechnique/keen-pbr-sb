@@ -290,21 +290,43 @@ DependencyAnalysis analyze_dependencies(
 
     if (config.lists) {
         for (const auto& [list_name, list] : *config.lists) {
-            if (!list.detour ||
-                removed_outbounds.find(*list.detour) ==
+            if (list.detour &&
+                removed_outbounds.find(*list.detour) !=
                     removed_outbounds.end()) {
-                continue;
+                add_reference(
+                    analysis,
+                    seen_references,
+                    {{DependencyEntityKind::Outbound, *list.detour, false},
+                     DependencyDependentKind::List,
+                     list_name,
+                     DependencyRelation::DetoursVia,
+                     DependencyConsequence::Disconnect,
+                     "lists." + list_name + ".detour",
+                     "/lists/" + list_name + "/edit"});
             }
-            add_reference(
-                analysis,
-                seen_references,
-                {{DependencyEntityKind::Outbound, *list.detour, false},
-                 DependencyDependentKind::List,
-                 list_name,
-                 DependencyRelation::DetoursVia,
-                 DependencyConsequence::Disconnect,
-                 "lists." + list_name + ".detour",
-                 "/lists/" + list_name + "/edit"});
+            const auto fallback_detours =
+                list.fallback_detours.value_or(
+                    std::vector<std::string>{});
+            for (std::size_t index = 0;
+                 index < fallback_detours.size();
+                 ++index) {
+                const auto& fallback = fallback_detours[index];
+                if (removed_outbounds.find(fallback) ==
+                    removed_outbounds.end()) {
+                    continue;
+                }
+                add_reference(
+                    analysis,
+                    seen_references,
+                    {{DependencyEntityKind::Outbound, fallback, false},
+                     DependencyDependentKind::List,
+                     list_name,
+                     DependencyRelation::DetoursVia,
+                     DependencyConsequence::Modify,
+                     "lists." + list_name + ".fallback_detours[" +
+                         std::to_string(index) + "]",
+                     "/lists/" + list_name + "/edit"});
+            }
         }
     }
 

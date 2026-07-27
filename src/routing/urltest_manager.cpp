@@ -70,7 +70,9 @@ UrltestManager::~UrltestManager() {
     }
 }
 
-void UrltestManager::register_urltest(const Outbound& ut) {
+void UrltestManager::register_urltest(
+    const Outbound& ut,
+    std::string initial_selected_outbound) {
     {
         KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
 
@@ -84,6 +86,17 @@ void UrltestManager::register_urltest(const Outbound& ut) {
                     CircuitBreaker(ut.circuit_breaker.value_or(CircuitBreakerConfig{})));
             }
         }
+        if (!initial_selected_outbound.empty() &&
+            state.circuit_breakers.find(initial_selected_outbound) ==
+                state.circuit_breakers.end()) {
+            Logger::instance().warn(
+                "Ignoring retained urltest selection '{}' for '{}': child is "
+                "not part of the selector",
+                initial_selected_outbound,
+                ut.tag);
+            initial_selected_outbound.clear();
+        }
+        state.selected_outbound = std::move(initial_selected_outbound);
 
         const std::string tag = ut.tag;
         state.scheduler_task_id = scheduler_.schedule_repeating(
@@ -108,6 +121,7 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
                                           std::uint64_t generation,
                                           std::map<std::string, URLTestResult> results) {
     std::string new_selected;
+    std::optional<UrltestSelectionChange> selection_change;
     bool selection_changed = false;
 
     {
@@ -151,8 +165,34 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
         const std::string previous_selected = state.selected_outbound;
         new_selected = select_outbound(urltest_tag);
         if (new_selected != previous_selected) {
+            UrltestSelectionChangeReason reason =
+                UrltestSelectionChangeReason::initial;
+            if (!previous_selected.empty()) {
+                const auto previous_result =
+                    state.last_results.find(previous_selected);
+                const auto previous_breaker =
+                    state.circuit_breakers.find(previous_selected);
+                const bool previous_healthy =
+                    previous_result != state.last_results.end() &&
+                    previous_result->second.success &&
+                    previous_breaker != state.circuit_breakers.end() &&
+                    previous_breaker->second.state(previous_selected) ==
+                        CircuitState::closed;
+                reason =
+                    previous_healthy
+                        ? UrltestSelectionChangeReason::healthy_rebalance
+                        : UrltestSelectionChangeReason::previous_unhealthy;
+            }
+
             state.selected_outbound = new_selected;
             selection_changed = true;
+            selection_change = UrltestSelectionChange{
+                .urltest_tag = urltest_tag,
+                .probe_generation = generation,
+                .previous_child_tag = previous_selected,
+                .new_child_tag = new_selected,
+                .reason = reason,
+            };
         }
     }
 
@@ -163,8 +203,8 @@ bool UrltestManager::commit_probe_results(const std::string& urltest_tag,
                              selection_changed ? "true" : "false",
                              new_selected);
 
-    if (selection_changed && on_change_) {
-        on_change_(urltest_tag, new_selected);
+    if (selection_change.has_value() && on_change_) {
+        on_change_(*selection_change);
     }
 
     return selection_changed;
@@ -186,6 +226,23 @@ std::optional<UrltestState> UrltestManager::get_state(const std::string& urltest
         return std::nullopt;
     }
     return it->second;
+}
+
+bool UrltestManager::synchronize_selected(
+    const std::string& urltest_tag,
+    const std::string& selected_outbound) {
+    KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+    const auto it = states_.find(urltest_tag);
+    if (it == states_.end()) {
+        return false;
+    }
+    if (!selected_outbound.empty() &&
+        it->second.circuit_breakers.find(selected_outbound) ==
+            it->second.circuit_breakers.end()) {
+        return false;
+    }
+    it->second.selected_outbound = selected_outbound;
+    return true;
 }
 
 void UrltestManager::clear() {

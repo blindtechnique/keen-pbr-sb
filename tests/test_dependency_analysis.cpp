@@ -13,6 +13,7 @@ Config dependency_fixture() {
     ListConfig ai;
     ai.domains = std::vector<std::string>{"example.ai"};
     ai.detour = "vpn";
+    ai.fallback_detours = std::vector<std::string>{"backup"};
     ListConfig media;
     media.domains = std::vector<std::string>{"example.video"};
     config.lists = std::map<std::string, ListConfig>{
@@ -31,7 +32,11 @@ Config dependency_fixture() {
     OutboundGroup group;
     group.outbounds = {"vpn"};
     automatic.outbound_groups = std::vector<OutboundGroup>{group};
-    config.outbounds = std::vector<Outbound>{vpn, automatic};
+    Outbound backup;
+    backup.tag = "backup";
+    backup.type = OutboundType::INTERFACE;
+    backup.interface = "tun1";
+    config.outbounds = std::vector<Outbound>{vpn, backup, automatic};
 
     RouteRule list_only;
     list_only.list = std::vector<std::string>{"ai"};
@@ -75,6 +80,18 @@ bool has_reference(const DependencyAnalysis& analysis,
 }
 
 } // namespace
+
+TEST_CASE("outbound dependency analysis includes list fallback detours") {
+    const auto analysis = analyze_dependencies(
+        dependency_fixture(),
+        {{DependencyEntityKind::Outbound, "backup", false}});
+
+    CHECK(has_reference(
+        analysis,
+        DependencyDependentKind::List,
+        "ai",
+        DependencyConsequence::Modify));
+}
 
 TEST_CASE("list dependency analysis distinguishes modified and deleted rules") {
     const auto analysis = analyze_dependencies(

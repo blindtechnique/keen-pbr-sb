@@ -863,6 +863,8 @@
   }
 
   .keen-sidebar-toggle-button:active {
+    --tw-translate-x: 0px !important;
+    --tw-translate-y: 0px !important;
     border: 0 !important;
     outline: 0 !important;
     box-shadow: none !important;

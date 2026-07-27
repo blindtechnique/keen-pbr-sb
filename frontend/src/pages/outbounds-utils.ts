@@ -1,10 +1,16 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { Outbound } from "@/api/generated/model/outbound"
 
 export type OutboundDeleteImpact = {
   deletedOutboundTags: string[]
   routeRuleIndexes: number[]
   dnsServerDetours: string[]
+  listDownloadRoutes: Array<{
+    listName: string
+    before: string[]
+    after: string[]
+  }>
   urltestMemberships: Array<{
     outboundTag: string
     groupIndex: number
@@ -52,6 +58,37 @@ export function getOutboundDeleteImpact(
   const dnsServerDetours = (config.dns?.servers ?? []).flatMap((server) =>
     server.detour && deletedTags.has(server.detour) ? [server.tag] : []
   )
+  const listDownloadRoutes: OutboundDeleteImpact["listDownloadRoutes"] =
+    Object.entries(config.lists ?? {}).flatMap(([listName, list]) => {
+      const primaryDetour = list.detour
+      const fallbackDetours = list.fallback_detours ?? []
+      const before = [
+        ...(primaryDetour ? [primaryDetour] : []),
+        ...fallbackDetours,
+      ]
+
+      if (primaryDetour && deletedTags.has(primaryDetour)) {
+        return [{ listName, before, after: [] }]
+      }
+
+      const remainingFallbacks = fallbackDetours.filter(
+        (tag) => !deletedTags.has(tag)
+      )
+      if (remainingFallbacks.length === fallbackDetours.length) {
+        return []
+      }
+
+      return [
+        {
+          listName,
+          before,
+          after: [
+            ...(primaryDetour ? [primaryDetour] : []),
+            ...remainingFallbacks,
+          ],
+        },
+      ]
+    })
   const urltestMemberships: OutboundDeleteImpact["urltestMemberships"] = []
   const removedUrltestGroups: OutboundDeleteImpact["removedUrltestGroups"] = []
 
@@ -89,6 +126,7 @@ export function getOutboundDeleteImpact(
     deletedOutboundTags: deletedTagList,
     routeRuleIndexes,
     dnsServerDetours,
+    listDownloadRoutes,
     urltestMemberships,
     removedUrltestGroups,
   }
@@ -124,7 +162,41 @@ export function buildUpdatedConfigForOutboundsDelete(
         return serverWithoutDetour
       }),
     },
+    lists: Object.fromEntries(
+      Object.entries(config.lists ?? {}).map(([name, list]) => [
+        name,
+        cleanupListDownloadRoutes(list, deletedTags),
+      ])
+    ),
   }
+}
+
+function cleanupListDownloadRoutes(
+  list: ListConfig,
+  deletedTags: ReadonlySet<string>
+): ListConfig {
+  if (list.detour && deletedTags.has(list.detour)) {
+    const nextList = { ...list }
+    delete nextList.detour
+    delete nextList.fallback_detours
+    return nextList
+  }
+
+  const fallbackDetours = list.fallback_detours ?? []
+  const remainingFallbacks = fallbackDetours.filter(
+    (tag) => !deletedTags.has(tag)
+  )
+  if (remainingFallbacks.length === fallbackDetours.length) {
+    return list
+  }
+
+  const nextList = { ...list }
+  if (remainingFallbacks.length > 0) {
+    nextList.fallback_detours = remainingFallbacks
+  } else {
+    delete nextList.fallback_detours
+  }
+  return nextList
 }
 
 function cleanupOutboundReferences(

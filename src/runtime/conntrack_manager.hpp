@@ -20,6 +20,12 @@ struct ConntrackPolicy {
     }
 };
 
+enum class ConntrackCleanupResult {
+    Succeeded,
+    CommandUnavailable,
+    Failed,
+};
+
 class ConntrackManager {
 public:
     struct CommandResult {
@@ -49,7 +55,8 @@ public:
 
     // Best-effort targeted removal for one owned mark. It never flushes the
     // global conntrack table and invokes each address family separately.
-    bool delete_mark(uint32_t mark, uint32_t owned_mask) const;
+    ConntrackCleanupResult delete_mark(uint32_t mark,
+                                       uint32_t owned_mask) const;
 
 private:
     ConntrackPolicy active_;

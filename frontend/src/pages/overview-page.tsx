@@ -11,6 +11,7 @@ import {
   useGetHealthService,
   useGetRuntimeInterfaces,
   useGetRuntimeOutbounds,
+  useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import { Button } from "@/components/ui/button"
@@ -48,6 +49,10 @@ export function OverviewPage() {
   })
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
+  // ServicesStatusCard observes the same query with its existing refresh
+  // policy. This observer only consumes that shared cache for connected-since
+  // timestamps; it does not add another polling loop.
+  const transportsQuery = useGetTransports()
 
   const serviceHealth =
     serviceHealthQuery.data?.status === 200
@@ -81,10 +86,7 @@ export function OverviewPage() {
         (runtimeInterfacesQuery.data?.status === 200
           ? runtimeInterfacesQuery.data.data.interfaces
           : []
-        ).map((runtimeInterface) => [
-          runtimeInterface.name,
-          runtimeInterface,
-        ])
+        ).map((runtimeInterface) => [runtimeInterface.name, runtimeInterface])
       ),
     [runtimeInterfacesQuery.data]
   )
@@ -153,6 +155,11 @@ export function OverviewPage() {
                 rules={loadedConfig?.route?.rules ?? []}
                 runtimeByTag={runtimeOutboundByTag}
                 runtimeInterfaceByName={runtimeInterfaceByName}
+                transports={
+                  transportsQuery.data?.status === 200
+                    ? transportsQuery.data.data
+                    : []
+                }
               />
             </>
           ) : null}

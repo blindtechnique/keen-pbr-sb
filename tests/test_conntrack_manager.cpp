@@ -25,7 +25,8 @@ TEST_CASE("ConntrackManager deletes only the requested mark in both families") {
         return ConntrackManager::CommandResult{0, {}};
     });
 
-    CHECK(manager.delete_mark(0x120000, 0xFF0000));
+    CHECK(manager.delete_mark(0x120000, 0xFF0000) ==
+          ConntrackCleanupResult::Succeeded);
     REQUIRE(commands.size() == 2);
     CHECK(commands[0] == std::vector<std::string>{
                              "conntrack", "-D", "-f", "ipv4", "--mark",
@@ -44,7 +45,8 @@ TEST_CASE("ConntrackManager attempts both families when one cleanup fails") {
             args[3] == "ipv4" ? "Operation not permitted" : ""};
     });
 
-    CHECK_FALSE(manager.delete_mark(0x120000, 0xFF0000));
+    CHECK(manager.delete_mark(0x120000, 0xFF0000) ==
+          ConntrackCleanupResult::Failed);
     CHECK(families == std::vector<std::string>{"ipv4", "ipv6"});
 }
 
@@ -56,7 +58,8 @@ TEST_CASE("ConntrackManager treats an already-empty family as cleanup success") 
             "0 flow entries have been deleted.\n"};
     });
 
-    CHECK(manager.delete_mark(0x120000, 0xFF0000));
+    CHECK(manager.delete_mark(0x120000, 0xFF0000) ==
+          ConntrackCleanupResult::Succeeded);
 }
 
 TEST_CASE("ConntrackManager does not hide other exit status one errors") {
@@ -64,7 +67,20 @@ TEST_CASE("ConntrackManager does not hide other exit status one errors") {
         return ConntrackManager::CommandResult{1, "Operation not permitted\n"};
     });
 
-    CHECK_FALSE(manager.delete_mark(0x120000, 0xFF0000));
+    CHECK(manager.delete_mark(0x120000, 0xFF0000) ==
+          ConntrackCleanupResult::Failed);
+}
+
+TEST_CASE("ConntrackManager reports a missing utility once without trying IPv6") {
+    std::vector<std::string> families;
+    ConntrackManager manager([&families](const std::vector<std::string>& args) {
+        families.push_back(args[3]);
+        return ConntrackManager::CommandResult{127, {}};
+    });
+
+    CHECK(manager.delete_mark(0x120000, 0xFF0000) ==
+          ConntrackCleanupResult::CommandUnavailable);
+    CHECK(families == std::vector<std::string>{"ipv4"});
 }
 
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {

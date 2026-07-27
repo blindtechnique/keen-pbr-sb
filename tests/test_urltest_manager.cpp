@@ -213,15 +213,15 @@ TEST_CASE("initial urltest probe commits through the controller callback") {
     FakeRepeatingScheduler scheduler;
     BlockingExecutor executor(1, 8);
     CommitQueue commits;
-    std::vector<std::pair<std::string, std::string>> changes;
+    std::vector<UrltestSelectionChange> changes;
 
     UrltestManager manager(
         tester,
         marks,
         scheduler,
         executor,
-        [&changes](const std::string& tag, const std::string& selected) {
-            changes.emplace_back(tag, selected);
+        [&changes](const UrltestSelectionChange& change) {
+            changes.push_back(change);
         },
         [&commits](const std::string& tag,
                    std::uint64_t generation,
@@ -243,8 +243,11 @@ TEST_CASE("initial urltest probe commits through the controller callback") {
                                        std::move(initial.results)));
     CHECK(manager.get_selected("automatic") == "primary");
     REQUIRE(changes.size() == 1);
-    CHECK(changes.front() == std::make_pair(std::string("automatic"),
-                                            std::string("primary")));
+    CHECK(changes.front().urltest_tag == "automatic");
+    CHECK(changes.front().previous_child_tag.empty());
+    CHECK(changes.front().new_child_tag == "primary");
+    CHECK(changes.front().reason ==
+          UrltestSelectionChangeReason::initial);
 
     transport->prefer_primary(false);
     manager.trigger_immediate_test("automatic");
@@ -258,8 +261,82 @@ TEST_CASE("initial urltest probe commits through the controller callback") {
                                        std::move(changed.results)));
     CHECK(manager.get_selected("automatic") == "backup");
     REQUIRE(changes.size() == 2);
-    CHECK(changes.back() == std::make_pair(std::string("automatic"),
-                                           std::string("backup")));
+    CHECK(changes.back().previous_child_tag == "primary");
+    CHECK(changes.back().new_child_tag == "backup");
+    CHECK(changes.back().reason ==
+          UrltestSelectionChangeReason::healthy_rebalance);
+}
+
+TEST_CASE("retained urltest selection is the cursor for the first probe") {
+    auto transport = std::make_shared<UrltestTransport>();
+    transport->set_primary_available(false);
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(1, 8);
+    CommitQueue commits;
+    std::vector<UrltestSelectionChange> changes;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [&changes](const UrltestSelectionChange& change) {
+            changes.push_back(change);
+        },
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+        });
+
+    manager.register_urltest(make_priority_urltest_outbound(), "primary");
+    CHECK(manager.get_selected("automatic") == "primary");
+
+    auto initial = commits.pop();
+    CHECK(manager.commit_probe_results(initial.tag,
+                                       initial.generation,
+                                       std::move(initial.results)));
+    CHECK(manager.get_selected("automatic") == "backup");
+    REQUIRE(changes.size() == 1);
+    CHECK(changes.front().previous_child_tag == "primary");
+    CHECK(changes.front().new_child_tag == "backup");
+    CHECK(changes.front().reason ==
+          UrltestSelectionChangeReason::previous_unhealthy);
+}
+
+TEST_CASE("urltest selection cursor can be restored after an apply failure") {
+    auto transport = std::make_shared<UrltestTransport>();
+    URLTester tester(transport);
+    const auto marks = make_marks();
+    FakeRepeatingScheduler scheduler;
+    BlockingExecutor executor(1, 8);
+    CommitQueue commits;
+
+    UrltestManager manager(
+        tester,
+        marks,
+        scheduler,
+        executor,
+        [](const UrltestSelectionChange&) {},
+        [&commits](const std::string& tag,
+                   std::uint64_t generation,
+                   std::map<std::string, URLTestResult> results,
+                   TraceId) {
+            commits.push(tag, generation, std::move(results));
+        });
+
+    manager.register_urltest(make_urltest_outbound(), "primary");
+    CHECK(manager.synchronize_selected("automatic", "backup"));
+    CHECK(manager.get_selected("automatic") == "backup");
+    CHECK(manager.synchronize_selected("automatic", "primary"));
+    CHECK(manager.get_selected("automatic") == "primary");
+
+    CHECK_FALSE(manager.synchronize_selected("automatic", "missing"));
+    CHECK(manager.get_selected("automatic") == "primary");
+    CHECK_FALSE(manager.synchronize_selected("removed", "primary"));
 }
 
 TEST_CASE("urltest probes two candidates concurrently without changing priority order") {
@@ -275,7 +352,7 @@ TEST_CASE("urltest probes two candidates concurrently without changing priority 
         marks,
         scheduler,
         executor,
-        [](const std::string&, const std::string&) {},
+        [](const UrltestSelectionChange&) {},
         [&commits](const std::string& tag,
                    std::uint64_t generation,
                    std::map<std::string, URLTestResult> results,
@@ -313,7 +390,7 @@ TEST_CASE("urltest ignores a probe result from a previous registration") {
         marks,
         scheduler,
         executor,
-        [&change_count](const std::string&, const std::string&) {
+        [&change_count](const UrltestSelectionChange&) {
             ++change_count;
         },
         [&commits](const std::string& tag,
@@ -358,15 +435,15 @@ TEST_CASE("priority urltest returns to the first healthy declared outbound") {
     FakeRepeatingScheduler scheduler;
     BlockingExecutor executor(1, 8);
     CommitQueue commits;
-    std::vector<std::string> changes;
+    std::vector<UrltestSelectionChange> changes;
 
     UrltestManager manager(
         tester,
         marks,
         scheduler,
         executor,
-        [&changes](const std::string&, const std::string& selected) {
-            changes.push_back(selected);
+        [&changes](const UrltestSelectionChange& change) {
+            changes.push_back(change);
         },
         [&commits](const std::string& tag,
                    std::uint64_t generation,
@@ -405,7 +482,17 @@ TEST_CASE("priority urltest returns to the first healthy declared outbound") {
                                        std::move(recovered_primary.results)));
     CHECK(manager.get_selected("automatic") == "primary");
 
-    CHECK(changes == std::vector<std::string>{"primary", "backup", "primary"});
+    REQUIRE(changes.size() == 3);
+    CHECK(changes[0].reason ==
+          UrltestSelectionChangeReason::initial);
+    CHECK(changes[1].previous_child_tag == "primary");
+    CHECK(changes[1].new_child_tag == "backup");
+    CHECK(changes[1].reason ==
+          UrltestSelectionChangeReason::previous_unhealthy);
+    CHECK(changes[2].previous_child_tag == "backup");
+    CHECK(changes[2].new_child_tag == "primary");
+    CHECK(changes[2].reason ==
+          UrltestSelectionChangeReason::healthy_rebalance);
 }
 
 TEST_CASE("priority urltest honors group weight before declaration order") {
@@ -423,7 +510,7 @@ TEST_CASE("priority urltest honors group weight before declaration order") {
         marks,
         scheduler,
         executor,
-        [](const std::string&, const std::string&) {},
+        [](const UrltestSelectionChange&) {},
         [&commits](const std::string& tag,
                    std::uint64_t generation,
                    std::map<std::string, URLTestResult> results,

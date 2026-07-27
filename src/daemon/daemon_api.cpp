@@ -349,9 +349,6 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
     auto result = std::make_shared<ConfigApplyResult>();
     auto prepared = std::make_shared<PreparedRuntimeInputs>();
     auto rollback_prepared = std::make_shared<PreparedRuntimeInputs>();
-    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
-    result->apply_started_ts = apply_started_ts;
-    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
 
     const Config active_config = config_store_.active_config();
     const bool refresh_remote_lists_after_apply =
@@ -366,9 +363,14 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
             RemoteListPreparationMode::None);
     } catch (const std::exception& e) {
         result->error = e.what();
+        result->runtime_unchanged = true;
         Logger::instance().error("Prepare staged config task failed: {}", e.what());
         return *result;
     }
+
+    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
+    result->apply_started_ts = apply_started_ts;
+    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
 
     enqueue_control_task(
         [this,
@@ -381,6 +383,7 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
                 apply_prepared_runtime_inputs(std::move(*prepared));
                 result->applied = true;
                 result->rolled_back = false;
+                result->runtime_unchanged = false;
                 config_store_.clear_staged_if_matches(saved_config_json);
                 if (refresh_remote_lists_after_apply) {
                     refresh_lists_and_maybe_reload_async("post-apply");

@@ -4,6 +4,14 @@ export type AuthStatus = Readonly<{
   error?: string
 }>
 
+export type KeeneticEndpointMode = "auto" | "manual"
+
+export function authEndpointModeLabelKey(mode: KeeneticEndpointMode) {
+  return mode === "manual"
+    ? ("pages.settings.auth.endpointModeManual" as const)
+    : ("pages.settings.auth.endpointModeAuto" as const)
+}
+
 export function parseAuthStatus(value: unknown): AuthStatus | null {
   if (
     typeof value !== "object" ||

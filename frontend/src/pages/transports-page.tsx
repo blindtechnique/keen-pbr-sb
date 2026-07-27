@@ -6,13 +6,12 @@ import {
   EyeIcon,
   EyeOffIcon,
   RefreshCwIcon,
-  RotateCw,
   ShieldCheckIcon,
   TrashIcon,
   UploadIcon,
   WorkflowIcon,
 } from "lucide-react"
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -52,6 +51,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceCard } from "@/components/transports/native-interface-card"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
+import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
 import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
 import { formatTransportPath } from "@/components/transports/transport-path"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
@@ -166,55 +166,6 @@ function groupTransports(
   return [...groups.values()]
 }
 
-/**
- * Latency with the age of the measurement next to it. A figure that refreshes
- * on screen but was taken minutes ago reads as live and misleads; saying how
- * old it is costs one line and makes the number honest.
- */
-function LatencyPill({
-  probe,
-  fallbackMs,
-  onRefresh,
-  refreshing,
-  t,
-}: {
-  probe?: ProbeEntry
-  fallbackMs?: number
-  onRefresh: () => void
-  refreshing: boolean
-  t: (key: string, options?: Record<string, unknown>) => string
-}) {
-  const latency = probe?.success ? probe.latency_ms : fallbackMs
-
-  if (latency === undefined) {
-    return null
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1">
-      <Badge size="xs" variant="success">
-        {t("transports.latencyValue", { value: latency })}
-      </Badge>
-      {probe ? (
-        <span className="text-xs text-muted-foreground tabular-nums">
-          {t("transports.latencyAge", { seconds: probe.age_seconds })}
-        </span>
-      ) : null}
-      <Button
-        aria-label={t("transports.latencyRefresh")}
-        className="size-6"
-        disabled={refreshing}
-        onClick={onRefresh}
-        size="icon"
-        title={t("transports.latencyRefresh")}
-        variant="ghost"
-      >
-        <RotateCw className={cn("size-3", refreshing && "animate-spin")} />
-      </Button>
-    </span>
-  )
-}
-
 export function TransportsPage() {
   const queryClient = useQueryClient()
   const { t, i18n } = useTranslation()
@@ -226,6 +177,10 @@ export function TransportsPage() {
   const [expandedTransportIds, setExpandedTransportIds] = useState(
     () => new Set<string>()
   )
+  const [requestedProbe, setRequestedProbe] = useState<{
+    interfaceName: string
+    baselineRuntimeUpdatedAt: number
+  } | null>(null)
   const [showHiddenNative, setShowHiddenNative] = useState(false)
   const transportImportRef = useRef<HTMLInputElement>(null)
   const query = useGetTransports({
@@ -409,8 +364,58 @@ export function TransportsPage() {
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
   })
+  const refetchProbes = probesQuery.refetch
 
   const runProbeMutation = useRunSystemProbes()
+
+  useEffect(() => {
+    if (
+      !requestedProbe ||
+      runtimeOutboundsQuery.dataUpdatedAt <=
+        requestedProbe.baselineRuntimeUpdatedAt
+    ) {
+      return
+    }
+
+    let active = true
+    const completedRequest = requestedProbe
+    void refetchProbes().finally(() => {
+      if (!active) return
+      setRequestedProbe((current) =>
+        current === completedRequest ? null : current
+      )
+    })
+    return () => {
+      active = false
+    }
+  }, [
+    refetchProbes,
+    requestedProbe,
+    runtimeOutboundsQuery.dataUpdatedAt,
+  ])
+
+  useEffect(() => {
+    if (!requestedProbe) return
+    const expiredRequest = requestedProbe
+    const timeout = window.setTimeout(() => {
+      setRequestedProbe((current) =>
+        current === expiredRequest ? null : current
+      )
+    }, 30_000)
+    return () => window.clearTimeout(timeout)
+  }, [requestedProbe])
+
+  const refreshLatency = (interfaceName: string) => {
+    setRequestedProbe({
+      interfaceName,
+      baselineRuntimeUpdatedAt: runtimeOutboundsQuery.dataUpdatedAt,
+    })
+    runProbeMutation.mutate(undefined, {
+      onError: () => setRequestedProbe(null),
+    })
+  }
+  const latencyRefreshPending = (interfaceName: string) =>
+    requestedProbe?.interfaceName === interfaceName
 
   // Probe results are keyed by outbound tag but shown per interface.
   const probeByInterface = new Map<string, ProbeEntry>()
@@ -899,7 +904,7 @@ export function TransportsPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid items-start gap-4 lg:grid-cols-2">
         {visibleItems.map((item) => {
           const boundOutbound = interfaceOutboundByInterface.get(item.interface)
           const configuredSpec = configuredByTag.get(item.tag)
@@ -913,7 +918,7 @@ export function TransportsPage() {
 
           return (
             <Card
-              className="flex h-full min-w-0 flex-col overflow-hidden"
+              className="flex min-w-0 flex-col overflow-hidden"
               key={item.tag}
               size="sm"
             >
@@ -1006,6 +1011,18 @@ export function TransportsPage() {
                   </Button>
                 </CardAction>
               </CardHeader>
+              {item.state === "up" ? (
+                <div className="flex min-h-7 items-center px-3">
+                  <TransportLatencyPill
+                    onRefresh={() => refreshLatency(item.interface)}
+                    probe={probeByInterface.get(item.interface)}
+                    refreshing={latencyRefreshPending(item.interface)}
+                    runtimeMilliseconds={transportLatencyByInterface.get(
+                      item.interface
+                    )}
+                  />
+                </div>
+              ) : null}
               <CardContent
                 className={cn(
                   "flex min-w-0 flex-1 flex-col gap-1.5 text-sm",
@@ -1037,17 +1054,6 @@ export function TransportsPage() {
                         >
                           {transportPath.text}
                         </Badge>
-                      ) : null}
-                      {item.state === "up" ? (
-                        <LatencyPill
-                          fallbackMs={transportLatencyByInterface.get(
-                            item.interface
-                          )}
-                          onRefresh={() => runProbeMutation.mutate()}
-                          probe={probeByInterface.get(item.interface)}
-                          refreshing={runProbeMutation.isPending}
-                          t={t}
-                        />
                       ) : null}
                       {dnsServersByInterface.has(item.interface) ? (
                         <Badge size="xs" variant="outline">
@@ -1203,6 +1209,11 @@ export function TransportsPage() {
                   ? transportLatencyByInterface.get(nativeInterface.kernelName)
                   : undefined
               }
+              latencyProbe={
+                nativeInterface.kernelName
+                  ? probeByInterface.get(nativeInterface.kernelName)
+                  : undefined
+              }
               nativeInterface={nativeInterface}
               onExpandedChange={(expanded) =>
                 setTransportExpanded(expandedId, expanded)
@@ -1214,6 +1225,16 @@ export function TransportsPage() {
               }
               onHiddenChange={(hidden) =>
                 setNativeHidden(nativeInterface.id, hidden)
+              }
+              onRefreshLatency={
+                nativeInterface.kernelName && boundOutbound
+                  ? () => refreshLatency(nativeInterface.kernelName!)
+                  : undefined
+              }
+              refreshingLatency={
+                nativeInterface.kernelName
+                  ? latencyRefreshPending(nativeInterface.kernelName)
+                  : false
               }
             />
           )

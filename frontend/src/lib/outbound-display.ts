@@ -14,9 +14,13 @@ export function getOutboundReferenceLabel(outbound: Outbound): string {
 export function sortOutboundsByDisplayName(
   outbounds: readonly Outbound[]
 ): Outbound[] {
-  return [...outbounds].sort((left, right) =>
-    getOutboundDisplayName(left).localeCompare(getOutboundDisplayName(right))
-  )
+  return [...outbounds].sort((left, right) => {
+    const leftName = normalizedSortKey(getOutboundDisplayName(left))
+    const rightName = normalizedSortKey(getOutboundDisplayName(right))
+    if (leftName < rightName) return -1
+    if (leftName > rightName) return 1
+    return left.tag < right.tag ? -1 : left.tag > right.tag ? 1 : 0
+  })
 }
 
 export function createOutboundDisplayNameMap(
@@ -28,4 +32,12 @@ export function createOutboundDisplayNameMap(
       getOutboundDisplayName(outbound),
     ])
   )
+}
+
+// String.localeCompare() follows the host's default locale. That made the
+// same mixed Latin/Cyrillic list sort differently on a Russian workstation
+// and in the English CI image. UTF-16 code-point order is less linguistic but
+// deterministic, while NFKC and lower-casing still make common aliases stable.
+function normalizedSortKey(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US")
 }

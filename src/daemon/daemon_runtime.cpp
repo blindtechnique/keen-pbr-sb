@@ -47,6 +47,19 @@ private:
     std::atomic<bool>& flag_;
 };
 
+bool urltest_contains_child(const Outbound& urltest,
+                            const std::string& child_tag) {
+    for (const auto& group :
+         urltest.outbound_groups.value_or(std::vector<OutboundGroup>{})) {
+        if (std::find(group.outbounds.begin(),
+                      group.outbounds.end(),
+                      child_tag) != group.outbounds.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 bool Daemon::run_system_resolver_hook(std::string_view action,
@@ -101,8 +114,9 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
     return true;
 }
 
-bool Daemon::run_system_resolver_hook_reload() {
-    if (build_system_resolver_reload_args(config_).empty()) {
+bool Daemon::run_system_resolver_hook_stream(
+    std::string_view action) {
+    if (build_system_resolver_hook_args(config_, action).empty()) {
         return true;
     }
 
@@ -118,7 +132,7 @@ bool Daemon::run_system_resolver_hook_reload() {
     const std::uint64_t expected_epoch =
         generation->stream_epoch;
     ResolverIpcGate gate(ipc_resolver_hook_inflight_);
-    if (!run_system_resolver_hook("reload", false)) {
+    if (!run_system_resolver_hook(action, false)) {
         return false;
     }
     if (!wait_for_resolver_stream_epoch(
@@ -134,6 +148,10 @@ bool Daemon::run_system_resolver_hook_reload() {
     // the expected hash only after the completed stream boundary.
     update_resolver_config_hash();
     return true;
+}
+
+bool Daemon::run_system_resolver_hook_reload() {
+    return run_system_resolver_hook_stream("reload");
 }
 
 bool Daemon::wait_for_resolver_stream_epoch(
@@ -159,6 +177,17 @@ bool Daemon::routing_runtime_active() const {
     return runtime_state_store_.snapshot().routing_runtime_active;
 }
 
+void Daemon::warn_conntrack_unavailable_once() {
+    if (conntrack_unavailable_warning_emitted_) {
+        return;
+    }
+    conntrack_unavailable_warning_emitted_ = true;
+    Logger::instance().warn(
+        "Best-effort conntrack cleanup is unavailable because the conntrack "
+        "utility is not installed; existing flows may keep their previous "
+        "path until they expire");
+}
+
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
     if (!routing_runtime_active_) {
@@ -181,14 +210,24 @@ void Daemon::stop_routing_runtime() {
         (void)tag;
         owned_marks.insert(mark);
     }
+    std::size_t conntrack_cleanup_failures = 0;
     for (const uint32_t mark : owned_marks) {
-        if (!conntrack_manager_.delete_mark(mark, owned_mark_mask)) {
-            log.warn(
-                "Best-effort conntrack cleanup failed while stopping routing "
-                "for mark {:#x}/{:#x}",
-                mark,
-                owned_mark_mask);
+        const auto cleanup =
+            conntrack_manager_.delete_mark(mark, owned_mark_mask);
+        if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
+            warn_conntrack_unavailable_once();
+            break;
         }
+        if (cleanup == ConntrackCleanupResult::Failed) {
+            ++conntrack_cleanup_failures;
+        }
+    }
+    if (conntrack_cleanup_failures != 0U) {
+        log.warn(
+            "Best-effort conntrack cleanup failed for {} owned mark(s) while "
+            "stopping routing; existing flows may keep their previous path "
+            "until they expire",
+            conntrack_cleanup_failures);
     }
     policy_rules_.clear();
     route_table_.clear();
@@ -227,6 +266,7 @@ void Daemon::start_routing_runtime() {
     try {
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
 
+        normalize_urltest_selections();
         setup_static_routing();
         register_urltest_outbounds();
         (void)refresh_keenetic_dns_cache(true);
@@ -235,8 +275,9 @@ void Daemon::start_routing_runtime() {
         apply_started_ts_.store(
             unix_timestamp_now_seconds(), std::memory_order_release);
         update_resolver_config_hash();
-        if (!run_system_resolver_hook_reload()) {
-            throw DaemonError("System resolver reload hook failed");
+        if (!run_system_resolver_hook_stream(
+                runtime_start_resolver_action())) {
+            throw DaemonError("System resolver activation hook failed");
         }
 
         routing_runtime_active_ = true;
@@ -296,8 +337,54 @@ void Daemon::restart_routing_runtime() {
     }
 
     apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-    stop_routing_runtime();
-    start_routing_runtime();
+    auto& log = Logger::instance();
+
+    // A restart is a recovery operation, not two unrelated button presses.
+    // The resolver deactivation hook runs after the owned routing/firewall
+    // state has already been removed. If only that hook fails, aborting here
+    // leaves the daemon stopped and makes the user press Restart a second
+    // time. Continue into activation when teardown really completed; the
+    // activation stream is the authoritative final state.
+    try {
+        stop_routing_runtime();
+    } catch (const std::exception& error) {
+        if (routing_runtime_active_) {
+            throw;
+        }
+        log.warn(
+            "Routing runtime teardown completed with a resolver fallback "
+            "warning; continuing restart recovery: {}",
+            error.what());
+    }
+
+    try {
+        start_routing_runtime();
+        return;
+    } catch (const std::exception& error) {
+        // Keenetic may finish starting dnsmasq just after the first activation
+        // stream deadline. start_routing_runtime() has already rolled every
+        // owned route/firewall/resolver subsystem back, so one bounded retry
+        // is safe and replaces the previously required second dashboard click.
+        const std::string first_error = error.what();
+        if (!runtime_restart_should_retry(first_error)) {
+            throw;
+        }
+        log.warn(
+            "Resolver activation did not converge during routing restart; "
+            "retrying once after clean rollback: {}",
+            first_error);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{250});
+    try {
+        start_routing_runtime();
+    } catch (const std::exception& error) {
+        throw DaemonError(
+            std::string(
+                "Routing runtime restart failed after resolver recovery "
+                "retry: ") +
+            error.what());
+    }
 }
 
 void Daemon::setup_static_routing() {
@@ -361,11 +448,63 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
 #endif
 }
 
-void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
-                                             const std::string& new_child_tag) {
-    post_control_task([this, urltest_tag, new_child_tag]() {
+void Daemon::normalize_urltest_selections() {
+    const auto current = firewall_state_.get_urltest_selections();
+    std::map<std::string, std::string> normalized;
+
+    for (const auto& outbound :
+         config_.outbounds.value_or(std::vector<Outbound>{})) {
+        if (outbound.type != OutboundType::URLTEST) {
+            continue;
+        }
+        const auto selection = current.find(outbound.tag);
+        if (selection == current.end()) {
+            continue;
+        }
+        if (urltest_contains_child(outbound, selection->second) &&
+            outbound_marks_.find(selection->second) != outbound_marks_.end()) {
+            normalized.emplace(selection->first, selection->second);
+            continue;
+        }
+        Logger::instance().warn(
+            "Dropping retained urltest selection '{}' for '{}': child is no "
+            "longer configured or routable",
+            selection->second,
+            outbound.tag);
+    }
+
+    firewall_state_.set_urltest_selections(std::move(normalized));
+}
+
+void Daemon::handle_urltest_selection_change(
+    const UrltestSelectionChange& change,
+    std::uint64_t expected_runtime_generation) {
+    post_control_task([this, change, expected_runtime_generation]() {
         auto& log = Logger::instance();
-        log.info("Urltest '{}' selected outbound: '{}'", urltest_tag, new_child_tag);
+        const auto current_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        if (expected_runtime_generation != current_runtime_generation) {
+            log.info(
+                "Ignoring stale urltest transition for '{}': runtime "
+                "generation changed from {} to {}",
+                change.urltest_tag,
+                expected_runtime_generation,
+                current_runtime_generation);
+            return;
+        }
+        const auto reason =
+            change.reason == UrltestSelectionChangeReason::previous_unhealthy
+                ? "previous_unhealthy"
+                : (change.reason ==
+                           UrltestSelectionChangeReason::healthy_rebalance
+                       ? "healthy_rebalance"
+                       : "initial");
+        log.info(
+            "Urltest '{}' selected outbound: '{}' (previous='{}', reason={})",
+            change.urltest_tag,
+            change.new_child_tag,
+            change.previous_child_tag,
+            reason);
 
         std::optional<uint32_t> retired_mark;
         const auto outbounds =
@@ -373,25 +512,64 @@ void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
         const auto urltest_it = std::find_if(
             outbounds.begin(),
             outbounds.end(),
-            [&urltest_tag](const Outbound& outbound) {
-                return outbound.tag == urltest_tag &&
+            [&change](const Outbound& outbound) {
+                return outbound.tag == change.urltest_tag &&
                        outbound.type == OutboundType::URLTEST;
             });
-        const auto& selections = firewall_state_.get_urltest_selections();
-        const auto old_selection_it = selections.find(urltest_tag);
-        if (urltest_it != outbounds.end() &&
+        if (urltest_it == outbounds.end() || !urltest_manager_) {
+            log.info(
+                "Ignoring stale urltest transition for '{}': selector is no "
+                "longer configured",
+                change.urltest_tag);
+            return;
+        }
+
+        const auto previous_selections =
+            firewall_state_.get_urltest_selections();
+        const auto& selections = previous_selections;
+        const auto old_selection_it = selections.find(change.urltest_tag);
+        const std::string applied_previous =
+            old_selection_it != selections.end()
+                ? old_selection_it->second
+                : std::string{};
+        if (applied_previous != change.previous_child_tag) {
+            log.info(
+                "Ignoring stale urltest transition for '{}': applied "
+                "selection is '{}', event expected '{}'",
+                change.urltest_tag,
+                applied_previous,
+                change.previous_child_tag);
+            return;
+        }
+
+        // Selection-change tasks preserve the order in which control-loop
+        // probe commits enqueue them. Do not compare this event with the
+        // manager's newest selection: a later probe can already have committed
+        // P -> B -> C while the queued P -> B transition is still waiting.
+        // Skipping P -> B in that case would also make B -> C fail its
+        // applied_previous guard and leave the kernel on P. The firewall
+        // selection is the transactional cursor for this ordered stream.
+
+        const auto cleanup_mode =
             urltest_it->conntrack_on_switch.value_or(
-                ConntrackOnSwitch::PRESERVE) == ConntrackOnSwitch::DELETE &&
-            old_selection_it != selections.end() &&
-            old_selection_it->second != new_child_tag) {
+                ConntrackOnSwitch::PRESERVE);
+        const bool cleanup_retired_flows =
+            cleanup_mode == ConntrackOnSwitch::DELETE ||
+            (cleanup_mode == ConntrackOnSwitch::DELETE_ON_FAILURE &&
+             change.reason ==
+                 UrltestSelectionChangeReason::previous_unhealthy);
+        if (cleanup_retired_flows &&
+            !change.previous_child_tag.empty() &&
+            change.previous_child_tag != change.new_child_tag) {
             const auto old_mark_it =
-                outbound_marks_.find(old_selection_it->second);
+                outbound_marks_.find(change.previous_child_tag);
             if (old_mark_it != outbound_marks_.end()) {
                 retired_mark = old_mark_it->second;
             }
         }
 
-        firewall_state_.set_urltest_selection(urltest_tag, new_child_tag);
+        firewall_state_.set_urltest_selection(
+            change.urltest_tag, change.new_child_tag);
         bool runtime_rebuilt = false;
         try {
             reconcile_static_routing();
@@ -399,12 +577,54 @@ void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
             runtime_rebuilt = true;
             log.info("Routing and firewall rebuilt after urltest change.");
         } catch (const std::exception& e) {
-            log.error("Error rebuilding routing/firewall after urltest change: {}", e.what());
+            log.error(
+                "Error rebuilding routing/firewall after urltest change: {}; "
+                "restoring the previously applied selection",
+                e.what());
+            firewall_state_.set_urltest_selections(previous_selections);
+            if (!urltest_manager_->synchronize_selected(
+                    change.urltest_tag, applied_previous)) {
+                log.error(
+                    "Failed to synchronize urltest '{}' with restored "
+                    "selection '{}'",
+                    change.urltest_tag,
+                    applied_previous);
+            }
+
+            try {
+                reconcile_static_routing();
+                apply_firewall(FirewallApplyMode::PreserveSets);
+                log.warn(
+                    "Urltest '{}' switch to '{}' was rolled back; the next "
+                    "probe may retry it",
+                    change.urltest_tag,
+                    change.new_child_tag);
+            } catch (const std::exception& rollback_error) {
+                log.error(
+                    "Failed to restore routing/firewall after urltest '{}' "
+                    "switch failure: {}",
+                    change.urltest_tag,
+                    rollback_error.what());
+                try {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "urltest selection rollback failed");
+                } catch (const std::exception& state_error) {
+                    log.error(
+                        "Failed to publish broken state after urltest rollback "
+                        "failure: {}",
+                        state_error.what());
+                }
+            }
         }
         if (runtime_rebuilt && retired_mark.has_value()) {
             const uint32_t owned_mask =
                 fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
-            if (!conntrack_manager_.delete_mark(*retired_mark, owned_mask)) {
+            const auto cleanup =
+                conntrack_manager_.delete_mark(*retired_mark, owned_mask);
+            if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
+                warn_conntrack_unavailable_once();
+            } else if (cleanup == ConntrackCleanupResult::Failed) {
                 log.warn(
                     "Failed to remove conntrack entries for retired urltest "
                     "mark {:#x}/{:#x}; existing flows may stay on the previous "
@@ -413,11 +633,11 @@ void Daemon::handle_urltest_selection_change(const std::string& urltest_tag,
                     owned_mask);
             }
         }
-        // Publish the committed probe and the best live kernel state even when
-        // firewall reconciliation failed. Otherwise the UI can retain the
-        // pre-selection "no exit responds" snapshot indefinitely.
+        // Publish the best live kernel state. On success this exposes the new
+        // child; after a failed switch it exposes the restored applied child
+        // (or the broken state when even rollback could not converge).
         publish_runtime_state();
-    }, "urltest-selection-change:" + urltest_tag);
+    }, "urltest-selection-change:" + change.urltest_tag);
 }
 
 void Daemon::commit_urltest_probe_results(const std::string& urltest_tag,
@@ -459,8 +679,10 @@ void Daemon::register_urltest_outbounds() {
             outbound_marks_,
             *scheduler_,
             blocking_executor_,
-            [this](const std::string& urltest_tag, const std::string& new_child_tag) {
-                handle_urltest_selection_change(urltest_tag, new_child_tag);
+            [this](const UrltestSelectionChange& change) {
+                handle_urltest_selection_change(
+                    change,
+                    runtime_generation_.load(std::memory_order_acquire));
             },
             [this](const std::string& urltest_tag,
                    std::uint64_t probe_generation,
@@ -479,7 +701,13 @@ void Daemon::register_urltest_outbounds() {
 
     for (const auto& ob : config_.outbounds.value_or(std::vector<Outbound>{})) {
         if (ob.type == OutboundType::URLTEST) {
-            urltest_manager_->register_urltest(ob);
+            const auto& selections =
+                firewall_state_.get_urltest_selections();
+            const auto retained = selections.find(ob.tag);
+            urltest_manager_->register_urltest(
+                ob,
+                retained != selections.end() ? retained->second
+                                             : std::string{});
         }
     }
 }
@@ -948,6 +1176,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     config_ = std::move(prepared.config);
     firewall_state_.set_outbound_marks(outbound_marks_);
     firewall_state_.set_fwmark_mask(fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{})));
+    normalize_urltest_selections();
 
     teardown_dns_probe();
 

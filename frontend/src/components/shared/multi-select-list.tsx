@@ -47,6 +47,8 @@ export function MultiSelectList({
   placeholderTitle,
   placeholderDescription,
   allowReorder = false,
+  maxItems,
+  limitMessage,
   usageSubtitle,
   error,
   renderItem,
@@ -63,6 +65,8 @@ export function MultiSelectList({
   placeholderTitle?: string
   placeholderDescription?: string
   allowReorder?: boolean
+  maxItems?: number
+  limitMessage?: string
   usageSubtitle?: (optionName: string) => string | undefined
   error?: string | null
   renderItem?: (item: string) => ReactNode
@@ -70,11 +74,18 @@ export function MultiSelectList({
 }) {
   const { t } = useTranslation()
   const [selectValue, setSelectValue] = useState("")
-  const selectedSet = new Set(value)
-  const unavailableSet = new Set(unavailable)
-  const availableOptions = options.filter(
-    (option) => !selectedSet.has(option) && !unavailableSet.has(option)
-  )
+  const atLimit = maxItems !== undefined && value.length >= maxItems
+  const availableOptions = useMemo(() => {
+    if (atLimit) {
+      return []
+    }
+
+    const selectedSet = new Set(value)
+    const unavailableSet = new Set(unavailable)
+    return options.filter(
+      (option) => !selectedSet.has(option) && !unavailableSet.has(option)
+    )
+  }, [atLimit, options, unavailable, value])
   const filteredOptions = useMemo(() => {
     const normalizedValue = selectValue.trim().toLowerCase()
 
@@ -90,8 +101,9 @@ export function MultiSelectList({
   }, [availableOptions, getSearchText, selectValue])
 
   const resolvedAddLabel = addLabel ?? t("common.multiSelectList.addItem")
-  const resolvedEmptyMessage =
-    emptyMessage ?? t("common.multiSelectList.emptyMessage")
+  const resolvedEmptyMessage = atLimit
+    ? (limitMessage ?? emptyMessage ?? t("common.multiSelectList.emptyMessage"))
+    : (emptyMessage ?? t("common.multiSelectList.emptyMessage"))
   const resolvedPlaceholderTitle =
     placeholderTitle ?? t("common.multiSelectList.noItemsSelected")
   const resolvedPlaceholderDescription =

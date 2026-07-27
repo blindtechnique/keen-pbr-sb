@@ -5,7 +5,11 @@ import type {
   RouteRule,
   RuntimeOutboundState,
 } from "@/api/generated/model"
-import { collectActiveTrafficPaths } from "@/components/overview/active-interface-traffic-model"
+import {
+  collectActiveTrafficPaths,
+  formatConnectionDuration,
+  interfaceConnectionState,
+} from "@/components/overview/active-interface-traffic-model"
 
 describe("dashboard active interface traffic", () => {
   test("uses the selected failover member and deduplicates shared interfaces", () => {
@@ -80,5 +84,61 @@ describe("dashboard active interface traffic", () => {
         new Map()
       )
     ).toEqual([{ interfaceName: "tun0", label: "VPN" }])
+  })
+
+  test("uses the managed transport state transition as connected-since time", () => {
+    expect(
+      interfaceConnectionState("vless0", true, [
+        {
+          tag: "vless",
+          display_name: "Основной VLESS",
+          type: "sing-box",
+          interface: "vless0",
+          state: "up",
+          updated_at: "2026-07-27T10:00:00Z",
+          desired_up: true,
+        },
+      ])
+    ).toEqual({
+      connected: true,
+      connectedAtUnixMs: Date.parse("2026-07-27T10:00:00Z"),
+    })
+  })
+
+  test("does not claim an old uptime for a down managed transport", () => {
+    expect(
+      interfaceConnectionState("vless0", true, [
+        {
+          tag: "vless",
+          type: "sing-box",
+          interface: "vless0",
+          state: "down",
+          updated_at: "2026-07-27T10:00:00Z",
+          desired_up: false,
+        },
+      ])
+    ).toEqual({ connected: false, connectedAtUnixMs: undefined })
+  })
+
+  test("does not treat a native status refresh as its connection start", () => {
+    expect(
+      interfaceConnectionState("nwg2", true, [
+        {
+          tag: "native_nwg2",
+          type: "native",
+          interface: "nwg2",
+          state: "up",
+          updated_at: "2026-07-27T10:00:00Z",
+          desired_up: false,
+        },
+      ])
+    ).toEqual({ connected: true })
+  })
+
+  test("formats the compact Keenetic-style elapsed time", () => {
+    expect(
+      formatConnectionDuration(3 * 86_400 + 3 * 3_600 + 14 * 60 + 10, "д.")
+    ).toBe("3 д. 03:14:10")
+    expect(formatConnectionDuration(65, "d")).toBe("00:01:05")
   })
 })

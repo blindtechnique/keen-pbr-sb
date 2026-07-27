@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   DownloadIcon,
+  ExternalLinkIcon,
   FilePlusIcon,
   LoaderCircleIcon,
   PlayIcon,
@@ -466,7 +467,18 @@ export function NfqwsPage() {
           </div>
         }
         description={t("nfqws.description")}
-        title="nfqws2"
+        title={
+          <a
+            aria-label={t("nfqws.repository")}
+            className="inline-flex items-center gap-1.5 text-inherit no-underline outline-none hover:text-inherit hover:no-underline focus-visible:ring-2 focus-visible:ring-ring"
+            href="https://github.com/nfqws/nfqws2-keenetic"
+            rel="noreferrer"
+            target="_blank"
+          >
+            nfqws2
+            <ExternalLinkIcon className="size-4" />
+          </a>
+        }
       />
 
       {!status?.installed && !query.isLoading ? <NotInstalled /> : null}
@@ -489,13 +501,11 @@ export function NfqwsPage() {
                       ? t("common.updateStatus.current")
                       : t("common.updateStatus.checking")}
                 </KeeneticStatus>
-                <Badge
-                  size="xs"
-                  variant={status.running ? "success" : "secondary"}
+                <KeeneticStatus
+                  tone={status.running ? "success" : "neutral"}
                 >
-                  <span className="mr-1.5 size-1.5 rounded-full bg-current" />
                   {status.running ? t("nfqws.running") : t("nfqws.stopped")}
-                </Badge>
+                </KeeneticStatus>
               </div>
             }
           >

@@ -26,6 +26,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import {
+  authEndpointModeLabelKey,
+  type KeeneticEndpointMode,
+} from "@/lib/auth-status"
 import type {
   SettingsSectionController,
   SettingsSectionState,
@@ -35,7 +39,7 @@ type AuthStatus = {
   enabled: boolean
   provider?: "local" | "keenetic"
   keenetic_endpoint?: string
-  keenetic_endpoint_mode?: "auto" | "manual"
+  keenetic_endpoint_mode?: KeeneticEndpointMode
   keenetic_endpoint_source?: "ndms" | "fallback"
   authenticated: boolean
 }
@@ -43,7 +47,7 @@ type AuthStatus = {
 type AuthDraft = {
   enabled: boolean
   provider: "local" | "keenetic"
-  endpointMode: "auto" | "manual"
+  endpointMode: KeeneticEndpointMode
   endpoint: string
 }
 
@@ -271,15 +275,23 @@ function AuthSettingsCardInner(
                     value={endpointMode}
                   >
                     <SelectTrigger>
-                      <SelectValue />
+                      <SelectValue>
+                        {(selected) =>
+                          t(
+                            authEndpointModeLabelKey(
+                              selected === "manual" ? "manual" : "auto"
+                            )
+                          )
+                        }
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
                         <SelectItem value="auto">
-                          {t("pages.settings.auth.endpointModeAuto")}
+                          {t(authEndpointModeLabelKey("auto"))}
                         </SelectItem>
                         <SelectItem value="manual">
-                          {t("pages.settings.auth.endpointModeManual")}
+                          {t(authEndpointModeLabelKey("manual"))}
                         </SelectItem>
                       </SelectGroup>
                     </SelectContent>

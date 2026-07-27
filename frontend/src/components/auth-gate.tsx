@@ -10,6 +10,7 @@ import {
 } from "react"
 import { useTranslation } from "react-i18next"
 
+import logoUrl from "@/assets/logo.png"
 import { useLanguage } from "@/components/language-provider"
 import { Button } from "@/components/ui/button"
 import {
@@ -96,9 +97,23 @@ function AuthInput({
   )
 }
 
-function AuthBrand({ inverted = false }: { readonly inverted?: boolean }) {
+function AuthBrand({
+  inverted = false,
+  showLogo = false,
+}: {
+  readonly inverted?: boolean
+  readonly showLogo?: boolean
+}) {
   return (
-    <header className="text-center">
+    <header className="flex flex-col items-center text-center">
+      {showLogo ? (
+        <img
+          alt=""
+          aria-hidden="true"
+          className="mb-7 size-24 rounded-2xl object-contain"
+          src={logoUrl}
+        />
+      ) : null}
       <div
         aria-label="keen-pbr-sb"
         className="mx-auto flex w-fit origin-center items-baseline leading-none"
@@ -144,11 +159,18 @@ function AuthPage({ children }: { children: ReactNode }) {
         </div>
       </section>
       <aside className="relative hidden min-h-svh overflow-hidden bg-primary text-primary-foreground lg:block">
-        <div className="absolute top-[40%] right-0 left-0 -translate-y-1/2">
-          <AuthBrand inverted />
+        <div className="absolute top-[42%] right-0 left-0 -translate-y-1/2">
+          <AuthBrand inverted showLogo />
         </div>
         <div className="absolute right-0 bottom-[27%] left-0 px-8 text-center text-sm font-medium">
-          {t("auth.otherManagement")}
+          <a
+            className="text-inherit no-underline outline-none hover:text-inherit hover:no-underline focus-visible:ring-2 focus-visible:ring-primary-foreground"
+            href="https://github.com/blindtechnique/keen-pbr-sb"
+            rel="noreferrer"
+            target="_blank"
+          >
+            {t("auth.otherManagement")}
+          </a>
         </div>
       </aside>
     </main>

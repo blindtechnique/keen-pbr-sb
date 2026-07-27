@@ -22,6 +22,7 @@ import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import { OutboundSelect } from "@/components/shared/outbound-select"
+import { MultiSelectList } from "@/components/shared/multi-select-list"
 import {
   Field,
   FieldContent,
@@ -68,6 +69,10 @@ import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { makeTechnicalId } from "@/lib/technical-id"
+import {
+  getOutboundDisplayName,
+  getOutboundReferenceLabel,
+} from "@/lib/outbound-display"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   NO_DNS_RULE,
@@ -91,6 +96,7 @@ const LIST_FIELD_NAMES = {
   name: "name",
   ttlMs: "ttlMs",
   detour: "detour",
+  fallbackDetours: "fallbackDetours",
   domains: "domains",
   ipCidrs: "ipCidrs",
   url: "url",
@@ -112,6 +118,7 @@ const sampleNewList: ListDraft = {
   name: "",
   ttlMs: "7200000",
   detour: "",
+  fallbackDetours: [],
   domains: "",
   ipCidrs: "",
   url: "",
@@ -289,6 +296,15 @@ function ListForm({
     initialDnsServerForList
   )
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
+  const downloadOutbounds = outbounds.filter(
+    (outbound) =>
+      outbound.type === "interface" ||
+      outbound.type === "table" ||
+      outbound.type === "urltest"
+  )
+  const downloadOutboundByTag = new Map(
+    downloadOutbounds.map((outbound) => [outbound.tag, outbound])
+  )
 
   const form = useForm({
     defaultValues: baselineDraft,
@@ -501,6 +517,10 @@ function ListForm({
     if (group !== "inline") {
       form.setFieldValue(LIST_FIELD_NAMES.domains, "")
       form.setFieldValue(LIST_FIELD_NAMES.ipCidrs, "")
+    }
+    if (group !== "url") {
+      form.setFieldValue(LIST_FIELD_NAMES.detour, "")
+      form.setFieldValue(LIST_FIELD_NAMES.fallbackDetours, [])
     }
   }
 
@@ -772,8 +792,18 @@ function ListForm({
                             emptyLabel={t(
                               "pages.listUpsert.fields.detourEmpty"
                             )}
-                            onValueChange={field.handleChange}
-                            outbounds={outbounds}
+                            onValueChange={(nextDetour) => {
+                              field.handleChange(nextDetour)
+                              form.setFieldValue(
+                                LIST_FIELD_NAMES.fallbackDetours,
+                                nextDetour
+                                  ? form.state.values.fallbackDetours.filter(
+                                      (fallback) => fallback !== nextDetour
+                                    )
+                                  : []
+                              )
+                            }}
+                            outbounds={downloadOutbounds}
                             placeholder={t(
                               "pages.listUpsert.fields.detourPlaceholder"
                             )}
@@ -790,6 +820,75 @@ function ListForm({
                     )
                   }}
                 </form.Field>
+              ) : null}
+
+              {presentation === "page" ? (
+                <form.Subscribe
+                  selector={(state) => state.values.detour}
+                >
+                  {(primaryDetour) =>
+                    primaryDetour ? (
+                      <form.Field name={LIST_FIELD_NAMES.fallbackDetours}>
+                        {(field) => (
+                          <Field>
+                            <FieldLabel>
+                              {t(
+                                "pages.listUpsert.fields.fallbackDetours"
+                              )}
+                            </FieldLabel>
+                            <FieldContent>
+                              <MultiSelectList
+                                addLabel={t(
+                                  "pages.listUpsert.fields.fallbackDetoursAdd"
+                                )}
+                                allowReorder
+                                emptyMessage={t(
+                                  "pages.listUpsert.fields.fallbackDetoursEmpty"
+                                )}
+                                getSearchText={(tag) => {
+                                  const outbound =
+                                    downloadOutboundByTag.get(tag)
+                                  return outbound
+                                    ? getOutboundReferenceLabel(outbound)
+                                    : tag
+                                }}
+                                limitMessage={t(
+                                  "pages.listUpsert.fields.fallbackDetoursLimit"
+                                )}
+                                maxItems={3}
+                                name={LIST_FIELD_NAMES.fallbackDetours}
+                                onChange={field.handleChange}
+                                options={downloadOutbounds.map(
+                                  (outbound) => outbound.tag
+                                )}
+                                placeholderDescription={t(
+                                  "pages.listUpsert.fields.fallbackDetoursPlaceholderDescription"
+                                )}
+                                placeholderTitle={t(
+                                  "pages.listUpsert.fields.fallbackDetoursPlaceholder"
+                                )}
+                                renderItem={(tag) => {
+                                  const outbound =
+                                    downloadOutboundByTag.get(tag)
+                                  return outbound
+                                    ? getOutboundDisplayName(outbound)
+                                    : tag
+                                }}
+                                unavailable={[primaryDetour]}
+                                value={field.state.value}
+                              />
+                              <FieldHint
+                                description={t(
+                                  "pages.listUpsert.fields.fallbackDetoursHint"
+                                )}
+                              />
+                            </FieldContent>
+                          </Field>
+                        )}
+                      </form.Field>
+                    ) : null
+                  }
+                </form.Subscribe>
               ) : null}
             </FieldGroup>
           </CardContent>

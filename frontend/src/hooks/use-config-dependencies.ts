@@ -32,7 +32,11 @@ function configRelationshipFingerprint(
     lists: Object.fromEntries(
       Object.entries(config.lists ?? {}).map(([name, list]) => [
         name,
-        { detour: list.detour, displayName: list.display_name },
+        {
+          detour: list.detour,
+          fallbackDetours: list.fallback_detours,
+          displayName: list.display_name,
+        },
       ])
     ),
     route: config.route?.rules ?? [],

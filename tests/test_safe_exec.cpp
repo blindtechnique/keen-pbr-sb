@@ -176,6 +176,19 @@ TEST_CASE("safe_exec_capture: output cap terminates a noisy child") {
     CHECK(std::chrono::steady_clock::now() - started_at < std::chrono::seconds(5));
 }
 
+TEST_CASE("safe_exec_capture: bounded diagnostics can drain a finite command") {
+    const auto result = safe_exec_capture(
+        {"/bin/sh", "-c", "head -c 4096 /dev/zero"},
+        true,
+        32,
+        false,
+        true);
+
+    CHECK(result.exit_code == 0);
+    CHECK(result.truncated);
+    CHECK(result.stdout_output.size() == 32);
+}
+
 TEST_CASE("safe_exec_capture: stderr is merged only when explicitly requested") {
     const auto stdout_only = safe_exec_capture(
         {"/bin/sh", "-c", "printf out; printf err >&2"},

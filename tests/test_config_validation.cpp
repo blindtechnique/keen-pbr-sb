@@ -253,6 +253,69 @@ TEST_CASE("legacy config without UI preferences remains valid") {
     CHECK_FALSE(config.ui_preferences.has_value());
 }
 
+TEST_CASE("remote list accepts at most three ordered routable fallbacks") {
+    const auto config = parse_test_config(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"eth0"},
+            {"tag":"backup_a","type":"interface","interface":"eth1"},
+            {"tag":"backup_b","type":"table","table":201},
+            {"tag":"backup_c","type":"interface","interface":"eth2"}
+        ],
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "detour":"primary",
+            "fallback_detours":["backup_a","backup_b","backup_c"]
+        }}
+    })");
+
+    REQUIRE(config.lists.has_value());
+    REQUIRE(config.lists->at("remote").fallback_detours.has_value());
+    CHECK(*config.lists->at("remote").fallback_detours ==
+          std::vector<std::string>{"backup_a", "backup_b", "backup_c"});
+}
+
+TEST_CASE("remote list fallback validation prevents implicit or invalid routes") {
+    const auto no_primary = validate_issues(R"({
+        "outbounds":[
+            {"tag":"backup","type":"interface","interface":"eth1"}
+        ],
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "fallback_detours":["backup"]
+        }}
+    })");
+    CHECK(find_issue(no_primary, "lists.remote.fallback_detours") != nullptr);
+
+    const auto too_many = validate_issues(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"eth0"},
+            {"tag":"a","type":"interface","interface":"eth1"},
+            {"tag":"b","type":"interface","interface":"eth2"},
+            {"tag":"c","type":"interface","interface":"eth3"},
+            {"tag":"d","type":"interface","interface":"eth4"}
+        ],
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "detour":"primary",
+            "fallback_detours":["a","b","c","d"]
+        }}
+    })");
+    CHECK(find_issue(too_many, "lists.remote.fallback_detours") != nullptr);
+
+    const auto duplicate = validate_issues(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"eth0"}
+        ],
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "detour":"primary",
+            "fallback_detours":["primary"]
+        }}
+    })");
+    CHECK(find_issue(
+              duplicate, "lists.remote.fallback_detours[0]") != nullptr);
+}
+
 TEST_CASE("legacy config without aliases or stable rule ids round-trips") {
     const auto parsed = parse_test_config(R"({
         "lists":{"legacy":{"domains":["example.com"]}},
@@ -604,6 +667,32 @@ TEST_CASE("conntrack_on_switch is accepted only for urltest outbounds") {
     CHECK(*delete_mode.outbounds->at(1).conntrack_on_switch ==
           ConntrackOnSwitch::DELETE);
 
+    const auto failure_only = parse_test_config(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "selection_mode":"priority",
+             "conntrack_on_switch":"delete_on_failure",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    REQUIRE(failure_only.outbounds.has_value());
+    REQUIRE(failure_only.outbounds->at(1).conntrack_on_switch.has_value());
+    CHECK(*failure_only.outbounds->at(1).conntrack_on_switch ==
+          ConntrackOnSwitch::DELETE_ON_FAILURE);
+
+    const auto latency_failure_only = validate_issues(R"({
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "conntrack_on_switch":"delete_on_failure",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    CHECK(find_issue(
+              latency_failure_only,
+              "outbounds.ut.conntrack_on_switch") != nullptr);
+
     const auto issues = validate_issues(R"({
         "outbounds": [
             {"tag":"vpn","type":"interface","interface":"wg0",
@@ -657,6 +746,50 @@ TEST_CASE("conntrack delete mode rejects child marks shared with unrelated traff
     CHECK(find_issue(
               nested_group_issues,
               "outbounds.outer.conntrack_on_switch") != nullptr);
+
+    const auto list_detour_issues = validate_issues(R"({
+        "lists":{
+            "matched":{
+                "url":"https://example.test/list.txt",
+                "detour":"vpn"
+            }
+        },
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "conntrack_on_switch":"delete",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ]
+    })");
+    CHECK(find_issue(
+              list_detour_issues,
+              "outbounds.ut.conntrack_on_switch") != nullptr);
+}
+
+TEST_CASE("failure-only conntrack cleanup may share a failed leaf mark") {
+    const auto config = parse_test_config(R"({
+        "lists":{
+            "matched":{
+                "url":"https://example.test/list.txt",
+                "detour":"vpn"
+            }
+        },
+        "outbounds": [
+            {"tag":"vpn","type":"interface","interface":"wg0"},
+            {"tag":"ut","type":"urltest","url":"https://example.test/x",
+             "selection_mode":"priority",
+             "conntrack_on_switch":"delete_on_failure",
+             "outbound_groups":[{"outbounds":["vpn"]}]},
+            {"tag":"other","type":"urltest","url":"https://example.test/y",
+             "outbound_groups":[{"outbounds":["vpn"]}]}
+        ],
+        "route":{"rules":[
+            {"list":["matched"],"outbound":"vpn"}
+        ]}
+    })");
+    REQUIRE(config.outbounds.has_value());
+    CHECK(config.outbounds->at(1).conntrack_on_switch ==
+          ConntrackOnSwitch::DELETE_ON_FAILURE);
 }
 
 TEST_CASE("urltest numeric fields reject unsafe lower bounds with exact paths") {

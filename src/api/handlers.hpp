@@ -35,6 +35,11 @@ struct ConfigApplyResult {
     bool rolled_back{false};
     std::optional<std::int64_t> apply_started_ts;
     std::string error;
+    // Preparation happens before the control/event-loop task mutates routes,
+    // firewall state, or resolver state. A preparation failure therefore
+    // leaves the previously healthy runtime intact; callers must distinguish
+    // that proven state from an apply whose rollback could not be verified.
+    bool runtime_unchanged{false};
 };
 
 struct ServiceHealthState {

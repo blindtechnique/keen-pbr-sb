@@ -32,4 +32,10 @@ export interface ListConfig {
   /** Optional outbound tag to use when downloading this list. If set, download traffic is marked with the outbound's fwmark and routed via its dedicated routing table. If omitted, the system default routing table is used.
    */
   detour?: string;
+  /**
+     * Ordered fallback outbound tags used only when downloading through `detour` fails. Every entry must reference a routable interface, table, or urltest outbound and must differ from `detour`. Direct routing is never added implicitly after an explicitly configured detour chain fails.
+
+     * @maxItems 3
+     */
+  fallback_detours?: string[];
 }

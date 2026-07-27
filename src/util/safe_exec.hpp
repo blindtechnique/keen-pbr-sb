@@ -740,17 +740,19 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
 inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
                                            bool suppress_stderr = false,
                                            size_t max_bytes = 0,
-                                           bool capture_stderr = false) {
+                                           bool capture_stderr = false,
+                                           bool drain_after_limit = false) {
     ExecCaptureResult result;
     if (args.empty()) return result;
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
     Logger::instance().trace("safe_exec_capture_start",
-                             "cmd={} suppress_stderr={} capture_stderr={} max_bytes={}",
+                             "cmd={} suppress_stderr={} capture_stderr={} max_bytes={} drain_after_limit={}",
                              command,
                              suppress_stderr ? "true" : "false",
                              capture_stderr ? "true" : "false",
-                             max_bytes);
+                             max_bytes,
+                             drain_after_limit ? "true" : "false");
 
     std::vector<const char*> argv;
     argv.reserve(args.size() + 1);
@@ -852,8 +854,11 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
             child_status_valid = waited == pid;
             child_reaped = child_status_valid || waited == -1;
         }
-        if (result.truncated || std::chrono::steady_clock::now() >= deadline) {
-            timed_out = !result.truncated;
+        const bool output_limit_reached =
+            result.truncated && !drain_after_limit;
+        if (output_limit_reached ||
+            std::chrono::steady_clock::now() >= deadline) {
+            timed_out = !output_limit_reached;
             if (!child_reaped) {
                 const auto wait_result = wait_for_child_until(
                     pid, std::chrono::steady_clock::now(), timeouts.kill_grace);

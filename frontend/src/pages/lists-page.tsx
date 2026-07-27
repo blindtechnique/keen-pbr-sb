@@ -56,6 +56,9 @@ import {
   getDnsRuleDisplayName,
 } from "@/lib/dns-display"
 import {
+  createOutboundDisplayNameMap,
+} from "@/lib/outbound-display"
+import {
   formatListReferenceLabels,
   getListDisplayName,
   getListReferenceLabel,
@@ -84,6 +87,9 @@ type ListTableRow = {
   locationLabel: string
   locationIcon?: "external"
   lastUpdated?: string
+  lastAttempt?: string
+  lastError?: string
+  lastDetour?: string
   stats?: {
     totalHosts: number
     ipv4Subnets: number
@@ -169,13 +175,20 @@ export function ListsPage() {
       },
       onSettled: () => {
         setActiveRefreshTarget(null)
+        void queryClient.invalidateQueries({ queryKey: queryKeys.config() })
       },
     },
   })
 
   const tableRows = useMemo(
-    () => getTableRowsFromListMap(loadedConfig?.lists, listRefreshState, t),
-    [loadedConfig?.lists, listRefreshState, t]
+    () =>
+      getTableRowsFromListMap(
+        loadedConfig?.lists,
+        listRefreshState,
+        createOutboundDisplayNameMap(loadedConfig?.outbounds ?? []),
+        t
+      ),
+    [loadedConfig?.lists, loadedConfig?.outbounds, listRefreshState, t]
   )
   const tableRowsById = useMemo(
     () => new Map(tableRows.map((row) => [row.id, row])),
@@ -428,6 +441,7 @@ export function ListsPage() {
                       <p className="truncate text-xs text-muted-foreground">
                         {list.locationLabel}
                       </p>
+                      <ListRefreshSummary list={list} t={t} />
                     </div>
                     <Badge size="xs" variant="outline">
                       {getListSourceLabel(list.draft, t)}
@@ -512,16 +526,7 @@ export function ListsPage() {
                   <div className="text-sm text-muted-foreground md:text-xs">
                     {list.locationLabel}
                   </div>
-                  {list.canRefresh ? (
-                    <div className="text-sm text-muted-foreground md:text-xs">
-                      {t("pages.lists.lastUpdated", {
-                        value: formatLastUpdatedLabel(
-                          list.lastUpdated,
-                          t("pages.lists.neverUpdated")
-                        ),
-                      })}
-                    </div>
-                  ) : null}
+                  <ListRefreshSummary list={list} t={t} />
                 </div>,
                 <Badge key={`${list.id}-type`} variant="outline">
                   {getListSourceLabel(list.draft, t)}
@@ -901,6 +906,7 @@ function getListAccessibleLabel(list: ListTableRow | undefined) {
 function getTableRowsFromListMap(
   lists: ConfigObject["lists"],
   listRefreshState: ConfigStateResponseListRefreshState,
+  outboundNames: ReadonlyMap<string, string>,
   t: (key: string) => string
 ): ListTableRow[] {
   return Object.entries(lists ?? {}).map(([name, listConfig]) => {
@@ -925,6 +931,12 @@ function getTableRowsFromListMap(
         listConfig.url || listConfig.file || t("pages.lists.location.inline"),
       locationIcon: listConfig.url ? "external" : undefined,
       lastUpdated: listRefreshState[name]?.last_updated,
+      lastAttempt: listRefreshState[name]?.last_attempt,
+      lastError: listRefreshState[name]?.last_error,
+      lastDetour: listRefreshState[name]?.last_detour
+        ? (outboundNames.get(listRefreshState[name]?.last_detour ?? "") ??
+          listRefreshState[name]?.last_detour)
+        : undefined,
       stats: showInlineStats
         ? {
             totalHosts: domains.length + ipCidrs.length,
@@ -935,6 +947,49 @@ function getTableRowsFromListMap(
       canRefresh: Boolean(listConfig.url),
     }
   })
+}
+
+function ListRefreshSummary({
+  list,
+  t,
+}: {
+  list: ListTableRow
+  t: ReturnType<typeof useTranslation>["t"]
+}) {
+  if (!list.canRefresh) {
+    return null
+  }
+
+  const successfulAt = formatLastUpdatedLabel(
+    list.lastUpdated,
+    t("pages.lists.neverUpdated")
+  )
+  const attemptedAt = formatLastUpdatedLabel(
+    list.lastAttempt,
+    t("pages.lists.neverUpdated")
+  )
+
+  return (
+    <div className="space-y-0.5 text-xs">
+      <div className="text-muted-foreground">
+        {t("pages.lists.lastUpdated", { value: successfulAt })}
+      </div>
+      {list.lastError ? (
+        <div className="break-words text-destructive">
+          {t(
+            list.lastDetour
+              ? "pages.lists.lastRefreshFailedVia"
+              : "pages.lists.lastRefreshFailed",
+            {
+              value: attemptedAt,
+              detour: list.lastDetour,
+              message: list.lastError,
+            }
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function getListSourceLabel(draft: ListDraft, t: (key: string) => string) {
@@ -963,7 +1018,11 @@ function formatLastUpdatedLabel(value: string | undefined, fallback: string) {
   }
 
   return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   }).format(parsedDate)
 }

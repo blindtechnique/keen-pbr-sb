@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 
-import { parseAuthStatus } from "../src/lib/auth-status"
+import {
+  authEndpointModeLabelKey,
+  parseAuthStatus,
+} from "../src/lib/auth-status"
+import { enTranslation } from "../src/i18n/en"
+import { ruTranslation } from "../src/i18n/ru"
 
 describe("authentication status contract", () => {
   test("accepts only the explicit boolean contract", () => {
@@ -18,5 +23,26 @@ describe("authentication status contract", () => {
     expect(
       parseAuthStatus({ enabled: "false", authenticated: 1 })
     ).toBeNull()
+  })
+
+  test("maps Keenetic endpoint modes to localized labels", () => {
+    expect(authEndpointModeLabelKey("auto")).toBe(
+      "pages.settings.auth.endpointModeAuto"
+    )
+    expect(authEndpointModeLabelKey("manual")).toBe(
+      "pages.settings.auth.endpointModeManual"
+    )
+    expect(ruTranslation.pages.settings.auth.endpointModeAuto).toBe(
+      "Автоматически через NDMS"
+    )
+    expect(ruTranslation.pages.settings.auth.endpointModeManual).toBe(
+      "Вручную"
+    )
+    expect(enTranslation.pages.settings.auth.endpointModeAuto).toBe(
+      "Automatically via NDMS"
+    )
+    expect(enTranslation.pages.settings.auth.endpointModeManual).toBe(
+      "Manually"
+    )
   })
 })

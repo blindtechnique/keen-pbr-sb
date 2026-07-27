@@ -2,6 +2,7 @@ import type {
   Outbound,
   RouteRule,
   RuntimeOutboundState,
+  TransportStatus,
 } from "@/api/generated/model"
 import {
   createOutboundDisplayNameMap,
@@ -11,6 +12,11 @@ import {
 export type ActiveTrafficPath = Readonly<{
   interfaceName: string
   label: string
+}>
+
+export type InterfaceConnectionState = Readonly<{
+  connected: boolean
+  connectedAtUnixMs?: number
 }>
 
 export function collectActiveTrafficPaths(
@@ -43,4 +49,49 @@ export function collectActiveTrafficPaths(
   }
 
   return [...paths.values()]
+}
+
+export function interfaceConnectionState(
+  interfaceName: string,
+  runtimeUp: boolean,
+  transports: readonly TransportStatus[]
+): InterfaceConnectionState {
+  const transport = transports.find(
+    (candidate) =>
+      candidate.interface === interfaceName && candidate.type !== "native"
+  )
+  if (transport) {
+    return {
+      connected: transport.state === "up",
+      connectedAtUnixMs:
+        transport.state === "up"
+          ? parseTimestamp(transport.updated_at)
+          : undefined,
+    }
+  }
+  return { connected: runtimeUp }
+}
+
+/**
+ * Keenetic uses a compact `D.HH:MM:SS`-style duration in its connection badge.
+ * Keeping the formatter locale-neutral avoids rerunning Intl on every second.
+ */
+export function formatConnectionDuration(
+  totalSeconds: number,
+  daySuffix: string
+): string {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds))
+  const days = Math.floor(safeSeconds / 86_400)
+  const hours = Math.floor((safeSeconds % 86_400) / 3_600)
+  const minutes = Math.floor((safeSeconds % 3_600) / 60)
+  const seconds = safeSeconds % 60
+  const clock = [hours, minutes, seconds]
+    .map((part) => part.toString().padStart(2, "0"))
+    .join(":")
+  return days > 0 ? `${days} ${daySuffix} ${clock}` : clock
+}
+
+function parseTimestamp(value: string): number | undefined {
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
 }

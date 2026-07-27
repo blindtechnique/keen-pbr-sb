@@ -116,6 +116,7 @@ const urltestSelectionModes = [
 
 const conntrackOnSwitchModes = [
   "preserve",
+  "delete_on_failure",
   "delete",
 ] as const satisfies readonly ConntrackOnSwitchMode[]
 
@@ -1007,9 +1008,21 @@ function OutboundForm({
                         ),
                       }))}
                       onValueChange={(value) =>
-                        field.handleChange(
-                          (value as UrltestSelectionMode | null) ?? "latency"
-                        )
+                        {
+                          const nextMode =
+                            (value as UrltestSelectionMode | null) ?? "latency"
+                          field.handleChange(nextMode)
+                          if (
+                            nextMode !== "priority" &&
+                            form.state.values.conntrackOnSwitch ===
+                              "delete_on_failure"
+                          ) {
+                            form.setFieldValue(
+                              OUTBOUND_FIELD_NAMES.conntrackOnSwitch,
+                              "preserve"
+                            )
+                          }
+                        }
                       }
                       value={field.state.value}
                     >
@@ -1052,11 +1065,17 @@ function OutboundForm({
                           `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
                         ),
                       }))}
-                      onValueChange={(value) =>
-                        field.handleChange(
+                      onValueChange={(value) => {
+                        const nextMode =
                           (value as ConntrackOnSwitchMode | null) ?? "preserve"
-                        )
-                      }
+                        field.handleChange(nextMode)
+                        if (nextMode === "delete_on_failure") {
+                          form.setFieldValue(
+                            OUTBOUND_FIELD_NAMES.selectionMode,
+                            "priority"
+                          )
+                        }
+                      }}
                       value={field.state.value}
                     >
                       <SelectTrigger>

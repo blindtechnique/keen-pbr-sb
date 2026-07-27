@@ -832,7 +832,8 @@ std::string commit_prepared_config_impl(
 
         if (!apply_result.error.empty() ||
             !apply_result.applied) {
-            if (!apply_result.rolled_back) {
+            if (!apply_result.rolled_back &&
+                !apply_result.runtime_unchanged) {
                 fail_lifecycle_best_effort(
                     ctx,
                     lifecycle,
@@ -887,7 +888,9 @@ std::string commit_prepared_config_impl(
                                apply_result.error},
                     {"saved", false},
                     {"applied", apply_result.applied},
-                    {"rolled_back", true},
+                    {"rolled_back", apply_result.rolled_back},
+                    {"runtime_unchanged",
+                     apply_result.runtime_unchanged},
                     {"file_rolled_back", true},
                     {"recovery_required", false},
                 }

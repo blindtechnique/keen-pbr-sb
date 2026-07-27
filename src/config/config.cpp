@@ -1094,6 +1094,84 @@ void validate_config(const Config& cfg) {
         }
     }
 
+    for (const auto& [name, list_cfg] :
+         cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
+        const std::string list_path =
+            name.empty() ? "lists" : "lists." + name;
+        const auto fallbacks = list_cfg.fallback_detours.value_or(
+            std::vector<std::string>{});
+
+        if (!fallbacks.empty() && !list_cfg.detour.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".fallback_detours",
+                list_path +
+                    ".fallback_detours requires an explicit primary detour");
+        }
+        if (fallbacks.size() > 3U) {
+            add_issue(
+                issues,
+                list_path + ".fallback_detours",
+                list_path +
+                    ".fallback_detours supports at most 3 entries");
+        }
+        if ((!fallbacks.empty() || list_cfg.detour.has_value()) &&
+            !list_cfg.url.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".detour",
+                list_path +
+                    " download detours are only valid for URL-backed lists");
+        }
+
+        std::set<std::string> seen_detours;
+        const auto validate_download_detour =
+            [&](const std::string& tag, const std::string& path) {
+                if (tag.empty()) {
+                    add_issue(
+                        issues, path, path + " must not be empty");
+                    return;
+                }
+                if (!seen_detours.insert(tag).second) {
+                    add_issue(
+                        issues,
+                        path,
+                        path + " repeats outbound tag '" + tag + "'");
+                    return;
+                }
+
+                const auto outbound_it = outbounds_by_tag.find(tag);
+                if (outbound_it == outbounds_by_tag.end()) {
+                    add_issue(
+                        issues,
+                        path,
+                        path + ": unknown outbound tag '" + tag + "'");
+                    return;
+                }
+                const auto type = outbound_it->second->type;
+                if (type != OutboundType::INTERFACE &&
+                    type != OutboundType::TABLE &&
+                    type != OutboundType::URLTEST) {
+                    add_issue(
+                        issues,
+                        path,
+                        path + ": outbound '" + tag +
+                            "' has no routable download table");
+                }
+            };
+
+        if (list_cfg.detour.has_value()) {
+            validate_download_detour(
+                *list_cfg.detour, list_path + ".detour");
+        }
+        for (std::size_t index = 0; index < fallbacks.size(); ++index) {
+            validate_download_detour(
+                fallbacks[index],
+                list_path + ".fallback_detours[" +
+                    std::to_string(index) + "]");
+        }
+    }
+
     for (const auto& ob : outbounds) {
         validate_tag(issues, "outbounds." + ob.tag + ".tag", "Outbound tag", ob.tag);
         validate_display_name(
@@ -1140,6 +1218,19 @@ void validate_config(const Config& cfg) {
         }
 
         if (ob.type != OutboundType::URLTEST) continue;
+
+        if (ob.conntrack_on_switch.value_or(
+                ConntrackOnSwitch::PRESERVE) ==
+                ConntrackOnSwitch::DELETE_ON_FAILURE &&
+            ob.selection_mode.value_or(
+                UrltestSelectionMode::LATENCY) !=
+                UrltestSelectionMode::PRIORITY) {
+            add_issue(
+                issues,
+                "outbounds." + ob.tag + ".conntrack_on_switch",
+                "conntrack_on_switch='delete_on_failure' requires "
+                "selection_mode='priority'");
+        }
 
         if (!ob.url.has_value() || ob.url->empty()) {
             add_issue(issues, "outbounds." + ob.tag + ".url",
@@ -1604,16 +1695,36 @@ void validate_config(const Config& cfg) {
         }
     }
 
+    std::set<std::string> direct_list_detours;
+    for (const auto& [list_name, list] :
+         cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
+        (void)list_name;
+        if (list.detour.has_value()) {
+            direct_list_detours.insert(*list.detour);
+        }
+        for (const auto& detour :
+             list.fallback_detours.value_or(
+                 std::vector<std::string>{})) {
+            direct_list_detours.insert(detour);
+        }
+    }
+
     for (const auto& outbound : outbounds) {
-        if (outbound.type != OutboundType::URLTEST ||
+        const auto cleanup_mode =
             outbound.conntrack_on_switch.value_or(
-                ConntrackOnSwitch::PRESERVE) != ConntrackOnSwitch::DELETE ||
+                ConntrackOnSwitch::PRESERVE);
+        if (outbound.type != OutboundType::URLTEST ||
+            cleanup_mode == ConntrackOnSwitch::PRESERVE ||
             !outbound.outbound_groups.has_value()) {
             continue;
         }
 
         const std::string mode_path =
             "outbounds." + outbound.tag + ".conntrack_on_switch";
+        const std::string mode_name =
+            cleanup_mode == ConntrackOnSwitch::DELETE
+                ? "delete"
+                : "delete_on_failure";
         std::set<std::string> checked_children;
         for (const auto& group : *outbound.outbound_groups) {
             for (const auto& child_tag : group.outbounds) {
@@ -1627,9 +1738,21 @@ void validate_config(const Config& cfg) {
                     add_issue(
                         issues,
                         mode_path,
-                        "conntrack_on_switch='delete' does not support nested "
+                        "conntrack_on_switch='" + mode_name +
+                            "' does not support nested "
                         "urltest child '" + child_tag +
                             "'; use 'preserve' for nested selectors");
+                }
+
+                // Failure-only cleanup deliberately targets every flow using
+                // the failed physical child. Direct rules, DNS/list downloads
+                // and another selector using that same failed child are not
+                // collateral in this mode. Symmetric cleanup can also run
+                // while the retired child is healthy (for example on
+                // failback), so only that legacy mode requires exclusive
+                // ownership.
+                if (cleanup_mode != ConntrackOnSwitch::DELETE) {
+                    continue;
                 }
 
                 const auto parents_it =
@@ -1639,7 +1762,8 @@ void validate_config(const Config& cfg) {
                     add_issue(
                         issues,
                         mode_path,
-                        "conntrack_on_switch='delete' requires exclusive child "
+                        "conntrack_on_switch='" + mode_name +
+                            "' requires exclusive child "
                         "marks, but outbound '" + child_tag +
                             "' is shared by multiple urltest selectors");
                 }
@@ -1647,7 +1771,8 @@ void validate_config(const Config& cfg) {
                     add_issue(
                         issues,
                         mode_path,
-                        "conntrack_on_switch='delete' cannot use child '" +
+                        "conntrack_on_switch='" + mode_name +
+                            "' cannot use child '" +
                             child_tag +
                             "' because a routing rule also references it "
                             "directly");
@@ -1656,9 +1781,19 @@ void validate_config(const Config& cfg) {
                     add_issue(
                         issues,
                         mode_path,
-                        "conntrack_on_switch='delete' cannot use child '" +
+                        "conntrack_on_switch='" + mode_name +
+                            "' cannot use child '" +
                             child_tag +
                             "' because a DNS server also references it "
+                            "directly");
+                }
+                if (direct_list_detours.count(child_tag) > 0) {
+                    add_issue(
+                        issues,
+                        mode_path,
+                        "conntrack_on_switch='" + mode_name +
+                            "' cannot use child '" + child_tag +
+                            "' because a URL list download also references it "
                             "directly");
                 }
             }

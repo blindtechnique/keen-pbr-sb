@@ -8,6 +8,8 @@ import { useTranslation } from "react-i18next"
 
 import type { NdmsManagementBlocker } from "@/api/generated/model"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
+import type { LatencyProbe } from "@/components/transports/transport-latency-model"
+import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
 import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { Badge } from "@/components/ui/badge"
@@ -28,6 +30,7 @@ import {
 export function NativeInterfaceCard({
   nativeInterface,
   latencyMs,
+  latencyProbe,
   boundOutboundTag,
   hasConfig,
   expanded,
@@ -35,9 +38,12 @@ export function NativeInterfaceCard({
   onCreateRoute,
   onExpandedChange,
   onHiddenChange,
+  onRefreshLatency,
+  refreshingLatency,
 }: {
   readonly nativeInterface: NativeInterfaceModel
   readonly latencyMs?: number
+  readonly latencyProbe?: LatencyProbe
   readonly boundOutboundTag?: string
   readonly hasConfig: boolean
   readonly expanded: boolean
@@ -45,6 +51,8 @@ export function NativeInterfaceCard({
   readonly onCreateRoute: (interfaceName: string) => void
   readonly onExpandedChange: (expanded: boolean) => void
   readonly onHiddenChange: (hidden: boolean) => void
+  readonly onRefreshLatency?: () => void
+  readonly refreshingLatency?: boolean
 }) {
   const { t, i18n } = useTranslation()
   const actionability = getNativeRouteActionability(nativeInterface, {
@@ -60,7 +68,7 @@ export function NativeInterfaceCard({
   const managementReadiness = nativeInterface.source.management_readiness
 
   return (
-    <Card className="flex h-full min-w-0 flex-col overflow-hidden" size="sm">
+    <Card className="flex min-w-0 flex-col overflow-hidden" size="sm">
       <CardHeader className="min-w-0">
         <div className="min-w-0">
           <CardTitle className="leading-5 tracking-normal break-words">
@@ -110,6 +118,17 @@ export function NativeInterfaceCard({
           </Button>
         </CardAction>
       </CardHeader>
+      {nativeInterface.live &&
+      (visibleLatency !== undefined || onRefreshLatency) ? (
+        <div className="flex min-h-7 items-center px-3">
+          <TransportLatencyPill
+            onRefresh={onRefreshLatency}
+            probe={latencyProbe}
+            refreshing={refreshingLatency}
+            runtimeMilliseconds={visibleLatency}
+          />
+        </div>
+      ) : null}
 
       <CardContent
         className={`flex min-w-0 flex-1 flex-col gap-1.5 text-sm ${
@@ -126,12 +145,6 @@ export function NativeInterfaceCard({
                 t("transports.nativeInterface.unresolved")
               }
             />
-            {visibleLatency !== undefined ? (
-              <NativeInterfaceField
-                label={t("transports.nativeInterface.latency")}
-                value={t("transports.latencyValue", { value: visibleLatency })}
-              />
-            ) : null}
             <NativeInterfaceField
               label={t("transports.nativeInterface.boundRoute")}
               mono={Boolean(boundOutboundTag)}

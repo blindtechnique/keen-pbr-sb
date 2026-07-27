@@ -102,6 +102,10 @@ namespace api {
         std::optional<std::string> etag;
         std::optional<int64_t> ips;
         std::optional<std::string> last_modified;
+        std::optional<std::string> last_refresh_attempt;
+        std::optional<std::string> last_refresh_detour;
+        std::optional<std::string> last_refresh_error;
+        std::optional<std::string> last_refresh_url;
         std::optional<int64_t> srs_decoder_revision;
         std::optional<std::string> url;
     };
@@ -184,6 +188,7 @@ namespace api {
         std::optional<std::string> detour;
         std::optional<std::string> display_name;
         std::optional<std::vector<std::string>> domains;
+        std::optional<std::vector<std::string>> fallback_detours;
         std::optional<std::string> file;
         std::optional<std::vector<std::string>> ip_cidrs;
         std::optional<int64_t> ttl_ms;
@@ -195,7 +200,7 @@ namespace api {
         std::optional<bool> enabled;
     };
 
-    enum class ConntrackOnSwitch : int { DELETE, PRESERVE };
+    enum class ConntrackOnSwitch : int { DELETE, DELETE_ON_FAILURE, PRESERVE };
 
     struct OutboundGroupElement {
         std::vector<std::string> outbounds;
@@ -275,6 +280,9 @@ namespace api {
     };
 
     struct ListRefreshStateValue {
+        std::optional<std::string> last_attempt;
+        std::optional<std::string> last_detour;
+        std::optional<std::string> last_error;
         std::optional<std::string> last_updated;
     };
 
@@ -627,6 +635,7 @@ namespace api {
         std::vector<RuntimeInterfaceTrafficPointElement> history;
         std::optional<int64_t> rx_bits_per_second;
         int64_t rx_bytes;
+        std::optional<int64_t> sampled_at_unix_ms;
         std::optional<int64_t> tx_bits_per_second;
         int64_t tx_bytes;
     };
@@ -656,6 +665,21 @@ namespace api {
         RuntimeInterfaceStatusEnum status;
     };
 
+    struct RuntimeInterfaceTrafficSample {
+        bool available;
+        std::string name;
+        bool reset;
+        std::optional<int64_t> rx_bits_per_second;
+        std::optional<int64_t> rx_bytes;
+        std::optional<int64_t> tx_bits_per_second;
+        std::optional<int64_t> tx_bytes;
+    };
+
+    struct RuntimeInterfaceTrafficUpdate {
+        std::vector<RuntimeInterfaceTrafficSample> interfaces;
+        int64_t sampled_at_unix_ms;
+    };
+
     struct RuntimeOutboundStateElement {
         std::optional<std::string> detail;
         std::vector<RuntimeInterfaceState> interfaces;
@@ -679,6 +703,13 @@ namespace api {
     struct StatusEventConnections {
         ConnectionEventState data;
         StatusEventConnectionsType type;
+    };
+
+    enum class StatusEventInterfaceTrafficType : int { INTERFACE_TRAFFIC };
+
+    struct StatusEventInterfaceTraffic {
+        RuntimeInterfaceTrafficUpdate data;
+        StatusEventInterfaceTrafficType type;
     };
 
     enum class StatusEventInterfacesType : int { INTERFACES };
@@ -723,7 +754,15 @@ namespace api {
         TransportActionResponseStatus status;
     };
 
-    enum class Operation : int { CREATE, DELETE, UPDATE };
+    enum class Mode : int { ENSURE };
+
+    struct LinkedOutbound {
+        std::optional<std::string> display_name;
+        Mode mode;
+        std::optional<bool> strict_enforcement;
+    };
+
+    enum class TransportConfigApplyRequestOperation : int { CREATE };
 
     enum class GeoMode : int { AUTO, DISABLED, MANUAL };
 
@@ -758,8 +797,29 @@ namespace api {
         std::optional<Vless> vless;
     };
 
+    struct TransportConfigApplyRequest {
+        LinkedOutbound linked_outbound;
+        TransportConfigApplyRequestOperation operation;
+        Transport transport;
+    };
+
+    enum class TransportConfigApplyResponseStatus : int { APPLIED };
+
+    struct TransportConfigApplyResponse {
+        std::optional<bool> applied;
+        std::optional<int64_t> apply_started_ts;
+        std::optional<std::string> config_revision;
+        std::optional<std::string> message;
+        std::optional<bool> rolled_back;
+        std::optional<bool> saved;
+        TransportConfigApplyResponseStatus status;
+        std::optional<std::string> transport_revision;
+    };
+
+    enum class TransportConfigOperationOperation : int { CREATE, DELETE, UPDATE };
+
     struct TransportConfigOperation {
-        Operation operation;
+        TransportConfigOperationOperation operation;
         std::optional<std::string> tag;
         std::optional<Transport> transport;
     };
@@ -887,6 +947,8 @@ namespace api {
         std::optional<RuntimeInterfaceStatusEnum> runtime_interface_status;
         std::optional<Traffic> runtime_interface_traffic;
         std::optional<RuntimeInterfaceTrafficPointElement> runtime_interface_traffic_point;
+        std::optional<RuntimeInterfaceTrafficSample> runtime_interface_traffic_sample;
+        std::optional<RuntimeInterfaceTrafficUpdate> runtime_interface_traffic_update;
         std::optional<RuntimeInventoryResponse> runtime_inventory_response;
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
@@ -894,13 +956,17 @@ namespace api {
         std::optional<SortOrder> sort_order;
         std::optional<StatusEventConnections> status_event_connections;
         std::optional<StatusEventInterfaces> status_event_interfaces;
+        std::optional<StatusEventInterfaceTraffic> status_event_interface_traffic;
         std::optional<StatusEventOutbounds> status_event_outbounds;
         std::optional<StatusEventService> status_event_service;
         std::optional<StatusEventSnapshot> status_event_snapshot;
         std::optional<TransportActionRequest> transport_action_request;
         std::optional<TransportActionResponse> transport_action_response;
+        std::optional<TransportConfigApplyRequest> transport_config_apply_request;
+        std::optional<TransportConfigApplyResponse> transport_config_apply_response;
         std::optional<TransportConfigOperation> transport_config_operation;
         std::optional<TransportConfigResponse> transport_config_response;
+        std::optional<LinkedOutbound> transport_linked_outbound_ensure;
         std::optional<TransportPath> transport_path;
         std::optional<Transport> transport_spec;
         std::optional<TransportStatus> transport_status;
@@ -1102,6 +1168,12 @@ namespace api {
     void from_json(const json & j, RuntimeInterfaceState & x);
     void to_json(json & j, const RuntimeInterfaceState & x);
 
+    void from_json(const json & j, RuntimeInterfaceTrafficSample & x);
+    void to_json(json & j, const RuntimeInterfaceTrafficSample & x);
+
+    void from_json(const json & j, RuntimeInterfaceTrafficUpdate & x);
+    void to_json(json & j, const RuntimeInterfaceTrafficUpdate & x);
+
     void from_json(const json & j, RuntimeOutboundStateElement & x);
     void to_json(json & j, const RuntimeOutboundStateElement & x);
 
@@ -1113,6 +1185,9 @@ namespace api {
 
     void from_json(const json & j, StatusEventConnections & x);
     void to_json(json & j, const StatusEventConnections & x);
+
+    void from_json(const json & j, StatusEventInterfaceTraffic & x);
+    void to_json(json & j, const StatusEventInterfaceTraffic & x);
 
     void from_json(const json & j, StatusEventInterfaces & x);
     void to_json(json & j, const StatusEventInterfaces & x);
@@ -1132,11 +1207,20 @@ namespace api {
     void from_json(const json & j, TransportActionResponse & x);
     void to_json(json & j, const TransportActionResponse & x);
 
+    void from_json(const json & j, LinkedOutbound & x);
+    void to_json(json & j, const LinkedOutbound & x);
+
     void from_json(const json & j, Vless & x);
     void to_json(json & j, const Vless & x);
 
     void from_json(const json & j, Transport & x);
     void to_json(json & j, const Transport & x);
+
+    void from_json(const json & j, TransportConfigApplyRequest & x);
+    void to_json(json & j, const TransportConfigApplyRequest & x);
+
+    void from_json(const json & j, TransportConfigApplyResponse & x);
+    void to_json(json & j, const TransportConfigApplyResponse & x);
 
     void from_json(const json & j, TransportConfigOperation & x);
     void to_json(json & j, const TransportConfigOperation & x);
@@ -1252,6 +1336,9 @@ namespace api {
     void from_json(const json & j, StatusEventConnectionsType & x);
     void to_json(json & j, const StatusEventConnectionsType & x);
 
+    void from_json(const json & j, StatusEventInterfaceTrafficType & x);
+    void to_json(json & j, const StatusEventInterfaceTrafficType & x);
+
     void from_json(const json & j, StatusEventInterfacesType & x);
     void to_json(json & j, const StatusEventInterfacesType & x);
 
@@ -1270,14 +1357,23 @@ namespace api {
     void from_json(const json & j, TransportActionResponseStatus & x);
     void to_json(json & j, const TransportActionResponseStatus & x);
 
-    void from_json(const json & j, Operation & x);
-    void to_json(json & j, const Operation & x);
+    void from_json(const json & j, Mode & x);
+    void to_json(json & j, const Mode & x);
+
+    void from_json(const json & j, TransportConfigApplyRequestOperation & x);
+    void to_json(json & j, const TransportConfigApplyRequestOperation & x);
 
     void from_json(const json & j, GeoMode & x);
     void to_json(json & j, const GeoMode & x);
 
     void from_json(const json & j, TransportSpecType & x);
     void to_json(json & j, const TransportSpecType & x);
+
+    void from_json(const json & j, TransportConfigApplyResponseStatus & x);
+    void to_json(json & j, const TransportConfigApplyResponseStatus & x);
+
+    void from_json(const json & j, TransportConfigOperationOperation & x);
+    void to_json(json & j, const TransportConfigOperationOperation & x);
 
     void from_json(const json & j, TransportConfigResponseStatus & x);
     void to_json(json & j, const TransportConfigResponseStatus & x);
@@ -1318,6 +1414,10 @@ namespace api {
         x.etag = get_stack_optional<std::string>(j, "etag");
         x.ips = get_stack_optional<int64_t>(j, "ips");
         x.last_modified = get_stack_optional<std::string>(j, "last_modified");
+        x.last_refresh_attempt = get_stack_optional<std::string>(j, "last_refresh_attempt");
+        x.last_refresh_detour = get_stack_optional<std::string>(j, "last_refresh_detour");
+        x.last_refresh_error = get_stack_optional<std::string>(j, "last_refresh_error");
+        x.last_refresh_url = get_stack_optional<std::string>(j, "last_refresh_url");
         x.srs_decoder_revision = get_stack_optional<int64_t>(j, "srs_decoder_revision");
         x.url = get_stack_optional<std::string>(j, "url");
     }
@@ -1330,6 +1430,10 @@ namespace api {
         j["etag"] = x.etag;
         j["ips"] = x.ips;
         j["last_modified"] = x.last_modified;
+        j["last_refresh_attempt"] = x.last_refresh_attempt;
+        j["last_refresh_detour"] = x.last_refresh_detour;
+        j["last_refresh_error"] = x.last_refresh_error;
+        j["last_refresh_url"] = x.last_refresh_url;
         j["srs_decoder_revision"] = x.srs_decoder_revision;
         j["url"] = x.url;
     }
@@ -1484,6 +1588,7 @@ namespace api {
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.domains = get_stack_optional<std::vector<std::string>>(j, "domains");
+        x.fallback_detours = get_stack_optional<std::vector<std::string>>(j, "fallback_detours");
         x.file = get_stack_optional<std::string>(j, "file");
         x.ip_cidrs = get_stack_optional<std::vector<std::string>>(j, "ip_cidrs");
         x.ttl_ms = get_stack_optional<int64_t>(j, "ttl_ms");
@@ -1495,6 +1600,7 @@ namespace api {
         j["detour"] = x.detour;
         j["display_name"] = x.display_name;
         j["domains"] = x.domains;
+        j["fallback_detours"] = x.fallback_detours;
         j["file"] = x.file;
         j["ip_cidrs"] = x.ip_cidrs;
         j["ttl_ms"] = x.ttl_ms;
@@ -1667,11 +1773,17 @@ namespace api {
     }
 
     inline void from_json(const json & j, ListRefreshStateValue& x) {
+        x.last_attempt = get_stack_optional<std::string>(j, "last_attempt");
+        x.last_detour = get_stack_optional<std::string>(j, "last_detour");
+        x.last_error = get_stack_optional<std::string>(j, "last_error");
         x.last_updated = get_stack_optional<std::string>(j, "last_updated");
     }
 
     inline void to_json(json & j, const ListRefreshStateValue & x) {
         j = json::object();
+        j["last_attempt"] = x.last_attempt;
+        j["last_detour"] = x.last_detour;
+        j["last_error"] = x.last_error;
         j["last_updated"] = x.last_updated;
     }
 
@@ -2305,6 +2417,7 @@ namespace api {
         x.history = j.at("history").get<std::vector<RuntimeInterfaceTrafficPointElement>>();
         x.rx_bits_per_second = get_stack_optional<int64_t>(j, "rx_bits_per_second");
         x.rx_bytes = j.at("rx_bytes").get<int64_t>();
+        x.sampled_at_unix_ms = get_stack_optional<int64_t>(j, "sampled_at_unix_ms");
         x.tx_bits_per_second = get_stack_optional<int64_t>(j, "tx_bits_per_second");
         x.tx_bytes = j.at("tx_bytes").get<int64_t>();
     }
@@ -2314,6 +2427,7 @@ namespace api {
         j["history"] = x.history;
         j["rx_bits_per_second"] = x.rx_bits_per_second;
         j["rx_bytes"] = x.rx_bytes;
+        j["sampled_at_unix_ms"] = x.sampled_at_unix_ms;
         j["tx_bits_per_second"] = x.tx_bits_per_second;
         j["tx_bytes"] = x.tx_bytes;
     }
@@ -2367,6 +2481,38 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, RuntimeInterfaceTrafficSample& x) {
+        x.available = j.at("available").get<bool>();
+        x.name = j.at("name").get<std::string>();
+        x.reset = j.at("reset").get<bool>();
+        x.rx_bits_per_second = get_stack_optional<int64_t>(j, "rx_bits_per_second");
+        x.rx_bytes = get_stack_optional<int64_t>(j, "rx_bytes");
+        x.tx_bits_per_second = get_stack_optional<int64_t>(j, "tx_bits_per_second");
+        x.tx_bytes = get_stack_optional<int64_t>(j, "tx_bytes");
+    }
+
+    inline void to_json(json & j, const RuntimeInterfaceTrafficSample & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["name"] = x.name;
+        j["reset"] = x.reset;
+        j["rx_bits_per_second"] = x.rx_bits_per_second;
+        j["rx_bytes"] = x.rx_bytes;
+        j["tx_bits_per_second"] = x.tx_bits_per_second;
+        j["tx_bytes"] = x.tx_bytes;
+    }
+
+    inline void from_json(const json & j, RuntimeInterfaceTrafficUpdate& x) {
+        x.interfaces = j.at("interfaces").get<std::vector<RuntimeInterfaceTrafficSample>>();
+        x.sampled_at_unix_ms = j.at("sampled_at_unix_ms").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const RuntimeInterfaceTrafficUpdate & x) {
+        j = json::object();
+        j["interfaces"] = x.interfaces;
+        j["sampled_at_unix_ms"] = x.sampled_at_unix_ms;
+    }
+
     inline void from_json(const json & j, RuntimeOutboundStateElement& x) {
         x.detail = get_stack_optional<std::string>(j, "detail");
         x.interfaces = j.at("interfaces").get<std::vector<RuntimeInterfaceState>>();
@@ -2412,6 +2558,17 @@ namespace api {
     }
 
     inline void to_json(json & j, const StatusEventConnections & x) {
+        j = json::object();
+        j["data"] = x.data;
+        j["type"] = x.type;
+    }
+
+    inline void from_json(const json & j, StatusEventInterfaceTraffic& x) {
+        x.data = j.at("data").get<RuntimeInterfaceTrafficUpdate>();
+        x.type = j.at("type").get<StatusEventInterfaceTrafficType>();
+    }
+
+    inline void to_json(json & j, const StatusEventInterfaceTraffic & x) {
         j = json::object();
         j["data"] = x.data;
         j["type"] = x.type;
@@ -2483,6 +2640,19 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, LinkedOutbound& x) {
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
+        x.mode = j.at("mode").get<Mode>();
+        x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
+    }
+
+    inline void to_json(json & j, const LinkedOutbound & x) {
+        j = json::object();
+        j["display_name"] = x.display_name;
+        j["mode"] = x.mode;
+        j["strict_enforcement"] = x.strict_enforcement;
+    }
+
     inline void from_json(const json & j, Vless& x) {
         x.fingerprint = get_stack_optional<std::string>(j, "fingerprint");
         x.flow = get_stack_optional<std::string>(j, "flow");
@@ -2543,8 +2713,44 @@ namespace api {
         j["vless"] = x.vless;
     }
 
+    inline void from_json(const json & j, TransportConfigApplyRequest& x) {
+        x.linked_outbound = j.at("linked_outbound").get<LinkedOutbound>();
+        x.operation = j.at("operation").get<TransportConfigApplyRequestOperation>();
+        x.transport = j.at("transport").get<Transport>();
+    }
+
+    inline void to_json(json & j, const TransportConfigApplyRequest & x) {
+        j = json::object();
+        j["linked_outbound"] = x.linked_outbound;
+        j["operation"] = x.operation;
+        j["transport"] = x.transport;
+    }
+
+    inline void from_json(const json & j, TransportConfigApplyResponse& x) {
+        x.applied = get_stack_optional<bool>(j, "applied");
+        x.apply_started_ts = get_stack_optional<int64_t>(j, "apply_started_ts");
+        x.config_revision = get_stack_optional<std::string>(j, "config_revision");
+        x.message = get_stack_optional<std::string>(j, "message");
+        x.rolled_back = get_stack_optional<bool>(j, "rolled_back");
+        x.saved = get_stack_optional<bool>(j, "saved");
+        x.status = j.at("status").get<TransportConfigApplyResponseStatus>();
+        x.transport_revision = get_stack_optional<std::string>(j, "transport_revision");
+    }
+
+    inline void to_json(json & j, const TransportConfigApplyResponse & x) {
+        j = json::object();
+        j["applied"] = x.applied;
+        j["apply_started_ts"] = x.apply_started_ts;
+        j["config_revision"] = x.config_revision;
+        j["message"] = x.message;
+        j["rolled_back"] = x.rolled_back;
+        j["saved"] = x.saved;
+        j["status"] = x.status;
+        j["transport_revision"] = x.transport_revision;
+    }
+
     inline void from_json(const json & j, TransportConfigOperation& x) {
-        x.operation = j.at("operation").get<Operation>();
+        x.operation = j.at("operation").get<TransportConfigOperationOperation>();
         x.tag = get_stack_optional<std::string>(j, "tag");
         x.transport = get_stack_optional<Transport>(j, "transport");
     }
@@ -2701,6 +2907,8 @@ namespace api {
         x.runtime_interface_status = get_stack_optional<RuntimeInterfaceStatusEnum>(j, "RuntimeInterfaceStatus");
         x.runtime_interface_traffic = get_stack_optional<Traffic>(j, "RuntimeInterfaceTraffic");
         x.runtime_interface_traffic_point = get_stack_optional<RuntimeInterfaceTrafficPointElement>(j, "RuntimeInterfaceTrafficPoint");
+        x.runtime_interface_traffic_sample = get_stack_optional<RuntimeInterfaceTrafficSample>(j, "RuntimeInterfaceTrafficSample");
+        x.runtime_interface_traffic_update = get_stack_optional<RuntimeInterfaceTrafficUpdate>(j, "RuntimeInterfaceTrafficUpdate");
         x.runtime_inventory_response = get_stack_optional<RuntimeInventoryResponse>(j, "RuntimeInventoryResponse");
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
@@ -2708,13 +2916,17 @@ namespace api {
         x.sort_order = get_stack_optional<SortOrder>(j, "SortOrder");
         x.status_event_connections = get_stack_optional<StatusEventConnections>(j, "StatusEventConnections");
         x.status_event_interfaces = get_stack_optional<StatusEventInterfaces>(j, "StatusEventInterfaces");
+        x.status_event_interface_traffic = get_stack_optional<StatusEventInterfaceTraffic>(j, "StatusEventInterfaceTraffic");
         x.status_event_outbounds = get_stack_optional<StatusEventOutbounds>(j, "StatusEventOutbounds");
         x.status_event_service = get_stack_optional<StatusEventService>(j, "StatusEventService");
         x.status_event_snapshot = get_stack_optional<StatusEventSnapshot>(j, "StatusEventSnapshot");
         x.transport_action_request = get_stack_optional<TransportActionRequest>(j, "TransportActionRequest");
         x.transport_action_response = get_stack_optional<TransportActionResponse>(j, "TransportActionResponse");
+        x.transport_config_apply_request = get_stack_optional<TransportConfigApplyRequest>(j, "TransportConfigApplyRequest");
+        x.transport_config_apply_response = get_stack_optional<TransportConfigApplyResponse>(j, "TransportConfigApplyResponse");
         x.transport_config_operation = get_stack_optional<TransportConfigOperation>(j, "TransportConfigOperation");
         x.transport_config_response = get_stack_optional<TransportConfigResponse>(j, "TransportConfigResponse");
+        x.transport_linked_outbound_ensure = get_stack_optional<LinkedOutbound>(j, "TransportLinkedOutboundEnsure");
         x.transport_path = get_stack_optional<TransportPath>(j, "TransportPath");
         x.transport_spec = get_stack_optional<Transport>(j, "TransportSpec");
         x.transport_status = get_stack_optional<TransportStatus>(j, "TransportStatus");
@@ -2800,6 +3012,8 @@ namespace api {
         j["RuntimeInterfaceStatus"] = x.runtime_interface_status;
         j["RuntimeInterfaceTraffic"] = x.runtime_interface_traffic;
         j["RuntimeInterfaceTrafficPoint"] = x.runtime_interface_traffic_point;
+        j["RuntimeInterfaceTrafficSample"] = x.runtime_interface_traffic_sample;
+        j["RuntimeInterfaceTrafficUpdate"] = x.runtime_interface_traffic_update;
         j["RuntimeInventoryResponse"] = x.runtime_inventory_response;
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
@@ -2807,13 +3021,17 @@ namespace api {
         j["SortOrder"] = x.sort_order;
         j["StatusEventConnections"] = x.status_event_connections;
         j["StatusEventInterfaces"] = x.status_event_interfaces;
+        j["StatusEventInterfaceTraffic"] = x.status_event_interface_traffic;
         j["StatusEventOutbounds"] = x.status_event_outbounds;
         j["StatusEventService"] = x.status_event_service;
         j["StatusEventSnapshot"] = x.status_event_snapshot;
         j["TransportActionRequest"] = x.transport_action_request;
         j["TransportActionResponse"] = x.transport_action_response;
+        j["TransportConfigApplyRequest"] = x.transport_config_apply_request;
+        j["TransportConfigApplyResponse"] = x.transport_config_apply_response;
         j["TransportConfigOperation"] = x.transport_config_operation;
         j["TransportConfigResponse"] = x.transport_config_response;
+        j["TransportLinkedOutboundEnsure"] = x.transport_linked_outbound_ensure;
         j["TransportPath"] = x.transport_path;
         j["TransportSpec"] = x.transport_spec;
         j["TransportStatus"] = x.transport_status;
@@ -2870,6 +3088,7 @@ namespace api {
 
     inline void from_json(const json & j, ConntrackOnSwitch & x) {
         if (j == "delete") x = ConntrackOnSwitch::DELETE;
+        else if (j == "delete_on_failure") x = ConntrackOnSwitch::DELETE_ON_FAILURE;
         else if (j == "preserve") x = ConntrackOnSwitch::PRESERVE;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"ConntrackOnSwitch\""); }
     }
@@ -2877,6 +3096,7 @@ namespace api {
     inline void to_json(json & j, const ConntrackOnSwitch & x) {
         switch (x) {
             case ConntrackOnSwitch::DELETE: j = "delete"; break;
+            case ConntrackOnSwitch::DELETE_ON_FAILURE: j = "delete_on_failure"; break;
             case ConntrackOnSwitch::PRESERVE: j = "preserve"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"ConntrackOnSwitch\": " + std::to_string(static_cast<int>(x)));
         }
@@ -3386,6 +3606,18 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, StatusEventInterfaceTrafficType & x) {
+        if (j == "interface_traffic") x = StatusEventInterfaceTrafficType::INTERFACE_TRAFFIC;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventInterfaceTrafficType\""); }
+    }
+
+    inline void to_json(json & j, const StatusEventInterfaceTrafficType & x) {
+        switch (x) {
+            case StatusEventInterfaceTrafficType::INTERFACE_TRAFFIC: j = "interface_traffic"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"StatusEventInterfaceTrafficType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, StatusEventInterfacesType & x) {
         if (j == "interfaces") x = StatusEventInterfacesType::INTERFACES;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"StatusEventInterfacesType\""); }
@@ -3462,19 +3694,27 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, Operation & x) {
-        if (j == "create") x = Operation::CREATE;
-        else if (j == "delete") x = Operation::DELETE;
-        else if (j == "update") x = Operation::UPDATE;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Operation\""); }
+    inline void from_json(const json & j, Mode & x) {
+        if (j == "ensure") x = Mode::ENSURE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Mode\""); }
     }
 
-    inline void to_json(json & j, const Operation & x) {
+    inline void to_json(json & j, const Mode & x) {
         switch (x) {
-            case Operation::CREATE: j = "create"; break;
-            case Operation::DELETE: j = "delete"; break;
-            case Operation::UPDATE: j = "update"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Operation\": " + std::to_string(static_cast<int>(x)));
+            case Mode::ENSURE: j = "ensure"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Mode\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, TransportConfigApplyRequestOperation & x) {
+        if (j == "create") x = TransportConfigApplyRequestOperation::CREATE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TransportConfigApplyRequestOperation\""); }
+    }
+
+    inline void to_json(json & j, const TransportConfigApplyRequestOperation & x) {
+        switch (x) {
+            case TransportConfigApplyRequestOperation::CREATE: j = "create"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TransportConfigApplyRequestOperation\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -3507,6 +3747,34 @@ namespace api {
             case TransportSpecType::SING_BOX: j = "sing-box"; break;
             case TransportSpecType::SING_BOX_VLESS_REALITY: j = "sing-box-vless-reality"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"TransportSpecType\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, TransportConfigApplyResponseStatus & x) {
+        if (j == "applied") x = TransportConfigApplyResponseStatus::APPLIED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TransportConfigApplyResponseStatus\""); }
+    }
+
+    inline void to_json(json & j, const TransportConfigApplyResponseStatus & x) {
+        switch (x) {
+            case TransportConfigApplyResponseStatus::APPLIED: j = "applied"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TransportConfigApplyResponseStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, TransportConfigOperationOperation & x) {
+        if (j == "create") x = TransportConfigOperationOperation::CREATE;
+        else if (j == "delete") x = TransportConfigOperationOperation::DELETE;
+        else if (j == "update") x = TransportConfigOperationOperation::UPDATE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TransportConfigOperationOperation\""); }
+    }
+
+    inline void to_json(json & j, const TransportConfigOperationOperation & x) {
+        switch (x) {
+            case TransportConfigOperationOperation::CREATE: j = "create"; break;
+            case TransportConfigOperationOperation::DELETE: j = "delete"; break;
+            case TransportConfigOperationOperation::UPDATE: j = "update"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TransportConfigOperationOperation\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

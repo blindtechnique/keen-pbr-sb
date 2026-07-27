@@ -13,18 +13,31 @@ export function useRunSystemProbes() {
 
   return useMutation({
     mutationKey: ["system-probes", "run"],
+    onMutate: () => ({
+      runtimeUpdatedAt:
+        queryClient.getQueryState(queryKeys.runtimeOutbounds())
+          ?.dataUpdatedAt ?? 0,
+    }),
     mutationFn: async (): Promise<ProbeRunResponse> => {
       const response = await fetch("/api/system/probes/run", { method: "POST" })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return response.json()
     },
-    onSuccess: () => {
+    // probe_interfaces_now() reconciles the shared runtime-outbound snapshot.
+    // Its SSE event updates the query cache as soon as the round completes.
+    // If that stream is unavailable, retain one delayed GET as a recovery path
+    // instead of leaving the displayed latency stale indefinitely.
+    onSuccess: (_data, _variables, baseline) => {
       window.setTimeout(() => {
-        void Promise.all([
-          queryClient.invalidateQueries({ queryKey: ["system-probes"] }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.runtimeOutbounds() }),
-        ])
-      }, 2_000)
+        const currentUpdatedAt =
+          queryClient.getQueryState(queryKeys.runtimeOutbounds())
+            ?.dataUpdatedAt ?? 0
+        if (currentUpdatedAt <= baseline.runtimeUpdatedAt) {
+          void queryClient.invalidateQueries({
+            queryKey: queryKeys.runtimeOutbounds(),
+          })
+        }
+      }, 3_000)
     },
     onError: () => toast.error(t("transports.latencyRefreshFailed")),
   })

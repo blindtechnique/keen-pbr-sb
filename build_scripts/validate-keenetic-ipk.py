@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import stat
 import struct
 import sys
@@ -64,6 +65,9 @@ REQUIRED_CONTROL_EXECUTABLES = {
     "postinst",
     "prerm",
     "postrm",
+}
+REQUIRED_PACKAGE_DEPENDENCIES = {
+    "conntrack",
 }
 EXPECTED_OUTER_MEMBERS = {
     "debian-binary",
@@ -249,9 +253,34 @@ def validate(path: Path, arch: str) -> None:
             if not entries[name].mode & stat.S_IXUSR:
                 raise ValidationError(f"control script is not executable: {name}")
         conffiles_stream = control_tar.extractfile(entries["conffiles"])
+        control_stream = control_tar.extractfile(entries["control"])
         postinst_stream = control_tar.extractfile(entries["postinst"])
-        if conffiles_stream is None or postinst_stream is None:
+        if (
+            conffiles_stream is None
+            or control_stream is None
+            or postinst_stream is None
+        ):
             raise ValidationError("cannot read package control files")
+        control = control_stream.read().decode()
+        depends_match = re.search(
+            r"^Depends:\s*(.*(?:\n[ \t].*)*)$",
+            control,
+            flags=re.MULTILINE,
+        )
+        dependencies: set[str] = set()
+        if depends_match:
+            for value in depends_match.group(1).replace("\n", " ").split(","):
+                name = value.strip().split(maxsplit=1)[0]
+                if name:
+                    dependencies.add(name)
+        missing_dependencies = sorted(
+            REQUIRED_PACKAGE_DEPENDENCIES - dependencies
+        )
+        if missing_dependencies:
+            raise ValidationError(
+                "missing package dependencies: "
+                + ", ".join(missing_dependencies)
+            )
         conffiles = set(conffiles_stream.read().decode().splitlines())
         missing_conffiles = sorted(REQUIRED_CONFFILES - conffiles)
         if missing_conffiles:

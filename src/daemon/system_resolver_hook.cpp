@@ -12,6 +12,21 @@ const char* system_resolver_hook_path() noexcept {
 #endif
 }
 
+std::string_view runtime_start_resolver_action() noexcept {
+    // stop_routing_runtime() deliberately switches the helper to inactive
+    // fallback mode. An in-process start must restore that state before
+    // waiting for dnsmasq to consume the new generation stream.
+    return "activate";
+}
+
+bool runtime_restart_should_retry(std::string_view error) noexcept {
+    // Route/firewall failures are deterministic and must be surfaced
+    // immediately. The only bounded restart retry is for the known Keenetic
+    // dnsmasq activation race after a clean rollback.
+    return error.find("System resolver activation hook failed") !=
+           std::string_view::npos;
+}
+
 std::vector<std::string> build_system_resolver_hook_args(const Config& config,
                                                          std::string_view action) {
     if (!config.dns.has_value() || !config.dns->system_resolver.has_value()) {

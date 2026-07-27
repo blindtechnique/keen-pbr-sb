@@ -41,4 +41,14 @@ describe("outbound display names", () => {
       sortOutboundsByDisplayName(outbounds).map(getOutboundDisplayName)
     ).toEqual(["legacy", "Основной VPN", "Резервный VPN"])
   })
+
+  test("uses an invariant order instead of the browser locale", () => {
+    expect(
+      sortOutboundsByDisplayName([
+        { type: "ignore", tag: "z", display_name: "ёж" },
+        { type: "ignore", tag: "a", display_name: "Alpha" },
+        { type: "ignore", tag: "b", display_name: "alpha" },
+      ]).map((outbound) => outbound.tag)
+    ).toEqual(["a", "b", "z"])
+  })
 })

@@ -51,7 +51,10 @@ import {
   createDnsServerDisplayNameMap,
   getDnsServerDisplayName,
 } from "@/lib/dns-display"
-import { formatListReferenceLabels } from "@/lib/list-display"
+import {
+  formatListReferenceLabels,
+  getListReferenceLabel,
+} from "@/lib/list-display"
 import {
   createOutboundDisplayNameMap,
   getOutboundDisplayName,
@@ -502,6 +505,25 @@ function getOutboundDeleteImpactItems(
               dnsServer?.detour ??
               t("common.noneShort"),
             t("common.noneShort")
+          )
+        ),
+      ],
+    })
+  }
+
+  for (const listRoute of impact.listDownloadRoutes) {
+    items.push({
+      label: t("pages.outbounds.deleteDialog.items.listDownloadRoutes", {
+        list: getListReferenceLabel(listRoute.listName, config?.lists),
+      }),
+      details: [
+        formatDetail(
+          t("pages.outbounds.deleteDialog.items.downloadRoutes"),
+          formatTransition(
+            listRoute.before,
+            listRoute.after,
+            t,
+            outboundNames
           )
         ),
       ],
