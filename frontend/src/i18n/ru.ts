@@ -170,6 +170,7 @@ export const ruTranslation = {
     },
     language: "Язык",
     theme: "Тема",
+    reportIssue: "Сообщить об ошибке",
     enabled: "Включено",
     disabled: "Выключено",
     close: "Закрыть",

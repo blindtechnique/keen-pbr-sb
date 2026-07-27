@@ -9,6 +9,7 @@ import type {
   TransportStatus,
 } from "@/api/generated/model"
 import {
+  activeTrafficStatusTranslationKey,
   collectActiveTrafficPaths,
   formatConnectionDuration,
   interfaceConnectionState,
@@ -85,7 +86,7 @@ export function ActiveInterfaceTraffic({
                     size="xs"
                     variant={statusBadgeVariant(path.status)}
                   >
-                    {t(`outbounds.member.${path.status}`)}
+                    {t(activeTrafficStatusTranslationKey(path.status))}
                   </Badge>
                   <KeeneticStatus
                     className="shrink-0"

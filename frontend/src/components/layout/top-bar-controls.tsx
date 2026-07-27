@@ -1,5 +1,6 @@
 import { useState } from "react"
 import {
+  BugIcon,
   LanguagesIcon,
   LoaderCircleIcon,
   LogOutIcon,
@@ -31,6 +32,8 @@ const LANGUAGE_OPTIONS = [
   { value: "ru", label: "Русский" },
   { value: "en", label: "English" },
 ] as const
+
+const ISSUES_URL = "https://github.com/blindtechnique/keen-pbr-sb/issues"
 
 /**
  * Compact theme and language pickers for the system bar, where KeeneticOS keeps
@@ -83,6 +86,23 @@ function SystemControlIcons({
           <NotificationsBell />
         </>
       ) : null}
+
+      <Button
+        aria-label={t("common.reportIssue")}
+        className={TOP_BAR_CONTROL_CLASS}
+        render={
+          <a
+            href={ISSUES_URL}
+            rel="noopener noreferrer"
+            target="_blank"
+          />
+        }
+        size="icon"
+        title={t("common.reportIssue")}
+        variant="ghost"
+      >
+        <BugIcon />
+      </Button>
 
       <IconMenu
         icon={<LanguagesIcon />}

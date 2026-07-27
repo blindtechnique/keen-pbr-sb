@@ -6,12 +6,22 @@ import type {
   RuntimeOutboundState,
 } from "@/api/generated/model"
 import {
+  activeTrafficStatusTranslationKey,
   collectActiveTrafficPaths,
   formatConnectionDuration,
   interfaceConnectionState,
 } from "@/components/overview/active-interface-traffic-model"
 
 describe("dashboard active interface traffic", () => {
+  test("uses the dashboard namespace for member status labels", () => {
+    expect(activeTrafficStatusTranslationKey("active")).toBe(
+      "overview.outbounds.member.active"
+    )
+    expect(activeTrafficStatusTranslationKey("degraded")).toBe(
+      "overview.outbounds.member.degraded"
+    )
+  })
+
   test("includes active and backup failover members and deduplicates rules", () => {
     const outbounds: Outbound[] = [
       {

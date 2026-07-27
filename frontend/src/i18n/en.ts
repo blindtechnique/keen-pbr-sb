@@ -170,6 +170,7 @@ export const enTranslation = {
     },
     language: "Language",
     theme: "Theme",
+    reportIssue: "Report an issue",
     enabled: "Enabled",
     disabled: "Disabled",
     close: "Close",

@@ -22,6 +22,20 @@ export type InterfaceConnectionState = Readonly<{
   connectedAtUnixMs?: number
 }>
 
+const ACTIVE_TRAFFIC_STATUS_TRANSLATION_KEYS = {
+  active: "overview.outbounds.member.active",
+  backup: "overview.outbounds.member.backup",
+  degraded: "overview.outbounds.member.degraded",
+  unavailable: "overview.outbounds.member.unavailable",
+  unknown: "overview.outbounds.member.unknown",
+} as const satisfies Record<RuntimeInterfaceStatus, string>
+
+export function activeTrafficStatusTranslationKey(
+  status: RuntimeInterfaceStatus
+) {
+  return ACTIVE_TRAFFIC_STATUS_TRANSLATION_KEYS[status]
+}
+
 export function collectActiveTrafficPaths(
   outbounds: readonly Outbound[],
   rules: readonly RouteRule[],
