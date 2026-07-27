@@ -106,11 +106,30 @@ Purpose:
 - basic routing + firewall apply
 - real interface existence and admin-up checks via dummy links
 - verifies that a simple interface outbound and list-backed rule can be applied
+- on iptables, exercises the complete A/B convergence and ownership scenario
+  in both mangle and raw PREROUTING modes
 
 Topology:
 
 - `lan0` dummy link in the client namespace
 - `wan0` dummy link in the client namespace
+
+The iptables convergence scenario deliberately damages live state between
+preserve-set applies and verifies that the backend repairs it without touching
+foreign rules. It covers:
+
+- repeated A/B publication without duplicate hooks
+- missing dispatchers and invalid secondary dispatchers when a valid
+  forwarded-traffic generation remains authoritative
+- fail-closed handling for ambiguous dual-jump dispatchers when neither side
+  is a valid authority
+- a missing inactive generation and a completely missing owned scaffold
+- duplicate builtin hooks collapsing back to exactly one
+- failed `iptables-restore` and partially applied `ipset restore` leaving the
+  active dispatcher unchanged
+- exactly one raw conntrack-companion hook in raw PREROUTING mode
+- preservation of a foreign chain and a foreign mark rule, including explicit
+  keen-pbr cleanup
 
 ### `urltest-reachable`
 
@@ -286,6 +305,12 @@ For urltest cases, add:
 
 ```sh
 --run-urltest-probes
+```
+
+To run the privileged iptables A/B convergence scenario, add:
+
+```sh
+--exercise-iptables-convergence
 ```
 
 ## Notes And Current Limitations

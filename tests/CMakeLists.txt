@@ -39,6 +39,7 @@ add_executable(keen-pbr-tests
   test_conntrack_manager.cpp
   test_interface_traffic_sampler.cpp
   test_api_status_events.cpp
+  test_api_logs.cpp
   test_api_transports.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
@@ -76,6 +77,7 @@ add_executable(keen-pbr-tests
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
   ../src/config/config_writer.cpp
+  ../src/util/last_command_failure.cpp
   ../src/backup/persistent_snapshot.cpp
   ../src/backup/restore_journal.cpp
   ../src/backup/restore_transaction.cpp
@@ -365,6 +367,7 @@ if(WITH_API)
     ../src/api/status_stream.cpp
     ../src/api/health_response.cpp
     ../src/api/handler_status_events.cpp
+    ../src/api/handler_logs.cpp
     ../src/api/handler_ndms_names.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
@@ -374,6 +377,7 @@ if(WITH_API)
     ../src/api/handler_config.cpp
     ../src/api/handler_backup.cpp
     ../src/health/runtime_interface_inventory.cpp
+    ../src/log/file_sink.cpp
   )
   target_link_libraries(keen-pbr-tests PRIVATE
     httplib::httplib
@@ -388,6 +392,7 @@ add_executable(keen-pbr-firewall-it
   firewall_integration_main.cpp
   ../src/cache/cache_manager.cpp
   ../src/config/config.cpp
+  ../src/config/config_writer.cpp
   ../src/config/list_parser.cpp
   ../src/config/routing_state.cpp
   ../src/dns/dns_router.cpp
@@ -425,6 +430,7 @@ add_executable(keen-pbr-firewall-it
   ../src/util/blocking_executor.cpp
   ../src/util/firewall_backend_utils.cpp
   ../src/util/ipv6_support.cpp
+  ../src/util/last_command_failure.cpp
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
 )

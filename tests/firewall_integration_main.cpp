@@ -15,6 +15,8 @@
 #include "../src/util/safe_exec.hpp"
 
 #include <algorithm>
+#include <array>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -39,6 +41,7 @@ struct CliOptions {
     bool repeat_preserve_apply{false};
     bool drop_iptables_dispatchers_before_repeat{false};
     bool use_raw_prerouting{false};
+    bool exercise_iptables_convergence{false};
 };
 
 struct RuntimeCleanup {
@@ -164,6 +167,7 @@ void print_usage(const char* argv0) {
         << "--mode <destructive|preserve-sets> [--run-urltest-probes] "
         << "[--repeat-preserve-apply] "
         << "[--drop-iptables-dispatchers-before-repeat] "
+        << "[--exercise-iptables-convergence] "
         << "[--use-raw-prerouting] [--log-level <lvl>]\n";
 }
 
@@ -200,6 +204,8 @@ CliOptions parse_args(int argc, char* argv[]) {
             options.drop_iptables_dispatchers_before_repeat = true;
         } else if (arg == "--use-raw-prerouting") {
             options.use_raw_prerouting = true;
+        } else if (arg == "--exercise-iptables-convergence") {
+            options.exercise_iptables_convergence = true;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             std::exit(0);
@@ -520,6 +526,515 @@ void print_report(const RoutingHealthReport& report) {
     }
 }
 
+struct IptablesConvergenceTopology {
+    explicit IptablesConvergenceTopology(bool raw)
+        : raw_prerouting(raw),
+          prerouting_table(raw ? "raw" : "mangle"),
+          prerouting_dispatcher(raw ? "KeenPbrRaw" : "KeenPbrTable"),
+          prerouting_generations(raw
+              ? std::array<std::string, 2>{"KeenPbrRaw_A", "KeenPbrRaw_B"}
+              : std::array<std::string, 2>{"KeenPbrTable_A", "KeenPbrTable_B"}) {}
+
+    bool raw_prerouting;
+    std::string prerouting_table;
+    std::string prerouting_dispatcher;
+    std::array<std::string, 2> prerouting_generations;
+    const std::string output_dispatcher{"KeenPbrOutput"};
+    const std::array<std::string, 2> output_generations{
+        "KeenPbrOutput_A", "KeenPbrOutput_B"};
+    const std::string raw_conntrack_chain{"KeenPbrRawCt"};
+    const std::string foreign_chain{"KpbrForeignGuard"};
+};
+
+ExecCaptureResult capture_command(const std::vector<std::string>& command) {
+    auto result = safe_exec_capture(
+        command,
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/1024U * 1024U,
+        /*capture_stderr=*/true);
+    if (result.exit_code != 0 || result.truncated || result.timed_out) {
+        throw std::runtime_error(
+            "Command failed during iptables convergence test: " +
+            safe_exec_command_string(command) + "\n" + result.stdout_output);
+    }
+    return result;
+}
+
+void run_command(const std::vector<std::string>& command) {
+    (void)capture_command(command);
+}
+
+size_t count_exact_line(const std::string& text, const std::string& expected) {
+    size_t count = 0;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line == expected) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t count_substring(const std::string& text, const std::string& needle) {
+    size_t count = 0;
+    size_t offset = 0;
+    while ((offset = text.find(needle, offset)) != std::string::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
+
+std::string dispatcher_target(
+    const std::string& rules,
+    const std::string& dispatcher,
+    const std::array<std::string, 2>& generations) {
+    std::vector<std::string> targets;
+    const std::string prefix = "-A " + dispatcher + " -j ";
+    std::istringstream lines(rules);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind(prefix, 0) == 0) {
+            targets.push_back(line.substr(prefix.size()));
+        }
+    }
+    if (targets.size() != 1 ||
+        (targets.front() != generations[0] &&
+         targets.front() != generations[1])) {
+        throw std::runtime_error(
+            "Dispatcher " + dispatcher +
+            " does not contain exactly one valid generation jump\n" + rules);
+    }
+    return targets.front();
+}
+
+size_t generation_index(
+    const std::string& target,
+    const std::array<std::string, 2>& generations) {
+    if (target == generations[0]) {
+        return 0;
+    }
+    if (target == generations[1]) {
+        return 1;
+    }
+    throw std::runtime_error("Unknown iptables generation target: " + target);
+}
+
+std::string iptables_save(const std::string& table) {
+    return capture_command({"iptables-save", "-t", table}).stdout_output;
+}
+
+size_t count_chain_declaration(
+    const std::string& rules,
+    const std::string& chain) {
+    size_t count = 0;
+    const std::string prefix = ":" + chain + " ";
+    std::istringstream lines(rules);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind(prefix, 0) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void assert_foreign_firewall_state(
+    const IptablesConvergenceTopology& topology) {
+    run_command({
+        "iptables", "-t", "mangle", "-C", "PREROUTING",
+        "-j", topology.foreign_chain});
+    run_command({
+        "iptables", "-t", "mangle", "-C", topology.foreign_chain,
+        "-j", "MARK", "--set-xmark", "0x40000000/0x40000000"});
+}
+
+void install_foreign_firewall_state(
+    const IptablesConvergenceTopology& topology) {
+    run_command({
+        "iptables", "-t", "mangle", "-N", topology.foreign_chain});
+    run_command({
+        "iptables", "-t", "mangle", "-A", topology.foreign_chain,
+        "-j", "MARK", "--set-xmark", "0x40000000/0x40000000"});
+    run_command({
+        "iptables", "-t", "mangle", "-A", "PREROUTING",
+        "-j", topology.foreign_chain});
+    assert_foreign_firewall_state(topology);
+}
+
+void assert_referenced_ipsets_exist(
+    const std::string& prerouting_state,
+    const std::string& mangle_state) {
+    std::set<std::string> referenced_sets;
+    std::istringstream rules(prerouting_state + "\n" + mangle_state);
+    std::string token;
+    while (rules >> token) {
+        if (token == "--match-set" && rules >> token) {
+            referenced_sets.insert(token);
+        }
+    }
+
+    std::set<std::string> existing_sets;
+    std::istringstream sets(
+        capture_command({"ipset", "save"}).stdout_output);
+    std::string line;
+    while (std::getline(sets, line)) {
+        std::istringstream fields(line);
+        std::string operation;
+        std::string name;
+        if (fields >> operation >> name && operation == "create") {
+            existing_sets.insert(name);
+        }
+    }
+
+    for (const auto& set_name : referenced_sets) {
+        if (existing_sets.find(set_name) == existing_sets.end()) {
+            throw std::runtime_error(
+                "iptables generation references missing ipset " + set_name);
+        }
+    }
+}
+
+size_t assert_iptables_converged(
+    const IptablesConvergenceTopology& topology,
+    bool require_both_generations = true) {
+    const std::string prerouting_state =
+        iptables_save(topology.prerouting_table);
+    const std::string mangle_state =
+        topology.prerouting_table == "mangle"
+            ? prerouting_state
+            : iptables_save("mangle");
+
+    if (count_chain_declaration(
+            prerouting_state, topology.prerouting_dispatcher) != 1 ||
+        count_chain_declaration(
+            mangle_state, topology.output_dispatcher) != 1) {
+        throw std::runtime_error(
+            "Missing or duplicate stable iptables dispatcher");
+    }
+
+    const std::string prerouting_target = dispatcher_target(
+        prerouting_state,
+        topology.prerouting_dispatcher,
+        topology.prerouting_generations);
+    const std::string output_target = dispatcher_target(
+        mangle_state,
+        topology.output_dispatcher,
+        topology.output_generations);
+    const size_t active =
+        generation_index(prerouting_target, topology.prerouting_generations);
+    if (generation_index(output_target, topology.output_generations) != active) {
+        throw std::runtime_error(
+            "PREROUTING and OUTPUT dispatchers publish different generations");
+    }
+    for (size_t index = 0;
+         index < topology.prerouting_generations.size();
+         ++index) {
+        const size_t prerouting_count = count_chain_declaration(
+            prerouting_state, topology.prerouting_generations[index]);
+        const size_t output_count = count_chain_declaration(
+            mangle_state, topology.output_generations[index]);
+        const bool required = require_both_generations || index == active;
+        if ((required && prerouting_count != 1) ||
+            (!required && prerouting_count > 1)) {
+            throw std::runtime_error(
+                "Missing or duplicate iptables generation chain " +
+                topology.prerouting_generations[index] + "\n" +
+                prerouting_state);
+        }
+        if ((required && output_count != 1) ||
+            (!required && output_count > 1)) {
+            throw std::runtime_error(
+                "Missing or duplicate iptables OUTPUT generation chain " +
+                topology.output_generations[index] + "\n" + mangle_state);
+        }
+    }
+
+    if (count_exact_line(
+            prerouting_state,
+            "-A PREROUTING -j " + topology.prerouting_dispatcher) != 1 ||
+        count_exact_line(
+            mangle_state,
+            "-A OUTPUT -j " + topology.output_dispatcher) != 1) {
+        throw std::runtime_error(
+            "Builtin iptables hooks did not converge to exactly one jump");
+    }
+    if (topology.raw_prerouting) {
+        if (count_chain_declaration(
+                mangle_state, topology.raw_conntrack_chain) != 1 ||
+            count_exact_line(
+                mangle_state,
+                "-A PREROUTING -j " + topology.raw_conntrack_chain) != 1) {
+            throw std::runtime_error(
+                "Raw PREROUTING companion hook did not converge");
+        }
+    }
+    if (count_substring(
+            prerouting_state + mangle_state,
+            "kpbr-integration-garbage") != 0) {
+        throw std::runtime_error(
+            "Garbage rule survived iptables reconciliation");
+    }
+
+    assert_referenced_ipsets_exist(prerouting_state, mangle_state);
+    assert_foreign_firewall_state(topology);
+    return active;
+}
+
+void delete_all_exact_hooks(
+    const std::string& table,
+    const std::string& builtin,
+    const std::string& target) {
+    while (safe_exec(
+               {"iptables", "-t", table, "-D", builtin, "-j", target},
+               /*suppress_output=*/true) == 0) {
+    }
+}
+
+void delete_chain_if_present(
+    const std::string& table,
+    const std::string& chain) {
+    (void)safe_exec(
+        {"iptables", "-t", table, "-F", chain},
+        /*suppress_output=*/true);
+    (void)safe_exec(
+        {"iptables", "-t", table, "-X", chain},
+        /*suppress_output=*/true);
+}
+
+void delete_dispatchers(
+    const IptablesConvergenceTopology& topology) {
+    delete_all_exact_hooks(
+        topology.prerouting_table,
+        "PREROUTING",
+        topology.prerouting_dispatcher);
+    delete_all_exact_hooks(
+        "mangle", "OUTPUT", topology.output_dispatcher);
+    delete_chain_if_present(
+        topology.prerouting_table, topology.prerouting_dispatcher);
+    delete_chain_if_present("mangle", topology.output_dispatcher);
+}
+
+void delete_all_owned_scaffold(
+    const IptablesConvergenceTopology& topology) {
+    delete_dispatchers(topology);
+    for (const auto& chain : topology.prerouting_generations) {
+        delete_chain_if_present(topology.prerouting_table, chain);
+    }
+    for (const auto& chain : topology.output_generations) {
+        delete_chain_if_present("mangle", chain);
+    }
+    if (topology.raw_prerouting) {
+        delete_all_exact_hooks(
+            "mangle", "PREROUTING", topology.raw_conntrack_chain);
+        delete_chain_if_present("mangle", topology.raw_conntrack_chain);
+    }
+}
+
+void expect_pipe_failure(
+    const std::vector<std::string>& command,
+    const std::string& input) {
+    std::string error;
+    if (safe_exec_pipe_stdin(
+            command,
+            input,
+            &error,
+            SafeExecFailureLog::Suppressed) == 0) {
+        throw std::runtime_error(
+            "Expected command failure during convergence test: " +
+            safe_exec_command_string(command));
+    }
+}
+
+void expect_apply_failure(const std::function<void()>& reapply) {
+    try {
+        reapply();
+    } catch (const std::exception&) {
+        return;
+    }
+    throw std::runtime_error(
+        "Expected invalid live iptables state to fail closed");
+}
+
+void exercise_iptables_convergence(
+    const IptablesConvergenceTopology& topology,
+    const std::function<void()>& reapply) {
+    // Repeated publication must only toggle the inactive slot. It must never
+    // accumulate hooks or leave either dispatcher malformed.
+    assert_iptables_converged(
+        topology, /*require_both_generations=*/false);
+    reapply();
+    for (size_t index = 0; index < 6; ++index) {
+        assert_iptables_converged(topology);
+        reapply();
+    }
+    assert_iptables_converged(topology);
+
+    delete_dispatchers(topology);
+    reapply();
+    assert_iptables_converged(topology);
+
+    size_t active = assert_iptables_converged(topology);
+    size_t inactive = 1U - active;
+    delete_chain_if_present(
+        topology.prerouting_table,
+        topology.prerouting_generations[inactive]);
+    delete_chain_if_present(
+        "mangle", topology.output_generations[inactive]);
+    reapply();
+    assert_iptables_converged(topology);
+
+    // A valid forwarded-traffic dispatcher remains the authority when the
+    // OUTPUT dispatcher is missing. The repair is staged in the opposite slot.
+    active = assert_iptables_converged(topology);
+    run_command({
+        "iptables", "-t", "mangle",
+        "-F", topology.output_dispatcher});
+    reapply();
+    if (assert_iptables_converged(topology) == active) {
+        throw std::runtime_error(
+            "Valid plus missing dispatcher did not stage the opposite generation");
+    }
+
+    // The same authority rule applies when OUTPUT is malformed rather than
+    // absent. Repair it to the forwarded generation before staging the next
+    // inactive slot.
+    active = assert_iptables_converged(topology);
+    run_command({
+        "iptables", "-t", "mangle",
+        "-A", topology.output_dispatcher,
+        "-m", "comment", "--comment", "kpbr-integration-garbage",
+        "-j", "RETURN"});
+    reapply();
+    if (assert_iptables_converged(topology) == active) {
+        throw std::runtime_error(
+            "Valid plus invalid dispatcher did not stage the opposite generation");
+    }
+
+    // With no valid authority, dual A/B dispatchers are ambiguous. Applying
+    // must fail before mutating live state instead of guessing a generation.
+    active = assert_iptables_converged(topology);
+    run_command({
+        "iptables", "-t", topology.prerouting_table,
+        "-F", topology.prerouting_dispatcher});
+    for (const auto& generation : topology.prerouting_generations) {
+        run_command({
+            "iptables", "-t", topology.prerouting_table,
+            "-A", topology.prerouting_dispatcher,
+            "-j", generation});
+    }
+    run_command({
+        "iptables", "-t", "mangle",
+        "-F", topology.output_dispatcher});
+    for (const auto& generation : topology.output_generations) {
+        run_command({
+            "iptables", "-t", "mangle",
+            "-A", topology.output_dispatcher,
+            "-j", generation});
+    }
+    const std::string invalid_prerouting =
+        iptables_save(topology.prerouting_table);
+    const std::string invalid_mangle =
+        topology.prerouting_table == "mangle"
+            ? invalid_prerouting
+            : iptables_save("mangle");
+    expect_apply_failure(reapply);
+    if (iptables_save(topology.prerouting_table) != invalid_prerouting ||
+        (topology.prerouting_table != "mangle" &&
+         iptables_save("mangle") != invalid_mangle)) {
+        throw std::runtime_error(
+            "Fail-closed apply mutated ambiguous live iptables state");
+    }
+    run_command({
+        "iptables", "-t", topology.prerouting_table,
+        "-F", topology.prerouting_dispatcher});
+    run_command({
+        "iptables", "-t", topology.prerouting_table,
+        "-A", topology.prerouting_dispatcher,
+        "-j", topology.prerouting_generations[active]});
+    run_command({
+        "iptables", "-t", "mangle",
+        "-F", topology.output_dispatcher});
+    run_command({
+        "iptables", "-t", "mangle",
+        "-A", topology.output_dispatcher,
+        "-j", topology.output_generations[active]});
+    assert_iptables_converged(topology);
+
+    // Missing plus missing has no contradictory authority and is the supported
+    // bootstrap/recovery case.
+    delete_all_owned_scaffold(topology);
+    reapply();
+    assert_iptables_converged(
+        topology, /*require_both_generations=*/false);
+    reapply();
+    assert_iptables_converged(topology);
+
+    // Out-of-band duplication is common after interrupted init scripts.
+    run_command({
+        "iptables", "-t", topology.prerouting_table,
+        "-A", "PREROUTING", "-j", topology.prerouting_dispatcher});
+    run_command({
+        "iptables", "-t", "mangle",
+        "-A", "OUTPUT", "-j", topology.output_dispatcher});
+    if (topology.raw_prerouting) {
+        run_command({
+            "iptables", "-t", "mangle",
+            "-A", "PREROUTING", "-j", topology.raw_conntrack_chain});
+    }
+    reapply();
+    active = assert_iptables_converged(topology);
+
+    // iptables-restore is table-transactional: a missing set in the staged
+    // slot must not switch or damage the active dispatcher.
+    inactive = 1U - active;
+    const std::string failed_restore =
+        "*" + topology.prerouting_table + "\n" +
+        ":" + topology.prerouting_dispatcher + " - [0:0]\n" +
+        ":" + topology.prerouting_generations[0] + " - [0:0]\n" +
+        ":" + topology.prerouting_generations[1] + " - [0:0]\n" +
+        "-F " + topology.prerouting_generations[inactive] + "\n" +
+        "-F " + topology.prerouting_dispatcher + "\n" +
+        "-A " + topology.prerouting_generations[inactive] +
+        " -m set --match-set kpbr4_missing_integration dst -j RETURN\n" +
+        "-A " + topology.prerouting_dispatcher + " -j " +
+        topology.prerouting_generations[inactive] + "\n" +
+        "COMMIT\n";
+    expect_pipe_failure(
+        {"iptables-restore", "--noflush", "--counters"},
+        failed_restore);
+    if (assert_iptables_converged(topology) != active) {
+        throw std::runtime_error(
+            "Failed iptables restore changed the active generation");
+    }
+
+    // ipset restore is not transactional, but it must never publish its
+    // partially changed inactive set. The next normal apply repairs that slot.
+    const std::string inactive_set =
+        inactive == 0 ? "kpbr4s_local" : "kpbr4S_local";
+    const std::string failed_ipset =
+        "flush " + inactive_set + "\n" +
+        "add " + inactive_set + " 203.0.113.77 -exist\n" +
+        "add kpbr4_missing_integration 203.0.113.78 -exist\n";
+    expect_pipe_failure(
+        {"ipset", "restore", "-exist"},
+        failed_ipset);
+    if (assert_iptables_converged(topology) != active) {
+        throw std::runtime_error(
+            "Failed ipset restore changed the active generation");
+    }
+    reapply();
+    assert_iptables_converged(topology);
+    run_command({"ipset", "test", inactive_set, "10.10.0.1"});
+    if (safe_exec(
+            {"ipset", "test", inactive_set, "203.0.113.77"},
+            /*suppress_output=*/true) == 0) {
+        throw std::runtime_error(
+            "Normal apply did not repair partially changed inactive ipset");
+    }
+}
+
 } // namespace
 
 int run_firewall_integration(int argc, char* argv[]) {
@@ -557,6 +1072,18 @@ int run_firewall_integration(int argc, char* argv[]) {
         parse_backend_preference(options.backend),
         options.use_raw_prerouting);
     RuntimeCleanup cleanup{route_table, policy_rules, *firewall};
+    const std::optional<IptablesConvergenceTopology> convergence_topology =
+        options.exercise_iptables_convergence
+            ? std::optional<IptablesConvergenceTopology>{
+                  options.use_raw_prerouting}
+            : std::nullopt;
+    if (convergence_topology.has_value()) {
+        if (firewall->backend() != FirewallBackend::iptables) {
+            throw std::runtime_error(
+                "--exercise-iptables-convergence requires the iptables backend");
+        }
+        install_foreign_firewall_state(*convergence_topology);
+    }
 
     FirewallState firewall_state;
     firewall_state.set_outbound_marks(marks);
@@ -575,13 +1102,16 @@ int run_firewall_integration(int argc, char* argv[]) {
         },
         &urltest_selections);
 
-    firewall_state.set_rules(apply_runtime_firewall(
-        config,
-        marks,
-        urltest_selections,
-        cache_manager,
-        *firewall,
-        mode));
+    auto apply_firewall = [&](FirewallApplyMode apply_mode) {
+        firewall_state.set_rules(apply_runtime_firewall(
+            config,
+            marks,
+            urltest_selections,
+            cache_manager,
+            *firewall,
+            apply_mode));
+    };
+    apply_firewall(mode);
     if (options.repeat_preserve_apply) {
         if (options.drop_iptables_dispatchers_before_repeat) {
             if (firewall->backend() != FirewallBackend::iptables) {
@@ -608,13 +1138,14 @@ int run_firewall_integration(int argc, char* argv[]) {
                 }
             }
         }
-        firewall_state.set_rules(apply_runtime_firewall(
-            config,
-            marks,
-            urltest_selections,
-            cache_manager,
-            *firewall,
-            FirewallApplyMode::PreserveSets));
+        apply_firewall(FirewallApplyMode::PreserveSets);
+    }
+    if (convergence_topology.has_value()) {
+        exercise_iptables_convergence(
+            *convergence_topology,
+            [&]() {
+                apply_firewall(FirewallApplyMode::PreserveSets);
+            });
     }
 
     const RoutingHealthReport report = build_routing_health_report(
@@ -630,6 +1161,13 @@ int run_firewall_integration(int argc, char* argv[]) {
         dump_routing_state(report);
         dump_firewall_state(firewall->backend());
         return 1;
+    }
+
+    if (convergence_topology.has_value()) {
+        // Explicit cleanup is part of the ownership contract too: only
+        // keen-pbr state may disappear.
+        firewall->cleanup();
+        assert_foreign_firewall_state(*convergence_topology);
     }
 
     std::cout << "ok backend=" << options.backend

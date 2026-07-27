@@ -142,6 +142,29 @@ std::string trim_copy(const std::string& value) {
     return value.substr(begin, end - begin + 1);
 }
 
+bool is_valid_iptables_interface_name(const std::string& interface_name) {
+    if (interface_name.empty() || trim_copy(interface_name).empty() ||
+        interface_name.size() >= IFNAMSIZ || interface_name == "." ||
+        interface_name == ".." || interface_name.back() == '+') {
+        return false;
+    }
+
+    return std::none_of(
+        interface_name.begin(),
+        interface_name.end(),
+        [](unsigned char ch) {
+            return ch == '/' || ch == ':' || ch == '"' || ch == '\\' ||
+                   std::isspace(ch) != 0 || std::iscntrl(ch) != 0;
+        });
+}
+
+std::string iptables_interface_name_requirement(const std::string& path) {
+    return path +
+           " must be a valid iptables interface name (shorter than IFNAMSIZ, "
+           "without '/', ':', quotes, backslashes, whitespace, or control "
+           "characters, and not ending in '+')";
+}
+
 FirewallBackendPreference to_firewall_backend_preference(api::DaemonConfigFirewallBackend backend) {
     switch (backend) {
         case api::DaemonConfigFirewallBackend::AUTO:
@@ -706,18 +729,9 @@ void validate_route_inbound_interfaces(const json& root, std::vector<ConfigValid
             continue;
         }
 
-        const bool invalid_character = std::any_of(
-            iface.begin(), iface.end(), [](unsigned char ch) {
-                return ch == '/' || ch == ':' || std::isspace(ch) != 0 ||
-                       std::iscntrl(ch) != 0;
-            });
-        if (iface.size() >= IFNAMSIZ || iface == "." || iface == ".." ||
-            invalid_character) {
-            add_issue(
-                issues,
-                iface_path,
-                iface_path +
-                    " must be a valid Linux interface name (shorter than IFNAMSIZ and without '/', ':', whitespace, or control characters)");
+        if (!is_valid_iptables_interface_name(iface)) {
+            add_issue(issues, iface_path,
+                      iptables_interface_name_requirement(iface_path));
             continue;
         }
 
@@ -1097,11 +1111,19 @@ void validate_config(const Config& cfg) {
 
         if (ob.type == OutboundType::INTERFACE) {
             const std::string iface = trim_copy(ob.interface.value_or(""));
+            const std::string interface_path =
+                "outbounds." + ob.tag + ".interface";
             if (iface.empty()) {
                 add_issue(issues,
-                          "outbounds." + ob.tag + ".interface",
+                          interface_path,
                           "Interface outbound '" + ob.tag +
                               "' requires a non-empty interface name");
+            } else if (!is_valid_iptables_interface_name(
+                           ob.interface.value_or(""))) {
+                add_issue(
+                    issues,
+                    interface_path,
+                    iptables_interface_name_requirement(interface_path));
             }
             if (ob.gateway.has_value() && !is_valid_ipv4_address(*ob.gateway)) {
                 add_issue(issues,

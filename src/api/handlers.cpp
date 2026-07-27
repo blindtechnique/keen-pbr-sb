@@ -42,7 +42,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_dns_test_handler(server, ctx);
     register_connections_handler(server, ctx);
     register_nfqws_handler(server, ctx);
-    register_logs_handler(server, ctx);
+    register_logs_handler(server);
     register_router_info_handler(server, ctx);
     register_catalog_handler(server, ctx);
     register_geo_handler(server, ctx);

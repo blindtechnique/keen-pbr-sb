@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../log/logger.hpp"
+#include "last_command_failure.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -89,6 +90,7 @@ struct ChildWaitResult {
     int status{0};
     bool reaped{false};
     bool timed_out{false};
+    int wait_errno{0};
 };
 
 inline void prepare_child_process_group() {
@@ -119,6 +121,7 @@ inline ChildWaitResult wait_for_child_until(
                 return true;
             }
             if (waited < 0 && errno != EINTR) {
+                result.wait_errno = errno;
                 return true;
             }
             const auto now = clock::now();
@@ -144,6 +147,7 @@ inline ChildWaitResult wait_for_child_until(
     signal_child_process_group(pid, SIGKILL);
     while (waitpid(pid, &result.status, 0) < 0) {
         if (errno != EINTR) {
+            result.wait_errno = errno;
             return result;
         }
     }
@@ -183,6 +187,35 @@ inline void log_failed_pipe_input(const std::string& command,
         preview.size(),
         truncated ? "true" : "false",
         preview);
+}
+
+inline void record_safe_exec_pipe_failure(
+    const std::vector<std::string>& args,
+    int exit_code,
+    const std::string& input,
+    std::string_view response,
+    std::string_view reason,
+    std::string_view numeric_detail = {},
+    int numeric_value = 0) noexcept {
+    // Diagnostics are observational only. In particular, their filesystem
+    // operations and allocations must not replace the command result or the
+    // errno produced by pipe/fork/waitpid.
+    const int saved_errno = errno;
+    try {
+        std::string rendered_reason(reason);
+        if (!numeric_detail.empty()) {
+            rendered_reason.push_back(' ');
+            rendered_reason.append(
+                numeric_detail.data(), numeric_detail.size());
+            rendered_reason.push_back('=');
+            rendered_reason += std::to_string(numeric_value);
+        }
+        (void)write_last_command_failure(LastCommandFailureView{
+            args, exit_code, input, response, rendered_reason});
+    } catch (...) {
+        // Best-effort diagnostics are never part of command execution.
+    }
+    errno = saved_errno;
 }
 
 // Execute a command with arguments directly via fork()+execvp(), bypassing
@@ -394,12 +427,19 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
 
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC) == -1) {
+        const int pipe_errno = errno;
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=pipe_failed errno={}",
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
-                                 errno);
+                                 pipe_errno);
+        if (failure_log == SafeExecFailureLog::Enabled) {
+            errno = pipe_errno;
+            record_safe_exec_pipe_failure(
+                args, -1, input, {}, "pipe_failed", "errno", pipe_errno);
+        }
+        errno = pipe_errno;
         return -1;
     }
 
@@ -410,6 +450,7 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
 
     const pid_t pid = fork();
     if (pid == -1) {
+        const int fork_errno = errno;
         close(pipefd[0]);
         close(pipefd[1]);
         if (errfd[0] != -1) { close(errfd[0]); close(errfd[1]); }
@@ -418,7 +459,13 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
-                                 errno);
+                                 fork_errno);
+        if (failure_log == SafeExecFailureLog::Enabled) {
+            errno = fork_errno;
+            record_safe_exec_pipe_failure(
+                args, -1, input, {}, "fork_failed", "errno", fork_errno);
+        }
+        errno = fork_errno;
         return -1;
     }
 
@@ -465,20 +512,32 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
     bool input_open = true;
     bool error_open = errfd[0] != -1;
     bool child_reaped = false;
+    int waitpid_error = 0;
     int status = 0;
     bool deadline_exceeded = false;
-    constexpr size_t kMaxStderrBytes = 8 * 1024;
     char buffer[512];
 
-    while ((!child_reaped || input_open || error_open) && !deadline_exceeded) {
+    const auto append_stderr =
+        [stderr_out](const char* source, std::size_t count) {
+            constexpr std::size_t kLimit = 8U * 1024U;
+            if (stderr_out != nullptr) {
+                const std::size_t available =
+                    stderr_out->size() < kLimit
+                        ? kLimit - stderr_out->size()
+                        : 0;
+                stderr_out->append(source, std::min(available, count));
+            }
+        };
+
+    while ((!child_reaped || input_open || error_open) &&
+           !deadline_exceeded &&
+           waitpid_error == 0) {
         if (error_open) {
             while (true) {
                 const ssize_t got = read(errfd[0], buffer, sizeof(buffer));
                 if (got > 0) {
-                    const size_t available = stderr_out->size() < kMaxStderrBytes
-                        ? kMaxStderrBytes - stderr_out->size()
-                        : 0;
-                    stderr_out->append(buffer, std::min(available, static_cast<size_t>(got)));
+                    append_stderr(
+                        buffer, static_cast<std::size_t>(got));
                     continue;
                 }
                 if (got == 0) {
@@ -510,7 +569,11 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
 
         if (!child_reaped) {
             const pid_t waited = waitpid(pid, &status, WNOHANG);
-            child_reaped = waited == pid || (waited < 0 && errno != EINTR);
+            if (waited == pid) {
+                child_reaped = true;
+            } else if (waited < 0 && errno != EINTR) {
+                waitpid_error = errno;
+            }
         }
         if (child_reaped && !input_open && !error_open) {
             break;
@@ -543,6 +606,32 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
             stderr_out->pop_back();
         }
     }
+    const std::string_view captured_stderr =
+        stderr_out != nullptr ? std::string_view(*stderr_out)
+                              : std::string_view{};
+
+    if (waitpid_error != 0) {
+        Logger::instance().trace(
+            "safe_exec_pipe_error",
+            "cmd={} duration_ms={} reason=waitpid_failed errno={}",
+            command,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started_at).count(),
+            waitpid_error);
+        if (failure_log == SafeExecFailureLog::Enabled) {
+            errno = waitpid_error;
+            record_safe_exec_pipe_failure(
+                args,
+                -1,
+                input,
+                captured_stderr,
+                "waitpid_failed",
+                "errno",
+                waitpid_error);
+        }
+        errno = waitpid_error;
+        return -1;
+    }
 
     ChildWaitResult wait_result;
     if (child_reaped) {
@@ -566,20 +655,34 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                 "be retried.",
                 command, timeouts.timeout.count());
             log_failed_pipe_input(command, input);
+            record_safe_exec_pipe_failure(
+                args, -1, input, captured_stderr, "timeout");
         }
         return -1;
     }
     status = wait_result.status;
     if (!wait_result.reaped) {
+        const int wait_errno =
+            wait_result.wait_errno != 0 ? wait_result.wait_errno : errno;
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=waitpid_failed errno={}",
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
-                                 errno);
+                                 wait_errno);
         if (failure_log == SafeExecFailureLog::Enabled) {
             log_failed_pipe_input(command, input);
+            errno = wait_errno;
+            record_safe_exec_pipe_failure(
+                args,
+                -1,
+                input,
+                captured_stderr,
+                "waitpid_failed",
+                "errno",
+                wait_errno);
         }
+        errno = wait_errno;
         return -1;
     }
     const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -599,6 +702,12 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                 exit_code,
                 duration_ms);
             log_failed_pipe_input(command, input);
+            record_safe_exec_pipe_failure(
+                args,
+                exit_code,
+                input,
+                captured_stderr,
+                "nonzero_exit");
         }
         return exit_code;
     }
@@ -608,6 +717,19 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
             command,
             duration_ms);
         log_failed_pipe_input(command, input);
+        if (WIFSIGNALED(status)) {
+            record_safe_exec_pipe_failure(
+                args,
+                -1,
+                input,
+                captured_stderr,
+                "abnormal_exit",
+                "signal",
+                WTERMSIG(status));
+        } else {
+            record_safe_exec_pipe_failure(
+                args, -1, input, captured_stderr, "abnormal_exit");
+        }
     }
     return -1;
 }

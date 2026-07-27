@@ -1561,10 +1561,12 @@ TEST_CASE("route inbound_interfaces: restore control characters are rejected") {
 
 TEST_CASE("route inbound_interfaces: Linux-invalid names are rejected") {
     for (const std::string& iface : {".", "..", "bad/name", "bad:name",
-                                     "bad name", "0123456789abcdef"}) {
+                                     "bad name", "bad\"name", "bad\\name",
+                                     "eth+", "0123456789abcdef"}) {
         const auto issues = parse_issues(
-            "{\"route\":{\"inbound_interfaces\":[\"" + iface +
-            "\"],\"rules\":[{\"list\":[\"ads\"],\"outbound\":\"vpn\"}]}}");
+            "{\"route\":{\"inbound_interfaces\":[" +
+            nlohmann::json(iface).dump() +
+            "],\"rules\":[{\"list\":[\"ads\"],\"outbound\":\"vpn\"}]}}");
         CAPTURE(iface);
         REQUIRE_FALSE(issues.empty());
         CHECK(issues.front().path == "route.inbound_interfaces[0]");
@@ -1574,6 +1576,36 @@ TEST_CASE("route inbound_interfaces: Linux-invalid names are rejected") {
 TEST_CASE("route inbound_interfaces: valid future interface need not exist") {
     CHECK_NOTHROW(parse_test_config(
         R"({"route":{"inbound_interfaces":["vpn_future@1"],"rules":[]}})"));
+}
+
+TEST_CASE("interface outbound: strict iptables interface names are accepted") {
+    for (const std::string& iface :
+         {"eth0", "nwg2", "vpn_future@1", "br-lan.10", "_managed"}) {
+        CAPTURE(iface);
+        CHECK_NOTHROW(parse_test_config(
+            "{\"outbounds\":[{\"tag\":\"vpn\",\"type\":\"interface\","
+            "\"interface\":" +
+            nlohmann::json(iface).dump() + "}],\"route\":{\"rules\":[]}}"));
+    }
+}
+
+TEST_CASE("interface outbound: restore metacharacters and wildcard suffix are rejected") {
+    for (const std::string& iface :
+         {"bad\"name", "bad\\name", "eth+"}) {
+        const auto issues = validate_issues(
+            "{\"outbounds\":[{\"tag\":\"vpn\",\"type\":\"interface\","
+            "\"interface\":" +
+            nlohmann::json(iface).dump() + "}],\"route\":{\"rules\":[]}}");
+        CAPTURE(iface);
+        const auto issue = std::find_if(
+            issues.begin(), issues.end(),
+            [](const ConfigValidationIssue& candidate) {
+                return candidate.path == "outbounds.vpn.interface";
+            });
+        REQUIRE(issue != issues.end());
+        CHECK(issue->message.find("valid iptables interface name") !=
+              std::string::npos);
+    }
 }
 
 // =============================================================================

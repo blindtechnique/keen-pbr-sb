@@ -74,12 +74,10 @@ for backend in iptables nftables; do
 
   if [[ "$backend" == "iptables" ]]; then
     run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
-      --repeat-preserve-apply \
-      --drop-iptables-dispatchers-before-repeat
+      --exercise-iptables-convergence
     run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
       --use-raw-prerouting \
-      --repeat-preserve-apply \
-      --drop-iptables-dispatchers-before-repeat
+      --exercise-iptables-convergence
   else
     run_case "$container" "$backend" "firewall-smoke.json" "firewall-smoke.setup.sh" \
       --repeat-preserve-apply

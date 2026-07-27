@@ -4,6 +4,7 @@
 
 #include "../log/file_sink.hpp"
 #include "../log/logger.hpp"
+#include "../util/last_command_failure.hpp"
 
 #include <httplib.h>
 
@@ -141,7 +142,7 @@ void apply_stored_log_settings() {
     }
 }
 
-void register_logs_handler(ApiServer& server, ApiContext& /*ctx*/) {
+void register_logs_handler(ApiServer& server) {
     // GET /api/logs?lines=N - tail of the daemon log file.
     //
     // The router runs keen-pbr from an init script where stderr is discarded,
@@ -170,7 +171,19 @@ void register_logs_handler(ApiServer& server, ApiContext& /*ctx*/) {
         response["exists"] = exists;
         response["size_bytes"] = size_bytes;
         response["lines"] = tail;
-        res.set_content(response.dump(), "application/json");
+        if (const auto failure = read_last_command_failure()) {
+            response["last_command_failure"] = *failure;
+        }
+        // A legacy daemon log may contain arbitrary tool output. Replace an
+        // invalid byte instead of turning the whole diagnostics endpoint into
+        // HTTP 500; new command-failure snapshots are sanitized at write time.
+        res.set_content(
+            response.dump(
+                -1,
+                ' ',
+                false,
+                nlohmann::json::error_handler_t::replace),
+            "application/json");
     });
 
     // GET /api/logs/settings - current logging preferences.

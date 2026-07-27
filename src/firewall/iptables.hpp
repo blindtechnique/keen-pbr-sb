@@ -23,8 +23,9 @@ class IptablesFirewall : public Firewall {
 public:
     // Initialize the iptables backend; does not modify firewall state yet.
     explicit IptablesFirewall(bool use_raw_prerouting = false);
-    // Destructor performs best-effort cleanup without virtual dispatch.
-    ~IptablesFirewall() override;
+    // Kernel firewall state is persistent and is removed only by explicit
+    // cleanup(), never as a side effect of C++ object destruction.
+    ~IptablesFirewall() override = default;
 
     void prepare_apply(FirewallApplyMode mode) override;
     std::string static_set_name(const std::string& list_name, int family) const override;
@@ -102,9 +103,15 @@ private:
         bool output{false}; // true → KeenPbrOutput (mangle OUTPUT), false → KeenPbrTable (PREROUTING)
     };
 
+    enum class LiveGenerationState { A, B, Missing, Invalid };
+
     // Build the 'create <name> hash:net family <f> [timeout <t>]' line.
     static std::string build_ipset_create_line(const PendingSet& ps);
     static bool is_dynamic_set_name(const std::string& set_name);
+    static bool dynamic_set_schema_compatible(
+        const std::string& xml,
+        const PendingSet& expected);
+    void preflight_dynamic_set_schemas(bool effective_ipv6) const;
     // Build a complete iptables-restore script for the given protocol and rules.
     static std::string build_ipt_script(bool ipv6,
                                         const std::vector<PendingRule>& rules,
@@ -137,26 +144,68 @@ private:
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain = CHAIN_NAME,
         bool allow_conntrack = true);
-    // Build the proto/port fragment for a single rule (single proto, not tcp/udp).
-    static std::string build_proto_port_fragment(L4Proto proto,
-                                                 const PortSpec& src_port,
-                                                 const PortSpec& dst_port,
-                                                 bool negate_src_port = false,
-                                                 bool negate_dst_port = false);
+    // Build the proto/port fragments for a single rule (single proto, not
+    // tcp/udp). Oversized positive multiport lists expand into alternative
+    // rules; negated chunks stay in one fragment so their AND semantics are
+    // preserved.
+    static std::vector<std::string> build_proto_port_fragments(
+        L4Proto proto,
+        const PortSpec& src_port,
+        const PortSpec& dst_port,
+        bool negate_src_port = false,
+        bool negate_dst_port = false);
     // Build one or more iptables-restore lines for a queued rule.
     static std::vector<std::string> build_rule_lines(
         const PendingRule& pr,
         const FirewallGlobalPrefilter& prefilter,
         bool allow_conntrack = true);
     bool ipv6_backend_available() const;
-    // true  = chains and built-in jumps are present
-    // false = a successful table snapshot confirms they are missing
-    // nullopt = the snapshot itself failed (for example, xtables lock contention)
-    std::optional<bool> dispatcher_chains_exist(bool ipv6) const;
-    static bool snapshot_contains_dispatcher_scaffold(
-        const std::string& snapshot,
-        const char* builtin,
-        const char* chain);
+    LiveGenerationState inspect_live_generation(bool ipv6) const;
+    LiveGenerationState inspect_dispatcher(
+        const char* command,
+        const char* table,
+        const std::string& dispatcher,
+        const std::string& generation_a,
+        const std::string& generation_b) const;
+    FirewallSetGeneration select_target_generation(bool ipv6) const;
+    void ensure_target_generation_inactive(
+        bool ipv6,
+        FirewallSetGeneration target) const;
+    void publish_dispatcher(
+        bool ipv6,
+        bool output,
+        FirewallSetGeneration generation) const;
+    static LiveGenerationState parse_live_generation(
+        const std::string& rules,
+        const std::string& dispatcher,
+        const std::string& generation_a,
+        const std::string& generation_b);
+    static FirewallSetGeneration target_generation_for_states(
+        LiveGenerationState primary,
+        LiveGenerationState secondary);
+    void reconcile_hooks(bool ipv6) const;
+    void verify_applied_generation(
+        bool ipv6,
+        FirewallSetGeneration target) const;
+    static size_t count_exact_jump(
+        const std::string& rules,
+        const std::string& source_chain,
+        const std::string& target_chain);
+    static void reconcile_hook(
+        const char* command,
+        const char* table,
+        const char* builtin_chain,
+        const char* target_chain);
+    static void remove_all_hooks(
+        const char* command,
+        const char* table,
+        const char* builtin_chain,
+        const char* target_chain);
+    const char* prerouting_table_name(bool ipv6) const;
+    const char* prerouting_dispatcher_chain_name(bool ipv6) const;
+    const char* prerouting_generation_chain(
+        FirewallSetGeneration generation,
+        bool ipv6) const;
     // Expand filter (proto, src_addr, dst_addr) into cross-product of PendingRules
     // and append them to out.  tcp/udp is split into two entries.  Multiple CIDRs
     // in src_addr / dst_addr each become separate rules (OR semantics when combined).
@@ -183,9 +232,6 @@ private:
     static const char* generation_output_chain(FirewallSetGeneration generation);
     static const char* raw_generation_prerouting_chain(
         FirewallSetGeneration generation);
-    static FirewallSetGeneration opposite_generation(FirewallSetGeneration generation);
-    std::optional<FirewallSetGeneration> active_v4_generation_;
-    std::optional<FirewallSetGeneration> active_v6_generation_;
     FirewallSetGeneration target_v4_generation_{FirewallSetGeneration::A};
     FirewallSetGeneration target_v6_generation_{FirewallSetGeneration::A};
     bool apply_prepared_{false};

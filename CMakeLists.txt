@@ -319,6 +319,7 @@ set(SOURCES
   src/util/base64.cpp
   src/util/firewall_backend_utils.cpp
   src/util/ipv6_support.cpp
+  src/util/last_command_failure.cpp
   src/util/network_routes.cpp
   src/util/nfqws_config.cpp
   src/util/nfqws_strategy_assets.cpp
@@ -384,6 +385,7 @@ target_include_directories(keen-pbr PRIVATE
   "${KEEN_PBR_GENERATED_INCLUDE_DIR}"
   include
   src
+  third_party/rapidxml
 )
 target_compile_definitions(keen-pbr PRIVATE
   KEEN_PBR_DEFAULT_CONFIG_PATH="${KEEN_PBR_DEFAULT_CONFIG_PATH}"

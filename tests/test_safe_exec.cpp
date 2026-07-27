@@ -1,4 +1,5 @@
 #include "../src/util/safe_exec.hpp"
+#include "../src/util/last_command_failure.hpp"
 #include "../src/util/ipv6_support.hpp"
 #include "../src/firewall/iptables.hpp"
 
@@ -112,6 +113,19 @@ class LoggerSinkGuard {
 public:
     ~LoggerSinkGuard() {
         Logger::instance().clear_sink();
+    }
+};
+
+class LastCommandFailurePathGuard {
+public:
+    explicit LastCommandFailurePathGuard(
+        const std::filesystem::path& path) {
+        set_last_command_failure_path_for_testing(path.string());
+    }
+
+    ~LastCommandFailurePathGuard() {
+        set_last_command_failure_post_commit_failure_for_testing(false);
+        set_last_command_failure_path_for_testing(std::nullopt);
     }
 };
 
@@ -252,6 +266,9 @@ TEST_CASE("safe_exec: timeout escalates to SIGKILL") {
 TEST_CASE("safe_exec_pipe_stdin: unread input is bounded by deadline") {
     SafeExecTimeoutGuard guard;
     LoggerSinkGuard logger_sink_guard;
+    TempDir temp_dir;
+    LastCommandFailurePathGuard failure_path(
+        temp_dir.path() / "last-command-failure.log");
     std::string log;
     Logger::instance().set_sink([&log](const std::string& line) {
         log += line;
@@ -271,10 +288,18 @@ TEST_CASE("safe_exec_pipe_stdin: unread input is bounded by deadline") {
     CHECK(log.size() < 16U * 1024U);
     CHECK(log.find("input_bytes=2097152") != std::string::npos);
     CHECK(log.find("truncated=true") != std::string::npos);
+    const auto failure = read_last_command_failure();
+    REQUIRE(failure.has_value());
+    CHECK(failure->find("reason: timeout") != std::string::npos);
+    CHECK(failure->find("stdin_bytes: 2097152") != std::string::npos);
 }
 
 TEST_CASE("safe_exec_pipe_stdin: failed command logs arguments and input") {
     LoggerSinkGuard logger_sink_guard;
+    TempDir temp_dir;
+    const auto failure_path =
+        temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(failure_path);
     std::string log;
     Logger::instance().set_sink([&log](const std::string& line) {
         log += line;
@@ -282,18 +307,35 @@ TEST_CASE("safe_exec_pipe_stdin: failed command logs arguments and input") {
     });
 
     const std::string input = "*mangle\nCOMMIT\n";
+    std::string stderr_output;
     const int exit_code = safe_exec_pipe_stdin(
-        {"/bin/sh", "-c", "cat >/dev/null; exit 42"}, input);
+        {"/bin/sh", "-c",
+         "cat >/dev/null; printf 'line 7 failed\\n' >&2; exit 42"},
+        input,
+        &stderr_output);
 
     CHECK(exit_code == 42);
-    CHECK(log.find("cmd=/bin/sh -c cat >/dev/null; exit 42") !=
+    CHECK(log.find("cmd=/bin/sh -c cat >/dev/null; printf 'line 7 failed") !=
           std::string::npos);
     CHECK(log.find(input) != std::string::npos);
     CHECK(log.find("truncated=false") != std::string::npos);
+    const auto failure = read_last_command_failure();
+    REQUIRE(failure.has_value());
+    CHECK(failure->find("exit_code: 42") != std::string::npos);
+    CHECK(failure->find(input) != std::string::npos);
+    CHECK(failure->find("line 7 failed") != std::string::npos);
 }
 
 TEST_CASE("safe_exec_pipe_stdin: capability probes can suppress expected failures") {
     LoggerSinkGuard logger_sink_guard;
+    TempDir temp_dir;
+    const auto failure_path =
+        temp_dir.path() / "last-command-failure.log";
+    {
+        std::ofstream sentinel(failure_path, std::ios::binary);
+        sentinel << "unchanged";
+    }
+    LastCommandFailurePathGuard failure_path_guard(failure_path);
     std::string log;
     Logger::instance().set_sink([&log](const std::string& line) {
         log += line;
@@ -311,6 +353,22 @@ TEST_CASE("safe_exec_pipe_stdin: capability probes can suppress expected failure
     CHECK(stderr_output == "unsupported");
     CHECK(log.find("safe_exec_pipe_failed") == std::string::npos);
     CHECK(log.find("safe_exec_pipe_input") == std::string::npos);
+    CHECK(read_file(failure_path) == "unchanged");
+}
+
+TEST_CASE("safe_exec_pipe_stdin: records abnormal signal termination") {
+    TempDir temp_dir;
+    LastCommandFailurePathGuard failure_path(
+        temp_dir.path() / "last-command-failure.log");
+
+    const int exit_code = safe_exec_pipe_stdin(
+        {"/bin/sh", "-c", "kill -TERM $$"}, {});
+
+    CHECK(exit_code == -1);
+    const auto failure = read_last_command_failure();
+    REQUIRE(failure.has_value());
+    CHECK(failure->find("reason: abnormal_exit signal=15") !=
+          std::string::npos);
 }
 
 TEST_CASE("safe_exec_capture: ignored SIGTERM cannot hang capture") {
@@ -326,6 +384,172 @@ TEST_CASE("safe_exec_capture: ignored SIGTERM cannot hang capture") {
     CHECK(result.exit_code == -1);
     CHECK(result.timed_out);
     CHECK(elapsed < std::chrono::seconds{2});
+}
+
+TEST_CASE("last command failure: writes one private atomic snapshot") {
+    TempDir temp_dir;
+    const auto path = temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(path);
+    const std::vector<std::string> first_command{
+        "/usr/sbin/iptables-restore", "-w", "10"};
+    const std::vector<std::string> second_command{
+        "/usr/sbin/ip", "route", "replace", "default"};
+    {
+        std::ofstream output(path, std::ios::binary);
+        output << "pre-existing diagnostic";
+    }
+    REQUIRE(::chmod(path.c_str(), 0644) == 0);
+
+    REQUIRE(write_last_command_failure(
+        {first_command, 1, "*mangle\nCOMMIT\n", "line 3 failed\n", {}}));
+    struct stat first_metadata {};
+    REQUIRE(::stat(path.c_str(), &first_metadata) == 0);
+    CHECK((first_metadata.st_mode & 0777) == 0600);
+    CHECK(first_metadata.st_uid == ::geteuid());
+    CHECK(first_metadata.st_gid == ::getegid());
+
+    std::ifstream old_snapshot(path, std::ios::binary);
+    REQUIRE(old_snapshot);
+
+    REQUIRE(write_last_command_failure(
+        {second_command, 2, {}, "RTNETLINK answers: File exists\n", "retry"}));
+
+    struct stat metadata {};
+    REQUIRE(::stat(path.c_str(), &metadata) == 0);
+    CHECK((metadata.st_mode & 0777) == 0600);
+    CHECK(metadata.st_uid == ::geteuid());
+    CHECK(metadata.st_gid == ::getegid());
+
+    const std::string current = read_file(path);
+    CHECK(current.find("command: /usr/sbin/ip route replace default") !=
+          std::string::npos);
+    CHECK(current.find("exit_code: 2") != std::string::npos);
+    CHECK(current.find("reason: retry") != std::string::npos);
+    CHECK(current.find("iptables-restore") == std::string::npos);
+
+    const std::string previous{
+        std::istreambuf_iterator<char>(old_snapshot),
+        std::istreambuf_iterator<char>()};
+    CHECK(previous.find("iptables-restore") != std::string::npos);
+    CHECK(previous.find("RTNETLINK") == std::string::npos);
+
+    for (const auto& entry :
+         std::filesystem::directory_iterator(temp_dir.path())) {
+        CHECK(entry.path().filename() == path.filename());
+    }
+}
+
+TEST_CASE("last command failure: preserves errno and accepts visible commit") {
+    TempDir temp_dir;
+    const auto path = temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(path);
+    set_last_command_failure_post_commit_failure_for_testing(true);
+    const std::vector<std::string> command{"/bin/false"};
+
+    errno = EDOM;
+    REQUIRE(write_last_command_failure(
+        {command, 1, {}, "failed", "nonzero_exit"}));
+    const int errno_after_write = errno;
+    CHECK(errno_after_write == EDOM);
+
+    errno = ERANGE;
+    const auto record = read_last_command_failure();
+    const int errno_after_read = errno;
+    REQUIRE(record.has_value());
+    CHECK(errno_after_read == ERANGE);
+    CHECK(record->find("command: /bin/false") != std::string::npos);
+}
+
+TEST_CASE("last command failure: redacts obvious credentials") {
+    TempDir temp_dir;
+    const auto path = temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(path);
+    const std::vector<std::string> command{
+        "/usr/bin/curl",
+        "--token",
+        "command-token-secret",
+        "--password=command-password-secret",
+        "-H",
+        "Authorization: Bearer header-secret",
+        "vless://share-uuid-secret@example.net:443",
+    };
+    const std::string input =
+        R"({"password":"json-password-secret","client_secret":"json-client-secret","uuid":"json-uuid-secret"})";
+    const std::string response =
+        "Set-Cookie: session=response-cookie-secret\n"
+        "proxy-authorization: Basic response-auth-secret\n";
+    const std::string reason =
+        "request https://reason-user:reason-password@example.net failed";
+
+    REQUIRE(write_last_command_failure(
+        {command, 22, input, response, reason}));
+    const std::string record = read_file(path);
+
+    CHECK(record.find("[REDACTED]") != std::string::npos);
+    CHECK(record.find("example.net") != std::string::npos);
+    CHECK(record.find("command-token-secret") == std::string::npos);
+    CHECK(record.find("command-password-secret") == std::string::npos);
+    CHECK(record.find("header-secret") == std::string::npos);
+    CHECK(record.find("share-uuid-secret") == std::string::npos);
+    CHECK(record.find("json-password-secret") == std::string::npos);
+    CHECK(record.find("json-client-secret") == std::string::npos);
+    CHECK(record.find("json-uuid-secret") == std::string::npos);
+    CHECK(record.find("response-cookie-secret") == std::string::npos);
+    CHECK(record.find("response-auth-secret") == std::string::npos);
+    CHECK(record.find("reason-user") == std::string::npos);
+    CHECK(record.find("reason-password") == std::string::npos);
+}
+
+TEST_CASE("last command failure: caps large records at 128 KiB") {
+    TempDir temp_dir;
+    const auto path = temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(path);
+    const std::vector<std::string> command{
+        "/usr/sbin/iptables-restore"};
+    const std::string input(512U * 1024U, 'i');
+    const std::string response(512U * 1024U, 'r');
+
+    REQUIRE(write_last_command_failure(
+        {command, 1, input, response, "oversized"}));
+
+    const auto size = std::filesystem::file_size(path);
+    CHECK(size <= kLastCommandFailureMaxBytes);
+    const std::string record = read_file(path);
+    CHECK(record.find("stdin_bytes: 524288") != std::string::npos);
+    CHECK(record.find("response_bytes: 524288") != std::string::npos);
+    CHECK(record.find("[truncated; original_bytes=524288]") !=
+          std::string::npos);
+}
+
+TEST_CASE("last command failure: refuses a symbolic-link destination") {
+    TempDir temp_dir;
+    const auto victim = temp_dir.path() / "victim";
+    const auto destination = temp_dir.path() / "last-command-failure.log";
+    {
+        std::ofstream output(victim, std::ios::binary);
+        output << "must-stay-unchanged";
+    }
+    std::filesystem::create_symlink(victim.filename(), destination);
+    LastCommandFailurePathGuard failure_path_guard(destination);
+    const std::vector<std::string> command{"/bin/false"};
+
+    CHECK_FALSE(write_last_command_failure(
+        {command, 1, {}, {}, "expected failure"}));
+    CHECK(std::filesystem::is_symlink(destination));
+    CHECK(read_file(victim) == "must-stay-unchanged");
+    CHECK_FALSE(read_last_command_failure().has_value());
+}
+
+TEST_CASE("last command failure: secure reader rejects oversized files") {
+    TempDir temp_dir;
+    const auto path = temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(path);
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << std::string(kLastCommandFailureMaxBytes + 1U, 'x');
+    }
+
+    CHECK_FALSE(read_last_command_failure().has_value());
 }
 
 TEST_CASE("iptables_ipv6_supported: probes ip6tables-restore test script") {
