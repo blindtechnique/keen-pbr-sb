@@ -130,8 +130,9 @@ export const enTranslation = {
       "Every imported rule must be mapped to an existing route or failover target.",
   },
   auth: {
-    title: "Sign in to keen-pbr-sb",
+    title: "Web configurator sign-in",
     description: "Authenticate to open routing management.",
+    otherManagement: "Other management options",
     username: "Username",
     password: "Password",
     showPassword: "Show password",
@@ -335,6 +336,8 @@ export const enTranslation = {
       received: "Received",
       transmitted: "Sent",
       chart: "Receive and transmit chart",
+      showChart: "Show chart",
+      hideChart: "Hide chart",
     },
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
@@ -1379,8 +1382,7 @@ export const enTranslation = {
       actions: { create: "Create rule", save: "Save rule" },
       fields: {
         displayName: "Name",
-        displayNameHint:
-          "A readable rule name shown throughout the interface.",
+        displayNameHint: "A readable rule name shown throughout the interface.",
         technicalId: "Technical ID",
         technicalIdHint:
           "A stable internal identifier. It is generated automatically and only needs manual control for exact integrations.",
@@ -1953,8 +1955,7 @@ export const enTranslation = {
       },
       fields: {
         displayName: "Display name",
-        displayNameHint:
-          "A readable list name shown throughout the interface.",
+        displayNameHint: "A readable list name shown throughout the interface.",
         technicalId: "Technical ID",
         technicalIdCreateHint:
           "Stable identifier used in rules and references: lowercase Latin letters, digits, and underscores.",

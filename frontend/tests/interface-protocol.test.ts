@@ -8,15 +8,16 @@ import {
   buildInterfaceProtocolIndex,
   protocolForFirmwareType,
   protocolForKernelName,
+  protocolForManagedTransport,
   protocolForNdmsKind,
 } from "../src/lib/interface-protocol"
 
 describe("interface protocol display", () => {
-  test("distinguishes typed WireGuard and AmneziaWG inventory entries", () => {
+  test("does not overclaim a generic NDMS WireGuard family", () => {
     expect(protocolForNdmsKind("wireguard")).toMatchObject({
-      kind: "wireguard",
-      label: "WG",
-      exact: true,
+      kind: "wireguard_ambiguous",
+      label: "AWG/WG",
+      exact: false,
     })
     expect(protocolForNdmsKind("amnezia_wireguard")).toMatchObject({
       kind: "amneziawg",
@@ -51,12 +52,20 @@ describe("interface protocol display", () => {
 
   test("keeps legacy firmware and kernel evidence explicitly ambiguous", () => {
     expect(protocolForFirmwareType("Wireguard")).toMatchObject({
-      label: "WG/AWG",
+      label: "AWG/WG",
       exact: false,
     })
     expect(protocolForKernelName("nwg7")).toMatchObject({
-      label: "WG/AWG",
+      label: "AWG/WG",
       exact: false,
+    })
+  })
+
+  test("keeps an explicitly configured managed WireGuard transport exact", () => {
+    expect(protocolForManagedTransport("wireguard")).toMatchObject({
+      kind: "wireguard",
+      label: "WG",
+      exact: true,
     })
   })
 })
@@ -90,9 +99,7 @@ function nativeInterface(
   }
 }
 
-function transport(
-  overrides: Partial<TransportStatus> = {}
-): TransportStatus {
+function transport(overrides: Partial<TransportStatus> = {}): TransportStatus {
   return {
     tag: "legacy-native",
     type: "native",

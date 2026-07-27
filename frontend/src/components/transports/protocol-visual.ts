@@ -92,7 +92,7 @@ const protocolMarks = {
   naive: "NAIVE",
   wireguard: "WG",
   amneziawg: "AWG",
-  wireguard_ambiguous: "WG/AWG",
+  wireguard_ambiguous: "AWG/WG",
   openvpn: "OPENVPN",
   ipsec: "IKE/IPSEC",
   l2tp: "L2TP",

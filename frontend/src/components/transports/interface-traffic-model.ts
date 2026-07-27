@@ -1,41 +1,59 @@
 import type { RuntimeInterfaceTraffic } from "@/api/generated/model/runtimeInterfaceTraffic"
 
-const CHART_WIDTH = 120
-const CHART_HEIGHT = 36
-const CHART_PADDING = 2
+export const TRAFFIC_CHART_WIDTH = 744
+export const TRAFFIC_CHART_HEIGHT = 162
 
 export type TrafficSeries = Readonly<{
   rx: string
   tx: string
+  rxArea: string
+  txArea: string
+  maximum: number
+  oldestSampledAt?: number
+  newestSampledAt?: number
 }>
 
 export function buildTrafficSeries(
-  traffic: Pick<RuntimeInterfaceTraffic, "history">
+  traffic: Pick<RuntimeInterfaceTraffic, "history" | "sampled_at_unix_ms">
 ): TrafficSeries {
   const retained = traffic.history.slice(-120)
-  const maximum = Math.max(
-    1,
+  const rawMaximum = Math.max(
+    0,
     ...retained.flatMap((point) => [
       finiteNonNegative(point.rx_bits_per_second),
       finiteNonNegative(point.tx_bits_per_second),
     ])
   )
+  const maximum = niceMaximum(rawMaximum)
+  const rx = polyline(
+    retained.map((point) => ({
+      ageMs: finiteNonNegative(point.age_ms),
+      value: finiteNonNegative(point.rx_bits_per_second),
+    })),
+    maximum
+  )
+  const tx = polyline(
+    retained.map((point) => ({
+      ageMs: finiteNonNegative(point.age_ms),
+      value: finiteNonNegative(point.tx_bits_per_second),
+    })),
+    maximum
+  )
+  const newestSampledAt = finiteTimestamp(traffic.sampled_at_unix_ms)
+  const oldestAge = retained.reduce(
+    (oldest, point) => Math.max(oldest, finiteNonNegative(point.age_ms)),
+    0
+  )
 
   return {
-    rx: polyline(
-      retained.map((point) => ({
-        ageMs: finiteNonNegative(point.age_ms),
-        value: finiteNonNegative(point.rx_bits_per_second),
-      })),
-      maximum
-    ),
-    tx: polyline(
-      retained.map((point) => ({
-        ageMs: finiteNonNegative(point.age_ms),
-        value: finiteNonNegative(point.tx_bits_per_second),
-      })),
-      maximum
-    ),
+    rx,
+    tx,
+    rxArea: area(rx),
+    txArea: area(tx),
+    maximum,
+    oldestSampledAt:
+      newestSampledAt === undefined ? undefined : newestSampledAt - oldestAge,
+    newestSampledAt,
   }
 }
 
@@ -81,8 +99,6 @@ function polyline(
     return ""
   }
 
-  const usableWidth = CHART_WIDTH - CHART_PADDING * 2
-  const usableHeight = CHART_HEIGHT - CHART_PADDING * 2
   const maximumAge = Math.max(...samples.map((sample) => sample.ageMs))
   const minimumAge = Math.min(...samples.map((sample) => sample.ageMs))
   const ageSpan = maximumAge - minimumAge
@@ -90,23 +106,43 @@ function polyline(
   return samples
     .map((sample, index) => {
       const relativeX =
-        ageSpan > 0
-          ? (maximumAge - sample.ageMs) / ageSpan
-          : index / divisor
-      const x =
-        CHART_PADDING +
-        Math.max(0, Math.min(1, relativeX)) * usableWidth
+        ageSpan > 0 ? (maximumAge - sample.ageMs) / ageSpan : index / divisor
+      const x = Math.max(0, Math.min(1, relativeX)) * TRAFFIC_CHART_WIDTH
       const y =
-        CHART_HEIGHT -
-        CHART_PADDING -
-        (sample.value / maximum) * usableHeight
+        TRAFFIC_CHART_HEIGHT - (sample.value / maximum) * TRAFFIC_CHART_HEIGHT
       return `${x.toFixed(2)},${y.toFixed(2)}`
     })
     .join(" ")
 }
 
+function area(points: string): string {
+  if (!points) {
+    return ""
+  }
+  return `M 0 ${TRAFFIC_CHART_HEIGHT} L ${points.replaceAll(" ", " L ")} L ${TRAFFIC_CHART_WIDTH} ${TRAFFIC_CHART_HEIGHT} Z`
+}
+
+function niceMaximum(rawMaximum: number): number {
+  if (!Number.isFinite(rawMaximum) || rawMaximum <= 0) {
+    return 1
+  }
+
+  const exponent = Math.floor(Math.log10(rawMaximum))
+  const magnitude = 10 ** exponent
+  const normalized = rawMaximum / magnitude
+  const step =
+    normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10
+  return step * magnitude
+}
+
 function finiteNonNegative(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+function finiteTimestamp(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined
 }
 
 function formatScaled(

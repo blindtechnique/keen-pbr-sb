@@ -33,8 +33,8 @@ describe("normalizeProtocolVisualKind", () => {
     ["WG", "WG"],
     ["AmneziaWG", "AWG"],
     ["AWG", "AWG"],
-    ["AWG/WG", "WG/AWG"],
-    ["WG/AWG", "WG/AWG"],
+    ["AWG/WG", "AWG/WG"],
+    ["WG/AWG", "AWG/WG"],
   ] as const)("%s renders the %s mark", (protocol, expected) => {
     expect(getProtocolVisualMark(protocol)).toBe(expected)
   })

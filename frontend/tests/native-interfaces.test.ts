@@ -44,7 +44,7 @@ describe("native Keenetic interfaces", () => {
     })
   })
 
-  test("uses the authoritative typed kind instead of an ambiguous kernel guess", () => {
+  test("keeps the generic NDMS WireGuard family explicitly ambiguous", () => {
     const [mapped] = mapNativeInterfaces(
       [
         nativeInterface({
@@ -56,10 +56,10 @@ describe("native Keenetic interfaces", () => {
       []
     )
     expect(mapped.protocol).toEqual({
-      kind: "wireguard",
-      label: "WG",
+      kind: "wireguard_ambiguous",
+      label: "AWG/WG",
       evidence: "ndms-kind",
-      exact: true,
+      exact: false,
     })
   })
 

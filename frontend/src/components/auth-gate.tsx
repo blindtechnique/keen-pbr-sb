@@ -60,8 +60,8 @@ function AuthInput({
         aria-invalid={error}
         autoComplete={autoComplete}
         className={cn(
-          "peer h-14 rounded-[4px] bg-card px-4 pt-1 text-base shadow-none transition-[border-color,box-shadow] placeholder:text-transparent hover:shadow-none focus-visible:ring-0 sm:h-16 sm:text-[17px]",
-          isPassword && "pr-13"
+          "peer h-12 rounded-[4px] bg-card px-3 pt-0.5 text-[15px] shadow-none transition-[border-color,box-shadow] placeholder:text-transparent hover:shadow-none focus-visible:ring-0 lg:h-10 lg:text-sm",
+          isPassword && "pr-11"
         )}
         id={id}
         onChange={(event) => onChange(event.target.value)}
@@ -71,7 +71,7 @@ function AuthInput({
         value={value}
       />
       <label
-        className="pointer-events-none absolute top-0 left-3 z-10 -translate-y-1/2 bg-card px-1 text-[13px] leading-5 text-muted-foreground transition-[top,transform,font-size,color,padding,background-color] peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:bg-transparent peer-placeholder-shown:px-1 peer-placeholder-shown:text-base peer-focus:top-0 peer-focus:-translate-y-1/2 peer-focus:bg-card peer-focus:px-1 peer-focus:text-[13px] peer-focus:text-primary sm:text-sm sm:peer-placeholder-shown:text-[17px] sm:peer-focus:text-sm"
+        className="pointer-events-none absolute top-0 left-2.5 z-10 -translate-y-1/2 bg-card px-1 text-xs leading-4 text-muted-foreground transition-[top,transform,font-size,color,padding,background-color] peer-placeholder-shown:top-1/2 peer-placeholder-shown:-translate-y-1/2 peer-placeholder-shown:bg-transparent peer-placeholder-shown:text-[15px] peer-focus:top-0 peer-focus:-translate-y-1/2 peer-focus:bg-card peer-focus:text-xs peer-focus:text-primary lg:peer-placeholder-shown:text-sm"
         htmlFor={id}
       >
         {label}
@@ -81,14 +81,14 @@ function AuthInput({
           aria-label={
             passwordVisible ? t("auth.hidePassword") : t("auth.showPassword")
           }
-          className="absolute top-1/2 right-2.5 grid size-10 -translate-y-1/2 place-items-center rounded-[4px] text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          className="absolute top-1/2 right-2 grid size-9 -translate-y-1/2 place-items-center rounded-[4px] text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           onClick={() => setPasswordVisible((visible) => !visible)}
           type="button"
         >
           {passwordVisible ? (
-            <EyeOffIcon className="size-5" />
+            <EyeOffIcon className="size-4.5" />
           ) : (
-            <EyeIcon className="size-5" />
+            <EyeIcon className="size-4.5" />
           )}
         </button>
       ) : null}
@@ -96,19 +96,33 @@ function AuthInput({
   )
 }
 
-function AuthBrand() {
+function AuthBrand({ inverted = false }: { readonly inverted?: boolean }) {
   return (
     <header className="text-center">
       <div
         aria-label="keen-pbr-sb"
         className="mx-auto flex w-fit origin-center items-baseline leading-none"
         role="img"
-        style={{ transform: "scaleX(1.08) scaleY(0.9)" }}
+        style={{ transform: "scaleX(1.18) scaleY(0.82)" }}
       >
-        <span className="text-[28px] font-medium tracking-[0.07em] text-primary sm:text-[36px]">
+        <span
+          className={cn(
+            "text-[28px] tracking-[0.07em] sm:text-[36px]",
+            inverted
+              ? "font-normal text-primary-foreground"
+              : "font-medium text-primary"
+          )}
+        >
           KEEN-PBR
         </span>
-        <span className="text-[28px] font-medium tracking-[0.07em] text-foreground sm:text-[36px]">
+        <span
+          className={cn(
+            "text-[28px] tracking-[0.07em] sm:text-[36px]",
+            inverted
+              ? "font-normal text-primary-foreground"
+              : "font-medium text-foreground"
+          )}
+        >
           -SB
         </span>
       </div>
@@ -120,16 +134,23 @@ function AuthPage({ children }: { children: ReactNode }) {
   const { t } = useTranslation()
 
   return (
-    <main className="flex min-h-svh flex-col overflow-x-hidden bg-card">
-      <div className="flex flex-1 items-center justify-center px-5 py-10 sm:px-8 sm:py-14">
-        <div className="w-full max-w-[600px]">
-          <AuthBrand />
+    <main className="min-h-svh overflow-x-hidden bg-card lg:grid lg:grid-cols-2">
+      <section className="flex min-h-svh items-center justify-center px-5 py-8 sm:px-8">
+        <div className="w-full max-w-[382px]">
+          <div className="mb-10 lg:hidden">
+            <AuthBrand />
+          </div>
           {children}
         </div>
-      </div>
-      <footer className="flex min-h-24 items-center justify-center bg-primary px-6 py-7 text-center text-base text-primary-foreground sm:min-h-28 sm:text-lg">
-        {t("brand.tagline")}
-      </footer>
+      </section>
+      <aside className="relative hidden min-h-svh overflow-hidden bg-primary text-primary-foreground lg:block">
+        <div className="absolute top-[40%] right-0 left-0 -translate-y-1/2">
+          <AuthBrand inverted />
+        </div>
+        <div className="absolute right-0 bottom-[27%] left-0 px-8 text-center text-sm font-medium">
+          {t("auth.otherManagement")}
+        </div>
+      </aside>
     </main>
   )
 }
@@ -217,7 +238,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <AuthPage>
         <section
           aria-labelledby="auth-unavailable-title"
-          className="mx-auto mt-12 max-w-lg text-center"
+          className="w-full rounded-[6px] px-1 py-8 text-center lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
         >
           <h1
             className="text-2xl font-semibold text-foreground sm:text-3xl"
@@ -248,9 +269,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
     <AuthPage>
       <form
         aria-label={t("auth.title")}
-        className="mx-auto mt-10 w-full max-w-[520px] space-y-5 sm:mt-12"
+        className="w-full space-y-4 rounded-[6px] px-1 py-1 lg:min-h-[432px] lg:border lg:border-input lg:px-10 lg:py-10"
         onSubmit={submit}
       >
+        <h1 className="mx-auto mb-7 max-w-[250px] text-center text-[28px] leading-9 font-semibold text-foreground">
+          {t("auth.title")}
+        </h1>
         <AuthInput
           autoComplete="username"
           error={Boolean(error)}
@@ -286,7 +310,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
           </p>
         ) : null}
         <Button
-          className="h-14 w-full text-base shadow-none hover:shadow-none active:translate-y-0 sm:text-lg"
+          className="h-12 w-full text-base shadow-none hover:shadow-none active:translate-y-0 lg:h-10 lg:text-sm"
           disabled={pending}
           type="submit"
         >
@@ -306,7 +330,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         >
           <SelectTrigger
             aria-label={t("language.selectorAria")}
-            className="h-14 bg-card px-4 text-base shadow-none hover:shadow-none sm:text-[17px]"
+            className="h-12 bg-card px-3 text-[15px] shadow-none hover:shadow-none lg:h-10 lg:text-sm"
           >
             <SelectValue />
           </SelectTrigger>
@@ -322,7 +346,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
             ))}
           </SelectContent>
         </Select>
-        <div className="flex items-center justify-center gap-4 pt-1 text-sm sm:text-base">
+        <div className="flex items-center justify-center gap-3 pt-0.5 text-sm">
           <button
             className="text-primary underline-offset-4 hover:underline"
             onClick={() => setShowCredentialsHelp((visible) => !visible)}

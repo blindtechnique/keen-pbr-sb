@@ -130,8 +130,9 @@ export const ruTranslation = {
       "Для каждого импортированного правила необходимо выбрать существующий маршрут или резервирование.",
   },
   auth: {
-    title: "Вход в keen-pbr-sb",
+    title: "Вход в веб-конфигуратор",
     description: "Авторизуйтесь, чтобы открыть управление маршрутизацией.",
+    otherManagement: "Другие возможности управления",
     username: "Имя пользователя",
     password: "Пароль",
     showPassword: "Показать пароль",
@@ -336,6 +337,8 @@ export const ruTranslation = {
       received: "Принято",
       transmitted: "Отправлено",
       chart: "График приёма и передачи",
+      showChart: "Показать график",
+      hideChart: "Скрыть график",
     },
     dnsDetour: "DNS через этот туннель",
     singBoxMissing: {

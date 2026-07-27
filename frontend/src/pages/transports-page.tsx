@@ -1006,82 +1006,90 @@ export function TransportsPage() {
                   </Button>
                 </CardAction>
               </CardHeader>
-              <CardContent className="flex min-w-0 flex-1 flex-col gap-1.5 text-sm">
-                <TransportField
-                  label={t("transports.interface")}
-                  value={item.interface}
-                />
-                <TransportField
-                  label={t("transports.server")}
-                  value={
-                    item.server
-                      ? item.server_port
-                        ? `${item.server}:${item.server_port}`
-                        : item.server
-                      : "—"
-                  }
-                />
-                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-                  {transportPath ? (
-                    <Badge
-                      size="xs"
-                      title={`${t("transports.pathConfidence")}: ${transportPath.confidence}`}
-                      variant="outline"
-                    >
-                      {transportPath.text}
-                    </Badge>
-                  ) : null}
-                  {item.state === "up" ? (
-                    <LatencyPill
-                      fallbackMs={transportLatencyByInterface.get(
-                        item.interface
-                      )}
-                      onRefresh={() => runProbeMutation.mutate()}
-                      probe={probeByInterface.get(item.interface)}
-                      refreshing={runProbeMutation.isPending}
-                      t={t}
-                    />
-                  ) : null}
-                  {dnsServersByInterface.has(item.interface) ? (
-                    <Badge size="xs" variant="outline">
-                      {t("transports.dnsDetour")}:{" "}
-                      {(dnsServersByInterface.get(item.interface) ?? []).join(
-                        ", "
-                      )}
-                    </Badge>
-                  ) : null}
-                  {item.type !== "native" && !item.desired_up ? (
-                    <Badge size="xs" variant="secondary">
-                      {t("transports.paused")}
-                    </Badge>
-                  ) : null}
-                  {item.retry_count ? (
-                    <Badge size="xs" variant="warning">
-                      {t("transports.retryCount")}: {item.retry_count}
-                    </Badge>
-                  ) : null}
-                </div>
-
-                {item.error ? (
-                  <p className="mt-1 rounded-md bg-destructive/10 p-2 text-xs text-destructive">
-                    {item.error}
-                  </p>
-                ) : null}
-
-                <InterfaceTraffic
-                  labels={{
-                    receive: t("transports.traffic.receive"),
-                    transmit: t("transports.traffic.transmit"),
-                    received: t("transports.traffic.received"),
-                    transmitted: t("transports.traffic.transmitted"),
-                    chart: t("transports.traffic.chart"),
-                  }}
-                  locale={i18n.resolvedLanguage ?? i18n.language}
-                  traffic={runtimeInterfaceByName.get(item.interface)?.traffic}
-                />
-
+              <CardContent
+                className={cn(
+                  "flex min-w-0 flex-1 flex-col gap-1.5 text-sm",
+                  !expanded && "hidden"
+                )}
+              >
                 {expanded ? (
                   <>
+                    <TransportField
+                      label={t("transports.interface")}
+                      value={item.interface}
+                    />
+                    <TransportField
+                      label={t("transports.server")}
+                      value={
+                        item.server
+                          ? item.server_port
+                            ? `${item.server}:${item.server_port}`
+                            : item.server
+                          : "—"
+                      }
+                    />
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                      {transportPath ? (
+                        <Badge
+                          size="xs"
+                          title={`${t("transports.pathConfidence")}: ${transportPath.confidence}`}
+                          variant="outline"
+                        >
+                          {transportPath.text}
+                        </Badge>
+                      ) : null}
+                      {item.state === "up" ? (
+                        <LatencyPill
+                          fallbackMs={transportLatencyByInterface.get(
+                            item.interface
+                          )}
+                          onRefresh={() => runProbeMutation.mutate()}
+                          probe={probeByInterface.get(item.interface)}
+                          refreshing={runProbeMutation.isPending}
+                          t={t}
+                        />
+                      ) : null}
+                      {dnsServersByInterface.has(item.interface) ? (
+                        <Badge size="xs" variant="outline">
+                          {t("transports.dnsDetour")}:{" "}
+                          {(
+                            dnsServersByInterface.get(item.interface) ?? []
+                          ).join(", ")}
+                        </Badge>
+                      ) : null}
+                      {item.type !== "native" && !item.desired_up ? (
+                        <Badge size="xs" variant="secondary">
+                          {t("transports.paused")}
+                        </Badge>
+                      ) : null}
+                      {item.retry_count ? (
+                        <Badge size="xs" variant="warning">
+                          {t("transports.retryCount")}: {item.retry_count}
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    {item.error ? (
+                      <p className="mt-1 rounded-md bg-destructive/10 p-2 text-xs text-destructive">
+                        {item.error}
+                      </p>
+                    ) : null}
+
+                    <InterfaceTraffic
+                      labels={{
+                        receive: t("transports.traffic.receive"),
+                        transmit: t("transports.traffic.transmit"),
+                        received: t("transports.traffic.received"),
+                        transmitted: t("transports.traffic.transmitted"),
+                        chart: t("transports.traffic.chart"),
+                      }}
+                      locale={i18n.resolvedLanguage ?? i18n.language}
+                      showChart={false}
+                      traffic={
+                        runtimeInterfaceByName.get(item.interface)?.traffic
+                      }
+                    />
+
                     <div className="my-1 border-t" />
                     <TransportField
                       label={t("transports.connection")}

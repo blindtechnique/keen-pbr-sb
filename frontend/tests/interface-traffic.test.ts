@@ -47,8 +47,8 @@ describe("interface traffic presentation", () => {
       ],
     })
 
-    expect(series.rx).toBe("2.00,34.00 118.00,34.00")
-    expect(series.tx).toBe("2.00,34.00 118.00,34.00")
+    expect(series.rx).toBe("0.00,162.00 744.00,162.00")
+    expect(series.tx).toBe("0.00,162.00 744.00,162.00")
   })
 
   test("preserves real sampling gaps on the horizontal axis", () => {
@@ -72,8 +72,29 @@ describe("interface traffic presentation", () => {
       ],
     })
 
-    expect(series.rx).toBe(
-      "2.00,2.00 94.80,2.00 118.00,2.00"
-    )
+    expect(series.rx).toBe("0.00,0.00 595.20,0.00 744.00,0.00")
+  })
+
+  test("rounds the chart ceiling and derives sample timestamps", () => {
+    const series = buildTrafficSeries({
+      sampled_at_unix_ms: 20_000,
+      history: [
+        {
+          age_ms: 10_000,
+          rx_bits_per_second: 18_000,
+          tx_bits_per_second: 1_000,
+        },
+        {
+          age_ms: 0,
+          rx_bits_per_second: 20_001,
+          tx_bits_per_second: 2_000,
+        },
+      ],
+    })
+
+    expect(series.maximum).toBe(50_000)
+    expect(series.oldestSampledAt).toBe(10_000)
+    expect(series.newestSampledAt).toBe(20_000)
+    expect(series.rxArea.startsWith("M 0 162 L ")).toBe(true)
   })
 })

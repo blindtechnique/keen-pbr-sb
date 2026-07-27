@@ -1,20 +1,21 @@
+import { useId } from "react"
+
 import type { RuntimeInterfaceTraffic } from "@/api/generated/model/runtimeInterfaceTraffic"
 import {
   buildTrafficSeries,
   formatBitRate,
   formatTrafficBytes,
+  TRAFFIC_CHART_HEIGHT,
+  TRAFFIC_CHART_WIDTH,
 } from "@/components/transports/interface-traffic-model"
 import { cn } from "@/lib/utils"
-
-const CHART_WIDTH = 120
-const CHART_HEIGHT = 36
-const CHART_PADDING = 2
 
 export function InterfaceTraffic({
   traffic,
   locale,
   labels,
   className,
+  showChart = false,
 }: {
   readonly traffic?: RuntimeInterfaceTraffic
   readonly locale: string
@@ -26,16 +27,21 @@ export function InterfaceTraffic({
     chart: string
   }>
   readonly className?: string
+  readonly showChart?: boolean
 }) {
   if (!traffic) {
     return null
   }
 
-  const series = buildTrafficSeries(traffic)
-  const hasChart = traffic.history.length >= 2
-
   return (
     <div className={cn("mt-2 min-w-0 border-t pt-2", className)}>
+      {showChart && traffic.history.length >= 2 ? (
+        <KeeneticTrafficChart
+          labels={labels}
+          locale={locale}
+          traffic={traffic}
+        />
+      ) : null}
       <div className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
         <TrafficValue
           label={labels.receive}
@@ -54,41 +60,115 @@ export function InterfaceTraffic({
           value={formatTrafficBytes(traffic.tx_bytes, locale)}
         />
       </div>
-      {hasChart ? (
+    </div>
+  )
+}
+
+function KeeneticTrafficChart({
+  traffic,
+  locale,
+  labels,
+}: {
+  readonly traffic: RuntimeInterfaceTraffic
+  readonly locale: string
+  readonly labels: Readonly<{
+    receive: string
+    transmit: string
+    chart: string
+  }>
+}) {
+  const series = buildTrafficSeries(traffic)
+  const generatedId = useId().replaceAll(":", "")
+  const receiveGradientId = `traffic-rx-${generatedId}`
+  const transmitGradientId = `traffic-tx-${generatedId}`
+
+  return (
+    <figure aria-label={labels.chart} className="mb-3 min-w-0" role="img">
+      <div className="relative mt-2">
+        <span className="absolute -top-2 right-0 z-10 bg-card pl-2 text-xs leading-4 text-muted-foreground tabular-nums">
+          {formatBitRate(series.maximum, locale)}
+        </span>
         <svg
-          aria-label={labels.chart}
-          className="mt-2 h-12 w-full overflow-visible"
+          className="h-[162px] w-full overflow-visible"
           preserveAspectRatio="none"
-          role="img"
-          viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+          viewBox={`0 0 ${TRAFFIC_CHART_WIDTH} ${TRAFFIC_CHART_HEIGHT}`}
         >
-          <line
-            className="stroke-border"
+          <defs>
+            <linearGradient id={receiveGradientId} x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0" stopColor="var(--traffic-rx-fill-start)" />
+              <stop offset="1" stopColor="var(--traffic-rx-fill-end)" />
+            </linearGradient>
+            <linearGradient id={transmitGradientId} x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0" stopColor="var(--traffic-tx-fill-start)" />
+              <stop offset="1" stopColor="var(--traffic-tx-fill-end)" />
+            </linearGradient>
+          </defs>
+          <path
+            d={`M 0 ${TRAFFIC_CHART_HEIGHT} V 0 H ${TRAFFIC_CHART_WIDTH} V ${TRAFFIC_CHART_HEIGHT}`}
+            fill="none"
+            stroke="var(--traffic-frame)"
+            strokeDasharray="2 2"
+            strokeWidth="2"
             vectorEffect="non-scaling-stroke"
-            x1={CHART_PADDING}
-            x2={CHART_WIDTH - CHART_PADDING}
-            y1={CHART_HEIGHT - CHART_PADDING}
-            y2={CHART_HEIGHT - CHART_PADDING}
+          />
+          <path
+            d={series.rxArea}
+            fill={`url(#${receiveGradientId})`}
+            stroke="none"
+          />
+          <path
+            d={series.txArea}
+            fill={`url(#${transmitGradientId})`}
+            stroke="none"
           />
           <polyline
-            className="fill-none stroke-sky-500"
+            fill="none"
             points={series.rx}
-            strokeLinecap="round"
+            stroke="var(--traffic-rx-line)"
             strokeLinejoin="round"
-            strokeWidth="1.5"
+            strokeWidth="1"
             vectorEffect="non-scaling-stroke"
           />
           <polyline
-            className="fill-none stroke-emerald-600 dark:stroke-emerald-400"
+            fill="none"
             points={series.tx}
-            strokeLinecap="round"
+            stroke="var(--traffic-tx-line)"
             strokeLinejoin="round"
-            strokeWidth="1.5"
+            strokeWidth="1"
             vectorEffect="non-scaling-stroke"
           />
         </svg>
-      ) : null}
-    </div>
+      </div>
+      <figcaption className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 text-xs leading-4 text-muted-foreground">
+        <time className="tabular-nums">
+          {formatSampleTime(series.oldestSampledAt, locale)}
+        </time>
+        <span className="flex min-w-0 flex-wrap items-center justify-center gap-x-4 gap-y-1 text-center">
+          <span className="whitespace-nowrap">
+            <TrafficLegendDot className="bg-[var(--traffic-rx-line)]" />
+            {labels.receive}:{" "}
+            {formatBitRate(traffic.rx_bits_per_second, locale)}
+          </span>
+          <span className="whitespace-nowrap">
+            <TrafficLegendDot className="bg-[var(--traffic-tx-line)]" />
+            {labels.transmit}:{" "}
+            {formatBitRate(traffic.tx_bits_per_second, locale)}
+          </span>
+        </span>
+        <time className="tabular-nums">
+          {formatSampleTime(series.newestSampledAt, locale)}
+        </time>
+      </figcaption>
+    </figure>
+  )
+}
+
+function TrafficLegendDot({ className }: { readonly className: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn("mr-1 inline-block size-2 rounded-full", className)}
+    />
   )
 }
 
@@ -107,4 +187,18 @@ function TrafficValue({
       </div>
     </div>
   )
+}
+
+function formatSampleTime(
+  timestamp: number | undefined,
+  locale: string
+): string {
+  if (timestamp === undefined) {
+    return "—"
+  }
+  return new Intl.DateTimeFormat(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(timestamp)
 }

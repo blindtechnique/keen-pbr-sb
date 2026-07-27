@@ -111,43 +111,48 @@ export function NativeInterfaceCard({
         </CardAction>
       </CardHeader>
 
-      <CardContent className="flex min-w-0 flex-1 flex-col gap-1.5 text-sm">
-        <NativeInterfaceField
-          label={t("transports.nativeInterface.kernelName")}
-          mono
-          value={
-            nativeInterface.kernelName ??
-            t("transports.nativeInterface.unresolved")
-          }
-        />
-        {visibleLatency !== undefined ? (
-          <NativeInterfaceField
-            label={t("transports.nativeInterface.latency")}
-            value={t("transports.latencyValue", { value: visibleLatency })}
-          />
-        ) : null}
-        <NativeInterfaceField
-          label={t("transports.nativeInterface.boundRoute")}
-          mono={Boolean(boundOutboundTag)}
-          value={
-            boundOutboundTag ??
-            t("transports.nativeInterface.routeNotConfigured")
-          }
-        />
-        <InterfaceTraffic
-          labels={{
-            receive: t("transports.traffic.receive"),
-            transmit: t("transports.traffic.transmit"),
-            received: t("transports.traffic.received"),
-            transmitted: t("transports.traffic.transmitted"),
-            chart: t("transports.traffic.chart"),
-          }}
-          locale={i18n.resolvedLanguage ?? i18n.language}
-          traffic={nativeInterface.runtime?.traffic}
-        />
-
+      <CardContent
+        className={`flex min-w-0 flex-1 flex-col gap-1.5 text-sm ${
+          expanded ? "" : "hidden"
+        }`}
+      >
         {expanded ? (
           <>
+            <NativeInterfaceField
+              label={t("transports.nativeInterface.kernelName")}
+              mono
+              value={
+                nativeInterface.kernelName ??
+                t("transports.nativeInterface.unresolved")
+              }
+            />
+            {visibleLatency !== undefined ? (
+              <NativeInterfaceField
+                label={t("transports.nativeInterface.latency")}
+                value={t("transports.latencyValue", { value: visibleLatency })}
+              />
+            ) : null}
+            <NativeInterfaceField
+              label={t("transports.nativeInterface.boundRoute")}
+              mono={Boolean(boundOutboundTag)}
+              value={
+                boundOutboundTag ??
+                t("transports.nativeInterface.routeNotConfigured")
+              }
+            />
+            <InterfaceTraffic
+              labels={{
+                receive: t("transports.traffic.receive"),
+                transmit: t("transports.traffic.transmit"),
+                received: t("transports.traffic.received"),
+                transmitted: t("transports.traffic.transmitted"),
+                chart: t("transports.traffic.chart"),
+              }}
+              locale={i18n.resolvedLanguage ?? i18n.language}
+              showChart={false}
+              traffic={nativeInterface.runtime?.traffic}
+            />
+
             <div className="my-1 border-t" />
             <NativeInterfaceField
               label={t("transports.nativeInterface.logicalName")}

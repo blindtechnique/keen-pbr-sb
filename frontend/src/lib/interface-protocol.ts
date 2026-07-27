@@ -26,7 +26,10 @@ export interface InterfaceProtocolDisplay {
 
 const NDMS_KIND_PROTOCOLS = {
   amnezia_wireguard: "amneziawg",
-  wireguard: "wireguard",
+  // Current NDMS inventory reports both vanilla WireGuard and AmneziaWG as
+  // the broad `Wireguard` family unless an explicit Amnezia marker is present.
+  // Keep that uncertainty visible instead of labelling a real AWG tunnel WG.
+  wireguard: "wireguard_ambiguous",
   openvpn: "openvpn",
   ike: "ipsec",
   l2tp: "l2tp",
@@ -40,9 +43,9 @@ const NDMS_KIND_PROTOCOLS = {
 /**
  * Authoritative protocol display for the typed Keenetic inventory.
  *
- * The backend emits `wireguard` and `amnezia_wireguard` only after classifying
- * the corresponding NDMS record. Do not re-guess those values from `nwgN` or
- * the broad firmware type in individual components.
+ * NDMS can prove AmneziaWG, but on current KeeneticOS a generic `Wireguard`
+ * record does not prove vanilla WireGuard. That family stays explicitly
+ * ambiguous until the API carries stronger protocol evidence.
  */
 export function protocolForNdmsKind(
   kind: NdmsTunnelKind
@@ -52,7 +55,7 @@ export function protocolForNdmsKind(
     kind: protocolKind,
     label: getProtocolVisualMarkForKind(protocolKind),
     evidence: "ndms-kind",
-    exact: true,
+    exact: protocolKind !== "wireguard_ambiguous",
   }
 }
 
