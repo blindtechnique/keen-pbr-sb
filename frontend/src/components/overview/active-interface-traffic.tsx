@@ -12,6 +12,7 @@ import {
   collectActiveTrafficPaths,
   formatConnectionDuration,
   interfaceConnectionState,
+  type ActiveTrafficPath,
 } from "@/components/overview/active-interface-traffic-model"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
@@ -41,11 +42,7 @@ export function ActiveInterfaceTraffic({
     ReadonlySet<string>
   >(() => new Set())
   const nowUnixMs = useSecondTicker()
-  const paths = collectActiveTrafficPaths(
-    outbounds,
-    rules,
-    runtimeByTag
-  ).filter((path) => runtimeInterfaceByName.get(path.interfaceName)?.traffic)
+  const paths = collectActiveTrafficPaths(outbounds, rules, runtimeByTag)
 
   if (paths.length === 0) {
     return null
@@ -83,6 +80,13 @@ export function ActiveInterfaceTraffic({
                   <span className="truncate text-sm font-medium">
                     {path.label}
                   </span>
+                  <Badge
+                    className="shrink-0"
+                    size="xs"
+                    variant={statusBadgeVariant(path.status)}
+                  >
+                    {t(`outbounds.member.${path.status}`)}
+                  </Badge>
                   <KeeneticStatus
                     className="shrink-0"
                     tone={connection.connected ? "success" : "neutral"}
@@ -150,6 +154,11 @@ export function ActiveInterfaceTraffic({
                     showChart
                     traffic={runtimeInterface?.traffic}
                   />
+                  {!runtimeInterface?.traffic ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {t("overview.outbounds.waitingForTraffic")}
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -158,6 +167,22 @@ export function ActiveInterfaceTraffic({
       </div>
     </div>
   )
+}
+
+function statusBadgeVariant(
+  status: ActiveTrafficPath["status"]
+): "success" | "warning" | "destructive" | "outline" {
+  switch (status) {
+    case "active":
+      return "success"
+    case "degraded":
+      return "warning"
+    case "unavailable":
+      return "destructive"
+    case "backup":
+    case "unknown":
+      return "outline"
+  }
 }
 
 function TrafficChartToggleIcon() {

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
-import { selectVisibleLatency } from "@/components/transports/transport-latency-model"
+import {
+  collectProbeByInterface,
+  collectRuntimeLatencyByInterface,
+  selectVisibleLatency,
+} from "@/components/transports/transport-latency-model"
 
 describe("transport latency presentation", () => {
   test("prefers the SSE runtime value over a stale probe-details response", () => {
@@ -34,5 +38,72 @@ describe("transport latency presentation", () => {
         undefined
       )
     ).toBeUndefined()
+    expect(
+      selectVisibleLatency(
+        { success: false, latency_ms: 0, age_seconds: 2 },
+        0
+      )
+    ).toBeUndefined()
+  })
+
+  test("keeps the successful standalone latency when a group reports failed zero", () => {
+    const result = collectRuntimeLatencyByInterface(
+      [
+        {
+          tag: "vless_primary",
+          type: "interface",
+          status: "healthy",
+          interfaces: [
+            {
+              outbound_tag: "vless_primary",
+              interface_name: "vless0",
+              status: "active",
+              latency_ms: 84,
+            },
+          ],
+        },
+        {
+          tag: "vless_failover",
+          type: "urltest",
+          status: "degraded",
+          interfaces: [
+            {
+              outbound_tag: "vless_primary",
+              interface_name: "vless0",
+              status: "unavailable",
+              latency_ms: 0,
+            },
+          ],
+        },
+      ],
+      new Map([["vless0", "vless_primary"]])
+    )
+
+    expect(result.get("vless0")).toBe(84)
+  })
+
+  test("keeps a successful standalone detailed probe over a failed group entry", () => {
+    const result = collectProbeByInterface(
+      {
+        vless_primary: {
+          success: true,
+          latency_ms: 84,
+          age_seconds: 2,
+          interface: "vless0",
+        },
+        vless_failover: {
+          success: false,
+          latency_ms: 0,
+          age_seconds: 1,
+          interface: "vless0",
+        },
+      },
+      new Map([["vless0", "vless_primary"]])
+    )
+
+    expect(result.get("vless0")).toMatchObject({
+      success: true,
+      latency_ms: 84,
+    })
   })
 })

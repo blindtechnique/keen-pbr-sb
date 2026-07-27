@@ -14,6 +14,18 @@
 
 namespace keen_pbr3 {
 
+namespace runtime_outbound_detail {
+
+std::optional<int64_t> latency_from_urltest_result(
+    const URLTestResult& result) noexcept {
+    if (!result.success) {
+        return std::nullopt;
+    }
+    return static_cast<int64_t>(result.latency_ms);
+}
+
+} // namespace runtime_outbound_detail
+
 namespace {
 
 const Outbound* find_outbound(const std::vector<Outbound>& outbounds,
@@ -372,7 +384,9 @@ api::RuntimeOutboundStateElement build_urltest_outbound_state(const Config& conf
         if (urltest_state.has_value()) {
             const auto result_it = urltest_state->last_results.find(child->tag);
             if (result_it != urltest_state->last_results.end()) {
-                interface_state.latency_ms = static_cast<int64_t>(result_it->second.latency_ms);
+                interface_state.latency_ms =
+                    runtime_outbound_detail::latency_from_urltest_result(
+                        result_it->second);
                 if (!result_it->second.error.empty()) {
                     interface_state.detail = result_it->second.error;
                 }

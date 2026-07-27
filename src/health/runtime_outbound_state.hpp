@@ -14,6 +14,16 @@
 
 namespace keen_pbr3 {
 
+namespace runtime_outbound_detail {
+
+// A failed URL test carries latency_ms=0 as the result type's default value.
+// Treat that value as absent rather than publishing a misleading zero-latency
+// measurement through the runtime inventory.
+std::optional<int64_t> latency_from_urltest_result(
+    const URLTestResult& result) noexcept;
+
+} // namespace runtime_outbound_detail
+
 using UrltestStateLookupFn = std::function<std::optional<UrltestState>(const std::string&)>;
 // Latency measured for a plain interface outbound, which urltest never covers.
 using InterfaceProbeLookupFn =

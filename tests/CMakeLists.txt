@@ -357,6 +357,7 @@ target_compile_definitions(keen-pbr-tests PRIVATE USE_KEENETIC_API)
 if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
+    test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
     ../src/api/server.cpp
     ../src/api/connection_query.cpp
@@ -377,6 +378,7 @@ if(WITH_API)
     ../src/api/handler_config.cpp
     ../src/api/handler_backup.cpp
     ../src/health/runtime_interface_inventory.cpp
+    ../src/health/runtime_outbound_state.cpp
     ../src/log/file_sink.cpp
   )
   target_link_libraries(keen-pbr-tests PRIVATE

@@ -1,6 +1,8 @@
 import type {
   Outbound,
   RouteRule,
+  RuntimeInterfaceState,
+  RuntimeInterfaceStatus,
   RuntimeOutboundState,
   TransportStatus,
 } from "@/api/generated/model"
@@ -12,6 +14,7 @@ import {
 export type ActiveTrafficPath = Readonly<{
   interfaceName: string
   label: string
+  status: RuntimeInterfaceStatus
 }>
 
 export type InterfaceConnectionState = Readonly<{
@@ -29,26 +32,185 @@ export function collectActiveTrafficPaths(
   const paths = new Map<string, ActiveTrafficPath>()
 
   for (const rule of rules) {
-    const configured = outboundsByTag.get(rule.outbound)
-    if (!configured) continue
-
-    const runtime = runtimeByTag.get(rule.outbound)
-    const active =
-      runtime?.interfaces.find((candidate) => candidate.status === "active") ??
-      (runtime?.interfaces.length === 1 ? runtime.interfaces[0] : undefined)
-    const interfaceName = active?.interface_name ?? configured.interface
-    if (!interfaceName || paths.has(interfaceName)) continue
-
-    paths.set(interfaceName, {
-      interfaceName,
-      label:
-        (active?.outbound_tag
-          ? displayNames.get(active.outbound_tag)
-          : undefined) ?? getOutboundDisplayName(configured),
+    collectPhysicalPaths({
+      tag: rule.outbound,
+      inheritedStatus: "active",
+      ancestorRuntime: [],
+      visiting: new Set(),
+      outboundsByTag,
+      displayNames,
+      runtimeByTag,
+      paths,
     })
   }
 
   return [...paths.values()]
+}
+
+type CollectPhysicalPathsContext = Readonly<{
+  tag: string
+  inheritedStatus: RuntimeInterfaceStatus
+  ancestorRuntime: readonly (readonly RuntimeInterfaceState[])[]
+  visiting: ReadonlySet<string>
+  outboundsByTag: ReadonlyMap<string, Outbound>
+  displayNames: ReadonlyMap<string, string>
+  runtimeByTag: ReadonlyMap<string, RuntimeOutboundState>
+  paths: Map<string, ActiveTrafficPath>
+}>
+
+function collectPhysicalPaths({
+  tag,
+  inheritedStatus,
+  ancestorRuntime,
+  visiting,
+  outboundsByTag,
+  displayNames,
+  runtimeByTag,
+  paths,
+}: CollectPhysicalPathsContext): void {
+  if (visiting.has(tag)) return
+
+  const configured = outboundsByTag.get(tag)
+  if (!configured) return
+
+  const runtime = runtimeByTag.get(tag)
+  const nextVisiting = new Set(visiting)
+  nextVisiting.add(tag)
+  const runtimeLayers = runtime
+    ? [...ancestorRuntime, runtime.interfaces]
+    : ancestorRuntime
+
+  if (configured.type === "interface" && configured.interface) {
+    const status = runtimeStatusForLeaf(
+      tag,
+      configured.interface,
+      inheritedStatus,
+      runtimeLayers
+    )
+    mergePhysicalPath(paths, {
+      interfaceName: configured.interface,
+      label: getOutboundDisplayName(configured),
+      status,
+    })
+    return
+  }
+
+  if (configured.type === "urltest") {
+    const childTags = uniqueChildTags(configured)
+    for (const childTag of childTags) {
+      const child = outboundsByTag.get(childTag)
+      const candidate = runtime?.interfaces.find(
+        (item) =>
+          item.outbound_tag === childTag ||
+          (child?.interface !== undefined &&
+            item.interface_name === child.interface)
+      )
+      collectPhysicalPaths({
+        tag: childTag,
+        inheritedStatus: combineRuntimeStatus(
+          inheritedStatus,
+          candidate?.status ?? "unknown"
+        ),
+        ancestorRuntime: runtimeLayers,
+        visiting: nextVisiting,
+        outboundsByTag,
+        displayNames,
+        runtimeByTag,
+        paths,
+      })
+    }
+  }
+
+  // Runtime inventory can resolve a table or a nested selector to a physical
+  // interface even when the static configuration does not carry that mapping.
+  // Keep these entries as a compatibility fallback and deduplicate them with
+  // the recursively discovered configured leaves.
+  for (const candidate of runtime?.interfaces ?? []) {
+    if (!candidate.interface_name) continue
+    mergePhysicalPath(paths, {
+      interfaceName: candidate.interface_name,
+      label:
+        displayNames.get(candidate.outbound_tag) ??
+        getOutboundDisplayName(configured),
+      status: combineRuntimeStatus(inheritedStatus, candidate.status),
+    })
+  }
+}
+
+function uniqueChildTags(outbound: Outbound): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const group of outbound.outbound_groups ?? []) {
+    for (const tag of group.outbounds) {
+      if (seen.has(tag)) continue
+      seen.add(tag)
+      result.push(tag)
+    }
+  }
+  return result
+}
+
+function runtimeStatusForLeaf(
+  tag: string,
+  interfaceName: string,
+  inheritedStatus: RuntimeInterfaceStatus,
+  runtimeLayers: readonly (readonly RuntimeInterfaceState[])[]
+): RuntimeInterfaceStatus {
+  let status = inheritedStatus
+  for (const layer of runtimeLayers) {
+    const candidate = layer.find(
+      (item) =>
+        item.outbound_tag === tag || item.interface_name === interfaceName
+    )
+    if (candidate) {
+      status = combineRuntimeStatus(status, candidate.status)
+    }
+  }
+  return status
+}
+
+function combineRuntimeStatus(
+  parent: RuntimeInterfaceStatus,
+  child: RuntimeInterfaceStatus
+): RuntimeInterfaceStatus {
+  if (parent === "unavailable") return "unavailable"
+  if (parent === "degraded") {
+    return child === "unavailable" ? "unavailable" : "degraded"
+  }
+  if (parent === "backup") {
+    if (child === "unavailable" || child === "degraded") return child
+    return "backup"
+  }
+  if (parent === "unknown") return child
+  return child
+}
+
+function mergePhysicalPath(
+  paths: Map<string, ActiveTrafficPath>,
+  next: ActiveTrafficPath
+): void {
+  const current = paths.get(next.interfaceName)
+  if (
+    !current ||
+    statusPriority(next.status) > statusPriority(current.status)
+  ) {
+    paths.set(next.interfaceName, next)
+  }
+}
+
+function statusPriority(status: RuntimeInterfaceStatus): number {
+  switch (status) {
+    case "active":
+      return 5
+    case "backup":
+      return 4
+    case "degraded":
+      return 3
+    case "unavailable":
+      return 2
+    case "unknown":
+      return 1
+  }
 }
 
 export function interfaceConnectionState(

@@ -52,6 +52,10 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceCard } from "@/components/transports/native-interface-card"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
+import {
+  collectProbeByInterface,
+  collectRuntimeLatencyByInterface,
+} from "@/components/transports/transport-latency-model"
 import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
 import { formatTransportPath } from "@/components/transports/transport-path"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
@@ -417,35 +421,6 @@ export function TransportsPage() {
   const latencyRefreshPending = (interfaceName: string) =>
     requestedProbe?.interfaceName === interfaceName
 
-  // Probe results are keyed by outbound tag but shown per interface.
-  const probeByInterface = new Map<string, ProbeEntry>()
-  for (const entry of Object.values(probesQuery.data?.probes ?? {})) {
-    if (entry.interface) {
-      probeByInterface.set(entry.interface, entry)
-    }
-  }
-
-  const transportLatencyByInterface = new Map<string, number>()
-  if (runtimeOutboundsQuery.data?.status === 200) {
-    for (const outbound of runtimeOutboundsQuery.data.data.outbounds) {
-      for (const candidate of outbound.interfaces) {
-        if (
-          candidate.interface_name &&
-          typeof candidate.latency_ms === "number"
-        ) {
-          const current = transportLatencyByInterface.get(
-            candidate.interface_name
-          )
-          if (current === undefined || candidate.latency_ms < current) {
-            transportLatencyByInterface.set(
-              candidate.interface_name,
-              candidate.latency_ms
-            )
-          }
-        }
-      }
-    }
-  }
   const interfaceOutboundByInterface = new Map(
     (keenConfig?.outbounds ?? [])
       .filter(
@@ -455,6 +430,22 @@ export function TransportsPage() {
           outbound.interface.length > 0
       )
       .map((outbound) => [outbound.interface!, outbound])
+  )
+  const preferredOutboundTagByInterface = new Map(
+    [...interfaceOutboundByInterface].map(([interfaceName, outbound]) => [
+      interfaceName,
+      outbound.tag,
+    ])
+  )
+  const probeByInterface = collectProbeByInterface(
+    probesQuery.data?.probes ?? {},
+    preferredOutboundTagByInterface
+  )
+  const transportLatencyByInterface = collectRuntimeLatencyByInterface(
+    runtimeOutboundsQuery.data?.status === 200
+      ? runtimeOutboundsQuery.data.data.outbounds
+      : [],
+    preferredOutboundTagByInterface
   )
   // DNS detour is a property of the DNS server, not of the transport, so the
   // card only points at it instead of duplicating the setting.

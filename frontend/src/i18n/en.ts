@@ -702,10 +702,11 @@ export const enTranslation = {
       },
     },
     outbounds: {
-      liveTraffic: "Active tunnel and proxy traffic",
+      liveTraffic: "Traffic through used tunnels and proxies",
       connected: "Connected",
       connectedFor: "Connected {{duration}}",
       disconnected: "Disconnected",
+      waitingForTraffic: "Waiting for traffic statistics…",
       dayShort: "d",
       summary: {
         tunnels: "Into tunnels - {{count}} lists",

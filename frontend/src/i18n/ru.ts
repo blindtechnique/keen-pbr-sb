@@ -707,10 +707,11 @@ export const ruTranslation = {
       },
     },
     outbounds: {
-      liveTraffic: "Трафик активных туннелей и прокси",
+      liveTraffic: "Трафик используемых туннелей и прокси",
       connected: "Подключено",
       connectedFor: "Подключено {{duration}}",
       disconnected: "Отключено",
+      waitingForTraffic: "Ожидание статистики трафика…",
       dayShort: "д.",
       summary: {
         tunnels: "В туннели — списков: {{count}}",
