@@ -5,14 +5,23 @@
 #include "../src/firewall/ipset_restore_pipe.hpp"
 #include "../src/firewall/iptables.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
+#include "../src/util/last_command_failure.hpp"
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <set>
 #include <array>
 #include <algorithm>
+#include <stdexcept>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -25,6 +34,84 @@ L4Proto parse_test_proto(const std::string& proto) {
   if (proto == "udp") return L4Proto::Udp;
   if (proto == "tcp/udp") return L4Proto::TcpUdp;
   throw std::invalid_argument("unexpected proto in test: " + proto);
+}
+
+class IptablesTestEnvironment {
+public:
+  explicit IptablesTestEnvironment(std::string name)
+      : name_(std::move(name)) {
+    if (const char* value = std::getenv(name_.c_str())) {
+      previous_ = value;
+    }
+  }
+  ~IptablesTestEnvironment() {
+    if (previous_) {
+      setenv(name_.c_str(), previous_->c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+  void set(const std::string& value) {
+    if (setenv(name_.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error("setenv failed");
+    }
+  }
+private:
+  std::string name_;
+  std::optional<std::string> previous_;
+};
+
+class IptablesTestTempDir {
+public:
+  IptablesTestTempDir() {
+    char path_template[] = "/tmp/keen-pbr-iptables-XXXXXX";
+    const char* created = mkdtemp(path_template);
+    if (created == nullptr) {
+      throw std::runtime_error("mkdtemp failed");
+    }
+    path_ = created;
+  }
+  ~IptablesTestTempDir() {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+  const std::filesystem::path& path() const { return path_; }
+private:
+  std::filesystem::path path_;
+};
+
+class IptablesFailurePathGuard {
+public:
+  explicit IptablesFailurePathGuard(const std::filesystem::path& path) {
+    set_last_command_failure_path_for_testing(path.string());
+  }
+  ~IptablesFailurePathGuard() {
+    set_last_command_failure_path_for_testing(std::nullopt);
+  }
+};
+
+void write_iptables_test_executable(
+    const std::filesystem::path& path,
+    const std::string& content) {
+  std::ofstream output(path);
+  output << content;
+  output.close();
+  if (!output || chmod(path.c_str(), 0700) != 0) {
+    throw std::runtime_error("failed to create test executable");
+  }
+}
+
+std::string read_iptables_test_file(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  return {std::istreambuf_iterator<char>(input),
+          std::istreambuf_iterator<char>()};
+}
+
+void use_iptables_test_path(
+    IptablesTestEnvironment& guard,
+    const std::filesystem::path& directory) {
+  const char* current = std::getenv("PATH");
+  guard.set(directory.string() + ":" + (current == nullptr ? "" : current));
 }
 
 } // namespace
@@ -249,6 +336,41 @@ public:
       const std::string& target) {
     return IptablesFirewall::count_exact_jump(rules, source, target);
   }
+
+  static void publish_dispatcher(
+      bool ipv6,
+      bool output,
+      FirewallSetGeneration generation) {
+    IptablesFirewall fw;
+    fw.publish_dispatcher(ipv6, output, generation);
+  }
+
+  static State inspect_dispatcher(
+      const char* command,
+      const char* table,
+      const std::string& dispatcher,
+      const std::string& generation_a,
+      const std::string& generation_b) {
+    IptablesFirewall fw;
+    return fw.inspect_dispatcher(
+        command, table, dispatcher, generation_a, generation_b);
+  }
+
+  static void reconcile_hook(
+      const char* command,
+      const char* table,
+      const char* builtin_chain,
+      const char* target_chain) {
+    IptablesFirewall::reconcile_hook(
+        command, table, builtin_chain, target_chain);
+  }
+
+  static void verify_applied_generation(
+      FirewallSetGeneration generation,
+      bool use_raw_prerouting = false) {
+    IptablesFirewall fw(use_raw_prerouting);
+    fw.verify_applied_generation(false, generation);
+  }
 };
 
 } // namespace keen_pbr3
@@ -256,6 +378,353 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("iptables restore wait capability cache is independent per tool") {
+  IptablesTestTempDir temp;
+  const auto v4_calls = temp.path() / "v4-calls";
+  const auto v6_calls = temp.path() / "v6-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\nprintf x >> \"$KPBR_V4_CALLS\"\nexit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "ip6tables-restore",
+      "#!/bin/sh\nprintf x >> \"$KPBR_V6_CALLS\"\nexit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment v4("KPBR_V4_CALLS");
+  IptablesTestEnvironment v6("KPBR_V6_CALLS");
+  use_iptables_test_path(path, temp.path());
+  v4.set(v4_calls.string());
+  v6.set(v6_calls.string());
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK(testing::restore_wait_option_supported_for_test("iptables-restore"));
+  CHECK_FALSE(testing::restore_wait_option_supported_for_test("ip6tables-restore"));
+  CHECK(testing::restore_wait_option_supported_for_test("iptables-restore"));
+  CHECK_FALSE(testing::restore_wait_option_supported_for_test("ip6tables-restore"));
+  CHECK(read_iptables_test_file(v4_calls) == "x");
+  CHECK(read_iptables_test_file(v6_calls) == "x");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("legacy iptables restore retries a transient COMMIT race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "if [ \"$count\" -lt 3 ]; then\n"
+      "  echo 'iptables-restore: line 5 failed' >&2\n"
+      "  exit 1\n"
+      "fi\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_NOTHROW(T::publish_dispatcher(
+      false, false, FirewallSetGeneration::A));
+  CHECK(read_iptables_test_file(calls) == "3\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("wait-capable iptables restore also retries a transient COMMIT race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 10 ] || exit 64\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "if [ \"$count\" -eq 1 ]; then\n"
+      "  echo 'iptables-restore: line 5 failed' >&2\n"
+      "  exit 1\n"
+      "fi\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_NOTHROW(T::publish_dispatcher(
+      false, false, FirewallSetGeneration::A));
+  CHECK(read_iptables_test_file(calls) == "2\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("wait-capable restore hands an exhausted lock wait to outer recovery") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "[ \"$1\" = -w ] && [ \"$2\" = 10 ] || exit 64\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "1\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("exhausted COMMIT retries remain typed as transient") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'iptables-restore: line 5 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "5\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("legacy iptables restore does not retry a permanent rule error") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "echo 'iptables-restore: line 4 failed' >&2\n"
+      "exit 1\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      FirewallError);
+  CHECK(read_iptables_test_file(calls) == "1\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("dispatcher inspection retries a transient snapshot failure") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_INSPECT_CALLS\" ] && count=$(/bin/cat \"$KPBR_INSPECT_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_INSPECT_CALLS\"\n"
+      "[ \"$count\" -eq 1 ] && exit 4\n"
+      "echo '-A KeenPbrTable -j KeenPbrTable_A'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_INSPECT_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK(T::inspect_dispatcher(
+            "iptables",
+            "mangle",
+            "KeenPbrTable",
+            "KeenPbrTable_A",
+            "KeenPbrTable_B") == T::State::A);
+  CHECK(read_iptables_test_file(calls) == "2\n");
+}
+
+TEST_CASE("iptables restore exit four is retried as a transient resource race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ]; then exit 1; fi\n"
+      "count=0\n"
+      "[ -f \"$KPBR_RESTORE_CALLS\" ] && count=$(/bin/cat \"$KPBR_RESTORE_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_RESTORE_CALLS\"\n"
+      "/bin/cat >/dev/null\n"
+      "exit 4\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_RESTORE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::publish_dispatcher(false, false, FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) == "5\n");
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("hook reconciliation re-reads after a transient inspection") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_HOOK_CALLS\" ] && count=$(/bin/cat \"$KPBR_HOOK_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_HOOK_CALLS\"\n"
+      "[ \"$count\" -eq 1 ] && exit 4\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK_NOTHROW(T::reconcile_hook(
+      "iptables", "mangle", "OUTPUT", "KeenPbrOutput"));
+  CHECK(read_iptables_test_file(calls) == "2\n");
+}
+
+TEST_CASE("hook reconciliation verifies state after an ambiguous mutation") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  const auto arguments = temp.path() / "arguments";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_ARGUMENTS\"\n"
+      "count=0\n"
+      "[ -f \"$KPBR_HOOK_CALLS\" ] && count=$(/bin/cat \"$KPBR_HOOK_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_HOOK_CALLS\"\n"
+      "[ \"$count\" -eq 1 ] && exit 0\n"
+      "[ \"$count\" -eq 2 ] && exit 1\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  IptablesTestEnvironment arguments_env("KPBR_HOOK_ARGUMENTS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  arguments_env.set(arguments.string());
+
+  CHECK_NOTHROW(T::reconcile_hook(
+      "iptables", "mangle", "OUTPUT", "KeenPbrOutput"));
+  CHECK(read_iptables_test_file(calls) == "3\n");
+  CHECK(read_iptables_test_file(arguments) ==
+        "-t mangle -S OUTPUT\n"
+        "-t mangle -A OUTPUT -j KeenPbrOutput\n"
+        "-t mangle -S OUTPUT\n");
+}
+
+TEST_CASE("hook reconciliation surfaces permanent command failures immediately") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_HOOK_CALLS\"\n"
+      "exit 2\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "OUTPUT", "KeenPbrOutput"),
+      FirewallError);
+  CHECK(read_iptables_test_file(calls) == "x");
+}
+
+TEST_CASE("generation verification retries a coherent publication mismatch") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "count=0\n"
+      "[ -f \"$KPBR_VERIFY_CALLS\" ] && count=$(/bin/cat \"$KPBR_VERIFY_CALLS\")\n"
+      "count=$((count + 1))\n"
+      "printf '%s\\n' \"$count\" > \"$KPBR_VERIFY_CALLS\"\n"
+      "generation=B\n"
+      "[ \"$count\" -gt 2 ] && generation=A\n"
+      "echo \"-A KeenPbrTable -j KeenPbrTable_${generation}\"\n"
+      "echo '-A PREROUTING -j KeenPbrTable'\n"
+      "echo \"-A KeenPbrOutput -j KeenPbrOutput_${generation}\"\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_VERIFY_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK_NOTHROW(T::verify_applied_generation(
+      FirewallSetGeneration::A));
+  CHECK(read_iptables_test_file(calls) == "4\n");
+}
+
+TEST_CASE("persistent generation verification mismatch stays transient") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_VERIFY_CALLS\"\n"
+      "echo '-A KeenPbrTable -j KeenPbrTable_B'\n"
+      "echo '-A PREROUTING -j KeenPbrTable'\n"
+      "echo '-A KeenPbrOutput -j KeenPbrOutput_B'\n"
+      "echo '-A OUTPUT -j KeenPbrOutput'\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_VERIFY_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+
+  CHECK_THROWS_AS(
+      T::verify_applied_generation(FirewallSetGeneration::A),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls).size() == 10);
+}
 
 TEST_CASE("generation ipset names alternate and stay within the kernel limit") {
   const auto [first, second] = T::generation_set_names();

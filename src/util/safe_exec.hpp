@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
+#include <optional>
 #include <poll.h>
 #include <signal.h>
 #include <sstream>
@@ -58,8 +59,40 @@ struct SafeExecTimeouts {
 
 enum class SafeExecFailureLog {
     Enabled,
+    // Preserve the bounded last-command snapshot for support diagnostics
+    // without promoting an error that a higher-level reconciler handles into
+    // the user-facing log/notification stream.
+    DiagnosticOnly,
     Suppressed,
 };
+
+struct SafeExecFailureDetail {
+    std::string reason;
+    std::string numeric_detail;
+    int numeric_value{0};
+};
+
+inline void set_safe_exec_failure_detail(
+    SafeExecFailureDetail* detail,
+    std::string_view reason,
+    std::string_view numeric_detail = {},
+    int numeric_value = 0) {
+    if (detail == nullptr) {
+        return;
+    }
+    detail->reason.assign(reason.data(), reason.size());
+    detail->numeric_detail.assign(
+        numeric_detail.data(), numeric_detail.size());
+    detail->numeric_value = numeric_value;
+}
+
+inline bool should_record_safe_exec_failure(SafeExecFailureLog mode) {
+    return mode != SafeExecFailureLog::Suppressed;
+}
+
+inline bool should_log_safe_exec_failure(SafeExecFailureLog mode) {
+    return mode == SafeExecFailureLog::Enabled;
+}
 
 inline std::atomic<std::int64_t>& safe_exec_timeout_ms_storage() {
     static std::atomic<std::int64_t> value{30000};
@@ -409,8 +442,17 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                 const std::string& input,
                                 std::string* stderr_out = nullptr,
                                 SafeExecFailureLog failure_log =
-                                    SafeExecFailureLog::Enabled) {
-    if (args.empty()) return -1;
+                                    SafeExecFailureLog::Enabled,
+                                SafeExecFailureDetail* failure_detail = nullptr,
+                                std::optional<SafeExecTimeouts> timeout_override =
+                                    std::nullopt) {
+    if (failure_detail != nullptr) {
+        *failure_detail = {};
+    }
+    if (args.empty()) {
+        set_safe_exec_failure_detail(failure_detail, "empty_command");
+        return -1;
+    }
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
     Logger::instance().trace("safe_exec_pipe_start",
@@ -428,13 +470,15 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC) == -1) {
         const int pipe_errno = errno;
+        set_safe_exec_failure_detail(
+            failure_detail, "pipe_failed", "errno", pipe_errno);
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=pipe_failed errno={}",
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
                                  pipe_errno);
-        if (failure_log == SafeExecFailureLog::Enabled) {
+        if (should_record_safe_exec_failure(failure_log)) {
             errno = pipe_errno;
             record_safe_exec_pipe_failure(
                 args, -1, input, {}, "pipe_failed", "errno", pipe_errno);
@@ -451,6 +495,8 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
     const pid_t pid = fork();
     if (pid == -1) {
         const int fork_errno = errno;
+        set_safe_exec_failure_detail(
+            failure_detail, "fork_failed", "errno", fork_errno);
         close(pipefd[0]);
         close(pipefd[1]);
         if (errfd[0] != -1) { close(errfd[0]); close(errfd[1]); }
@@ -460,7 +506,7 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
                                  fork_errno);
-        if (failure_log == SafeExecFailureLog::Enabled) {
+        if (should_record_safe_exec_failure(failure_log)) {
             errno = fork_errno;
             record_safe_exec_pipe_failure(
                 args, -1, input, {}, "fork_failed", "errno", fork_errno);
@@ -486,7 +532,8 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
     }
 
     prepare_parent_process_group(pid);
-    const SafeExecTimeouts timeouts = safe_exec_timeouts();
+    const SafeExecTimeouts timeouts =
+        timeout_override.value_or(safe_exec_timeouts());
     const auto deadline = started_at + timeouts.timeout;
 
     // Write input and collect stderr concurrently. Both descriptors are
@@ -611,6 +658,8 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                               : std::string_view{};
 
     if (waitpid_error != 0) {
+        set_safe_exec_failure_detail(
+            failure_detail, "waitpid_failed", "errno", waitpid_error);
         Logger::instance().trace(
             "safe_exec_pipe_error",
             "cmd={} duration_ms={} reason=waitpid_failed errno={}",
@@ -618,7 +667,7 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started_at).count(),
             waitpid_error);
-        if (failure_log == SafeExecFailureLog::Enabled) {
+        if (should_record_safe_exec_failure(failure_log)) {
             errno = waitpid_error;
             record_safe_exec_pipe_failure(
                 args,
@@ -648,13 +697,16 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
         wait_result = wait_for_child_until(pid, deadline, timeouts.kill_grace);
     }
     if (wait_result.timed_out) {
-        if (failure_log == SafeExecFailureLog::Enabled) {
+        set_safe_exec_failure_detail(failure_detail, "timeout");
+        if (should_log_safe_exec_failure(failure_log)) {
             Logger::instance().error(
                 "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
                 "means the firmware is holding the xtables lock; the operation will "
                 "be retried.",
                 command, timeouts.timeout.count());
             log_failed_pipe_input(command, input);
+        }
+        if (should_record_safe_exec_failure(failure_log)) {
             record_safe_exec_pipe_failure(
                 args, -1, input, captured_stderr, "timeout");
         }
@@ -664,14 +716,18 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
     if (!wait_result.reaped) {
         const int wait_errno =
             wait_result.wait_errno != 0 ? wait_result.wait_errno : errno;
+        set_safe_exec_failure_detail(
+            failure_detail, "waitpid_failed", "errno", wait_errno);
         Logger::instance().trace("safe_exec_pipe_error",
                                  "cmd={} duration_ms={} reason=waitpid_failed errno={}",
                                  command,
                                  std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - started_at).count(),
                                  wait_errno);
-        if (failure_log == SafeExecFailureLog::Enabled) {
+        if (should_log_safe_exec_failure(failure_log)) {
             log_failed_pipe_input(command, input);
+        }
+        if (should_record_safe_exec_failure(failure_log)) {
             errno = wait_errno;
             record_safe_exec_pipe_failure(
                 args,
@@ -695,13 +751,16 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                                      command,
                                      exit_code,
                                      duration_ms);
-        } else if (failure_log == SafeExecFailureLog::Enabled) {
+        } else if (should_log_safe_exec_failure(failure_log)) {
             Logger::instance().error(
                 "safe_exec_pipe_failed cmd={} exit_code={} duration_ms={}",
                 command,
                 exit_code,
                 duration_ms);
             log_failed_pipe_input(command, input);
+        }
+        if (exit_code != 0 &&
+            should_record_safe_exec_failure(failure_log)) {
             record_safe_exec_pipe_failure(
                 args,
                 exit_code,
@@ -709,14 +768,20 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                 captured_stderr,
                 "nonzero_exit");
         }
+        if (exit_code != 0) {
+            set_safe_exec_failure_detail(
+                failure_detail, "nonzero_exit");
+        }
         return exit_code;
     }
-    if (failure_log == SafeExecFailureLog::Enabled) {
+    if (should_log_safe_exec_failure(failure_log)) {
         Logger::instance().error(
             "safe_exec_pipe_failed cmd={} duration_ms={} reason=abnormal_exit",
             command,
             duration_ms);
         log_failed_pipe_input(command, input);
+    }
+    if (should_record_safe_exec_failure(failure_log)) {
         if (WIFSIGNALED(status)) {
             record_safe_exec_pipe_failure(
                 args,
@@ -731,6 +796,16 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
                 args, -1, input, captured_stderr, "abnormal_exit");
         }
     }
+    if (WIFSIGNALED(status)) {
+        set_safe_exec_failure_detail(
+            failure_detail,
+            "abnormal_exit",
+            "signal",
+            WTERMSIG(status));
+    } else {
+        set_safe_exec_failure_detail(
+            failure_detail, "abnormal_exit");
+    }
     return -1;
 }
 
@@ -741,7 +816,12 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
                                            bool suppress_stderr = false,
                                            size_t max_bytes = 0,
                                            bool capture_stderr = false,
-                                           bool drain_after_limit = false) {
+                                           bool drain_after_limit = false,
+                                           SafeExecFailureLog failure_log =
+                                               SafeExecFailureLog::Enabled,
+                                           std::optional<SafeExecTimeouts>
+                                               timeout_override =
+                                                   std::nullopt) {
     ExecCaptureResult result;
     if (args.empty()) return result;
     const std::string command = safe_exec_command_string(args);
@@ -809,7 +889,8 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
     }
 
     prepare_parent_process_group(pid);
-    const SafeExecTimeouts timeouts = safe_exec_timeouts();
+    const SafeExecTimeouts timeouts =
+        timeout_override.value_or(safe_exec_timeouts());
     // Parent: read captured output without blocking forever. A service script,
     // nft or a descendant inheriting stdout can otherwise keep this pipe open
     // indefinitely and wedge the daemon request thread.
@@ -881,9 +962,12 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         result.exit_code = WEXITSTATUS(status);
     }
     if (timed_out) {
-        Logger::instance().error("Command '{}' exceeded {} ms and was killed",
-                                 command,
-                                 timeouts.timeout.count());
+        if (should_log_safe_exec_failure(failure_log)) {
+            Logger::instance().error(
+                "Command '{}' exceeded {} ms and was killed",
+                command,
+                timeouts.timeout.count());
+        }
         result.timed_out = true;
     }
     Logger::instance().trace("safe_exec_capture_end",

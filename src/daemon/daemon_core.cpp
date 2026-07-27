@@ -15,6 +15,7 @@
 #include <ostream>
 #include <signal.h>
 #include <set>
+#include <string_view>
 #include <streambuf>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
@@ -60,6 +61,15 @@ namespace {
 constexpr auto SIGUSR1_DEBOUNCE_DELAY = std::chrono::milliseconds{150};
 constexpr auto INTERFACE_MONITOR_RECONNECT_RETRY_DELAY = std::chrono::seconds{5};
 constexpr std::size_t kResolverStreamChunkBytes = 16U * 1024U;
+constexpr std::array<std::chrono::seconds, 6>
+    RUNTIME_FIREWALL_RETRY_DELAYS{
+        std::chrono::seconds{1},
+        std::chrono::seconds{2},
+        std::chrono::seconds{4},
+        std::chrono::seconds{8},
+        std::chrono::seconds{16},
+        std::chrono::seconds{32},
+    };
 
 #ifndef KEEN_PBR_CONTROL_SOCKET
 #define KEEN_PBR_CONTROL_SOCKET "/run/keen-pbr/control.sock"
@@ -1123,16 +1133,84 @@ void Daemon::handle_sighup() {
     }
 }
 
-void Daemon::refresh_iproute_and_firewall_runtime() {
+void Daemon::refresh_iproute_and_firewall_runtime(std::size_t retry_attempt) {
     auto& log = Logger::instance();
+    if (!routing_runtime_active_) {
+        log.verbose(
+            "Skipping runtime routing/firewall refresh because routing is stopped.");
+        return;
+    }
+    if (runtime_recovery_request_should_coalesce(
+            retry_attempt,
+            runtime_firewall_retry_task_id_ >= 0)) {
+        log.verbose(
+            "Coalescing runtime routing/firewall refresh with the pending "
+            "recovery retry.");
+        return;
+    }
     try {
         reconcile_static_routing();
         apply_firewall(FirewallApplyMode::PreserveSets);
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
+    } catch (const TransientFirewallError& e) {
+        if (retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
+            log.error(
+                "Runtime routing/firewall reconciliation failed after {} "
+                "retries: {}",
+                retry_attempt,
+                e.what());
+            return;
+        }
+        log.info(
+            "Runtime iproute and firewall refresh deferred: {}", e.what());
+        schedule_runtime_firewall_retry(
+            retry_attempt,
+            runtime_generation_.load(std::memory_order_acquire));
     } catch (const std::exception& e) {
-        log.error("Runtime iproute and firewall refresh failed: {}", e.what());
+        // A permanent rule/configuration failure is actionable and must remain
+        // visible to the user.
+        log.error(
+            "Runtime routing/firewall reconciliation failed permanently: {}",
+            e.what());
     }
+}
+
+void Daemon::cancel_runtime_firewall_retry() {
+    if (runtime_firewall_retry_task_id_ < 0) {
+        return;
+    }
+    scheduler_->cancel(runtime_firewall_retry_task_id_);
+    runtime_firewall_retry_task_id_ = -1;
+}
+
+void Daemon::schedule_runtime_firewall_retry(
+    std::size_t attempt,
+    std::uint64_t runtime_generation) {
+    if (runtime_firewall_retry_task_id_ >= 0 ||
+        attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
+        return;
+    }
+    const auto delay = RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
+    runtime_firewall_retry_task_id_ = scheduler_->schedule_oneshot(
+        delay,
+        [this, attempt, runtime_generation]() {
+            runtime_firewall_retry_task_id_ = -1;
+            if (!runtime_recovery_is_current(
+                    routing_runtime_active_,
+                    runtime_generation,
+                    runtime_generation_.load(std::memory_order_acquire))) {
+                Logger::instance().verbose(
+                    "Discarding stale runtime firewall recovery retry.");
+                return;
+            }
+            refresh_iproute_and_firewall_runtime(attempt + 1);
+        },
+        "runtime-firewall-retry");
+    Logger::instance().info(
+        "Runtime firewall recovery retry {} scheduled in {}s.",
+        attempt + 1,
+        delay.count());
 }
 
 bool Daemon::is_interface_outbound_in_use(const std::string& interface_name) const {
@@ -1153,7 +1231,8 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     }
 #endif
     if ((!event.administrative_state_changed && !event.address_changed) ||
-        !is_interface_outbound_in_use(event.interface_name)) {
+        !is_interface_outbound_in_use(event.interface_name) ||
+        !routing_runtime_active_) {
         return;
     }
 
@@ -1375,10 +1454,17 @@ void Daemon::run() {
     try {
         apply_firewall(FirewallApplyMode::Destructive);
         log.info("Firewall rules and routing applied.");
-    } catch (const std::exception& e) {
-        log.error("Could not apply firewall rules at startup: {}. "
-                  "The service continues and will retry shortly.", e.what());
+    } catch (const TransientFirewallError& e) {
+        // This is expected while NDMS is still publishing its firewall after
+        // boot. schedule_startup_firewall_retry() emits one actionable error
+        // only if bounded recovery is exhausted.
+        log.info("Firewall rules are not ready at startup: {}. "
+                 "The service continues and will retry shortly.", e.what());
         schedule_startup_firewall_retry();
+    } catch (const std::exception& e) {
+        // Invalid rules, missing helpers and other permanent faults will not
+        // improve by repeating the same transaction for two minutes.
+        log.error("Firewall apply failed permanently at startup: {}", e.what());
     }
 
     schedule_lists_autoupdate();

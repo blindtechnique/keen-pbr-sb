@@ -97,6 +97,14 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// The transaction itself is valid, but KeeneticOS changed the shared kernel
+// firewall state concurrently. Callers may retry this error with backoff;
+// ordinary FirewallError remains a permanent/configuration failure.
+class TransientFirewallError : public FirewallError {
+public:
+    using FirewallError::FirewallError;
+};
+
 // Concrete firewall backend selected for runtime use.
 enum class FirewallBackend : uint8_t {
     iptables,

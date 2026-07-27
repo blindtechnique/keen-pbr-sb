@@ -369,6 +369,38 @@ TEST_CASE("safe_exec_pipe_stdin: capability probes can suppress expected failure
     CHECK(read_file(failure_path) == "unchanged");
 }
 
+TEST_CASE("safe_exec_pipe_stdin: diagnostic-only failures do not notify") {
+    LoggerSinkGuard logger_sink_guard;
+    TempDir temp_dir;
+    const auto failure_path =
+        temp_dir.path() / "last-command-failure.log";
+    LastCommandFailurePathGuard failure_path_guard(failure_path);
+    std::string log;
+    Logger::instance().set_sink([&log](const std::string& line) {
+        log += line;
+        log += '\n';
+    });
+
+    const std::string input = "*mangle\nCOMMIT\n";
+    std::string stderr_output;
+    const int exit_code = safe_exec_pipe_stdin(
+        {"/bin/sh", "-c",
+         "cat >/dev/null; printf 'line 2 failed\\n' >&2; exit 1"},
+        input,
+        &stderr_output,
+        SafeExecFailureLog::DiagnosticOnly);
+
+    CHECK(exit_code == 1);
+    CHECK(stderr_output == "line 2 failed");
+    CHECK(log.find("safe_exec_pipe_failed") == std::string::npos);
+    CHECK(log.find("safe_exec_pipe_input") == std::string::npos);
+    const auto failure = read_last_command_failure();
+    REQUIRE(failure.has_value());
+    CHECK(failure->find("exit_code: 1") != std::string::npos);
+    CHECK(failure->find(input) != std::string::npos);
+    CHECK(failure->find("line 2 failed") != std::string::npos);
+}
+
 TEST_CASE("safe_exec_pipe_stdin: records abnormal signal termination") {
     TempDir temp_dir;
     LastCommandFailurePathGuard failure_path(
@@ -397,6 +429,30 @@ TEST_CASE("safe_exec_capture: ignored SIGTERM cannot hang capture") {
     CHECK(result.exit_code == -1);
     CHECK(result.timed_out);
     CHECK(elapsed < std::chrono::seconds{2});
+}
+
+TEST_CASE("safe_exec_capture: suppressed timeout stays out of user log") {
+    SafeExecTimeoutGuard timeout_guard;
+    LoggerSinkGuard logger_sink_guard;
+    set_safe_exec_timeouts(std::chrono::milliseconds{50},
+                           std::chrono::milliseconds{25});
+    std::string log;
+    Logger::instance().set_sink([&log](const std::string& line) {
+        log += line;
+        log += '\n';
+    });
+
+    const auto result = safe_exec_capture(
+        {"/bin/sh", "-c", "sleep 2"},
+        /*suppress_stderr=*/true,
+        /*max_bytes=*/1024,
+        /*capture_stderr=*/false,
+        /*drain_after_limit=*/false,
+        SafeExecFailureLog::Suppressed);
+
+    CHECK(result.exit_code == -1);
+    CHECK(result.timed_out);
+    CHECK(log.find("exceeded") == std::string::npos);
 }
 
 TEST_CASE("last command failure: writes one private atomic snapshot") {

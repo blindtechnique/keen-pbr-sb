@@ -16,6 +16,50 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
 
 const MAX_NOTICES = 20
 
+const LEGACY_INTERNAL_RECOVERY_PREFIXES = [
+  "safe_exec_pipe_input cmd=",
+  "safe_exec_pipe_failed cmd=",
+  "Best-effort conntrack cleanup failed",
+  "iptables dispatcher chains are missing; recreating the firewall scaffold",
+  "Restoring vanished managed route",
+] as const
+
+const LEGACY_TRANSIENT_FIREWALL_MARKERS = [
+  "(rule: COMMIT)",
+  "xtables lock",
+  "temporarily unavailable",
+  "Device or resource busy",
+  "failed to inspect live iptables dispatcher",
+  "live iptables generation changed while preparing apply",
+  "failed to synchronize live iptables",
+] as const
+
+function isInternalRecoveryMessage(text: string): boolean {
+  if (
+    LEGACY_INTERNAL_RECOVERY_PREFIXES.some((prefix) =>
+      text.startsWith(prefix)
+    )
+  ) {
+    return true
+  }
+
+  if (
+    text.startsWith("Runtime iproute and firewall refresh failed:") ||
+    text.startsWith(
+      "Error rebuilding routing/firewall after urltest change:"
+    )
+  ) {
+    return LEGACY_TRANSIENT_FIREWALL_MARKERS.some((marker) =>
+      text.includes(marker)
+    )
+  }
+
+  return (
+    (text.startsWith("Firewall retry ") && text.includes(" failed:")) ||
+    (text.startsWith("Urltest '") && text.includes(" was rolled back;"))
+  )
+}
+
 export function collectNotices(
   lines: string[],
   softwareUpdate: SoftwareUpdateResponse | undefined,
@@ -68,6 +112,12 @@ export function collectNotices(
       continue
     }
     const [, timestamp, marker, text] = match
+    // Older builds recorded automatic recovery as warnings/errors. Keep those
+    // historical details in the downloadable journal without showing them as
+    // current, actionable notifications after an upgrade.
+    if (isInternalRecoveryMessage(text)) {
+      continue
+    }
     // The log keeps its history; dismissing only hides what was already read.
     if (
       dismissedUntil > 0 &&

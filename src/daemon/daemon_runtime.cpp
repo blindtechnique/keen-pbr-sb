@@ -190,6 +190,7 @@ void Daemon::warn_conntrack_unavailable_once() {
 
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
+    cancel_runtime_firewall_retry();
     if (!routing_runtime_active_) {
         if (runtime_state_machine_.state() != RuntimeState::stopped) {
             transition_runtime_or_throw(RuntimeState::stopped, "inactive runtime stopped");
@@ -203,6 +204,7 @@ void Daemon::stop_routing_runtime() {
     if (urltest_manager_) {
         urltest_manager_->clear();
     }
+    urltest_apply_incidents_.clear();
     const uint32_t owned_mark_mask =
         fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
     std::set<uint32_t> owned_marks;
@@ -223,7 +225,7 @@ void Daemon::stop_routing_runtime() {
         }
     }
     if (conntrack_cleanup_failures != 0U) {
-        log.warn(
+        log.info(
             "Best-effort conntrack cleanup failed for {} owned mark(s) while "
             "stopping routing; existing flows may keep their previous path "
             "until they expire",
@@ -575,16 +577,23 @@ void Daemon::handle_urltest_selection_change(
             reconcile_static_routing();
             apply_firewall(FirewallApplyMode::PreserveSets);
             runtime_rebuilt = true;
+            urltest_apply_incidents_.reset(change.urltest_tag);
             log.info("Routing and firewall rebuilt after urltest change.");
         } catch (const std::exception& e) {
-            log.error(
-                "Error rebuilding routing/firewall after urltest change: {}; "
+            // A failed candidate switch is transactional: the previous
+            // selection stays authoritative until the kernel accepts the new
+            // generation. This recovery detail is useful in the journal but
+            // is not an actionable user notification.
+            log.info(
+                "Routing/firewall did not accept the urltest change: {}; "
                 "restoring the previously applied selection",
                 e.what());
             firewall_state_.set_urltest_selections(previous_selections);
-            if (!urltest_manager_->synchronize_selected(
-                    change.urltest_tag, applied_previous)) {
-                log.error(
+            const bool manager_synchronized =
+                urltest_manager_->synchronize_selected(
+                    change.urltest_tag, applied_previous);
+            if (!manager_synchronized) {
+                log.info(
                     "Failed to synchronize urltest '{}' with restored "
                     "selection '{}'",
                     change.urltest_tag,
@@ -594,13 +603,27 @@ void Daemon::handle_urltest_selection_change(
             try {
                 reconcile_static_routing();
                 apply_firewall(FirewallApplyMode::PreserveSets);
-                log.warn(
+                log.info(
                     "Urltest '{}' switch to '{}' was rolled back; the next "
                     "probe may retry it",
                     change.urltest_tag,
                     change.new_child_tag);
+                const auto incident =
+                    urltest_apply_incidents_.record_failure(
+                        change.urltest_tag);
+                if (incident.notify) {
+                    log.error(
+                        "Urltest '{}' could not converge after {} consecutive "
+                        "probe rounds; the previous kernel route remains "
+                        "active{}",
+                        change.urltest_tag,
+                        incident.consecutive_failures,
+                        manager_synchronized
+                            ? ""
+                            : ", but the selector state also requires attention");
+                }
             } catch (const std::exception& rollback_error) {
-                log.error(
+                log.info(
                     "Failed to restore routing/firewall after urltest '{}' "
                     "switch failure: {}",
                     change.urltest_tag,
@@ -610,10 +633,21 @@ void Daemon::handle_urltest_selection_change(
                         RuntimeState::broken,
                         "urltest selection rollback failed");
                 } catch (const std::exception& state_error) {
-                    log.error(
+                    log.info(
                         "Failed to publish broken state after urltest rollback "
                         "failure: {}",
                         state_error.what());
+                }
+                const auto incident =
+                    urltest_apply_incidents_.record_failure(
+                        change.urltest_tag,
+                        /*notify_immediately=*/true);
+                if (incident.notify) {
+                    log.error(
+                        "Urltest '{}' could not restore the previously active "
+                        "kernel route after a failed switch; routing requires "
+                        "attention",
+                        change.urltest_tag);
                 }
             }
         }
@@ -625,7 +659,7 @@ void Daemon::handle_urltest_selection_change(
             if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
                 warn_conntrack_unavailable_once();
             } else if (cleanup == ConntrackCleanupResult::Failed) {
-                log.warn(
+                log.info(
                     "Failed to remove conntrack entries for retired urltest "
                     "mark {:#x}/{:#x}; existing flows may stay on the previous "
                     "path until they expire",
@@ -814,27 +848,43 @@ void Daemon::schedule_interface_probe() {
         "interface-probe");
 }
 
-void Daemon::schedule_startup_firewall_retry(int attempt) {
+void Daemon::schedule_startup_firewall_retry(
+    int attempt,
+    std::optional<std::uint64_t> expected_generation) {
     // Backing off matters here: the contention that caused the failure is the
     // firmware settling after boot, and it clears on its own within seconds.
     constexpr int kMaxAttempts = 6;
     const auto delay = std::chrono::seconds{5 * attempt};
+    const auto generation = expected_generation.value_or(
+        runtime_generation_.load(std::memory_order_acquire));
 
     scheduler_->schedule_oneshot(
         delay,
-        [this, attempt]() {
+        [this, attempt, generation]() {
             auto& log = Logger::instance();
+            if (!runtime_recovery_is_current(
+                    routing_runtime_active_,
+                    generation,
+                    runtime_generation_.load(std::memory_order_acquire))) {
+                log.verbose(
+                    "Discarding stale startup firewall recovery retry.");
+                return;
+            }
             try {
                 apply_firewall(FirewallApplyMode::Destructive);
                 log.info("Firewall rules and routing applied on retry {}.", attempt);
-            } catch (const std::exception& e) {
+            } catch (const TransientFirewallError& e) {
                 if (attempt >= kMaxAttempts) {
                     log.error("Giving up on applying firewall rules after {} retries: {}",
                               attempt, e.what());
                     return;
                 }
-                log.warn("Firewall retry {} failed: {}. Trying again.", attempt, e.what());
-                schedule_startup_firewall_retry(attempt + 1);
+                log.info("Firewall retry {} failed: {}. Trying again.", attempt, e.what());
+                schedule_startup_firewall_retry(attempt + 1, generation);
+            } catch (const std::exception& e) {
+                log.error(
+                    "Firewall recovery stopped after a permanent failure: {}",
+                    e.what());
             }
         },
         "startup-firewall-retry");
@@ -1159,6 +1209,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
 
     try {
     runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
+    cancel_runtime_firewall_retry();
 
     if (lists_autoupdate_task_id_ >= 0) {
         scheduler_->cancel(lists_autoupdate_task_id_);
@@ -1183,6 +1234,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     if (urltest_manager_) {
         urltest_manager_->clear();
     }
+    urltest_apply_incidents_.clear();
     // Reconcile in place: install replacement routes/rules before removing
     // obsolete owned state. Clearing first creates a visible traffic gap on
     // every configuration save and makes failover briefly lose its path.

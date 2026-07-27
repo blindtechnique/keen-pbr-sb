@@ -1313,10 +1313,14 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
 
     // Apply atomically via nft -j -f -
     std::string error_output;
-    int status = safe_exec_pipe_stdin({"nft", "-j", "-f", "-"}, json_str, &error_output);
+    int status = safe_exec_pipe_stdin(
+        {"nft", "-j", "-f", "-"},
+        json_str,
+        &error_output,
+        SafeExecFailureLog::Suppressed);
     if (status != 0 && mode == FirewallApplyMode::PreserveSets &&
         !emit_full_table && !table_exists()) {
-        Logger::instance().warn(
+        Logger::instance().info(
             "nft preserve apply failed after KeenPbrTable disappeared; retrying full table restore");
         cleanup_live_impl();
         doc = build_apply_document(
@@ -1327,9 +1331,19 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
         json_str = doc.dump();
         Logger::instance().verbose("nft recovery json:\n{}", json_str);
         error_output.clear();
-        status = safe_exec_pipe_stdin({"nft", "-j", "-f", "-"}, json_str, &error_output);
+        status = safe_exec_pipe_stdin(
+            {"nft", "-j", "-f", "-"},
+            json_str,
+            &error_output,
+            SafeExecFailureLog::Suppressed);
     }
     if (status != 0) {
+        record_safe_exec_pipe_failure(
+            {"nft", "-j", "-f", "-"},
+            status,
+            json_str,
+            error_output,
+            status < 0 ? "execution_failed" : "nonzero_exit");
         // nft names the offending expression on stderr; without it the status
         // code alone told us nothing.
         throw FirewallError(

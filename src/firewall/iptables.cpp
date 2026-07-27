@@ -8,7 +8,10 @@
 #include <rapidxml.hpp>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <cstring>
 #include <optional>
@@ -17,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <thread>
 
 namespace keen_pbr3 {
 
@@ -301,11 +305,6 @@ std::unique_ptr<ListEntryVisitor> IptablesFirewall::create_batch_loader(
     return std::make_unique<IpsetRestoreVisitor>(buf, set_name);
 }
 
-// Whether the local iptables-restore understands -w. Probed once: busybox and
-// older builds reject the option outright, newer ones need it to avoid blocking
-// forever on the xtables lock.
-static int xtables_wait_supported = -1; // -1 unknown, 0 no, 1 yes
-
 // Inserts "-w <seconds>" right after the program name for the restore tools.
 static std::vector<std::string> with_wait_option(const std::vector<std::string>& args) {
     std::vector<std::string> out;
@@ -321,9 +320,20 @@ static bool is_restore_tool(const std::string& program) {
     return program == "iptables-restore" || program == "ip6tables-restore";
 }
 
+// IPv4 and IPv6 restore binaries are not guaranteed to be the same build on
+// Entware. Keep their capability results independent: probing one tool must
+// never make us pass an unsupported option to the other.
+static std::atomic<int>& restore_wait_support_cache(const std::string& program) {
+    static std::atomic<int> ipv4{-1}; // -1 unknown, 0 no, 1 yes
+    static std::atomic<int> ipv6{-1};
+    return program == "ip6tables-restore" ? ipv6 : ipv4;
+}
+
 static bool restore_wait_option_supported(const std::string& program) {
-    if (xtables_wait_supported >= 0) {
-        return xtables_wait_supported == 1;
+    auto& cache = restore_wait_support_cache(program);
+    const int cached = cache.load(std::memory_order_acquire);
+    if (cached >= 0) {
+        return cached == 1;
     }
 
     // Probe the option without feeding the real transaction to the tool.
@@ -334,13 +344,14 @@ static bool restore_wait_option_supported(const std::string& program) {
         {program, "-w", "0", "--test"},
         /*suppress_stderr=*/true,
         /*max_bytes=*/1024);
-    xtables_wait_supported =
+    const int supported =
         !probe.timed_out && !probe.truncated && probe.exit_code == 0 ? 1 : 0;
+    cache.store(supported, std::memory_order_release);
     Logger::instance().verbose(
         "{} xtables wait option support: {}",
         program,
-        xtables_wait_supported == 1 ? "yes" : "no");
-    return xtables_wait_supported == 1;
+        supported == 1 ? "yes" : "no");
+    return supported == 1;
 }
 
 #ifdef KEEN_PBR3_TESTING
@@ -351,11 +362,97 @@ bool restore_wait_option_supported_for_test(const std::string& program) {
 }
 
 void reset_restore_wait_option_probe_for_test() {
-    xtables_wait_supported = -1;
+    restore_wait_support_cache("iptables-restore").store(
+        -1, std::memory_order_release);
+    restore_wait_support_cache("ip6tables-restore").store(
+        -1, std::memory_order_release);
 }
 
 } // namespace testing
 #endif
+
+static std::optional<unsigned long> restore_failure_line_number(
+    const std::string& error_output) {
+    const auto marker = error_output.find("line");
+    if (marker == std::string::npos) {
+        return std::nullopt;
+    }
+    try {
+        auto cursor = marker + 4;
+        while (cursor < error_output.size() &&
+               (error_output[cursor] == ':' ||
+                std::isspace(static_cast<unsigned char>(error_output[cursor])))) {
+            ++cursor;
+        }
+        if (cursor >= error_output.size() ||
+            !std::isdigit(static_cast<unsigned char>(error_output[cursor]))) {
+            return std::nullopt;
+        }
+        return std::stoul(error_output.substr(cursor));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+static std::optional<std::string> restore_script_line(
+    const std::string& script,
+    unsigned long line_number) {
+    std::istringstream stream(script);
+    std::string line;
+    for (unsigned long index = 1;
+         index <= line_number && std::getline(stream, line);
+         ++index) {
+        if (index == line_number) {
+            return line;
+        }
+    }
+    return std::nullopt;
+}
+
+static bool is_commit_line(std::string line) {
+    const auto first = std::find_if_not(
+        line.begin(), line.end(), [](unsigned char ch) { return std::isspace(ch); });
+    const auto last = std::find_if_not(
+        line.rbegin(), line.rend(), [](unsigned char ch) { return std::isspace(ch); })
+                          .base();
+    return first < last && std::string(first, last) == "COMMIT";
+}
+
+// Legacy iptables-restore has no -w. On Keenetic, a concurrent NDMS firewall
+// replacement can surface either as an xtables-lock diagnostic or as a failure
+// on the transaction's COMMIT line. A malformed rule fails on its own line and
+// must not be hidden behind retries.
+static bool restore_failure_is_transient(const std::string& error_output,
+                                         const std::string& script) {
+    std::string normalized = error_output;
+    std::transform(
+        normalized.begin(),
+        normalized.end(),
+        normalized.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    constexpr std::array<std::string_view, 5> lock_markers{
+        "xtables lock",
+        "holding the xtables lock",
+        "resource temporarily unavailable",
+        "temporarily unavailable",
+        "device or resource busy",
+    };
+    if (std::any_of(
+            lock_markers.begin(),
+            lock_markers.end(),
+            [&normalized](std::string_view marker) {
+                return normalized.find(marker) != std::string::npos;
+            })) {
+        return true;
+    }
+
+    const auto line_number = restore_failure_line_number(error_output);
+    if (!line_number.has_value()) {
+        return false;
+    }
+    const auto line = restore_script_line(script, *line_number);
+    return line.has_value() && is_commit_line(*line);
+}
 
 // Turns "exited with status 1" into something actionable.
 //
@@ -376,53 +473,211 @@ static std::string describe_restore_failure(const std::string& tool,
     // "Error occurred at line: 113", другие — "line 113 failed". Раньше
     // разбирался только первый вариант, и в самом частом случае номер строки
     // оставался известен, а правило — нет.
-    const auto marker = error_output.find("line");
-    if (marker != std::string::npos) {
-        try {
-            auto cursor = marker + 4;
-            while (cursor < error_output.size() &&
-                   (error_output[cursor] == ':' || error_output[cursor] == ' ')) {
-                ++cursor;
-            }
-            const auto line_number = std::stoul(error_output.substr(cursor));
-            std::istringstream script_stream(script);
-            std::string line;
-            for (unsigned long index = 1;
-                 index <= line_number && std::getline(script_stream, line);
-                 ++index) {
-                if (index == line_number) {
-                    message += keen_pbr3::format(" (rule: {})", line);
-                    break;
-                }
-            }
-        } catch (const std::exception&) {
-            // No line number to quote; the tool's own text still stands.
+    if (const auto line_number = restore_failure_line_number(error_output);
+        line_number.has_value()) {
+        if (const auto line = restore_script_line(script, *line_number);
+            line.has_value()) {
+            message += keen_pbr3::format(" (rule: {})", *line);
         }
     }
 
     return message;
 }
 
+static constexpr std::array<std::chrono::milliseconds, 4>
+    restore_retry_delays{
+        std::chrono::milliseconds{50},
+        std::chrono::milliseconds{100},
+        std::chrono::milliseconds{200},
+        std::chrono::milliseconds{400},
+    };
+
+enum class IptablesCommandOutcome {
+    Success,
+    TransientFailure,
+    PermanentFailure,
+};
+
+static constexpr std::array<std::chrono::milliseconds, 4>
+    iptables_control_retry_delays{
+        std::chrono::milliseconds{25},
+        std::chrono::milliseconds{50},
+        std::chrono::milliseconds{100},
+        std::chrono::milliseconds{200},
+    };
+
+static IptablesCommandOutcome classify_iptables_command(
+    const ExecCaptureResult& result) {
+    if (result.exit_code == 0 && !result.timed_out && !result.truncated) {
+        return IptablesCommandOutcome::Success;
+    }
+    if (result.truncated) {
+        // A complete table snapshot is required for exact hook counting. A
+        // stable oversized result will not heal by retrying.
+        return IptablesCommandOutcome::PermanentFailure;
+    }
+    std::string normalized = result.stdout_output;
+    std::transform(
+        normalized.begin(),
+        normalized.end(),
+        normalized.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+    constexpr std::array<std::string_view, 7> permanent_markers{
+        "permission denied",
+        "operation not permitted",
+        "can't initialize iptables table",
+        "can't initialize ip6tables table",
+        "unknown option",
+        "bad argument",
+        "invalid argument",
+    };
+    if (std::any_of(
+            permanent_markers.begin(),
+            permanent_markers.end(),
+            [&normalized](std::string_view marker) {
+                return normalized.find(marker) != std::string::npos;
+            })) {
+        return IptablesCommandOutcome::PermanentFailure;
+    }
+    if (result.timed_out || result.exit_code < 0 ||
+        result.exit_code == 1 || result.exit_code == 4) {
+        // For the fixed -S/-A/-D commands below, exit 1 means the table/chain
+        // changed between inspection and mutation. Exit 4 is the documented
+        // xtables resource/lock failure. Both are normal short-lived races
+        // while KeeneticOS republishes its firewall.
+        return IptablesCommandOutcome::TransientFailure;
+    }
+    return IptablesCommandOutcome::PermanentFailure;
+}
+
+static ExecCaptureResult run_iptables_control(
+    const std::vector<std::string>& args) {
+    return safe_exec_capture(
+        args,
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/256U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::Suppressed,
+        SafeExecTimeouts{
+            std::chrono::seconds{2},
+            std::chrono::milliseconds{500}});
+}
+
+static void record_iptables_control_failure(
+    const std::vector<std::string>& args,
+    const ExecCaptureResult& result,
+    std::string_view fallback_reason = "nonzero_exit") {
+    const std::string_view reason =
+        result.timed_out
+            ? std::string_view{"timeout"}
+            : result.truncated
+                ? std::string_view{"output_truncated"}
+                : fallback_reason;
+    record_safe_exec_pipe_failure(
+        args,
+        result.exit_code,
+        {},
+        result.stdout_output,
+        reason);
+}
+
 static void pipe_to_cmd(const std::vector<std::string>& args, const std::string& input) {
     Logger::instance().verbose("{} script:\n{}", args[0], input);
 
-    // The Keenetic firmware reconfigures iptables dozens of times a second while
-    // it brings interfaces up at boot. Without -w our restore call waits on the
-    // xtables lock indefinitely and the daemon never reaches its event loop.
-    if (is_restore_tool(args[0]) && restore_wait_option_supported(args[0])) {
-        std::string error_output;
-        const int status = safe_exec_pipe_stdin(with_wait_option(args), input, &error_output);
-        if (status == 0) {
-            return;
+    if (is_restore_tool(args[0])) {
+        // KeeneticOS can replace its own chains between our snapshot and the
+        // atomic commit. -w protects the xtables lock on newer tools; the same
+        // bounded retry also covers generation/COMMIT races on both new and
+        // legacy Entware builds.
+        const bool wait_supported =
+            restore_wait_option_supported(args[0]);
+        const auto restore_args =
+            wait_supported ? with_wait_option(args) : args;
+        const SafeExecTimeouts restore_timeouts{
+            wait_supported
+                ? std::chrono::seconds{12}
+                : std::chrono::seconds{2},
+            std::chrono::milliseconds{500},
+        };
+        for (std::size_t attempt = 0;
+             attempt <= restore_retry_delays.size();
+             ++attempt) {
+            std::string error_output;
+            SafeExecFailureDetail failure_detail;
+            int status = safe_exec_pipe_stdin(
+                restore_args,
+                input,
+                &error_output,
+                SafeExecFailureLog::Suppressed,
+                &failure_detail,
+                restore_timeouts);
+            if (status == 0) {
+                return;
+            }
+
+            // safe_exec_pipe_stdin returns a negative status for timeout or
+            // another parent-side execution interruption. A missing program
+            // still exits as 127, so retrying the negative result is both
+            // bounded and safe while covering a legacy restore blocked on the
+            // xtables lock without a useful stderr diagnostic.
+            const bool transient =
+                status < 0 || status == 4 ||
+                restore_failure_is_transient(error_output, input);
+            // A negative status already consumed the full bounded command
+            // timeout. Likewise, exit 4 from a wait-capable restore means its
+            // ten-second xtables wait was exhausted. Hand either case to the
+            // daemon's outer backoff immediately instead of blocking the
+            // control loop for several more full lock waits.
+            const bool wait_exhausted =
+                wait_supported && status == 4;
+            const bool final_attempt =
+                attempt == restore_retry_delays.size() ||
+                status < 0 ||
+                wait_exhausted;
+            if (!transient || final_attempt) {
+                const std::string_view reason =
+                    failure_detail.reason.empty()
+                        ? (status < 0
+                               ? std::string_view{"execution_failed"}
+                               : std::string_view{"nonzero_exit"})
+                        : std::string_view{failure_detail.reason};
+                record_safe_exec_pipe_failure(
+                    restore_args,
+                    status,
+                    input,
+                    error_output,
+                    reason,
+                    failure_detail.numeric_detail,
+                    failure_detail.numeric_value);
+            }
+            if (!transient) {
+                throw FirewallError(
+                    describe_restore_failure(args[0], status, error_output, input));
+            }
+
+            if (final_attempt) {
+                throw TransientFirewallError(
+                    describe_restore_failure(args[0], status, error_output, input));
+            }
+            Logger::instance().verbose(
+                "{} transient transaction failure; retrying in {} ms ({}/{})",
+                args[0],
+                restore_retry_delays[attempt].count(),
+                attempt + 1,
+                restore_retry_delays.size());
+            std::this_thread::sleep_for(restore_retry_delays[attempt]);
         }
-        // Support was established by an empty --test transaction. A failure
-        // here is therefore a real ruleset/lock error and must not be hidden by
-        // replaying the same mutation without locking.
-        throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
     }
 
     std::string error_output;
-    int status = safe_exec_pipe_stdin(args, input, &error_output);
+    int status = safe_exec_pipe_stdin(
+        args,
+        input,
+        &error_output,
+        SafeExecFailureLog::DiagnosticOnly);
     if (status != 0) {
         throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
     }
@@ -596,16 +851,44 @@ IptablesFirewall::LiveGenerationState IptablesFirewall::inspect_dispatcher(
     const std::string& dispatcher,
     const std::string& generation_a,
     const std::string& generation_b) const {
-    const auto result = safe_exec_capture(
-        {command, "-t", table, "-S"},
-        /*suppress_stderr=*/true,
-        /*max_bytes=*/256U * 1024U);
-    if (result.exit_code != 0 || result.truncated || result.timed_out) {
-        throw FirewallError("failed to inspect live iptables dispatcher " +
-                            dispatcher);
+    ExecCaptureResult last_result;
+    const std::vector<std::string> inspect_args{
+        command, "-t", table, "-S"};
+    for (std::size_t attempt = 0;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        last_result = run_iptables_control(inspect_args);
+        const auto outcome = classify_iptables_command(last_result);
+        if (outcome == IptablesCommandOutcome::Success) {
+            return parse_live_generation(
+                last_result.stdout_output,
+                dispatcher,
+                generation_a,
+                generation_b);
+        }
+        if (outcome == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(inspect_args, last_result);
+            throw FirewallError(
+                "failed to execute iptables dispatcher inspection for " +
+                dispatcher);
+        }
+        if (last_result.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            break;
+        }
+        Logger::instance().verbose(
+            "{} dispatcher inspection was transiently unavailable; "
+            "retrying in {} ms ({}/{})",
+            dispatcher,
+            iptables_control_retry_delays[attempt].count(),
+            attempt + 1,
+            iptables_control_retry_delays.size());
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
     }
-    return parse_live_generation(
-        result.stdout_output, dispatcher, generation_a, generation_b);
+    record_iptables_control_failure(inspect_args, last_result);
+    throw TransientFirewallError(
+        "failed to inspect live iptables dispatcher " + dispatcher);
 }
 
 FirewallSetGeneration IptablesFirewall::select_target_generation(
@@ -653,7 +936,7 @@ FirewallSetGeneration IptablesFirewall::select_target_generation(
                 generation_output_chain(FirewallSetGeneration::A),
                 generation_output_chain(FirewallSetGeneration::B));
             if (secondary != state_for_generation(*authoritative)) {
-                throw FirewallError(
+                throw TransientFirewallError(
                     "failed to synchronize live iptables OUTPUT dispatcher");
             }
         }
@@ -668,7 +951,7 @@ FirewallSetGeneration IptablesFirewall::select_target_generation(
                 *authoritative);
             primary = inspect_live_generation(ipv6);
             if (primary != state_for_generation(*authoritative)) {
-                throw FirewallError(
+                throw TransientFirewallError(
                     "failed to synchronize live iptables PREROUTING dispatcher");
             }
         }
@@ -681,7 +964,7 @@ void IptablesFirewall::ensure_target_generation_inactive(
     bool ipv6,
     FirewallSetGeneration target) const {
     if (select_target_generation(ipv6) != target) {
-        throw FirewallError(
+        throw TransientFirewallError(
             "live iptables generation changed while preparing apply");
     }
 }
@@ -767,7 +1050,11 @@ FirewallSetGeneration IptablesFirewall::target_generation_for_states(
         // vanished; stale generation chains/ipsets do not make a slot active.
         return FirewallSetGeneration::A;
     }
-    throw FirewallError(
+    // Two snapshots can legitimately straddle an NDMS publication and expose
+    // no authoritative managed generation for a few milliseconds. Stay
+    // fail-closed, but let the bounded outer reconciler take a fresh pair
+    // instead of reporting an immediate permanent outage.
+    throw TransientFirewallError(
         "no authoritative live iptables generation; refusing to mutate ipsets");
 }
 
@@ -793,37 +1080,91 @@ void IptablesFirewall::reconcile_hook(
     const char* table,
     const char* builtin_chain,
     const char* target_chain) {
-    const auto result = safe_exec_capture(
-        {command, "-t", table, "-S", builtin_chain},
-        /*suppress_stderr=*/true,
-        /*max_bytes=*/256U * 1024U);
-    if (result.exit_code != 0 || result.truncated || result.timed_out) {
-        throw FirewallError(keen_pbr3::format(
-            "failed to inspect {} {}/{} hook",
-            command, table, builtin_chain));
-    }
-    size_t count = count_exact_jump(
-        result.stdout_output, builtin_chain, target_chain);
-    if (count == 0) {
-        if (safe_exec(
-                {command, "-t", table, "-A", builtin_chain, "-j", target_chain},
-                /*suppress_output=*/true) != 0) {
+    const std::vector<std::string> inspect_args{
+        command, "-t", table, "-S", builtin_chain};
+    ExecCaptureResult last_result;
+
+    // Never retry a mutation blindly: it may have succeeded just before the
+    // process observed a timeout or a concurrent NDMS replacement. Every
+    // attempt starts with a fresh snapshot and succeeds only after observing
+    // exactly one hook.
+    for (std::size_t attempt = 0;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        last_result = run_iptables_control(inspect_args);
+        const auto inspect_outcome =
+            classify_iptables_command(last_result);
+        if (inspect_outcome ==
+            IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(inspect_args, last_result);
             throw FirewallError(keen_pbr3::format(
-                "failed to add {} {}/{} hook",
+                "failed to inspect {} {}/{} hook",
                 command, table, builtin_chain));
         }
-        return;
-    }
-    while (count > 1) {
-        if (safe_exec(
-                {command, "-t", table, "-D", builtin_chain, "-j", target_chain},
-                /*suppress_output=*/true) != 0) {
+        if (inspect_outcome ==
+            IptablesCommandOutcome::TransientFailure) {
+            if (last_result.timed_out ||
+                attempt == iptables_control_retry_delays.size()) {
+                record_iptables_control_failure(
+                    inspect_args, last_result);
+                throw TransientFirewallError(
+                    keen_pbr3::format(
+                        "temporarily failed to inspect {} {}/{} hook",
+                        command, table, builtin_chain));
+            }
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[attempt]);
+            continue;
+        }
+
+        const size_t count = count_exact_jump(
+            last_result.stdout_output, builtin_chain, target_chain);
+        if (count == 1) {
+            return;
+        }
+        if (attempt == iptables_control_retry_delays.size()) {
+            break;
+        }
+
+        const std::vector<std::string> mutate_args =
+            count == 0
+                ? std::vector<std::string>{
+                      command,
+                      "-t",
+                      table,
+                      "-A",
+                      builtin_chain,
+                      "-j",
+                      target_chain}
+                : std::vector<std::string>{
+                      command,
+                      "-t",
+                      table,
+                      "-D",
+                      builtin_chain,
+                      "-j",
+                      target_chain};
+        const auto mutation = run_iptables_control(mutate_args);
+        const auto mutation_outcome =
+            classify_iptables_command(mutation);
+        if (mutation_outcome ==
+            IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(mutate_args, mutation);
             throw FirewallError(keen_pbr3::format(
-                "failed to remove duplicate {} {}/{} hook",
+                "failed to reconcile {} {}/{} hook",
                 command, table, builtin_chain));
         }
-        --count;
+
+        // A successful mutation still needs verification. A transient result
+        // is also re-read because the kernel may have committed the change
+        // before userspace observed the failure.
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
     }
+
+    throw TransientFirewallError(keen_pbr3::format(
+        "{} {}/{} hook did not converge",
+        command, table, builtin_chain));
 }
 
 void IptablesFirewall::remove_all_hooks(
@@ -876,43 +1217,107 @@ void IptablesFirewall::verify_applied_generation(
 
     const std::string primary_dispatcher =
         prerouting_dispatcher_chain_name(ipv6);
-    const auto primary = safe_exec_capture(
-        {command, "-t", prerouting_table_name(ipv6), "-S"},
-        /*suppress_stderr=*/true,
-        /*max_bytes=*/256U * 1024U);
-    if (primary.exit_code != 0 || primary.truncated || primary.timed_out ||
-        parse_live_generation(
-            primary.stdout_output,
-            primary_dispatcher,
-            prerouting_generation_chain(FirewallSetGeneration::A, ipv6),
-            prerouting_generation_chain(FirewallSetGeneration::B, ipv6)) !=
-            expected ||
-        count_exact_jump(
-            primary.stdout_output, "PREROUTING", primary_dispatcher) != 1) {
-        throw FirewallError(
-            "iptables PREROUTING dispatcher verification failed");
+    const std::vector<std::string> primary_args{
+        command, "-t", prerouting_table_name(ipv6), "-S"};
+    const std::vector<std::string> output_args{
+        command, "-t", "mangle", "-S"};
+
+    // KeeneticOS can replace a table immediately after our atomic publish.
+    // Verify one coherent pair of fresh snapshots instead of turning that
+    // short publication window into a permanent service failure.
+    for (std::size_t attempt = 0;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        const auto primary = run_iptables_control(primary_args);
+        const auto primary_outcome =
+            classify_iptables_command(primary);
+        if (primary_outcome ==
+            IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(primary_args, primary);
+            throw FirewallError(
+                "iptables PREROUTING dispatcher verification failed");
+        }
+        if (primary_outcome ==
+            IptablesCommandOutcome::TransientFailure) {
+            if (primary.timed_out ||
+                attempt == iptables_control_retry_delays.size()) {
+                record_iptables_control_failure(primary_args, primary);
+                throw TransientFirewallError(
+                    "iptables PREROUTING verification was temporarily unavailable");
+            }
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[attempt]);
+            continue;
+        }
+
+        const auto output = run_iptables_control(output_args);
+        const auto output_outcome =
+            classify_iptables_command(output);
+        if (output_outcome ==
+            IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(output_args, output);
+            throw FirewallError(
+                "iptables OUTPUT or companion hook verification failed");
+        }
+        if (output_outcome ==
+            IptablesCommandOutcome::TransientFailure) {
+            if (output.timed_out ||
+                attempt == iptables_control_retry_delays.size()) {
+                record_iptables_control_failure(output_args, output);
+                throw TransientFirewallError(
+                    "iptables OUTPUT verification was temporarily unavailable");
+            }
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[attempt]);
+            continue;
+        }
+
+        const bool primary_matches =
+            parse_live_generation(
+                primary.stdout_output,
+                primary_dispatcher,
+                prerouting_generation_chain(
+                    FirewallSetGeneration::A, ipv6),
+                prerouting_generation_chain(
+                    FirewallSetGeneration::B, ipv6)) == expected &&
+            count_exact_jump(
+                primary.stdout_output,
+                "PREROUTING",
+                primary_dispatcher) == 1;
+        const bool output_matches =
+            parse_live_generation(
+                output.stdout_output,
+                OUTPUT_CHAIN_NAME,
+                generation_output_chain(FirewallSetGeneration::A),
+                generation_output_chain(FirewallSetGeneration::B)) ==
+                expected &&
+            count_exact_jump(
+                output.stdout_output,
+                "OUTPUT",
+                OUTPUT_CHAIN_NAME) == 1 &&
+            (!use_raw_prerouting_ || ipv6 ||
+             count_exact_jump(
+                 output.stdout_output,
+                 "PREROUTING",
+                 RAW_CONNTRACK_CHAIN_NAME) == 1);
+        if (primary_matches && output_matches) {
+            return;
+        }
+
+        if (attempt != iptables_control_retry_delays.size()) {
+            Logger::instance().verbose(
+                "iptables generation verification raced with a firmware "
+                "firewall update; retrying in {} ms ({}/{})",
+                iptables_control_retry_delays[attempt].count(),
+                attempt + 1,
+                iptables_control_retry_delays.size());
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[attempt]);
+        }
     }
 
-    const auto output = safe_exec_capture(
-        {command, "-t", "mangle", "-S"},
-        /*suppress_stderr=*/true,
-        /*max_bytes=*/256U * 1024U);
-    if (output.exit_code != 0 || output.truncated || output.timed_out ||
-        parse_live_generation(
-            output.stdout_output,
-            OUTPUT_CHAIN_NAME,
-            generation_output_chain(FirewallSetGeneration::A),
-            generation_output_chain(FirewallSetGeneration::B)) != expected ||
-        count_exact_jump(
-            output.stdout_output, "OUTPUT", OUTPUT_CHAIN_NAME) != 1 ||
-        (use_raw_prerouting_ && !ipv6 &&
-         count_exact_jump(
-             output.stdout_output,
-             "PREROUTING",
-             RAW_CONNTRACK_CHAIN_NAME) != 1)) {
-        throw FirewallError(
-            "iptables OUTPUT or companion hook verification failed");
-    }
+    throw TransientFirewallError(
+        "iptables generation changed before verification completed");
 }
 
 std::vector<std::string> IptablesFirewall::build_proto_port_fragments(

@@ -34,6 +34,7 @@
 #include "../util/blocking_executor.hpp"
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
+#include "runtime_recovery_policy.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
 #include "system_resolver_hook.hpp"
@@ -221,7 +222,10 @@ private:
     void schedule_interface_monitor_reconnect_retry();
     void handle_interface_event(const InterfaceMonitor::Event& event);
     bool is_interface_outbound_in_use(const std::string& interface_name) const;
-    void refresh_iproute_and_firewall_runtime();
+    void refresh_iproute_and_firewall_runtime(std::size_t retry_attempt = 0);
+    void schedule_runtime_firewall_retry(std::size_t attempt,
+                                         std::uint64_t runtime_generation);
+    void cancel_runtime_firewall_retry();
     void dispatch_event_fd(int fd, uint32_t events);
     void run_event_loop();
 
@@ -260,7 +264,9 @@ private:
                                         std::chrono::milliseconds timeout);
     void schedule_lists_autoupdate();
     // Re-applies rules after a failed startup attempt, backing off each time.
-    void schedule_startup_firewall_retry(int attempt = 1);
+    void schedule_startup_firewall_retry(
+        int attempt = 1,
+        std::optional<std::uint64_t> runtime_generation = std::nullopt);
     // Periodic HTTP probe of every interface outbound.
     void schedule_interface_probe();
     // Weekly refresh of the ready-made list catalogue.
@@ -359,6 +365,8 @@ private:
     std::uint32_t resolver_config_hash_actual_retry_attempt_{0};
     // Debounced runtime refresh triggered by SIGUSR1.
     int sigusr1_refresh_task_id_{-1};
+    // One bounded retry chain for races with NDMS firewall publication.
+    int runtime_firewall_retry_task_id_{-1};
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
 
@@ -426,6 +434,7 @@ private:
     OutboundMarkMap outbound_marks_;
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
+    RuntimeIncidentLatch urltest_apply_incidents_{3};
     BlockingExecutor blocking_executor_{2, 64};
     // Resolver hooks can synchronously request a generated configuration.
     // Keep command execution, streaming and TXT probes on independent queues.
