@@ -1015,7 +1015,26 @@ TEST_CASE("populate_routing_state: non-strict urltest still appends dual-stack k
         [](const Outbound&) { return true; },
         &selections);
 
-    CHECK(count_routes_in_table(routes.get_routes(), 102) == 7);
+    CHECK(count_routes_in_table(routes.get_routes(), 102) == 5);
+    CHECK(find_route(routes.get_routes(),
+                     102,
+                     false,
+                     false,
+                     0,
+                     std::optional<std::string>{"wg2"}) != nullptr);
+    CHECK(find_route(routes.get_routes(),
+                     102,
+                     false,
+                     false,
+                     1,
+                     std::optional<std::string>{"wg1"}) != nullptr);
+    CHECK(std::count_if(routes.get_routes().begin(),
+                        routes.get_routes().end(),
+                        [](const RouteSpec& route) {
+                            return route.table == 102 &&
+                                   !route.unreachable &&
+                                   route.interface == "wg2";
+                        }) == 1);
     CHECK(std::count_if(routes.get_routes().begin(),
                         routes.get_routes().end(),
                         [](const RouteSpec& route) {
