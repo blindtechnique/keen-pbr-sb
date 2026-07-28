@@ -281,6 +281,15 @@ add_test(
   COMMAND keen-pbr-update-lock-protocol-tests
 )
 
+add_test(
+  NAME keen-pbr-dnsmasq-helper-lkg
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-dnsmasq-helper-lkg.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
+    ${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh
+    ${CMAKE_SOURCE_DIR}/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
+)
+
 set_target_properties(keen-pbr-tests PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED YES
@@ -300,6 +309,7 @@ target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
   KEEN_PBR_KEENETIC_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh"
   KEEN_PBR_OPENWRT_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh"
+  KEEN_PBR_OPENWRT_UCI_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/uci.sh"
   KEEN_PBR_DEBIAN_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh"
 )
 

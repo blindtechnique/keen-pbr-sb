@@ -105,6 +105,13 @@ jobs:
             busybox:1.37 \
             sh /workspace/tests/package_it/run-uninstall-target-shell.sh \
               /workspace
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-dnsmasq-helper-lkg.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh \
+              /workspace/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh \
+              /workspace/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
 
   crash-diagnostics-smoke:
     runs-on: ubuntu-latest

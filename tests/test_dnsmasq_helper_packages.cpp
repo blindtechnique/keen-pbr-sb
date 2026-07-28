@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
@@ -19,6 +20,11 @@
 #ifndef KEEN_PBR_DEBIAN_DNSMASQ_HELPER_PATH
 #define KEEN_PBR_DEBIAN_DNSMASQ_HELPER_PATH \
     "packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh"
+#endif
+
+#ifndef KEEN_PBR_OPENWRT_UCI_HELPER_PATH
+#define KEEN_PBR_OPENWRT_UCI_HELPER_PATH \
+    "packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/uci.sh"
 #endif
 
 namespace {
@@ -52,5 +58,42 @@ TEST_CASE("packaged dnsmasq helpers delegate backend selection to the daemon") {
         CHECK(helper.find("dnsmasq-ipset") == std::string::npos);
         CHECK(helper.find("dnsmasq-nftset") == std::string::npos);
         CHECK(helper.find("resolver_type()") == std::string::npos);
+        CHECK(helper.find("MANAGED_CONFIG_FILE") != std::string::npos);
+        CHECK(helper.find("refresh_managed_config") != std::string::npos);
+        CHECK(helper.find("resolver_config_has_upstream") != std::string::npos);
+        CHECK(helper.find("resolver_config_is_active") != std::string::npos);
+        CHECK(helper.find("# keen-pbr resolver state: active") !=
+              std::string::npos);
+        CHECK(helper.find("last complete") != std::string::npos);
+        CHECK(helper.find("mv -f \"$MANAGED_CONFIG_TMP\"") !=
+              std::string::npos);
     }
+}
+
+TEST_CASE("OpenWrt dnsmasq jail can execute and persist the managed helper") {
+    const auto dnsmasq_helper =
+        read_helper(KEEN_PBR_OPENWRT_DNSMASQ_HELPER_PATH);
+    const auto uci_helper = read_helper(KEEN_PBR_OPENWRT_UCI_HELPER_PATH);
+    const auto package_root =
+        std::filesystem::path(KEEN_PBR_OPENWRT_DNSMASQ_HELPER_PATH)
+            .parent_path()
+            .parent_path()
+            .parent_path()
+            .parent_path()
+            .parent_path();
+    const auto package_makefile =
+        read_helper((package_root / "Makefile").string());
+
+    CHECK(dnsmasq_helper.find(
+              "STATE_DIR=\"${KEEN_PBR_STATE_DIR:-/var/run/dnsmasq/keen-pbr}\"") !=
+          std::string::npos);
+    CHECK(uci_helper.find(
+              "DNSMASQ_HELPER=\"/usr/lib/keen-pbr/dnsmasq.sh\"") !=
+          std::string::npos);
+    CHECK(uci_helper.find(
+              "JAIL_MOUNTS=\"$KEEN_PBR_BIN $DNSMASQ_HELPER $CONFIG_DIR $CACHE_DIR\"") !=
+          std::string::npos);
+    CHECK(package_makefile.find(
+              "-DKEEN_PBR_CONTROL_SOCKET:STRING=/var/run/dnsmasq/keen-pbr/control.sock") !=
+          std::string::npos);
 }

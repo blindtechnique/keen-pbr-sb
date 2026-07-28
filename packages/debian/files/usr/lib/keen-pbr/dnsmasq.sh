@@ -2,17 +2,30 @@
 
 set -eu
 
-KEEN_PBR_BIN="/usr/sbin/keen-pbr"
-CONFIG_PATH="/etc/keen-pbr/config.json"
-DNSMASQ_FALLBACK_FILE="/etc/keen-pbr/dnsmasq-fallback.conf"
-STATE_DIR="/tmp/keen-pbr"
+KEEN_PBR_BIN="${KEEN_PBR_BIN:-/usr/sbin/keen-pbr}"
+CONFIG_PATH="${KEEN_PBR_CONFIG_PATH:-/etc/keen-pbr/config.json}"
+DNSMASQ_FALLBACK_FILE="${KEEN_PBR_DNSMASQ_FALLBACK_FILE:-/etc/keen-pbr/dnsmasq-fallback.conf}"
+STATE_DIR="${KEEN_PBR_STATE_DIR:-/tmp/keen-pbr}"
 ACTIVE_FILE="${STATE_DIR}/active"
+MANAGED_CONFIG_FILE="${STATE_DIR}/dnsmasq-managed.conf"
+MANAGED_CONFIG_TMP="${MANAGED_CONFIG_FILE}.$$"
+MANAGED_CANDIDATE_COMPLETE="N"
+
+cleanup_managed_config_tmp() {
+    rm -f "$MANAGED_CONFIG_TMP"
+}
+
+trap cleanup_managed_config_tmp EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 log_message() {
     local level="$1"
     local message="$2"
 
-    logger -s -t "keen-pbr" -p "user.${level}" "$message"
+    logger -s -t "keen-pbr" -p "user.${level}" "$message" 2>/dev/null ||
+        true
 }
 
 log_warn() {
@@ -60,6 +73,74 @@ active_conf_line() {
     "$KEEN_PBR_BIN" --config "$CONFIG_PATH" generate-resolver-config dnsmasq
 }
 
+resolver_config_has_upstream() {
+    local path="$1"
+
+    [ -s "$path" ] || return 1
+    grep -q '^[[:space:]]*server=' "$path" ||
+        grep -q '^[[:space:]]*conf-file=' "$path"
+}
+
+resolver_config_is_active() {
+    local path="$1"
+
+    [ -s "$path" ] || return 1
+    grep -q '^# keen-pbr resolver state: active$' "$path" &&
+        grep -q '^txt-record=config-hash\.keen\.pbr,' "$path" &&
+        grep -q '^txt-record=resolver-state\.keen\.pbr,.*|active|runtime_active$' "$path" &&
+        resolver_config_has_upstream "$path"
+}
+
+resolver_config_is_fallback() {
+    local path="$1"
+
+    [ -s "$path" ] || return 1
+    grep -q '^# keen-pbr resolver state: fallback reason=' "$path" &&
+        grep -q '^txt-record=resolver-state\.keen\.pbr,' "$path" &&
+        resolver_config_has_upstream "$path"
+}
+
+refresh_managed_config() {
+    umask 077
+    mkdir -p "$STATE_DIR" || return 1
+    rm -f "$MANAGED_CONFIG_TMP"
+    MANAGED_CANDIDATE_COMPLETE="N"
+
+    if active_conf_line > "$MANAGED_CONFIG_TMP"; then
+        MANAGED_CANDIDATE_COMPLETE="Y"
+        if resolver_config_is_active "$MANAGED_CONFIG_TMP"; then
+            mv -f "$MANAGED_CONFIG_TMP" "$MANAGED_CONFIG_FILE" || return 1
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+emit_active_config() {
+    if refresh_managed_config; then
+        cat "$MANAGED_CONFIG_FILE" || return 1
+        log_info "Produced complete dnsmasq keen-pbr managed config"
+        return 0
+    fi
+
+    if [ "$MANAGED_CANDIDATE_COMPLETE" = "Y" ] &&
+        resolver_config_is_fallback "$MANAGED_CONFIG_TMP"; then
+        cat "$MANAGED_CONFIG_TMP" || return 1
+        log_warn "Resolver daemon supplied a complete fallback dnsmasq config"
+        return 0
+    fi
+
+    if resolver_config_is_active "$MANAGED_CONFIG_FILE"; then
+        cat "$MANAGED_CONFIG_FILE" || return 1
+        log_warn "Resolver stream failed; reusing last complete dnsmasq config"
+        return 0
+    fi
+
+    fallback_conf_line
+    log_warn "Resolver stream failed without a last-known-good config; using dnsmasq fallback"
+}
+
 is_active() {
     [ -r "$ACTIVE_FILE" ] || return 1
 
@@ -74,8 +155,7 @@ set_active_state() {
 
 emit_dnsmasq_config_entry() {
     if is_active; then
-        active_conf_line
-        log_info "Produced dnsmasq keen-pbr managed config"
+        emit_active_config
     else
         fallback_conf_line
         log_info "Produced dnsmasq fallback config entry"
@@ -97,9 +177,12 @@ deactivate_dnsmasq() {
 
 restart_dnsmasq() {
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart dnsmasq >/dev/null 2>&1 || true
+        systemctl restart dnsmasq >/dev/null 2>&1
     elif command -v service >/dev/null 2>&1; then
-        service dnsmasq restart >/dev/null 2>&1 || true
+        service dnsmasq restart >/dev/null 2>&1
+    else
+        log_warn "No supported dnsmasq service manager was found"
+        return 1
     fi
 }
 
