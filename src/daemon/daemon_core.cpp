@@ -1472,6 +1472,8 @@ void Daemon::run() {
                     retry,
                     delay.count());
             });
+        cleanup_owned_conntrack_marks(
+            "after initial firewall activation");
         log.info("Firewall rules and routing applied.");
     } catch (const TransientFirewallError& e) {
         // This is expected while NDMS is still publishing its firewall after

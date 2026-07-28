@@ -259,6 +259,7 @@ private:
     void restart_routing_runtime();
     bool routing_runtime_active() const;
     void warn_conntrack_unavailable_once();
+    void cleanup_owned_conntrack_marks(const char* context);
     bool run_system_resolver_hook(std::string_view action,
                                   bool manage_ipc_gate = true);
     bool run_system_resolver_hook_stream(std::string_view action);

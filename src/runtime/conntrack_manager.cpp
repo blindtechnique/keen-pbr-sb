@@ -62,8 +62,16 @@ uint32_t ConntrackManager::save_selected_mark(uint32_t ctmark,
 ConntrackCleanupResult ConntrackManager::delete_mark(
     uint32_t mark,
     uint32_t owned_mask) const {
+    // Never turn an invalid/custom fwmark configuration into a broad
+    // `--mark 0/<mask>` delete. That selector matches ordinary unmarked
+    // connections and would evict unrelated router traffic.
+    if (owned_mask == 0 || (mark & owned_mask) == 0) {
+        return ConntrackCleanupResult::Failed;
+    }
+
     const std::string selector =
-        std::to_string(mark) + "/" + std::to_string(owned_mask);
+        std::to_string(mark & owned_mask) + "/" +
+        std::to_string(owned_mask);
     const auto delete_family = [this, &selector](const char* family) {
         const auto result =
             runner_({"conntrack", "-D", "-f", family, "--mark", selector});
@@ -88,6 +96,23 @@ ConntrackCleanupResult ConntrackManager::delete_mark(
                    ipv6 == ConntrackCleanupResult::Succeeded
                ? ConntrackCleanupResult::Succeeded
                : ConntrackCleanupResult::Failed;
+}
+
+ConntrackCleanupSummary ConntrackManager::delete_marks(
+    const std::set<uint32_t>& marks,
+    uint32_t owned_mask) const {
+    ConntrackCleanupSummary summary;
+    for (const uint32_t mark : marks) {
+        const auto result = delete_mark(mark, owned_mask);
+        if (result == ConntrackCleanupResult::CommandUnavailable) {
+            summary.command_unavailable = true;
+            break;
+        }
+        if (result == ConntrackCleanupResult::Failed) {
+            ++summary.failed;
+        }
+    }
+    return summary;
 }
 
 } // namespace keen_pbr3

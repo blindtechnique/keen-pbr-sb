@@ -189,6 +189,41 @@ void Daemon::warn_conntrack_unavailable_once() {
         "path until they expire");
 }
 
+void Daemon::cleanup_owned_conntrack_marks(const char* context) {
+    std::set<uint32_t> owned_marks;
+    for (const auto& [tag, mark] : outbound_marks_) {
+        (void)tag;
+        owned_marks.insert(mark);
+    }
+    if (owned_marks.empty()) {
+        return;
+    }
+
+    const uint32_t owned_mask =
+        fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
+    try {
+        const auto cleanup =
+            conntrack_manager_.delete_marks(owned_marks, owned_mask);
+        if (cleanup.command_unavailable) {
+            warn_conntrack_unavailable_once();
+        }
+        if (cleanup.failed == 0U) {
+            return;
+        }
+        Logger::instance().info(
+            "Best-effort conntrack cleanup failed for {} owned mark(s) {}; "
+            "existing flows may keep their previous path until they expire",
+            cleanup.failed,
+            context);
+    } catch (const std::exception& error) {
+        Logger::instance().info(
+            "Best-effort conntrack cleanup {} raised an error: {}; existing "
+            "flows may keep their previous path until they expire",
+            context,
+            error.what());
+    }
+}
+
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
     cancel_runtime_firewall_retry();
@@ -206,32 +241,7 @@ void Daemon::stop_routing_runtime() {
         urltest_manager_->clear();
     }
     urltest_apply_incidents_.clear();
-    const uint32_t owned_mark_mask =
-        fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
-    std::set<uint32_t> owned_marks;
-    for (const auto& [tag, mark] : outbound_marks_) {
-        (void)tag;
-        owned_marks.insert(mark);
-    }
-    std::size_t conntrack_cleanup_failures = 0;
-    for (const uint32_t mark : owned_marks) {
-        const auto cleanup =
-            conntrack_manager_.delete_mark(mark, owned_mark_mask);
-        if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
-            warn_conntrack_unavailable_once();
-            break;
-        }
-        if (cleanup == ConntrackCleanupResult::Failed) {
-            ++conntrack_cleanup_failures;
-        }
-    }
-    if (conntrack_cleanup_failures != 0U) {
-        log.info(
-            "Best-effort conntrack cleanup failed for {} owned mark(s) while "
-            "stopping routing; existing flows may keep their previous path "
-            "until they expire",
-            conntrack_cleanup_failures);
-    }
+    cleanup_owned_conntrack_marks("while stopping routing");
     policy_rules_.clear();
     route_table_.clear();
     firewall_->cleanup();
@@ -290,6 +300,15 @@ void Daemon::start_routing_runtime() {
                     retry,
                     delay.count());
             });
+
+        // A previous daemon crash or a transiently missing SNAT hook can leave
+        // keen-pbr-marked conntrack entries without a usable NAT mapping.
+        // Reinstall the complete firewall first, then retire only our marked
+        // flows so the clients reconnect through the current route and SNAT.
+        // Do this on a cold start only: transactional restarts intentionally
+        // preserve established connections.
+        cleanup_owned_conntrack_marks(
+            "after cold-start firewall activation");
 
         apply_started_ts_.store(
             unix_timestamp_now_seconds(), std::memory_order_release);
@@ -935,6 +954,8 @@ void Daemon::schedule_startup_firewall_retry(
             }
             try {
                 apply_firewall(FirewallApplyMode::PreserveSets);
+                cleanup_owned_conntrack_marks(
+                    "after delayed startup firewall activation");
                 log.info("Firewall rules and routing applied on retry {}.", attempt);
             } catch (const TransientFirewallError& e) {
                 if (attempt >= kMaxAttempts) {

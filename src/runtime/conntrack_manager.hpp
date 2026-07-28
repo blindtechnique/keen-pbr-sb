@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,11 @@ enum class ConntrackCleanupResult {
     Succeeded,
     CommandUnavailable,
     Failed,
+};
+
+struct ConntrackCleanupSummary {
+    std::size_t failed{0};
+    bool command_unavailable{false};
 };
 
 class ConntrackManager {
@@ -57,6 +64,13 @@ public:
     // global conntrack table and invokes each address family separately.
     ConntrackCleanupResult delete_mark(uint32_t mark,
                                        uint32_t owned_mask) const;
+
+    // Delete a deduplicated set of keen-pbr-owned marks. Stop immediately when
+    // conntrack is unavailable instead of spawning one failing command per
+    // outbound.
+    ConntrackCleanupSummary delete_marks(
+        const std::set<uint32_t>& marks,
+        uint32_t owned_mask) const;
 
 private:
     ConntrackPolicy active_;

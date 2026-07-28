@@ -83,6 +83,57 @@ TEST_CASE("ConntrackManager reports a missing utility once without trying IPv6")
     CHECK(families == std::vector<std::string>{"ipv4"});
 }
 
+TEST_CASE("ConntrackManager never deletes the unmarked conntrack population") {
+    std::size_t calls = 0;
+    ConntrackManager manager([&calls](const std::vector<std::string>&) {
+        ++calls;
+        return ConntrackManager::CommandResult{0, {}};
+    });
+
+    CHECK(manager.delete_mark(0, 0xFF0000) ==
+          ConntrackCleanupResult::Failed);
+    CHECK(manager.delete_mark(0x120000, 0) ==
+          ConntrackCleanupResult::Failed);
+    CHECK(calls == 0);
+}
+
+TEST_CASE("ConntrackManager cleans a deduplicated set and summarizes failures") {
+    std::vector<std::string> marks;
+    ConntrackManager manager([&marks](const std::vector<std::string>& args) {
+        marks.push_back(args[5]);
+        const bool fail = args[5].rfind("196608/", 0) == 0;
+        return ConntrackManager::CommandResult{
+            fail ? 1 : 0,
+            fail ? "Operation not permitted" : ""};
+    });
+
+    const auto summary =
+        manager.delete_marks({0x30000, 0x20000, 0x30000}, 0xFF0000);
+
+    CHECK(summary.failed == 1);
+    CHECK_FALSE(summary.command_unavailable);
+    CHECK(marks == std::vector<std::string>{
+                       "131072/16711680",
+                       "131072/16711680",
+                       "196608/16711680",
+                       "196608/16711680"});
+}
+
+TEST_CASE("ConntrackManager stops a mark batch when the utility is unavailable") {
+    std::vector<std::string> marks;
+    ConntrackManager manager([&marks](const std::vector<std::string>& args) {
+        marks.push_back(args[5]);
+        return ConntrackManager::CommandResult{127, {}};
+    });
+
+    const auto summary =
+        manager.delete_marks({0x20000, 0x30000}, 0xFF0000);
+
+    CHECK(summary.failed == 0);
+    CHECK(summary.command_unavailable);
+    CHECK(marks == std::vector<std::string>{"131072/16711680"});
+}
+
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {
     constexpr uint32_t owned = 0x00FF0000U;
     CHECK(ConntrackManager::restore_original_mark(
