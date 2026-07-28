@@ -392,11 +392,7 @@ export function TransportsPage() {
     return () => {
       active = false
     }
-  }, [
-    refetchProbes,
-    requestedProbe,
-    runtimeOutboundsQuery.dataUpdatedAt,
-  ])
+  }, [refetchProbes, requestedProbe, runtimeOutboundsQuery.dataUpdatedAt])
 
   useEffect(() => {
     if (!requestedProbe) return
@@ -1236,10 +1232,14 @@ export function TransportsPage() {
           existingInterfaces={[
             ...configured.map((spec) => spec.interface),
             ...items.map((item) => item.interface),
+            ...(keenConfig?.outbounds ?? []).flatMap((outbound) =>
+              typeof outbound.interface === "string" ? [outbound.interface] : []
+            ),
           ]}
           existingTags={[
             ...configured.map((spec) => spec.tag),
             ...items.map((item) => item.tag),
+            ...(keenConfig?.outbounds ?? []).map((outbound) => outbound.tag),
           ]}
           initial={editing}
           isPending={configMutation.isPending || configApplyMutation.isPending}

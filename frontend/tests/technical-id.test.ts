@@ -3,15 +3,14 @@ import { describe, expect, test } from "bun:test"
 import {
   generateTechnicalId,
   generateTransportIdentity,
+  inferTransportProtocol,
   makeTechnicalId,
   normalizeTechnicalId,
 } from "../src/lib/technical-id"
 
 describe("technical id generation", () => {
   test("normalizes human-readable Latin and Cyrillic names", () => {
-    expect(normalizeTechnicalId("Cloudflare DNS", "dns")).toBe(
-      "cloudflare_dns"
-    )
+    expect(normalizeTechnicalId("Cloudflare DNS", "dns")).toBe("cloudflare_dns")
     expect(normalizeTechnicalId("Мой резервный DNS", "dns")).toBe(
       "moy_rezervnyy_dns"
     )
@@ -52,24 +51,40 @@ describe("technical id generation", () => {
     expect(attempt).toBe(2)
   })
 
-  test("transport identity retries when either half of the generated pair collides", () => {
-    const tokens = [
-      new Uint8Array([0x11, 0x11, 0x11, 0x11]),
-      new Uint8Array([0x22, 0x22, 0x22, 0x22]),
-      new Uint8Array([0x33, 0x33, 0x33, 0x33]),
-    ]
-    let attempt = 0
-
+  test("transport identity is readable and skips collisions in either namespace", () => {
     const identity = generateTransportIdentity({
-      existingTags: ["tr_11111111"],
-      existingInterfaces: ["kpbr22222222"],
-      randomBytes: () => tokens[attempt++]!,
+      existingTags: ["vless1"],
+      existingInterfaces: ["vless2"],
+      protocol: "vless",
     })
 
     expect(identity).toEqual({
-      tag: "tr_33333333",
-      interfaceName: "kpbr33333333",
+      tag: "vless3",
+      interfaceName: "vless3",
     })
-    expect(attempt).toBe(3)
+  })
+
+  test("uses compact readable names for Hysteria2 and a safe generic fallback", () => {
+    expect(generateTransportIdentity({ protocol: "hysteria2" })).toEqual({
+      tag: "hys1",
+      interfaceName: "hys1",
+    })
+    expect(generateTransportIdentity({ protocol: "unknown" })).toEqual({
+      tag: "proxy1",
+      interfaceName: "proxy1",
+    })
+  })
+
+  test("infers transport protocols from links and outbound JSON", () => {
+    expect(
+      inferTransportProtocol(
+        "vless://user@example.net:443",
+        '{"type":"hysteria2"}'
+      )
+    ).toBe("vless")
+    expect(inferTransportProtocol(undefined, '{"type":"hysteria2"}')).toBe(
+      "hysteria2"
+    )
+    expect(inferTransportProtocol(undefined, "{not-json")).toBeUndefined()
   })
 })

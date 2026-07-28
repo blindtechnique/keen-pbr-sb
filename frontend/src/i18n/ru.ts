@@ -479,6 +479,8 @@ export const ruTranslation = {
       displayNameInvalid:
         "Название должно содержать от 1 до 80 символов Unicode и не содержать управляющих знаков.",
       useAliasSuggestion: "Использовать «{{name}}»",
+      advancedSettings: "Расширенные настройки",
+      simpleSettings: "Простые настройки",
       technicalSettings: "Расширенные технические параметры",
       technicalIdentityImmutable:
         "После создания технический тег и имя интерфейса не меняются: на них ссылаются маршруты.",
@@ -1904,8 +1906,7 @@ export const ruTranslation = {
         refreshFailedMore: "ещё {{count}}",
       },
       lastUpdated: "Обновлён: {{value}}",
-      lastRefreshFailed:
-        "Не удалось обновить {{value}}: {{message}}",
+      lastRefreshFailed: "Не удалось обновить {{value}}: {{message}}",
       lastRefreshFailedVia:
         "Не удалось обновить {{value}} через {{detour}}: {{message}}",
       technicalId: "Технический ID: {{id}}",
@@ -2041,7 +2042,8 @@ export const ruTranslation = {
         fallbackDetours: "Резервные маршруты загрузки",
         fallbackDetoursAdd: "Добавить резервный маршрут",
         fallbackDetoursEmpty: "Доступных резервных маршрутов нет",
-        fallbackDetoursLimit: "Можно выбрать не больше трёх резервных маршрутов",
+        fallbackDetoursLimit:
+          "Можно выбрать не больше трёх резервных маршрутов",
         fallbackDetoursPlaceholder: "Резервные маршруты не выбраны",
         fallbackDetoursPlaceholderDescription:
           "При ошибке загрузки они будут проверены по порядку.",

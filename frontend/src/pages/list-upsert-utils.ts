@@ -1,6 +1,8 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsRule } from "@/api/generated/model/dnsRule"
+import type { DnsServer } from "@/api/generated/model/dnsServer"
 import type { ListConfig } from "@/api/generated/model/listConfig"
+import { getDnsServerDisplayName } from "@/lib/dns-display"
 import { withListDisplayName } from "@/lib/list-display"
 import { makeTechnicalId } from "@/lib/technical-id"
 
@@ -24,6 +26,19 @@ export type QuickSetup = {
 }
 
 export const NO_DNS_RULE = "__none__"
+
+export function createListDnsServerSelectItems(
+  servers: readonly DnsServer[],
+  noneLabel: string
+) {
+  return [
+    { value: NO_DNS_RULE, label: noneLabel },
+    ...servers.map((server) => ({
+      value: server.tag,
+      label: getDnsServerDisplayName(server),
+    })),
+  ]
+}
 
 export function createListDraft(
   displayName = "",
@@ -86,8 +101,7 @@ export function buildUpdatedConfigForListUpsert(
     lists: nextLists,
   }
   if (quickSetup?.createRouteRule && quickSetup.routeOutbound) {
-    const routeRuleDisplayName =
-      nextDraft.displayName.trim() || resolvedName
+    const routeRuleDisplayName = nextDraft.displayName.trim() || resolvedName
     const existingRuleIds = (config.route?.rules ?? [])
       .map((rule) => rule.id)
       .filter((id): id is string => Boolean(id))
@@ -108,8 +122,7 @@ export function buildUpdatedConfigForListUpsert(
     }
   }
   if (quickSetup?.createDnsRule && quickSetup.dnsServer) {
-    const dnsRuleDisplayName =
-      nextDraft.displayName.trim() || resolvedName
+    const dnsRuleDisplayName = nextDraft.displayName.trim() || resolvedName
     const existingDnsRuleIds = (config.dns?.rules ?? [])
       .map((rule) => rule.id)
       .filter((id): id is string => Boolean(id))

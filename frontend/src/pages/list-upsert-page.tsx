@@ -77,6 +77,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import {
   NO_DNS_RULE,
   buildUpdatedConfigForListUpsert,
+  createListDnsServerSelectItems,
   createListDraft,
   getDraftFromMapEntry,
   normalizeListDraftForComparison,
@@ -267,8 +268,11 @@ function ListForm({
   >(() => getActiveSourceGroupsFromDraft(draft))
   const postConfigMutation = usePostConfigMutation()
   const isMobile = useIsMobile()
-  const dnsServerTags = (loadedConfig.dns?.servers ?? []).map(
-    (server) => server.tag
+  const dnsServers = loadedConfig.dns?.servers ?? []
+  const dnsServerTags = dnsServers.map((server) => server.tag)
+  const dnsServerSelectItems = createListDnsServerSelectItems(
+    dnsServers,
+    t("pages.listUpsert.dnsRule.none")
   )
   const [baselineDraft] = useState<ListDraft>(() => {
     if (mode !== "create" || draft.name.trim()) {
@@ -620,12 +624,10 @@ function ListForm({
                           disabled={!isCreate}
                           id="list-name"
                           onBlur={field.handleBlur}
-                      onChange={(event) =>
-                        {
-                          setTechnicalIdManuallyEdited(true)
-                          field.handleChange(event.target.value)
-                        }
-                      }
+                          onChange={(event) => {
+                            setTechnicalIdManuallyEdited(true)
+                            field.handleChange(event.target.value)
+                          }}
                           value={field.state.value}
                         />
                         <FieldHint
@@ -823,18 +825,14 @@ function ListForm({
               ) : null}
 
               {presentation === "page" ? (
-                <form.Subscribe
-                  selector={(state) => state.values.detour}
-                >
+                <form.Subscribe selector={(state) => state.values.detour}>
                   {(primaryDetour) =>
                     primaryDetour ? (
                       <form.Field name={LIST_FIELD_NAMES.fallbackDetours}>
                         {(field) => (
                           <Field>
                             <FieldLabel>
-                              {t(
-                                "pages.listUpsert.fields.fallbackDetours"
-                              )}
+                              {t("pages.listUpsert.fields.fallbackDetours")}
                             </FieldLabel>
                             <FieldContent>
                               <MultiSelectList
@@ -1005,6 +1003,7 @@ function ListForm({
           </CardHeader>
           <CardContent className="space-y-3">
             <Select
+              items={dnsServerSelectItems}
               onValueChange={(value) => setDnsServerForList(value ?? "")}
               value={dnsServerForList || NO_DNS_RULE}
             >
@@ -1018,9 +1017,9 @@ function ListForm({
                   <SelectItem value={NO_DNS_RULE}>
                     {t("pages.listUpsert.dnsRule.none")}
                   </SelectItem>
-                  {dnsServerTags.map((tag) => (
-                    <SelectItem key={tag} value={tag}>
-                      {tag}
+                  {dnsServers.map((server) => (
+                    <SelectItem key={server.tag} value={server.tag}>
+                      {server.display_name?.trim() || server.tag}
                     </SelectItem>
                   ))}
                 </SelectGroup>

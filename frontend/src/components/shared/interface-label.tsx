@@ -1,4 +1,4 @@
-import { useInterfaceNames } from "@/hooks/use-interface-names"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 import { cn } from "@/lib/utils"
 
 /**
@@ -19,7 +19,7 @@ export function InterfaceLabel({
   name?: string | null
   className?: string
 }) {
-  const { labelFor } = useInterfaceNames()
+  const { labelFor } = useInterfaceDisplayNames()
 
   if (!name) {
     return null

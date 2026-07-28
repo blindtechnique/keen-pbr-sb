@@ -4,6 +4,8 @@ import {
   createOutboundDisplayNameMap,
   getOutboundDisplayName,
   getOutboundReferenceLabel,
+  getOutboundSelectDisplayName,
+  getOutboundSelectReferenceLabel,
   sortOutboundsByDisplayName,
 } from "../src/lib/outbound-display"
 
@@ -50,5 +52,35 @@ describe("outbound display names", () => {
         { type: "ignore", tag: "b", display_name: "alpha" },
       ]).map((outbound) => outbound.tag)
     ).toEqual(["a", "b", "z"])
+  })
+
+  test("uses the NDMS label for a legacy interface route without an alias", () => {
+    const outbound = {
+      type: "interface" as const,
+      tag: "legacy_nwg2",
+      interface: "nwg2",
+    }
+    const labelFor = (interfaceName: string) =>
+      interfaceName === "nwg2" ? "Домашний AWG" : interfaceName
+
+    expect(getOutboundSelectDisplayName(outbound, labelFor)).toBe(
+      "Домашний AWG"
+    )
+    expect(getOutboundSelectReferenceLabel(outbound, labelFor)).toBe(
+      "Домашний AWG (legacy_nwg2)"
+    )
+  })
+
+  test("keeps an explicit route alias ahead of the NDMS interface label", () => {
+    const outbound = {
+      type: "interface" as const,
+      tag: "primary",
+      display_name: "Основной маршрут",
+      interface: "nwg2",
+    }
+
+    expect(getOutboundSelectDisplayName(outbound, () => "Домашний AWG")).toBe(
+      "Основной маршрут"
+    )
   })
 })

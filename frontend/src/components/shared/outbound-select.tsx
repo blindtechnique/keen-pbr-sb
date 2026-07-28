@@ -7,10 +7,11 @@ import { useGetRuntimeOutbounds } from "@/api/queries"
 import { RuntimeOutboundStatusLabel } from "@/components/shared/runtime-outbound-state"
 import { Badge } from "@/components/ui/badge"
 import {
-  getOutboundDisplayName,
-  getOutboundReferenceLabel,
+  getOutboundSelectDisplayName,
+  getOutboundSelectReferenceLabel,
   sortOutboundsByDisplayName,
 } from "@/lib/outbound-display"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 import {
   Select,
   SelectContent,
@@ -45,6 +46,7 @@ export function OutboundSelect({
   disabled,
 }: OutboundSelectProps) {
   const { t } = useTranslation()
+  const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
 
   const runtimeOutboundsByTag = useMemo(
@@ -87,17 +89,28 @@ export function OutboundSelect({
               return allowEmpty ? resolvedEmptyLabel : resolvedPlaceholder
             }
 
+            const selectedOutbound = outboundByTag.get(selected) ?? {
+              tag: selected,
+              type: "interface" as const,
+            }
+
             return (
-              <RuntimeOutboundStatusLabel
-                runtimeState={runtimeOutboundsByTag.get(selected)}
-                t={t}
-                title={getOutboundDisplayName(
-                  outboundByTag.get(selected) ?? {
-                    tag: selected,
-                    type: "interface",
-                  }
+              <span
+                className="min-w-0"
+                title={getOutboundSelectReferenceLabel(
+                  selectedOutbound,
+                  interfaceLabelFor
                 )}
-              />
+              >
+                <RuntimeOutboundStatusLabel
+                  runtimeState={runtimeOutboundsByTag.get(selected)}
+                  t={t}
+                  title={getOutboundSelectDisplayName(
+                    selectedOutbound,
+                    interfaceLabelFor
+                  )}
+                />
+              </span>
             )
           }}
         </SelectValue>
@@ -116,6 +129,7 @@ export function OutboundSelect({
             <SelectItem key={outbound.tag} value={outbound.tag}>
               <OutboundSelectOption
                 outbound={outbound}
+                interfaceLabelFor={interfaceLabelFor}
                 runtimeState={runtimeOutboundsByTag.get(outbound.tag)}
                 t={t}
               />
@@ -129,25 +143,29 @@ export function OutboundSelect({
 
 function OutboundSelectOption({
   outbound,
+  interfaceLabelFor,
   runtimeState,
   t,
 }: {
   outbound: Outbound
+  interfaceLabelFor: (interfaceName: string) => string
   runtimeState?: RuntimeOutboundState
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
+  const displayName = getOutboundSelectDisplayName(outbound, interfaceLabelFor)
+
   return (
-    <div className="flex min-w-0 items-center justify-between gap-3">
+    <div
+      className="flex min-w-0 items-center justify-between gap-3"
+      title={getOutboundSelectReferenceLabel(outbound, interfaceLabelFor)}
+    >
       <RuntimeOutboundStatusLabel
         runtimeState={runtimeState}
         t={t}
-        title={getOutboundDisplayName(outbound)}
+        title={displayName}
       />
-      {getOutboundDisplayName(outbound) !== outbound.tag ? (
-        <span
-          className="sr-only"
-          title={getOutboundReferenceLabel(outbound)}
-        >
+      {displayName !== outbound.tag ? (
+        <span className="truncate font-mono text-xs text-muted-foreground">
           {outbound.tag}
         </span>
       ) : null}

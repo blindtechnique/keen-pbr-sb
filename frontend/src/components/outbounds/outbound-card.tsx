@@ -11,7 +11,7 @@ import { DependencyList } from "@/components/shared/dependency-list"
 import type { Dependency } from "@/lib/dependencies"
 import { Checkbox } from "@/components/ui/checkbox"
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
-import { useInterfaceNames } from "@/hooks/use-interface-names"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 import {
   getOutboundDisplayName,
   getOutboundReferenceLabel,
@@ -59,7 +59,7 @@ export function OutboundCard({
   outboundDisplayNames?: ReadonlyMap<string, string>
 }) {
   const { t } = useTranslation()
-  const { labelFor } = useInterfaceNames()
+  const { labelFor } = useInterfaceDisplayNames()
 
   const latency = firstLatency(runtimeState)
   const tone = statusTone(runtimeState?.status)
@@ -87,7 +87,11 @@ export function OutboundCard({
             {getOutboundDisplayName(outbound)}
           </span>
           {protocol ? (
-            <Badge className="font-mono text-[10px]" size="xs" variant="outline">
+            <Badge
+              className="font-mono text-[10px]"
+              size="xs"
+              variant="outline"
+            >
               {protocol}
             </Badge>
           ) : null}
@@ -105,9 +109,12 @@ export function OutboundCard({
           />
           {latency !== undefined
             ? t("transports.latencyValue", { value: latency })
-            : t(`overview.outbounds.status.${runtimeState?.status ?? "unknown"}`, {
-                defaultValue: "",
-              })}
+            : t(
+                `overview.outbounds.status.${runtimeState?.status ?? "unknown"}`,
+                {
+                  defaultValue: "",
+                }
+              )}
         </span>
         {onRefreshLatency ? (
           <IconButtonWithTooltip
@@ -174,9 +181,7 @@ function MemberChain({
     <div className="flex flex-wrap items-center gap-1.5 text-xs">
       {members.map((member, index) => (
         <span className="flex items-center gap-1.5" key={member.outbound_tag}>
-          {index > 0 ? (
-            <span className="text-muted-foreground">→</span>
-          ) : null}
+          {index > 0 ? <span className="text-muted-foreground">→</span> : null}
           <span
             className={cn(
               "flex items-center gap-1.5 rounded-md px-2 py-1",

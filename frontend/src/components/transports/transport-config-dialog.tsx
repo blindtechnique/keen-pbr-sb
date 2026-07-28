@@ -30,7 +30,10 @@ import {
 } from "@/lib/hidden-native-interfaces"
 import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
-import { generateTransportIdentity } from "@/lib/technical-id"
+import {
+  generateTransportIdentity,
+  inferTransportProtocol,
+} from "@/lib/technical-id"
 
 type Props = {
   existingInterfaces?: readonly string[]
@@ -239,6 +242,9 @@ export function TransportConfigDialog({
     structuredClone(baseline.spec)
   )
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [technicalIdentityAutomatic, setTechnicalIdentityAutomatic] =
+    useState(!initial)
   // A transport only becomes a route once an interface outbound points at it,
   // so offer that step right here instead of sending people to another page.
   const [createOutbound, setCreateOutbound] = useState(baseline.createOutbound)
@@ -271,6 +277,40 @@ export function TransportConfigDialog({
     normalize: (value) =>
       normalizeTransportFormComparable(value, baseline, Boolean(initial)),
   })
+
+  const withAutomaticTechnicalIdentity = (
+    nextSpec: TransportSpec,
+    nextSourceMode = sourceMode
+  ) => {
+    if (
+      !technicalIdentityAutomatic ||
+      nextSpec.type === TransportSpecType.native
+    ) {
+      return nextSpec
+    }
+
+    const protocol =
+      nextSourceMode === "link"
+        ? inferTransportProtocol(nextSpec.link, undefined)
+        : inferTransportProtocol(undefined, nextSpec.outbound_json)
+    const identity = generateTransportIdentity({
+      existingInterfaces,
+      existingTags,
+      protocol,
+    })
+    return {
+      ...nextSpec,
+      interface: identity.interfaceName,
+      tag: identity.tag,
+    }
+  }
+
+  const selectSourceMode = (nextSourceMode: SourceMode) => {
+    setSourceMode(nextSourceMode)
+    setSpec((current) =>
+      withAutomaticTechnicalIdentity(current, nextSourceMode)
+    )
+  }
 
   useEffect(() => {
     if (!isDirty) {
@@ -314,14 +354,32 @@ export function TransportConfigDialog({
       >
         <DialogContent className="grid max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl">
           <DialogHeader className="border-b px-5 py-4 pr-12">
-            <DialogTitle>
-              {initial
-                ? t("transports.form.editTitle")
-                : t("transports.form.createTitle")}
-            </DialogTitle>
-            <DialogDescription>
-              {t("transports.form.description")}
-            </DialogDescription>
+            <div className="flex items-start justify-between gap-4 max-sm:flex-col">
+              <div className="min-w-0 space-y-1">
+                <DialogTitle>
+                  {initial
+                    ? t("transports.form.editTitle")
+                    : t("transports.form.createTitle")}
+                </DialogTitle>
+                <DialogDescription>
+                  {t("transports.form.description")}
+                </DialogDescription>
+              </div>
+              <Button
+                aria-expanded={showAdvanced}
+                className="shrink-0 max-sm:self-start"
+                onClick={() => setShowAdvanced((value) => !value)}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                {t(
+                  showAdvanced
+                    ? "transports.form.simpleSettings"
+                    : "transports.form.advancedSettings"
+                )}
+              </Button>
+            </div>
           </DialogHeader>
           <form
             className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]"
@@ -371,19 +429,20 @@ export function TransportConfigDialog({
                   className="h-9 rounded-md border bg-background px-3"
                   disabled={Boolean(initial)}
                   onChange={(event) => {
-                    const nextType =
-                      event.target.value as TransportSpec["type"]
+                    const nextType = event.target.value as TransportSpec["type"]
                     const firstNative = nativeCandidates.find(
                       (candidate) => candidate.selectable
                     )
-                    setSpec({
-                      ...spec,
-                      type: nextType,
-                      interface:
-                        nextType === TransportSpecType.native
-                          ? (firstNative?.interfaceName ?? "")
-                          : baseline.spec.interface,
-                    })
+                    setSpec((current) =>
+                      withAutomaticTechnicalIdentity({
+                        ...current,
+                        type: nextType,
+                        interface:
+                          nextType === TransportSpecType.native
+                            ? (firstNative?.interfaceName ?? "")
+                            : baseline.spec.interface,
+                      })
+                    )
                   }}
                   value={spec.type}
                 >
@@ -419,9 +478,7 @@ export function TransportConfigDialog({
                     </option>
                     {initial?.type === TransportSpecType.native &&
                     !selectedNativeCandidate ? (
-                      <option value={spec.interface}>
-                        {spec.interface}
-                      </option>
+                      <option value={spec.interface}>{spec.interface}</option>
                     ) : null}
                     {nativeCandidates.map((candidate) => (
                       <option
@@ -433,9 +490,7 @@ export function TransportConfigDialog({
                         }
                       >
                         {formatNativeTransportCandidate(candidate, {
-                          hidden: t(
-                            "transports.form.nativeInterfaceHidden"
-                          ),
+                          hidden: t("transports.form.nativeInterfaceHidden"),
                           unavailable: t(
                             "transports.form.nativeInterfaceUnavailable"
                           ),
@@ -448,19 +503,20 @@ export function TransportConfigDialog({
                   </p>
                 </Field>
               ) : null}
-              <details className="rounded-md border px-3 py-2">
-                <summary className="cursor-pointer text-sm font-medium">
-                  {t("transports.form.technicalSettings")}
-                </summary>
-                <div className="grid gap-4 pt-4">
+              {showAdvanced ? (
+                <div className="grid gap-4 rounded-md border px-3 py-3">
+                  <p className="text-sm font-medium">
+                    {t("transports.form.technicalSettings")}
+                  </p>
                   <Field label={t("transports.form.tag")}>
                     <Input
                       aria-describedby="transport-tag-hint"
                       disabled={Boolean(initial)}
                       maxLength={24}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        setTechnicalIdentityAutomatic(false)
                         setSpec({ ...spec, tag: event.target.value })
-                      }
+                      }}
                       pattern="[a-z][a-z0-9_]{0,23}"
                       placeholder="my_tunnel"
                       required
@@ -477,11 +533,12 @@ export function TransportConfigDialog({
                   <Field label={t("transports.form.interface")}>
                     <Input
                       maxLength={15}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        setTechnicalIdentityAutomatic(false)
                         setSpec({ ...spec, interface: event.target.value })
-                      }
+                      }}
                       pattern="[A-Za-z0-9_.-]{1,15}"
-                      placeholder="kpbr0"
+                      placeholder="vless1"
                       readOnly={
                         Boolean(initial) ||
                         spec.type === TransportSpecType.native
@@ -496,7 +553,7 @@ export function TransportConfigDialog({
                     ) : null}
                   </Field>
                 </div>
-              </details>
+              ) : null}
               <div className="flex items-center justify-between rounded-md border p-3">
                 <Label htmlFor="transport-auto-start">
                   {t("transports.form.autoStart")}
@@ -509,60 +566,62 @@ export function TransportConfigDialog({
                   }
                 />
               </div>
-              <Field label={t("transports.form.countryDisplay")}>
-                <div className="grid gap-2 rounded-md border p-3">
-                  {(["disabled", "manual", "auto"] as const).map((mode) => (
-                    <label
-                      className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
-                      key={mode}
-                    >
-                      <input
-                        checked={(spec.geo_mode ?? "disabled") === mode}
-                        className="mt-1 accent-primary"
-                        name="transport-geo-mode"
-                        onChange={() => setSpec({ ...spec, geo_mode: mode })}
-                        type="radio"
-                      />
-                      <span className="grid gap-0.5">
-                        <span className="text-sm font-medium">
-                          {t(`transports.form.geo.${mode}`)}
-                        </span>
-                        {mode === "auto" ? (
-                          <span className="text-xs text-amber-700 dark:text-amber-300">
-                            {t("transports.form.geo.autoWarning")}
+              {showAdvanced ? (
+                <Field label={t("transports.form.countryDisplay")}>
+                  <div className="grid gap-2 rounded-md border p-3">
+                    {(["disabled", "manual", "auto"] as const).map((mode) => (
+                      <label
+                        className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
+                        key={mode}
+                      >
+                        <input
+                          checked={(spec.geo_mode ?? "disabled") === mode}
+                          className="mt-1 accent-primary"
+                          name="transport-geo-mode"
+                          onChange={() => setSpec({ ...spec, geo_mode: mode })}
+                          type="radio"
+                        />
+                        <span className="grid gap-0.5">
+                          <span className="text-sm font-medium">
+                            {t(`transports.form.geo.${mode}`)}
                           </span>
-                        ) : null}
-                      </span>
-                    </label>
-                  ))}
-                  {spec.geo_mode === "manual" ? (
-                    <select
-                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                      onChange={(event) => {
-                        const selected = countries.find(
-                          (country) => country.code === event.target.value
-                        )
-                        setSpec({
-                          ...spec,
-                          country_code: selected?.code,
-                          country: selected?.name,
-                        })
-                      }}
-                      required
-                      value={spec.country_code?.toUpperCase() ?? ""}
-                    >
-                      <option disabled value="">
-                        {t("transports.form.geo.countryPlaceholder")}
-                      </option>
-                      {countries.map((country) => (
-                        <option key={country.code} value={country.code}>
-                          {country.flag} {country.name} ({country.code})
+                          {mode === "auto" ? (
+                            <span className="text-xs text-amber-700 dark:text-amber-300">
+                              {t("transports.form.geo.autoWarning")}
+                            </span>
+                          ) : null}
+                        </span>
+                      </label>
+                    ))}
+                    {spec.geo_mode === "manual" ? (
+                      <select
+                        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                        onChange={(event) => {
+                          const selected = countries.find(
+                            (country) => country.code === event.target.value
+                          )
+                          setSpec({
+                            ...spec,
+                            country_code: selected?.code,
+                            country: selected?.name,
+                          })
+                        }}
+                        required
+                        value={spec.country_code?.toUpperCase() ?? ""}
+                      >
+                        <option disabled value="">
+                          {t("transports.form.geo.countryPlaceholder")}
                         </option>
-                      ))}
-                    </select>
-                  ) : null}
-                </div>
-              </Field>
+                        {countries.map((country) => (
+                          <option key={country.code} value={country.code}>
+                            {country.flag} {country.name} ({country.code})
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                  </div>
+                </Field>
+              ) : null}
               {!initial ? (
                 <div className="flex items-center justify-between rounded-md border p-3">
                   <div className="min-w-0 pr-3">
@@ -602,7 +661,7 @@ export function TransportConfigDialog({
                       className="h-auto min-h-9 py-2 text-center leading-tight whitespace-normal"
                       type="button"
                       variant={sourceMode === "link" ? "default" : "outline"}
-                      onClick={() => setSourceMode("link")}
+                      onClick={() => selectSourceMode("link")}
                     >
                       {t("transports.form.shareLink")}
                     </Button>
@@ -610,7 +669,7 @@ export function TransportConfigDialog({
                       className="h-auto min-h-9 py-2 text-center leading-tight whitespace-normal"
                       type="button"
                       variant={sourceMode === "json" ? "default" : "outline"}
-                      onClick={() => setSourceMode("json")}
+                      onClick={() => selectSourceMode("json")}
                     >
                       {t("transports.form.outboundJson")}
                     </Button>
@@ -620,7 +679,12 @@ export function TransportConfigDialog({
                       <Textarea
                         className="min-h-28 font-mono text-xs"
                         onChange={(event) =>
-                          setSpec({ ...spec, link: event.target.value })
+                          setSpec((current) =>
+                            withAutomaticTechnicalIdentity({
+                              ...current,
+                              link: event.target.value,
+                            })
+                          )
                         }
                         placeholder={
                           initial
@@ -639,10 +703,12 @@ export function TransportConfigDialog({
                       <Textarea
                         className="min-h-48 font-mono text-xs"
                         onChange={(event) =>
-                          setSpec({
-                            ...spec,
-                            outbound_json: event.target.value,
-                          })
+                          setSpec((current) =>
+                            withAutomaticTechnicalIdentity({
+                              ...current,
+                              outbound_json: event.target.value,
+                            })
+                          )
                         }
                         placeholder={
                           initial
@@ -657,53 +723,63 @@ export function TransportConfigDialog({
                       </p>
                     </Field>
                   )}
-                  <Field label={t("transports.form.mtu")}>
-                    <Input
-                      min={576}
-                      max={9000}
-                      onChange={(event) =>
-                        setSpec({ ...spec, mtu: Number(event.target.value) })
-                      }
-                      type="number"
-                      value={spec.mtu ?? 1420}
-                    />
-                  </Field>
-                  <Field label={t("transports.form.tunAddress")}>
-                    <Input
-                      onChange={(event) =>
-                        setSpec({
-                          ...spec,
-                          tun_address: event.target.value.trim() || undefined,
-                        })
-                      }
-                      pattern="(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/30"
-                      placeholder={t("transports.form.tunAddressPlaceholder")}
-                      title={t("transports.form.tunAddressHint")}
-                      value={spec.tun_address ?? ""}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {t("transports.form.tunAddressHint")}
-                    </p>
-                  </Field>
-                  <Field label={t("transports.form.bootstrapDns")}>
-                    <Textarea
-                      className="min-h-20 font-mono text-xs"
-                      onChange={(event) =>
-                        setSpec({
-                          ...spec,
-                          bootstrap_dns: event.target.value
-                            .split(/[\n,]/)
-                            .map((value) => value.trim())
-                            .filter(Boolean),
-                        })
-                      }
-                      placeholder={"1.1.1.1\n9.9.9.9"}
-                      value={(spec.bootstrap_dns ?? []).join("\n")}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {t("transports.form.bootstrapDnsHint")}
-                    </p>
-                  </Field>
+                  {showAdvanced ? (
+                    <>
+                      <Field label={t("transports.form.mtu")}>
+                        <Input
+                          min={576}
+                          max={9000}
+                          onChange={(event) =>
+                            setSpec({
+                              ...spec,
+                              mtu: Number(event.target.value),
+                            })
+                          }
+                          type="number"
+                          value={spec.mtu ?? 1420}
+                        />
+                      </Field>
+                      <Field label={t("transports.form.tunAddress")}>
+                        <Input
+                          onChange={(event) =>
+                            setSpec({
+                              ...spec,
+                              tun_address:
+                                event.target.value.trim() || undefined,
+                            })
+                          }
+                          pattern="(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/30"
+                          placeholder={t(
+                            "transports.form.tunAddressPlaceholder"
+                          )}
+                          title={t("transports.form.tunAddressHint")}
+                          value={spec.tun_address ?? ""}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          {t("transports.form.tunAddressHint")}
+                        </p>
+                      </Field>
+                      <Field label={t("transports.form.bootstrapDns")}>
+                        <Textarea
+                          className="min-h-20 font-mono text-xs"
+                          onChange={(event) =>
+                            setSpec({
+                              ...spec,
+                              bootstrap_dns: event.target.value
+                                .split(/[\n,]/)
+                                .map((value) => value.trim())
+                                .filter(Boolean),
+                            })
+                          }
+                          placeholder={"1.1.1.1\n9.9.9.9"}
+                          value={(spec.bootstrap_dns ?? []).join("\n")}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          {t("transports.form.bootstrapDnsHint")}
+                        </p>
+                      </Field>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </div>

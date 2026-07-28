@@ -477,6 +477,8 @@ export const enTranslation = {
       displayNameInvalid:
         "Use 1 to 80 Unicode code points and no control characters.",
       useAliasSuggestion: "Use “{{name}}”",
+      advancedSettings: "Advanced settings",
+      simpleSettings: "Simple settings",
       technicalSettings: "Advanced technical settings",
       technicalIdentityImmutable:
         "The technical tag and interface name cannot change after creation because routes reference them.",
@@ -1871,8 +1873,7 @@ export const enTranslation = {
         refreshFailedMore: "+{{count}} more",
       },
       lastUpdated: "Updated: {{value}}",
-      lastRefreshFailed:
-        "Update failed at {{value}}: {{message}}",
+      lastRefreshFailed: "Update failed at {{value}}: {{message}}",
       lastRefreshFailedVia:
         "Update failed at {{value}} via {{detour}}: {{message}}",
       technicalId: "Technical ID: {{id}}",

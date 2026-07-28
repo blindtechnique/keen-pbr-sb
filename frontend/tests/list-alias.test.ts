@@ -4,6 +4,7 @@ import type { ConfigObject } from "../src/api/generated/model/configObject"
 import { semanticJsonEqual } from "../src/lib/semantic-json"
 import {
   buildUpdatedConfigForListUpsert,
+  createListDnsServerSelectItems,
   createListDraft,
   getDraftFromMapEntry,
   getListConfigFromDraft,
@@ -24,10 +25,26 @@ const baselineDraft: ListDraft = {
 }
 
 describe("list aliases", () => {
+  test("renders the no-DNS sentinel as a localized label", () => {
+    expect(createListDnsServerSelectItems([], "Не выбрано")).toEqual([
+      { value: "__none__", label: "Не выбрано" },
+    ])
+  })
+
+  test("uses DNS aliases without changing persisted server tags", () => {
+    expect(
+      createListDnsServerSelectItems(
+        [{ tag: "cloudflare", display_name: "Cloudflare" }],
+        "Не выбрано"
+      )
+    ).toEqual([
+      { value: "__none__", label: "Не выбрано" },
+      { value: "cloudflare", label: "Cloudflare" },
+    ])
+  })
+
   test("derives a collision-safe technical ID from the readable name", () => {
-    expect(createListDraft("Нейросети", ["neyroseti"]).name).toBe(
-      "neyroseti_2"
-    )
+    expect(createListDraft("Нейросети", ["neyroseti"]).name).toBe("neyroseti_2")
   })
 
   test("reads and persists a trimmed Unicode display name", () => {

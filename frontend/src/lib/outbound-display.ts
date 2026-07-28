@@ -11,6 +11,39 @@ export function getOutboundReferenceLabel(outbound: Outbound): string {
     : `${displayName} (${outbound.tag})`
 }
 
+export function getOutboundSelectDisplayName(
+  outbound: Outbound,
+  interfaceLabelFor?: (interfaceName: string) => string
+): string {
+  const explicitName = outbound.display_name?.trim()
+  if (explicitName) {
+    return explicitName
+  }
+
+  if (
+    outbound.type === "interface" &&
+    outbound.interface &&
+    interfaceLabelFor
+  ) {
+    const interfaceLabel = interfaceLabelFor(outbound.interface).trim()
+    if (interfaceLabel && interfaceLabel !== outbound.interface) {
+      return interfaceLabel
+    }
+  }
+
+  return outbound.tag
+}
+
+export function getOutboundSelectReferenceLabel(
+  outbound: Outbound,
+  interfaceLabelFor?: (interfaceName: string) => string
+): string {
+  const displayName = getOutboundSelectDisplayName(outbound, interfaceLabelFor)
+  return displayName === outbound.tag
+    ? outbound.tag
+    : `${displayName} (${outbound.tag})`
+}
+
 export function sortOutboundsByDisplayName(
   outbounds: readonly Outbound[]
 ): Outbound[] {

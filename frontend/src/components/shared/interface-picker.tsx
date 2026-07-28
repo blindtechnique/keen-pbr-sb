@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next"
 
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model"
 import { FieldError } from "@/components/shared/field"
-import { useInterfaceNames } from "@/hooks/use-interface-names"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -61,7 +61,7 @@ export function InterfacePicker({
   className,
 }: InterfacePickerProps) {
   const { t } = useTranslation()
-  const { names } = useInterfaceNames()
+  const { names } = useInterfaceDisplayNames()
   const [isFocused, setIsFocused] = useState(false)
   const trimmedValue = value.trim()
   const selectedInterface = findInterface(interfaces, value)
@@ -394,7 +394,7 @@ export function InterfaceRowContent({
   showAddressesInline?: boolean
 }) {
   const { t } = useTranslation()
-  const { labelFor } = useInterfaceNames()
+  const { labelFor } = useInterfaceDisplayNames()
   const label = labelFor(name)
   const hasFirmwareLabel = label !== name
   const addresses = interfaceEntry ? getInterfaceAddresses(interfaceEntry) : []

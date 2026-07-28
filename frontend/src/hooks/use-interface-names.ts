@@ -13,6 +13,17 @@ type InterfaceNamesResponse = {
   names?: Record<string, InterfaceName>
 }
 
+export function resolveInterfaceDisplayName(
+  names: Record<string, InterfaceName>,
+  kernelName?: string
+) {
+  if (!kernelName) {
+    return ""
+  }
+
+  return names[kernelName]?.label?.trim() || kernelName
+}
+
 /**
  * The router's own names for its interfaces, keyed by kernel name.
  *
@@ -42,12 +53,14 @@ export function useInterfaceNames() {
     available: Boolean(query.data?.available),
     /** The router's label for an interface, or the kernel name unchanged. */
     labelFor: (kernelName?: string) =>
-      (kernelName && names[kernelName]?.label) || kernelName || "",
+      resolveInterfaceDisplayName(names, kernelName),
     /** "sddvpn.mooo.com AWG2 (nwg2)" where a label exists, "nwg2" otherwise. */
     describe: (kernelName?: string) => {
       if (!kernelName) return ""
       const label = names[kernelName]?.label
-      return label && label !== kernelName ? `${label} (${kernelName})` : kernelName
+      return label && label !== kernelName
+        ? `${label} (${kernelName})`
+        : kernelName
     },
   }
 }
