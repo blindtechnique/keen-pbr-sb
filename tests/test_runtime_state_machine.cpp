@@ -4,6 +4,7 @@
 #include "runtime/runtime_state_machine.hpp"
 
 #include <chrono>
+#include <stdexcept>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -152,4 +153,65 @@ TEST_CASE("hot apply bounds repeated transient firewall failures") {
         std::chrono::milliseconds{400},
     };
     CHECK(waits == expected_waits);
+}
+
+TEST_CASE("runtime replacement reconciles before firewall and resolver") {
+    std::vector<std::string> events;
+
+    apply_runtime_replacement(
+        [&]() { events.push_back("routing"); },
+        [&]() { events.push_back("firewall"); },
+        [](std::chrono::milliseconds) {},
+        [](std::size_t,
+           std::chrono::milliseconds,
+           const TransientFirewallError&) {},
+        [&]() { events.push_back("resolver"); });
+
+    const std::vector<std::string> expected{
+        "routing",
+        "firewall",
+        "resolver",
+    };
+    CHECK(events == expected);
+}
+
+TEST_CASE("runtime replacement keeps later stages untouched after firewall failure") {
+    bool previous_runtime_active = true;
+    bool resolver_reloaded = false;
+    std::size_t attempts = 0;
+
+    CHECK_THROWS_AS(
+        apply_runtime_replacement(
+            []() {},
+            [&]() {
+                ++attempts;
+                throw TransientFirewallError("firmware is still changing");
+            },
+            [](std::chrono::milliseconds) {},
+            [](std::size_t,
+               std::chrono::milliseconds,
+               const TransientFirewallError&) {},
+            [&]() { resolver_reloaded = true; }),
+        TransientFirewallError);
+
+    CHECK(attempts == 4);
+    CHECK(previous_runtime_active);
+    CHECK_FALSE(resolver_reloaded);
+}
+
+TEST_CASE("runtime replacement does not stop the previous runtime on resolver failure") {
+    bool previous_runtime_active = true;
+
+    CHECK_THROWS_AS(
+        apply_runtime_replacement(
+            []() {},
+            []() {},
+            [](std::chrono::milliseconds) {},
+            [](std::size_t,
+               std::chrono::milliseconds,
+               const TransientFirewallError&) {},
+            []() { throw std::runtime_error("resolver reload failed"); }),
+        std::runtime_error);
+
+    CHECK(previous_runtime_active);
 }

@@ -21,6 +21,22 @@ struct ResolverSyncSnapshot {
     api::ResolverLiveStatus live_status{api::ResolverLiveStatus::UNKNOWN};
 };
 
+// Exact, restorable state used to make a multi-stage runtime replacement
+// transactional. Unlike ResolverSyncSnapshot, this also retains internal
+// lifecycle flags and failure counters which affect subsequent probes.
+struct ResolverSyncCheckpoint {
+    std::string expected_hash;
+    std::string actual_hash;
+    std::optional<std::int64_t> actual_ts;
+    std::optional<std::int64_t> last_probe_ts;
+    std::optional<std::int64_t> apply_started_ts;
+    api::ResolverConfigProbeStatus probe_status{
+        api::ResolverConfigProbeStatus::UNKNOWN};
+    int consecutive_probe_failures{0};
+    bool runtime_active{true};
+    bool resolver_configured{true};
+};
+
 class ResolverSyncStateMachine {
 public:
     static constexpr std::int64_t kConvergingWindowSeconds = 15;
@@ -36,6 +52,8 @@ public:
                       std::optional<std::int64_t> probe_ts);
 
     ResolverSyncSnapshot snapshot(std::int64_t now_ts) const;
+    ResolverSyncCheckpoint checkpoint() const;
+    void restore(const ResolverSyncCheckpoint& checkpoint);
 
     // How many probes in a row have failed. The caller uses this to decide
     // whether a failure is worth telling the user about: one is noise, several

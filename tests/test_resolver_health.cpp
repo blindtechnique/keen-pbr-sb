@@ -238,3 +238,36 @@ TEST_CASE("resolver semantic state ignores only probe timestamp") {
     fresh_probe.actual_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     CHECK_FALSE(resolver_sync_semantically_equal(baseline, fresh_probe));
 }
+
+TEST_CASE("resolver sync checkpoint restores exact lifecycle state") {
+    ResolverSyncStateMachine machine;
+    machine.apply_started(100, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    machine.probe_succeeded(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 98, 101);
+    machine.probe_failed(ResolverConfigHashProbeStatus::QUERY_FAILED, 102);
+    const ResolverSyncCheckpoint checkpoint = machine.checkpoint();
+
+    machine.apply_started(200, "cccccccccccccccccccccccccccccccc");
+    machine.probe_failed(ResolverConfigHashProbeStatus::INVALID_TXT, 201);
+    machine.runtime_stopped();
+    machine.restore(checkpoint);
+
+    const ResolverSyncCheckpoint restored = machine.checkpoint();
+    CHECK(restored.expected_hash == checkpoint.expected_hash);
+    CHECK(restored.actual_hash == checkpoint.actual_hash);
+    CHECK(restored.actual_ts == checkpoint.actual_ts);
+    CHECK(restored.last_probe_ts == checkpoint.last_probe_ts);
+    CHECK(restored.apply_started_ts == checkpoint.apply_started_ts);
+    CHECK(restored.probe_status == checkpoint.probe_status);
+    CHECK(restored.consecutive_probe_failures ==
+          checkpoint.consecutive_probe_failures);
+    CHECK(restored.runtime_active == checkpoint.runtime_active);
+    CHECK(restored.resolver_configured == checkpoint.resolver_configured);
+
+    const auto snapshot = machine.snapshot(120);
+    CHECK(snapshot.expected_hash == checkpoint.expected_hash);
+    CHECK(snapshot.actual_hash == checkpoint.actual_hash);
+    CHECK(snapshot.apply_started_ts == checkpoint.apply_started_ts);
+    CHECK(machine.consecutive_probe_failures() ==
+          checkpoint.consecutive_probe_failures);
+}

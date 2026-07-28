@@ -85,7 +85,7 @@ void print_usage(const char* argv0) {
               << "  download                           Download all configured lists to cache and exit\n"
               << "    --reload                         Apply changed lists through the running daemon\n"
               << "  generate-resolver-config <res>     Print generated resolver config to stdout and exit\n"
-              << "                                     Resolvers: dnsmasq-ipset, dnsmasq-nftset\n"
+              << "                                     Resolvers: dnsmasq (auto), dnsmasq-ipset, dnsmasq-nftset\n"
               << "  resolver-config-hash               Print MD5 hash of domain-to-ipset mapping and exit\n"
               << "  recover-persistent-state           Recover an interrupted persistent transaction and exit\n"
               << "  test-routing <ip-or-domain>        Test expected vs actual routing for an IP or domain\n";

@@ -48,7 +48,7 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
     const Ipv6SupportDecision ipv6_decision =
         resolve_ipv6_support(snapshot.config);
     log_ipv6_support_decision_once(ipv6_decision);
-    snapshot.ipv6_enabled = ipv6_decision.enabled;
+    snapshot.ipv6_policy = resolver_ipv6_policy(ipv6_decision);
     snapshot.generation =
         runtime_generation_.load(std::memory_order_acquire);
     ListStreamer streamer(list_service_.cache_manager());
@@ -68,7 +68,7 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
         lists,
         snapshot.resolver_type,
         KEEN_PBR3_VERSION_FULL_STRING,
-        snapshot.ipv6_enabled);
+        snapshot.ipv6_policy);
     snapshot.expected_hash = generator.compute_config_hash();
     return snapshot;
 }

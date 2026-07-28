@@ -273,7 +273,23 @@ void Daemon::start_routing_runtime() {
         setup_static_routing();
         register_urltest_outbounds();
         (void)refresh_keenetic_dns_cache(true);
-        apply_firewall(FirewallApplyMode::Destructive);
+        retry_hot_apply_firewall(
+            [this]() {
+                apply_firewall(FirewallApplyMode::PreserveSets);
+            },
+            [](std::chrono::milliseconds delay) {
+                std::this_thread::sleep_for(delay);
+            },
+            [](std::size_t retry,
+               std::chrono::milliseconds delay,
+               const TransientFirewallError& error) {
+                Logger::instance().info(
+                    "Routing start firewall apply deferred after a concurrent "
+                    "firmware change: {}. Retry {} in {}ms.",
+                    error.what(),
+                    retry,
+                    delay.count());
+            });
 
         apply_started_ts_.store(
             unix_timestamp_now_seconds(), std::memory_order_release);
@@ -339,53 +355,99 @@ void Daemon::restart_routing_runtime() {
         throw DaemonError("Routing runtime is stopped");
     }
 
-    apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
     auto& log = Logger::instance();
+    const auto previous_apply_started =
+        apply_started_ts_.load(std::memory_order_acquire);
+    const ResolverSyncCheckpoint previous_resolver_sync =
+        resolver_sync_.checkpoint();
 
-    // A restart is a recovery operation, not two unrelated button presses.
-    // The resolver deactivation hook runs after the owned routing/firewall
-    // state has already been removed. If only that hook fails, aborting here
-    // leaves the daemon stopped and makes the user press Restart a second
-    // time. Continue into activation when teardown really completed; the
-    // activation stream is the authoritative final state.
+    transition_runtime_or_throw(
+        RuntimeState::applying, "transactional runtime restart requested");
+    publish_runtime_state();
+
     try {
-        stop_routing_runtime();
+        // This is a same-config replacement. Keeping the generation stable is
+        // required so a URLTEST transition already committed by the probe
+        // manager cannot be discarded while its control task is queued.
+        cancel_runtime_firewall_retry();
+
+        apply_runtime_replacement(
+            [this]() {
+                // Recreate missing routes first and retire obsolete owned
+                // entries only after their replacements exist.
+                reconcile_static_routing();
+            },
+            [this]() {
+                // PreserveSets keeps the currently committed firewall
+                // generation forwarding until the replacement transaction
+                // itself has reached COMMIT.
+                apply_firewall(FirewallApplyMode::PreserveSets);
+            },
+            [](std::chrono::milliseconds delay) {
+                std::this_thread::sleep_for(delay);
+            },
+            [](std::size_t retry,
+               std::chrono::milliseconds delay,
+               const TransientFirewallError& error) {
+                Logger::instance().info(
+                    "Runtime restart firewall replacement deferred after a "
+                    "concurrent firmware change: {}. Retry {} in {}ms.",
+                    error.what(),
+                    retry,
+                    delay.count());
+            },
+            [this, &log]() {
+                apply_started_ts_.store(
+                    unix_timestamp_now_seconds(),
+                    std::memory_order_release);
+                update_resolver_config_hash();
+                if (run_system_resolver_hook_reload()) {
+                    return;
+                }
+
+                // dnsmasq can finish its own firmware-triggered reload just
+                // after our stream deadline. Retry the live reload once
+                // without deactivating the currently forwarding runtime.
+                log.info(
+                    "Resolver reload did not converge during runtime restart; "
+                    "retrying once without tearing down routing.");
+                std::this_thread::sleep_for(std::chrono::milliseconds{250});
+                if (!run_system_resolver_hook_reload()) {
+                    throw DaemonError(
+                        "System resolver reload hook failed during runtime "
+                        "restart");
+                }
+            });
+
+        routing_runtime_active_ = true;
+        refresh_resolver_config_hash_actual_async();
+        transition_runtime_or_throw(
+            RuntimeState::running, "transactional runtime restart complete");
+        publish_runtime_state();
+        log.info(
+            "Routing runtime restarted in place without a forwarding teardown.");
     } catch (const std::exception& error) {
-        if (routing_runtime_active_) {
-            throw;
+        // None of the in-place stages calls stop/cleanup. A failed replacement
+        // therefore leaves the last committed runtime authoritative and the
+        // dashboard must continue to report it as running.
+        apply_started_ts_.store(
+            previous_apply_started, std::memory_order_release);
+        resolver_sync_.restore(previous_resolver_sync);
+        routing_runtime_active_ = true;
+        try {
+            transition_runtime_or_throw(
+                RuntimeState::running,
+                "runtime restart failed; previous runtime retained");
+            refresh_resolver_config_hash_actual_async();
+            publish_runtime_state();
+        } catch (const std::exception& state_error) {
+            log.error(
+                "Failed to publish retained runtime after restart failure: {}",
+                state_error.what());
         }
-        log.warn(
-            "Routing runtime teardown completed with a resolver fallback "
-            "warning; continuing restart recovery: {}",
-            error.what());
-    }
-
-    try {
-        start_routing_runtime();
-        return;
-    } catch (const std::exception& error) {
-        // Keenetic may finish starting dnsmasq just after the first activation
-        // stream deadline. start_routing_runtime() has already rolled every
-        // owned route/firewall/resolver subsystem back, so one bounded retry
-        // is safe and replaces the previously required second dashboard click.
-        const std::string first_error = error.what();
-        if (!runtime_restart_should_retry(first_error)) {
-            throw;
-        }
-        log.warn(
-            "Resolver activation did not converge during routing restart; "
-            "retrying once after clean rollback: {}",
-            first_error);
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds{250});
-    try {
-        start_routing_runtime();
-    } catch (const std::exception& error) {
         throw DaemonError(
-            std::string(
-                "Routing runtime restart failed after resolver recovery "
-                "retry: ") +
+            std::string("Routing runtime restart failed; the previous runtime "
+                        "remains active: ") +
             error.what());
     }
 }
@@ -872,7 +934,7 @@ void Daemon::schedule_startup_firewall_retry(
                 return;
             }
             try {
-                apply_firewall(FirewallApplyMode::Destructive);
+                apply_firewall(FirewallApplyMode::PreserveSets);
                 log.info("Firewall rules and routing applied on retry {}.", attempt);
             } catch (const TransientFirewallError& e) {
                 if (attempt >= kMaxAttempts) {

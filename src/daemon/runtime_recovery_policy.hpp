@@ -7,6 +7,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 
 #include "../firewall/firewall.hpp"
 
@@ -36,6 +37,28 @@ void retry_hot_apply_firewall(Apply&& apply,
             wait(delay);
         }
     }
+}
+
+// Replace a live runtime without first tearing down the generation which is
+// currently forwarding traffic. Each stage must either reconcile in place or
+// commit atomically. The caller remains responsible for publishing the new
+// generation only after this function returns.
+template <typename Reconcile,
+          typename ApplyFirewall,
+          typename Wait,
+          typename OnRetry,
+          typename ReloadResolver>
+void apply_runtime_replacement(Reconcile&& reconcile,
+                               ApplyFirewall&& apply_firewall,
+                               Wait&& wait,
+                               OnRetry&& on_retry,
+                               ReloadResolver&& reload_resolver) {
+    reconcile();
+    retry_hot_apply_firewall(
+        std::forward<ApplyFirewall>(apply_firewall),
+        std::forward<Wait>(wait),
+        std::forward<OnRetry>(on_retry));
+    reload_resolver();
 }
 
 inline bool runtime_recovery_is_current(

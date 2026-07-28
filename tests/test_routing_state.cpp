@@ -602,7 +602,7 @@ TEST_CASE("populate_routing_state: strict urltest installs selected primary, wei
         [](const Outbound&) { return true; },
         &selections);
 
-    REQUIRE(routes.get_routes().size() == 17);
+    REQUIRE(routes.get_routes().size() == 14);
     CHECK(find_route(routes.get_routes(), 104, false, false, 0, std::optional<std::string>{"wg2"}) != nullptr);
     CHECK(find_route(routes.get_routes(), 104, false, false, 1, std::optional<std::string>{"wg1"}) != nullptr);
     CHECK(find_route(routes.get_routes(), 104, false, false, 2, std::optional<std::string>{"eth0"}) != nullptr);
@@ -664,6 +664,156 @@ TEST_CASE("populate_routing_state: strict urltest skips unreachable children") {
                                    route.metric == kUnreachableRouteMetric &&
                                    (route.family == AF_INET || route.family == AF_INET6);
                         }) == 2);
+}
+
+TEST_CASE("populate_routing_state: urltest uses one reachability snapshot per child") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[
+            {"tag":"vpn1","type":"interface","interface":"wg1"},
+            {"tag":"vpn2","type":"interface","interface":"wg2"},
+            {"tag":"auto","type":"urltest","url":"http://example.com",
+             "strict_enforcement":true,
+             "outbound_groups":[{"weight":1,"outbounds":["vpn1","vpn2"]}]}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(cfg.fwmark.value_or(FwmarkConfig{}),
+                                         cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    std::map<std::string, std::string> selections{{"auto", "vpn1"}};
+    std::map<std::string, size_t> reachability_checks;
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    populate_routing_state(
+        cfg,
+        marks,
+        routes,
+        rules,
+        [&reachability_checks](const Outbound& outbound) {
+            ++reachability_checks[outbound.tag];
+            return outbound.tag != "vpn1";
+        },
+        &selections);
+
+    CHECK(reachability_checks["vpn1"] == 1);
+    CHECK(reachability_checks["vpn2"] == 1);
+    CHECK(find_route(routes.get_routes(), 102, false, false, 0,
+                     std::optional<std::string>{"wg1"}) == nullptr);
+    CHECK(find_route(routes.get_routes(), 102, false, false, 1,
+                     std::optional<std::string>{"wg2"}) != nullptr);
+}
+
+TEST_CASE("populate_routing_state: mixed-family urltest closures stay terminal") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "daemon":{"strict_enforcement":false},
+        "outbounds":[
+            {"tag":"dead","type":"interface","interface":"wg0","gateway":"10.0.0.1"},
+            {"tag":"ipv4","type":"interface","interface":"wg4","gateway":"10.0.4.1"},
+            {"tag":"ipv6","type":"interface","interface":"wg6","gateway6":"2001:db8::1"},
+            {"tag":"auto","type":"urltest","url":"http://example.com",
+             "strict_enforcement":true,
+             "outbound_groups":[{"weight":1,"outbounds":["dead","ipv4","ipv6"]}]}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(
+        cfg.fwmark.value_or(FwmarkConfig{}),
+        cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    std::map<std::string, std::string> selections{{"auto", "dead"}};
+    std::map<std::string, size_t> reachability_checks;
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    populate_routing_state(
+        cfg,
+        marks,
+        routes,
+        rules,
+        [&reachability_checks](const Outbound& outbound) {
+            ++reachability_checks[outbound.tag];
+            return outbound.tag != "dead";
+        },
+        &selections);
+
+    CHECK(reachability_checks["dead"] == 1);
+    CHECK(reachability_checks["ipv4"] == 1);
+    CHECK(reachability_checks["ipv6"] == 1);
+    CHECK(find_route(routes.get_routes(), 103, false, false, 1,
+                     std::optional<std::string>{"wg4"}) != nullptr);
+    CHECK(find_route(routes.get_routes(), 103, false, false, 2,
+                     std::optional<std::string>{"wg6"}) != nullptr);
+    CHECK(std::none_of(
+        routes.get_routes().begin(),
+        routes.get_routes().end(),
+        [](const RouteSpec& route) {
+            return route.table == 103 && route.unreachable &&
+                   route.metric != kUnreachableRouteMetric;
+        }));
+    CHECK(std::count_if(
+              routes.get_routes().begin(),
+              routes.get_routes().end(),
+              [](const RouteSpec& route) {
+                  return route.table == 103 && route.unreachable &&
+                         route.metric == kUnreachableRouteMetric &&
+                         (route.family == AF_INET ||
+                          route.family == AF_INET6);
+              }) == 2);
+}
+
+TEST_CASE("populate_routing_state: disabled-family children do not consume fallback metrics") {
+    auto cfg = parse_minimal_config(R"({
+        "iproute":{"table_start":100},
+        "daemon":{"strict_enforcement":false,"ipv6_enabled":false},
+        "outbounds":[
+            {"tag":"ipv6a","type":"interface","interface":"wg6a","gateway6":"2001:db8::1"},
+            {"tag":"ipv6b","type":"interface","interface":"wg6b","gateway6":"2001:db8::2"},
+            {"tag":"ipv4","type":"interface","interface":"wg4","gateway":"10.0.4.1"},
+            {"tag":"auto","type":"urltest","url":"http://example.com",
+             "strict_enforcement":true,
+             "outbound_groups":[{"weight":1,"outbounds":["ipv6a","ipv6b","ipv4"]}]}
+        ]
+    })");
+    auto marks = allocate_outbound_marks(
+        cfg.fwmark.value_or(FwmarkConfig{}),
+        cfg.outbounds.value_or(std::vector<Outbound>{}));
+
+    std::map<std::string, std::string> selections{{"auto", "ipv6a"}};
+    std::map<std::string, size_t> reachability_checks;
+
+    NetlinkManager netlink;
+    RouteTable routes(netlink, true);
+    PolicyRuleManager rules(netlink, true);
+
+    populate_routing_state(
+        cfg,
+        marks,
+        routes,
+        rules,
+        [&reachability_checks](const Outbound& outbound) {
+            ++reachability_checks[outbound.tag];
+            return true;
+        },
+        &selections,
+        false);
+
+    CHECK(reachability_checks["ipv6a"] == 1);
+    CHECK(reachability_checks["ipv6b"] == 1);
+    CHECK(reachability_checks["ipv4"] == 1);
+    CHECK(find_route(routes.get_routes(), 103, false, false, 1,
+                     std::optional<std::string>{"wg4"}) != nullptr);
+    CHECK(std::none_of(
+        routes.get_routes().begin(),
+        routes.get_routes().end(),
+        [](const RouteSpec& route) {
+            return route.table == 103 && route.family == AF_INET6;
+        }));
 }
 
 TEST_CASE("populate_routing_state: urltest without completed probe installs only terminal kill-switch routes") {
@@ -1015,7 +1165,7 @@ TEST_CASE("populate_routing_state: non-strict urltest still appends dual-stack k
         [](const Outbound&) { return true; },
         &selections);
 
-    CHECK(count_routes_in_table(routes.get_routes(), 102) == 5);
+    CHECK(count_routes_in_table(routes.get_routes(), 102) == 4);
     CHECK(find_route(routes.get_routes(),
                      102,
                      false,

@@ -39,17 +39,9 @@ write_managed_conf() {
     log_info "Created $target with $description configuration"
 }
 
-resolver_type() {
-    if command -v nft >/dev/null 2>&1; then
-        echo "dnsmasq-nftset"
-    else
-        echo "dnsmasq-ipset"
-    fi
-}
-
 conf_script_line() {
-    printf 'conf-script=%s --config %s generate-resolver-config %s' \
-        "$KEEN_PBR_BIN" "$CONFIG_PATH" "$(resolver_type)"
+    printf 'conf-script=%s --config %s generate-resolver-config dnsmasq' \
+        "$KEEN_PBR_BIN" "$CONFIG_PATH"
 }
 
 fallback_conf_line() {

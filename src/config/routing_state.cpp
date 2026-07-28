@@ -455,9 +455,23 @@ void populate_routing_state(const Config& cfg,
 
     auto add_route_if_enabled = [&](const RouteSpec& route) {
         if (!ipv6_enabled && route.family == AF_INET6) {
-            return;
+            return false;
         }
         planned_routes.push_back(route);
+        return true;
+    };
+
+    // Reachability is a point-in-time input to one routing transaction. Cache
+    // it per interface so a flapping link cannot produce a table assembled
+    // from mutually inconsistent checks of the same child.
+    std::map<std::string, bool> reachability_snapshot;
+    auto is_reachable = [&](const Outbound& outbound) {
+        const auto [it, inserted] =
+            reachability_snapshot.try_emplace(outbound.tag, true);
+        if (inserted && reachability_check) {
+            it->second = reachability_check(outbound);
+        }
+        return it->second;
     };
 
     uint32_t table_offset = 0;
@@ -470,7 +484,7 @@ void populate_routing_state(const Config& cfg,
             ++table_offset;
 
             const bool strict = strict_enforcement_enabled(cfg, ob);
-            const bool reachable = !reachability_check || reachability_check(ob);
+            const bool reachable = is_reachable(ob);
             if (reachable) {
                 for (const auto& route : make_default_routes(table_id, ob)) {
                     add_route_if_enabled(route);
@@ -526,10 +540,12 @@ void populate_routing_state(const Config& cfg,
             if (selection_ready) {
                 const Outbound* selected =
                     resolve_selected_interface(outbounds, ob, urltest_selections);
-                if (selected &&
-                    (!reachability_check || reachability_check(*selected))) {
+                bool selected_primary_planned = false;
+                if (selected && is_reachable(*selected)) {
                     for (const auto& route : make_default_routes(table_id, *selected)) {
-                        add_route_if_enabled(route);
+                        if (add_route_if_enabled(route)) {
+                            selected_primary_planned = true;
+                        }
                     }
                     for (const auto& route : make_family_closure_routes(table_id, *selected)) {
                         add_route_if_enabled(route);
@@ -538,18 +554,39 @@ void populate_routing_state(const Config& cfg,
 
                 uint32_t metric = 1;
                 for (const Outbound* child : ordered_children) {
-                    if (selected && child->tag == selected->tag) {
+                    // Do not duplicate a selected child whose metric-zero
+                    // primary route is already present. If no usable primary
+                    // route was emitted (for example an IPv6-only child while
+                    // IPv6 is disabled), process it as a fallback using the
+                    // same reachability snapshot.
+                    if (selected_primary_planned &&
+                        selected && child->tag == selected->tag) {
                         continue;
                     }
-                    if (reachability_check && !reachability_check(*child)) {
+                    if (!is_reachable(*child)) {
                         continue;
                     }
+
+                    bool usable_default_planned = false;
                     for (auto route : make_default_routes(table_id, *child)) {
                         route.metric = metric;
-                        add_route_if_enabled(route);
+                        if (add_route_if_enabled(route)) {
+                            usable_default_planned = true;
+                        }
                     }
-                    for (auto route : make_family_closure_routes(table_id, *child)) {
-                        route.metric = metric;
+
+                    // A child that cannot emit a route for any enabled family
+                    // must not consume a fallback priority.
+                    if (!usable_default_planned) {
+                        continue;
+                    }
+
+                    // Missing-family closures are terminal safety routes, not
+                    // peers of this child's usable default. Giving them the
+                    // fallback metric would make an early IPv4-only child
+                    // shadow a later IPv6-capable child (and vice versa).
+                    for (const auto& route :
+                         make_family_closure_routes(table_id, *child)) {
                         add_route_if_enabled(route);
                     }
                     ++metric;

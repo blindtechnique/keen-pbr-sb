@@ -7,6 +7,7 @@ add_executable(keen-pbr-tests
   test_addr_spec.cpp
   test_base64.cpp
   test_dnsmasq_gen.cpp
+  test_dnsmasq_helper_packages.cpp
   test_dns_txt_client.cpp
   test_dns_server.cpp
   test_test_routing.cpp
@@ -179,6 +180,7 @@ target_compile_definitions(keen-pbr-rescue-tests PRIVATE
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
   KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
+  KEEN_PBR_TRANSPORT_INIT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager"
   KEEN_PBR_INSTALL_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/install.sh"
   KEEN_PBR_POSTINST_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postinst"
   KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
@@ -292,9 +294,13 @@ target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"
   KEEN_PBR_PORTABLE_STAT_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh"
+  KEEN_PBR_TRANSPORT_INIT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S79transport-manager"
   KEEN_PBR_INSTALL_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/install.sh"
   KEEN_PBR_POSTINST_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postinst"
   KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
+  KEEN_PBR_KEENETIC_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh"
+  KEEN_PBR_OPENWRT_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh"
+  KEEN_PBR_DEBIAN_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh"
 )
 
 # Reuse include paths from the main target so generated headers such as

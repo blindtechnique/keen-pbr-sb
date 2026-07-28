@@ -32,6 +32,7 @@
 #include "../runtime/runtime_state_machine.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
+#include "../util/ipv6_support.hpp"
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
 #include "runtime_recovery_policy.hpp"
@@ -130,7 +131,7 @@ enum class RemoteListPreparationMode {
 struct ResolverGenerationSnapshot {
     Config config;
     ResolverType resolver_type;
-    bool ipv6_enabled{true};
+    ResolverIpv6Policy ipv6_policy;
     std::string expected_hash;
     std::uint64_t generation{0};
     std::uint64_t stream_epoch{0};
@@ -232,7 +233,9 @@ private:
     // lifecycle and runtime apply
     void setup_static_routing();
     void reconcile_static_routing();
-    void apply_firewall(FirewallApplyMode mode = FirewallApplyMode::Destructive);
+    // Runtime callers must deliberately choose preserving or destructive
+    // semantics; an omitted mode is a compile-time error.
+    void apply_firewall(FirewallApplyMode mode);
     void normalize_urltest_selections();
     void register_urltest_outbounds();
     void handle_urltest_selection_change(

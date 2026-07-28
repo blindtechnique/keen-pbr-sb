@@ -199,7 +199,9 @@ public:
         const std::string& set_name) = 0;
 
     // Apply all pending changes atomically (where supported by the backend).
-    virtual void apply(FirewallApplyMode mode = FirewallApplyMode::Destructive) = 0;
+    // The apply mode is intentionally explicit: a missing argument must never
+    // silently turn a live runtime refresh into a destructive replacement.
+    virtual void apply(FirewallApplyMode mode) = 0;
 
     // Configure a backend-wide prefilter emitted ahead of mark/drop/pass rules.
     void set_global_prefilter(FirewallGlobalPrefilter prefilter) {

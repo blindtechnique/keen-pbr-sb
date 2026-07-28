@@ -20,6 +20,6 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::map<std::string, std::string>& urltest_selections,
     const CacheManager& cache_manager,
     Firewall& firewall,
-    FirewallApplyMode mode = FirewallApplyMode::Destructive);
+    FirewallApplyMode mode);
 
 } // namespace keen_pbr3

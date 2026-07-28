@@ -267,8 +267,14 @@ std::string IptablesFirewall::build_dns_nat_script(
     std::string s;
     s += "*nat\n";
     if (dns_redirect) {
-        s += keen_pbr3::format(":{} - [0:0]\n-A PREROUTING -j {}\n",
-                               DNS_NAT_CHAIN_NAME, DNS_NAT_CHAIN_NAME);
+        // Keep the builtin hook outside the restore transaction. With
+        // --noflush the existing hook continues to point at this chain while
+        // the chain contents are replaced atomically; a failed COMMIT leaves
+        // the previously working redirect untouched.
+        s += keen_pbr3::format(
+            ":{} - [0:0]\n-F {}\n",
+            DNS_NAT_CHAIN_NAME,
+            DNS_NAT_CHAIN_NAME);
         for (const auto& iface_frag : iface_frags) {
             for (const char* proto : {"udp", "tcp"}) {
                 s += keen_pbr3::format(
@@ -280,8 +286,10 @@ std::string IptablesFirewall::build_dns_nat_script(
     if (router_origin_snat) {
         // Without this the packet keeps the source address chosen before the
         // mark was applied and the tunnel peer drops it.
-        s += keen_pbr3::format(":{} - [0:0]\n-A POSTROUTING -j {}\n",
-                               SNAT_CHAIN_NAME, SNAT_CHAIN_NAME);
+        s += keen_pbr3::format(
+            ":{} - [0:0]\n-F {}\n",
+            SNAT_CHAIN_NAME,
+            SNAT_CHAIN_NAME);
         s += keen_pbr3::format(
             "-A {} -m mark --mark {:#x}/{:#x} -j MASQUERADE\n",
             SNAT_CHAIN_NAME, kRouterOriginMark, kRouterOriginMark);
@@ -329,6 +337,105 @@ static std::atomic<int>& restore_wait_support_cache(const std::string& program) 
     return program == "ip6tables-restore" ? ipv6 : ipv4;
 }
 
+static std::atomic<int>& restore_test_support_cache(const std::string& program) {
+    static std::atomic<int> ipv4{-1}; // -1 unknown, 0 no, 1 yes
+    static std::atomic<int> ipv6{-1};
+    return program == "ip6tables-restore" ? ipv6 : ipv4;
+}
+
+static bool restore_failure_is_transient(
+    const std::string& error_output,
+    const std::string& script);
+
+static bool restore_test_option_explicitly_unsupported(
+    std::string error_output) {
+    std::transform(
+        error_output.begin(),
+        error_output.end(),
+        error_output.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+    constexpr std::array<std::string_view, 7> unsupported_markers{
+        "unknown option",
+        "unrecognized option",
+        "unrecognised option",
+        "invalid option",
+        "illegal option",
+        "unsupported option",
+        "option not supported",
+    };
+    return std::any_of(
+        unsupported_markers.begin(),
+        unsupported_markers.end(),
+        [&error_output](std::string_view marker) {
+            return error_output.find(marker) != std::string::npos;
+        });
+}
+
+static bool restore_test_option_supported(const std::string& program) {
+    auto& cache = restore_test_support_cache(program);
+    const int cached = cache.load(std::memory_order_acquire);
+    if (cached >= 0) {
+        return cached == 1;
+    }
+
+    constexpr std::string_view probe_script{"*filter\nCOMMIT\n"};
+    std::string error_output;
+    SafeExecFailureDetail failure_detail;
+    const int exit_code = safe_exec_pipe_stdin(
+        {program, "--test"},
+        std::string{probe_script},
+        &error_output,
+        SafeExecFailureLog::Suppressed,
+        &failure_detail,
+        SafeExecTimeouts{
+            std::chrono::seconds{2},
+            std::chrono::milliseconds{500}});
+    if (exit_code == 0) {
+        cache.store(1, std::memory_order_release);
+        Logger::instance().verbose(
+            "{} xtables test option support: yes", program);
+        return true;
+    }
+
+    const std::string detail = error_output.empty()
+        ? failure_detail.reason
+        : error_output;
+    const std::string message = keen_pbr3::format(
+        "{} --test capability probe failed with status {}{}{}",
+        program,
+        exit_code,
+        detail.empty() ? "" : ": ",
+        detail);
+
+    // A timeout/exec failure or an exhausted xtables wait says nothing about
+    // option support. Classify it before parsing stderr so even a partial
+    // diagnostic containing "unknown option" cannot poison the cache.
+    if (exit_code < 0 || exit_code == 4 ||
+        restore_failure_is_transient(
+            error_output, std::string{probe_script})) {
+        throw TransientFirewallError(message);
+    }
+
+    // safe_exec_pipe_stdin bounds captured stderr at 8 KiB. At the boundary
+    // the diagnostic may be partial, so it cannot be authoritative evidence
+    // that --test is unsupported.
+    constexpr std::size_t kCapturedStderrLimit = 8U * 1024U;
+    if (error_output.size() >= kCapturedStderrLimit) {
+        throw FirewallError(message + " (stderr truncated)");
+    }
+
+    if (restore_test_option_explicitly_unsupported(error_output)) {
+        cache.store(0, std::memory_order_release);
+        Logger::instance().verbose(
+            "{} xtables test option support: no", program);
+        return false;
+    }
+
+    throw FirewallError(message);
+}
+
 static bool restore_wait_option_supported(const std::string& program) {
     auto& cache = restore_wait_support_cache(program);
     const int cached = cache.load(std::memory_order_acquire);
@@ -361,10 +468,18 @@ bool restore_wait_option_supported_for_test(const std::string& program) {
     return restore_wait_option_supported(program);
 }
 
+bool restore_test_option_supported_for_test(const std::string& program) {
+    return restore_test_option_supported(program);
+}
+
 void reset_restore_wait_option_probe_for_test() {
     restore_wait_support_cache("iptables-restore").store(
         -1, std::memory_order_release);
     restore_wait_support_cache("ip6tables-restore").store(
+        -1, std::memory_order_release);
+    restore_test_support_cache("iptables-restore").store(
+        -1, std::memory_order_release);
+    restore_test_support_cache("ip6tables-restore").store(
         -1, std::memory_order_release);
 }
 
@@ -506,6 +621,45 @@ static constexpr std::array<std::chrono::milliseconds, 4>
         std::chrono::milliseconds{200},
     };
 
+static std::string normalized_iptables_output(
+    const ExecCaptureResult& result) {
+    std::string normalized = result.stdout_output;
+    std::transform(
+        normalized.begin(),
+        normalized.end(),
+        normalized.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+    return normalized;
+}
+
+static bool command_reports_table_unavailable(
+    const ExecCaptureResult& result) {
+    const std::string normalized = normalized_iptables_output(result);
+    constexpr std::array<std::string_view, 6> markers{
+        "table does not exist",
+        "table `nat' does not exist",
+        "can't initialize iptables table `nat'",
+        "can't initialize ip6tables table `nat'",
+        "address family not supported",
+        "protocol not supported",
+    };
+    return std::any_of(
+        markers.begin(),
+        markers.end(),
+        [&normalized](std::string_view marker) {
+            return normalized.find(marker) != std::string::npos;
+        });
+}
+
+static bool command_reports_chain_missing(
+    const ExecCaptureResult& result) {
+    const std::string normalized = normalized_iptables_output(result);
+    return normalized.find("no chain/target/match") != std::string::npos ||
+           normalized.find("does a matching rule exist") != std::string::npos;
+}
+
 static IptablesCommandOutcome classify_iptables_command(
     const ExecCaptureResult& result) {
     if (result.exit_code == 0 && !result.timed_out && !result.truncated) {
@@ -516,14 +670,7 @@ static IptablesCommandOutcome classify_iptables_command(
         // stable oversized result will not heal by retrying.
         return IptablesCommandOutcome::PermanentFailure;
     }
-    std::string normalized = result.stdout_output;
-    std::transform(
-        normalized.begin(),
-        normalized.end(),
-        normalized.begin(),
-        [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
+    const std::string normalized = normalized_iptables_output(result);
     constexpr std::array<std::string_view, 7> permanent_markers{
         "permission denied",
         "operation not permitted",
@@ -681,6 +828,116 @@ static void pipe_to_cmd(const std::vector<std::string>& args, const std::string&
     if (status != 0) {
         throw FirewallError(describe_restore_failure(args[0], status, error_output, input));
     }
+}
+
+namespace {
+
+class NatValidationCleanup final {
+public:
+    NatValidationCleanup(std::string command,
+                         std::string dns_chain,
+                         std::string snat_chain)
+        : command_(std::move(command)),
+          dns_chain_(std::move(dns_chain)),
+          snat_chain_(std::move(snat_chain)) {
+        cleanup();
+    }
+
+    ~NatValidationCleanup() {
+        cleanup();
+    }
+
+    NatValidationCleanup(const NatValidationCleanup&) = delete;
+    NatValidationCleanup& operator=(const NatValidationCleanup&) = delete;
+
+private:
+    void cleanup() const {
+        // Validation chains are never hooked into a builtin chain. A stale
+        // chain can therefore only be residue from an interrupted preflight.
+        safe_exec(
+            {command_, "-t", "nat", "-F", dns_chain_},
+            /*suppress_output=*/true);
+        safe_exec(
+            {command_, "-t", "nat", "-X", dns_chain_},
+            /*suppress_output=*/true);
+        safe_exec(
+            {command_, "-t", "nat", "-F", snat_chain_},
+            /*suppress_output=*/true);
+        safe_exec(
+            {command_, "-t", "nat", "-X", snat_chain_},
+            /*suppress_output=*/true);
+    }
+
+    std::string command_;
+    std::string dns_chain_;
+    std::string snat_chain_;
+};
+
+} // namespace
+
+std::string IptablesFirewall::build_nat_validation_script(
+    const std::string& nat_script) {
+    const auto replace_all = [](std::string& value,
+                                std::string_view from,
+                                std::string_view to) {
+        std::size_t offset = 0;
+        while ((offset = value.find(from, offset)) != std::string::npos) {
+            value.replace(offset, from.size(), to);
+            offset += to.size();
+        }
+    };
+
+    std::istringstream input(nat_script);
+    std::string output;
+    std::string line;
+    while (std::getline(input, line)) {
+        replace_all(line, DNS_NAT_CHAIN_NAME, DNS_NAT_VALIDATION_CHAIN_NAME);
+        replace_all(line, SNAT_CHAIN_NAME, SNAT_VALIDATION_CHAIN_NAME);
+
+        // Legacy restore binaries have no --test. Stage the exact generated
+        // NAT rules in deterministic, unhooked owned chains instead. The
+        // builtin hook lines are fixed scaffolding and deliberately omitted:
+        // validation must never redirect a live packet.
+        if (line == keen_pbr3::format(
+                        "-A PREROUTING -j {}",
+                        DNS_NAT_VALIDATION_CHAIN_NAME) ||
+            line == keen_pbr3::format(
+                        "-A POSTROUTING -j {}",
+                        SNAT_VALIDATION_CHAIN_NAME)) {
+            continue;
+        }
+        output += line;
+        output.push_back('\n');
+    }
+    return output;
+}
+
+void IptablesFirewall::preflight_nat_restore(
+    const std::string& restore_program,
+    const std::string& nat_script) {
+    if (restore_test_option_supported(restore_program)) {
+        // Validate the exact transaction that will be committed after the old
+        // NAT chains are removed.
+        pipe_to_cmd(
+            {restore_program, "--test", "--noflush", "--counters"},
+            nat_script);
+        return;
+    }
+
+    // Entware still ships legacy restore variants without --test on some
+    // Keenetic architectures. Validate the same generated match/target rules
+    // in unhooked temporary chains, preserving the active DNS/SNAT hooks.
+    const std::string command =
+        restore_program == "ip6tables-restore"
+            ? "ip6tables"
+            : "iptables";
+    NatValidationCleanup cleanup(
+        command,
+        DNS_NAT_VALIDATION_CHAIN_NAME,
+        SNAT_VALIDATION_CHAIN_NAME);
+    pipe_to_cmd(
+        {restore_program, "--noflush", "--counters"},
+        build_nat_validation_script(nat_script));
 }
 
 std::string IptablesFirewall::build_ipset_create_line(const PendingSet& ps) {
@@ -1190,6 +1447,227 @@ void IptablesFirewall::remove_all_hooks(
     }
 }
 
+bool IptablesFirewall::ipv6_nat_table_available() {
+    const std::vector<std::string> inspect_args{
+        "ip6tables", "-t", "nat", "-S"};
+    ExecCaptureResult last_result;
+    for (std::size_t attempt = 0;
+         attempt <= iptables_control_retry_delays.size();
+        ++attempt) {
+        last_result = run_iptables_control(inspect_args);
+        // BusyBox/Entware installations are allowed to be IPv4-only. The
+        // child exits with 127 when execvp cannot find ip6tables; for this
+        // read-only capability probe that means the IPv6 NAT family is
+        // absent, not that the IPv4 transaction failed.
+        if (last_result.exit_code == 127 &&
+            !last_result.timed_out) {
+            return false;
+        }
+        if (command_reports_table_unavailable(last_result)) {
+            return false;
+        }
+        const auto outcome = classify_iptables_command(last_result);
+        if (outcome == IptablesCommandOutcome::Success) {
+            return true;
+        }
+        if (outcome == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(inspect_args, last_result);
+            throw FirewallError("failed to inspect IPv6 nat table");
+        }
+        if (last_result.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            break;
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
+    }
+    record_iptables_control_failure(inspect_args, last_result);
+    throw TransientFirewallError(
+        "temporarily failed to inspect IPv6 nat table");
+}
+
+void IptablesFirewall::remove_nat_chain_checked(
+    const char* command,
+    const char* builtin_chain,
+    const char* target_chain) {
+    const std::vector<std::string> inspect_hook_args{
+        command, "-t", "nat", "-S", builtin_chain};
+    ExecCaptureResult last_result;
+    bool hooks_removed = false;
+
+    // Removal follows the same inspect-mutate-verify contract as hook
+    // creation. An xtables timeout may happen after the kernel committed a
+    // mutation, so every retry starts from a fresh snapshot.
+    for (std::size_t attempt = 0;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        last_result = run_iptables_control(inspect_hook_args);
+        if (command_reports_table_unavailable(last_result) ||
+            command_reports_chain_missing(last_result)) {
+            return;
+        }
+        const auto inspect_outcome =
+            classify_iptables_command(last_result);
+        if (inspect_outcome == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(
+                inspect_hook_args, last_result);
+            throw FirewallError(keen_pbr3::format(
+                "failed to inspect {} nat/{} hook removal",
+                command, builtin_chain));
+        }
+        if (inspect_outcome == IptablesCommandOutcome::Success) {
+            const size_t observed = count_exact_jump(
+                last_result.stdout_output,
+                builtin_chain,
+                target_chain);
+            if (observed == 0) {
+                hooks_removed = true;
+                break;
+            }
+            if (attempt == iptables_control_retry_delays.size()) {
+                break;
+            }
+
+            const std::vector<std::string> remove_args{
+                command,
+                "-t",
+                "nat",
+                "-D",
+                builtin_chain,
+                "-j",
+                target_chain};
+            for (size_t index = 0; index < observed; ++index) {
+                const auto mutation =
+                    run_iptables_control(remove_args);
+                if (command_reports_table_unavailable(mutation) ||
+                    command_reports_chain_missing(mutation)) {
+                    break;
+                }
+                const auto mutation_outcome =
+                    classify_iptables_command(mutation);
+                if (mutation_outcome ==
+                    IptablesCommandOutcome::PermanentFailure) {
+                    record_iptables_control_failure(
+                        remove_args, mutation);
+                    throw FirewallError(keen_pbr3::format(
+                        "failed to remove {} nat/{} hook",
+                        command, builtin_chain));
+                }
+                if (mutation_outcome ==
+                    IptablesCommandOutcome::TransientFailure) {
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[attempt]);
+            continue;
+        }
+
+        if (last_result.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            break;
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
+    }
+    if (!hooks_removed) {
+        record_iptables_control_failure(
+            inspect_hook_args, last_result);
+        throw TransientFirewallError(keen_pbr3::format(
+            "{} nat/{} hook removal did not converge",
+            command, builtin_chain));
+    }
+
+    const std::vector<std::string> inspect_chain_args{
+        command, "-t", "nat", "-S", target_chain};
+    for (std::size_t attempt = 0;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        last_result = run_iptables_control(inspect_chain_args);
+        if (command_reports_table_unavailable(last_result) ||
+            command_reports_chain_missing(last_result)) {
+            return;
+        }
+        const auto inspect_outcome =
+            classify_iptables_command(last_result);
+        if (inspect_outcome == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(
+                inspect_chain_args, last_result);
+            throw FirewallError(keen_pbr3::format(
+                "failed to inspect {} nat chain {} removal",
+                command, target_chain));
+        }
+        if (inspect_outcome == IptablesCommandOutcome::Success) {
+            if (attempt == iptables_control_retry_delays.size()) {
+                break;
+            }
+            const std::vector<std::string> flush_args{
+                command, "-t", "nat", "-F", target_chain};
+            const auto flush = run_iptables_control(flush_args);
+            if (!command_reports_chain_missing(flush) &&
+                !command_reports_table_unavailable(flush)) {
+                const auto flush_outcome =
+                    classify_iptables_command(flush);
+                if (flush_outcome ==
+                    IptablesCommandOutcome::PermanentFailure) {
+                    record_iptables_control_failure(flush_args, flush);
+                    throw FirewallError(keen_pbr3::format(
+                        "failed to flush {} nat chain {}",
+                        command, target_chain));
+                }
+                if (flush_outcome ==
+                    IptablesCommandOutcome::Success) {
+                    const std::vector<std::string> delete_args{
+                        command, "-t", "nat", "-X", target_chain};
+                    const auto deletion =
+                        run_iptables_control(delete_args);
+                    if (command_reports_chain_missing(deletion) ||
+                        command_reports_table_unavailable(deletion)) {
+                        return;
+                    }
+                    const auto delete_outcome =
+                        classify_iptables_command(deletion);
+                    if (delete_outcome ==
+                        IptablesCommandOutcome::PermanentFailure) {
+                        record_iptables_control_failure(
+                            delete_args, deletion);
+                        throw FirewallError(keen_pbr3::format(
+                            "failed to delete {} nat chain {}",
+                            command, target_chain));
+                    }
+                }
+            } else {
+                return;
+            }
+        }
+
+        if (last_result.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            break;
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
+    }
+    record_iptables_control_failure(inspect_chain_args, last_result);
+    throw TransientFirewallError(keen_pbr3::format(
+        "{} nat chain {} removal did not converge",
+        command, target_chain));
+}
+
+void IptablesFirewall::cleanup_nat_family_checked(
+    const char* command,
+    bool ipv6) {
+    remove_nat_chain_checked(
+        command, "PREROUTING", DNS_NAT_CHAIN_NAME);
+    remove_nat_chain_checked(
+        command, "POSTROUTING", SNAT_CHAIN_NAME);
+    if (ipv6) {
+        dns_nat_v6_created_ = false;
+    } else {
+        dns_nat_v4_created_ = false;
+    }
+}
+
 void IptablesFirewall::reconcile_hooks(bool ipv6) const {
     const char* command = ipv6 ? "ip6tables" : "iptables";
     reconcile_hook(
@@ -1430,11 +1908,7 @@ std::string IptablesFirewall::build_prefilter_lines(
             chain);
     }
 
-    if (prefilter.skip_marked_packets) {
-        lines += keen_pbr3::format(
-            "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
-            chain);
-    }
+    lines += build_skip_marked_packet_line(prefilter, chain);
 
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()
@@ -1469,6 +1943,22 @@ std::string IptablesFirewall::build_conntrack_prefilter_lines(
         mask,
         chain,
         mask);
+}
+
+std::string IptablesFirewall::build_skip_marked_packet_line(
+    const FirewallGlobalPrefilter& prefilter,
+    const std::string& chain) {
+    if (!prefilter.skip_marked_packets) {
+        return {};
+    }
+
+    // This public setting protects marks owned by NDMS and other firewall
+    // policies: any pre-existing skb mark must bypass keen-pbr entirely.
+    // conntrack_mark_mask is deliberately not used here; it scopes only the
+    // bits restored and written by keen-pbr's own flow-stickiness rules.
+    return keen_pbr3::format(
+        "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
+        chain);
 }
 
 std::vector<std::string> IptablesFirewall::build_rule_lines(
@@ -1644,11 +2134,7 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
     s += keen_pbr3::format(":{} - [0:0]\n-A OUTPUT -j {}\n",
                            OUTPUT_CHAIN_NAME, OUTPUT_CHAIN_NAME);
     s += build_conntrack_prefilter_lines(prefilter, OUTPUT_CHAIN_NAME);
-    if (prefilter.skip_marked_packets) {
-        s += keen_pbr3::format(
-            "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
-            OUTPUT_CHAIN_NAME);
-    }
+    s += build_skip_marked_packet_line(prefilter, OUTPUT_CHAIN_NAME);
     for (const auto& pr : rules) {
         if (pr.ipv6 != ipv6 || !pr.output) continue;
         for (const auto& line : build_rule_lines(
@@ -1705,11 +2191,7 @@ std::string IptablesFirewall::build_generation_ipt_script(
     }
 
     script += build_conntrack_prefilter_lines(prefilter, output_chain);
-    if (prefilter.skip_marked_packets) {
-        script += keen_pbr3::format(
-            "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
-            output_chain);
-    }
+    script += build_skip_marked_packet_line(prefilter, output_chain);
     for (const auto& rule : rules) {
         if (rule.ipv6 != ipv6) {
             continue;
@@ -1806,11 +2288,7 @@ std::string IptablesFirewall::build_output_generation_script(
         OUTPUT_CHAIN_NAME, output_chain);
 
     script += build_conntrack_prefilter_lines(prefilter, output_chain);
-    if (prefilter.skip_marked_packets) {
-        script += keen_pbr3::format(
-            "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
-            output_chain);
-    }
+    script += build_skip_marked_packet_line(prefilter, output_chain);
 
     for (const auto& rule : rules) {
         if (rule.ipv6 || !rule.output) {
@@ -1830,6 +2308,122 @@ std::string IptablesFirewall::build_output_generation_script(
     }
     script += "COMMIT\n";
     return script;
+}
+
+void IptablesFirewall::apply_nat_rules(
+    bool effective_ipv6,
+    FirewallApplyMode mode) {
+    const bool nat_requested =
+        dns_redirect_requested_ || router_origin_snat_requested_;
+    const std::string nat_script =
+        nat_requested
+            ? build_dns_nat_script(
+                  global_prefilter_,
+                  dns_redirect_requested_,
+                  router_origin_snat_requested_,
+                  snat_interfaces_)
+            : std::string{};
+
+    bool ipv6_nat_backend_available = false;
+    if (nat_requested) {
+        // Determine absence of the IPv6 NAT table with a read-only capability
+        // probe even when IPv6 is disabled: an available backend may still
+        // contain stale chains from an earlier IPv6-enabled generation.
+        // Restore, lock and hook failures are not capability failures and
+        // must reach the outer reconciler instead of being downgraded to an
+        // IPv4-only success.
+        ipv6_nat_backend_available = ipv6_nat_table_available();
+        if (effective_ipv6 && !ipv6_nat_backend_available) {
+            Logger::instance().warn(
+                "IPv6 nat table is unavailable; continuing IPv4-only");
+        }
+    }
+    const bool apply_ipv6_nat =
+        effective_ipv6 && ipv6_nat_backend_available;
+    if (mode == FirewallApplyMode::PreserveSets && nat_requested) {
+        // Phase 2 has converged, but the currently working NAT state is still
+        // live. Validate both transactions before removing any active DNS
+        // redirect or tunnel masquerade chain.
+        preflight_nat_restore("iptables-restore", nat_script);
+        if (apply_ipv6_nat) {
+            preflight_nat_restore("ip6tables-restore", nat_script);
+        }
+    }
+
+    if (!nat_requested && mode == FirewallApplyMode::PreserveSets) {
+        // Removing NAT is intentional when both features are disabled. For a
+        // replacement, never tear down the live chains before the new atomic
+        // restore transaction has committed.
+        cleanup_nat_rules_impl();
+    }
+
+    const auto reconcile_nat_hooks =
+        [this](const char* command, bool ipv6) {
+            if (dns_redirect_requested_) {
+                reconcile_hook(
+                    command,
+                    "nat",
+                    "PREROUTING",
+                    DNS_NAT_CHAIN_NAME);
+            } else {
+                remove_nat_chain_checked(
+                    command,
+                    "PREROUTING",
+                    DNS_NAT_CHAIN_NAME);
+            }
+
+            if (router_origin_snat_requested_) {
+                reconcile_hook(
+                    command,
+                    "nat",
+                    "POSTROUTING",
+                    SNAT_CHAIN_NAME);
+            } else {
+                remove_nat_chain_checked(
+                    command,
+                    "POSTROUTING",
+                    SNAT_CHAIN_NAME);
+            }
+
+            if (ipv6) {
+                dns_nat_v6_created_ =
+                    dns_redirect_requested_ ||
+                    router_origin_snat_requested_;
+            } else {
+                dns_nat_v4_created_ =
+                    dns_redirect_requested_ ||
+                    router_origin_snat_requested_;
+            }
+        };
+
+    if (nat_requested) {
+        pipe_to_cmd(
+            {"iptables-restore", "--noflush", "--counters"},
+            nat_script);
+        reconcile_nat_hooks("iptables", /*ipv6=*/false);
+        if (apply_ipv6_nat) {
+            pipe_to_cmd(
+                {"ip6tables-restore", "--noflush", "--counters"},
+                nat_script);
+            reconcile_nat_hooks("ip6tables", /*ipv6=*/true);
+        } else if (ipv6_nat_backend_available) {
+            // IPv6 was explicitly disabled while its NAT backend remains
+            // available. Remove any generation retained from an earlier
+            // IPv6-enabled process only after IPv4 converged. Inspect live
+            // state even when this fresh daemon has no in-memory ownership
+            // flag for the old chains.
+            cleanup_nat_family_checked("ip6tables", /*ipv6=*/true);
+        } else {
+            // No executable/table means there cannot be live IPv6 NAT state
+            // reachable through this backend. Do not turn a valid IPv4-only
+            // apply into a permanent failure.
+            dns_nat_v6_created_ = false;
+        }
+    }
+
+    dns_redirect_requested_ = false;
+    router_origin_snat_requested_ = false;
+    snat_interfaces_.clear();
 }
 
 void IptablesFirewall::apply(FirewallApplyMode mode) {
@@ -1983,38 +2577,10 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         verify_applied_generation(true, target_v6_generation_);
     }
 
-    if (mode != FirewallApplyMode::Destructive) {
-        // Keep the previously working DNS redirect and tunnel masquerade live
-        // until the new routing generation and all of its builtin hooks have
-        // converged. In particular, a transient mangle/PREROUTING race must not
-        // strand VPN-server clients without the old KeenPbrSnat rules.
-        cleanup_nat_rules_impl();
-    }
-
     // Phase 3: nat rules — client DNS enforcement and the masquerade that keeps
-    // router-originated detour traffic usable.
-    if (dns_redirect_requested_ || router_origin_snat_requested_) {
-        const std::string nat_script = build_dns_nat_script(
-            global_prefilter_, dns_redirect_requested_,
-            router_origin_snat_requested_, snat_interfaces_);
-        pipe_to_cmd({"iptables-restore", "--noflush", "--counters"}, nat_script);
-        dns_nat_v4_created_ = true;
-        if (effective_ipv6) {
-            try {
-                pipe_to_cmd({"ip6tables-restore", "--noflush", "--counters"},
-                            nat_script);
-                dns_nat_v6_created_ = true;
-            } catch (const std::exception& e) {
-                // ip6table_nat is missing on some older Keenetic kernels;
-                // IPv4 enforcement still applies.
-                Logger::instance().warn(
-                    "IPv6 DNS redirect unavailable ({}); continuing IPv4-only", e.what());
-            }
-        }
-    }
-    dns_redirect_requested_ = false;
-    router_origin_snat_requested_ = false;
-    snat_interfaces_.clear();
+    // router-originated detour traffic usable. Preserve-set applies validate
+    // the replacement first and only then remove the active NAT generation.
+    apply_nat_rules(effective_ipv6, mode);
 
     // Clear pending buffers
     pending_sets_.clear();
@@ -2134,8 +2700,27 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
 }
 
 void IptablesFirewall::cleanup_nat_rules_impl(bool sweep_live_state) {
+    if (!sweep_live_state) {
+        // Process-local ownership flags are only an optimization hint. After a
+        // daemon restart, named keen-pbr NAT chains may still be live while
+        // both flags are false. Checked live reconciliation makes ordinary
+        // cleanup and "NAT disabled" applies idempotent across restarts.
+        cleanup_nat_family_checked("iptables", /*ipv6=*/false);
+        if (ipv6_nat_table_available()) {
+            cleanup_nat_family_checked("ip6tables", /*ipv6=*/true);
+        } else {
+            dns_nat_v6_created_ = false;
+        }
+        return;
+    }
+
     // DNS redirect and tunnel masquerade NAT chains.
-    if (dns_nat_v4_created_ || sweep_live_state) {
+    if (dns_nat_v4_created_) {
+        // Ownership is cleared only after hooks and chains are observed gone.
+        // A failed stop/apply can therefore be retried without losing track of
+        // a still-live redirect or masquerade rule.
+        cleanup_nat_family_checked("iptables", /*ipv6=*/false);
+    } else if (sweep_live_state) {
         remove_all_hooks(
             "iptables", "nat", "PREROUTING", DNS_NAT_CHAIN_NAME);
         safe_exec({"iptables", "-t", "nat", "-F", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);
@@ -2146,7 +2731,13 @@ void IptablesFirewall::cleanup_nat_rules_impl(bool sweep_live_state) {
         safe_exec({"iptables", "-t", "nat", "-X", SNAT_CHAIN_NAME}, /*suppress_output=*/true);
         dns_nat_v4_created_ = false;
     }
-    if (dns_nat_v6_created_ || sweep_live_state) {
+    const bool ipv6_nat_backend_available =
+        ipv6_nat_table_available();
+    if (!ipv6_nat_backend_available) {
+        dns_nat_v6_created_ = false;
+    } else if (dns_nat_v6_created_) {
+        cleanup_nat_family_checked("ip6tables", /*ipv6=*/true);
+    } else if (sweep_live_state) {
         remove_all_hooks(
             "ip6tables", "nat", "PREROUTING", DNS_NAT_CHAIN_NAME);
         safe_exec({"ip6tables", "-t", "nat", "-F", DNS_NAT_CHAIN_NAME}, /*suppress_output=*/true);

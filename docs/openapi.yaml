@@ -1024,8 +1024,10 @@ components:
           type: boolean
           nullable: true
           description: >
-            Whether keen-pbr should install IPv6 firewall sets/rules and emit IPv6
-            resolver set targets. Defaults to `true` when omitted or set to `null`.
+            Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6
+            resolver set targets. When disabled, managed dnsmasq also suppresses
+            AAAA answers so clients do not wait on an unusable IPv6 path.
+            Defaults to `true` when omitted or set to `null`.
             If enabled but the system lacks IPv6 support, keen-pbr logs an error and
             continues in IPv4-only mode.
           default: true

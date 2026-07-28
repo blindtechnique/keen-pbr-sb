@@ -747,9 +747,10 @@ TEST_CASE("generate output omits IPv6 dnsmasq targets when IPv6 is disabled") {
     DnsmasqGenerator ipset_gen(reg1, streamer1, route_cfg, dns_cfg, lists,
                                ResolverType::DNSMASQ_IPSET,
                                KEEN_PBR3_VERSION_FULL_STRING,
-                               false);
+                               ResolverIpv6Policy::explicitly_disabled());
     const std::string ipset_output = run_generate(ipset_gen);
 
+    CHECK(ipset_output.find("filter-AAAA\n") != std::string::npos);
     CHECK(ipset_output.find("ipset=/example.com/kpbr4d_mylist\n") != std::string::npos);
     CHECK(ipset_output.find("kpbr6d_mylist") == std::string::npos);
 
@@ -757,11 +758,72 @@ TEST_CASE("generate output omits IPv6 dnsmasq targets when IPv6 is disabled") {
     DnsmasqGenerator nftset_gen(reg2, streamer2, route_cfg, dns_cfg, lists,
                                 ResolverType::DNSMASQ_NFTSET,
                                 KEEN_PBR3_VERSION_FULL_STRING,
-                                false);
+                                ResolverIpv6Policy::explicitly_disabled());
     const std::string nftset_output = run_generate(nftset_gen);
 
+    CHECK(nftset_output.find("filter-AAAA\n") != std::string::npos);
     CHECK(nftset_output.find("nftset=/example.com/4#inet#KeenPbrTable#kpbr4d_mylist\n") != std::string::npos);
     CHECK(nftset_output.find("kpbr6d_mylist") == std::string::npos);
+}
+
+TEST_CASE("generate output keeps AAAA answers when IPv6 is enabled") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry registry(dns_cfg);
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists,
+        ResolverType::DNSMASQ_IPSET,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::supported());
+
+    CHECK(run_generate(generator).find("filter-AAAA") == std::string::npos);
+}
+
+TEST_CASE("unsupported effective IPv6 omits IPv6 targets without suppressing AAAA") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry registry(dns_cfg);
+    DnsmasqGenerator generator(
+        registry, streamer, route_cfg, dns_cfg, lists,
+        ResolverType::DNSMASQ_IPSET,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::unsupported());
+
+    const std::string output = run_generate(generator);
+    CHECK(output.find("filter-AAAA") == std::string::npos);
+    CHECK(output.find("ipset=/example.com/kpbr4d_mylist\n")
+          != std::string::npos);
+    CHECK(output.find("kpbr6d_mylist") == std::string::npos);
+}
+
+TEST_CASE("resolver IPv6 policy filters AAAA only for explicit user disable") {
+    const ResolverIpv6Policy configured_off = resolver_ipv6_policy(
+        {false, Ipv6SupportDecision::Reason::DisabledByConfig});
+    const ResolverIpv6Policy unsupported = resolver_ipv6_policy(
+        {false, Ipv6SupportDecision::Reason::UnsupportedBySystem});
+    const ResolverIpv6Policy enabled = resolver_ipv6_policy(
+        {true, Ipv6SupportDecision::Reason::Enabled});
+
+    CHECK_FALSE(configured_off.targets_enabled);
+    CHECK(configured_off.suppress_aaaa);
+    CHECK_FALSE(unsupported.targets_enabled);
+    CHECK_FALSE(unsupported.suppress_aaaa);
+    CHECK(enabled.targets_enabled);
+    CHECK_FALSE(enabled.suppress_aaaa);
 }
 
 TEST_CASE("hash changes when IPv6 dnsmasq targets are disabled") {
@@ -778,13 +840,45 @@ TEST_CASE("hash changes when IPv6 dnsmasq targets are disabled") {
     DnsServerRegistry reg2(dns_cfg);
 
     const std::string hash_ipv6 = DnsmasqGenerator::compute_config_hash(
-        reg1, streamer1, route_cfg, dns_cfg, lists, KEEN_PBR3_VERSION_FULL_STRING, true);
+        reg1, streamer1, route_cfg, dns_cfg, lists,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::supported());
     const std::string hash_ipv4_only = DnsmasqGenerator::compute_config_hash(
-        reg2, streamer2, route_cfg, dns_cfg, lists, KEEN_PBR3_VERSION_FULL_STRING, false);
+        reg2, streamer2, route_cfg, dns_cfg, lists,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        ResolverIpv6Policy::unsupported());
 
     CHECK(!hash_ipv6.empty());
     CHECK(!hash_ipv4_only.empty());
     CHECK(hash_ipv6 != hash_ipv4_only);
+}
+
+TEST_CASE("hash changes when explicit IPv6 disable toggles AAAA filtering") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer1(cache);
+    ListStreamer streamer2(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+
+    DnsServerRegistry reg1(dns_cfg);
+    DnsServerRegistry reg2(dns_cfg);
+
+    const std::string unsupported_hash =
+        DnsmasqGenerator::compute_config_hash(
+            reg1, streamer1, route_cfg, dns_cfg, lists,
+            KEEN_PBR3_VERSION_FULL_STRING,
+            ResolverIpv6Policy::unsupported());
+    const std::string user_disabled_hash =
+        DnsmasqGenerator::compute_config_hash(
+            reg2, streamer2, route_cfg, dns_cfg, lists,
+            KEEN_PBR3_VERSION_FULL_STRING,
+            ResolverIpv6Policy::explicitly_disabled());
+
+    CHECK(unsupported_hash != user_disabled_hash);
 }
 
 TEST_CASE("hash changes when allow_domain_rebinding changes") {

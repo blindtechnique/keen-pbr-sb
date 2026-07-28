@@ -50,7 +50,7 @@ public:
 
     // Atomically apply all pending table/set/rule/element operations via
     // a single 'nft -j -f -' invocation with a JSON batch.
-    void apply(FirewallApplyMode mode = FirewallApplyMode::Destructive) override;
+    void apply(FirewallApplyMode mode) override;
     // Delete the inet KeenPbrTable table, removing all sets and rules within it.
     void cleanup() override;
     // Returns FirewallBackend::nftables.

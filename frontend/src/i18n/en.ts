@@ -1092,7 +1092,7 @@ export const enTranslation = {
           "Clear dynamic addresses learned by dnsmasq during a full config apply. Disable this to preserve them until TTL expiry and avoid a cold routing start.",
         ipv6EnabledLabel: "Enable IPv6 support",
         ipv6EnabledHint:
-          "Install IPv6 firewall sets and emit IPv6 dnsmasq targets. Disable this on older firmware without IPv6 netfilter support.",
+          "Install IPv6 routes, firewall rules, and dnsmasq targets. When disabled, managed dnsmasq suppresses AAAA answers so clients do not wait on unusable IPv6.",
         clientDnsEnforcementLabel: "Force clients to use router DNS",
         clientDnsEnforcementHint:
           "Transparently redirect plain DNS (port 53) from LAN clients to the router's resolver and block DNS-over-TLS (port 853), so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked this way; disable Secure DNS in browsers for full coverage.",

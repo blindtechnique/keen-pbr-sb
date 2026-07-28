@@ -596,7 +596,7 @@ void Daemon::setup_api() {
                 dns_cfg,
                 config.lists.value_or(std::map<std::string, ListConfig>{}),
                 KEEN_PBR3_VERSION_FULL_STRING,
-                ipv6_decision.enabled);
+                resolver_ipv6_policy(ipv6_decision));
         },
         [this]() {
             const auto runtime_snapshot = runtime_state_store_.snapshot();

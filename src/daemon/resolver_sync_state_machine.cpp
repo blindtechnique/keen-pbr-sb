@@ -173,4 +173,31 @@ ResolverSyncSnapshot ResolverSyncStateMachine::snapshot(std::int64_t now_ts) con
     return result;
 }
 
+ResolverSyncCheckpoint ResolverSyncStateMachine::checkpoint() const {
+    ResolverSyncCheckpoint result;
+    result.expected_hash = expected_hash_;
+    result.actual_hash = actual_hash_;
+    result.actual_ts = actual_ts_;
+    result.last_probe_ts = last_probe_ts_;
+    result.apply_started_ts = apply_started_ts_;
+    result.probe_status = probe_status_;
+    result.consecutive_probe_failures = consecutive_probe_failures_;
+    result.runtime_active = runtime_active_;
+    result.resolver_configured = resolver_configured_;
+    return result;
+}
+
+void ResolverSyncStateMachine::restore(
+    const ResolverSyncCheckpoint& checkpoint) {
+    expected_hash_ = checkpoint.expected_hash;
+    actual_hash_ = checkpoint.actual_hash;
+    actual_ts_ = checkpoint.actual_ts;
+    last_probe_ts_ = checkpoint.last_probe_ts;
+    apply_started_ts_ = checkpoint.apply_started_ts;
+    probe_status_ = checkpoint.probe_status;
+    consecutive_probe_failures_ = checkpoint.consecutive_probe_failures;
+    runtime_active_ = checkpoint.runtime_active;
+    resolver_configured_ = checkpoint.resolver_configured;
+}
+
 } // namespace keen_pbr3

@@ -15,6 +15,7 @@ namespace keen_pbr3 {
 #ifdef KEEN_PBR3_TESTING
 namespace testing {
 bool restore_wait_option_supported_for_test(const std::string& program);
+bool restore_test_option_supported_for_test(const std::string& program);
 void reset_restore_wait_option_probe_for_test();
 } // namespace testing
 #endif
@@ -59,7 +60,7 @@ public:
     // Atomically apply all pending ipsets (via ipset restore) and rules
     // (via iptables-restore / ip6tables-restore), always materializing the
     // KeenPbrTable chain scaffold and PREROUTING jump for diagnostics.
-    void apply(FirewallApplyMode mode = FirewallApplyMode::Destructive) override;
+    void apply(FirewallApplyMode mode) override;
     // Destroy all buffered ipsets (ipset destroy) and flush/delete the
     // KeenPbrTable chain from both iptables and ip6tables mangle tables.
     void cleanup() override;
@@ -77,11 +78,16 @@ private:
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
+    static constexpr const char* DNS_NAT_VALIDATION_CHAIN_NAME =
+        "KeenPbrDnsValidate";
+    static constexpr const char* SNAT_VALIDATION_CHAIN_NAME =
+        "KeenPbrSnatValidate";
     void cleanup_live_impl(bool preserve_dynamic_sets = false,
                            bool sweep_live_state = false);
     void cleanup_impl();
     void cleanup_rules_impl(bool sweep_live_state = false);
     void cleanup_nat_rules_impl(bool sweep_live_state = false);
+    void apply_nat_rules(bool effective_ipv6, FirewallApplyMode mode);
     void cleanup_saved_sets(bool preserve_dynamic_sets);
     static void cleanup_legacy_generation_chains(const char* command);
 
@@ -137,6 +143,9 @@ private:
         bool replace_active_chain,
         const FirewallGlobalPrefilter& prefilter = {});
     static std::string build_conntrack_prefilter_lines(
+        const FirewallGlobalPrefilter& prefilter,
+        const std::string& chain);
+    static std::string build_skip_marked_packet_line(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain);
     // Build early RETURN lines for the global prefilter.
@@ -201,6 +210,12 @@ private:
         const char* table,
         const char* builtin_chain,
         const char* target_chain);
+    static void remove_nat_chain_checked(
+        const char* command,
+        const char* builtin_chain,
+        const char* target_chain);
+    static bool ipv6_nat_table_available();
+    void cleanup_nat_family_checked(const char* command, bool ipv6);
     const char* prerouting_table_name(bool ipv6) const;
     const char* prerouting_dispatcher_chain_name(bool ipv6) const;
     const char* prerouting_generation_chain(
@@ -252,6 +267,11 @@ private:
         bool dns_redirect,
         bool router_origin_snat,
         const std::vector<std::string>& snat_interfaces);
+    static std::string build_nat_validation_script(
+        const std::string& nat_script);
+    static void preflight_nat_restore(
+        const std::string& restore_program,
+        const std::string& nat_script);
 
 #ifdef KEEN_PBR3_TESTING
     friend class IptablesBuilderTest;

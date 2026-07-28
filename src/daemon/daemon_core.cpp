@@ -694,7 +694,7 @@ void Daemon::handle_ipc_control_socket() {
                                     lists,
                                     type,
                                     KEEN_PBR3_VERSION_FULL_STRING,
-                                    generation->ipv6_enabled);
+                                    generation->ipv6_policy);
                                 generator.generate(output);
                                 output
                                     << "txt-record=resolver-state.keen.pbr,"
@@ -1452,7 +1452,26 @@ void Daemon::run() {
     // coming up without rules and retrying beats leaving the router with no
     // service at all, because a running daemon can still be reached and fixed.
     try {
-        apply_firewall(FirewallApplyMode::Destructive);
+        retry_hot_apply_firewall(
+            [this]() {
+                // A previous daemon generation may still own working chains
+                // after a crash or package replacement. Keep them live until
+                // this generation reaches an atomic COMMIT.
+                apply_firewall(FirewallApplyMode::PreserveSets);
+            },
+            [](std::chrono::milliseconds delay) {
+                std::this_thread::sleep_for(delay);
+            },
+            [](std::size_t retry,
+               std::chrono::milliseconds delay,
+               const TransientFirewallError& error) {
+                Logger::instance().info(
+                    "Initial firewall replacement deferred after a concurrent "
+                    "firmware change: {}. Retry {} in {}ms.",
+                    error.what(),
+                    retry,
+                    delay.count());
+            });
         log.info("Firewall rules and routing applied.");
     } catch (const TransientFirewallError& e) {
         // This is expected while NDMS is still publishing its firewall after

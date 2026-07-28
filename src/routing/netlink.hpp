@@ -83,6 +83,8 @@ enum class RuleAddResult {
     AlreadyPresent,
 };
 
+struct DumpedRule;
+
 // PolicyRuleManager expands family=0 into two concrete operations so it can
 // roll IPv4 back if the matching IPv6 install fails.
 class RuleNetlinkOperations {
@@ -90,6 +92,7 @@ public:
     virtual ~RuleNetlinkOperations() = default;
     virtual RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) = 0;
     virtual void delete_rule_for_family(const RuleSpec& spec, int family) = 0;
+    virtual std::vector<DumpedRule> dump_policy_rules(int family = 0) = 0;
 };
 
 // A route dumped from the kernel (read-only snapshot)
@@ -154,7 +157,7 @@ public:
 
     // Dump all policy rules from the kernel.
     // family: 0 (AF_UNSPEC) to get both IPv4 and IPv6 rules.
-    std::vector<DumpedRule> dump_policy_rules(int family = 0);
+    std::vector<DumpedRule> dump_policy_rules(int family = 0) override;
 
     // Dump all network interfaces from the kernel with best-effort live detail.
     std::vector<DumpedInterface> dump_interfaces();
