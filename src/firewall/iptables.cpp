@@ -1869,11 +1869,6 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         cleanup_live_impl(
             /*preserve_dynamic_sets=*/!clear_dynamic_sets_on_apply(),
             /*sweep_live_state=*/true);
-    } else {
-        // Routing chains stay live until their A/B dispatcher is switched.
-        // NAT chains are rebuilt separately because they do not reference the
-        // generation-scoped list sets.
-        cleanup_nat_rules_impl();
     }
 
     // Phase 1: ipsets via 'ipset restore -exist'
@@ -1986,6 +1981,14 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     verify_applied_generation(false, target_v4_generation_);
     if (has_v6) {
         verify_applied_generation(true, target_v6_generation_);
+    }
+
+    if (mode != FirewallApplyMode::Destructive) {
+        // Keep the previously working DNS redirect and tunnel masquerade live
+        // until the new routing generation and all of its builtin hooks have
+        // converged. In particular, a transient mangle/PREROUTING race must not
+        // strand VPN-server clients without the old KeenPbrSnat rules.
+        cleanup_nat_rules_impl();
     }
 
     // Phase 3: nat rules — client DNS enforcement and the masquerade that keeps

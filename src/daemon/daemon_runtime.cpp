@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <thread>
 
 #include "../config/routing_state.hpp"
 #include "../firewall/firewall.hpp"
@@ -468,7 +469,7 @@ void Daemon::normalize_urltest_selections() {
             normalized.emplace(selection->first, selection->second);
             continue;
         }
-        Logger::instance().warn(
+        Logger::instance().info(
             "Dropping retained urltest selection '{}' for '{}': child is no "
             "longer configured or routable",
             selection->second,
@@ -1241,7 +1242,26 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     reconcile_static_routing();
     register_urltest_outbounds();
     (void)refresh_keenetic_dns_cache(true);
-    apply_firewall(FirewallApplyMode::PreserveSets);
+    retry_hot_apply_firewall(
+        [this]() {
+            // apply_firewall rebuilds the complete pending transaction on
+            // every call. A retry therefore never reuses the one-shot backend
+            // state from the failed attempt.
+            apply_firewall(FirewallApplyMode::PreserveSets);
+        },
+        [](std::chrono::milliseconds delay) {
+            std::this_thread::sleep_for(delay);
+        },
+        [](std::size_t retry,
+           std::chrono::milliseconds delay,
+           const TransientFirewallError& error) {
+            Logger::instance().info(
+                "Hot configuration firewall apply deferred after a "
+                "concurrent firmware change: {}. Retry {} in {}ms.",
+                error.what(),
+                retry,
+                delay.count());
+        });
     schedule_keenetic_dns_refresh();
     schedule_lists_autoupdate();
     update_resolver_config_hash();

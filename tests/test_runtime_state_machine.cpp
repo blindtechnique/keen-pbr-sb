@@ -3,6 +3,9 @@
 #include "daemon/runtime_recovery_policy.hpp"
 #include "runtime/runtime_state_machine.hpp"
 
+#include <chrono>
+#include <vector>
+
 using namespace keen_pbr3;
 
 TEST_CASE("runtime state machine accepts recovery and rejects impossible transitions") {
@@ -69,4 +72,84 @@ TEST_CASE("runtime incident latch reports an immediate severe failure once") {
         incidents.record_failure(
             "selector", /*notify_immediately=*/true)
             .notify);
+}
+
+TEST_CASE("hot apply retries only transient firewall failures with backoff") {
+    std::size_t apply_attempts = 0;
+    std::vector<std::chrono::milliseconds> waits;
+    std::vector<std::size_t> retries;
+
+    retry_hot_apply_firewall(
+        [&]() {
+            ++apply_attempts;
+            if (apply_attempts < 3) {
+                throw TransientFirewallError("firmware changed the hook");
+            }
+        },
+        [&](std::chrono::milliseconds delay) {
+            waits.push_back(delay);
+        },
+        [&](std::size_t retry,
+            std::chrono::milliseconds,
+            const TransientFirewallError&) {
+            retries.push_back(retry);
+        });
+
+    CHECK(apply_attempts == 3);
+    const std::vector<std::chrono::milliseconds> expected_waits{
+        std::chrono::milliseconds{100},
+        std::chrono::milliseconds{200},
+    };
+    const std::vector<std::size_t> expected_retries{1, 2};
+    CHECK(waits == expected_waits);
+    CHECK(retries == expected_retries);
+}
+
+TEST_CASE("hot apply propagates a permanent firewall failure immediately") {
+    std::size_t apply_attempts = 0;
+    std::size_t waits = 0;
+
+    CHECK_THROWS_AS(
+        retry_hot_apply_firewall(
+            [&]() {
+                ++apply_attempts;
+                throw FirewallError("invalid generated rule");
+            },
+            [&](std::chrono::milliseconds) {
+                ++waits;
+            },
+            [](std::size_t,
+               std::chrono::milliseconds,
+               const TransientFirewallError&) {}),
+        FirewallError);
+
+    CHECK(apply_attempts == 1);
+    CHECK(waits == 0);
+}
+
+TEST_CASE("hot apply bounds repeated transient firewall failures") {
+    std::size_t apply_attempts = 0;
+    std::vector<std::chrono::milliseconds> waits;
+
+    CHECK_THROWS_AS(
+        retry_hot_apply_firewall(
+            [&]() {
+                ++apply_attempts;
+                throw TransientFirewallError("firmware is still changing");
+            },
+            [&](std::chrono::milliseconds delay) {
+                waits.push_back(delay);
+            },
+            [](std::size_t,
+               std::chrono::milliseconds,
+               const TransientFirewallError&) {}),
+        TransientFirewallError);
+
+    CHECK(apply_attempts == 4);
+    const std::vector<std::chrono::milliseconds> expected_waits{
+        std::chrono::milliseconds{100},
+        std::chrono::milliseconds{200},
+        std::chrono::milliseconds{400},
+    };
+    CHECK(waits == expected_waits);
 }

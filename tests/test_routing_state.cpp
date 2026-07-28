@@ -602,12 +602,18 @@ TEST_CASE("populate_routing_state: strict urltest installs selected primary, wei
         [](const Outbound&) { return true; },
         &selections);
 
-    REQUIRE(routes.get_routes().size() == 19);
+    REQUIRE(routes.get_routes().size() == 17);
     CHECK(find_route(routes.get_routes(), 104, false, false, 0, std::optional<std::string>{"wg2"}) != nullptr);
     CHECK(find_route(routes.get_routes(), 104, false, false, 1, std::optional<std::string>{"wg1"}) != nullptr);
-    CHECK(find_route(routes.get_routes(), 104, false, false, 2, std::optional<std::string>{"wg2"}) != nullptr);
-    CHECK(find_route(routes.get_routes(), 104, false, false, 3, std::optional<std::string>{"eth0"}) != nullptr);
-    CHECK(find_route(routes.get_routes(), 104, false, false, 4, std::optional<std::string>{"eth1"}) != nullptr);
+    CHECK(find_route(routes.get_routes(), 104, false, false, 2, std::optional<std::string>{"eth0"}) != nullptr);
+    CHECK(find_route(routes.get_routes(), 104, false, false, 3, std::optional<std::string>{"eth1"}) != nullptr);
+    CHECK(std::count_if(routes.get_routes().begin(),
+                        routes.get_routes().end(),
+                        [](const RouteSpec& route) {
+                            return route.table == 104 &&
+                                   !route.unreachable &&
+                                   route.interface == "wg2";
+                        }) == 1);
     CHECK(std::count_if(routes.get_routes().begin(),
                         routes.get_routes().end(),
                         [](const RouteSpec& route) {
@@ -647,9 +653,8 @@ TEST_CASE("populate_routing_state: strict urltest skips unreachable children") {
         [](const Outbound& ob) { return ob.tag != "vpn1"; },
         &selections);
 
-    REQUIRE(routes.get_routes().size() == 7);
+    REQUIRE(routes.get_routes().size() == 5);
     CHECK(find_route(routes.get_routes(), 102, false, false, 0, std::optional<std::string>{"wg2"}) != nullptr);
-    CHECK(find_route(routes.get_routes(), 102, false, false, 1, std::optional<std::string>{"wg2"}) != nullptr);
     CHECK(find_route(routes.get_routes(), 102, false, false, 1, std::optional<std::string>{"wg1"}) == nullptr);
     CHECK(std::count_if(routes.get_routes().begin(),
                         routes.get_routes().end(),

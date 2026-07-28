@@ -1,12 +1,42 @@
 #pragma once
 
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
 #include <string>
 
+#include "../firewall/firewall.hpp"
+
 namespace keen_pbr3 {
+
+inline constexpr std::array<std::chrono::milliseconds, 3>
+    HOT_APPLY_FIREWALL_RETRY_DELAYS{
+        std::chrono::milliseconds{100},
+        std::chrono::milliseconds{200},
+        std::chrono::milliseconds{400},
+    };
+
+template <typename Apply, typename Wait, typename OnRetry>
+void retry_hot_apply_firewall(Apply&& apply,
+                              Wait&& wait,
+                              OnRetry&& on_retry) {
+    for (std::size_t retry = 0;; ++retry) {
+        try {
+            apply();
+            return;
+        } catch (const TransientFirewallError& error) {
+            if (retry >= HOT_APPLY_FIREWALL_RETRY_DELAYS.size()) {
+                throw;
+            }
+            const auto delay = HOT_APPLY_FIREWALL_RETRY_DELAYS[retry];
+            on_retry(retry + 1, delay, error);
+            wait(delay);
+        }
+    }
+}
 
 inline bool runtime_recovery_is_current(
     bool runtime_active,

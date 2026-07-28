@@ -371,6 +371,17 @@ public:
     IptablesFirewall fw(use_raw_prerouting);
     fw.verify_applied_generation(false, generation);
   }
+
+  static void apply_preserve_with_existing_nat_and_raw_hook_failure() {
+    IptablesFirewall fw(/*use_raw_prerouting=*/true);
+    fw.set_ipv6_enabled(false);
+    fw.apply_prepared_ = true;
+    fw.target_v4_generation_ = FirewallSetGeneration::B;
+    fw.dns_nat_v4_created_ = true;
+    fw.router_origin_snat_requested_ = true;
+    fw.snat_interfaces_ = {"nwg2"};
+    fw.apply(FirewallApplyMode::PreserveSets);
+  }
 };
 
 } // namespace keen_pbr3
@@ -378,6 +389,55 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("preserve apply keeps existing NAT when raw companion hook fails") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "iptables-calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_IPTABLES_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t raw -S')\n"
+      "    printf '%s\\n' '-N KeenPbrRaw' '-A KeenPbrRaw -j KeenPbrRaw_A'\n"
+      "    ;;\n"
+      "  '-t mangle -S')\n"
+      "    printf '%s\\n' '-N KeenPbrOutput' "
+      "'-A KeenPbrOutput -j KeenPbrOutput_A'\n"
+      "    ;;\n"
+      "  '-t raw -S PREROUTING')\n"
+      "    printf '%s\\n' '-A PREROUTING -j KeenPbrRaw'\n"
+      "    ;;\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    printf '%s\\n' '-A OUTPUT -j KeenPbrOutput'\n"
+      "    ;;\n"
+      "  '-t mangle -S PREROUTING')\n"
+      "    echo 'invalid argument' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "/bin/cat >/dev/null\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_IPTABLES_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK_THROWS_AS(
+      T::apply_preserve_with_existing_nat_and_raw_hook_failure(),
+      FirewallError);
+  const std::string command_log = read_iptables_test_file(calls);
+  CHECK(command_log.find("-t mangle -S PREROUTING") != std::string::npos);
+  CHECK(command_log.find("-t nat ") == std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
 
 TEST_CASE("iptables restore wait capability cache is independent per tool") {
   IptablesTestTempDir temp;

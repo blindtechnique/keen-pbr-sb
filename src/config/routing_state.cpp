@@ -538,6 +538,9 @@ void populate_routing_state(const Config& cfg,
 
                 uint32_t metric = 1;
                 for (const Outbound* child : ordered_children) {
+                    if (selected && child->tag == selected->tag) {
+                        continue;
+                    }
                     if (reachability_check && !reachability_check(*child)) {
                         continue;
                     }
