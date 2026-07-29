@@ -13,6 +13,7 @@ add_executable(keen-pbr-tests
   test_test_routing.cpp
   test_keenetic_dns.cpp
   test_ndms_interface_inventory.cpp
+  test_internal_vpn_server_resolver.cpp
   test_ndms_interface_management.cpp
   test_ndms_rci_observation.cpp
   test_ndms_rci_restorable_snapshot.cpp
@@ -27,6 +28,8 @@ add_executable(keen-pbr-tests
   test_srs_decoder.cpp
   test_http_client.cpp
   test_config_validation.cpp
+  test_config_store.cpp
+  test_catalog_setup_planner.cpp
   test_config_writer.cpp
   test_dependency_analysis.cpp
   test_routing_state.cpp
@@ -77,6 +80,8 @@ add_executable(keen-pbr-tests
   test_pid_file.cpp
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
+  ../src/daemon/config_store.cpp
+  ../src/setup/catalog_setup_planner.cpp
   ../src/config/config_writer.cpp
   ../src/util/last_command_failure.cpp
   ../src/backup/persistent_snapshot.cpp
@@ -131,6 +136,8 @@ add_executable(keen-pbr-tests
   ../src/http/http_transport.cpp
   ../src/http/curl_runtime.cpp
   ../src/keenetic/ndms_interface_inventory.cpp
+  ../src/keenetic/ndms_catalog_cache.cpp
+  ../src/keenetic/internal_vpn_server_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
   ../src/keenetic/ndms_rci_observation.cpp
   ../src/keenetic/ndms_rci_restorable_snapshot.cpp
@@ -373,6 +380,7 @@ target_compile_definitions(keen-pbr-tests PRIVATE USE_KEENETIC_API)
 if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
+    test_api_catalog_setup.cpp
     test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
     ../src/api/server.cpp
@@ -392,6 +400,8 @@ if(WITH_API)
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
     ../src/api/handler_config.cpp
+    ../src/api/handler_catalog.cpp
+    ../src/api/handler_catalog_setup.cpp
     ../src/api/handler_backup.cpp
     ../src/health/runtime_interface_inventory.cpp
     ../src/health/runtime_outbound_state.cpp

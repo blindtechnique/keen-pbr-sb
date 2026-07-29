@@ -110,6 +110,103 @@ namespace api {
         std::optional<std::string> url;
     };
 
+    struct CatalogPresetSelection {
+        std::optional<std::string> display_name;
+        std::string preset_id;
+    };
+
+    enum class DnsMode : int { AUTOMATIC, EXPLICIT_SERVER, NONE };
+
+    enum class CatalogSetupModeEnum : int { BLOCK, NONE, OUTBOUND };
+
+    struct Intent {
+        std::optional<std::string> dns_display_name;
+        DnsMode dns_mode;
+        std::optional<std::string> dns_server_tag;
+        CatalogSetupModeEnum mode;
+        std::optional<std::string> outbound_tag;
+        std::optional<std::string> route_display_name;
+        std::vector<CatalogPresetSelection> selections;
+        std::optional<std::string> source_detour_tag;
+    };
+
+    struct CatalogSetupApplyRequest {
+        bool accept_warnings;
+        std::string base_revision;
+        std::string candidate_revision;
+        Intent intent;
+        std::string preview_token;
+    };
+
+    struct CatalogSetupApplyResponse {
+        bool applied;
+        std::optional<int64_t> apply_started_ts;
+        std::string config_revision;
+        std::string message;
+        bool rolled_back;
+        bool saved;
+        std::string status;
+    };
+
+    struct CatalogSetupBlackholeSummary {
+        bool created;
+        std::string tag;
+    };
+
+    struct CatalogSetupDnsRuleSummary {
+        std::string display_name;
+        int64_t insertion_index;
+        std::string server;
+        std::string technical_id;
+    };
+
+    struct CatalogSetupListSummary {
+        std::string display_name;
+        bool has_inline_cidrs;
+        bool has_inline_domains;
+        std::string preset_id;
+        std::optional<std::string> source_detour;
+        std::string technical_id;
+        bool url_backed;
+    };
+
+    struct CatalogSetupPreviewRequest {
+        Intent intent;
+    };
+
+    struct RouteRule {
+        bool blocking;
+        std::string display_name;
+        int64_t insertion_index;
+        std::string outbound;
+        std::string technical_id;
+    };
+
+    struct Summary {
+        std::optional<CatalogSetupBlackholeSummary> blackhole;
+        std::optional<CatalogSetupDnsRuleSummary> dns_rule;
+        std::vector<CatalogSetupListSummary> lists;
+        CatalogSetupModeEnum mode;
+        std::optional<RouteRule> route_rule;
+    };
+
+    enum class Code : int { DNS_AUTOMATIC_UNAVAILABLE, DNS_DETOUR_MISMATCH, DNS_DETOUR_MISSING, DNS_IGNORED_FOR_BLOCK, SOURCE_DETOUR_NOT_APPLICABLE, SOURCE_DETOUR_NOT_FOUND, SOURCE_DETOUR_NOT_ROUTABLE };
+
+    struct CatalogSetupWarningElement {
+        Code code;
+        std::string message;
+        std::string path;
+    };
+
+    struct CatalogSetupPreviewResponse {
+        std::string base_revision;
+        std::string candidate_revision;
+        std::string preview_token;
+        bool requires_warning_acceptance;
+        Summary summary;
+        std::vector<CatalogSetupWarningElement> warnings;
+    };
+
     enum class CheckStatus : int { MISMATCH, MISSING, OK };
 
     struct CircuitBreakerConfig {
@@ -236,6 +333,12 @@ namespace api {
         std::optional<std::string> url;
     };
 
+    struct InternalVpnServerElement {
+        std::string interface;
+        std::optional<std::string> ndms_id;
+        bool process_clients;
+    };
+
     struct RouteRuleElement {
         std::optional<std::string> dest_addr;
         std::optional<std::string> dest_port;
@@ -252,6 +355,7 @@ namespace api {
 
     struct Route {
         std::optional<std::vector<std::string>> inbound_interfaces;
+        std::optional<std::vector<InternalVpnServerElement>> internal_vpn_servers;
         std::optional<std::vector<RouteRuleElement>> rules;
     };
 
@@ -478,6 +582,8 @@ namespace api {
         ConfigUpdateResponseStatus status;
     };
 
+    enum class NdmsCatalogStatus : int { FRESH, STALE, UNAVAILABLE };
+
     struct NdmsInterfaceCapabilities {
         bool backup_required;
         bool can_delete;
@@ -507,6 +613,8 @@ namespace api {
         std::string firmware_interface_name;
         std::string firmware_type;
         std::string id;
+        bool internal_vpn_server_candidate;
+        bool internal_vpn_server_role_confirmation_required;
         std::optional<std::string> kernel_name;
         Kind kind;
         std::string label;
@@ -522,6 +630,7 @@ namespace api {
 
     struct NdmsInterfaceInventoryResponse {
         bool available;
+        NdmsCatalogStatus catalog_status;
         std::vector<NdmsTunnelInterfaceElement> interfaces;
         MutationMode mutation_mode;
         bool read_only;
@@ -754,11 +863,11 @@ namespace api {
         TransportActionResponseStatus status;
     };
 
-    enum class Mode : int { ENSURE };
+    enum class TransportLinkedOutboundEnsureMode : int { ENSURE };
 
     struct LinkedOutbound {
         std::optional<std::string> display_name;
-        Mode mode;
+        TransportLinkedOutboundEnsureMode mode;
         std::optional<bool> strict_enforcement;
     };
 
@@ -874,6 +983,20 @@ namespace api {
     struct ApiTypes {
         std::optional<ApiConfig> api_config;
         std::optional<CacheMetadata> cache_metadata;
+        std::optional<CatalogPresetSelection> catalog_preset_selection;
+        std::optional<CatalogSetupApplyRequest> catalog_setup_apply_request;
+        std::optional<CatalogSetupApplyResponse> catalog_setup_apply_response;
+        std::optional<CatalogSetupBlackholeSummary> catalog_setup_blackhole_summary;
+        std::optional<DnsMode> catalog_setup_dns_mode;
+        std::optional<CatalogSetupDnsRuleSummary> catalog_setup_dns_rule_summary;
+        std::optional<Intent> catalog_setup_intent;
+        std::optional<CatalogSetupListSummary> catalog_setup_list_summary;
+        std::optional<CatalogSetupModeEnum> catalog_setup_mode;
+        std::optional<CatalogSetupPreviewRequest> catalog_setup_preview_request;
+        std::optional<CatalogSetupPreviewResponse> catalog_setup_preview_response;
+        std::optional<RouteRule> catalog_setup_route_rule_summary;
+        std::optional<Summary> catalog_setup_summary;
+        std::optional<CatalogSetupWarningElement> catalog_setup_warning;
         std::optional<CheckStatus> check_status;
         std::optional<CircuitBreakerConfig> circuit_breaker_config;
         std::optional<ClientDnsEnforcement> client_dns_enforcement;
@@ -906,6 +1029,7 @@ namespace api {
         std::optional<FirewallRuleCheck> firewall_rule_check;
         std::optional<Fwmark> fwmark_config;
         std::optional<HealthResponse> health_response;
+        std::optional<InternalVpnServerElement> internal_vpn_server;
         std::optional<Iproute> iproute_config;
         std::optional<LifecycleOperation> lifecycle_operation;
         std::optional<LifecycleOperationStageElement> lifecycle_operation_stage;
@@ -914,6 +1038,7 @@ namespace api {
         std::optional<ListRefreshResponse> list_refresh_response;
         std::optional<ListRefreshStateValue> list_refresh_state;
         std::optional<ListsAutoupdate> lists_autoupdate_config;
+        std::optional<NdmsCatalogStatus> ndms_catalog_status;
         std::optional<NdmsInterfaceCapabilities> ndms_interface_capabilities;
         std::optional<NdmsInterfaceInventoryResponse> ndms_interface_inventory_response;
         std::optional<NdmsInterfaceManagementReadiness> ndms_interface_management_readiness;
@@ -985,6 +1110,42 @@ namespace api {
     void from_json(const json & j, CacheMetadata & x);
     void to_json(json & j, const CacheMetadata & x);
 
+    void from_json(const json & j, CatalogPresetSelection & x);
+    void to_json(json & j, const CatalogPresetSelection & x);
+
+    void from_json(const json & j, Intent & x);
+    void to_json(json & j, const Intent & x);
+
+    void from_json(const json & j, CatalogSetupApplyRequest & x);
+    void to_json(json & j, const CatalogSetupApplyRequest & x);
+
+    void from_json(const json & j, CatalogSetupApplyResponse & x);
+    void to_json(json & j, const CatalogSetupApplyResponse & x);
+
+    void from_json(const json & j, CatalogSetupBlackholeSummary & x);
+    void to_json(json & j, const CatalogSetupBlackholeSummary & x);
+
+    void from_json(const json & j, CatalogSetupDnsRuleSummary & x);
+    void to_json(json & j, const CatalogSetupDnsRuleSummary & x);
+
+    void from_json(const json & j, CatalogSetupListSummary & x);
+    void to_json(json & j, const CatalogSetupListSummary & x);
+
+    void from_json(const json & j, CatalogSetupPreviewRequest & x);
+    void to_json(json & j, const CatalogSetupPreviewRequest & x);
+
+    void from_json(const json & j, RouteRule & x);
+    void to_json(json & j, const RouteRule & x);
+
+    void from_json(const json & j, Summary & x);
+    void to_json(json & j, const Summary & x);
+
+    void from_json(const json & j, CatalogSetupWarningElement & x);
+    void to_json(json & j, const CatalogSetupWarningElement & x);
+
+    void from_json(const json & j, CatalogSetupPreviewResponse & x);
+    void to_json(json & j, const CatalogSetupPreviewResponse & x);
+
     void from_json(const json & j, CircuitBreakerConfig & x);
     void to_json(json & j, const CircuitBreakerConfig & x);
 
@@ -1029,6 +1190,9 @@ namespace api {
 
     void from_json(const json & j, OutboundElement & x);
     void to_json(json & j, const OutboundElement & x);
+
+    void from_json(const json & j, InternalVpnServerElement & x);
+    void to_json(json & j, const InternalVpnServerElement & x);
 
     void from_json(const json & j, RouteRuleElement & x);
     void to_json(json & j, const RouteRuleElement & x);
@@ -1237,6 +1401,15 @@ namespace api {
     void from_json(const json & j, ApiTypes & x);
     void to_json(json & j, const ApiTypes & x);
 
+    void from_json(const json & j, DnsMode & x);
+    void to_json(json & j, const DnsMode & x);
+
+    void from_json(const json & j, CatalogSetupModeEnum & x);
+    void to_json(json & j, const CatalogSetupModeEnum & x);
+
+    void from_json(const json & j, Code & x);
+    void to_json(json & j, const Code & x);
+
     void from_json(const json & j, CheckStatus & x);
     void to_json(json & j, const CheckStatus & x);
 
@@ -1300,6 +1473,9 @@ namespace api {
     void from_json(const json & j, HealthResponseStatus & x);
     void to_json(json & j, const HealthResponseStatus & x);
 
+    void from_json(const json & j, NdmsCatalogStatus & x);
+    void to_json(json & j, const NdmsCatalogStatus & x);
+
     void from_json(const json & j, Kind & x);
     void to_json(json & j, const Kind & x);
 
@@ -1357,8 +1533,8 @@ namespace api {
     void from_json(const json & j, TransportActionResponseStatus & x);
     void to_json(json & j, const TransportActionResponseStatus & x);
 
-    void from_json(const json & j, Mode & x);
-    void to_json(json & j, const Mode & x);
+    void from_json(const json & j, TransportLinkedOutboundEnsureMode & x);
+    void to_json(json & j, const TransportLinkedOutboundEnsureMode & x);
 
     void from_json(const json & j, TransportConfigApplyRequestOperation & x);
     void to_json(json & j, const TransportConfigApplyRequestOperation & x);
@@ -1436,6 +1612,200 @@ namespace api {
         j["last_refresh_url"] = x.last_refresh_url;
         j["srs_decoder_revision"] = x.srs_decoder_revision;
         j["url"] = x.url;
+    }
+
+    inline void from_json(const json & j, CatalogPresetSelection& x) {
+        x.display_name = get_stack_optional<std::string>(j, "display_name");
+        x.preset_id = j.at("preset_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogPresetSelection & x) {
+        j = json::object();
+        j["display_name"] = x.display_name;
+        j["preset_id"] = x.preset_id;
+    }
+
+    inline void from_json(const json & j, Intent& x) {
+        x.dns_display_name = get_stack_optional<std::string>(j, "dns_display_name");
+        x.dns_mode = j.at("dns_mode").get<DnsMode>();
+        x.dns_server_tag = get_stack_optional<std::string>(j, "dns_server_tag");
+        x.mode = j.at("mode").get<CatalogSetupModeEnum>();
+        x.outbound_tag = get_stack_optional<std::string>(j, "outbound_tag");
+        x.route_display_name = get_stack_optional<std::string>(j, "route_display_name");
+        x.selections = j.at("selections").get<std::vector<CatalogPresetSelection>>();
+        x.source_detour_tag = get_stack_optional<std::string>(j, "source_detour_tag");
+    }
+
+    inline void to_json(json & j, const Intent & x) {
+        j = json::object();
+        j["dns_display_name"] = x.dns_display_name;
+        j["dns_mode"] = x.dns_mode;
+        j["dns_server_tag"] = x.dns_server_tag;
+        j["mode"] = x.mode;
+        j["outbound_tag"] = x.outbound_tag;
+        j["route_display_name"] = x.route_display_name;
+        j["selections"] = x.selections;
+        j["source_detour_tag"] = x.source_detour_tag;
+    }
+
+    inline void from_json(const json & j, CatalogSetupApplyRequest& x) {
+        x.accept_warnings = j.at("accept_warnings").get<bool>();
+        x.base_revision = j.at("base_revision").get<std::string>();
+        x.candidate_revision = j.at("candidate_revision").get<std::string>();
+        x.intent = j.at("intent").get<Intent>();
+        x.preview_token = j.at("preview_token").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupApplyRequest & x) {
+        j = json::object();
+        j["accept_warnings"] = x.accept_warnings;
+        j["base_revision"] = x.base_revision;
+        j["candidate_revision"] = x.candidate_revision;
+        j["intent"] = x.intent;
+        j["preview_token"] = x.preview_token;
+    }
+
+    inline void from_json(const json & j, CatalogSetupApplyResponse& x) {
+        x.applied = j.at("applied").get<bool>();
+        x.apply_started_ts = get_stack_optional<int64_t>(j, "apply_started_ts");
+        x.config_revision = j.at("config_revision").get<std::string>();
+        x.message = j.at("message").get<std::string>();
+        x.rolled_back = j.at("rolled_back").get<bool>();
+        x.saved = j.at("saved").get<bool>();
+        x.status = j.at("status").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupApplyResponse & x) {
+        j = json::object();
+        j["applied"] = x.applied;
+        j["apply_started_ts"] = x.apply_started_ts;
+        j["config_revision"] = x.config_revision;
+        j["message"] = x.message;
+        j["rolled_back"] = x.rolled_back;
+        j["saved"] = x.saved;
+        j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, CatalogSetupBlackholeSummary& x) {
+        x.created = j.at("created").get<bool>();
+        x.tag = j.at("tag").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupBlackholeSummary & x) {
+        j = json::object();
+        j["created"] = x.created;
+        j["tag"] = x.tag;
+    }
+
+    inline void from_json(const json & j, CatalogSetupDnsRuleSummary& x) {
+        x.display_name = j.at("display_name").get<std::string>();
+        x.insertion_index = j.at("insertion_index").get<int64_t>();
+        x.server = j.at("server").get<std::string>();
+        x.technical_id = j.at("technical_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupDnsRuleSummary & x) {
+        j = json::object();
+        j["display_name"] = x.display_name;
+        j["insertion_index"] = x.insertion_index;
+        j["server"] = x.server;
+        j["technical_id"] = x.technical_id;
+    }
+
+    inline void from_json(const json & j, CatalogSetupListSummary& x) {
+        x.display_name = j.at("display_name").get<std::string>();
+        x.has_inline_cidrs = j.at("has_inline_cidrs").get<bool>();
+        x.has_inline_domains = j.at("has_inline_domains").get<bool>();
+        x.preset_id = j.at("preset_id").get<std::string>();
+        x.source_detour = get_stack_optional<std::string>(j, "source_detour");
+        x.technical_id = j.at("technical_id").get<std::string>();
+        x.url_backed = j.at("url_backed").get<bool>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupListSummary & x) {
+        j = json::object();
+        j["display_name"] = x.display_name;
+        j["has_inline_cidrs"] = x.has_inline_cidrs;
+        j["has_inline_domains"] = x.has_inline_domains;
+        j["preset_id"] = x.preset_id;
+        j["source_detour"] = x.source_detour;
+        j["technical_id"] = x.technical_id;
+        j["url_backed"] = x.url_backed;
+    }
+
+    inline void from_json(const json & j, CatalogSetupPreviewRequest& x) {
+        x.intent = j.at("intent").get<Intent>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupPreviewRequest & x) {
+        j = json::object();
+        j["intent"] = x.intent;
+    }
+
+    inline void from_json(const json & j, RouteRule& x) {
+        x.blocking = j.at("blocking").get<bool>();
+        x.display_name = j.at("display_name").get<std::string>();
+        x.insertion_index = j.at("insertion_index").get<int64_t>();
+        x.outbound = j.at("outbound").get<std::string>();
+        x.technical_id = j.at("technical_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RouteRule & x) {
+        j = json::object();
+        j["blocking"] = x.blocking;
+        j["display_name"] = x.display_name;
+        j["insertion_index"] = x.insertion_index;
+        j["outbound"] = x.outbound;
+        j["technical_id"] = x.technical_id;
+    }
+
+    inline void from_json(const json & j, Summary& x) {
+        x.blackhole = get_stack_optional<CatalogSetupBlackholeSummary>(j, "blackhole");
+        x.dns_rule = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "dns_rule");
+        x.lists = j.at("lists").get<std::vector<CatalogSetupListSummary>>();
+        x.mode = j.at("mode").get<CatalogSetupModeEnum>();
+        x.route_rule = get_stack_optional<RouteRule>(j, "route_rule");
+    }
+
+    inline void to_json(json & j, const Summary & x) {
+        j = json::object();
+        j["blackhole"] = x.blackhole;
+        j["dns_rule"] = x.dns_rule;
+        j["lists"] = x.lists;
+        j["mode"] = x.mode;
+        j["route_rule"] = x.route_rule;
+    }
+
+    inline void from_json(const json & j, CatalogSetupWarningElement& x) {
+        x.code = j.at("code").get<Code>();
+        x.message = j.at("message").get<std::string>();
+        x.path = j.at("path").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupWarningElement & x) {
+        j = json::object();
+        j["code"] = x.code;
+        j["message"] = x.message;
+        j["path"] = x.path;
+    }
+
+    inline void from_json(const json & j, CatalogSetupPreviewResponse& x) {
+        x.base_revision = j.at("base_revision").get<std::string>();
+        x.candidate_revision = j.at("candidate_revision").get<std::string>();
+        x.preview_token = j.at("preview_token").get<std::string>();
+        x.requires_warning_acceptance = j.at("requires_warning_acceptance").get<bool>();
+        x.summary = j.at("summary").get<Summary>();
+        x.warnings = j.at("warnings").get<std::vector<CatalogSetupWarningElement>>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupPreviewResponse & x) {
+        j = json::object();
+        j["base_revision"] = x.base_revision;
+        j["candidate_revision"] = x.candidate_revision;
+        j["preview_token"] = x.preview_token;
+        j["requires_warning_acceptance"] = x.requires_warning_acceptance;
+        j["summary"] = x.summary;
+        j["warnings"] = x.warnings;
     }
 
     inline void from_json(const json & j, CircuitBreakerConfig& x) {
@@ -1681,6 +2051,19 @@ namespace api {
         j["url"] = x.url;
     }
 
+    inline void from_json(const json & j, InternalVpnServerElement& x) {
+        x.interface = j.at("interface").get<std::string>();
+        x.ndms_id = get_stack_optional<std::string>(j, "ndms_id");
+        x.process_clients = j.at("process_clients").get<bool>();
+    }
+
+    inline void to_json(json & j, const InternalVpnServerElement & x) {
+        j = json::object();
+        j["interface"] = x.interface;
+        j["ndms_id"] = x.ndms_id;
+        j["process_clients"] = x.process_clients;
+    }
+
     inline void from_json(const json & j, RouteRuleElement& x) {
         x.dest_addr = get_stack_optional<std::string>(j, "dest_addr");
         x.dest_port = get_stack_optional<std::string>(j, "dest_port");
@@ -1712,12 +2095,14 @@ namespace api {
 
     inline void from_json(const json & j, Route& x) {
         x.inbound_interfaces = get_stack_optional<std::vector<std::string>>(j, "inbound_interfaces");
+        x.internal_vpn_servers = get_stack_optional<std::vector<InternalVpnServerElement>>(j, "internal_vpn_servers");
         x.rules = get_stack_optional<std::vector<RouteRuleElement>>(j, "rules");
     }
 
     inline void to_json(json & j, const Route & x) {
         j = json::object();
         j["inbound_interfaces"] = x.inbound_interfaces;
+        j["internal_vpn_servers"] = x.internal_vpn_servers;
         j["rules"] = x.rules;
     }
 
@@ -2169,6 +2554,8 @@ namespace api {
         x.firmware_interface_name = j.at("firmware_interface_name").get<std::string>();
         x.firmware_type = j.at("firmware_type").get<std::string>();
         x.id = j.at("id").get<std::string>();
+        x.internal_vpn_server_candidate = j.at("internal_vpn_server_candidate").get<bool>();
+        x.internal_vpn_server_role_confirmation_required = j.at("internal_vpn_server_role_confirmation_required").get<bool>();
         x.kernel_name = get_stack_optional<std::string>(j, "kernel_name");
         x.kind = j.at("kind").get<Kind>();
         x.label = j.at("label").get<std::string>();
@@ -2185,6 +2572,8 @@ namespace api {
         j["firmware_interface_name"] = x.firmware_interface_name;
         j["firmware_type"] = x.firmware_type;
         j["id"] = x.id;
+        j["internal_vpn_server_candidate"] = x.internal_vpn_server_candidate;
+        j["internal_vpn_server_role_confirmation_required"] = x.internal_vpn_server_role_confirmation_required;
         j["kernel_name"] = x.kernel_name;
         j["kind"] = x.kind;
         j["label"] = x.label;
@@ -2196,6 +2585,7 @@ namespace api {
 
     inline void from_json(const json & j, NdmsInterfaceInventoryResponse& x) {
         x.available = j.at("available").get<bool>();
+        x.catalog_status = j.at("catalog_status").get<NdmsCatalogStatus>();
         x.interfaces = j.at("interfaces").get<std::vector<NdmsTunnelInterfaceElement>>();
         x.mutation_mode = j.at("mutation_mode").get<MutationMode>();
         x.read_only = j.at("read_only").get<bool>();
@@ -2205,6 +2595,7 @@ namespace api {
     inline void to_json(json & j, const NdmsInterfaceInventoryResponse & x) {
         j = json::object();
         j["available"] = x.available;
+        j["catalog_status"] = x.catalog_status;
         j["interfaces"] = x.interfaces;
         j["mutation_mode"] = x.mutation_mode;
         j["read_only"] = x.read_only;
@@ -2642,7 +3033,7 @@ namespace api {
 
     inline void from_json(const json & j, LinkedOutbound& x) {
         x.display_name = get_stack_optional<std::string>(j, "display_name");
-        x.mode = j.at("mode").get<Mode>();
+        x.mode = j.at("mode").get<TransportLinkedOutboundEnsureMode>();
         x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
     }
 
@@ -2834,6 +3225,20 @@ namespace api {
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
         x.cache_metadata = get_stack_optional<CacheMetadata>(j, "CacheMetadata");
+        x.catalog_preset_selection = get_stack_optional<CatalogPresetSelection>(j, "CatalogPresetSelection");
+        x.catalog_setup_apply_request = get_stack_optional<CatalogSetupApplyRequest>(j, "CatalogSetupApplyRequest");
+        x.catalog_setup_apply_response = get_stack_optional<CatalogSetupApplyResponse>(j, "CatalogSetupApplyResponse");
+        x.catalog_setup_blackhole_summary = get_stack_optional<CatalogSetupBlackholeSummary>(j, "CatalogSetupBlackholeSummary");
+        x.catalog_setup_dns_mode = get_stack_optional<DnsMode>(j, "CatalogSetupDnsMode");
+        x.catalog_setup_dns_rule_summary = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "CatalogSetupDnsRuleSummary");
+        x.catalog_setup_intent = get_stack_optional<Intent>(j, "CatalogSetupIntent");
+        x.catalog_setup_list_summary = get_stack_optional<CatalogSetupListSummary>(j, "CatalogSetupListSummary");
+        x.catalog_setup_mode = get_stack_optional<CatalogSetupModeEnum>(j, "CatalogSetupMode");
+        x.catalog_setup_preview_request = get_stack_optional<CatalogSetupPreviewRequest>(j, "CatalogSetupPreviewRequest");
+        x.catalog_setup_preview_response = get_stack_optional<CatalogSetupPreviewResponse>(j, "CatalogSetupPreviewResponse");
+        x.catalog_setup_route_rule_summary = get_stack_optional<RouteRule>(j, "CatalogSetupRouteRuleSummary");
+        x.catalog_setup_summary = get_stack_optional<Summary>(j, "CatalogSetupSummary");
+        x.catalog_setup_warning = get_stack_optional<CatalogSetupWarningElement>(j, "CatalogSetupWarning");
         x.check_status = get_stack_optional<CheckStatus>(j, "CheckStatus");
         x.circuit_breaker_config = get_stack_optional<CircuitBreakerConfig>(j, "CircuitBreakerConfig");
         x.client_dns_enforcement = get_stack_optional<ClientDnsEnforcement>(j, "ClientDnsEnforcement");
@@ -2866,6 +3271,7 @@ namespace api {
         x.firewall_rule_check = get_stack_optional<FirewallRuleCheck>(j, "FirewallRuleCheck");
         x.fwmark_config = get_stack_optional<Fwmark>(j, "FwmarkConfig");
         x.health_response = get_stack_optional<HealthResponse>(j, "HealthResponse");
+        x.internal_vpn_server = get_stack_optional<InternalVpnServerElement>(j, "InternalVpnServer");
         x.iproute_config = get_stack_optional<Iproute>(j, "IprouteConfig");
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "LifecycleOperation");
         x.lifecycle_operation_stage = get_stack_optional<LifecycleOperationStageElement>(j, "LifecycleOperationStage");
@@ -2874,6 +3280,7 @@ namespace api {
         x.list_refresh_response = get_stack_optional<ListRefreshResponse>(j, "ListRefreshResponse");
         x.list_refresh_state = get_stack_optional<ListRefreshStateValue>(j, "ListRefreshState");
         x.lists_autoupdate_config = get_stack_optional<ListsAutoupdate>(j, "ListsAutoupdateConfig");
+        x.ndms_catalog_status = get_stack_optional<NdmsCatalogStatus>(j, "NdmsCatalogStatus");
         x.ndms_interface_capabilities = get_stack_optional<NdmsInterfaceCapabilities>(j, "NdmsInterfaceCapabilities");
         x.ndms_interface_inventory_response = get_stack_optional<NdmsInterfaceInventoryResponse>(j, "NdmsInterfaceInventoryResponse");
         x.ndms_interface_management_readiness = get_stack_optional<NdmsInterfaceManagementReadiness>(j, "NdmsInterfaceManagementReadiness");
@@ -2939,6 +3346,20 @@ namespace api {
         j = json::object();
         j["ApiConfig"] = x.api_config;
         j["CacheMetadata"] = x.cache_metadata;
+        j["CatalogPresetSelection"] = x.catalog_preset_selection;
+        j["CatalogSetupApplyRequest"] = x.catalog_setup_apply_request;
+        j["CatalogSetupApplyResponse"] = x.catalog_setup_apply_response;
+        j["CatalogSetupBlackholeSummary"] = x.catalog_setup_blackhole_summary;
+        j["CatalogSetupDnsMode"] = x.catalog_setup_dns_mode;
+        j["CatalogSetupDnsRuleSummary"] = x.catalog_setup_dns_rule_summary;
+        j["CatalogSetupIntent"] = x.catalog_setup_intent;
+        j["CatalogSetupListSummary"] = x.catalog_setup_list_summary;
+        j["CatalogSetupMode"] = x.catalog_setup_mode;
+        j["CatalogSetupPreviewRequest"] = x.catalog_setup_preview_request;
+        j["CatalogSetupPreviewResponse"] = x.catalog_setup_preview_response;
+        j["CatalogSetupRouteRuleSummary"] = x.catalog_setup_route_rule_summary;
+        j["CatalogSetupSummary"] = x.catalog_setup_summary;
+        j["CatalogSetupWarning"] = x.catalog_setup_warning;
         j["CheckStatus"] = x.check_status;
         j["CircuitBreakerConfig"] = x.circuit_breaker_config;
         j["ClientDnsEnforcement"] = x.client_dns_enforcement;
@@ -2971,6 +3392,7 @@ namespace api {
         j["FirewallRuleCheck"] = x.firewall_rule_check;
         j["FwmarkConfig"] = x.fwmark_config;
         j["HealthResponse"] = x.health_response;
+        j["InternalVpnServer"] = x.internal_vpn_server;
         j["IprouteConfig"] = x.iproute_config;
         j["LifecycleOperation"] = x.lifecycle_operation;
         j["LifecycleOperationStage"] = x.lifecycle_operation_stage;
@@ -2979,6 +3401,7 @@ namespace api {
         j["ListRefreshResponse"] = x.list_refresh_response;
         j["ListRefreshState"] = x.list_refresh_state;
         j["ListsAutoupdateConfig"] = x.lists_autoupdate_config;
+        j["NdmsCatalogStatus"] = x.ndms_catalog_status;
         j["NdmsInterfaceCapabilities"] = x.ndms_interface_capabilities;
         j["NdmsInterfaceInventoryResponse"] = x.ndms_interface_inventory_response;
         j["NdmsInterfaceManagementReadiness"] = x.ndms_interface_management_readiness;
@@ -3038,6 +3461,62 @@ namespace api {
         j["UiPreferencesConfig"] = x.ui_preferences_config;
         j["ValidationError"] = x.validation_error;
         j["VlessRealitySpec"] = x.vless_reality_spec;
+    }
+
+    inline void from_json(const json & j, DnsMode & x) {
+        if (j == "automatic") x = DnsMode::AUTOMATIC;
+        else if (j == "explicit_server") x = DnsMode::EXPLICIT_SERVER;
+        else if (j == "none") x = DnsMode::NONE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"DnsMode\""); }
+    }
+
+    inline void to_json(json & j, const DnsMode & x) {
+        switch (x) {
+            case DnsMode::AUTOMATIC: j = "automatic"; break;
+            case DnsMode::EXPLICIT_SERVER: j = "explicit_server"; break;
+            case DnsMode::NONE: j = "none"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"DnsMode\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, CatalogSetupModeEnum & x) {
+        if (j == "block") x = CatalogSetupModeEnum::BLOCK;
+        else if (j == "none") x = CatalogSetupModeEnum::NONE;
+        else if (j == "outbound") x = CatalogSetupModeEnum::OUTBOUND;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"CatalogSetupModeEnum\""); }
+    }
+
+    inline void to_json(json & j, const CatalogSetupModeEnum & x) {
+        switch (x) {
+            case CatalogSetupModeEnum::BLOCK: j = "block"; break;
+            case CatalogSetupModeEnum::NONE: j = "none"; break;
+            case CatalogSetupModeEnum::OUTBOUND: j = "outbound"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"CatalogSetupModeEnum\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Code & x) {
+        if (j == "dns_automatic_unavailable") x = Code::DNS_AUTOMATIC_UNAVAILABLE;
+        else if (j == "dns_detour_mismatch") x = Code::DNS_DETOUR_MISMATCH;
+        else if (j == "dns_detour_missing") x = Code::DNS_DETOUR_MISSING;
+        else if (j == "dns_ignored_for_block") x = Code::DNS_IGNORED_FOR_BLOCK;
+        else if (j == "source_detour_not_applicable") x = Code::SOURCE_DETOUR_NOT_APPLICABLE;
+        else if (j == "source_detour_not_found") x = Code::SOURCE_DETOUR_NOT_FOUND;
+        else if (j == "source_detour_not_routable") x = Code::SOURCE_DETOUR_NOT_ROUTABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Code\""); }
+    }
+
+    inline void to_json(json & j, const Code & x) {
+        switch (x) {
+            case Code::DNS_AUTOMATIC_UNAVAILABLE: j = "dns_automatic_unavailable"; break;
+            case Code::DNS_DETOUR_MISMATCH: j = "dns_detour_mismatch"; break;
+            case Code::DNS_DETOUR_MISSING: j = "dns_detour_missing"; break;
+            case Code::DNS_IGNORED_FOR_BLOCK: j = "dns_ignored_for_block"; break;
+            case Code::SOURCE_DETOUR_NOT_APPLICABLE: j = "source_detour_not_applicable"; break;
+            case Code::SOURCE_DETOUR_NOT_FOUND: j = "source_detour_not_found"; break;
+            case Code::SOURCE_DETOUR_NOT_ROUTABLE: j = "source_detour_not_routable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Code\": " + std::to_string(static_cast<int>(x)));
+        }
     }
 
     inline void from_json(const json & j, CheckStatus & x) {
@@ -3404,6 +3883,22 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, NdmsCatalogStatus & x) {
+        if (j == "fresh") x = NdmsCatalogStatus::FRESH;
+        else if (j == "stale") x = NdmsCatalogStatus::STALE;
+        else if (j == "unavailable") x = NdmsCatalogStatus::UNAVAILABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsCatalogStatus\""); }
+    }
+
+    inline void to_json(json & j, const NdmsCatalogStatus & x) {
+        switch (x) {
+            case NdmsCatalogStatus::FRESH: j = "fresh"; break;
+            case NdmsCatalogStatus::STALE: j = "stale"; break;
+            case NdmsCatalogStatus::UNAVAILABLE: j = "unavailable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsCatalogStatus\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, Kind & x) {
         if (j == "amnezia_wireguard") x = Kind::AMNEZIA_WIREGUARD;
         else if (j == "https_proxy") x = Kind::HTTPS_PROXY;
@@ -3694,15 +4189,15 @@ namespace api {
         }
     }
 
-    inline void from_json(const json & j, Mode & x) {
-        if (j == "ensure") x = Mode::ENSURE;
-        else { throw std::runtime_error("Cannot deserialize to enumeration \"Mode\""); }
+    inline void from_json(const json & j, TransportLinkedOutboundEnsureMode & x) {
+        if (j == "ensure") x = TransportLinkedOutboundEnsureMode::ENSURE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TransportLinkedOutboundEnsureMode\""); }
     }
 
-    inline void to_json(json & j, const Mode & x) {
+    inline void to_json(json & j, const TransportLinkedOutboundEnsureMode & x) {
         switch (x) {
-            case Mode::ENSURE: j = "ensure"; break;
-            default: throw std::runtime_error("Unexpected value in enumeration \"Mode\": " + std::to_string(static_cast<int>(x)));
+            case TransportLinkedOutboundEnsureMode::ENSURE: j = "ensure"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TransportLinkedOutboundEnsureMode\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

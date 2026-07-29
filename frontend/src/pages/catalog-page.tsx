@@ -1,19 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useMemo, useState } from "react"
-import { CheckIcon, RefreshCw } from "lucide-react"
+import { useMemo, useRef, useState } from "react"
+import { AlertTriangleIcon, RefreshCw, ShieldCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import type { ApiError } from "@/api/client"
-import {
-  useConfigMutationPending,
-  usePostConfigMutation,
-} from "@/api/mutations"
+import { useConfigMutationPending } from "@/api/mutations"
+import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -28,17 +27,27 @@ import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
-import {
-  createOutboundDisplayNameMap,
-} from "@/lib/outbound-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 import {
-  applyCatalogAddDraft,
-  createCatalogAddDraft,
-  sanitizeCatalogListId,
-  type CatalogAddDraft,
+  getCatalogPresetSourceSummary,
+  getCatalogSelectionMode,
+  isCatalogRoutableOutboundType,
   type CatalogPreset,
-} from "@/pages/catalog-add"
+} from "@/pages/catalog-model"
+import {
+  applyCatalogSetup,
+  previewCatalogSetup,
+  type CatalogSetupPreview,
+  type CatalogSetupWarning,
+} from "@/pages/catalog-setup-api"
+import {
+  createCatalogSetupIntent,
+  resolveCatalogDestination,
+  updateCatalogSetupRuleName,
+  updateCatalogSetupSelectionName,
+  type CatalogSetupIntent,
+} from "@/pages/catalog-setup-intent"
 
 /**
  * Ready-made lists borrowed from the awg-manager catalogue.
@@ -75,7 +84,6 @@ export function CatalogPage() {
 
   const configQuery = useGetConfig()
   const config = selectConfig(configQuery.data)
-  const postConfigMutation = usePostConfigMutation()
   const configMutationPending = useConfigMutationPending()
 
   const catalogQuery = useQuery<CatalogResponse>({
@@ -91,23 +99,30 @@ export function CatalogPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [destination, setDestination] = useState("")
   const [sourceDetour, setSourceDetour] = useState<string | null>(null)
-  const [addDraft, setAddDraft] = useState<CatalogAddDraft | null>(null)
+  const [setupIntent, setSetupIntent] = useState<CatalogSetupIntent | null>(
+    null
+  )
+  const setupIntentRef = useRef<CatalogSetupIntent | null>(null)
+  const [setupPreview, setSetupPreview] = useState<CatalogSetupPreview | null>(
+    null
+  )
+  const [acceptWarnings, setAcceptWarnings] = useState(false)
 
   // Only outbounds that can actually carry traffic: urltest groups and
-  // interfaces both qualify, blackhole does not.
-  const outboundTags = useMemo(
-    () =>
-      (config?.outbounds ?? [])
-        .filter((outbound) => outbound.type !== "blackhole")
-        .map((outbound) => outbound.tag),
-    [config]
-  )
-  const outboundDisplayNames = useMemo(
-    () => createOutboundDisplayNameMap(config?.outbounds ?? []),
-    [config?.outbounds]
+  // interfaces/tables qualify. Ignore and blackhole are verdicts, not egress
+  // paths. The backend planner repeats this validation authoritatively.
+  const outboundTags = (config?.outbounds ?? [])
+    .filter((outbound) => isCatalogRoutableOutboundType(outbound.type))
+    .map((outbound) => outbound.tag)
+  const outboundDisplayNames = createOutboundDisplayNameMap(
+    config?.outbounds ?? []
   )
 
-  const effectiveDestination = destination || outboundTags[0] || ""
+  const effectiveDestination = resolveCatalogDestination(
+    destination,
+    outboundTags,
+    DIRECT
+  )
   const effectiveSourceDetour = sourceDetour ?? catalogQuery.data?.detour ?? ""
 
   const refreshMutation = useMutation({
@@ -134,8 +149,72 @@ export function CatalogPage() {
     onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
+  const previewMutation = useMutation({
+    mutationFn: previewCatalogSetup,
+    onSuccess: (preview, requestedIntent) => {
+      if (
+        JSON.stringify(requestedIntent) !==
+        JSON.stringify(setupIntentRef.current)
+      ) {
+        return
+      }
+      setSetupPreview(preview)
+      setAcceptWarnings(false)
+    },
+    onError: (error: ApiError) =>
+      toast.error(getApiErrorMessage(error), { richColors: true }),
+  })
+
+  const applyMutation = useMutation({
+    mutationFn: ({
+      intent,
+      preview,
+      acceptWarnings: accepted,
+    }: {
+      intent: CatalogSetupIntent
+      preview: CatalogSetupPreview
+      acceptWarnings: boolean
+    }) =>
+      applyCatalogSetup({
+        intent,
+        preview,
+        acceptWarnings: accepted,
+      }),
+    onSuccess: async (_, variables) => {
+      const addedCount = variables.intent.selections.length
+      setSelected(new Set())
+      setupIntentRef.current = null
+      setSetupIntent(null)
+      setSetupPreview(null)
+      setAcceptWarnings(false)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.config() }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.healthService(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.healthRouting(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.runtimeOutbounds(),
+        }),
+        queryClient.invalidateQueries({ queryKey: ["catalog"] }),
+      ])
+      toast.success(t("pages.catalog.added", { count: addedCount }))
+    },
+    onError: (error: ApiError) => {
+      // A conflict means the authoritative config or catalogue changed after
+      // preview. Never retry with a stale candidate identity.
+      if (error.status === 409) {
+        setSetupPreview(null)
+        setAcceptWarnings(false)
+      }
+      toast.error(getApiErrorMessage(error), { richColors: true })
+    },
+  })
+
   const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
-  const existingNames = new Set(Object.keys(config?.lists ?? {}))
+  const selectedMode = getCatalogSelectionMode(presets, selected)
 
   const categories = useMemo(() => {
     const present = new Set(presets.map((preset) => preset.category))
@@ -193,42 +272,81 @@ export function CatalogPage() {
     if (!config || selected.size === 0) {
       return
     }
+    if (selectedMode === "mixed") {
+      toast.error(t("pages.catalog.mixedSelection"), { richColors: true })
+      return
+    }
 
-    setAddDraft(
-      createCatalogAddDraft({
-        config,
-        destination: effectiveDestination,
-        directDestination: DIRECT,
-        combinedDisplayName: t("pages.catalog.routeRuleName", {
-          count: selected.size,
-        }),
-        presets,
-        selectedIds: selected,
-        sourceDetour: effectiveSourceDetour,
-      })
-    )
+    const intent = createCatalogSetupIntent({
+      destination: effectiveDestination,
+      directDestination: DIRECT,
+      presets,
+      selectedIds: selected,
+      selectionMode: selectedMode,
+      sourceDetour: effectiveSourceDetour,
+      combinedDisplayName: t("pages.catalog.routeRuleName", {
+        count: selected.size,
+      }),
+    })
+    if (!intent) {
+      toast.error(t("pages.catalog.invalidSelection"), { richColors: true })
+      return
+    }
+    setupIntentRef.current = intent
+    setSetupIntent(intent)
+    setSetupPreview(null)
+    setAcceptWarnings(false)
+    previewMutation.mutate(intent)
   }
 
   const confirmAdd = () => {
-    if (!config || !addDraft) {
+    if (!setupIntent || previewMutation.isPending || applyMutation.isPending) {
       return
     }
-    const nextConfig = applyCatalogAddDraft(config, addDraft)
-    const addedCount = addDraft.lists.length
-    postConfigMutation.mutate(
-      { data: nextConfig },
-      {
-        onSuccess: () => {
-          setSelected(new Set())
-          setAddDraft(null)
-          toast.success(t("pages.catalog.added", { count: addedCount }))
-        },
-        onError: (error) =>
-          toast.error(getApiErrorMessage(error as ApiError), {
-            richColors: true,
-          }),
-      }
-    )
+
+    if (!setupPreview) {
+      previewMutation.mutate(setupIntent)
+      return
+    }
+
+    applyMutation.mutate({
+      intent: setupIntent,
+      preview: setupPreview,
+      acceptWarnings,
+    })
+  }
+
+  const updateSetupIntent = (
+    update: (current: CatalogSetupIntent) => CatalogSetupIntent
+  ) => {
+    setSetupIntent((current) => {
+      const next = current ? update(current) : current
+      setupIntentRef.current = next
+      return next
+    })
+    setSetupPreview(null)
+    setAcceptWarnings(false)
+  }
+
+  const setupWarningMessage = (warning: CatalogSetupWarning) => {
+    switch (warning.code) {
+      case "source_detour_not_found":
+        return t("pages.catalog.setup.warnings.sourceDetourNotFound")
+      case "source_detour_not_routable":
+        return t("pages.catalog.setup.warnings.sourceDetourNotRoutable")
+      case "source_detour_not_applicable":
+        return t("pages.catalog.setup.warnings.sourceDetourNotApplicable")
+      case "dns_automatic_unavailable":
+        return t("pages.catalog.setup.warnings.dnsAutomaticUnavailable")
+      case "dns_ignored_for_block":
+        return t("pages.catalog.setup.warnings.dnsIgnoredForBlock")
+      case "dns_detour_missing":
+        return t("pages.catalog.setup.warnings.dnsDetourMissing")
+      case "dns_detour_mismatch":
+        return t("pages.catalog.setup.warnings.dnsDetourMismatch")
+      default:
+        return warning.message
+    }
   }
 
   return (
@@ -324,10 +442,8 @@ export function CatalogPage() {
           чтобы нажать «Добавить», приходилось листать обратно. */}
       <div className="max-h-[55vh] divide-y overflow-y-auto border-y">
         {visible.map((preset) => {
-          const url = preset.engines?.singbox?.ruleSets?.[0]?.url
-          const domains = preset.engines?.dns?.domains?.length ?? 0
+          const sourceSummary = getCatalogPresetSourceSummary(preset)
           const blocks = preset.engines?.singbox?.action === "reject"
-          const already = existingNames.has(sanitizeCatalogListId(preset.id))
 
           return (
             <label
@@ -337,35 +453,38 @@ export function CatalogPage() {
               <input
                 checked={selected.has(preset.id)}
                 className="size-4 accent-[var(--primary)]"
-                disabled={already}
                 onChange={() => toggle(preset.id)}
                 type="checkbox"
               />
               <span className="min-w-0 flex-1 truncate">{preset.name}</span>
               <span className="shrink-0 text-xs text-muted-foreground">
-                {url
+                {sourceSummary.urlBacked
                   ? t("pages.catalog.ruleSet")
-                  : t("pages.catalog.domains", { count: domains })}
+                  : sourceSummary.domainCount > 0 && sourceSummary.cidrCount > 0
+                    ? t("pages.catalog.domainsAndCidrs", {
+                        domains: sourceSummary.domainCount,
+                        cidrs: sourceSummary.cidrCount,
+                      })
+                    : sourceSummary.cidrCount > 0
+                      ? t("pages.catalog.cidrs", {
+                          count: sourceSummary.cidrCount,
+                        })
+                      : t("pages.catalog.domains", {
+                          count: sourceSummary.domainCount,
+                        })}
               </span>
-              {already ? (
-                <span className="flex shrink-0 items-center gap-1 text-xs text-success">
-                  <CheckIcon className="size-3.5" />
-                  {t("pages.catalog.alreadyAdded")}
-                </span>
-              ) : (
-                <span
-                  className={cn(
-                    "shrink-0 rounded-full px-2 py-0.5 text-xs",
-                    blocks
-                      ? "bg-destructive/10 text-destructive"
-                      : "bg-success/10 text-success"
-                  )}
-                >
-                  {blocks
-                    ? t("pages.catalog.actionBlock")
-                    : t("pages.catalog.actionTunnel")}
-                </span>
-              )}
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 text-xs",
+                  blocks
+                    ? "bg-destructive/10 text-destructive"
+                    : "bg-success/10 text-success"
+                )}
+              >
+                {blocks
+                  ? t("pages.catalog.actionBlock")
+                  : t("pages.catalog.actionTunnel")}
+              </span>
             </label>
           )
         })}
@@ -376,21 +495,41 @@ export function CatalogPage() {
           {t("pages.catalog.selected", { count: selected.size })}
         </span>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[13px]">{t("pages.catalog.routeTo")}</span>
-          <select
-            className="h-9 rounded-md border border-input bg-card px-2 text-[13px]"
-            onChange={(event) => setDestination(event.target.value)}
-            value={effectiveDestination}
-          >
-            {outboundTags.map((tag) => (
-              <option key={tag} value={tag}>
-                {outboundDisplayNames.get(tag) ?? tag}
-              </option>
-            ))}
-            <option value={DIRECT}>{t("pages.catalog.directly")}</option>
-          </select>
+          {selectedMode === "reject" ? (
+            <span className="text-[13px] text-destructive">
+              {t("pages.catalog.blockSelected")}
+            </span>
+          ) : (
+            <>
+              <span className="text-[13px]">{t("pages.catalog.routeTo")}</span>
+              <select
+                className="h-9 rounded-md border border-input bg-card px-2 text-[13px]"
+                onChange={(event) => setDestination(event.target.value)}
+                value={effectiveDestination}
+              >
+                {outboundTags.map((tag) => (
+                  <option key={tag} value={tag}>
+                    {outboundDisplayNames.get(tag) ?? tag}
+                  </option>
+                ))}
+                <option value={DIRECT}>{t("pages.catalog.directly")}</option>
+              </select>
+            </>
+          )}
+          {selectedMode === "mixed" ? (
+            <span className="max-w-80 text-[12px] text-destructive">
+              {t("pages.catalog.mixedSelectionShort")}
+            </span>
+          ) : null}
           <Button
-            disabled={selected.size === 0 || configMutationPending}
+            disabled={
+              !config ||
+              selected.size === 0 ||
+              configMutationPending ||
+              previewMutation.isPending ||
+              applyMutation.isPending ||
+              selectedMode === "mixed"
+            }
             onClick={openAddDialog}
           >
             {t("pages.catalog.add")}
@@ -400,122 +539,199 @@ export function CatalogPage() {
 
       <Dialog
         onOpenChange={(open) => {
-          if (!open && !configMutationPending) {
-            setAddDraft(null)
+          if (!open && !previewMutation.isPending && !applyMutation.isPending) {
+            setupIntentRef.current = null
+            setSetupIntent(null)
+            setSetupPreview(null)
+            setAcceptWarnings(false)
           }
         }}
-        open={addDraft !== null}
+        open={setupIntent !== null}
       >
-        <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-xl">
+        <DialogContent className="max-h-[calc(100dvh-0.75rem)] overflow-y-auto max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-h-[90svh] sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>{t("pages.catalog.naming.title")}</DialogTitle>
             <DialogDescription>
               {t("pages.catalog.naming.description")}
             </DialogDescription>
           </DialogHeader>
-          {addDraft ? (
+          {setupIntent ? (
             <div className="space-y-5">
               <div className="space-y-3">
-                {addDraft.lists.map((proposal, index) => (
-                  <div className="space-y-1.5" key={proposal.technicalId}>
+                {setupIntent.selections.map((selection, index) => (
+                  <div className="space-y-1.5" key={selection.preset_id}>
                     <Label htmlFor={`catalog-list-name-${index}`}>
                       {t("pages.catalog.naming.listName")}
                     </Label>
                     <Input
+                      disabled={applyMutation.isPending}
                       id={`catalog-list-name-${index}`}
                       maxLength={80}
                       onChange={(event) =>
-                        setAddDraft((current) =>
-                          current
-                            ? {
-                                ...current,
-                                lists: current.lists.map((item, itemIndex) =>
-                                  itemIndex === index
-                                    ? {
-                                        ...item,
-                                        displayName: event.target.value,
-                                      }
-                                    : item
-                                ),
-                              }
-                            : current
+                        updateSetupIntent((current) =>
+                          updateCatalogSetupSelectionName(
+                            current,
+                            selection.preset_id,
+                            event.target.value
+                          )
                         )
                       }
-                      value={proposal.displayName}
+                      value={selection.display_name ?? ""}
                     />
                   </div>
                 ))}
               </div>
-              {addDraft.routeRule ? (
+              {setupIntent.mode !== "none" ? (
                 <div className="space-y-1.5 border-t border-border pt-4">
                   <Label htmlFor="catalog-route-rule-name">
                     {t("pages.catalog.naming.routeRuleName")}
                   </Label>
                   <Input
+                    disabled={applyMutation.isPending}
                     id="catalog-route-rule-name"
                     maxLength={80}
                     onChange={(event) =>
-                      setAddDraft((current) =>
-                        current?.routeRule
-                          ? {
-                              ...current,
-                              routeRule: {
-                                ...current.routeRule,
-                                displayName: event.target.value,
-                              },
-                            }
-                          : current
+                      updateSetupIntent((current) =>
+                        updateCatalogSetupRuleName(
+                          current,
+                          "route_display_name",
+                          event.target.value
+                        )
                       )
                     }
-                    value={addDraft.routeRule.displayName}
+                    value={setupIntent.route_display_name ?? ""}
                   />
                 </div>
               ) : null}
-              {addDraft.dnsRule ? (
+              {setupIntent.mode === "outbound" &&
+              setupIntent.dns_mode !== "none" ? (
                 <div className="space-y-1.5">
                   <Label htmlFor="catalog-dns-rule-name">
                     {t("pages.catalog.naming.dnsRuleName")}
                   </Label>
                   <Input
+                    disabled={applyMutation.isPending}
                     id="catalog-dns-rule-name"
                     maxLength={80}
                     onChange={(event) =>
-                      setAddDraft((current) =>
-                        current?.dnsRule
-                          ? {
-                              ...current,
-                              dnsRule: {
-                                ...current.dnsRule,
-                                displayName: event.target.value,
-                              },
-                            }
-                          : current
+                      updateSetupIntent((current) =>
+                        updateCatalogSetupRuleName(
+                          current,
+                          "dns_display_name",
+                          event.target.value
+                        )
                       )
                     }
-                    value={addDraft.dnsRule.displayName}
+                    value={setupIntent.dns_display_name ?? ""}
                   />
                   <p className="text-xs text-muted-foreground">
-                    {t("pages.catalog.naming.dnsRuleHint", {
-                      server: addDraft.dnsRule.server,
-                    })}
+                    {t("pages.catalog.setup.automaticDnsHint")}
                   </p>
+                </div>
+              ) : null}
+
+              {previewMutation.isPending ? (
+                <div
+                  aria-live="polite"
+                  className="space-y-2 border-t border-border pt-4"
+                >
+                  <Skeleton className="h-5 w-48" />
+                  <Skeleton className="h-4 w-full" />
+                </div>
+              ) : null}
+
+              {setupPreview ? (
+                <div className="space-y-3 border-t border-border pt-4">
+                  <Alert>
+                    <ShieldCheckIcon className="size-4" />
+                    <AlertTitle>
+                      {t("pages.catalog.setup.previewReady")}
+                    </AlertTitle>
+                    <AlertDescription>
+                      {t("pages.catalog.setup.previewSummary", {
+                        lists: setupPreview.summary.lists.length,
+                        route: setupPreview.summary.route_rule
+                          ? (outboundDisplayNames.get(
+                              setupPreview.summary.route_rule.outbound
+                            ) ?? setupPreview.summary.route_rule.outbound)
+                          : t("pages.catalog.setup.noRoute"),
+                        dns: setupPreview.summary.dns_rule?.server
+                          ? (config?.dns?.servers?.find(
+                              (server) =>
+                                server.tag ===
+                                setupPreview.summary.dns_rule?.server
+                            )?.display_name ??
+                            setupPreview.summary.dns_rule.server)
+                          : t("pages.catalog.setup.noDnsRule"),
+                      })}
+                    </AlertDescription>
+                  </Alert>
+
+                  {setupPreview.warnings.map((warning) => (
+                    <Alert
+                      key={`${warning.code}:${warning.path}`}
+                      variant="warning"
+                    >
+                      <AlertTriangleIcon className="size-4" />
+                      <AlertTitle>
+                        {t("pages.catalog.setup.warningTitle")}
+                      </AlertTitle>
+                      <AlertDescription>
+                        {setupWarningMessage(warning)}
+                      </AlertDescription>
+                    </Alert>
+                  ))}
+
+                  {setupPreview.requires_warning_acceptance ? (
+                    <label className="flex items-start gap-3 text-sm">
+                      <input
+                        checked={acceptWarnings}
+                        className="mt-0.5 size-4 accent-[var(--primary)]"
+                        onChange={(event) =>
+                          setAcceptWarnings(event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                      <span>{t("pages.catalog.setup.acceptWarnings")}</span>
+                    </label>
+                  ) : null}
                 </div>
               ) : null}
             </div>
           ) : null}
           <DialogFooter>
             <Button
-              disabled={configMutationPending}
-              onClick={() => setAddDraft(null)}
+              disabled={
+                configMutationPending ||
+                previewMutation.isPending ||
+                applyMutation.isPending
+              }
+              onClick={() => {
+                setupIntentRef.current = null
+                setSetupIntent(null)
+                setSetupPreview(null)
+                setAcceptWarnings(false)
+              }}
               variant="outline"
             >
               {t("common.cancel")}
             </Button>
             <Button
-              disabled={configMutationPending}
+              disabled={
+                configMutationPending ||
+                previewMutation.isPending ||
+                applyMutation.isPending ||
+                Boolean(
+                  setupPreview?.requires_warning_acceptance && !acceptWarnings
+                )
+              }
               onClick={confirmAdd}
             >
-              {t("pages.catalog.naming.confirm")}
+              {applyMutation.isPending
+                ? t("pages.catalog.setup.applying")
+                : setupPreview
+                  ? t("pages.catalog.naming.confirm")
+                  : t("pages.catalog.setup.preview")}
             </Button>
           </DialogFooter>
         </DialogContent>

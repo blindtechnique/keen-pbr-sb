@@ -21,6 +21,12 @@ export interface NdmsTunnelInterface {
   firmware_type: string;
   kind: NdmsTunnelKind;
   role: NdmsInterfaceRole;
+  /** True only when this fresh read-only NDMS record can safely be offered as an internal VPN-server policy target. A reported server role is authoritative. For role-less WireGuard/AmneziaWG records, strict non-global, no-default-route and non-host-subnet guards must all pass.
+   */
+  internal_vpn_server_candidate: boolean;
+  /** True for a guarded WireGuard/AmneziaWG candidate whose firmware does not report a server role. It is never enabled by inheritance; the user must explicitly save the policy choice.
+   */
+  internal_vpn_server_role_confirmation_required: boolean;
   owner: NdmsTunnelInterfaceOwner;
   connected?: boolean;
   link?: boolean;

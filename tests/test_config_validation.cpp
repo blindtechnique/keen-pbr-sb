@@ -1711,6 +1711,169 @@ TEST_CASE("route inbound_interfaces: valid future interface need not exist") {
         R"({"route":{"inbound_interfaces":["vpn_future@1"],"rules":[]}})"));
 }
 
+TEST_CASE("route internal_vpn_servers: omitted preserves legacy config") {
+    const auto config =
+        parse_test_config(R"({"route":{"inbound_interfaces":["br0"],"rules":[]}})");
+    REQUIRE(config.route.has_value());
+    CHECK_FALSE(config.route->internal_vpn_servers.has_value());
+}
+
+TEST_CASE("route internal_vpn_servers: strict values round-trip") {
+    const auto config = parse_test_config(R"({
+        "route":{
+            "internal_vpn_servers":[
+                {
+                    "interface":"nwg0",
+                    "ndms_id":"WireguardServer0",
+                    "process_clients":true
+                },
+                {"interface":"OpenVPN1","process_clients":false}
+            ],
+            "rules":[]
+        }
+    })");
+
+    REQUIRE(config.route.has_value());
+    REQUIRE(config.route->internal_vpn_servers.has_value());
+    REQUIRE(config.route->internal_vpn_servers->size() == 2);
+    CHECK(config.route->internal_vpn_servers->at(0).interface == "nwg0");
+    CHECK(
+        config.route->internal_vpn_servers->at(0).ndms_id ==
+        std::optional<std::string>{"WireguardServer0"});
+    CHECK(config.route->internal_vpn_servers->at(0).process_clients);
+    CHECK(config.route->internal_vpn_servers->at(1).interface == "OpenVPN1");
+    CHECK_FALSE(
+        config.route->internal_vpn_servers->at(1).ndms_id.has_value());
+    CHECK_FALSE(config.route->internal_vpn_servers->at(1).process_clients);
+
+    const auto serialized = nlohmann::json(config);
+    CHECK(serialized.at("route")
+              .at("internal_vpn_servers")
+              .at(1)
+              .at("process_clients") == false);
+    const auto reparsed = parse_test_config(serialized.dump());
+    REQUIRE(reparsed.route->internal_vpn_servers.has_value());
+    CHECK(reparsed.route->internal_vpn_servers->at(0).interface == "nwg0");
+    CHECK(
+        reparsed.route->internal_vpn_servers->at(0).ndms_id ==
+        std::optional<std::string>{"WireguardServer0"});
+    CHECK_FALSE(
+        reparsed.route->internal_vpn_servers->at(1).process_clients);
+}
+
+TEST_CASE("route internal_vpn_servers: array and object shapes are strict") {
+    const auto non_array = parse_issues(
+        R"({"route":{"internal_vpn_servers":"nwg0","rules":[]}})");
+    CHECK(find_issue(non_array, "route.internal_vpn_servers") != nullptr);
+
+    const auto non_object = parse_issues(
+        R"({"route":{"internal_vpn_servers":["nwg0"],"rules":[]}})");
+    CHECK(find_issue(
+              non_object, "route.internal_vpn_servers[0]") != nullptr);
+}
+
+TEST_CASE("route internal_vpn_servers: required fields are strict") {
+    const auto missing_interface = parse_issues(R"({
+        "route":{"internal_vpn_servers":[{"process_clients":true}],"rules":[]}
+    })");
+    CHECK(find_issue(
+              missing_interface,
+              "route.internal_vpn_servers[0].interface") != nullptr);
+
+    const auto missing_process = parse_issues(R"({
+        "route":{"internal_vpn_servers":[{"interface":"nwg0"}],"rules":[]}
+    })");
+    CHECK(find_issue(
+              missing_process,
+              "route.internal_vpn_servers[0].process_clients") != nullptr);
+
+    const auto string_process = parse_issues(R"({
+        "route":{"internal_vpn_servers":[
+            {"interface":"nwg0","process_clients":"false"}
+        ],"rules":[]}
+    })");
+    CHECK(find_issue(
+              string_process,
+              "route.internal_vpn_servers[0].process_clients") != nullptr);
+}
+
+TEST_CASE("route internal_vpn_servers: interface names reuse Linux validation") {
+    for (const std::string& interface :
+         {"bad/name", "bad name", "eth+", "0123456789abcdef"}) {
+        const auto issues = parse_issues(
+            "{\"route\":{\"internal_vpn_servers\":[{\"interface\":" +
+            nlohmann::json(interface).dump() +
+            ",\"process_clients\":true}],\"rules\":[]}}");
+        CAPTURE(interface);
+        CHECK(find_issue(
+                  issues,
+                  "route.internal_vpn_servers[0].interface") != nullptr);
+    }
+}
+
+TEST_CASE("route internal_vpn_servers: duplicate interfaces are rejected") {
+    const auto issues = parse_issues(R"({
+        "route":{"internal_vpn_servers":[
+            {"interface":"nwg0","process_clients":true},
+            {"interface":"nwg0","process_clients":false}
+        ],"rules":[]}
+    })");
+    CHECK(find_issue(
+              issues,
+              "route.internal_vpn_servers[1].interface") != nullptr);
+}
+
+TEST_CASE("route internal_vpn_servers: stable ids are strict and unique") {
+    const auto invalid = parse_issues(R"({
+        "route":{"internal_vpn_servers":[
+            {
+                "interface":"nwg0",
+                "ndms_id":" Wireguard0 ",
+                "process_clients":true
+            }
+        ],"rules":[]}
+    })");
+    CHECK(find_issue(
+              invalid,
+              "route.internal_vpn_servers[0].ndms_id") != nullptr);
+
+    const auto duplicate = parse_issues(R"({
+        "route":{"internal_vpn_servers":[
+            {
+                "interface":"nwg0",
+                "ndms_id":"WireguardServer",
+                "process_clients":true
+            },
+            {
+                "interface":"nwg1",
+                "ndms_id":"WireguardServer",
+                "process_clients":false
+            }
+        ],"rules":[]}
+    })");
+    CHECK(find_issue(
+              duplicate,
+              "route.internal_vpn_servers[1].ndms_id") != nullptr);
+}
+
+TEST_CASE("route internal_vpn_servers: OpenAPI maximum is enforced") {
+    nlohmann::json servers = nlohmann::json::array();
+    for (size_t index = 0; index < 129; ++index) {
+        servers.push_back({
+            {"interface", "v" + std::to_string(index)},
+            {"process_clients", true},
+        });
+    }
+    nlohmann::json config{
+        {"route", {
+            {"internal_vpn_servers", std::move(servers)},
+            {"rules", nlohmann::json::array()},
+        }},
+    };
+    const auto issues = parse_issues(config.dump());
+    CHECK(find_issue(issues, "route.internal_vpn_servers") != nullptr);
+}
+
 TEST_CASE("interface outbound: strict iptables interface names are accepted") {
     for (const std::string& iface :
          {"eth0", "nwg2", "vpn_future@1", "br-lan.10", "_managed"}) {

@@ -1015,13 +1015,15 @@ static void register_config_handler_impl(
     ConfigSaveRuntimeOptions runtime_options) {
     // GET /api/config - return current config and whether it is staged in memory
     server.get("/api/config", [&ctx]() -> std::string {
+        const auto visible_snapshot =
+            ctx.get_visible_config_state();
         const Config visible_config =
-            normalize_config_for_api_response(ctx.get_visible_config());
-        const bool is_draft = ctx.config_is_draft();
+            normalize_config_for_api_response(
+                visible_snapshot.config);
         const auto list_refresh_state = ctx.get_list_refresh_state_map(visible_config);
         nlohmann::json response = {
             {"config", nlohmann::json(visible_config)},
-            {"is_draft", is_draft},
+            {"is_draft", visible_snapshot.is_draft},
             {"list_refresh_state", nlohmann::json(list_refresh_state)},
         };
         return response.dump();
@@ -1046,7 +1048,9 @@ static void register_config_handler_impl(
         }
 
         std::string formatted_config = serialize_config_pretty(staged);
+        ConfigOperationGuard config_operation(ctx);
         ctx.stage_config(std::move(staged), std::move(formatted_config));
+        config_operation.finish();
 
         api::ConfigUpdateResponse resp;
         resp.status = api::ConfigUpdateResponseStatus::OK;
@@ -1067,14 +1071,38 @@ static void register_config_handler_impl(
                 "config-save",
                 [&ctx]() -> PreparedConfigCommit {
                     const auto staged_snapshot =
-                        ctx.get_staged_config_snapshot();
+                        ctx.get_staged_config_cas_snapshot();
                     if (!staged_snapshot.has_value()) {
                         throw ApiError(
                             "No staged config to save", 400);
                     }
+                    if (!staged_snapshot->base_revision.empty() &&
+                        staged_snapshot->base_revision !=
+                            staged_snapshot->active_revision) {
+                        const std::string message =
+                            "The active configuration changed after this "
+                            "draft was created";
+                        throw ApiError(
+                            message,
+                            409,
+                            nlohmann::json{
+                                {"error", message},
+                                {"reason",
+                                 "draft_base_revision_mismatch"},
+                                {"base_revision",
+                                 staged_snapshot->base_revision},
+                                {"active_revision",
+                                 staged_snapshot->active_revision},
+                                {"draft_preserved", true},
+                                {"saved", false},
+                                {"applied", false},
+                            }
+                                .dump());
+                    }
                     PreparedConfigCommit prepared;
-                    prepared.config = staged_snapshot->first;
-                    prepared.serialized = staged_snapshot->second;
+                    prepared.config = staged_snapshot->config;
+                    prepared.serialized =
+                        staged_snapshot->serialized;
                     return prepared;
                 },
                 write_config_file,

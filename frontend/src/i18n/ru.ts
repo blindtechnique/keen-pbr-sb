@@ -932,23 +932,71 @@ export const ruTranslation = {
       empty: "Ничего не найдено",
       ruleSet: "готовый набор",
       domains: "{{count}} доменов",
+      cidrs: "{{count}} CIDR",
+      domainsAndCidrs: "{{domains}} доменов · {{cidrs}} CIDR",
       actionTunnel: "в туннель",
       actionBlock: "блокировать",
       alreadyAdded: "уже добавлен",
       selected: "Выбрано: {{count}}",
       routeTo: "Направить в",
+      blockSelected: "Выбранные списки будут заблокированы",
+      mixedSelection:
+        "Списки для маршрутизации и блокировки нужно добавлять отдельно.",
+      mixedSelectionShort:
+        "Сначала добавьте списки для маршрутизации, затем блокирующие.",
+      invalidSelection:
+        "В выбранных пунктах нет данных, которые можно добавить.",
+      configUnavailable:
+        "Не удалось перечитать актуальную конфигурацию. Ничего не изменено.",
       add: "Добавить",
       added: "Добавлено списков: {{count}}",
+      priorityGuard: {
+        title: "Приоритет блокировок учтён",
+        description:
+          "Новое правило будет размещено перед блокирующими правилами: {{rules}}. Правила проверяются сверху вниз, поэтому общий IP-адрес CDN не попадёт под блокировку раньше выбранного маршрута. Порядок существующих правил не изменится.",
+      },
       naming: {
         title: "Названия добавляемых элементов",
         description:
-          "Мы предлагаем понятные названия из каталога. Их можно изменить или удалить перед добавлением.",
+          "Мы предлагаем понятные названия из каталога. Их можно изменить или удалить. Перед применением сервер сам проверит актуальную конфигурацию, источники и порядок правил.",
         listName: "Название списка",
         routeRuleName: "Название правила маршрутизации",
         dnsRuleName: "Название DNS-правила",
         dnsRuleHint:
           "DNS-правило будет создано для сервера {{server}}, который использует выбранный маршрут.",
+        blackholeHint:
+          "В конфигурации нет системного выхода для блокировки. Он будет создан автоматически и использован только этим правилом.",
         confirm: "Добавить",
+      },
+      setup: {
+        preview: "Проверить",
+        applying: "Добавляю…",
+        previewReady: "Настройка проверена",
+        previewSummary:
+          "Списков: {{lists}}. Маршрут: {{route}}. DNS: {{dns}}.",
+        noRoute: "не создаётся",
+        noDnsRule: "правило не создаётся",
+        automaticDnsHint:
+          "Подходящий DNS-сервер будет выбран автоматически по выбранному маршруту. Если его нет, проверка предупредит об этом и ничего не подменит молча.",
+        warningTitle: "Нужно проверить",
+        acceptWarnings:
+          "Я прочитал предупреждения и согласен применить именно этот проверенный план.",
+        warnings: {
+          sourceDetourNotFound:
+            "Выбранный маршрут для скачивания больше не существует. Список будет добавлен без него.",
+          sourceDetourNotRoutable:
+            "Выбранный маршрут нельзя использовать для скачивания. Список будет добавлен без него.",
+          sourceDetourNotApplicable:
+            "У выбранного списка нет удалённого файла, поэтому маршрут для скачивания ему не нужен.",
+          dnsAutomaticUnavailable:
+            "Для выбранного маршрута не найден подходящий DNS-сервер. Список и маршрут будут добавлены без DNS-правила.",
+          dnsIgnoredForBlock:
+            "Для блокирующего списка DNS-правило не создаётся.",
+          dnsDetourMissing:
+            "Выбранный DNS-сервер не привязан к маршруту. Проверьте, сможет ли он разрешать домены через нужный выход.",
+          dnsDetourMismatch:
+            "DNS-сервер использует другой маршрут. Разрешение доменов и основной трафик могут пойти через разные выходы.",
+        },
       },
       categories: {
         all: "Все",
@@ -1104,7 +1152,7 @@ export const ruTranslation = {
           "При полном применении конфигурации очищать динамические адреса, которые dnsmasq получил из DNS. Отключите, чтобы сохранить их до окончания TTL и избежать холодного старта маршрутизации.",
         ipv6EnabledLabel: "Включить поддержку IPv6",
         ipv6EnabledHint:
-          "Создавать IPv6-маршруты, правила firewall и цели dnsmasq. При отключении управляемый dnsmasq не возвращает AAAA-записи, чтобы клиенты не ждали неработающий IPv6.",
+          "Создавать IPv6-маршруты, правила firewall и цели dnsmasq. При явном отключении управляемый dnsmasq подавляет AAAA и SVCB/HTTPS (типы 64/65): A-записи продолжают работать, но обнаружение HTTP/3 и ECH может быть недоступно.",
         clientDnsEnforcementLabel:
           "Принудительно направлять DNS клиентов через роутер",
         clientDnsEnforcementHint:
@@ -1127,6 +1175,44 @@ export const ruTranslation = {
         inboundInterfacesStatusMissing: "Отсутствует",
         inboundInterfacesMissingDetail:
           "Этот интерфейс сохранён в конфиге, но сейчас отсутствует в живом списке интерфейсов системы.",
+        internalVpnServersTitle: "Внутренние VPN-серверы",
+        internalVpnServersDescription:
+          "Укажите, должен ли трафик и DNS-запросы клиентов нативных VPN-серверов Keenetic проходить через keen-pbr-sb. Поддерживаются WireGuard, AmneziaWG, OpenVPN, IKE, L2TP, SSTP и OpenConnect. Переключатели применятся только после общего сохранения настроек.",
+        internalVpnServersEmptyTitle: "VPN-серверы не найдены",
+        internalVpnServersEmptyDescription:
+          "KeeneticOS не сообщил ни одного поддерживаемого VPN-сервера с доступным системным интерфейсом.",
+        internalVpnServersLoadingTitle: "Загрузка VPN-серверов",
+        internalVpnServersLoadingDescription:
+          "Ожидаем список интерфейсов KeeneticOS. Сохранённые правила не будут изменены.",
+        internalVpnServersUnavailableTitle: "Список VPN-серверов недоступен",
+        internalVpnServersUnavailableDescription:
+          "Эта версия KeeneticOS не предоставила список поддерживаемых VPN-серверов. Сохранённые правила по-прежнему можно изменить ниже.",
+        internalVpnServersStaleTitle:
+          "Показана последняя известная конфигурация VPN-серверов",
+        internalVpnServersStaleDescription:
+          "Свежий ответ KeeneticOS временно недоступен. Сохранённые правила можно удалить, но подтверждение новых серверов и изменение переключателей отключены до обновления списка.",
+        internalVpnServersLoadErrorTitle: "Не удалось загрузить VPN-серверы",
+        internalVpnServersLoadErrorDescription:
+          "Список интерфейсов KeeneticOS временно недоступен. Сохранённые правила по-прежнему можно изменить ниже.",
+        internalVpnServersConfirmationTitle:
+          "KeeneticOS не сообщил роль WireGuard-интерфейса",
+        internalVpnServersConfirmationDescription:
+          "Подтвердите, что это именно внутренний VPN-сервер, а не клиентское подключение. После подтверждения его клиентов можно будет пропускать через keen-pbr-sb.",
+        internalVpnServersConfirmationAction: "Подтвердить VPN-сервер",
+        internalVpnServersProcessLabel: "Через keen-pbr-sb",
+        internalVpnServersInheritLabel: "Наследовать",
+        internalVpnServersStatusUp: "UP",
+        internalVpnServersStatusDown: "DOWN",
+        internalVpnServersStatusMissing: "Отсутствует",
+        internalVpnServersStatusUnknown: "Неизвестно",
+        internalVpnServersMissingHint:
+          "Настройка сохранена, но интерфейс сейчас не обнаружен. Она не будет удалена автоматически.",
+        internalVpnServersConfirmationAriaLabel:
+          "Подтвердить {{server}} как внутренний VPN-сервер",
+        internalVpnServersToggleAriaLabel:
+          "Пропускать клиентов {{server}} через keen-pbr-sb",
+        internalVpnServersInheritAriaLabel:
+          "Вернуть для {{server}} наследуемую настройку",
       },
       autoupdate: {
         scheduleHint: "Как часто проверять обновления списков.",

@@ -275,6 +275,8 @@ std::string IptablesFirewall::build_dns_nat_script(
             ":{} - [0:0]\n-F {}\n",
             DNS_NAT_CHAIN_NAME,
             DNS_NAT_CHAIN_NAME);
+        s += build_bypass_inbound_interface_lines(
+            prefilter, DNS_NAT_CHAIN_NAME);
         for (const auto& iface_frag : iface_frags) {
             for (const char* proto : {"udp", "tcp"}) {
                 s += keen_pbr3::format(
@@ -1896,7 +1898,8 @@ std::string IptablesFirewall::build_prefilter_lines(
     const FirewallGlobalPrefilter& prefilter,
     const std::string& chain,
     bool allow_conntrack) {
-    std::string lines;
+    std::string lines =
+        build_bypass_inbound_interface_lines(prefilter, chain);
     // The raw table runs before conntrack. Classify every forwarded packet
     // there instead of emitting a matcher that cannot be valid at this hook.
     if (allow_conntrack) {
@@ -1959,6 +1962,19 @@ std::string IptablesFirewall::build_skip_marked_packet_line(
     return keen_pbr3::format(
         "-A {} -m mark ! --mark 0x0/0xffffffff -j ACCEPT\n",
         chain);
+}
+
+std::string IptablesFirewall::build_bypass_inbound_interface_lines(
+    const FirewallGlobalPrefilter& prefilter,
+    const std::string& chain) {
+    std::string lines;
+    for (const auto& interface : prefilter.bypass_inbound_interfaces) {
+        lines += keen_pbr3::format(
+            "-A {} -i {} -j RETURN\n",
+            chain,
+            interface);
+    }
+    return lines;
 }
 
 std::vector<std::string> IptablesFirewall::build_rule_lines(
@@ -2253,6 +2269,8 @@ std::string IptablesFirewall::build_raw_conntrack_script(
         RAW_CONNTRACK_CHAIN_NAME,
         RAW_CONNTRACK_CHAIN_NAME);
 
+    script += build_bypass_inbound_interface_lines(
+        prefilter, RAW_CONNTRACK_CHAIN_NAME);
     script += build_conntrack_prefilter_lines(
         prefilter, RAW_CONNTRACK_CHAIN_NAME);
     if (prefilter.restore_conntrack_mark &&

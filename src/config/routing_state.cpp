@@ -661,18 +661,56 @@ bool is_interface_outbound_reachable(
     return true;
 }
 
-FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg) {
+FirewallGlobalPrefilter build_firewall_global_prefilter(
+    const Config& cfg,
+    const std::vector<InternalVpnServer>& internal_servers) {
     FirewallGlobalPrefilter prefilter;
     prefilter.skip_established_or_dnat = true;
     prefilter.skip_marked_packets = cfg.daemon.value_or(DaemonConfig{}).skip_marked_packets.value_or(true);
 
     const auto route_cfg = cfg.route.value_or(RouteConfig{});
-    if (route_cfg.inbound_interfaces.has_value()
-        && !route_cfg.inbound_interfaces->empty()) {
+    const bool legacy_inbound_is_restricted =
+        route_cfg.inbound_interfaces.has_value() &&
+        !route_cfg.inbound_interfaces->empty();
+    if (legacy_inbound_is_restricted) {
         prefilter.inbound_interfaces = *route_cfg.inbound_interfaces;
     }
 
+    std::set<std::string> bypass_interfaces;
+    for (const auto& server : internal_servers) {
+        if (!server.process_clients) {
+            bypass_interfaces.insert(server.interface);
+        }
+    }
+
+    prefilter.bypass_inbound_interfaces.assign(
+        bypass_interfaces.begin(), bypass_interfaces.end());
+
+    if (legacy_inbound_is_restricted) {
+        auto& inbound_interfaces = *prefilter.inbound_interfaces;
+        for (const auto& server : internal_servers) {
+            if (!server.process_clients ||
+                bypass_interfaces.find(server.interface) !=
+                    bypass_interfaces.end() ||
+                std::find(
+                    inbound_interfaces.begin(),
+                    inbound_interfaces.end(),
+                    server.interface) != inbound_interfaces.end()) {
+                continue;
+            }
+            inbound_interfaces.push_back(server.interface);
+        }
+    }
+
     return prefilter;
+}
+
+FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg) {
+    const auto route_cfg = cfg.route.value_or(RouteConfig{});
+    return build_firewall_global_prefilter(
+        cfg,
+        route_cfg.internal_vpn_servers.value_or(
+            std::vector<InternalVpnServer>{}));
 }
 
 FirewallRuleCriteria build_firewall_rule_criteria(const RouteRule& rule) {

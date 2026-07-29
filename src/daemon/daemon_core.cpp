@@ -37,6 +37,9 @@
 #include "../firewall/firewall_verifier.hpp"
 #include "../health/routing_health_checker.hpp"
 #include "../ipc/control_protocol.hpp"
+#include "../keenetic/internal_vpn_server_resolver.hpp"
+#include "../keenetic/internal_vpn_runtime_generation.hpp"
+#include "../keenetic/ndms_catalog_cache.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/daemon_signals.hpp"
@@ -1125,15 +1128,50 @@ void Daemon::schedule_sigusr1_runtime_refresh() {
 void Daemon::handle_sighup() {
     auto& log = Logger::instance();
     log.info("SIGHUP: full reload starting...");
+#ifdef WITH_API
+    bool operation_started = false;
+#endif
     try {
+#ifdef WITH_API
+        // SIGHUP is another configuration writer. Serialize it with API
+        // staging and transactional commits so a disk reload cannot replace
+        // the active ConfigStore snapshot after a catalogue preview has been
+        // revalidated but before that candidate is committed.
+        begin_config_operation_or_throw(
+            ConfigOperationState::Reloading,
+            "sighup-reload",
+            false,
+            false);
+        operation_started = true;
+        if (config_store_.config_is_draft()) {
+            log.warn(
+                "SIGHUP: reload deferred because a configuration draft is "
+                "staged; save or discard the draft first.");
+            finish_config_operation();
+            operation_started = false;
+            return;
+        }
+#endif
         reload_from_disk();
+#ifdef WITH_API
+        finish_config_operation();
+        operation_started = false;
+#endif
         log.info("SIGHUP: full reload complete.");
     } catch (const std::exception& e) {
+#ifdef WITH_API
+        if (operation_started) {
+            finish_config_operation();
+        }
+#endif
         log.error("SIGHUP: reload failed: {}", e.what());
     }
 }
 
-void Daemon::refresh_iproute_and_firewall_runtime(std::size_t retry_attempt) {
+void Daemon::refresh_iproute_and_firewall_runtime(
+    std::size_t retry_attempt,
+    std::optional<InternalVpnRuntimeResolution>
+        prepared_internal_vpn_resolution) {
     auto& log = Logger::instance();
     if (!routing_runtime_active_) {
         log.verbose(
@@ -1149,8 +1187,30 @@ void Daemon::refresh_iproute_and_firewall_runtime(std::size_t retry_attempt) {
         return;
     }
     try {
-        reconcile_static_routing();
-        apply_firewall(FirewallApplyMode::PreserveSets);
+        // Interface notifications are handled on the control loop. Re-resolve
+        // against live netlink names using only the shared cache snapshot;
+        // never perform an NDMS HTTP request here.
+        const auto internal_vpn_resolution =
+            prepared_internal_vpn_resolution.has_value()
+                ? std::move(*prepared_internal_vpn_resolution)
+                : prepare_internal_vpn_server_resolution_from_cache();
+        // This can be an ordinary managed-WAN event after the catalog TTL,
+        // not only a native-VPN event. Cache-only reconciliation remains
+        // immediate; the central lifecycle invariant puts the authoritative
+        // RCI observation on the blocking executor.
+        schedule_internal_vpn_catalog_refresh_if_needed(
+            internal_vpn_resolution.state);
+        commit_internal_vpn_runtime_generation(
+            resolved_internal_vpn_servers_,
+            internal_vpn_resolution.effective_servers,
+            [this]() {
+                reconcile_static_routing();
+                apply_firewall(FirewallApplyMode::PreserveSets);
+            },
+            [this, &internal_vpn_resolution]() {
+                update_internal_vpn_verified_includes_lkg(
+                    internal_vpn_resolution);
+            });
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
     } catch (const TransientFirewallError& e) {
@@ -1169,10 +1229,18 @@ void Daemon::refresh_iproute_and_firewall_runtime(std::size_t retry_attempt) {
             runtime_generation_.load(std::memory_order_acquire));
     } catch (const std::exception& e) {
         // A permanent rule/configuration failure is actionable and must remain
-        // visible to the user.
+        // visible to the user. Stable-ID changes also retain a bounded retry:
+        // the generation guard has restored the previous in-memory map, so
+        // kernel and memory still describe the same previous generation.
         log.error(
             "Runtime routing/firewall reconciliation failed permanently: {}",
             e.what());
+        if (config_has_stable_internal_vpn_server_policy(config_) &&
+            retry_attempt < RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
+            schedule_runtime_firewall_retry(
+                retry_attempt,
+                runtime_generation_.load(std::memory_order_acquire));
+        }
     }
 }
 
@@ -1213,15 +1281,6 @@ void Daemon::schedule_runtime_firewall_retry(
         delay.count());
 }
 
-bool Daemon::is_interface_outbound_in_use(const std::string& interface_name) const {
-    const auto outbounds = config_.outbounds.value_or(std::vector<Outbound>{});
-    return std::any_of(outbounds.begin(), outbounds.end(), [&interface_name](const Outbound& outbound) {
-        return outbound.type == OutboundType::INTERFACE &&
-               outbound.interface.has_value() &&
-               outbound.interface.value() == interface_name;
-    });
-}
-
 void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     auto& log = Logger::instance();
 #ifdef WITH_API
@@ -1230,13 +1289,42 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         status_stream_->reconcile();
     }
 #endif
-    if ((!event.administrative_state_changed && !event.address_changed) ||
-        !is_interface_outbound_in_use(event.interface_name) ||
+    if (!interface_event_requires_runtime_observation(event) ||
         !routing_runtime_active_) {
         return;
     }
+    if (event.observation_gap) {
+        recover_internal_vpn_catalog_after_observation_gap();
+        return;
+    }
+    const bool reconcile_immediately =
+        interface_event_affects_managed_runtime(
+            config_,
+            resolved_internal_vpn_servers_,
+            event.interface_name);
+    const bool refresh_stable_catalog =
+        config_has_stable_internal_vpn_server_policy(config_);
+    if (!reconcile_immediately && !refresh_stable_catalog) {
+        return;
+    }
+    if (!reconcile_immediately) {
+        // A new kernel name after NDMS renumbering is not yet present in the
+        // persisted/effective rows. A topology event can be the only rename
+        // notification Linux emits, so revoke the pre-rename catalog before
+        // scheduling its asynchronous replacement. Address/state churn on an
+        // unrelated WAN/LAN interface still leaves cache authority intact.
+        if (event.topology_changed) {
+            shared_ndms_catalog_cache().invalidate();
+        }
+        schedule_internal_vpn_catalog_refresh();
+        return;
+    }
 
-    if (event.address_changed) {
+    if (event.topology_changed) {
+        log.info(
+            "Interface {} topology changed, runtime observation triggered",
+            event.interface_name);
+    } else if (event.address_changed) {
         log.info("Interface {} address changed, iproute and firewall refresh triggered",
                  event.interface_name);
     } else {
@@ -1244,6 +1332,55 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
                  event.interface_name,
                  event.is_up ? "UP" : "DOWN");
     }
+    const auto configured_internal_servers = config_.route.has_value()
+        ? config_.route->internal_vpn_servers.value_or(
+              std::vector<InternalVpnServer>{})
+        : std::vector<InternalVpnServer>{};
+    const bool is_internal_vpn_event = std::any_of(
+        resolved_internal_vpn_servers_.begin(),
+        resolved_internal_vpn_servers_.end(),
+        [&event](const InternalVpnServer& server) {
+            return server.interface == event.interface_name;
+        }) ||
+        std::any_of(
+            configured_internal_servers.begin(),
+            configured_internal_servers.end(),
+            [&event](const InternalVpnServer& server) {
+                return server.interface == event.interface_name;
+            });
+    if (refresh_stable_catalog && is_internal_vpn_event) {
+        // The cache may still be within its normal TTL, but an interface event
+        // can mean NDMS renumbered or reused the old kernel name. Revoke its
+        // authority before the immediate cache-only reconcile. The worker
+        // below will restore authority only after a fresh RCI observation.
+        shared_ndms_catalog_cache().invalidate();
+    }
+    refresh_iproute_and_firewall_runtime();
+    // A stable NDMS identity may keep the same id while KeeneticOS renumbers
+    // its current kernel interface. Refresh on a bounded worker after the
+    // immediate cache-only reconciliation; never block the control loop.
+    if (refresh_stable_catalog && is_internal_vpn_event) {
+        schedule_internal_vpn_catalog_refresh();
+    }
+}
+
+void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
+    if (!routing_runtime_active_ ||
+        !config_has_stable_internal_vpn_server_policy(config_)) {
+        return;
+    }
+    // A netlink observation gap revokes the authority of the current
+    // stable-id mapping. Reconcile from the invalidated cache immediately so
+    // an unverified process_clients=false bypass cannot remain active while
+    // the asynchronous RCI observation is in flight. The include-only LKG is
+    // intentionally retained by the runtime resolver.
+    shared_ndms_catalog_cache().invalidate();
+    // A previously scheduled retry may describe the pre-gap generation and
+    // would otherwise suppress this safety-critical reconciliation for up to
+    // the full retry delay. Replace it with an immediate attempt; if that
+    // attempt still sees a transient firewall race, it schedules a fresh
+    // bounded retry for the invalidated generation.
+    cancel_runtime_firewall_retry();
     refresh_iproute_and_firewall_runtime();
 }
 
@@ -1320,6 +1457,10 @@ void Daemon::reconnect_interface_monitor() {
             interface_monitor_->reconnect();
             register_interface_monitor_fd();
             Logger::instance().warn("Interface monitor reconnected after netlink error");
+            // Events may have been lost while the socket was unavailable.
+            // Treat every successful reconnect as an observation gap instead
+            // of trusting a potentially stale NDMS-id to kernel-name mapping.
+            recover_internal_vpn_catalog_after_observation_gap();
         } catch (const std::exception& e) {
             Logger::instance().error("Interface monitor reconnect failed: {}", e.what());
             schedule_interface_monitor_reconnect_retry();
@@ -1413,6 +1554,20 @@ void Daemon::run() {
     auto& log = Logger::instance();
 
     try {
+    // Startup happens before the event loop. It is the one lifecycle point
+    // where a bounded shared-cache refresh may safely query loopback NDMS.
+    auto internal_vpn_resolution =
+        resolve_internal_vpn_servers_for_runtime(
+            config_,
+            true,
+            snapshot_internal_vpn_verified_includes_lkg());
+    const auto internal_vpn_resolution_state =
+        internal_vpn_resolution.state;
+    std::optional<InternalVpnRuntimeGenerationTransaction>
+        internal_vpn_generation;
+    internal_vpn_generation.emplace(
+        resolved_internal_vpn_servers_,
+        internal_vpn_resolution.effective_servers);
     setup_static_routing();
     log.info("Static routing tables and ip rules installed.");
 
@@ -1451,6 +1606,7 @@ void Daemon::run() {
     // xtables lock while it brings interfaces up, so this can legitimately fail;
     // coming up without rules and retrying beats leaving the router with no
     // service at all, because a running daemon can still be reached and fixed.
+    bool startup_firewall_generation_committed = false;
     try {
         retry_hot_apply_firewall(
             [this]() {
@@ -1474,8 +1630,13 @@ void Daemon::run() {
             });
         cleanup_owned_conntrack_marks(
             "after initial firewall activation");
+        startup_firewall_generation_committed = true;
         log.info("Firewall rules and routing applied.");
     } catch (const TransientFirewallError& e) {
+        // The previous daemon's atomic firewall generation may still be the
+        // one forwarding. Do not let the new process describe its uncommitted
+        // candidate as active while the delayed retry is pending.
+        internal_vpn_generation.reset();
         // This is expected while NDMS is still publishing its firewall after
         // boot. schedule_startup_firewall_retry() emits one actionable error
         // only if bounded recovery is exhausted.
@@ -1483,9 +1644,16 @@ void Daemon::run() {
                  "The service continues and will retry shortly.", e.what());
         schedule_startup_firewall_retry();
     } catch (const std::exception& e) {
+        internal_vpn_generation.reset();
         // Invalid rules, missing helpers and other permanent faults will not
-        // improve by repeating the same transaction for two minutes.
+        // normally improve by repeating the same transaction. A stable-ID
+        // candidate is the exception: until it commits, an older retained
+        // kernel generation may still be forwarding, so keep the existing
+        // bounded recovery rather than stranding the candidate indefinitely.
         log.error("Firewall apply failed permanently at startup: {}", e.what());
+        if (config_has_stable_internal_vpn_server_policy(config_)) {
+            schedule_startup_firewall_retry();
+        }
     }
 
     schedule_lists_autoupdate();
@@ -1515,6 +1683,16 @@ void Daemon::run() {
         throw DaemonError(
             "system resolver reload did not complete its configuration stream");
     }
+    // Publish a verified include-only LKG only after the initial route and
+    // firewall transaction has actually committed. A transient startup
+    // firewall failure is recovered by refresh_iproute_and_firewall_runtime(),
+    // which performs the same commit after its successful retry.
+    if (startup_firewall_generation_committed) {
+        internal_vpn_generation->commit();
+        update_internal_vpn_verified_includes_lkg(
+            internal_vpn_resolution);
+        internal_vpn_generation.reset();
+    }
     routing_runtime_active_ = true;
     transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
@@ -1533,6 +1711,14 @@ void Daemon::run() {
     // URLTest children queue their first result without exposing a half-started
     // daemon to synchronous control requests.
     accept_posted_control_tasks_.store(true, std::memory_order_release);
+    if (internal_vpn_resolution_requires_catalog_refresh(
+            config_, internal_vpn_resolution_state)) {
+        // The initial bounded observation may fail transiently. Start the
+        // retrying worker only after posted control tasks are accepted, so a
+        // fast loopback response cannot be lost before the event loop starts.
+        schedule_internal_vpn_catalog_refresh_if_needed(
+            internal_vpn_resolution_state);
+    }
     register_urltest_outbounds();
     refresh_resolver_config_hash_actual_async();
     probe_interfaces_now();

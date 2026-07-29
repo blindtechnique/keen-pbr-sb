@@ -602,8 +602,345 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/catalog/preview:
+    post:
+      summary: Preview an authoritative catalogue quick setup
+      description: >
+        Builds and validates a deterministic candidate from the server-owned
+        catalogue snapshot and the current active configuration. No durable or
+        runtime state is changed. Existing configuration drafts are rejected
+        so the preview cannot silently include unrelated edits.
+      operationId: postCatalogSetupPreview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogSetupPreviewRequest"
+      responses:
+        "200":
+          description: Deterministic setup preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogSetupPreviewResponse"
+        "400":
+          description: Invalid intent, catalogue preset, or generated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: An unrelated configuration draft already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: The authoritative catalogue snapshot is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/setup/catalog/apply:
+    post:
+      summary: Atomically commit an authoritative catalogue quick setup
+      description: >
+        Rebuilds the candidate from the current server-owned catalogue, checks
+        all preview revisions and warnings, then saves and applies it through
+        the shared configuration WAL and runtime coordinator. Ordinary config
+        staging is serialized with this operation.
+      operationId: postCatalogSetupApply
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogSetupApplyRequest"
+      responses:
+        "200":
+          description: Candidate saved and applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogSetupApplyResponse"
+        "400":
+          description: Invalid request, intent, preset, or generated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: >
+            Preview is stale, warnings were not accepted, a draft exists, or
+            another configuration/runtime operation is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Commit or runtime apply failed and was rolled back
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Catalogue, maintenance guardian, or recovery is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
+
+    CatalogSetupMode:
+      type: string
+      enum: [none, outbound, block]
+
+    CatalogSetupDnsMode:
+      type: string
+      enum: [none, automatic, explicit_server]
+
+    CatalogPresetSelection:
+      type: object
+      additionalProperties: false
+      required: [preset_id]
+      properties:
+        preset_id:
+          type: string
+          minLength: 1
+        display_name:
+          type: string
+
+    CatalogSetupIntent:
+      type: object
+      additionalProperties: false
+      required: [selections, mode, dns_mode]
+      properties:
+        selections:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CatalogPresetSelection"
+        mode:
+          $ref: "#/components/schemas/CatalogSetupMode"
+        outbound_tag:
+          type: string
+        dns_mode:
+          $ref: "#/components/schemas/CatalogSetupDnsMode"
+        dns_server_tag:
+          type: string
+        source_detour_tag:
+          type: string
+        route_display_name:
+          type: string
+        dns_display_name:
+          type: string
+
+    CatalogSetupPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent:
+          $ref: "#/components/schemas/CatalogSetupIntent"
+
+    CatalogSetupApplyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - intent
+        - base_revision
+        - candidate_revision
+        - preview_token
+        - accept_warnings
+      properties:
+        intent:
+          $ref: "#/components/schemas/CatalogSetupIntent"
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        candidate_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        preview_token:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        accept_warnings:
+          type: boolean
+
+    CatalogSetupWarning:
+      type: object
+      additionalProperties: false
+      required: [code, path, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - source_detour_not_found
+            - source_detour_not_routable
+            - source_detour_not_applicable
+            - dns_automatic_unavailable
+            - dns_ignored_for_block
+            - dns_detour_missing
+            - dns_detour_mismatch
+        path:
+          type: string
+        message:
+          type: string
+
+    CatalogSetupListSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - preset_id
+        - technical_id
+        - display_name
+        - url_backed
+        - has_inline_domains
+        - has_inline_cidrs
+      properties:
+        preset_id:
+          type: string
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        url_backed:
+          type: boolean
+        has_inline_domains:
+          type: boolean
+        has_inline_cidrs:
+          type: boolean
+        source_detour:
+          type: string
+
+    CatalogSetupRouteRuleSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - technical_id
+        - display_name
+        - outbound
+        - insertion_index
+        - blocking
+      properties:
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        outbound:
+          type: string
+        insertion_index:
+          type: integer
+          minimum: 0
+        blocking:
+          type: boolean
+
+    CatalogSetupDnsRuleSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - technical_id
+        - display_name
+        - server
+        - insertion_index
+      properties:
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        server:
+          type: string
+        insertion_index:
+          type: integer
+          minimum: 0
+
+    CatalogSetupBlackholeSummary:
+      type: object
+      additionalProperties: false
+      required: [tag, created]
+      properties:
+        tag:
+          type: string
+        created:
+          type: boolean
+
+    CatalogSetupSummary:
+      type: object
+      additionalProperties: false
+      required: [mode, lists]
+      properties:
+        mode:
+          $ref: "#/components/schemas/CatalogSetupMode"
+        lists:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSetupListSummary"
+        route_rule:
+          $ref: "#/components/schemas/CatalogSetupRouteRuleSummary"
+        dns_rule:
+          $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
+        blackhole:
+          $ref: "#/components/schemas/CatalogSetupBlackholeSummary"
+
+    CatalogSetupPreviewResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - base_revision
+        - candidate_revision
+        - preview_token
+        - requires_warning_acceptance
+        - summary
+        - warnings
+      properties:
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        candidate_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        preview_token:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        requires_warning_acceptance:
+          type: boolean
+        summary:
+          $ref: "#/components/schemas/CatalogSetupSummary"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSetupWarning"
+
+    CatalogSetupApplyResponse:
+      type: object
+      required:
+        - status
+        - message
+        - saved
+        - applied
+        - rolled_back
+        - config_revision
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        saved:
+          type: boolean
+        applied:
+          type: boolean
+        rolled_back:
+          type: boolean
+        config_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        apply_started_ts:
+          type: integer
+          format: int64
 
     StatusEventSnapshot:
       type: object
@@ -1026,7 +1363,9 @@ components:
           description: >
             Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6
             resolver set targets. When disabled, managed dnsmasq also suppresses
-            AAAA answers so clients do not wait on an unusable IPv6 path.
+            AAAA, SVCB, and HTTPS answers so clients cannot use IPv6 hints from
+            service-binding records. This IPv4-only mode also disables automatic
+            HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected.
             Defaults to `true` when omitted or set to `null`.
             If enabled but the system lacks IPv6 support, keen-pbr logs an error and
             continues in IPv4-only mode.
@@ -1561,6 +1900,41 @@ components:
             (e.g. "!10.0.0.0/8" matches traffic NOT destined for 10.0.0.0/8).
           example: "10.0.0.0/8"
 
+    InternalVpnServer:
+      type: object
+      additionalProperties: false
+      required:
+        - interface
+        - process_clients
+      properties:
+        interface:
+          type: string
+          description: >
+            Last observed kernel interface name of a native VPN server whose
+            client traffic can explicitly participate in or bypass keen-pbr
+            processing. Legacy configurations use this value directly. When
+            ndms_id is present, keen-pbr resolves the current kernel name from
+            the stable NDMS identity and keeps this field only as the last
+            observed diagnostic value. It is never trusted to create an
+            unverified bypass; during a temporary inventory outage an exact
+            live match may only conservatively force process_clients=true.
+        ndms_id:
+          type: string
+          description: >
+            Stable NDMS interface identifier. Supported ingress servers are
+            WireGuard, AmneziaWG, OpenVPN, IKE, L2TP, SSTP and OpenConnect.
+            Non-WireGuard kinds require an exact live kernel-name match.
+            HTTP/HTTPS/SOCKS proxy records are never accepted as VPN ingress.
+            KeeneticOS versions that do not report a WireGuard server role
+            require an explicit saved user choice and a fail-closed structural
+            guard (non-global, no default gateway, non-host local subnet).
+        process_clients:
+          type: boolean
+          description: >
+            Whether traffic and DNS requests arriving from clients of this
+            native VPN server are processed by keen-pbr. False is an explicit
+            early bypass and takes precedence over inbound_interfaces.
+
     RouteConfig:
       type: object
       properties:
@@ -1573,6 +1947,17 @@ components:
             ingress interfaces.
           items:
             type: string
+        internal_vpn_servers:
+          type: array
+          maxItems: 128
+          description: >
+            Per-interface participation overrides for native VPN servers.
+            If omitted, inbound_interfaces keeps its legacy behavior unchanged.
+            process_clients=true force-includes the interface when an explicit
+            inbound_interfaces allowlist is active. process_clients=false
+            bypasses both route classification and client DNS redirection.
+          items:
+            $ref: "#/components/schemas/InternalVpnServer"
         rules:
           type: array
           items:
@@ -2451,6 +2836,8 @@ components:
         - firmware_type
         - kind
         - role
+        - internal_vpn_server_candidate
+        - internal_vpn_server_role_confirmation_required
         - owner
         - capabilities
         - management_readiness
@@ -2472,6 +2859,20 @@ components:
           $ref: "#/components/schemas/NdmsTunnelKind"
         role:
           $ref: "#/components/schemas/NdmsInterfaceRole"
+        internal_vpn_server_candidate:
+          type: boolean
+          description: >
+            True only when this fresh read-only NDMS record can safely be
+            offered as an internal VPN-server policy target. A reported server
+            role is authoritative. For role-less WireGuard/AmneziaWG records,
+            strict non-global, no-default-route and non-host-subnet guards must
+            all pass.
+        internal_vpn_server_role_confirmation_required:
+          type: boolean
+          description: >
+            True for a guarded WireGuard/AmneziaWG candidate whose firmware
+            does not report a server role. It is never enabled by inheritance;
+            the user must explicitly save the policy choice.
         owner:
           type: string
           enum: [keenetic]
@@ -2484,10 +2885,15 @@ components:
         management_readiness:
           $ref: "#/components/schemas/NdmsInterfaceManagementReadiness"
 
+    NdmsCatalogStatus:
+      type: string
+      enum: [fresh, stale, unavailable]
+
     NdmsInterfaceInventoryResponse:
       type: object
       required:
         - available
+        - catalog_status
         - read_only
         - mutation_mode
         - required_guards
@@ -2495,6 +2901,12 @@ components:
       properties:
         available:
           type: boolean
+          description: >
+            True only for a fresh authoritative NDMS observation. Stale
+            last-known-good rows can remain visible but cannot authorize a new
+            internal VPN-server choice.
+        catalog_status:
+          $ref: "#/components/schemas/NdmsCatalogStatus"
         read_only:
           type: boolean
           enum: [true]

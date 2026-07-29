@@ -51,8 +51,13 @@ bool is_interface_outbound_reachable(
     const std::vector<DumpedRoute>& main_table_routes);
 
 // Build the global firewall prefilter derived from route-level config.
-// Missing or empty inbound_interfaces leaves interface restriction disabled.
+// Missing or empty inbound_interfaces leaves the legacy interface restriction
+// disabled. Native VPN server overrides can force-include an interface in an
+// active allowlist or explicitly bypass both routing and DNS processing.
 FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg);
+FirewallGlobalPrefilter build_firewall_global_prefilter(
+    const Config& cfg,
+    const std::vector<InternalVpnServer>& effective_internal_vpn_servers);
 
 // Build the realized firewall selector criteria for a route rule.
 FirewallRuleCriteria build_firewall_rule_criteria(const RouteRule& rule);

@@ -45,6 +45,19 @@ bool needs_family_specific_rule(const FirewallRuleCriteria& criteria) {
         || !criteria.dst_addr.empty();
 }
 
+nlohmann::json interface_name_rhs(
+    const std::vector<std::string>& interfaces) {
+    if (interfaces.size() == 1) {
+        return interfaces.front();
+    }
+
+    nlohmann::json rhs = {{"set", nlohmann::json::array()}};
+    for (const auto& interface : interfaces) {
+        rhs["set"].push_back(interface);
+    }
+    return rhs;
+}
+
 } // namespace
 
 NftablesFirewall::NftablesFirewall()
@@ -543,22 +556,31 @@ nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
     const FirewallGlobalPrefilter& prefilter) {
     nlohmann::json commands = nlohmann::json::array();
 
+    if (prefilter.has_bypass_inbound_interfaces()) {
+        nlohmann::json bypass_expr = nlohmann::json::array();
+        bypass_expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"meta", {{"key", "iifname"}}}}},
+            {"right", interface_name_rhs(
+                prefilter.bypass_inbound_interfaces)}
+        }}});
+        bypass_expr.push_back({{"counter", nullptr}});
+        bypass_expr.push_back({{"accept", nullptr}});
+        commands.push_back({{"add", {{"rule", {
+            {"family", "inet"},
+            {"table", TABLE_NAME},
+            {"chain", DNS_NAT_CHAIN_NAME},
+            {"expr", bypass_expr}
+        }}}}});
+    }
+
     nlohmann::json iface_match = nullptr;
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
-        nlohmann::json iface_rhs;
-        if (prefilter.inbound_interfaces->size() == 1) {
-            iface_rhs = prefilter.inbound_interfaces->front();
-        } else {
-            iface_rhs = {{"set", nlohmann::json::array()}};
-            for (const auto& iface : *prefilter.inbound_interfaces) {
-                iface_rhs["set"].push_back(iface);
-            }
-        }
         iface_match = {{"match", {
             {"op", "=="},
             {"left", {{"meta", {{"key", "iifname"}}}}},
-            {"right", iface_rhs}
+            {"right", interface_name_rhs(*prefilter.inbound_interfaces)}
         }}};
     }
 
@@ -595,6 +617,24 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
     const std::vector<PendingRule>& rules,
     MarkMergeMode mark_merge_mode) {
     nlohmann::json commands = nlohmann::json::array();
+
+    if (prefilter.has_bypass_inbound_interfaces()) {
+        nlohmann::json bypass_expr = nlohmann::json::array();
+        bypass_expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"meta", {{"key", "iifname"}}}}},
+            {"right", interface_name_rhs(
+                prefilter.bypass_inbound_interfaces)}
+        }}});
+        bypass_expr.push_back({{"counter", nullptr}});
+        bypass_expr.push_back({{"accept", nullptr}});
+        commands.push_back({{"add", {{"rule", {
+            {"family", "inet"},
+            {"table", TABLE_NAME},
+            {"chain", CHAIN_NAME},
+            {"expr", bypass_expr}
+        }}}}});
+    }
 
     const auto append_conntrack_restore =
         [&commands, &prefilter, &rules, mark_merge_mode](
@@ -765,21 +805,11 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
 
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
-        nlohmann::json iface_rhs;
-        if (prefilter.inbound_interfaces->size() == 1) {
-            iface_rhs = prefilter.inbound_interfaces->front();
-        } else {
-            iface_rhs = {{"set", nlohmann::json::array()}};
-            for (const auto& iface : *prefilter.inbound_interfaces) {
-                iface_rhs["set"].push_back(iface);
-            }
-        }
-
         nlohmann::json iface_expr = nlohmann::json::array();
         iface_expr.push_back({{"match", {
             {"op", "!="},
             {"left", {{"meta", {{"key", "iifname"}}}}},
-            {"right", iface_rhs}
+            {"right", interface_name_rhs(*prefilter.inbound_interfaces)}
         }}});
         iface_expr.push_back({{"counter", nullptr}});
         iface_expr.push_back({{"accept", nullptr}});

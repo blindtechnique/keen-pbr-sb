@@ -106,6 +106,37 @@ uint32_t mark_for_detour(const Config& config, const std::string& tag) {
     }
 }
 
+// catalog_mutex() must be held by the caller.
+nlohmann::json load_catalog_snapshot_locked() {
+    std::string source = "cache";
+    auto payload = read_file(kCachePath);
+    if (payload.empty()) {
+        payload = read_file(kBundledPath);
+        source = "bundled";
+    }
+
+    nlohmann::json response;
+    response["source"] = source;
+
+    if (const auto mtime =
+            file_mtime(source == "cache" ? kCachePath : kBundledPath)) {
+        response["updated_at"] =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                mtime->time_since_epoch())
+                .count();
+    }
+
+    try {
+        response["presets"] = nlohmann::json::parse(payload);
+    } catch (const std::exception&) {
+        response["presets"] = nlohmann::json::array();
+        response["error"] = "catalogue is unavailable";
+    }
+    response["url"] = kCatalogUrl;
+    response["detour"] = catalog_detour();
+    return response;
+}
+
 } // namespace
 
 std::string catalog_detour() {
@@ -148,35 +179,15 @@ bool refresh_catalog_if_stale(bool force, uint32_t fwmark) {
     }
 }
 
+nlohmann::json load_catalog_snapshot() {
+    std::lock_guard<std::mutex> lock(catalog_mutex());
+    return load_catalog_snapshot_locked();
+}
+
 void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
     // GET /api/catalog - presets with their source and freshness.
     server.get("/api/catalog", []() -> std::string {
-        std::lock_guard<std::mutex> lock(catalog_mutex());
-
-        std::string source = "cache";
-        auto payload = read_file(kCachePath);
-        if (payload.empty()) {
-            payload = read_file(kBundledPath);
-            source = "bundled";
-        }
-
-        nlohmann::json response;
-        response["source"] = source;
-
-        if (const auto mtime = file_mtime(source == "cache" ? kCachePath : kBundledPath)) {
-            response["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(
-                                         mtime->time_since_epoch()).count();
-        }
-
-        try {
-            response["presets"] = nlohmann::json::parse(payload);
-        } catch (const std::exception&) {
-            response["presets"] = nlohmann::json::array();
-            response["error"] = "catalogue is unavailable";
-        }
-        response["url"] = kCatalogUrl;
-        response["detour"] = catalog_detour();
-        return response.dump();
+        return load_catalog_snapshot().dump();
     });
 
     // POST /api/catalog/refresh - fetch now instead of waiting for the weekly

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -73,6 +74,55 @@ inline bool runtime_recovery_request_should_coalesce(
     bool retry_pending) noexcept {
     return retry_attempt == 0 && retry_pending;
 }
+
+class CoalescedSingleFlightGate {
+public:
+    bool request() noexcept {
+        auto state = state_.load(std::memory_order_acquire);
+        for (;;) {
+            if ((state & kInFlight) != 0) {
+                if ((state & kPending) != 0) {
+                    return false;
+                }
+                if (state_.compare_exchange_weak(
+                        state,
+                        static_cast<std::uint8_t>(state | kPending),
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (state_.compare_exchange_weak(
+                    state,
+                    kInFlight,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    bool complete() noexcept {
+        auto state = state_.load(std::memory_order_acquire);
+        for (;;) {
+            const bool rerun_requested = (state & kPending) != 0;
+            if (state_.compare_exchange_weak(
+                    state,
+                    0,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return rerun_requested;
+            }
+        }
+    }
+
+private:
+    static constexpr std::uint8_t kInFlight = 1U;
+    static constexpr std::uint8_t kPending = 2U;
+    std::atomic<std::uint8_t> state_{0};
+};
 
 class RuntimeIncidentLatch {
 public:

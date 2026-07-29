@@ -5,12 +5,16 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { NdmsCatalogStatus } from './ndmsCatalogStatus';
 import type { NdmsInterfaceInventoryResponseMutationMode } from './ndmsInterfaceInventoryResponseMutationMode';
 import type { NdmsInterfaceInventoryResponseRequiredGuardsItem } from './ndmsInterfaceInventoryResponseRequiredGuardsItem';
 import type { NdmsTunnelInterface } from './ndmsTunnelInterface';
 
 export interface NdmsInterfaceInventoryResponse {
+  /** True only for a fresh authoritative NDMS observation. Stale last-known-good rows can remain visible but cannot authorize a new internal VPN-server choice.
+   */
   available: boolean;
+  catalog_status: NdmsCatalogStatus;
   read_only: boolean;
   mutation_mode: NdmsInterfaceInventoryResponseMutationMode;
   required_guards: NdmsInterfaceInventoryResponseRequiredGuardsItem[];

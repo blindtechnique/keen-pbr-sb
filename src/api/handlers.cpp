@@ -18,6 +18,7 @@
 #include "handler_logs.hpp"
 #include "handler_router_info.hpp"
 #include "handler_catalog.hpp"
+#include "handler_catalog_setup.hpp"
 #include "handler_geo.hpp"
 #include "handler_naive.hpp"
 #include "handler_ndms_names.hpp"
@@ -45,6 +46,7 @@ void register_api_handlers(ApiServer& server, ApiContext& ctx) {
     register_logs_handler(server);
     register_router_info_handler(server, ctx);
     register_catalog_handler(server, ctx);
+    register_catalog_setup_handler(server, ctx);
     register_geo_handler(server, ctx);
     register_naive_component_handler(server, ctx);
     register_ndms_names_handler(server, ctx);

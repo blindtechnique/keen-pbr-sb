@@ -20,6 +20,8 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::map<std::string, std::string>& urltest_selections,
     const CacheManager& cache_manager,
     Firewall& firewall,
-    FirewallApplyMode mode);
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers = nullptr);
 
 } // namespace keen_pbr3

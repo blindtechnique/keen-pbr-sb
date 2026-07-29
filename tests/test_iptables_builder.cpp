@@ -1687,6 +1687,30 @@ TEST_CASE("build_dns_nat_script: no inbound interfaces redirects from any interf
   CHECK(s.find("-i ") == std::string::npos);
 }
 
+TEST_CASE("build_dns_nat_script: internal VPN bypass precedes every DNS redirect") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0", "nwg1"};
+  const auto s = T::build_dns_nat_script(prefilter);
+
+  const auto first_bypass =
+      s.find("-A KeenPbrDnsRdr -i nwg0 -j RETURN\n");
+  const auto second_bypass =
+      s.find("-A KeenPbrDnsRdr -i nwg1 -j RETURN\n");
+  const auto udp_redirect =
+      s.find("-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n");
+  const auto tcp_redirect =
+      s.find("-A KeenPbrDnsRdr -p tcp --dport 53 -j REDIRECT --to-ports 53\n");
+
+  REQUIRE(first_bypass != std::string::npos);
+  REQUIRE(second_bypass != std::string::npos);
+  REQUIRE(udp_redirect != std::string::npos);
+  REQUIRE(tcp_redirect != std::string::npos);
+  CHECK(first_bypass < udp_redirect);
+  CHECK(second_bypass < udp_redirect);
+  CHECK(first_bypass < tcp_redirect);
+  CHECK(second_bypass < tcp_redirect);
+}
+
 TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {
   auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
                                    /*router_origin_snat=*/true);
@@ -1791,6 +1815,34 @@ TEST_CASE("build_ipt_script: restores and saves only keen-pbr conntrack mark bit
   CHECK(s.find("--ctdir REPLY") == std::string::npos);
 }
 
+TEST_CASE("build_ipt_script: internal VPN bypass precedes conntrack restore and classification") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0"};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto s = T::build_ipt_script(
+      false,
+      {mark_rule("myset", false, 0x00120000)},
+      prefilter);
+
+  const auto bypass =
+      s.find("-A KeenPbrTable -i nwg0 -j RETURN\n");
+  const auto restore =
+      s.find("-A KeenPbrTable -m conntrack --ctdir ORIGINAL "
+             "-m connmark ! --mark 0/0xff0000 "
+             "-j CONNMARK --restore-mark");
+  const auto classify =
+      s.find("-A KeenPbrTable -m set --match-set myset dst "
+             "-j MARK --set-xmark 0x120000/0xffffffff\n");
+
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(restore != std::string::npos);
+  REQUIRE(classify != std::string::npos);
+  CHECK(bypass < restore);
+  CHECK(bypass < classify);
+}
+
 TEST_CASE("raw PREROUTING never references conntrack state or CONNMARK") {
   FirewallGlobalPrefilter prefilter;
   prefilter.restore_conntrack_mark = true;
@@ -1832,6 +1884,24 @@ TEST_CASE("raw PREROUTING uses a mangle conntrack companion for flow stickiness"
         std::string::npos);
 }
 
+TEST_CASE("raw conntrack companion bypasses internal VPN before restore") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0"};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto script = T::build_raw_conntrack_script(false, prefilter);
+  const auto bypass =
+      script.find("-A KeenPbrRawCt -i nwg0 -j RETURN\n");
+  const auto restore =
+      script.find("-A KeenPbrRawCt -m conntrack --ctdir ORIGINAL "
+                  "-m connmark ! --mark 0/0xff0000 "
+                  "-j CONNMARK --restore-mark");
+
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(restore != std::string::npos);
+  CHECK(bypass < restore);
+}
 TEST_CASE("build_ipt_script: skip_marked_packets prefilter can be disabled") {
   FirewallGlobalPrefilter prefilter;
   prefilter.skip_established_or_dnat = true;

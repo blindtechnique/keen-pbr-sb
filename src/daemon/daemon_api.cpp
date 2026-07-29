@@ -740,6 +740,14 @@ void Daemon::setup_api() {
                 true,
                 "config-save-emergency-quiesce");
         };
+    api_ctx_->get_visible_config_snapshot_fn =
+        [this]() {
+            return config_store_.visible_snapshot();
+        };
+    api_ctx_->get_staged_config_cas_snapshot_fn =
+        [this]() {
+            return config_store_.staged_cas_snapshot();
+        };
     api_ctx_->replace_interface_traffic_targets_fn =
         [this](std::string source, std::vector<std::string> names) {
             replace_interface_traffic_targets(

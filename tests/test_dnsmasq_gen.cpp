@@ -750,7 +750,8 @@ TEST_CASE("generate output omits IPv6 dnsmasq targets when IPv6 is disabled") {
                                ResolverIpv6Policy::explicitly_disabled());
     const std::string ipset_output = run_generate(ipset_gen);
 
-    CHECK(ipset_output.find("filter-AAAA\n") != std::string::npos);
+    CHECK(ipset_output.find("filter-AAAA\nfilter-rr=64,65\n\n")
+          != std::string::npos);
     CHECK(ipset_output.find("ipset=/example.com/kpbr4d_mylist\n") != std::string::npos);
     CHECK(ipset_output.find("kpbr6d_mylist") == std::string::npos);
 
@@ -761,7 +762,8 @@ TEST_CASE("generate output omits IPv6 dnsmasq targets when IPv6 is disabled") {
                                 ResolverIpv6Policy::explicitly_disabled());
     const std::string nftset_output = run_generate(nftset_gen);
 
-    CHECK(nftset_output.find("filter-AAAA\n") != std::string::npos);
+    CHECK(nftset_output.find("filter-AAAA\nfilter-rr=64,65\n\n")
+          != std::string::npos);
     CHECK(nftset_output.find("nftset=/example.com/4#inet#KeenPbrTable#kpbr4d_mylist\n") != std::string::npos);
     CHECK(nftset_output.find("kpbr6d_mylist") == std::string::npos);
 }
@@ -783,7 +785,9 @@ TEST_CASE("generate output keeps AAAA answers when IPv6 is enabled") {
         KEEN_PBR3_VERSION_FULL_STRING,
         ResolverIpv6Policy::supported());
 
-    CHECK(run_generate(generator).find("filter-AAAA") == std::string::npos);
+    const std::string output = run_generate(generator);
+    CHECK(output.find("filter-AAAA") == std::string::npos);
+    CHECK(output.find("filter-rr=64,65") == std::string::npos);
 }
 
 TEST_CASE("unsupported effective IPv6 omits IPv6 targets without suppressing AAAA") {
@@ -805,6 +809,7 @@ TEST_CASE("unsupported effective IPv6 omits IPv6 targets without suppressing AAA
 
     const std::string output = run_generate(generator);
     CHECK(output.find("filter-AAAA") == std::string::npos);
+    CHECK(output.find("filter-rr=64,65") == std::string::npos);
     CHECK(output.find("ipset=/example.com/kpbr4d_mylist\n")
           != std::string::npos);
     CHECK(output.find("kpbr6d_mylist") == std::string::npos);

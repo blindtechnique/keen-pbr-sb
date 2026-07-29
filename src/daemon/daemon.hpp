@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -49,6 +50,7 @@ struct UrltestSelectionChange;
 class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
+struct NdmsCatalogSnapshot;
 enum class ResolverType;
 
 #ifdef WITH_API
@@ -116,9 +118,25 @@ struct ListsRefreshExecutionResult {
     bool reloaded{false};
 };
 
+enum class InternalVpnRuntimeResolutionState : std::uint8_t {
+    verified,
+    retained_verified_includes,
+    degraded,
+    authoritative_negative,
+};
+
+struct InternalVpnRuntimeResolution {
+    std::vector<InternalVpnServer> effective_servers;
+    InternalVpnRuntimeResolutionState state{
+        InternalVpnRuntimeResolutionState::degraded};
+    std::vector<InternalVpnServer> verified_includes_for_lkg;
+    std::vector<std::string> retain_verified_include_ndms_ids;
+};
+
 struct PreparedRuntimeInputs {
     Config config;
     OutboundMarkMap outbound_marks;
+    InternalVpnRuntimeResolution internal_vpn_resolution;
     bool remote_lists_refreshed{false};
 };
 
@@ -127,6 +145,76 @@ enum class RemoteListPreparationMode {
     MissingOrInvalid,
     RefreshAll,
 };
+
+inline bool interface_event_requires_runtime_observation(
+    const InterfaceMonitor::Event& event) {
+    return event.observation_gap ||
+           event.administrative_state_changed ||
+           event.address_changed ||
+           event.topology_changed;
+}
+
+inline bool interface_event_affects_managed_runtime(
+    const Config& config,
+    const std::vector<InternalVpnServer>& effective_internal_vpn_servers,
+    const std::string& interface_name) {
+    const auto outbounds =
+        config.outbounds.value_or(std::vector<Outbound>{});
+    const bool is_managed_outbound = std::any_of(
+        outbounds.begin(),
+        outbounds.end(),
+        [&interface_name](const Outbound& outbound) {
+            return outbound.type == OutboundType::INTERFACE &&
+                   outbound.interface.has_value() &&
+                   *outbound.interface == interface_name;
+        });
+    const auto configured_internal_servers = config.route.has_value()
+        ? config.route->internal_vpn_servers.value_or(
+              std::vector<InternalVpnServer>{})
+        : std::vector<InternalVpnServer>{};
+    const auto matches_interface =
+        [&interface_name](const InternalVpnServer& server) {
+            return server.interface == interface_name;
+        };
+    const bool is_internal_vpn_interface =
+        std::any_of(
+            configured_internal_servers.begin(),
+            configured_internal_servers.end(),
+            matches_interface) ||
+        std::any_of(
+            effective_internal_vpn_servers.begin(),
+            effective_internal_vpn_servers.end(),
+            matches_interface);
+    return is_managed_outbound || is_internal_vpn_interface;
+}
+
+inline bool interface_event_affects_managed_runtime(
+    const Config& config,
+    const std::string& interface_name) {
+    return interface_event_affects_managed_runtime(
+        config, {}, interface_name);
+}
+
+inline bool config_has_stable_internal_vpn_server_policy(
+    const Config& config) {
+    const auto configured_internal_servers = config.route.has_value()
+        ? config.route->internal_vpn_servers.value_or(
+              std::vector<InternalVpnServer>{})
+        : std::vector<InternalVpnServer>{};
+    return std::any_of(
+        configured_internal_servers.begin(),
+        configured_internal_servers.end(),
+        [](const InternalVpnServer& server) {
+            return server.ndms_id.has_value();
+        });
+}
+
+inline bool internal_vpn_resolution_requires_catalog_refresh(
+    const Config& config,
+    InternalVpnRuntimeResolutionState state) {
+    return config_has_stable_internal_vpn_server_policy(config) &&
+           state != InternalVpnRuntimeResolutionState::verified;
+}
 
 struct ResolverGenerationSnapshot {
     Config config;
@@ -221,12 +309,18 @@ private:
     void register_interface_monitor_fd();
     void unregister_interface_monitor_fd();
     void schedule_interface_monitor_reconnect_retry();
+    void recover_internal_vpn_catalog_after_observation_gap();
     void handle_interface_event(const InterfaceMonitor::Event& event);
-    bool is_interface_outbound_in_use(const std::string& interface_name) const;
-    void refresh_iproute_and_firewall_runtime(std::size_t retry_attempt = 0);
+    void refresh_iproute_and_firewall_runtime(
+        std::size_t retry_attempt = 0,
+        std::optional<InternalVpnRuntimeResolution>
+            prepared_internal_vpn_resolution = std::nullopt);
     void schedule_runtime_firewall_retry(std::size_t attempt,
                                          std::uint64_t runtime_generation);
     void cancel_runtime_firewall_retry();
+    void schedule_resolver_reload_retry(std::size_t attempt,
+                                        std::uint64_t runtime_generation);
+    void cancel_resolver_reload_retry();
     void dispatch_event_fd(int fd, uint32_t events);
     void run_event_loop();
 
@@ -250,6 +344,26 @@ private:
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
                                                   RemoteListPreparationMode list_mode =
                                                       RemoteListPreparationMode::RefreshAll);
+    InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
+        const Config& config,
+        bool allow_catalog_refresh,
+        const std::vector<InternalVpnServer>& previous_effective = {});
+    InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
+        const Config& config,
+        const NdmsCatalogSnapshot& snapshot,
+        const std::vector<InternalVpnServer>& previous_effective = {});
+    std::vector<InternalVpnServer>
+    snapshot_internal_vpn_verified_includes_lkg() const;
+    void update_internal_vpn_verified_includes_lkg(
+        const InternalVpnRuntimeResolution& resolution) noexcept;
+    InternalVpnRuntimeResolution
+    prepare_internal_vpn_server_resolution_from_cache();
+    void schedule_internal_vpn_catalog_refresh();
+    void schedule_internal_vpn_catalog_refresh_if_needed(
+        InternalVpnRuntimeResolutionState state);
+    void schedule_internal_vpn_catalog_refresh_retry(
+        std::uint64_t runtime_generation);
+    void cancel_internal_vpn_catalog_refresh_retry();
     void apply_config_with_rollback(const Config& next_config,
                                     bool& rolled_back,
                                     bool refresh_remote_lists = true);
@@ -371,6 +485,9 @@ private:
     int sigusr1_refresh_task_id_{-1};
     // One bounded retry chain for races with NDMS firewall publication.
     int runtime_firewall_retry_task_id_{-1};
+    // Separate bounded repair chain for a resolver hook that failed after
+    // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq.
+    int resolver_reload_retry_task_id_{-1};
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
 
@@ -436,6 +553,16 @@ private:
     // firmware owns and standalone outbounds urltest never looks at.
     InterfaceProbe interface_probe_;
     OutboundMarkMap outbound_marks_;
+    // Runtime-only mapping from stable NDMS identities to current kernel
+    // ingress names. Persisted configuration remains unchanged.
+    std::vector<InternalVpnServer> resolved_internal_vpn_servers_;
+    // API preparation runs outside the control loop. It may reuse only a
+    // thread-safe, previously verified, include-only stable binding. Exclusion
+    // bypasses and degraded/legacy observations are never stored here.
+    mutable TracedMutex internal_vpn_lkg_mutex_;
+    std::vector<InternalVpnServer>
+        internal_vpn_verified_includes_lkg_
+            GUARDED_BY(internal_vpn_lkg_mutex_);
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
     RuntimeIncidentLatch urltest_apply_incidents_{3};
@@ -450,6 +577,9 @@ private:
     std::atomic<bool> ipc_mutation_inflight_{false};
     std::atomic<bool> ipc_resolver_hook_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
+    CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
+    int internal_vpn_catalog_refresh_retry_task_id_{-1};
+    std::size_t internal_vpn_catalog_refresh_retry_attempt_{0};
     std::atomic<std::uint64_t> resolver_stream_epoch_{0};
     std::atomic<std::uint64_t> resolver_stream_completed_epoch_{0};
     TracedMutex system_resolver_hook_mutex_;

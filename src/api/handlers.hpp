@@ -6,6 +6,7 @@
 
 #include "../cmd/test_routing.hpp"
 #include "../config/config.hpp"
+#include "../daemon/config_store.hpp"
 #include "../health/routing_health.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../update/maintenance_lock.hpp"
@@ -111,6 +112,13 @@ struct ApiContext {
     // operation state. Production wiring must not try to acquire a second
     // Reloading operation, otherwise the emergency stop self-deadlocks.
     std::function<void()> emergency_quiesce_runtime_fn;
+    // Catalog setup uses one visible snapshot identity. Mutations are
+    // serialized by the same config-operation guard as ordinary staging.
+    std::function<VisibleConfigSnapshot()> get_visible_config_snapshot_fn;
+    // Tail callback preserves positional aggregate initializers used by
+    // embedders. Production wiring supplies the atomic draft/base snapshot.
+    std::function<std::optional<StagedConfigSnapshot>()>
+        get_staged_config_cas_snapshot_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -130,6 +138,44 @@ struct ApiContext {
 
     void stage_config(Config config, std::string staged_config_json) const {
         stage_config_fn(std::move(config), std::move(staged_config_json));
+    }
+
+    VisibleConfigSnapshot get_visible_config_snapshot() const {
+        if (!get_visible_config_snapshot_fn) {
+            throw std::runtime_error(
+                "Atomic visible config snapshots are unavailable");
+        }
+        return get_visible_config_snapshot_fn();
+    }
+
+    VisibleConfigSnapshot get_visible_config_state() const {
+        if (get_visible_config_snapshot_fn) {
+            return get_visible_config_snapshot_fn();
+        }
+        // Compatibility for embedders predating the atomic snapshot callback.
+        // Production always takes the single-lock path above.
+        return VisibleConfigSnapshot{
+            get_visible_config(),
+            config_is_draft(),
+            {},
+        };
+    }
+
+    std::optional<StagedConfigSnapshot>
+    get_staged_config_cas_snapshot() const {
+        if (get_staged_config_cas_snapshot_fn) {
+            return get_staged_config_cas_snapshot_fn();
+        }
+        const auto legacy = get_staged_config_snapshot();
+        if (!legacy.has_value()) {
+            return std::nullopt;
+        }
+        return StagedConfigSnapshot{
+            legacy->first,
+            legacy->second,
+            {},
+            {},
+        };
     }
 
     void validate_candidate_config(const Config& config) const {

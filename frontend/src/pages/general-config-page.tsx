@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next"
-import { useRef, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 
 import { useForm } from "@tanstack/react-form"
 import { useQueryClient } from "@tanstack/react-query"
@@ -7,9 +7,14 @@ import { useStore } from "@tanstack/react-store"
 
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
+import type { InternalVpnServer } from "@/api/generated/model/internalVpnServer"
 import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
-import { useGetConfig, useGetRuntimeInterfaces } from "@/api/queries"
+import {
+  useGetConfig,
+  useGetNdmsInterfaceInventory,
+  useGetRuntimeInterfaces,
+} from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import {
   Field,
@@ -27,6 +32,10 @@ import { PageHeader } from "@/components/shared/page-header"
 import { SchedulePicker } from "@/components/shared/schedule-picker"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { AuthSettingsCard } from "@/components/settings/auth-settings-card"
+import {
+  InternalVpnServersField,
+  type InternalVpnServerInventoryState,
+} from "@/components/settings/internal-vpn-servers-field"
 import { LoggingSettingsCard } from "@/components/settings/logging-settings-card"
 import {
   BackupAndRestoreCard,
@@ -63,6 +72,13 @@ import {
   setFormServerErrors,
   splitFormApiErrors,
 } from "@/lib/form-api-errors"
+import {
+  normalizeInternalVpnServerInterfaceNames,
+  reconcileInternalVpnServerOverrides,
+  type InternalVpnServerRuntimeState,
+} from "@/lib/internal-vpn-server-policy"
+import { mapNativeInterfaces } from "@/lib/native-interfaces"
+import { getGeneralConfigActionState } from "@/pages/general-config-form-state"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { toast } from "sonner"
 
@@ -75,6 +91,7 @@ type SettingsDraft = {
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
+  internalVpnServers?: InternalVpnServer[]
   listsAutoupdateEnabled: boolean
   cron: string
   fwmarkStart: string
@@ -103,6 +120,7 @@ const SETTINGS_FIELD_NAMES = {
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
+  internalVpnServers: "internalVpnServers",
   listsAutoupdateEnabled: "listsAutoupdateEnabled",
   cron: "cron",
   fwmarkStart: "fwmarkStart",
@@ -171,10 +189,15 @@ function LoadedGeneralConfigPage({
 }: LoadedGeneralConfigPageProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const authSettingsRef = useRef<SettingsSectionController>(null)
   const remoteAccessRef = useRef<SettingsSectionController>(null)
   const loggingSettingsRef = useRef<SettingsSectionController>(null)
+  // Role-less WG/AWG confirmation is an explicit user action in this edit
+  // session. Keep it independently of live inventory flags: stale snapshots
+  // intentionally mask candidate authority and must not erase the draft.
+  const rolelessConfirmationNdmsIdsRef = useRef(new Set<string>())
   const [deferredState, setDeferredState] = useState(
     INITIAL_DEFERRED_SETTINGS_STATE
   )
@@ -269,12 +292,44 @@ function LoadedGeneralConfigPage({
   )
 
   const isPending = postConfigMutation.isPending || deferredSavePending
-  const runtimeInterfaces =
-    runtimeInterfacesQuery.data?.status === 200
-      ? runtimeInterfacesQuery.data.data.interfaces
-      : []
+  const internalVpnServerInventoryState: InternalVpnServerInventoryState =
+    ndmsInventoryQuery.isLoading
+      ? "loading"
+      : ndmsInventoryQuery.isError || ndmsInventoryQuery.data?.status !== 200
+        ? "error"
+        : ndmsInventoryQuery.data.data.catalog_status === "stale"
+          ? "stale"
+          : ndmsInventoryQuery.data.data.catalog_status === "fresh" &&
+              ndmsInventoryQuery.data.data.available
+            ? "ready"
+            : "unavailable"
+  const internalVpnServerRuntimeState: InternalVpnServerRuntimeState =
+    runtimeInterfacesQuery.isLoading
+      ? "loading"
+      : runtimeInterfacesQuery.isError ||
+          runtimeInterfacesQuery.data?.status !== 200
+        ? "error"
+        : "ready"
+  const runtimeInterfaces = useMemo(
+    () =>
+      runtimeInterfacesQuery.data?.status === 200
+        ? runtimeInterfacesQuery.data.data.interfaces
+        : [],
+    [runtimeInterfacesQuery.data]
+  )
+  const nativeInterfaces = useMemo(
+    () =>
+      mapNativeInterfaces(
+        ndmsInventoryQuery.data?.status === 200
+          ? ndmsInventoryQuery.data.data.interfaces
+          : [],
+        runtimeInterfaces
+      ),
+    [ndmsInventoryQuery.data, runtimeInterfaces]
+  )
 
   const handleCancel = () => {
+    rolelessConfirmationNdmsIdsRef.current.clear()
     form.reset(getDraftFromConfig(loadedConfig))
     clearFormServerErrors(form)
     authSettingsRef.current?.reset()
@@ -288,8 +343,7 @@ function LoadedGeneralConfigPage({
     state: SettingsSectionState
   ) => {
     setDeferredState((current) =>
-      current[key].dirty === state.dirty &&
-      current[key].valid === state.valid
+      current[key].dirty === state.dirty && current[key].valid === state.valid
         ? current
         : { ...current, [key]: state }
     )
@@ -302,10 +356,10 @@ function LoadedGeneralConfigPage({
     (state) => state.valid
   )
 
-  const handleSaveAll = async (formIsPristine: boolean) => {
+  const handleSaveAll = async (formIsDefaultValue: boolean) => {
     setDeferredSavePending(true)
     try {
-      if (!formIsPristine) {
+      if (!formIsDefaultValue) {
         await form.handleSubmit()
       }
       await loggingSettingsRef.current?.save()
@@ -347,9 +401,7 @@ function LoadedGeneralConfigPage({
                 {(field) => (
                   <Field>
                     <FieldLabel>
-                      {t(
-                        "pages.settings.general.strictEnforcementLabel"
-                      )}
+                      {t("pages.settings.general.strictEnforcementLabel")}
                     </FieldLabel>
                     <FieldContent>
                       <Select
@@ -387,11 +439,7 @@ function LoadedGeneralConfigPage({
                         <SelectContent>
                           <SelectGroup>
                             {(
-                              [
-                                "automatic",
-                                "enabled",
-                                "disabled",
-                              ] as const
+                              ["automatic", "enabled", "disabled"] as const
                             ).map((option) => (
                               <SelectItem key={option} value={option}>
                                 {t(
@@ -557,7 +605,45 @@ function LoadedGeneralConfigPage({
                             name={SETTINGS_FIELD_NAMES.inboundInterfaces}
                             interfaces={runtimeInterfaces}
                             value={field.state.value}
-                            onChange={field.handleChange}
+                            onChange={(nextInterfaces) => {
+                              const normalizedInterfaces =
+                                normalizeInternalVpnServerInterfaceNames(
+                                  nextInterfaces
+                                )
+                              const reconciledOverrides =
+                                reconcileInternalVpnServerOverrides({
+                                  overrides: form.getFieldValue(
+                                    SETTINGS_FIELD_NAMES.internalVpnServers
+                                  ),
+                                  baselineOverrides:
+                                    loadedConfig.route?.internal_vpn_servers,
+                                  legacyInboundInterfaces: normalizedInterfaces,
+                                  baselineLegacyInboundInterfaces:
+                                    loadedConfig.route?.inbound_interfaces,
+                                  rolelessConfirmationNdmsIds:
+                                    [
+                                      ...new Set([
+                                        ...nativeInterfaces
+                                          .filter(
+                                            (nativeInterface) =>
+                                              nativeInterface.source
+                                                .internal_vpn_server_role_confirmation_required
+                                          )
+                                          .map(
+                                            (nativeInterface) =>
+                                              nativeInterface.source.id
+                                          ),
+                                        ...rolelessConfirmationNdmsIdsRef.current,
+                                      ]),
+                                    ],
+                                })
+
+                              field.handleChange(normalizedInterfaces)
+                              form.setFieldValue(
+                                SETTINGS_FIELD_NAMES.internalVpnServers,
+                                reconciledOverrides
+                              )
+                            }}
                             addLabel={t(
                               "pages.settings.general.inboundInterfacesAddAction"
                             )}
@@ -580,6 +666,136 @@ function LoadedGeneralConfigPage({
                     </Field>
                   )
                 }}
+              </form.Field>
+
+              <FieldSeparator />
+
+              <form.Field name={SETTINGS_FIELD_NAMES.internalVpnServers}>
+                {(field) => (
+                  <form.Subscribe
+                    selector={(state) => state.values.inboundInterfaces}
+                  >
+                    {(legacyInboundInterfaces) => {
+                      const error = getFirstFieldError(field.state.meta.errors)
+                      return (
+                        <Field invalid={Boolean(error)}>
+                          <FieldContent>
+                            <InternalVpnServersField
+                              baselineOverrides={
+                                loadedConfig.route?.internal_vpn_servers
+                              }
+                              copy={{
+                                title: t(
+                                  "pages.settings.general.internalVpnServersTitle"
+                                ),
+                                description: t(
+                                  "pages.settings.general.internalVpnServersDescription"
+                                ),
+                                emptyTitle: t(
+                                  "pages.settings.general.internalVpnServersEmptyTitle"
+                                ),
+                                emptyDescription: t(
+                                  "pages.settings.general.internalVpnServersEmptyDescription"
+                                ),
+                                loadingTitle: t(
+                                  "pages.settings.general.internalVpnServersLoadingTitle"
+                                ),
+                                loadingDescription: t(
+                                  "pages.settings.general.internalVpnServersLoadingDescription"
+                                ),
+                                unavailableTitle: t(
+                                  "pages.settings.general.internalVpnServersUnavailableTitle"
+                                ),
+                                unavailableDescription: t(
+                                  "pages.settings.general.internalVpnServersUnavailableDescription"
+                                ),
+                                staleTitle: t(
+                                  "pages.settings.general.internalVpnServersStaleTitle"
+                                ),
+                                staleDescription: t(
+                                  "pages.settings.general.internalVpnServersStaleDescription"
+                                ),
+                                loadErrorTitle: t(
+                                  "pages.settings.general.internalVpnServersLoadErrorTitle"
+                                ),
+                                loadErrorDescription: t(
+                                  "pages.settings.general.internalVpnServersLoadErrorDescription"
+                                ),
+                                confirmationTitle: t(
+                                  "pages.settings.general.internalVpnServersConfirmationTitle"
+                                ),
+                                confirmationDescription: t(
+                                  "pages.settings.general.internalVpnServersConfirmationDescription"
+                                ),
+                                confirmationAction: t(
+                                  "pages.settings.general.internalVpnServersConfirmationAction"
+                                ),
+                                processLabel: t(
+                                  "pages.settings.general.internalVpnServersProcessLabel"
+                                ),
+                                inheritLabel: t(
+                                  "pages.settings.general.internalVpnServersInheritLabel"
+                                ),
+                                statusUp: t(
+                                  "pages.settings.general.internalVpnServersStatusUp"
+                                ),
+                                statusDown: t(
+                                  "pages.settings.general.internalVpnServersStatusDown"
+                                ),
+                                statusMissing: t(
+                                  "pages.settings.general.internalVpnServersStatusMissing"
+                                ),
+                                statusUnknown: t(
+                                  "pages.settings.general.internalVpnServersStatusUnknown"
+                                ),
+                                missingHint: t(
+                                  "pages.settings.general.internalVpnServersMissingHint"
+                                ),
+                                confirmationAriaLabel: (serverLabel) =>
+                                  t(
+                                    "pages.settings.general.internalVpnServersConfirmationAriaLabel",
+                                    { server: serverLabel }
+                                  ),
+                                toggleAriaLabel: (serverLabel) =>
+                                  t(
+                                    "pages.settings.general.internalVpnServersToggleAriaLabel",
+                                    { server: serverLabel }
+                                  ),
+                                inheritAriaLabel: (serverLabel) =>
+                                  t(
+                                    "pages.settings.general.internalVpnServersInheritAriaLabel",
+                                    { server: serverLabel }
+                                  ),
+                              }}
+                              disabled={isPending}
+                              inventoryState={internalVpnServerInventoryState}
+                              legacyInboundInterfaces={legacyInboundInterfaces}
+                              nativeInterfaces={nativeInterfaces}
+                              onChange={field.handleChange}
+                              onRolelessConfirmationChange={(
+                                ndmsId,
+                                confirmed
+                              ) => {
+                                if (confirmed) {
+                                  rolelessConfirmationNdmsIdsRef.current.add(
+                                    ndmsId
+                                  )
+                                } else {
+                                  rolelessConfirmationNdmsIdsRef.current.delete(
+                                    ndmsId
+                                  )
+                                }
+                              }}
+                              overrides={field.state.value}
+                              runtimeState={internalVpnServerRuntimeState}
+                            />
+                            <FieldHint error={error ?? null} />
+                          </FieldContent>
+                        </Field>
+                      )
+                    }}
+                  </form.Subscribe>
+                )}
               </form.Field>
             </FieldGroup>
           </CardContent>
@@ -664,9 +880,7 @@ function LoadedGeneralConfigPage({
           ref={authSettingsRef}
         />
         <RemoteAccessCard
-          onStateChange={(state) =>
-            updateDeferredState("remoteAccess", state)
-          }
+          onStateChange={(state) => updateDeferredState("remoteAccess", state)}
           ref={remoteAccessRef}
         />
       </div>
@@ -823,35 +1037,40 @@ function LoadedGeneralConfigPage({
       <form.Subscribe
         selector={(state) => ({
           canSubmit: state.canSubmit,
-          isPristine: state.isPristine,
+          isDefaultValue: state.isDefaultValue,
         })}
       >
-        {({ canSubmit, isPristine }) => (
-          <BottomActionBar contentClassName="justify-end">
-            <Button
-              disabled={isPending || (isPristine && !deferredDirty)}
-              onClick={handleCancel}
-              size="xl"
-              variant="outline"
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              disabled={
-                isPending ||
-                (isPristine && !deferredDirty) ||
-                !canSubmit ||
-                !deferredValid
-              }
-              onClick={() => void handleSaveAll(isPristine)}
-              size="xl"
-            >
-              {isPending
-                ? t("pages.settings.actions.saving")
-                : t("pages.settings.actions.save")}
-            </Button>
-          </BottomActionBar>
-        )}
+        {({ canSubmit, isDefaultValue }) => {
+          const actionState = getGeneralConfigActionState({
+            canSubmit,
+            deferredDirty,
+            deferredValid,
+            isDefaultValue,
+            isPending,
+          })
+
+          return (
+            <BottomActionBar contentClassName="justify-end">
+              <Button
+                disabled={actionState.cancelDisabled}
+                onClick={handleCancel}
+                size="xl"
+                variant="outline"
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                disabled={actionState.saveDisabled}
+                onClick={() => void handleSaveAll(isDefaultValue)}
+                size="xl"
+              >
+                {isPending
+                  ? t("pages.settings.actions.saving")
+                  : t("pages.settings.actions.save")}
+              </Button>
+            </BottomActionBar>
+          )
+        }}
       </form.Subscribe>
     </>
   )
@@ -954,8 +1173,12 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
       fallbackDraft.clientDnsEnforcement,
-    inboundInterfaces:
-      config.route?.inbound_interfaces ?? fallbackDraft.inboundInterfaces,
+    inboundInterfaces: normalizeInternalVpnServerInterfaceNames(
+      config.route?.inbound_interfaces ?? fallbackDraft.inboundInterfaces
+    ),
+    internalVpnServers: config.route?.internal_vpn_servers?.map((server) => ({
+      ...server,
+    })),
     listsAutoupdateEnabled:
       config.lists_autoupdate?.enabled ?? fallbackDraft.listsAutoupdateEnabled,
     cron: config.lists_autoupdate?.cron ?? fallbackDraft.cron,
@@ -988,7 +1211,10 @@ function buildUpdatedConfig(
     },
     route: {
       ...config.route,
-      inbound_interfaces: draft.inboundInterfaces,
+      inbound_interfaces: normalizeInternalVpnServerInterfaceNames(
+        draft.inboundInterfaces
+      ),
+      internal_vpn_servers: draft.internalVpnServers,
     },
     dns: {
       ...config.dns,
@@ -1059,6 +1285,13 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
     path.startsWith("route.inbound_interfaces[")
   ) {
     return SETTINGS_FIELD_NAMES.inboundInterfaces
+  }
+
+  if (
+    path === "route.internal_vpn_servers" ||
+    path.startsWith("route.internal_vpn_servers[")
+  ) {
+    return SETTINGS_FIELD_NAMES.internalVpnServers
   }
 
   switch (path) {

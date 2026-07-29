@@ -103,6 +103,11 @@ void DnsmasqGenerator::generate_directives(
         hash_record_callback(
             std::string("filter-aaaa|")
             + (ipv6_policy_.suppress_aaaa ? "1" : "0"));
+        if (ipv6_policy_.suppress_aaaa) {
+            // RR 64/65 filtering changes the effective resolver output and
+            // must therefore participate in the managed-config hash.
+            hash_record_callback("filter-rr|64,65");
+        }
     }
 
     if (out != nullptr) {
@@ -114,9 +119,13 @@ void DnsmasqGenerator::generate_directives(
             // When IPv6 routing is disabled, returning AAAA records gives
             // clients an unusable first candidate. Browsers then wait for
             // Happy Eyeballs fallback before trying the correctly routed A
-            // record. Keep the global IPv6 switch end-to-end by suppressing
-            // AAAA answers at the managed resolver as well.
-            *out << "filter-AAAA\n\n";
+            // record. HTTPS/SVCB records can carry ipv6hint values which
+            // bypass an AAAA-only filter, so dnsmasq 2.92 must suppress RR
+            // types 64 and 65 as well. This deliberately disables service
+            // binding discovery such as HTTP/3 and ECH for this IPv4-only
+            // mode; ordinary A-record resolution remains available.
+            *out << "filter-AAAA\n";
+            *out << "filter-rr=64,65\n\n";
         }
     }
 

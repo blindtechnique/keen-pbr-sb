@@ -35,6 +35,13 @@ struct NdmsTunnelInterface {
     std::string firmware_type;
     NdmsTunnelKind kind{NdmsTunnelKind::wireguard};
     NdmsInterfaceRole role{NdmsInterfaceRole::unknown};
+    // True only when the read-only NDMS record is safe to offer as an
+    // internal VPN-server policy target. For WG/AWG, KeeneticOS 5.1.1 does
+    // not report a client/server role, so this additionally requires an
+    // explicitly non-global interface, no default gateway and a non-host
+    // local subnet. The UI must still obtain an explicit user confirmation.
+    bool internal_vpn_server_candidate{false};
+    bool internal_vpn_server_role_confirmation_required{false};
     std::optional<bool> connected;
     std::optional<bool> link;
     // SHA-256 of a strict allowlist of non-secret structural NDMS fields.

@@ -34,6 +34,294 @@ std::string ndms_payload(const std::string& label = "Office VPN") {
 
 } // namespace
 
+TEST_CASE("NDMS catalog cache peek never triggers a fetch") {
+    std::atomic<int> fetches{0};
+    NdmsCatalogCache cache([&fetches] {
+        ++fetches;
+        return ndms_payload();
+    });
+
+    const auto before_refresh = cache.peek();
+    CHECK(
+        before_refresh.status ==
+        NdmsCatalogCacheStatus::unavailable);
+    CHECK_FALSE(before_refresh.refreshed);
+    CHECK(fetches.load() == 0);
+
+    const auto refreshed = cache.get();
+    CHECK(refreshed.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(refreshed.refreshed);
+    CHECK(fetches.load() == 1);
+
+    const auto cached = cache.peek();
+    CHECK(cached.status == NdmsCatalogCacheStatus::fresh);
+    CHECK_FALSE(cached.refreshed);
+    CHECK(fetches.load() == 1);
+}
+
+TEST_CASE("NDMS catalog forced refresh bypasses TTL but remains throttled") {
+    auto now = NdmsCatalogCache::Clock::time_point{};
+    int fetch_count = 0;
+    std::string label = "Office VPN";
+    NdmsCatalogCache cache(
+        [&] {
+            ++fetch_count;
+            return ndms_payload(label);
+        },
+        30s,
+        5s,
+        [&] {
+            return now;
+        });
+
+    CHECK(cache.get().status == NdmsCatalogCacheStatus::fresh);
+    CHECK(fetch_count == 1);
+
+    label = "Renumbered VPN";
+    now += 1s;
+    const auto first_forced = cache.force_refresh();
+    CHECK(first_forced.refreshed);
+    CHECK(first_forced.catalog.tunnels.front().label == "Renumbered VPN");
+    CHECK(fetch_count == 2);
+
+    label = "Too soon";
+    now += 1s;
+    const auto throttled = cache.force_refresh();
+    CHECK_FALSE(throttled.refreshed);
+    CHECK(throttled.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(throttled.catalog.tunnels.front().label == "Renumbered VPN");
+    CHECK(fetch_count == 2);
+
+    now += 5s;
+    const auto forced = cache.force_refresh();
+    CHECK(forced.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(forced.refreshed);
+    REQUIRE(forced.catalog.tunnels.size() == 1);
+    CHECK(forced.catalog.tunnels.front().label == "Too soon");
+    CHECK(fetch_count == 3);
+}
+
+TEST_CASE("NDMS catalog peek becomes stale when verified TTL expires") {
+    auto now = NdmsCatalogCache::Clock::time_point{};
+    NdmsCatalogCache cache(
+        [] {
+            return ndms_payload();
+        },
+        30s,
+        5s,
+        [&] {
+            return now;
+        });
+
+    CHECK(cache.get().status == NdmsCatalogCacheStatus::fresh);
+    now += 29s;
+    CHECK(cache.peek().status == NdmsCatalogCacheStatus::fresh);
+    now += 1s;
+    const auto expired = cache.peek();
+    CHECK(expired.status == NdmsCatalogCacheStatus::stale);
+    CHECK_FALSE(expired.refreshed);
+}
+
+TEST_CASE("NDMS catalog invalidation revokes authority and permits immediate refresh") {
+    auto now = NdmsCatalogCache::Clock::time_point{};
+    int fetch_count = 0;
+    std::string label = "Office VPN";
+    NdmsCatalogCache cache(
+        [&] {
+            ++fetch_count;
+            return ndms_payload(label);
+        },
+        30s,
+        5s,
+        [&] {
+            return now;
+        });
+
+    CHECK(cache.force_refresh().status == NdmsCatalogCacheStatus::fresh);
+    CHECK(fetch_count == 1);
+
+    now += 1s;
+    cache.invalidate();
+    const auto invalidated = cache.peek();
+    CHECK(invalidated.status == NdmsCatalogCacheStatus::stale);
+    CHECK_FALSE(invalidated.refreshed);
+    CHECK(fetch_count == 1);
+
+    label = "Renumbered VPN";
+    const auto refreshed = cache.force_refresh();
+    CHECK(refreshed.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(refreshed.refreshed);
+    CHECK(refreshed.catalog.tunnels.front().label == "Renumbered VPN");
+    CHECK(fetch_count == 2);
+}
+
+TEST_CASE("NDMS catalog invalidation rejects an older in-flight response") {
+    std::atomic<int> fetch_count{0};
+    std::mutex fetch_mutex;
+    std::condition_variable fetch_condition;
+    bool first_fetch_started = false;
+    bool release_first_fetch = false;
+
+    NdmsCatalogCache cache(
+        [&] {
+            const auto attempt =
+                fetch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (attempt == 1) {
+                std::unique_lock<std::mutex> lock(fetch_mutex);
+                first_fetch_started = true;
+                fetch_condition.notify_all();
+                fetch_condition.wait(
+                    lock,
+                    [&] {
+                        return release_first_fetch;
+                    });
+                return ndms_payload("Pre-event catalog");
+            }
+            return ndms_payload("Post-event catalog");
+        });
+
+    auto old_refresh = std::async(
+        std::launch::async,
+        [&] {
+            return cache.force_refresh();
+        });
+    {
+        std::unique_lock<std::mutex> lock(fetch_mutex);
+        fetch_condition.wait(
+            lock,
+            [&] {
+                return first_fetch_started;
+            });
+    }
+
+    cache.invalidate();
+    std::atomic<bool> replacement_started{false};
+    auto replacement = std::async(
+        std::launch::async,
+        [&] {
+            replacement_started.store(true, std::memory_order_release);
+            return cache.force_refresh();
+        });
+    while (!replacement_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    // The post-invalidation forced caller must join the old single-flight
+    // request first, rather than racing a duplicate fetch alongside it.
+    CHECK(replacement.wait_for(20ms) == std::future_status::timeout);
+    {
+        std::lock_guard<std::mutex> lock(fetch_mutex);
+        release_first_fetch = true;
+    }
+    fetch_condition.notify_all();
+
+    const auto rejected = old_refresh.get();
+    CHECK(
+        rejected.status ==
+        NdmsCatalogCacheStatus::unavailable);
+    CHECK_FALSE(rejected.refreshed);
+    const auto replacement_result = replacement.get();
+    CHECK(replacement_result.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(replacement_result.refreshed);
+    CHECK(
+        replacement_result.catalog.tunnels.front().label ==
+        "Post-event catalog");
+    CHECK(fetch_count.load(std::memory_order_relaxed) == 2);
+}
+
+TEST_CASE(
+    "NDMS catalog invalidation does not inherit an older failed refresh throttle") {
+    bool malformed_response = false;
+    SUBCASE("transport failure") {
+        malformed_response = false;
+    }
+    SUBCASE("malformed response") {
+        malformed_response = true;
+    }
+
+    auto now = NdmsCatalogCache::Clock::time_point{};
+    std::atomic<int> fetch_count{0};
+    std::mutex fetch_mutex;
+    std::condition_variable fetch_condition;
+    bool stale_fetch_started = false;
+    bool release_stale_fetch = false;
+
+    NdmsCatalogCache cache(
+        [&]() -> std::string {
+            const auto attempt =
+                fetch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (attempt == 1) {
+                return ndms_payload("Initial catalog");
+            }
+            if (attempt == 2) {
+                std::unique_lock<std::mutex> lock(fetch_mutex);
+                stale_fetch_started = true;
+                fetch_condition.notify_all();
+                fetch_condition.wait(
+                    lock,
+                    [&] {
+                        return release_stale_fetch;
+                    });
+                if (malformed_response) {
+                    return "{";
+                }
+                throw std::runtime_error("simulated transport failure");
+            }
+            return ndms_payload("Replacement catalog");
+        },
+        30s,
+        5s,
+        [&] {
+            return now;
+        });
+
+    CHECK(cache.force_refresh().status == NdmsCatalogCacheStatus::fresh);
+    now += 5s;
+    auto stale_refresh = std::async(
+        std::launch::async,
+        [&] {
+            return cache.force_refresh();
+        });
+    {
+        std::unique_lock<std::mutex> lock(fetch_mutex);
+        fetch_condition.wait(
+            lock,
+            [&] {
+                return stale_fetch_started;
+            });
+    }
+
+    cache.invalidate();
+    auto replacement_refresh = std::async(
+        std::launch::async,
+        [&] {
+            return cache.force_refresh();
+        });
+    CHECK(
+        replacement_refresh.wait_for(20ms) ==
+        std::future_status::timeout);
+
+    {
+        std::lock_guard<std::mutex> lock(fetch_mutex);
+        release_stale_fetch = true;
+    }
+    fetch_condition.notify_all();
+
+    const auto stale_result = stale_refresh.get();
+    CHECK(stale_result.status == NdmsCatalogCacheStatus::stale);
+    CHECK_FALSE(stale_result.refreshed);
+
+    // No clock advance: the invalidated attempt belongs to the old topology
+    // epoch and must not impose its five-second failure throttle on the
+    // replacement observation.
+    const auto replacement_result = replacement_refresh.get();
+    CHECK(replacement_result.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(replacement_result.refreshed);
+    CHECK(
+        replacement_result.catalog.tunnels.front().label ==
+        "Replacement catalog");
+    CHECK(fetch_count.load(std::memory_order_relaxed) == 3);
+}
+
 TEST_CASE("NDMS handler cache preserves its last good catalog") {
     enum class FetchMode {
         valid,
@@ -214,6 +502,8 @@ TEST_CASE("NDMS handler cache coalesces concurrent refreshes") {
     const auto second_result = second.get();
     CHECK(first_result.status == NdmsCatalogCacheStatus::fresh);
     CHECK(second_result.status == NdmsCatalogCacheStatus::fresh);
+    CHECK(first_result.refreshed);
+    CHECK(second_result.refreshed);
     CHECK(fetch_count.load(std::memory_order_relaxed) == 1);
 }
 
@@ -245,12 +535,14 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
 
     const auto names = nlohmann::json::parse(names_response->body);
     CHECK(names["available"] == true);
+    CHECK(names["catalog_status"] == "fresh");
     CHECK(names["names"]["nwg2"]["label"] == "Office VPN");
     CHECK(names["names"]["nwg2"]["firmware_interface_name"] ==
           "Wireguard2");
 
     const auto inventory = nlohmann::json::parse(inventory_response->body);
     CHECK(inventory["available"] == true);
+    CHECK(inventory["catalog_status"] == "fresh");
     CHECK(inventory["read_only"] == true);
     CHECK(inventory["mutation_mode"] == "disabled");
     CHECK(inventory["required_guards"] ==
@@ -267,6 +559,13 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
     CHECK(inventory["interfaces"][0]["kind"] == "wireguard");
     CHECK(inventory["interfaces"][0]["owner"] == "keenetic");
     CHECK(inventory["interfaces"][0]["role"] == "client");
+    CHECK(
+        inventory["interfaces"][0]["internal_vpn_server_candidate"] ==
+        false);
+    CHECK(
+        inventory["interfaces"][0]
+                 ["internal_vpn_server_role_confirmation_required"] ==
+        false);
     CHECK(inventory["interfaces"][0]["capabilities"]["can_edit"] == false);
     CHECK(inventory["interfaces"][0]["capabilities"]["can_delete"] == false);
     CHECK(inventory["interfaces"][0]["capabilities"]["can_hide"] == false);
@@ -287,6 +586,69 @@ TEST_CASE("NDMS read-only endpoints share the cache and safety contract") {
                "automatic_backup_unavailable",
                "ownership_unknown",
                "optimistic_revision_unavailable"}));
+}
+
+TEST_CASE("NDMS stale endpoint keeps rows but revokes server-candidate authority") {
+    bool fail_fetch = false;
+    NdmsCatalogCache cache([&]() -> std::string {
+        if (fail_fetch) {
+            throw std::runtime_error("temporary RCI outage");
+        }
+        return nlohmann::json{
+            {"Wireguard0",
+             {
+                 {"type", "Wireguard"},
+                 {"interface-name", "Wireguard0"},
+                 {"description", "Home server"},
+                 {"global", false},
+                 {"address", "10.10.0.1/24"},
+             }},
+        }.dump();
+    });
+
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18196");
+    ApiServer server(config);
+    register_ndms_names_handler_for_tests(server, cache, {"nwg0"});
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18196);
+    const auto fresh_response =
+        client.Get("/api/system/ndms/interfaces");
+    REQUIRE(fresh_response != nullptr);
+    REQUIRE(fresh_response->status == 200);
+    const auto fresh = nlohmann::json::parse(fresh_response->body);
+    CHECK(fresh["available"] == true);
+    CHECK(fresh["catalog_status"] == "fresh");
+    REQUIRE(fresh["interfaces"].size() == 1);
+    CHECK(
+        fresh["interfaces"][0]["internal_vpn_server_candidate"] ==
+        true);
+    CHECK(
+        fresh["interfaces"][0]
+             ["internal_vpn_server_role_confirmation_required"] ==
+        true);
+
+    fail_fetch = true;
+    cache.invalidate();
+    const auto stale_response =
+        client.Get("/api/system/ndms/interfaces");
+    server.stop();
+
+    REQUIRE(stale_response != nullptr);
+    REQUIRE(stale_response->status == 200);
+    const auto stale = nlohmann::json::parse(stale_response->body);
+    CHECK(stale["available"] == false);
+    CHECK(stale["catalog_status"] == "stale");
+    REQUIRE(stale["interfaces"].size() == 1);
+    CHECK(stale["interfaces"][0]["id"] == "Wireguard0");
+    CHECK(
+        stale["interfaces"][0]["internal_vpn_server_candidate"] ==
+        false);
+    CHECK(
+        stale["interfaces"][0]
+             ["internal_vpn_server_role_confirmation_required"] ==
+        false);
 }
 
 } // namespace keen_pbr3

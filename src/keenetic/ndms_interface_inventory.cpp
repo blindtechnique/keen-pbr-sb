@@ -2,8 +2,12 @@
 
 #include "../crypto/sha256.hpp"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <array>
+#include <charconv>
+#include <cstdint>
 #include <initializer_list>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -79,6 +83,135 @@ std::optional<bool> boolean_field(const nlohmann::json& entry,
     return std::nullopt;
 }
 
+std::optional<unsigned> decimal_prefix(const std::string& value,
+                                       unsigned maximum) {
+    const auto token = trim_ascii_whitespace(value);
+    if (token.empty()) return std::nullopt;
+    unsigned parsed = 0;
+    const auto result =
+        std::from_chars(token.data(), token.data() + token.size(), parsed);
+    if (result.ec != std::errc{} ||
+        result.ptr != token.data() + token.size() ||
+        parsed > maximum) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+std::optional<unsigned> ipv4_mask_prefix(const std::string& value) {
+    in_addr mask{};
+    if (inet_pton(AF_INET, value.c_str(), &mask) != 1) {
+        return decimal_prefix(value, 32);
+    }
+
+    const auto bits = ntohl(mask.s_addr);
+    bool zero_seen = false;
+    unsigned prefix = 0;
+    for (int bit = 31; bit >= 0; --bit) {
+        const bool set = (bits & (std::uint32_t{1} << bit)) != 0;
+        if (set && zero_seen) return std::nullopt;
+        if (set) {
+            ++prefix;
+        } else {
+            zero_seen = true;
+        }
+    }
+    return prefix;
+}
+
+std::optional<unsigned> local_prefix_length(const nlohmann::json& entry) {
+    const auto address_field = string_field(entry, "address");
+    if (!address_field || address_field->empty()) return std::nullopt;
+
+    auto address = *address_field;
+    std::optional<unsigned> embedded_prefix;
+    const auto slash = address.find('/');
+    if (slash != std::string::npos) {
+        if (address.find('/', slash + 1) != std::string::npos) {
+            return std::nullopt;
+        }
+        const auto suffix = address.substr(slash + 1);
+        address.erase(slash);
+        embedded_prefix = decimal_prefix(
+            suffix,
+            address.find(':') == std::string::npos ? 32U : 128U);
+        if (!embedded_prefix) return std::nullopt;
+    }
+
+    in_addr ipv4{};
+    in6_addr ipv6{};
+    unsigned maximum = 0;
+    const bool is_ipv4 = inet_pton(AF_INET, address.c_str(), &ipv4) == 1;
+    if (is_ipv4) {
+        maximum = 32;
+    } else if (inet_pton(AF_INET6, address.c_str(), &ipv6) == 1) {
+        maximum = 128;
+    } else {
+        return std::nullopt;
+    }
+
+    std::optional<unsigned> mask_prefix;
+    const auto mask = entry.find("mask");
+    if (mask != entry.end()) {
+        if (mask->is_number_unsigned()) {
+            const auto value = mask->get<std::uint64_t>();
+            if (value > maximum) return std::nullopt;
+            mask_prefix = static_cast<unsigned>(value);
+        } else if (mask->is_number_integer()) {
+            const auto value = mask->get<std::int64_t>();
+            if (value < 0 ||
+                static_cast<std::uint64_t>(value) > maximum) {
+                return std::nullopt;
+            }
+            mask_prefix = static_cast<unsigned>(value);
+        } else if (mask->is_string()) {
+            const auto value =
+                trim_ascii_whitespace(mask->get_ref<const std::string&>());
+            mask_prefix = is_ipv4 ? ipv4_mask_prefix(value)
+                                  : decimal_prefix(value, maximum);
+            if (!mask_prefix) return std::nullopt;
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    if (embedded_prefix && mask_prefix &&
+        *embedded_prefix != *mask_prefix) {
+        return std::nullopt;
+    }
+    return embedded_prefix ? embedded_prefix : mask_prefix;
+}
+
+bool has_non_host_local_subnet(const nlohmann::json& entry) {
+    const auto address = string_field(entry, "address");
+    const auto prefix = local_prefix_length(entry);
+    if (!address || !prefix) return false;
+    const bool ipv6 = address->find(':') != std::string::npos;
+    return *prefix > 0U && (ipv6 ? *prefix <= 126U : *prefix <= 30U);
+}
+
+bool strict_false_field(const nlohmann::json& entry,
+                        const char* key,
+                        bool required) {
+    const auto found = entry.find(key);
+    if (found == entry.end()) return !required;
+    if (found->is_boolean()) return !found->get<bool>();
+    if (!found->is_string()) return false;
+    const auto value =
+        ascii_casefolded_trimmed(found->get_ref<const std::string&>());
+    return token_is(value, {"false", "no"});
+}
+
+bool wireguard_server_shape(const nlohmann::json& entry) {
+    if (!strict_false_field(entry, "global", true) ||
+        !strict_false_field(entry, "defaultgw", false) ||
+        !strict_false_field(entry, "default-route", false) ||
+        !strict_false_field(entry, "default-gateway", false)) {
+        return false;
+    }
+    return has_non_host_local_subnet(entry);
+}
+
 bool is_numbered_wireguard_name(const std::string& value) {
     constexpr std::string_view prefix{"Wireguard"};
     if (value.size() <= prefix.size() ||
@@ -106,12 +239,30 @@ std::optional<std::string> exact_runtime_interface_name(
     return std::nullopt;
 }
 
-NdmsInterfaceRole parse_role(const nlohmann::json& entry) {
+enum class RoleEvidence {
+    absent,
+    valid,
+    invalid_or_conflicting,
+};
+
+struct ParsedRole {
+    NdmsInterfaceRole role{NdmsInterfaceRole::unknown};
+    RoleEvidence evidence{RoleEvidence::absent};
+};
+
+ParsedRole parse_role(const nlohmann::json& entry) {
     std::optional<NdmsInterfaceRole> parsed;
+    bool field_present = false;
     for (const auto* key : {"role", "mode", "interface-role"}) {
         const auto found = entry.find(key);
         if (found == entry.end()) continue;
-        if (!found->is_string()) return NdmsInterfaceRole::unknown;
+        field_present = true;
+        if (!found->is_string()) {
+            return {
+                NdmsInterfaceRole::unknown,
+                RoleEvidence::invalid_or_conflicting,
+            };
+        }
 
         const auto value =
             ascii_casefolded_trimmed(found->get_ref<const std::string&>());
@@ -121,15 +272,30 @@ NdmsInterfaceRole parse_role(const nlohmann::json& entry) {
         } else if (value == "server") {
             candidate = NdmsInterfaceRole::server;
         } else {
-            return NdmsInterfaceRole::unknown;
+            return {
+                NdmsInterfaceRole::unknown,
+                RoleEvidence::invalid_or_conflicting,
+            };
         }
 
         if (parsed && *parsed != candidate) {
-            return NdmsInterfaceRole::unknown;
+            return {
+                NdmsInterfaceRole::unknown,
+                RoleEvidence::invalid_or_conflicting,
+            };
         }
         parsed = candidate;
     }
-    return parsed.value_or(NdmsInterfaceRole::unknown);
+    if (!field_present) {
+        return {
+            NdmsInterfaceRole::unknown,
+            RoleEvidence::absent,
+        };
+    }
+    return {
+        parsed.value_or(NdmsInterfaceRole::unknown),
+        RoleEvidence::valid,
+    };
 }
 
 std::optional<NdmsTunnelKind> tunnel_kind_for_token(
@@ -159,6 +325,18 @@ std::optional<NdmsTunnelKind> tunnel_kind_for_token(
 }
 
 std::optional<NdmsTunnelKind> classify(const nlohmann::json& entry) {
+    // A present-but-malformed discriminator is not equivalent to an omitted
+    // optional field. Another token must not turn a corrupt/conflicting RCI
+    // record into a policy-authoritative tunnel.
+    for (const auto* key : {"type", "subtype", "protocol"}) {
+        const auto found = entry.find(key);
+        if (found != entry.end() &&
+            !found->is_null() &&
+            !found->is_string()) {
+            return std::nullopt;
+        }
+    }
+
     const std::array<std::string, 3> tunnel_tokens{
         canonical_type_token(string_field(entry, "type")),
         canonical_type_token(string_field(entry, "subtype")),
@@ -222,6 +400,8 @@ struct ParsedEntry {
     std::string firmware_type;
     std::optional<NdmsTunnelKind> kind;
     NdmsInterfaceRole role{NdmsInterfaceRole::unknown};
+    bool internal_vpn_server_candidate{false};
+    bool internal_vpn_server_role_confirmation_required{false};
     std::optional<bool> connected;
     std::optional<bool> link;
     std::string inventory_revision;
@@ -239,6 +419,12 @@ std::string inventory_revision(const nlohmann::json& entry) {
           "role",
           "mode",
           "interface-role",
+          "global",
+          "defaultgw",
+          "default-route",
+          "default-gateway",
+          "address",
+          "mask",
           "mtu"}) {
         const auto found = entry.find(field);
         if (found != entry.end()) structural[field] = *found;
@@ -298,13 +484,38 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
 
         const auto description = string_field(entry, "description");
         const auto firmware_type = string_field(entry, "type");
+        const auto kind = classify(entry);
+        const auto parsed_role = parse_role(entry);
+        const auto role = parsed_role.role;
+        const bool wireguard_kind =
+            kind &&
+            (*kind == NdmsTunnelKind::wireguard ||
+             *kind == NdmsTunnelKind::amnezia_wireguard);
+        const bool supported_typed_server =
+            kind &&
+            *kind != NdmsTunnelKind::http_proxy &&
+            *kind != NdmsTunnelKind::https_proxy &&
+            *kind != NdmsTunnelKind::socks5_proxy;
+        const bool wireguard_candidate =
+            wireguard_kind &&
+            (role == NdmsInterfaceRole::server ||
+             (parsed_role.evidence == RoleEvidence::absent &&
+              wireguard_server_shape(entry)));
+        const bool internal_vpn_server_candidate =
+            wireguard_kind
+                ? wireguard_candidate
+                : supported_typed_server &&
+                      role == NdmsInterfaceRole::server;
         parsed_entries.push_back(ParsedEntry{
             id,
             firmware_interface_name,
             description && !description->empty() ? *description : id,
             firmware_type.value_or(std::string{}),
-            classify(entry),
-            parse_role(entry),
+            kind,
+            role,
+            internal_vpn_server_candidate,
+            wireguard_candidate &&
+                parsed_role.evidence == RoleEvidence::absent,
             boolean_field(entry, "connected"),
             boolean_field(entry, "link"),
             inventory_revision(entry),
@@ -348,6 +559,8 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
             parsed.firmware_type,
             *parsed.kind,
             parsed.role,
+            parsed.internal_vpn_server_candidate,
+            parsed.internal_vpn_server_role_confirmation_required,
             parsed.connected,
             parsed.link,
             parsed.inventory_revision,

@@ -25,6 +25,10 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  CatalogSetupApplyRequest,
+  CatalogSetupApplyResponse,
+  CatalogSetupPreviewRequest,
+  CatalogSetupPreviewResponse,
   ConfigObject,
   ConfigStateResponse,
   ConfigUpdateResponse,
@@ -2580,4 +2584,213 @@ export function useGetTransportConfigExport<TData = Awaited<ReturnType<typeof ge
 
 
 
+
+/**
+ * Builds and validates a deterministic candidate from the server-owned catalogue snapshot and the current active configuration. No durable or runtime state is changed. Existing configuration drafts are rejected so the preview cannot silently include unrelated edits.
+
+ * @summary Preview an authoritative catalogue quick setup
+ */
+export type postCatalogSetupPreviewResponse200 = {
+  data: CatalogSetupPreviewResponse
+  status: 200
+}
+
+export type postCatalogSetupPreviewResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postCatalogSetupPreviewResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postCatalogSetupPreviewResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postCatalogSetupPreviewResponseSuccess = (postCatalogSetupPreviewResponse200) & {
+  headers: Headers;
+};
+export type postCatalogSetupPreviewResponseError = (postCatalogSetupPreviewResponse400 | postCatalogSetupPreviewResponse409 | postCatalogSetupPreviewResponse503) & {
+  headers: Headers;
+};
+
+export type postCatalogSetupPreviewResponse = (postCatalogSetupPreviewResponseSuccess | postCatalogSetupPreviewResponseError)
+
+export const getPostCatalogSetupPreviewUrl = () => {
+
+
+
+
+  return `/api/setup/catalog/preview`
+}
+
+export const postCatalogSetupPreview = async (catalogSetupPreviewRequest: CatalogSetupPreviewRequest, options?: RequestInit): Promise<postCatalogSetupPreviewResponse> => {
+
+  return apiFetch<postCatalogSetupPreviewResponse>(getPostCatalogSetupPreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      catalogSetupPreviewRequest,)
+  }
+);}
+
+
+
+
+export const getPostCatalogSetupPreviewMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupPreview>>, TError,{data: CatalogSetupPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupPreview>>, TError,{data: CatalogSetupPreviewRequest}, TContext> => {
+
+const mutationKey = ['postCatalogSetupPreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postCatalogSetupPreview>>, {data: CatalogSetupPreviewRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postCatalogSetupPreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostCatalogSetupPreviewMutationResult = NonNullable<Awaited<ReturnType<typeof postCatalogSetupPreview>>>
+    export type PostCatalogSetupPreviewMutationBody = CatalogSetupPreviewRequest
+    export type PostCatalogSetupPreviewMutationError = ErrorResponse
+
+    /**
+ * @summary Preview an authoritative catalogue quick setup
+ */
+export const usePostCatalogSetupPreview = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupPreview>>, TError,{data: CatalogSetupPreviewRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postCatalogSetupPreview>>,
+        TError,
+        {data: CatalogSetupPreviewRequest},
+        TContext
+      > => {
+      return useMutation(getPostCatalogSetupPreviewMutationOptions(options), queryClient);
+    }
+
+/**
+ * Rebuilds the candidate from the current server-owned catalogue, checks all preview revisions and warnings, then saves and applies it through the shared configuration WAL and runtime coordinator. Ordinary config staging is serialized with this operation.
+
+ * @summary Atomically commit an authoritative catalogue quick setup
+ */
+export type postCatalogSetupApplyResponse200 = {
+  data: CatalogSetupApplyResponse
+  status: 200
+}
+
+export type postCatalogSetupApplyResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postCatalogSetupApplyResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postCatalogSetupApplyResponse500 = {
+  data: ErrorResponse
+  status: 500
+}
+
+export type postCatalogSetupApplyResponse503 = {
+  data: ErrorResponse
+  status: 503
+}
+
+export type postCatalogSetupApplyResponseSuccess = (postCatalogSetupApplyResponse200) & {
+  headers: Headers;
+};
+export type postCatalogSetupApplyResponseError = (postCatalogSetupApplyResponse400 | postCatalogSetupApplyResponse409 | postCatalogSetupApplyResponse500 | postCatalogSetupApplyResponse503) & {
+  headers: Headers;
+};
+
+export type postCatalogSetupApplyResponse = (postCatalogSetupApplyResponseSuccess | postCatalogSetupApplyResponseError)
+
+export const getPostCatalogSetupApplyUrl = () => {
+
+
+
+
+  return `/api/setup/catalog/apply`
+}
+
+export const postCatalogSetupApply = async (catalogSetupApplyRequest: CatalogSetupApplyRequest, options?: RequestInit): Promise<postCatalogSetupApplyResponse> => {
+
+  return apiFetch<postCatalogSetupApplyResponse>(getPostCatalogSetupApplyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      catalogSetupApplyRequest,)
+  }
+);}
+
+
+
+
+export const getPostCatalogSetupApplyMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupApply>>, TError,{data: CatalogSetupApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupApply>>, TError,{data: CatalogSetupApplyRequest}, TContext> => {
+
+const mutationKey = ['postCatalogSetupApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postCatalogSetupApply>>, {data: CatalogSetupApplyRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postCatalogSetupApply(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostCatalogSetupApplyMutationResult = NonNullable<Awaited<ReturnType<typeof postCatalogSetupApply>>>
+    export type PostCatalogSetupApplyMutationBody = CatalogSetupApplyRequest
+    export type PostCatalogSetupApplyMutationError = ErrorResponse
+
+    /**
+ * @summary Atomically commit an authoritative catalogue quick setup
+ */
+export const usePostCatalogSetupApply = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postCatalogSetupApply>>, TError,{data: CatalogSetupApplyRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postCatalogSetupApply>>,
+        TError,
+        {data: CatalogSetupApplyRequest},
+        TContext
+      > => {
+      return useMutation(getPostCatalogSetupApplyMutationOptions(options), queryClient);
+    }
 

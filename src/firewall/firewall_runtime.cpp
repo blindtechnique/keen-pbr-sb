@@ -37,7 +37,9 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::map<std::string, std::string>& urltest_selections,
     const CacheManager& cache_manager,
     Firewall& firewall,
-    FirewallApplyMode mode) {
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers) {
     ListStreamer list_streamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
@@ -46,7 +48,10 @@ std::vector<RuleState> apply_runtime_firewall(
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
     firewall.set_clear_dynamic_sets_on_apply(
         config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
-    auto prefilter = build_firewall_global_prefilter(config);
+    auto prefilter = effective_internal_vpn_servers != nullptr
+        ? build_firewall_global_prefilter(
+              config, *effective_internal_vpn_servers)
+        : build_firewall_global_prefilter(config);
     prefilter.restore_conntrack_mark = true;
     prefilter.conntrack_mark_mask =
         fwmark_mask_value(config.fwmark.value_or(FwmarkConfig{}));

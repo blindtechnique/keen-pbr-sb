@@ -130,6 +130,11 @@ public:
             : NftablesFirewall::MarkMergeMode::LegacyConstant);
   }
 
+  static nlohmann::json build_dns_redirect_rules_json(
+      const FirewallGlobalPrefilter& prefilter) {
+    return NftablesFirewall::build_dns_redirect_rules_json(prefilter);
+  }
+
   static nlohmann::json build_rule_add_commands_for_rule(
       int family, RuleDesc::Action action, uint32_t fwmark,
       FirewallRuleCriteria criteria, bool list_backed,
@@ -427,6 +432,64 @@ TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") 
   // Output-chain prefilter mirrors the skip-marked guard.
   CHECK(cmds[4]["add"]["rule"]["chain"] == "output");
   CHECK(cmds[4]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
+}
+
+TEST_CASE("build_rule_add_commands: internal VPN bypass precedes conntrack restore and classification") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0", "nwg1"};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto cmds = T::build_rule_add_commands(
+      prefilter,
+      {mark_rule("myset", AF_INET, 0x00120000)},
+      /*register_merge=*/true);
+
+  REQUIRE(cmds.is_array());
+  REQUIRE(cmds.size() >= 4);
+  const auto& bypass = cmds[0]["add"]["rule"];
+  CHECK(bypass["chain"] == "prerouting");
+  CHECK(bypass["expr"][0]["match"]["left"]["meta"]["key"] == "iifname");
+  CHECK(bypass["expr"][0]["match"]["right"]["set"][0] == "nwg0");
+  CHECK(bypass["expr"][0]["match"]["right"]["set"][1] == "nwg1");
+  CHECK(bypass["expr"][2].contains("accept"));
+
+  const auto& restore = cmds[1]["add"]["rule"];
+  CHECK(restore["expr"][0]["match"]["left"]["ct"]["key"] == "direction");
+
+  bool found_classification = false;
+  for (size_t i = 2; i < cmds.size(); ++i) {
+    const auto& rule = cmds[i]["add"]["rule"];
+    if (rule["chain"] != "prerouting") {
+      continue;
+    }
+    const auto serialized = rule["expr"].dump();
+    if (serialized.find("@myset") != std::string::npos) {
+      found_classification = true;
+      break;
+    }
+  }
+  CHECK(found_classification);
+}
+
+TEST_CASE("nft DNS redirect bypasses internal VPN interfaces first") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_inbound_interfaces = {"nwg0"};
+
+  const auto commands = T::build_dns_redirect_rules_json(prefilter);
+  REQUIRE(commands.is_array());
+  REQUIRE(commands.size() == 3);
+
+  const auto& bypass = commands[0]["add"]["rule"];
+  CHECK(bypass["chain"] == "dns_redirect");
+  CHECK(bypass["expr"][0]["match"]["left"]["meta"]["key"] == "iifname");
+  CHECK(bypass["expr"][0]["match"]["right"] == "nwg0");
+  CHECK(bypass["expr"][2].contains("accept"));
+
+  for (size_t i = 1; i < commands.size(); ++i) {
+    const auto& expr = commands[i]["add"]["rule"]["expr"];
+    CHECK(expr.back().contains("redirect"));
+  }
 }
 
 TEST_CASE("nft modern mark merge uses numeric direction and preserves foreign bits") {

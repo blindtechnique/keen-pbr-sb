@@ -42,6 +42,27 @@ TEST_CASE("new runtime refresh coalesces with a pending recovery chain") {
     CHECK_FALSE(runtime_recovery_request_should_coalesce(1, true));
 }
 
+TEST_CASE("single-flight refresh hands one pending request to an immediate rerun") {
+    CoalescedSingleFlightGate gate;
+    std::size_t launched_workers = 0;
+    const auto schedule = [&]() {
+        if (gate.request()) {
+            ++launched_workers;
+        }
+    };
+
+    schedule();
+    schedule();
+    schedule();
+    CHECK(launched_workers == 1);
+
+    if (gate.complete()) {
+        schedule();
+    }
+    CHECK(launched_workers == 2);
+    CHECK_FALSE(gate.complete());
+}
+
 TEST_CASE("runtime incident latch reports threshold once and resets") {
     RuntimeIncidentLatch incidents(3);
 

@@ -5,6 +5,8 @@
 #include "handlers.hpp"
 #include "server.hpp"
 
+#include <nlohmann/json_fwd.hpp>
+
 #include <cstdint>
 #include <string>
 
@@ -28,6 +30,11 @@ bool refresh_catalog_if_stale(bool force = false, uint32_t fwmark = 0);
 
 // Outbound tag the catalogue should be downloaded through, empty for direct.
 std::string catalog_detour();
+
+// Returns the same authoritative server-owned snapshot exposed by
+// GET /api/catalog. Setup preview/apply must call this instead of accepting
+// catalogue records from the client.
+nlohmann::json load_catalog_snapshot();
 
 } // namespace keen_pbr3
 

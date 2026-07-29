@@ -37,6 +37,14 @@ Config parse_minimal_config(const std::string& json) {
     return cfg;
 }
 
+InternalVpnServer internal_vpn_policy(std::string interface_name,
+                                      bool process_clients) {
+    InternalVpnServer policy{};
+    policy.interface = std::move(interface_name);
+    policy.process_clients = process_clients;
+    return policy;
+}
+
 const RouteSpec* find_route(const std::vector<RouteSpec>& routes,
                             uint32_t table,
                             bool blackhole,
@@ -197,6 +205,118 @@ TEST_CASE("build_firewall_global_prefilter: inbound_interfaces enables interface
     REQUIRE(prefilter.inbound_interfaces.has_value());
     CHECK(prefilter.has_inbound_interfaces());
     CHECK(*prefilter.inbound_interfaces == std::vector<std::string>({"br0", "wg0"}));
+}
+
+TEST_CASE("build_firewall_global_prefilter: disabled internal VPN server bypasses legacy default-all") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{
+            "internal_vpn_servers":[
+                {"interface":"nwg0","process_clients":false}
+            ],
+            "rules":[]
+        }
+    })");
+
+    const auto prefilter = build_firewall_global_prefilter(cfg);
+    CHECK_FALSE(prefilter.has_inbound_interfaces());
+    CHECK(prefilter.bypass_inbound_interfaces ==
+          std::vector<std::string>{"nwg0"});
+}
+
+TEST_CASE("build_firewall_global_prefilter: enabled internal VPN server extends explicit allowlist") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{
+            "inbound_interfaces":["br0"],
+            "internal_vpn_servers":[
+                {"interface":"nwg0","process_clients":true}
+            ],
+            "rules":[]
+        }
+    })");
+
+    const auto prefilter = build_firewall_global_prefilter(cfg);
+    REQUIRE(prefilter.inbound_interfaces.has_value());
+    CHECK(*prefilter.inbound_interfaces ==
+          std::vector<std::string>({"br0", "nwg0"}));
+    CHECK_FALSE(prefilter.has_bypass_inbound_interfaces());
+}
+
+TEST_CASE("build_firewall_global_prefilter: runtime resolution does not rewrite stable config") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{
+            "inbound_interfaces":["br0"],
+            "internal_vpn_servers":[
+                {
+                    "interface":"nwg0",
+                    "ndms_id":"WireguardServer",
+                    "process_clients":true
+                }
+            ],
+            "rules":[]
+        }
+    })");
+    auto effective = internal_vpn_policy("nwg2", true);
+    effective.ndms_id = "WireguardServer";
+
+    const auto prefilter =
+        build_firewall_global_prefilter(cfg, {effective});
+    REQUIRE(prefilter.inbound_interfaces.has_value());
+    CHECK(*prefilter.inbound_interfaces ==
+          std::vector<std::string>({"br0", "nwg2"}));
+    REQUIRE(cfg.route->internal_vpn_servers.has_value());
+    CHECK(cfg.route->internal_vpn_servers->front().interface == "nwg0");
+}
+
+TEST_CASE("build_firewall_global_prefilter: enabled internal VPN server does not restrict legacy default-all") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{
+            "internal_vpn_servers":[
+                {"interface":"nwg0","process_clients":true}
+            ],
+            "rules":[]
+        }
+    })");
+
+    const auto prefilter = build_firewall_global_prefilter(cfg);
+    CHECK_FALSE(prefilter.has_inbound_interfaces());
+    CHECK_FALSE(prefilter.has_bypass_inbound_interfaces());
+}
+
+TEST_CASE("build_firewall_global_prefilter: explicit empty ingress remains default-all with internal VPN policies") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{
+            "inbound_interfaces":[],
+            "internal_vpn_servers":[
+                {"interface":"nwg0","process_clients":true},
+                {"interface":"ovpn0","process_clients":false}
+            ],
+            "rules":[]
+        }
+    })");
+
+    const auto prefilter = build_firewall_global_prefilter(cfg);
+    CHECK_FALSE(prefilter.has_inbound_interfaces());
+    CHECK_FALSE(prefilter.inbound_interfaces.has_value());
+    CHECK(prefilter.bypass_inbound_interfaces ==
+          std::vector<std::string>{"ovpn0"});
+}
+
+TEST_CASE("build_firewall_global_prefilter: false wins defensively and legacy allowlist remains intact") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{"inbound_interfaces":["br0","nwg0"],"rules":[]}
+    })");
+    REQUIRE(cfg.route.has_value());
+    cfg.route->internal_vpn_servers = std::vector<InternalVpnServer>{
+        internal_vpn_policy("nwg0", true),
+        internal_vpn_policy("nwg0", false),
+    };
+
+    const auto prefilter = build_firewall_global_prefilter(cfg);
+    REQUIRE(prefilter.inbound_interfaces.has_value());
+    CHECK(*prefilter.inbound_interfaces ==
+          std::vector<std::string>({"br0", "nwg0"}));
+    CHECK(prefilter.bypass_inbound_interfaces ==
+          std::vector<std::string>{"nwg0"});
 }
 
 TEST_CASE("build_firewall_global_prefilter: daemon.skip_marked_packets false disables marked-packet bypass") {

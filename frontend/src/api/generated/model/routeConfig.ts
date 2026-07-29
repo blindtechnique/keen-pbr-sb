@@ -5,11 +5,18 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { InternalVpnServer } from './internalVpnServer';
 import type { RouteRule } from './routeRule';
 
 export interface RouteConfig {
   /** Optional ingress interface filter for route processing. If omitted or empty, route processing applies to packets from any interface. If present and non-empty, KeenPbrTable processes packets only when they arrive via one of the listed ingress interfaces.
    */
   inbound_interfaces?: string[];
+  /**
+     * Per-interface participation overrides for native VPN servers. If omitted, inbound_interfaces keeps its legacy behavior unchanged. process_clients=true force-includes the interface when an explicit inbound_interfaces allowlist is active. process_clients=false bypasses both route classification and client DNS redirection.
+
+     * @maxItems 128
+     */
+  internal_vpn_servers?: InternalVpnServer[];
   rules?: RouteRule[];
 }

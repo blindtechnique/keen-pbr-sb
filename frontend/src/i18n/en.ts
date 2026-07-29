@@ -921,23 +921,68 @@ export const enTranslation = {
       empty: "Nothing found",
       ruleSet: "rule set",
       domains: "{{count}} domains",
+      cidrs: "{{count}} CIDRs",
+      domainsAndCidrs: "{{domains}} domains · {{cidrs}} CIDRs",
       actionTunnel: "tunnel",
       actionBlock: "block",
       alreadyAdded: "already added",
       selected: "Selected: {{count}}",
       routeTo: "Route to",
+      blockSelected: "The selected lists will be blocked",
+      mixedSelection: "Routing and blocking lists must be added separately.",
+      mixedSelectionShort: "Add routing lists first, then add blocking lists.",
+      invalidSelection: "The selected items do not contain importable data.",
+      configUnavailable:
+        "Could not reload the current configuration. Nothing was changed.",
       add: "Add",
       added: "Lists added: {{count}}",
+      priorityGuard: {
+        title: "Blocking-rule priority accounted for",
+        description:
+          "The new rule will be placed before these blocking rules: {{rules}}. Rules are checked from top to bottom, so a shared CDN address cannot be blocked before the selected route handles it. Existing rules keep their current order.",
+      },
       naming: {
         title: "Names for the new items",
         description:
-          "The catalogue suggests friendly names. Edit or clear them before adding.",
+          "The catalogue suggests friendly names. Edit or clear them. Before applying, the server checks the current config, catalogue sources, and rule placement itself.",
         listName: "List name",
         routeRuleName: "Routing rule name",
         dnsRuleName: "DNS rule name",
         dnsRuleHint:
           "A DNS rule will be created for {{server}}, which uses the selected route.",
+        blackholeHint:
+          "No system blocking output exists yet. It will be created automatically and used only by this rule.",
         confirm: "Add",
+      },
+      setup: {
+        preview: "Check",
+        applying: "Adding…",
+        previewReady: "Setup checked",
+        previewSummary:
+          "Lists: {{lists}}. Route: {{route}}. DNS: {{dns}}.",
+        noRoute: "not created",
+        noDnsRule: "rule not created",
+        automaticDnsHint:
+          "A matching DNS server is selected automatically from the chosen route. If none exists, preview warns you instead of silently changing the plan.",
+        warningTitle: "Review required",
+        acceptWarnings:
+          "I have reviewed the warnings and agree to apply this exact checked plan.",
+        warnings: {
+          sourceDetourNotFound:
+            "The selected download route no longer exists. The list will be added without it.",
+          sourceDetourNotRoutable:
+            "The selected route cannot carry downloads. The list will be added without it.",
+          sourceDetourNotApplicable:
+            "The selected list has no remote file, so it does not need a download route.",
+          dnsAutomaticUnavailable:
+            "No matching DNS server was found for this route. The list and route will be added without a DNS rule.",
+          dnsIgnoredForBlock:
+            "A DNS rule is not created for a blocking list.",
+          dnsDetourMissing:
+            "The selected DNS server is not attached to the route. Check that it can resolve domains through the intended output.",
+          dnsDetourMismatch:
+            "The DNS server uses a different route. Name resolution and application traffic may leave through different outputs.",
+        },
       },
       categories: {
         all: "All",
@@ -1092,7 +1137,7 @@ export const enTranslation = {
           "Clear dynamic addresses learned by dnsmasq during a full config apply. Disable this to preserve them until TTL expiry and avoid a cold routing start.",
         ipv6EnabledLabel: "Enable IPv6 support",
         ipv6EnabledHint:
-          "Install IPv6 routes, firewall rules, and dnsmasq targets. When disabled, managed dnsmasq suppresses AAAA answers so clients do not wait on unusable IPv6.",
+          "Install IPv6 routes, firewall rules, and dnsmasq targets. When explicitly disabled, managed dnsmasq suppresses AAAA and SVCB/HTTPS (types 64/65): A records keep working, but HTTP/3 and ECH discovery may be unavailable.",
         clientDnsEnforcementLabel: "Force clients to use router DNS",
         clientDnsEnforcementHint:
           "Transparently redirect plain DNS (port 53) from LAN clients to the router's resolver and block DNS-over-TLS (port 853), so browser Secure DNS cannot bypass domain-based routing. DNS-over-HTTPS on port 443 cannot be blocked this way; disable Secure DNS in browsers for full coverage.",
@@ -1113,6 +1158,45 @@ export const enTranslation = {
         inboundInterfacesStatusMissing: "Missing",
         inboundInterfacesMissingDetail:
           "This interface is saved in config but is not present in the current live interface inventory.",
+        internalVpnServersTitle: "Internal VPN servers",
+        internalVpnServersDescription:
+          "Choose whether traffic and DNS requests from clients of native Keenetic VPN servers are processed by keen-pbr-sb. WireGuard, AmneziaWG, OpenVPN, IKE, L2TP, SSTP and OpenConnect are supported. Switches take effect only after the shared settings form is saved.",
+        internalVpnServersEmptyTitle: "No VPN servers found",
+        internalVpnServersEmptyDescription:
+          "KeeneticOS did not report a supported VPN server with a resolved system interface.",
+        internalVpnServersLoadingTitle: "Loading VPN servers",
+        internalVpnServersLoadingDescription:
+          "Waiting for the KeeneticOS interface inventory. Saved policies will remain unchanged.",
+        internalVpnServersUnavailableTitle:
+          "VPN server inventory is unavailable",
+        internalVpnServersUnavailableDescription:
+          "This KeeneticOS version did not provide a supported VPN server inventory. Saved policies remain editable below.",
+        internalVpnServersStaleTitle:
+          "Showing the last known VPN server configuration",
+        internalVpnServersStaleDescription:
+          "A fresh KeeneticOS response is temporarily unavailable. Saved policies can be removed, but confirming new servers and changing switches is disabled until the inventory refreshes.",
+        internalVpnServersLoadErrorTitle: "Could not load VPN servers",
+        internalVpnServersLoadErrorDescription:
+          "The KeeneticOS interface inventory is temporarily unavailable. Saved policies remain editable below.",
+        internalVpnServersConfirmationTitle:
+          "KeeneticOS did not report the WireGuard interface role",
+        internalVpnServersConfirmationDescription:
+          "Confirm that this is an internal VPN server rather than a client connection. Once confirmed, its clients can be routed through keen-pbr-sb.",
+        internalVpnServersConfirmationAction: "Confirm VPN server",
+        internalVpnServersProcessLabel: "Through keen-pbr-sb",
+        internalVpnServersInheritLabel: "Inherit",
+        internalVpnServersStatusUp: "UP",
+        internalVpnServersStatusDown: "DOWN",
+        internalVpnServersStatusMissing: "Missing",
+        internalVpnServersStatusUnknown: "Unknown",
+        internalVpnServersMissingHint:
+          "This policy is saved, but the interface is currently unavailable. It will not be removed automatically.",
+        internalVpnServersConfirmationAriaLabel:
+          "Confirm {{server}} as an internal VPN server",
+        internalVpnServersToggleAriaLabel:
+          "Process clients of {{server}} through keen-pbr-sb",
+        internalVpnServersInheritAriaLabel:
+          "Return {{server}} to the inherited policy",
       },
       autoupdate: {
         scheduleHint: "How often to check the remote lists for updates.",

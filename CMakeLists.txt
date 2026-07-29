@@ -241,7 +241,9 @@ set(SOURCES
   src/http/http_client.cpp
   src/http/http_transport.cpp
   src/http/curl_runtime.cpp
+  src/keenetic/ndms_catalog_cache.cpp
   src/keenetic/ndms_interface_inventory.cpp
+  src/keenetic/internal_vpn_server_resolver.cpp
   src/keenetic/ndms_interface_management.cpp
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
@@ -257,6 +259,7 @@ set(SOURCES
   src/config/dependency_analysis.cpp
   src/config/routing_state.cpp
   src/config/list_parser.cpp
+  src/setup/catalog_setup_planner.cpp
   src/lists/ipset.cpp
   src/lists/kernel_set_tester.cpp
   src/lists/list_streamer.cpp
@@ -312,6 +315,7 @@ set(SOURCES
   src/daemon/runtime_state_store.cpp
   src/daemon/system_resolver_hook.cpp
   src/daemon/scheduler.cpp
+  src/runtime/runtime_state_machine.cpp
   src/ipc/control_protocol.cpp
   src/ipc/control_client.cpp
   src/ipc/resolver_fallback.cpp
@@ -357,13 +361,13 @@ if(WITH_API)
     src/api/handler_logs.cpp
     src/api/handler_router_info.cpp
     src/api/handler_catalog.cpp
+    src/api/handler_catalog_setup.cpp
     src/api/handler_geo.cpp
     src/api/handler_naive.cpp
     src/api/handler_ndms_names.cpp
     src/api/handler_remote_access.cpp
     src/api/handler_backup.cpp
     src/runtime/lifecycle_operation.cpp
-    src/runtime/runtime_state_machine.cpp
   )
 endif()
 

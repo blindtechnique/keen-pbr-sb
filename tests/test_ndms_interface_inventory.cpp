@@ -5,8 +5,10 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -359,6 +361,157 @@ TEST_CASE("NDMS role accepts only exact non-conflicting role fields") {
           "server");
     CHECK(std::string{ndms_interface_role_name(NdmsInterfaceRole::unknown)} ==
           "unknown");
+}
+
+TEST_CASE("NDMS role-less WireGuard server candidates are fail-closed") {
+    const auto candidate = [](nlohmann::json entry) {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{{"Candidate", std::move(entry)}});
+        const auto* tunnel = find_tunnel(catalog, "Candidate");
+        REQUIRE(tunnel != nullptr);
+        return std::pair{
+            tunnel->internal_vpn_server_candidate,
+            tunnel->internal_vpn_server_role_confirmation_required,
+        };
+    };
+    const auto shaped_ipv4 = [] {
+        return nlohmann::json{
+            {"type", "Wireguard"},
+            {"interface-name", "Wireguard0"},
+            {"global", false},
+            {"address", "10.10.0.1"},
+            {"mask", "255.255.255.0"},
+        };
+    };
+
+    CHECK(candidate(shaped_ipv4()) == std::pair{true, true});
+
+    auto cidr = shaped_ipv4();
+    cidr["address"] = "10.10.0.1/24";
+    cidr.erase("mask");
+    CHECK(candidate(cidr) == std::pair{true, true});
+
+    auto ipv6 = shaped_ipv4();
+    ipv6["address"] = "fd00::1/64";
+    ipv6.erase("mask");
+    CHECK(candidate(ipv6) == std::pair{true, true});
+
+    for (const auto& [field, value] :
+         std::vector<std::pair<std::string, nlohmann::json>>{
+             {"global", true},
+             {"global", "down"},
+             {"global", "off"},
+             {"global", nullptr},
+             {"global", 0},
+             {"defaultgw", true},
+             {"default-route", true},
+             {"default-gateway", true},
+         }) {
+        auto rejected = shaped_ipv4();
+        rejected[field] = value;
+        CHECK(candidate(rejected) == std::pair{false, false});
+    }
+
+    auto missing_global = shaped_ipv4();
+    missing_global.erase("global");
+    CHECK(candidate(missing_global) == std::pair{false, false});
+
+    for (const auto* address :
+         {"10.10.0.1/32",
+          "10.10.0.1/31",
+          "10.10.0.1/0",
+          "fd00::1/128",
+          "fd00::1/127",
+          "fd00::1/0"}) {
+        auto rejected = shaped_ipv4();
+        rejected["address"] = address;
+        rejected.erase("mask");
+        CHECK(candidate(rejected) == std::pair{false, false});
+    }
+
+    auto non_contiguous_mask = shaped_ipv4();
+    non_contiguous_mask["mask"] = "255.0.255.0";
+    CHECK(candidate(non_contiguous_mask) == std::pair{false, false});
+
+    auto huge_mask = shaped_ipv4();
+    huge_mask["mask"] = std::uint64_t{4294967296ULL};
+    CHECK(candidate(huge_mask) == std::pair{false, false});
+
+    for (const auto& role_fields :
+         std::vector<nlohmann::json>{
+             nlohmann::json{{"role", "client"}},
+             nlohmann::json{{"role", "unknown"}},
+             nlohmann::json{{"role", 17}},
+             nlohmann::json{{"role", "client"}, {"mode", "server"}},
+         }) {
+        auto rejected = shaped_ipv4();
+        rejected.update(role_fields);
+        CHECK(candidate(rejected) == std::pair{false, false});
+    }
+
+    auto typed_server = nlohmann::json{
+        {"type", "Wireguard"},
+        {"interface-name", "Wireguard0"},
+        {"role", "server"},
+    };
+    CHECK(candidate(typed_server) == std::pair{true, false});
+
+    auto typed_client_with_shape = shaped_ipv4();
+    typed_client_with_shape["role"] = "client";
+    CHECK(candidate(typed_client_with_shape) == std::pair{false, false});
+
+    for (const auto& malformed_discriminator :
+         std::vector<nlohmann::json>{
+             nlohmann::json{
+                 {"type", 17},
+                 {"protocol", "Wireguard"},
+                 {"interface-name", "Wireguard0"},
+                 {"role", "server"},
+             },
+             nlohmann::json{
+                 {"type", "Wireguard"},
+                 {"protocol", nlohmann::json::object()},
+                 {"interface-name", "Wireguard0"},
+                 {"role", "server"},
+             },
+         }) {
+        const auto catalog = parse_ndms_interface_catalog(
+            nlohmann::json{{"MalformedCandidate", malformed_discriminator}});
+        CHECK(find_tunnel(catalog, "MalformedCandidate") == nullptr);
+    }
+}
+
+TEST_CASE("NDMS server guard changes alter the inventory revision") {
+    auto payload = nlohmann::json{
+        {"Candidate",
+         {
+             {"type", "Wireguard"},
+             {"interface-name", "Wireguard0"},
+             {"global", false},
+             {"address", "10.10.0.1/24"},
+         }},
+    };
+    const auto baseline =
+        parse_ndms_interface_catalog(payload).tunnels.front().inventory_revision;
+
+    for (const auto* field :
+         {"global",
+          "defaultgw",
+          "default-route",
+          "default-gateway",
+          "address",
+          "mask",
+          "role",
+          "mode",
+          "interface-role"}) {
+        auto changed = payload;
+        changed["Candidate"][field] =
+            std::string{"changed-"} + field;
+        CHECK(
+            parse_ndms_interface_catalog(changed)
+                .tunnels.front()
+                .inventory_revision != baseline);
+    }
 }
 
 TEST_CASE("NDMS duplicate selection is deterministic") {

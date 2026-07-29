@@ -26,6 +26,11 @@ constexpr int kLinkAttributeMax = IFLA_MAX + 1;
 } // namespace
 
 struct InterfaceMonitor::Impl {
+    struct ObservedInterface {
+        std::string name;
+        bool is_up{false};
+    };
+
     explicit Impl(InterfaceStateCallback callback)
         : callback(std::move(callback)) {}
 
@@ -61,7 +66,13 @@ struct InterfaceMonitor::Impl {
             }
             char name[IF_NAMESIZE] = {};
             if (if_indextoname(addr->ifa_index, name) != nullptr) {
-                callback(Event{std::string(name), false, false, true});
+                callback(Event{
+                    std::string(name),
+                    false,
+                    false,
+                    true,
+                    false,
+                });
             }
             return;
         }
@@ -94,16 +105,30 @@ struct InterfaceMonitor::Impl {
         const std::string interface_name(if_name_raw);
         const bool is_up = (hdr->nlmsg_type == RTM_NEWLINK) && ((if_info->ifi_flags & IFF_UP) != 0);
 
-        const auto previous = interface_state.find(interface_name);
-        const bool administrative_state_changed =
-            hdr->nlmsg_type == RTM_NEWLINK &&
-            previous != interface_state.end() && previous->second != is_up;
+        const auto interface_index =
+            static_cast<unsigned int>(if_info->ifi_index);
+        const auto previous = interface_state.find(interface_index);
+        const auto previous_name =
+            previous == interface_state.end()
+                ? std::optional<std::string>{}
+                : std::optional<std::string>{previous->second.name};
+        const auto previous_is_up =
+            previous == interface_state.end()
+                ? std::optional<bool>{}
+                : std::optional<bool>{previous->second.is_up};
+        auto event = InterfaceMonitor::describe_indexed_link_transition(
+            interface_name,
+            hdr->nlmsg_type == RTM_NEWLINK,
+            previous_name,
+            previous_is_up,
+            is_up);
         if (hdr->nlmsg_type == RTM_DELLINK) {
-            interface_state.erase(interface_name);
+            interface_state.erase(interface_index);
         } else {
-            interface_state[interface_name] = is_up;
+            interface_state[interface_index] =
+                ObservedInterface{interface_name, is_up};
         }
-        callback(Event{interface_name, administrative_state_changed, is_up});
+        callback(event);
     }
 
     void close_socket() {
@@ -167,8 +192,15 @@ struct InterfaceMonitor::Impl {
             for (auto* current = interfaces; current != nullptr;
                  current = current->ifa_next) {
                 if (current->ifa_name != nullptr) {
-                    interface_state[current->ifa_name] =
-                        (current->ifa_flags & IFF_UP) != 0;
+                    const auto interface_index =
+                        if_nametoindex(current->ifa_name);
+                    if (interface_index != 0) {
+                        interface_state[interface_index] =
+                            ObservedInterface{
+                                current->ifa_name,
+                                (current->ifa_flags & IFF_UP) != 0,
+                            };
+                    }
                 }
             }
             freeifaddrs(interfaces);
@@ -177,7 +209,7 @@ struct InterfaceMonitor::Impl {
 
     InterfaceStateCallback callback;
     struct nl_sock* socket{nullptr};
-    std::unordered_map<std::string, bool> interface_state;
+    std::unordered_map<unsigned int, ObservedInterface> interface_state;
 };
 
 InterfaceMonitor::InterfaceMonitor(InterfaceStateCallback callback)
@@ -186,6 +218,48 @@ InterfaceMonitor::InterfaceMonitor(InterfaceStateCallback callback)
 }
 
 InterfaceMonitor::~InterfaceMonitor() = default;
+
+InterfaceMonitor::Event InterfaceMonitor::describe_link_transition(
+    std::string interface_name,
+    bool link_present,
+    std::optional<bool> previous_is_up,
+    bool is_up) {
+    const auto previous_interface_name =
+        previous_is_up.has_value()
+            ? std::optional<std::string>{interface_name}
+            : std::optional<std::string>{};
+    return describe_indexed_link_transition(
+        std::move(interface_name),
+        link_present,
+        previous_interface_name,
+        previous_is_up,
+        is_up);
+}
+
+InterfaceMonitor::Event InterfaceMonitor::describe_indexed_link_transition(
+    std::string interface_name,
+    bool link_present,
+    std::optional<std::string> previous_interface_name,
+    std::optional<bool> previous_is_up,
+    bool is_up) {
+    const bool same_identity_name =
+        previous_interface_name.has_value() &&
+        *previous_interface_name == interface_name;
+    const bool topology_changed =
+        !link_present || !same_identity_name;
+    const bool administrative_state_changed =
+        link_present &&
+        same_identity_name &&
+        previous_is_up.has_value() &&
+        *previous_is_up != is_up;
+    return Event{
+        std::move(interface_name),
+        administrative_state_changed,
+        link_present && is_up,
+        false,
+        topology_changed,
+    };
+}
 
 int InterfaceMonitor::fd() const {
     if (!impl_ || !impl_->socket) {
@@ -212,13 +286,23 @@ void InterfaceMonitor::handle_events() {
         // ENOBUFS is not a failure, it is a gap: the kernel dropped events we
         // were too slow to read. The socket stays usable, so there is nothing
         // to reopen - and reopening here would invalidate the descriptor the
-        // event loop is polling. Later events still arrive, and the interface
-        // probe re-reads the real state every 20 seconds anyway, so a missed
-        // link change corrects itself without troubling the user.
+        // event loop is polling. Report an observation gap to the daemon so it
+        // revokes cached NDMS authority and schedules a fresh topology read;
+        // outbound probes do not rebuild the native-interface inventory.
         if (err == -NLE_NOMEM || errno == ENOBUFS) {
-            Logger::instance().verbose(
+            Logger::instance().info(
                 "Interface monitor fell behind and lost some link events; "
-                "state will be picked up by the next probe");
+                "requesting a fresh topology observation");
+            if (impl_->callback) {
+                impl_->callback(Event{
+                    {},
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                });
+            }
             break;
         }
 

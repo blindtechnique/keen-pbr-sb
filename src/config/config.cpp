@@ -209,6 +209,7 @@ constexpr size_t MAX_TAG_LEN = IPSET_MAX_NAME - IPSET_PREFIX_LEN; // 24
 constexpr size_t MAX_HIDDEN_NATIVE_INTERFACE_IDS = 128;
 constexpr size_t MAX_NATIVE_INTERFACE_ID_CODE_POINTS = 128;
 constexpr size_t MAX_PLAIN_DNS_TEMPLATES = 32;
+constexpr size_t MAX_INTERNAL_VPN_SERVERS = 128;
 
 void validate_display_name(
     std::vector<ConfigValidationIssue>& issues,
@@ -860,6 +861,14 @@ uint32_t parse_fwmark_mask_or_throw(const FwmarkConfig& fwmark_cfg) {
     return parse_fwmark_hex_or_throw(fwmark_cfg.mask, 0x00FF0000, "fwmark.mask");
 }
 
+namespace {
+
+void validate_route_internal_vpn_servers(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues);
+
+} // namespace
+
 Config parse_config(const std::string& json_str) {
     Config cfg;
     json parsed_json;
@@ -895,6 +904,7 @@ Config parse_config(const std::string& json_str) {
         parsed_json, "daemon", "ipv6_enabled", "daemon.ipv6_enabled", issues);
     validate_route_rule_specs(parsed_json, issues);
     validate_route_inbound_interfaces(parsed_json, issues);
+    validate_route_internal_vpn_servers(parsed_json, issues);
 
     if (!issues.empty()) {
         throw ConfigValidationError(std::move(issues));
@@ -1010,12 +1020,215 @@ void validate_urltest_cycles(
     }
 }
 
+void validate_route_internal_vpn_servers(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto route_it = root.find("route");
+    if (route_it == root.end() || !route_it->is_object()) {
+        return;
+    }
+
+    const auto servers_it = route_it->find("internal_vpn_servers");
+    if (servers_it == route_it->end() || servers_it->is_null()) {
+        return;
+    }
+
+    if (!servers_it->is_array()) {
+        add_issue(
+            issues,
+            "route.internal_vpn_servers",
+            "route.internal_vpn_servers must be an array of objects");
+        return;
+    }
+
+    if (servers_it->size() > MAX_INTERNAL_VPN_SERVERS) {
+        add_issue(
+            issues,
+            "route.internal_vpn_servers",
+            "route.internal_vpn_servers must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVERS) + " entries");
+    }
+
+    std::set<std::string> seen_interfaces;
+    std::set<std::string> seen_ndms_ids;
+    for (size_t index = 0; index < servers_it->size(); ++index) {
+        const auto& server = servers_it->at(index);
+        const std::string path =
+            "route.internal_vpn_servers[" + std::to_string(index) + "]";
+        if (!server.is_object()) {
+            add_issue(issues, path, path + " must be an object");
+            continue;
+        }
+
+        const auto interface_it = server.find("interface");
+        if (interface_it == server.end() || !interface_it->is_string()) {
+            add_issue(
+                issues,
+                path + ".interface",
+                path + ".interface must be a string");
+        } else {
+            const std::string interface = interface_it->get<std::string>();
+            if (!is_valid_iptables_interface_name(interface)) {
+                add_issue(
+                    issues,
+                    path + ".interface",
+                    iptables_interface_name_requirement(path + ".interface"));
+            }
+            if (!seen_interfaces.insert(interface).second) {
+                add_issue(
+                    issues,
+                    path + ".interface",
+                    path + ".interface duplicates interface '" + interface +
+                        "'");
+            }
+        }
+
+        const auto ndms_id_it = server.find("ndms_id");
+        if (ndms_id_it != server.end() && !ndms_id_it->is_null()) {
+            if (!ndms_id_it->is_string()) {
+                add_issue(
+                    issues,
+                    path + ".ndms_id",
+                    path + ".ndms_id must be a string");
+            } else {
+                const std::string ndms_id =
+                    ndms_id_it->get<std::string>();
+                const auto summary = display_name::summarize_utf8(ndms_id);
+                if (!summary.has_value()) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id must be valid UTF-8");
+                } else if (!summary->has_non_whitespace ||
+                           trim_copy(ndms_id) != ndms_id) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path +
+                            ".ndms_id must be a non-blank identifier without "
+                            "surrounding whitespace");
+                } else if (
+                    summary->code_points >
+                    MAX_NATIVE_INTERFACE_ID_CODE_POINTS) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id must not exceed " +
+                            std::to_string(
+                                MAX_NATIVE_INTERFACE_ID_CODE_POINTS) +
+                            " Unicode code points");
+                } else if (summary->has_ascii_control) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id must not contain control characters");
+                }
+                if (!seen_ndms_ids.insert(ndms_id).second) {
+                    add_issue(
+                        issues,
+                        path + ".ndms_id",
+                        path + ".ndms_id duplicates native interface id '" +
+                            ndms_id + "'");
+                }
+            }
+        }
+
+        const auto process_it = server.find("process_clients");
+        if (process_it == server.end() || !process_it->is_boolean()) {
+            add_issue(
+                issues,
+                path + ".process_clients",
+                path + ".process_clients must be a boolean");
+        }
+    }
+}
+
+void validate_route_internal_vpn_servers(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::optional<RouteConfig>& route) {
+    if (!route.has_value() || !route->internal_vpn_servers.has_value()) {
+        return;
+    }
+
+    const auto& servers = *route->internal_vpn_servers;
+    if (servers.size() > MAX_INTERNAL_VPN_SERVERS) {
+        add_issue(
+            issues,
+            "route.internal_vpn_servers",
+            "route.internal_vpn_servers must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVERS) + " entries");
+    }
+
+    std::set<std::string> seen_interfaces;
+    std::set<std::string> seen_ndms_ids;
+    for (size_t index = 0; index < servers.size(); ++index) {
+        const auto& server = servers[index];
+        const std::string path =
+            "route.internal_vpn_servers[" + std::to_string(index) +
+            "].interface";
+        if (!is_valid_iptables_interface_name(server.interface)) {
+            add_issue(
+                issues,
+                path,
+                iptables_interface_name_requirement(path));
+        }
+        if (!seen_interfaces.insert(server.interface).second) {
+            add_issue(
+                issues,
+                path,
+                path + " duplicates interface '" + server.interface + "'");
+        }
+        if (server.ndms_id.has_value()) {
+            const std::string ndms_path =
+                "route.internal_vpn_servers[" + std::to_string(index) +
+                "].ndms_id";
+            const auto summary =
+                display_name::summarize_utf8(*server.ndms_id);
+            if (!summary.has_value()) {
+                add_issue(
+                    issues, ndms_path, ndms_path + " must be valid UTF-8");
+            } else if (
+                !summary->has_non_whitespace ||
+                trim_copy(*server.ndms_id) != *server.ndms_id) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path +
+                        " must be a non-blank identifier without surrounding "
+                        "whitespace");
+            } else if (
+                summary->code_points >
+                MAX_NATIVE_INTERFACE_ID_CODE_POINTS) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path + " must not exceed " +
+                        std::to_string(MAX_NATIVE_INTERFACE_ID_CODE_POINTS) +
+                        " Unicode code points");
+            } else if (summary->has_ascii_control) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path + " must not contain control characters");
+            }
+            if (!seen_ndms_ids.insert(*server.ndms_id).second) {
+                add_issue(
+                    issues,
+                    ndms_path,
+                    ndms_path + " duplicates native interface id '" +
+                        *server.ndms_id + "'");
+            }
+        }
+    }
+}
+
 } // namespace
 
 void validate_config(const Config& cfg) {
     std::vector<ConfigValidationIssue> issues;
 
     validate_ui_preferences(issues, cfg.ui_preferences);
+    validate_route_internal_vpn_servers(issues, cfg.route);
 
     if (cfg.daemon && cfg.daemon->firewall_verify_max_bytes.has_value() &&
         *cfg.daemon->firewall_verify_max_bytes < 0) {

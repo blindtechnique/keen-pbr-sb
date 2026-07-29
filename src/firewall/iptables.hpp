@@ -148,6 +148,9 @@ private:
     static std::string build_skip_marked_packet_line(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain);
+    static std::string build_bypass_inbound_interface_lines(
+        const FirewallGlobalPrefilter& prefilter,
+        const std::string& chain);
     // Build early RETURN lines for the global prefilter.
     static std::string build_prefilter_lines(
         const FirewallGlobalPrefilter& prefilter,

@@ -66,6 +66,9 @@ using ProtoPortFilter = FirewallRuleCriteria;
 
 struct FirewallGlobalPrefilter {
     std::optional<std::vector<std::string>> inbound_interfaces;
+    // Explicit ingress interfaces that must bypass keen-pbr before conntrack
+    // mark restoration, route classification, and client DNS redirection.
+    std::vector<std::string> bypass_inbound_interfaces;
     bool skip_established_or_dnat{false};
     bool skip_marked_packets{false};
     // Restore only the keen-pbr-owned portion of the conntrack mark before
@@ -78,9 +81,14 @@ struct FirewallGlobalPrefilter {
         return inbound_interfaces.has_value() && !inbound_interfaces->empty();
     }
 
+    bool has_bypass_inbound_interfaces() const {
+        return !bypass_inbound_interfaces.empty();
+    }
+
     bool empty() const {
         return !skip_established_or_dnat && !skip_marked_packets
-            && !restore_conntrack_mark && !has_inbound_interfaces();
+            && !restore_conntrack_mark && !has_inbound_interfaces()
+            && !has_bypass_inbound_interfaces();
     }
 };
 

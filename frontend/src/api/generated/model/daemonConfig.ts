@@ -25,7 +25,7 @@ export interface DaemonConfig {
   /** Whether a full config apply or runtime restart should clear dynamic dnsmasq-managed firewall sets. Defaults to `true` when omitted or set to `null`. Preserve-set reconciles never clear learned entries.
    */
   clear_dynamic_sets_on_apply?: boolean | null;
-  /** Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6 resolver set targets. When disabled, managed dnsmasq also suppresses AAAA answers so clients do not wait on an unusable IPv6 path. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
+  /** Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6 resolver set targets. When disabled, managed dnsmasq also suppresses AAAA, SVCB, and HTTPS answers so clients cannot use IPv6 hints from service-binding records. This IPv4-only mode also disables automatic HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
    */
   ipv6_enabled?: boolean | null;
   /** Default strict routing enforcement for interface outbounds. When enabled, an unreachable default route is installed if the outbound gateway/interface cannot be confirmed reachable.
