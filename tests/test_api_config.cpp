@@ -8,6 +8,7 @@
 #include "../src/backup/persistent_snapshot.hpp"
 #include "../src/backup/restore_journal.hpp"
 #include "../src/config/config_writer.hpp"
+#include "../src/daemon/config_store.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -114,6 +115,38 @@ Config make_valid_config(const std::string& listen) {
     })");
     document["api"]["listen"] = listen;
     auto config = parse_config(document.dump());
+    validate_config(config);
+    return config;
+}
+
+Config make_recommended_list_config(
+    const std::string& listen,
+    const std::string& list_id) {
+    Config config = make_valid_config(listen);
+
+    ListConfig list;
+    list.display_name = "Recommended test list";
+    list.domains = std::vector<std::string>{"example.test"};
+    config.lists =
+        std::map<std::string, ListConfig>{{list_id, std::move(list)}};
+
+    REQUIRE(config.dns.has_value());
+    REQUIRE(config.dns->servers.has_value());
+    REQUIRE_FALSE(config.dns->servers->empty());
+    config.dns->servers->front().detour = "wan";
+
+    DnsRule dns_rule;
+    dns_rule.list = {list_id};
+    dns_rule.server = config.dns->servers->front().tag;
+    config.dns->rules = std::vector<DnsRule>{std::move(dns_rule)};
+
+    REQUIRE(config.route.has_value());
+    RouteRule route_rule;
+    route_rule.list = std::vector<std::string>{list_id};
+    route_rule.outbound = "wan";
+    config.route->rules =
+        std::vector<RouteRule>{std::move(route_rule)};
+
     validate_config(config);
     return config;
 }
@@ -266,7 +299,188 @@ ApiContext make_config_context(
     };
 }
 
+void connect_config_store(
+    ApiContext& context,
+    ConfigStore& store) {
+    context.get_visible_config_fn =
+        [&store]() { return store.visible_config(); };
+    context.config_is_draft_fn =
+        [&store]() { return store.config_is_draft(); };
+    context.stage_config_fn =
+        [&store](Config config, std::string serialized) {
+            store.stage_config(
+                std::move(config), std::move(serialized));
+        };
+    context.get_staged_config_snapshot_fn =
+        [&store]() { return store.staged_snapshot(); };
+    context.clear_staged_config_fn =
+        [&store]() { store.clear_staged(); };
+    context.get_visible_config_snapshot_fn =
+        [&store]() { return store.visible_snapshot(); };
+    context.get_staged_config_cas_snapshot_fn =
+        [&store]() { return store.staged_cas_snapshot(); };
+    context.stage_config_if_visible_revision_fn =
+        [&store](
+            const std::string& expected_visible_revision,
+            Config config,
+            std::string serialized) {
+            return store.stage_config_if_visible_revision(
+                expected_visible_revision,
+                std::move(config),
+                std::move(serialized));
+        };
+}
+
 } // namespace
+
+TEST_CASE(
+    "recommended list setup stages only the visible config revision") {
+    constexpr int api_port = 18261;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config active =
+        make_valid_config("127.0.0.1:12121");
+    ConfigStore store(active);
+    const Config candidate = make_recommended_list_config(
+        "127.0.0.1:12121", "recommended");
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        active,
+        nlohmann::json(active).dump(),
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string&, const std::string&) {});
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto initial_response = client.Get("/api/config");
+    REQUIRE(initial_response != nullptr);
+    REQUIRE(initial_response->status == 200);
+    const nlohmann::json initial =
+        nlohmann::json::parse(initial_response->body);
+    const std::string base_revision =
+        initial.at("revision").get<std::string>();
+    REQUIRE(base_revision.size() == 64U);
+
+    const auto stage_response = client.Post(
+        "/api/setup/list/stage",
+        nlohmann::json{
+            {"config", candidate},
+            {"list_id", "recommended"},
+            {"base_revision", base_revision},
+        }
+            .dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(stage_response != nullptr);
+    CHECK(stage_response->status == 200);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(apply_calls == 0U);
+    CHECK_FALSE(store.active_config().lists.has_value());
+    const auto staged = store.staged_cas_snapshot();
+    REQUIRE(staged.has_value());
+    CHECK(staged->base_revision == base_revision);
+    REQUIRE(staged->config.lists.has_value());
+    CHECK(staged->config.lists->count("recommended") == 1U);
+}
+
+TEST_CASE(
+    "recommended list setup rejects a stale revision without clobbering active config") {
+    constexpr int api_port = 18262;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original =
+        make_valid_config("127.0.0.1:12121");
+    ConfigStore store(original);
+    const Config stale_candidate = make_recommended_list_config(
+        "127.0.0.1:12121", "recommended");
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        original,
+        nlohmann::json(original).dump(),
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string&, const std::string&) {});
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto initial_response = client.Get("/api/config");
+    REQUIRE(initial_response != nullptr);
+    REQUIRE(initial_response->status == 200);
+    const std::string stale_revision =
+        nlohmann::json::parse(initial_response->body)
+            .at("revision")
+            .get<std::string>();
+
+    Config replacement =
+        make_valid_config("127.0.0.1:12122");
+    const nlohmann::json replacement_json = replacement;
+    store.replace_active(
+        replacement,
+        allocate_outbound_marks(
+            replacement.fwmark.value_or(FwmarkConfig{}),
+            replacement.outbounds.value_or(
+                std::vector<Outbound>{})));
+
+    const auto stage_response = client.Post(
+        "/api/setup/list/stage",
+        nlohmann::json{
+            {"config", stale_candidate},
+            {"list_id", "recommended"},
+            {"base_revision", stale_revision},
+        }
+            .dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(stage_response != nullptr);
+    CHECK(stage_response->status == 409);
+    const nlohmann::json error =
+        nlohmann::json::parse(stage_response->body);
+    CHECK(error.at("reason") == "base_revision_mismatch");
+    CHECK(error.at("base_revision") == stale_revision);
+    CHECK(error.at("current_base_revision") != stale_revision);
+    CHECK(error.at("staged") == false);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(apply_calls == 0U);
+    CHECK_FALSE(store.staged_cas_snapshot().has_value());
+    CHECK(nlohmann::json(store.active_config()) == replacement_json);
+}
 
 TEST_CASE(
     "config save restores disk after post-rename atomic write failure") {

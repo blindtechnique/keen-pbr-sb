@@ -1,10 +1,12 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsRule } from "@/api/generated/model/dnsRule"
 import type { DnsServer } from "@/api/generated/model/dnsServer"
+import { DnsServerType } from "@/api/generated/model/dnsServerType"
 import type { ListConfig } from "@/api/generated/model/listConfig"
 import { getDnsServerDisplayName } from "@/lib/dns-display"
 import { withListDisplayName } from "@/lib/list-display"
 import { makeTechnicalId } from "@/lib/technical-id"
+import { buildUpdatedConfigForDnsServerUpsert } from "@/pages/dns-server-upsert-utils"
 
 export type ListDraft = {
   displayName: string
@@ -23,6 +25,17 @@ export type QuickSetup = {
   routeOutbound: string
   createDnsRule: boolean
   dnsServer: string
+}
+
+export type RecommendedDnsTemplate = {
+  name: string
+  primaryAddress: string
+  technicalSeed: string
+}
+
+export type RecommendedDnsServerResult = {
+  config: ConfigObject
+  serverTag: string
 }
 
 export const NO_DNS_RULE = "__none__"
@@ -59,6 +72,47 @@ export function createListDraft(
   }
 }
 
+export function addRecommendedDnsServer(
+  config: ConfigObject,
+  template: RecommendedDnsTemplate,
+  outboundTag: string,
+  outboundDisplayName: string
+): RecommendedDnsServerResult | null {
+  const normalizedOutboundTag = outboundTag.trim()
+  if (!normalizedOutboundTag) {
+    return null
+  }
+
+  const existing = (config.dns?.servers ?? []).find(
+    (server) =>
+      server.detour === normalizedOutboundTag &&
+      server.address === template.primaryAddress
+  )
+  if (existing) {
+    return { config, serverTag: existing.tag }
+  }
+
+  const existingTags = (config.dns?.servers ?? []).map((server) => server.tag)
+  const serverTag = makeTechnicalId(
+    `${template.technicalSeed}_${normalizedOutboundTag}`,
+    existingTags,
+    { prefix: "dns" }
+  )
+  const displayName = [...`${template.name} · ${outboundDisplayName.trim()}`]
+    .slice(0, 80)
+    .join("")
+    .trim()
+  const updated = buildUpdatedConfigForDnsServerUpsert(config, "create", {
+    displayName: displayName || template.name,
+    tag: serverTag,
+    type: DnsServerType.static,
+    address: template.primaryAddress,
+    detour: normalizedOutboundTag,
+  })
+
+  return updated ? { config: updated, serverTag } : null
+}
+
 export function getDraftFromMapEntry(
   name: string | undefined,
   listConfig?: ListConfig
@@ -93,6 +147,14 @@ export function buildUpdatedConfigForListUpsert(
   const resolvedName =
     mode === "edit" ? (originalName?.trim() ?? trimmedName) : trimmedName
   const nextListConfig = getListConfigFromDraft(nextDraft)
+  const originalListConfig =
+    mode === "edit" && originalName ? config.lists?.[originalName] : undefined
+  if (
+    originalListConfig?.catalog_identity &&
+    sameListSource(originalListConfig, nextListConfig)
+  ) {
+    nextListConfig.catalog_identity = originalListConfig.catalog_identity
+  }
 
   nextLists[resolvedName] = nextListConfig
 
@@ -233,6 +295,35 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
   }
 
   return withListDisplayName(listConfig, draft.displayName)
+}
+
+function sameListSource(left: ListConfig, right: ListConfig): boolean {
+  return (
+    normalizedOptionalText(left.url) === normalizedOptionalText(right.url) &&
+    normalizedOptionalText(left.file) === normalizedOptionalText(right.file) &&
+    sameNormalizedValues(left.domains, right.domains) &&
+    sameNormalizedValues(left.ip_cidrs, right.ip_cidrs)
+  )
+}
+
+function normalizedOptionalText(value: string | undefined): string {
+  return value?.trim() ?? ""
+}
+
+function sameNormalizedValues(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined
+): boolean {
+  const normalize = (values: readonly string[] | undefined) =>
+    [
+      ...new Set((values ?? []).map((value) => value.trim()).filter(Boolean)),
+    ].sort()
+  const normalizedLeft = normalize(left)
+  const normalizedRight = normalize(right)
+  return (
+    normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((value, index) => value === normalizedRight[index])
+  )
 }
 
 export function normalizeListDraftForComparison(draft: ListDraft) {

@@ -27,6 +27,12 @@ struct ParsedPreset {
     bool rejects{false};
 };
 
+struct ResolvedPreset {
+    ParsedPreset preset;
+    std::string catalog_identity;
+    std::optional<std::string> existing_technical_id;
+};
+
 [[noreturn]] void fail(CatalogSetupErrorCode code,
                        std::string path,
                        std::string message) {
@@ -178,6 +184,82 @@ const nlohmann::json& preset_array(const nlohmann::json& snapshot) {
         CatalogSetupErrorCode::invalid_catalog_snapshot,
         "catalog",
         "Catalogue snapshot must be an array or contain a presets array");
+}
+
+std::string catalog_source_identity(const nlohmann::json& snapshot) {
+    if (snapshot.is_object()) {
+        const auto catalog_id = snapshot.find("catalog_id");
+        if (catalog_id != snapshot.end() && catalog_id->is_string()) {
+            const auto value =
+                trim_ascii(catalog_id->get<std::string>());
+            if (!value.empty()) return value;
+        }
+        // Compatibility for external/test providers predating catalog_id.
+        // The URL describes the logical source better than cache/bundled,
+        // which only describes how the same catalogue reached the router.
+        const auto url = snapshot.find("url");
+        if (url != snapshot.end() && url->is_string()) {
+            const auto value = trim_ascii(url->get<std::string>());
+            if (!value.empty()) return "url:" + value;
+        }
+    }
+    // Pure planner tests and embedded callers may supply the preset array
+    // directly. Production snapshots always carry catalog_id.
+    return "catalog:inline";
+}
+
+std::string catalog_preset_identity_for_source(
+    const std::string& catalog_source,
+    const std::string& preset_id) {
+    return Sha256::hex(
+        nlohmann::json{
+            {"catalog_source", catalog_source},
+            {"preset_id", preset_id},
+        }
+            .dump());
+}
+
+std::vector<std::string> normalized_values(
+    std::vector<std::string> values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    return values;
+}
+
+bool legacy_list_matches_preset(const ListConfig& list,
+                                const ParsedPreset& preset) {
+    if (preset.url.has_value()) {
+        return list.url.has_value() &&
+               trim_ascii(*list.url) == trim_ascii(*preset.url);
+    }
+    if (list.url.has_value() || list.file.has_value()) return false;
+    return normalized_values(
+               list.domains.value_or(std::vector<std::string>{})) ==
+               normalized_values(preset.domains) &&
+           normalized_values(
+               list.ip_cidrs.value_or(std::vector<std::string>{})) ==
+               normalized_values(preset.ip_cidrs);
+}
+
+std::optional<std::string> find_installed_preset_list(
+    const std::map<std::string, ListConfig>& lists,
+    const ParsedPreset& preset,
+    const std::string& catalog_identity) {
+    for (const auto& [technical_id, list] : lists) {
+        if (list.catalog_identity == catalog_identity) {
+            return technical_id;
+        }
+    }
+    // Lists created by the first sb.12 alpha did not persist provenance.
+    // Adopt only an exact source/content match; aliases and technical IDs are
+    // deliberately ignored because users may rename them.
+    for (const auto& [technical_id, list] : lists) {
+        if (!list.catalog_identity.has_value() &&
+            legacy_list_matches_preset(list, preset)) {
+            return technical_id;
+        }
+    }
+    return std::nullopt;
 }
 
 std::vector<std::string> parse_domains(const nlohmann::json& preset,
@@ -648,6 +730,51 @@ std::set<std::string> occupied_dns_rule_ids(const Config& config) {
     return result;
 }
 
+bool route_rule_covers_list(const RouteRule& rule,
+                            const std::string& list_id,
+                            const std::string& outbound) {
+    if (!route_rule_enabled(rule) || rule.outbound != outbound ||
+        !rule.list.has_value()) {
+        return false;
+    }
+    // Other route conditions are combined with the list condition, so such a
+    // rule covers only a subset of the catalogue list and cannot satisfy the
+    // one-click setup contract on its own.
+    if (rule.dscp.has_value() || rule.src_port.has_value() ||
+        rule.dest_port.has_value() || rule.src_addr.has_value() ||
+        rule.dest_addr.has_value() || rule.proto.has_value()) {
+        return false;
+    }
+    return *rule.list == std::vector<std::string>{list_id};
+}
+
+bool route_policy_covers_list(const Config& config,
+                              const std::string& list_id,
+                              const std::string& outbound) {
+    const auto rules =
+        config.route.value_or(RouteConfig{}).rules.value_or(
+            std::vector<RouteRule>{});
+    return std::any_of(
+        rules.begin(), rules.end(),
+        [&](const RouteRule& rule) {
+            return route_rule_covers_list(rule, list_id, outbound);
+        });
+}
+
+bool dns_policy_covers_list(const Config& config,
+                            const std::string& list_id,
+                            const std::string& server) {
+    const auto rules =
+        config.dns.value_or(DnsConfig{}).rules.value_or(
+            std::vector<DnsRule>{});
+    return std::any_of(
+        rules.begin(), rules.end(),
+        [&](const DnsRule& rule) {
+            return dns_rule_enabled(rule) && rule.server == server &&
+                   rule.list == std::vector<std::string>{list_id};
+        });
+}
+
 std::optional<std::string> usable_source_detour(
     const CatalogSetupIntent& intent,
     const Config& config,
@@ -706,25 +833,23 @@ std::optional<std::string> select_dns_server(
 
     if (intent.dns_mode == CatalogDnsMode::automatic) {
         if (!route_outbound.has_value()) {
-            warnings.push_back({
-                CatalogSetupWarningCode::dns_automatic_unavailable,
+            fail(
+                CatalogSetupErrorCode::dns_automatic_unavailable,
                 "intent.dns_mode",
-                "Automatic DNS selection needs an outbound route",
-            });
-            return std::nullopt;
+                "Automatic DNS requires an outbound route; choose an "
+                "outbound or disable automatic DNS");
         }
         for (const auto& server :
              config.dns.value_or(DnsConfig{}).servers.value_or(
                  std::vector<DnsServer>{})) {
             if (server.detour == route_outbound) return server.tag;
         }
-        warnings.push_back({
-            CatalogSetupWarningCode::dns_automatic_unavailable,
+        fail(
+            CatalogSetupErrorCode::dns_automatic_unavailable,
             "intent.dns_mode",
             "No DNS server is detoured through outbound '" +
-                *route_outbound + "'",
-        });
-        return std::nullopt;
+                *route_outbound +
+                "'; create or select a compatible DNS server first");
     }
 
     const auto& tag = *intent.dns_server_tag;
@@ -737,21 +862,19 @@ std::optional<std::string> select_dns_server(
     }
     if (route_outbound.has_value()) {
         if (!server->detour.has_value()) {
-            warnings.push_back({
-                CatalogSetupWarningCode::dns_detour_missing,
+            fail(
+                CatalogSetupErrorCode::dns_detour_mismatch,
                 "intent.dns_server_tag",
                 "DNS server '" + tag +
                     "' has no detour while the route uses outbound '" +
-                    *route_outbound + "'",
-            });
+                    *route_outbound + "'");
         } else if (*server->detour != *route_outbound) {
-            warnings.push_back({
-                CatalogSetupWarningCode::dns_detour_mismatch,
+            fail(
+                CatalogSetupErrorCode::dns_detour_mismatch,
                 "intent.dns_server_tag",
                 "DNS server '" + tag + "' uses detour '" +
                     *server->detour + "' instead of route outbound '" +
-                    *route_outbound + "'",
-            });
+                    *route_outbound + "'");
         }
     }
     return tag;
@@ -766,6 +889,13 @@ CatalogSetupPlanError::CatalogSetupPlanError(
     : std::runtime_error(std::move(message)),
       code_(code),
       path_(std::move(path)) {}
+
+std::string catalog_preset_identity(
+    const nlohmann::json& catalog_snapshot,
+    const std::string& preset_id) {
+    return catalog_preset_identity_for_source(
+        catalog_source_identity(catalog_snapshot), preset_id);
+}
 
 CatalogSetupPlan plan_catalog_setup(
     const CatalogSetupIntent& intent,
@@ -800,7 +930,24 @@ CatalogSetupPlan plan_catalog_setup(
     CatalogSetupPlan plan;
     plan.summary.mode = intent.mode;
 
+    const auto active_lists =
+        active_config.lists.value_or(
+            std::map<std::string, ListConfig>{});
+    std::vector<ResolvedPreset> resolved;
+    resolved.reserve(presets.size());
+    std::vector<ParsedPreset> pending_presets;
+    pending_presets.reserve(presets.size());
+    for (const auto& preset : presets) {
+        const auto identity =
+            catalog_preset_identity(catalog_snapshot, preset.id);
+        const auto existing = find_installed_preset_list(
+            active_lists, preset, identity);
+        resolved.push_back({preset, identity, existing});
+        if (!existing.has_value()) pending_presets.push_back(preset);
+    }
+
     std::optional<std::string> route_outbound;
+    bool create_blackhole_if_needed = false;
     if (intent.mode == CatalogSetupMode::outbound) {
         const auto* outbound =
             find_outbound(active_config, *intent.outbound_tag);
@@ -828,8 +975,6 @@ CatalogSetupPlan plan_catalog_setup(
             });
         if (existing != outbounds.end()) {
             route_outbound = existing->tag;
-            plan.summary.blackhole =
-                CatalogBlackholePlanSummary{existing->tag, false};
         } else {
             std::set<std::string> occupied;
             for (const auto& outbound : outbounds) {
@@ -837,48 +982,65 @@ CatalogSetupPlan plan_catalog_setup(
             }
             const auto tag =
                 unique_technical_id("block", "block", occupied);
-            Outbound blackhole;
-            blackhole.tag = tag;
-            blackhole.type = OutboundType::BLACKHOLE;
-            outbounds.push_back(std::move(blackhole));
-            candidate.outbounds = std::move(outbounds);
             route_outbound = tag;
-            plan.summary.blackhole =
-                CatalogBlackholePlanSummary{tag, true};
+            create_blackhole_if_needed = true;
         }
     }
 
     const bool has_url_backed_list = std::any_of(
-        presets.begin(), presets.end(),
+        pending_presets.begin(), pending_presets.end(),
         [](const ParsedPreset& preset) { return preset.url.has_value(); });
-    const auto source_detour = usable_source_detour(
-        intent,
-        active_config,
-        has_url_backed_list,
-        plan.warnings);
+    const auto source_detour =
+        pending_presets.empty()
+            ? std::optional<std::string>{}
+            : usable_source_detour(
+                  intent,
+                  active_config,
+                  has_url_backed_list,
+                  plan.warnings);
 
     auto lists =
         candidate.lists.value_or(std::map<std::string, ListConfig>{});
     std::set<std::string> occupied_list_ids;
     for (const auto& [id, _] : lists) occupied_list_ids.insert(id);
 
-    std::vector<std::string> list_ids;
-    list_ids.reserve(presets.size());
-    for (const auto& preset : presets) {
+    std::vector<std::pair<std::string, ParsedPreset>> selected_lists;
+    selected_lists.reserve(resolved.size());
+    for (const auto& item : resolved) {
+        const auto& preset = item.preset;
+        if (item.existing_technical_id.has_value()) {
+            const auto& list =
+                active_lists.at(*item.existing_technical_id);
+            plan.summary.lists.push_back({
+                preset.id,
+                *item.existing_technical_id,
+                list.display_name.value_or(preset.name),
+                true,
+                preset.url.has_value(),
+                !preset.domains.empty(),
+                !preset.ip_cidrs.empty(),
+                preset.url ? list.detour : std::nullopt,
+            });
+            selected_lists.emplace_back(
+                *item.existing_technical_id, preset);
+            continue;
+        }
         const auto technical_id = unique_technical_id(
             preset.id, "list", occupied_list_ids);
         ListConfig list;
         list.display_name = preset.name;
+        list.catalog_identity = item.catalog_identity;
         list.url = preset.url;
         if (!preset.domains.empty()) list.domains = preset.domains;
         if (!preset.ip_cidrs.empty()) list.ip_cidrs = preset.ip_cidrs;
         if (preset.url && source_detour) list.detour = source_detour;
         lists.emplace(technical_id, std::move(list));
-        list_ids.push_back(technical_id);
+        selected_lists.emplace_back(technical_id, preset);
         plan.summary.lists.push_back({
             preset.id,
             technical_id,
             preset.name,
+            false,
             preset.url.has_value(),
             !preset.domains.empty(),
             !preset.ip_cidrs.empty(),
@@ -887,33 +1049,87 @@ CatalogSetupPlan plan_catalog_setup(
     }
     candidate.lists = std::move(lists);
 
-    const auto route_display_name =
-        generated_display_name(intent.route_display_name, presets);
-    const auto dns_display_name =
-        generated_display_name(intent.dns_display_name, presets);
-    const auto rule_seed = [&]() {
+    const auto unique_selected_ids = [&]() {
+        std::vector<std::string> result;
+        std::set<std::string> seen;
+        for (const auto& [list_id, _] : selected_lists) {
+            if (seen.insert(list_id).second) result.push_back(list_id);
+        }
+        return result;
+    }();
+    const auto missing_route_list_ids = [&]() {
+        std::vector<std::string> result;
+        if (!route_outbound.has_value()) return result;
+        for (const auto& list_id : unique_selected_ids) {
+            if (!route_policy_covers_list(
+                    active_config, list_id, *route_outbound)) {
+                result.push_back(list_id);
+            }
+        }
+        return result;
+    }();
+
+    const auto dns_server = select_dns_server(
+        intent, active_config, route_outbound, plan.warnings);
+    const auto missing_dns_list_ids = [&]() {
+        std::vector<std::string> result;
+        if (!dns_server.has_value()) return result;
+        for (const auto& list_id : unique_selected_ids) {
+            if (!dns_policy_covers_list(
+                    active_config, list_id, *dns_server)) {
+                result.push_back(list_id);
+            }
+        }
+        return result;
+    }();
+
+    const auto preset_for_list_id =
+        [&](const std::string& list_id) -> const ParsedPreset& {
+            const auto found = std::find_if(
+                selected_lists.begin(),
+                selected_lists.end(),
+                [&](const auto& selected) {
+                    return selected.first == list_id;
+                });
+            if (found == selected_lists.end()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    "intent.selections",
+                    "Resolved catalogue list has no source preset");
+            }
+            return found->second;
+        };
+    const auto rule_seed =
+        [](const std::vector<std::string>& list_ids) {
         std::ostringstream value;
         value << "catalog";
         for (const auto& id : list_ids) value << "_" << id;
         return value.str();
-    }();
+    };
 
-    if (route_outbound.has_value()) {
+    if (!missing_route_list_ids.empty() &&
+        intent.mode == CatalogSetupMode::block) {
+        if (create_blackhole_if_needed) {
+            auto outbounds =
+                candidate.outbounds.value_or(std::vector<Outbound>{});
+            Outbound blackhole;
+            blackhole.tag = *route_outbound;
+            blackhole.type = OutboundType::BLACKHOLE;
+            outbounds.push_back(std::move(blackhole));
+            candidate.outbounds = std::move(outbounds);
+        }
+        plan.summary.blackhole = CatalogBlackholePlanSummary{
+            *route_outbound, create_blackhole_if_needed};
+    }
+
+    if (route_outbound.has_value() &&
+        !missing_route_list_ids.empty()) {
         auto route = candidate.route.value_or(RouteConfig{});
         auto rules = route.rules.value_or(std::vector<RouteRule>{});
         auto ids = occupied_route_ids(active_config);
-
-        RouteRule rule;
-        rule.id =
-            unique_technical_id(rule_seed, "rule", ids);
-        rule.display_name = route_display_name;
-        rule.enabled = true;
-        rule.list = list_ids;
-        rule.outbound = *route_outbound;
-
-        std::size_t insertion_index = rules.size();
+        std::size_t base_insertion_index = rules.size();
         if (intent.mode == CatalogSetupMode::block) {
-            insertion_index = 0U;
+            base_insertion_index = 0U;
         } else {
             std::set<std::string> blackhole_tags;
             for (const auto& outbound :
@@ -925,51 +1141,90 @@ CatalogSetupPlan plan_catalog_setup(
             for (std::size_t index = 0; index < rules.size(); ++index) {
                 if (route_rule_enabled(rules[index]) &&
                     blackhole_tags.count(rules[index].outbound) != 0U) {
-                    insertion_index = index;
+                    base_insertion_index = index;
                     break;
                 }
             }
         }
 
-        rules.insert(
-            rules.begin() + static_cast<std::ptrdiff_t>(insertion_index),
-            rule);
+        for (std::size_t offset = 0U;
+             offset < missing_route_list_ids.size();
+             ++offset) {
+            const auto& list_id = missing_route_list_ids[offset];
+            const auto& preset = preset_for_list_id(list_id);
+            const bool single_rule =
+                missing_route_list_ids.size() == 1U;
+            const auto route_display_name = generated_display_name(
+                single_rule ? intent.route_display_name : std::nullopt,
+                std::vector<ParsedPreset>{preset});
+
+            RouteRule rule;
+            rule.id = unique_technical_id(
+                rule_seed(std::vector<std::string>{list_id}),
+                "rule",
+                ids);
+            rule.display_name = route_display_name;
+            rule.enabled = true;
+            rule.list = std::vector<std::string>{list_id};
+            rule.outbound = *route_outbound;
+
+            const auto insertion_index =
+                base_insertion_index + offset;
+            rules.insert(
+                rules.begin() +
+                    static_cast<std::ptrdiff_t>(insertion_index),
+                rule);
+            plan.summary.route_rules.push_back(
+                CatalogRouteRulePlanSummary{
+                    *rule.id,
+                    route_display_name,
+                    *route_outbound,
+                    insertion_index,
+                    intent.mode == CatalogSetupMode::block,
+                });
+        }
         route.rules = std::move(rules);
         candidate.route = std::move(route);
-        plan.summary.route_rule = CatalogRouteRulePlanSummary{
-            *rule.id,
-            route_display_name,
-            *route_outbound,
-            insertion_index,
-            intent.mode == CatalogSetupMode::block,
-        };
+        plan.summary.route_rule =
+            plan.summary.route_rules.front();
     }
 
-    const auto dns_server = select_dns_server(
-        intent, active_config, route_outbound, plan.warnings);
-    if (dns_server.has_value()) {
+    if (dns_server.has_value() && !missing_dns_list_ids.empty()) {
         auto dns = candidate.dns.value_or(DnsConfig{});
         auto rules = dns.rules.value_or(std::vector<DnsRule>{});
         auto ids = occupied_dns_rule_ids(active_config);
+        for (const auto& list_id : missing_dns_list_ids) {
+            const auto& preset = preset_for_list_id(list_id);
+            const bool single_rule =
+                missing_dns_list_ids.size() == 1U;
+            const auto dns_display_name = generated_display_name(
+                single_rule ? intent.dns_display_name : std::nullopt,
+                std::vector<ParsedPreset>{preset});
 
-        DnsRule rule;
-        rule.id =
-            unique_technical_id(rule_seed, "dns_rule", ids);
-        rule.display_name = dns_display_name;
-        rule.enabled = true;
-        rule.list = list_ids;
-        rule.server = *dns_server;
-        rule.allow_domain_rebinding = false;
-        const auto insertion_index = rules.size();
-        rules.push_back(rule);
+            DnsRule rule;
+            rule.id = unique_technical_id(
+                rule_seed(std::vector<std::string>{list_id}),
+                "dns_rule",
+                ids);
+            rule.display_name = dns_display_name;
+            rule.enabled = true;
+            rule.list = std::vector<std::string>{list_id};
+            rule.server = *dns_server;
+            rule.allow_domain_rebinding = false;
+            const auto insertion_index = rules.size();
+            rules.push_back(rule);
+            plan.summary.dns_rules.push_back(
+                CatalogDnsRulePlanSummary{
+                    *rule.id,
+                    dns_display_name,
+                    *dns_server,
+                    insertion_index,
+                });
+        }
         dns.rules = std::move(rules);
         candidate.dns = std::move(dns);
-        plan.summary.dns_rule = CatalogDnsRulePlanSummary{
-            *rule.id,
-            dns_display_name,
-            *dns_server,
-            insertion_index,
-        };
+        plan.summary.dns_rule =
+            plan.summary.dns_rules.front();
     }
 
     // This is deliberately the last planner step: the same authoritative
@@ -979,6 +1234,91 @@ CatalogSetupPlan plan_catalog_setup(
         Sha256::hex(nlohmann::json(candidate).dump());
     plan.candidate = std::move(candidate);
     return plan;
+}
+
+void validate_recommended_list_setup(
+    const Config& candidate,
+    const std::string& list_id) {
+    validate_config(candidate);
+
+    const auto normalized_list_id = trim_ascii(list_id);
+    if (normalized_list_id.empty() ||
+        !candidate.lists.has_value() ||
+        candidate.lists->find(normalized_list_id) ==
+            candidate.lists->end()) {
+        throw std::invalid_argument(
+            "The beginner setup list does not exist in the candidate");
+    }
+
+    const auto route_rules =
+        candidate.route.value_or(RouteConfig{}).rules.value_or(
+            std::vector<RouteRule>{});
+    std::vector<const RouteRule*> route_matches;
+    for (const auto& rule : route_rules) {
+        const auto& lists = route_rule_lists(rule);
+        if (route_rule_enabled(rule) &&
+            std::find(
+                lists.begin(), lists.end(), normalized_list_id) !=
+                lists.end()) {
+            route_matches.push_back(&rule);
+        }
+    }
+    const auto dedicated_route =
+        route_matches.size() == 1U
+            ? route_matches.front()
+            : nullptr;
+    if (dedicated_route == nullptr ||
+        route_rule_lists(*dedicated_route) !=
+            std::vector<std::string>{normalized_list_id} ||
+        dedicated_route->dscp.has_value() ||
+        dedicated_route->proto.has_value() ||
+        dedicated_route->src_port.has_value() ||
+        dedicated_route->dest_port.has_value() ||
+        dedicated_route->src_addr.has_value() ||
+        dedicated_route->dest_addr.has_value()) {
+        throw std::invalid_argument(
+            "Beginner setup requires one dedicated route rule for the list");
+    }
+
+    const auto* outbound =
+        find_outbound(candidate, dedicated_route->outbound);
+    if (outbound == nullptr || !is_routable(outbound->type)) {
+        throw std::invalid_argument(
+            "Beginner setup route must use a routable outbound");
+    }
+
+    const auto dns_rules =
+        candidate.dns.value_or(DnsConfig{}).rules.value_or(
+            std::vector<DnsRule>{});
+    std::vector<const DnsRule*> dns_matches;
+    for (const auto& rule : dns_rules) {
+        if (dns_rule_enabled(rule) &&
+            std::find(
+                rule.list.begin(),
+                rule.list.end(),
+                normalized_list_id) != rule.list.end()) {
+            dns_matches.push_back(&rule);
+        }
+    }
+    if (dns_matches.size() != 1U ||
+        dns_matches.front()->list !=
+            std::vector<std::string>{normalized_list_id}) {
+        throw std::invalid_argument(
+            "Beginner setup requires one dedicated DNS rule for the list");
+    }
+
+    const auto* dns_server =
+        find_dns_server(candidate, dns_matches.front()->server);
+    if (dns_server == nullptr) {
+        throw std::invalid_argument(
+            "Beginner setup DNS server does not exist");
+    }
+    if (!dns_server->detour.has_value() ||
+        *dns_server->detour != outbound->tag) {
+        throw std::invalid_argument(
+            "Beginner setup DNS server must use the same outbound as the "
+            "route; create or select a compatible DNS server");
+    }
 }
 
 } // namespace keen_pbr3::setup

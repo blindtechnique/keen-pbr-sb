@@ -319,6 +319,62 @@ TEST_CASE("build_firewall_global_prefilter: false wins defensively and legacy al
           std::vector<std::string>{"nwg0"});
 }
 
+TEST_CASE("build_firewall_global_prefilter: service pools extend an explicit ingress allowlist") {
+    auto cfg = parse_minimal_config(R"({
+        "route":{"inbound_interfaces":["br0"],"rules":[]}
+    })");
+
+    InternalVpnRuntimeTarget include;
+    include.stable_id = "ndms-crypto-map:ike2";
+    include.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    include.process_clients = true;
+    include.source_cidrs_v4 = {"172.20.8.0/23"};
+    include.source_cidrs_v6 = {"2001:db8:20::/64"};
+
+    InternalVpnRuntimeTarget bypass;
+    bypass.stable_id = "ndms-service:sstp-server";
+    bypass.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    bypass.process_clients = false;
+    bypass.interface = "Sstp0";
+    bypass.source_cidrs_v4 = {"172.16.1.0/24"};
+
+    const auto prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, {include, bypass});
+    REQUIRE(prefilter.inbound_interfaces.has_value());
+    CHECK(*prefilter.inbound_interfaces ==
+          std::vector<std::string>{"br0"});
+    CHECK(prefilter.include_source_cidrs_v4 ==
+          std::vector<std::string>{"172.20.8.0/23"});
+    CHECK(prefilter.include_source_cidrs_v6 ==
+          std::vector<std::string>{"2001:db8:20::/64"});
+    REQUIRE(prefilter.bypass_source_selectors_v4.size() == 1U);
+    CHECK(
+        prefilter.bypass_source_selectors_v4.front().interface ==
+        "Sstp0");
+    CHECK(
+        prefilter.bypass_source_selectors_v4.front().cidr ==
+        "172.16.1.0/24");
+}
+
+TEST_CASE("build_firewall_global_prefilter: inherited service include preserves default-all") {
+    auto cfg = parse_minimal_config(
+        R"({"route":{"rules":[]}})");
+    InternalVpnRuntimeTarget include;
+    include.stable_id = "ndms-service:sstp-server";
+    include.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    include.process_clients = true;
+    include.source_cidrs_v4 = {"172.16.1.0/24"};
+
+    const auto prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, {include});
+    CHECK_FALSE(prefilter.has_inbound_interfaces());
+    CHECK(prefilter.include_source_cidrs_v4 ==
+          std::vector<std::string>{"172.16.1.0/24"});
+    CHECK_FALSE(prefilter.has_bypass_source_cidrs());
+}
+
 TEST_CASE("build_firewall_global_prefilter: daemon.skip_marked_packets false disables marked-packet bypass") {
     auto cfg = parse_minimal_config(R"({
         "daemon":{"skip_marked_packets":false},

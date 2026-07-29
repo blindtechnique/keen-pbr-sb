@@ -38,8 +38,10 @@
 #include "../health/routing_health_checker.hpp"
 #include "../ipc/control_protocol.hpp"
 #include "../keenetic/internal_vpn_server_resolver.hpp"
+#include "../keenetic/internal_vpn_service_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_generation.hpp"
 #include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/daemon_signals.hpp"
@@ -61,7 +63,10 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr auto SIGUSR1_DEBOUNCE_DELAY = std::chrono::milliseconds{150};
+constexpr auto NETFILTER_REFRESH_DEBOUNCE_DELAY =
+    std::chrono::milliseconds{400};
+constexpr auto OWNED_SNAT_HEALTH_INTERVAL =
+    std::chrono::seconds{60};
 constexpr auto INTERFACE_MONITOR_RECONNECT_RETRY_DELAY = std::chrono::seconds{5};
 constexpr std::size_t kResolverStreamChunkBytes = 16U * 1024U;
 constexpr std::array<std::chrono::seconds, 6>
@@ -1085,6 +1090,9 @@ void Daemon::handle_signal() {
     case SIGUSR1:
         handle_sigusr1();
         break;
+    case SIGUSR2:
+        handle_sigusr2();
+        break;
     case SIGHUP:
         handle_sighup();
         break;
@@ -1095,34 +1103,154 @@ void Daemon::handle_signal() {
 
 void Daemon::handle_sigusr1() {
     auto& log = Logger::instance();
-    log.info("SIGUSR1: scheduling firewall refresh...");
-    schedule_sigusr1_runtime_refresh();
+    log.info("SIGUSR1: scheduling full firewall refresh...");
+    schedule_netfilter_runtime_refresh(NetfilterRefreshReason::full);
 }
 
-void Daemon::schedule_sigusr1_runtime_refresh() {
-    if (sigusr1_refresh_task_id_ >= 0) {
-        scheduler_->cancel(sigusr1_refresh_task_id_);
-        sigusr1_refresh_task_id_ = -1;
+void Daemon::handle_sigusr2() {
+    auto& log = Logger::instance();
+    log.info("SIGUSR2: scheduling NAT firewall refresh...");
+    schedule_netfilter_runtime_refresh(NetfilterRefreshReason::nat_only);
+}
+
+void Daemon::schedule_owned_snat_health_check() {
+    if (owned_snat_health_task_id_ >= 0) {
+        return;
+    }
+    owned_snat_health_task_id_ = scheduler_->schedule_repeating(
+        OWNED_SNAT_HEALTH_INTERVAL,
+        [this]() { check_owned_snat_health(); },
+        "owned-snat-health");
+}
+
+void Daemon::cancel_owned_snat_health_check() {
+    if (owned_snat_health_task_id_ < 0) {
+        return;
+    }
+    scheduler_->cancel(owned_snat_health_task_id_);
+    owned_snat_health_task_id_ = -1;
+}
+
+void Daemon::check_owned_snat_health() {
+    const bool recovery_pending =
+        runtime_firewall_retry_task_id_ >= 0 ||
+        pending_owned_snat_recovery_.requested;
+    const bool netfilter_refresh_pending =
+        netfilter_refresh_task_id_ >= 0 ||
+        pending_netfilter_refresh_reasons_ != 0;
+    if (!routing_runtime_active_ ||
+        recovery_pending ||
+        netfilter_refresh_pending) {
+        return;
     }
 
-    sigusr1_refresh_task_id_ = scheduler_->schedule_oneshot(
-        SIGUSR1_DEBOUNCE_DELAY,
+    OwnedSnatState state = OwnedSnatState::unknown;
+    try {
+        state = firewall_->inspect_owned_snat_state();
+    } catch (...) {
+        // This is a fallback guard, not an alert source. An inspection error
+        // must neither disrupt the event loop nor emit one message per tick.
+        return;
+    }
+    if (!should_run_periodic_snat_repair(
+            routing_runtime_active_,
+            recovery_pending,
+            netfilter_refresh_pending,
+            state)) {
+        return;
+    }
+
+    Logger::instance().info(
+        "Periodic SNAT health check detected a {} owned scaffold; "
+        "repairing it.",
+        state == OwnedSnatState::missing ? "missing" : "stale");
+    (void)refresh_iproute_and_firewall_runtime(
+        0,
+        std::nullopt,
+        std::nullopt,
+        /*schedule_catalog_refresh=*/false,
+        OwnedSnatRecovery{
+            /*requested=*/true,
+            /*missing_observed=*/false});
+}
+
+void Daemon::schedule_netfilter_runtime_refresh(
+    NetfilterRefreshReason reason) {
+    pending_netfilter_refresh_reasons_ |=
+        static_cast<std::uint8_t>(reason);
+    if (netfilter_refresh_task_id_ >= 0) {
+        scheduler_->cancel(netfilter_refresh_task_id_);
+        netfilter_refresh_task_id_ = -1;
+    }
+
+    netfilter_refresh_task_id_ = scheduler_->schedule_oneshot(
+        NETFILTER_REFRESH_DEBOUNCE_DELAY,
         [this]() {
-            sigusr1_refresh_task_id_ = -1;
-            Logger::instance().info("SIGUSR1: applying firewall refresh...");
-            refresh_iproute_and_firewall_runtime();
-            
-            if (urltest_manager_) {
-                Logger::instance().info("SIGUSR1: probing urltest endpoints...");
+            netfilter_refresh_task_id_ = -1;
+            const std::uint8_t reasons =
+                pending_netfilter_refresh_reasons_;
+            pending_netfilter_refresh_reasons_ = 0;
+            const bool full_refresh =
+                (reasons &
+                 static_cast<std::uint8_t>(
+                     NetfilterRefreshReason::full)) != 0;
+            const bool nat_refresh =
+                (reasons &
+                 static_cast<std::uint8_t>(
+                     NetfilterRefreshReason::nat_only)) != 0;
+            const bool snat_health_check =
+                full_refresh || nat_refresh;
+            const char* reason_label =
+                full_refresh && nat_refresh
+                    ? "full+nat"
+                    : (full_refresh ? "full" : "nat");
+
+            Logger::instance().info(
+                "Netfilter event: applying {} runtime refresh...",
+                reason_label);
+            if (nat_refresh &&
+                runtime_firewall_retry_task_id_ >= 0) {
+                // Do not coalesce away a confirmed firmware NAT rebuild behind
+                // an older generic recovery. Replace that retry with an
+                // immediate attempt whose bounded retry chain remembers that
+                // SNAT health must be verified.
+                cancel_runtime_firewall_retry();
+            }
+            const bool runtime_refreshed =
+                refresh_iproute_and_firewall_runtime(
+                    0,
+                    std::nullopt,
+                    std::nullopt,
+                    /*schedule_catalog_refresh=*/true,
+                    OwnedSnatRecovery{
+                        /*requested=*/snat_health_check,
+                        /*missing_observed=*/false});
+
+            // A nat-only repair must not turn one firmware table rebuild into
+            // a burst of remote health probes. Full/mangle refreshes preserve
+            // the historical SIGUSR1 behaviour, but only after the runtime
+            // generation was actually reconciled.
+            if (runtime_refreshed && full_refresh && urltest_manager_) {
+                Logger::instance().info(
+                    "Netfilter event: probing urltest endpoints...");
                 for (const auto& ob : config_.outbounds.value_or(std::vector<Outbound>{})) {
                     if (ob.type == OutboundType::URLTEST) {
                         urltest_manager_->trigger_immediate_test(ob.tag);
                     }
                 }
             }
-            Logger::instance().info("SIGUSR1: firewall refresh complete.");
+            if (runtime_refreshed) {
+                Logger::instance().info(
+                    "Netfilter event: {} runtime refresh complete.",
+                    reason_label);
+            } else {
+                Logger::instance().info(
+                    "Netfilter event: {} runtime refresh deferred or "
+                    "coalesced with recovery.",
+                    reason_label);
+            }
         },
-        "sigusr1-runtime-refresh");
+        "netfilter-runtime-refresh");
 }
 
 void Daemon::handle_sighup() {
@@ -1168,23 +1296,31 @@ void Daemon::handle_sighup() {
     }
 }
 
-void Daemon::refresh_iproute_and_firewall_runtime(
+bool Daemon::refresh_iproute_and_firewall_runtime(
     std::size_t retry_attempt,
     std::optional<InternalVpnRuntimeResolution>
-        prepared_internal_vpn_resolution) {
+        prepared_internal_vpn_resolution,
+    std::optional<InternalVpnServiceRuntimeResolution>
+        prepared_internal_vpn_service_resolution,
+    bool schedule_catalog_refresh,
+    OwnedSnatRecovery snat_recovery) {
     auto& log = Logger::instance();
     if (!routing_runtime_active_) {
         log.verbose(
             "Skipping runtime routing/firewall refresh because routing is stopped.");
-        return;
+        return false;
     }
+    pending_owned_snat_recovery_ =
+        merge_owned_snat_recovery(
+            pending_owned_snat_recovery_, snat_recovery);
+    snat_recovery = pending_owned_snat_recovery_;
     if (runtime_recovery_request_should_coalesce(
             retry_attempt,
             runtime_firewall_retry_task_id_ >= 0)) {
         log.verbose(
             "Coalescing runtime routing/firewall refresh with the pending "
             "recovery retry.");
-        return;
+        return false;
     }
     try {
         // Interface notifications are handled on the control loop. Re-resolve
@@ -1194,39 +1330,129 @@ void Daemon::refresh_iproute_and_firewall_runtime(
             prepared_internal_vpn_resolution.has_value()
                 ? std::move(*prepared_internal_vpn_resolution)
                 : prepare_internal_vpn_server_resolution_from_cache();
+        const auto internal_vpn_service_resolution =
+            prepared_internal_vpn_service_resolution.has_value()
+                ? std::move(*prepared_internal_vpn_service_resolution)
+                : prepare_internal_vpn_service_resolution_from_cache();
         // This can be an ordinary managed-WAN event after the catalog TTL,
         // not only a native-VPN event. Cache-only reconciliation remains
         // immediate; the central lifecycle invariant puts the authoritative
         // RCI observation on the blocking executor.
-        schedule_internal_vpn_catalog_refresh_if_needed(
-            internal_vpn_resolution.state);
-        commit_internal_vpn_runtime_generation(
-            resolved_internal_vpn_servers_,
-            internal_vpn_resolution.effective_servers,
-            [this]() {
-                reconcile_static_routing();
-                apply_firewall(FirewallApplyMode::PreserveSets);
-            },
-            [this, &internal_vpn_resolution]() {
-                update_internal_vpn_verified_includes_lkg(
-                    internal_vpn_resolution);
-            });
+        if (schedule_catalog_refresh) {
+            schedule_internal_vpn_catalog_refresh_if_needed(
+                internal_vpn_resolution.state,
+                internal_vpn_service_resolution.state);
+        }
+        InternalVpnRuntimeGenerationTransaction
+            internal_vpn_generation(
+                resolved_internal_vpn_servers_,
+                internal_vpn_resolution.effective_servers);
+        InternalVpnRuntimeTargetGenerationTransaction
+            internal_vpn_service_generation(
+                resolved_internal_vpn_service_targets_,
+                internal_vpn_service_resolution.effective_targets);
+        const OwnedSnatState snat_before =
+            snat_recovery.requested
+                ? firewall_->inspect_owned_snat_state()
+                : OwnedSnatState::unknown;
+        snat_recovery =
+            observe_owned_snat_state(
+                std::move(snat_recovery),
+                snat_before,
+                snat_before == OwnedSnatState::missing
+                    ? std::optional<OwnedConntrackCleanupSnapshot>{
+                          snapshot_owned_conntrack_marks()}
+                    : std::nullopt);
+        pending_owned_snat_recovery_ = snat_recovery;
+        reconcile_static_routing();
+        apply_firewall(FirewallApplyMode::PreserveSets);
+        const OwnedSnatState inspected_snat_after =
+            snat_recovery.requested
+                ? firewall_->inspect_owned_snat_state()
+                : OwnedSnatState::unknown;
+        snat_recovery =
+            observe_owned_snat_state(
+                std::move(snat_recovery),
+                inspected_snat_after,
+                inspected_snat_after == OwnedSnatState::missing
+                    ? std::optional<OwnedConntrackCleanupSnapshot>{
+                          snapshot_owned_conntrack_marks()}
+                    : std::nullopt);
+        pending_owned_snat_recovery_ = snat_recovery;
+        const OwnedSnatState snat_after = inspected_snat_after;
+        if (snat_recovery.requested &&
+            snat_after != OwnedSnatState::healthy) {
+            throw TransientFirewallError(
+                snat_after == OwnedSnatState::missing
+                    ? "tunnel SNAT scaffold is missing after runtime repair"
+                    : (snat_after == OwnedSnatState::stale
+                           ? "tunnel SNAT scaffold is stale after runtime "
+                             "repair"
+                           : "tunnel SNAT scaffold could not be inspected "
+                             "after runtime repair"));
+        }
+        internal_vpn_generation.commit();
+        internal_vpn_service_generation.commit();
+        update_internal_vpn_verified_includes_lkg(
+            internal_vpn_resolution);
+        update_internal_vpn_service_verified_includes_lkg(
+            internal_vpn_service_resolution);
+        if (should_cleanup_conntrack_after_snat_repair(
+                snat_recovery, snat_after)) {
+            if (snat_recovery.cleanup_snapshot.has_value()) {
+                // This event is rare and serialized on the control loop. A
+                // bounded synchronous cleanup is intentional: it is the
+                // generation barrier that prevents an old numerical mark
+                // from being deleted after a concurrent config save reuses
+                // it for a different outbound.
+                cleanup_owned_conntrack_snapshot(
+                    *snat_recovery.cleanup_snapshot,
+                    "after verified tunnel SNAT recovery");
+                log.info(
+                    "Tunnel SNAT was restored after a firmware firewall "
+                    "rebuild; retired the affected "
+                    "keen-pbr-marked flows.");
+            }
+        }
+        if (snat_recovery.requested) {
+            pending_owned_snat_recovery_ = {};
+        }
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
+        return true;
     } catch (const TransientFirewallError& e) {
         if (retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
-            log.error(
-                "Runtime routing/firewall reconciliation failed after {} "
-                "retries: {}",
-                retry_attempt,
-                e.what());
-            return;
+            if (snat_recovery.requested) {
+                // Keep one quiet, capped maintenance retry alive while the
+                // desired SNAT contract is still missing. Netfilter hooks can
+                // be lost during firmware service restarts; recovery must not
+                // depend on receiving another external event.
+                log.info(
+                    "Runtime firewall recovery remains pending after {} "
+                    "bounded retries: {}. A maintenance retry will continue "
+                    "in the background.",
+                    retry_attempt,
+                    e.what());
+                schedule_runtime_firewall_retry(
+                    retry_attempt,
+                    runtime_generation_.load(std::memory_order_acquire),
+                    snat_recovery);
+            } else {
+                log.error(
+                    "Runtime routing/firewall reconciliation failed after {} "
+                    "retries: {}",
+                    retry_attempt,
+                    e.what());
+            }
+            return false;
         }
         log.info(
             "Runtime iproute and firewall refresh deferred: {}", e.what());
         schedule_runtime_firewall_retry(
             retry_attempt,
-            runtime_generation_.load(std::memory_order_acquire));
+            runtime_generation_.load(std::memory_order_acquire),
+            snat_recovery);
+        return false;
     } catch (const std::exception& e) {
         // A permanent rule/configuration failure is actionable and must remain
         // visible to the user. Stable-ID changes also retain a bounded retry:
@@ -1235,12 +1461,14 @@ void Daemon::refresh_iproute_and_firewall_runtime(
         log.error(
             "Runtime routing/firewall reconciliation failed permanently: {}",
             e.what());
-        if (config_has_stable_internal_vpn_server_policy(config_) &&
+        if (config_has_native_vpn_catalog_policy(config_) &&
             retry_attempt < RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
             schedule_runtime_firewall_retry(
                 retry_attempt,
-                runtime_generation_.load(std::memory_order_acquire));
+                runtime_generation_.load(std::memory_order_acquire),
+                snat_recovery);
         }
+        return false;
     }
 }
 
@@ -1254,15 +1482,27 @@ void Daemon::cancel_runtime_firewall_retry() {
 
 void Daemon::schedule_runtime_firewall_retry(
     std::size_t attempt,
-    std::uint64_t runtime_generation) {
-    if (runtime_firewall_retry_task_id_ >= 0 ||
-        attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
+    std::uint64_t runtime_generation,
+    OwnedSnatRecovery snat_recovery) {
+    if (runtime_firewall_retry_task_id_ >= 0) {
         return;
     }
-    const auto delay = RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
+    const auto retry_plan = plan_runtime_firewall_retry(
+        attempt,
+        RUNTIME_FIREWALL_RETRY_DELAYS.size(),
+        snat_recovery.requested);
+    if (!retry_plan.schedule) {
+        return;
+    }
+    const auto delay = retry_plan.maintenance
+        ? std::chrono::seconds{60}
+        : RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
     runtime_firewall_retry_task_id_ = scheduler_->schedule_oneshot(
         delay,
-        [this, attempt, runtime_generation]() {
+        [this,
+         next_attempt = retry_plan.next_attempt,
+         runtime_generation,
+         snat_recovery]() {
             runtime_firewall_retry_task_id_ = -1;
             if (!runtime_recovery_is_current(
                     routing_runtime_active_,
@@ -1272,13 +1512,24 @@ void Daemon::schedule_runtime_firewall_retry(
                     "Discarding stale runtime firewall recovery retry.");
                 return;
             }
-            refresh_iproute_and_firewall_runtime(attempt + 1);
+            refresh_iproute_and_firewall_runtime(
+                next_attempt,
+                std::nullopt,
+                std::nullopt,
+                /*schedule_catalog_refresh=*/true,
+                snat_recovery);
         },
         "runtime-firewall-retry");
-    Logger::instance().info(
-        "Runtime firewall recovery retry {} scheduled in {}s.",
-        attempt + 1,
-        delay.count());
+    if (retry_plan.maintenance) {
+        Logger::instance().verbose(
+            "SNAT maintenance recovery scheduled in {}s.",
+            delay.count());
+    } else {
+        Logger::instance().info(
+            "Runtime firewall recovery retry {} scheduled in {}s.",
+            retry_plan.next_attempt,
+            delay.count());
+    }
 }
 
 void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
@@ -1304,7 +1555,11 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
             event.interface_name);
     const bool refresh_stable_catalog =
         config_has_stable_internal_vpn_server_policy(config_);
-    if (!reconcile_immediately && !refresh_stable_catalog) {
+    const bool refresh_service_catalog =
+        config_requires_internal_vpn_service_inventory(config_);
+    if (!reconcile_immediately &&
+        !refresh_stable_catalog &&
+        !refresh_service_catalog) {
         return;
     }
     if (!reconcile_immediately) {
@@ -1314,7 +1569,12 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         // scheduling its asynchronous replacement. Address/state churn on an
         // unrelated WAN/LAN interface still leaves cache authority intact.
         if (event.topology_changed) {
-            shared_ndms_catalog_cache().invalidate();
+            if (refresh_stable_catalog) {
+                shared_ndms_catalog_cache().invalidate();
+            }
+            if (refresh_service_catalog) {
+                shared_ndms_vpn_server_service_cache().invalidate();
+            }
         }
         schedule_internal_vpn_catalog_refresh();
         return;
@@ -1355,33 +1615,53 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         // below will restore authority only after a fresh RCI observation.
         shared_ndms_catalog_cache().invalidate();
     }
+    if (refresh_service_catalog && event.topology_changed) {
+        shared_ndms_vpn_server_service_cache().invalidate();
+    }
     refresh_iproute_and_firewall_runtime();
     // A stable NDMS identity may keep the same id while KeeneticOS renumbers
     // its current kernel interface. Refresh on a bounded worker after the
     // immediate cache-only reconciliation; never block the control loop.
-    if (refresh_stable_catalog && is_internal_vpn_event) {
+    if ((refresh_stable_catalog && is_internal_vpn_event) ||
+        (refresh_service_catalog && event.topology_changed)) {
         schedule_internal_vpn_catalog_refresh();
     }
 }
 
 void Daemon::recover_internal_vpn_catalog_after_observation_gap() {
     if (!routing_runtime_active_ ||
-        !config_has_stable_internal_vpn_server_policy(config_)) {
+        !config_has_native_vpn_catalog_policy(config_)) {
         return;
     }
-    // A netlink observation gap revokes the authority of the current
-    // stable-id mapping. Reconcile from the invalidated cache immediately so
-    // an unverified process_clients=false bypass cannot remain active while
-    // the asynchronous RCI observation is in flight. The include-only LKG is
-    // intentionally retained by the runtime resolver.
-    shared_ndms_catalog_cache().invalidate();
-    // A previously scheduled retry may describe the pre-gap generation and
-    // would otherwise suppress this safety-critical reconciliation for up to
-    // the full retry delay. Replace it with an immediate attempt; if that
-    // attempt still sees a transient firewall race, it schedules a fresh
-    // bounded retry for the invalidated generation.
-    cancel_runtime_firewall_retry();
-    refresh_iproute_and_firewall_runtime();
+    recover_internal_vpn_after_observation_gap(
+        // A netlink observation gap revokes the authority of the current
+        // stable-id mapping. The include-only LKG is intentionally retained by
+        // the runtime resolver.
+        [this]() {
+            if (config_has_stable_internal_vpn_server_policy(config_)) {
+                shared_ndms_catalog_cache().invalidate();
+            }
+            if (config_requires_internal_vpn_service_inventory(config_)) {
+                shared_ndms_vpn_server_service_cache().invalidate();
+            }
+        },
+        // A previously scheduled retry may describe the pre-gap generation
+        // and must not suppress this safety-critical reconciliation.
+        [this]() { cancel_runtime_firewall_retry(); },
+        // Reconcile from the invalidated cache immediately so an unverified
+        // process_clients=false bypass cannot remain active. Suppress the
+        // implicit catalog request here: the explicit final stage below gives
+        // ENOBUFS and reconnect recovery one deterministic lifecycle order.
+        [this]() {
+            refresh_iproute_and_firewall_runtime(
+                0,
+                std::nullopt,
+                std::nullopt,
+                /*schedule_catalog_refresh=*/false);
+        },
+        // The single-flight gate coalesces this request with any refresh that
+        // was already in flight and hands it to one immediate rerun.
+        [this]() { schedule_internal_vpn_catalog_refresh(); });
 }
 
 void Daemon::handle_interface_monitor_events(uint32_t events) {
@@ -1563,11 +1843,23 @@ void Daemon::run() {
             snapshot_internal_vpn_verified_includes_lkg());
     const auto internal_vpn_resolution_state =
         internal_vpn_resolution.state;
+    auto internal_vpn_service_resolution =
+        resolve_internal_vpn_services_for_runtime(
+            config_,
+            true,
+            snapshot_internal_vpn_service_verified_includes_lkg());
+    const auto internal_vpn_service_resolution_state =
+        internal_vpn_service_resolution.state;
     std::optional<InternalVpnRuntimeGenerationTransaction>
         internal_vpn_generation;
     internal_vpn_generation.emplace(
         resolved_internal_vpn_servers_,
         internal_vpn_resolution.effective_servers);
+    std::optional<InternalVpnRuntimeTargetGenerationTransaction>
+        internal_vpn_service_generation;
+    internal_vpn_service_generation.emplace(
+        resolved_internal_vpn_service_targets_,
+        internal_vpn_service_resolution.effective_targets);
     setup_static_routing();
     log.info("Static routing tables and ip rules installed.");
 
@@ -1637,6 +1929,7 @@ void Daemon::run() {
         // one forwarding. Do not let the new process describe its uncommitted
         // candidate as active while the delayed retry is pending.
         internal_vpn_generation.reset();
+        internal_vpn_service_generation.reset();
         // This is expected while NDMS is still publishing its firewall after
         // boot. schedule_startup_firewall_retry() emits one actionable error
         // only if bounded recovery is exhausted.
@@ -1645,13 +1938,14 @@ void Daemon::run() {
         schedule_startup_firewall_retry();
     } catch (const std::exception& e) {
         internal_vpn_generation.reset();
+        internal_vpn_service_generation.reset();
         // Invalid rules, missing helpers and other permanent faults will not
         // normally improve by repeating the same transaction. A stable-ID
         // candidate is the exception: until it commits, an older retained
         // kernel generation may still be forwarding, so keep the existing
         // bounded recovery rather than stranding the candidate indefinitely.
         log.error("Firewall apply failed permanently at startup: {}", e.what());
-        if (config_has_stable_internal_vpn_server_policy(config_)) {
+        if (config_has_native_vpn_catalog_policy(config_)) {
             schedule_startup_firewall_retry();
         }
     }
@@ -1689,11 +1983,16 @@ void Daemon::run() {
     // which performs the same commit after its successful retry.
     if (startup_firewall_generation_committed) {
         internal_vpn_generation->commit();
+        internal_vpn_service_generation->commit();
         update_internal_vpn_verified_includes_lkg(
             internal_vpn_resolution);
+        update_internal_vpn_service_verified_includes_lkg(
+            internal_vpn_service_resolution);
         internal_vpn_generation.reset();
+        internal_vpn_service_generation.reset();
     }
     routing_runtime_active_ = true;
+    schedule_owned_snat_health_check();
     transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
 
@@ -1712,12 +2011,16 @@ void Daemon::run() {
     // daemon to synchronous control requests.
     accept_posted_control_tasks_.store(true, std::memory_order_release);
     if (internal_vpn_resolution_requires_catalog_refresh(
-            config_, internal_vpn_resolution_state)) {
+            config_, internal_vpn_resolution_state) ||
+        (config_requires_internal_vpn_service_inventory(config_) &&
+         internal_vpn_service_resolution_state !=
+             InternalVpnRuntimeResolutionState::verified)) {
         // The initial bounded observation may fail transiently. Start the
         // retrying worker only after posted control tasks are accepted, so a
         // fast loopback response cannot be lost before the event loop starts.
         schedule_internal_vpn_catalog_refresh_if_needed(
-            internal_vpn_resolution_state);
+            internal_vpn_resolution_state,
+            internal_vpn_service_resolution_state);
     }
     register_urltest_outbounds();
     refresh_resolver_config_hash_actual_async();
@@ -1729,6 +2032,7 @@ void Daemon::run() {
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
         accept_posted_control_tasks_.store(false, std::memory_order_release);
+        cancel_owned_conntrack_cleanup_retry();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
         scheduler_->cancel_all();
 #ifdef WITH_API
@@ -1857,6 +2161,7 @@ void Daemon::run() {
     if (urltest_manager_) {
         urltest_manager_->clear();
     }
+    cancel_owned_conntrack_cleanup_retry();
     scheduler_->cancel_all();
     policy_rules_.clear();
     route_table_.clear();

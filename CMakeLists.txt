@@ -244,6 +244,9 @@ set(SOURCES
   src/keenetic/ndms_catalog_cache.cpp
   src/keenetic/ndms_interface_inventory.cpp
   src/keenetic/internal_vpn_server_resolver.cpp
+  src/keenetic/ndms_vpn_server_service.cpp
+  src/keenetic/ndms_vpn_server_service_cache.cpp
+  src/keenetic/internal_vpn_service_resolver.cpp
   src/keenetic/ndms_interface_management.cpp
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp

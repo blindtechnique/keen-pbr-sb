@@ -64,11 +64,25 @@ struct FirewallRuleCriteria {
 
 using ProtoPortFilter = FirewallRuleCriteria;
 
+struct FirewallIngressSourceSelector {
+    std::string interface;
+    std::string cidr;
+};
+
 struct FirewallGlobalPrefilter {
     std::optional<std::vector<std::string>> inbound_interfaces;
     // Explicit ingress interfaces that must bypass keen-pbr before conntrack
     // mark restoration, route classification, and client DNS redirection.
     std::vector<std::string> bypass_inbound_interfaces;
+    // Service-based NDMS VPN servers have stable client pools. Inclusion may
+    // use a verified pool directly; bypass is stricter and is always scoped to
+    // the exact ingress interface verified in the current Netlink inventory.
+    std::vector<std::string> include_source_cidrs_v4;
+    std::vector<std::string> include_source_cidrs_v6;
+    std::vector<FirewallIngressSourceSelector>
+        bypass_source_selectors_v4;
+    std::vector<FirewallIngressSourceSelector>
+        bypass_source_selectors_v6;
     bool skip_established_or_dnat{false};
     bool skip_marked_packets{false};
     // Restore only the keen-pbr-owned portion of the conntrack mark before
@@ -85,10 +99,22 @@ struct FirewallGlobalPrefilter {
         return !bypass_inbound_interfaces.empty();
     }
 
+    bool has_include_source_cidrs() const {
+        return !include_source_cidrs_v4.empty() ||
+               !include_source_cidrs_v6.empty();
+    }
+
+    bool has_bypass_source_cidrs() const {
+        return !bypass_source_selectors_v4.empty() ||
+               !bypass_source_selectors_v6.empty();
+    }
+
     bool empty() const {
         return !skip_established_or_dnat && !skip_marked_packets
             && !restore_conntrack_mark && !has_inbound_interfaces()
-            && !has_bypass_inbound_interfaces();
+            && !has_bypass_inbound_interfaces()
+            && !has_include_source_cidrs()
+            && !has_bypass_source_cidrs();
     }
 };
 
@@ -135,6 +161,21 @@ enum class FirewallApplyMode : uint8_t {
 };
 
 enum class FirewallSetGeneration : uint8_t { A, B };
+
+// Read-only health of the backend-owned tunnel SNAT scaffold.
+// Missing means the last applied contract required SNAT but its scaffold no
+// longer matches. Stale means SNAT is intentionally disabled but owned
+// artifacts are still present; it is safe to reconcile, but it must not be
+// treated as a lost egress path (and therefore must not trigger conntrack
+// eviction). Unknown means the backend could not be inspected (for example
+// because xtables was locked) and must not be treated as an instruction to
+// mutate live firewall state.
+enum class OwnedSnatState : uint8_t {
+    healthy,
+    missing,
+    stale,
+    unknown,
+};
 
 // Abstract firewall interface for managing IP sets and packet marking rules.
 // Both iptables and nftables backends implement this interface.
@@ -188,13 +229,14 @@ public:
     // inbound interfaces to the router's local resolver (client DNS
     // enforcement). Backends implement this with a NAT REDIRECT chain.
     virtual void create_dns_redirect_rules() = 0;
-    // Masquerade forwarded traffic leaving through the listed tunnel
-    // interfaces. The firmware only masquerades source networks it routed
-    // itself, so clients of a VPN server on the router (and any other network
-    // it does not consider LAN) would enter the tunnel with a private source
-    // address and never receive an answer.
+    // Masquerade keen-pbr-marked forwarded traffic leaving through the listed
+    // tunnel interfaces. The firmware only masquerades source networks it
+    // routed itself, so clients of a VPN server on the router (and any other
+    // network it does not consider LAN) would otherwise enter the tunnel with
+    // a private source address and never receive an answer.
     virtual void create_tunnel_snat_rules(
         const std::vector<std::string>& interfaces) = 0;
+    virtual OwnedSnatState inspect_owned_snat_state() const = 0;
 
     // Create a firewall rule that stops keen-pbr processing for matching packets
     // and leaves them unmodified for normal system routing.

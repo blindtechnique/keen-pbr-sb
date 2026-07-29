@@ -10,11 +10,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 // NftablesBuilderTest must be in the same namespace as the friend declaration
 // (keen_pbr3::NftablesBuilderTest matches the friend class NftablesBuilderTest
@@ -133,6 +135,33 @@ public:
   static nlohmann::json build_dns_redirect_rules_json(
       const FirewallGlobalPrefilter& prefilter) {
     return NftablesFirewall::build_dns_redirect_rules_json(prefilter);
+  }
+
+  static nlohmann::json build_interface_snat_rule_json(
+      const std::string& interface,
+      uint32_t fwmark_mask) {
+    return NftablesFirewall::build_interface_snat_rule_json(
+        interface, fwmark_mask);
+  }
+
+  static OwnedSnatState parse_owned_snat_state(
+      const nlohmann::json& document,
+      bool expected = false,
+      const std::vector<std::string>& expected_interfaces = {},
+      uint32_t expected_fwmark_mask = 0xFFFFFFFFu) {
+    return NftablesFirewall::parse_owned_snat_state(
+        document.dump(),
+        expected,
+        expected_interfaces,
+        expected_fwmark_mask);
+  }
+
+  static std::pair<std::chrono::milliseconds, std::chrono::milliseconds>
+  owned_snat_inspect_timeouts() {
+    return {
+        NftablesFirewall::owned_snat_inspect_timeout(),
+        NftablesFirewall::owned_snat_inspect_kill_grace(),
+    };
   }
 
   static nlohmann::json build_rule_add_commands_for_rule(
@@ -434,6 +463,183 @@ TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") 
   CHECK(cmds[4]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
 }
 
+TEST_CASE("nft tunnel SNAT only masquerades keen-pbr-marked traffic") {
+  const auto command =
+      T::build_interface_snat_rule_json("nwg2", 0x00FF0000u);
+  const auto& expr = command["add"]["rule"]["expr"];
+  REQUIRE(expr.size() == 4);
+  CHECK(expr[0]["match"]["left"]["meta"]["key"] == "oifname");
+  CHECK(expr[0]["match"]["right"] == "nwg2");
+  CHECK(expr[1]["match"]["op"] == "!=");
+  CHECK(expr[1]["match"]["left"]["&"][0]["meta"]["key"] == "mark");
+  CHECK(expr[1]["match"]["left"]["&"][1] == 0x00FF0000u);
+  CHECK(expr[1]["match"]["right"] == 0);
+  CHECK(expr[3].contains("masquerade"));
+}
+
+TEST_CASE("nft owned SNAT state requires the managed postrouting nat chain") {
+  const nlohmann::json healthy = {
+      {"nftables", nlohmann::json::array({
+          {{"table", {
+              {"family", "inet"},
+              {"name", "KeenPbrTable"},
+          }}},
+          {{"chain", {
+              {"family", "inet"},
+              {"table", "KeenPbrTable"},
+              {"name", "router_origin_snat"},
+              {"type", "nat"},
+              {"hook", "postrouting"},
+              {"prio", 100},
+              {"policy", "accept"},
+          }}},
+          {{"rule", {
+              {"family", "inet"},
+              {"table", "KeenPbrTable"},
+              {"chain", "router_origin_snat"},
+              {"expr", nlohmann::json::array({
+                  {{"match", {
+                      {"op", "=="},
+                      {"left", {{"&", nlohmann::json::array({
+                          {{"meta", {{"key", "mark"}}}},
+                          0x01000000u,
+                      })}}},
+                      {"right", 0x01000000u},
+                  }}},
+                  {{"counter", nullptr}},
+                  {{"masquerade", nlohmann::json::object()}},
+              })},
+          }}},
+      })},
+  };
+  CHECK(T::parse_owned_snat_state(
+            healthy,
+            /*expected=*/true) == OwnedSnatState::healthy);
+  CHECK(T::parse_owned_snat_state(
+            healthy,
+            /*expected=*/false) == OwnedSnatState::stale);
+  CHECK(T::parse_owned_snat_state(
+            healthy,
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::missing);
+
+  auto with_interface = healthy;
+  with_interface["nftables"].push_back({{"rule", {
+      {"family", "inet"},
+      {"table", "KeenPbrTable"},
+      {"chain", "router_origin_snat"},
+      {"expr", nlohmann::json::array({
+          {{"match", {
+              {"op", "=="},
+              {"left", {{"meta", {{"key", "oifname"}}}}},
+              {"right", "nwg2"},
+          }}},
+          {{"match", {
+              {"op", "!="},
+              {"left", {{"&", nlohmann::json::array({
+                  {{"meta", {{"key", "mark"}}}},
+                  0x00FF0000u,
+              })}}},
+              {"right", 0},
+          }}},
+          {{"counter", nullptr}},
+          {{"masquerade", nlohmann::json::object()}},
+      })},
+  }}});
+  CHECK(T::parse_owned_snat_state(
+            with_interface,
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+
+  auto with_live_counters = with_interface;
+  with_live_counters["nftables"][2]["rule"]["expr"][1]["counter"] = {
+      {"packets", 7},
+      {"bytes", 512},
+  };
+  with_live_counters["nftables"][3]["rule"]["expr"][2]["counter"] = {
+      {"packets", 3},
+      {"bytes", 256},
+  };
+  CHECK(T::parse_owned_snat_state(
+            with_live_counters,
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+
+  auto with_extra_verdict = with_interface;
+  with_extra_verdict["nftables"][2]["rule"]["expr"].insert(
+      with_extra_verdict["nftables"][2]["rule"]["expr"].begin() + 2,
+      nlohmann::json{{"accept", nullptr}});
+  CHECK(T::parse_owned_snat_state(
+            with_extra_verdict,
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::missing);
+
+  auto with_duplicate_rule = with_interface;
+  with_duplicate_rule["nftables"].push_back(
+      with_duplicate_rule["nftables"].back());
+  CHECK(T::parse_owned_snat_state(
+            with_duplicate_rule,
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::missing);
+
+  auto with_two_interfaces = with_interface;
+  auto second_interface = with_interface["nftables"].back();
+  second_interface["rule"]["expr"][0]["match"]["right"] = "nwg3";
+  with_two_interfaces["nftables"].push_back(std::move(second_interface));
+  CHECK(T::parse_owned_snat_state(
+            with_two_interfaces,
+            /*expected=*/true,
+            {"nwg2", "nwg3"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+  CHECK(T::parse_owned_snat_state(
+            with_two_interfaces,
+            /*expected=*/true,
+            {"nwg3", "nwg2"},
+            0x00FF0000u) == OwnedSnatState::missing);
+
+  auto missing = healthy;
+  missing["nftables"].erase(2);
+  missing["nftables"].erase(1);
+  CHECK(T::parse_owned_snat_state(
+            missing,
+            /*expected=*/true) == OwnedSnatState::missing);
+  CHECK(T::parse_owned_snat_state(
+            missing,
+            /*expected=*/false) == OwnedSnatState::healthy);
+
+  auto malformed = healthy;
+  malformed["nftables"][1]["chain"]["hook"] = "prerouting";
+  CHECK(T::parse_owned_snat_state(
+            malformed,
+            /*expected=*/true) == OwnedSnatState::missing);
+
+  auto empty_chain = healthy;
+  empty_chain["nftables"].erase(2);
+  CHECK(T::parse_owned_snat_state(
+            empty_chain,
+            /*expected=*/true) == OwnedSnatState::missing);
+
+  CHECK(T::parse_owned_snat_state(
+            nlohmann::json::object(),
+            /*expected=*/true) ==
+        OwnedSnatState::unknown);
+  CHECK(T::parse_owned_snat_state(
+            nlohmann::json{{"nftables", nlohmann::json::array()}},
+            /*expected=*/false) ==
+        OwnedSnatState::unknown);
+}
+
+TEST_CASE("nft owned SNAT inspection uses a short maintenance timeout") {
+  const auto [timeout, kill_grace] = T::owned_snat_inspect_timeouts();
+  CHECK(timeout == std::chrono::seconds{2});
+  CHECK(kill_grace == std::chrono::milliseconds{500});
+}
+
 TEST_CASE("build_rule_add_commands: internal VPN bypass precedes conntrack restore and classification") {
   FirewallGlobalPrefilter prefilter;
   prefilter.bypass_inbound_interfaces = {"nwg0", "nwg1"};
@@ -490,6 +696,81 @@ TEST_CASE("nft DNS redirect bypasses internal VPN interfaces first") {
     const auto& expr = commands[i]["add"]["rule"]["expr"];
     CHECK(expr.back().contains("redirect"));
   }
+}
+
+TEST_CASE("nft service pools bypass before conntrack and extend route scope") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces =
+      std::vector<std::string>{"br0"};
+  prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
+  prefilter.bypass_source_selectors_v4 = {
+      {"Sstp0", "172.16.1.0/24"}};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto commands = T::build_rule_add_commands(
+      prefilter,
+      {mark_rule("myset", AF_INET, 0x00120000)},
+      /*register_merge=*/true);
+  REQUIRE(commands.is_array());
+  REQUIRE(commands.size() >= 7);
+
+  const auto bypass_dump =
+      commands[0]["add"]["rule"]["expr"].dump();
+    CHECK(bypass_dump.find("172.16.1.0") != std::string::npos);
+    CHECK(bypass_dump.find("\"saddr\"") != std::string::npos);
+    CHECK(bypass_dump.find("\"iifname\"") != std::string::npos);
+    CHECK(bypass_dump.find("Sstp0") != std::string::npos);
+
+  bool found_ipv4_guard = false;
+  bool found_ipv6_guard = false;
+  bool found_classification_after_guard = false;
+  for (std::size_t index = 1; index < commands.size(); ++index) {
+    const auto serialized =
+        commands[index]["add"]["rule"]["expr"].dump();
+    if (serialized.find("\"nfproto\"") != std::string::npos &&
+        serialized.find("\"ipv4\"") != std::string::npos &&
+        serialized.find("172.20.8.0") != std::string::npos) {
+      found_ipv4_guard = true;
+    }
+    if (serialized.find("\"nfproto\"") != std::string::npos &&
+        serialized.find("\"ipv6\"") != std::string::npos) {
+      found_ipv6_guard = true;
+    }
+    if (serialized.find("@myset") != std::string::npos) {
+      found_classification_after_guard =
+          found_ipv4_guard && found_ipv6_guard;
+    }
+  }
+  CHECK(found_ipv4_guard);
+  CHECK(found_ipv6_guard);
+  CHECK(found_classification_after_guard);
+}
+
+TEST_CASE("nft DNS redirect applies service include and bypass source pools") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces =
+      std::vector<std::string>{"br0"};
+  prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
+  prefilter.bypass_source_selectors_v4 = {
+      {"Sstp0", "172.16.1.0/24"}};
+
+  const auto commands =
+      T::build_dns_redirect_rules_json(prefilter);
+  REQUIRE(commands.is_array());
+  REQUIRE(commands.size() == 5);
+    CHECK(commands[0].dump().find("172.16.1.0") !=
+          std::string::npos);
+    CHECK(commands[0].dump().find("Sstp0") !=
+          std::string::npos);
+  CHECK(commands[1].dump().find("172.20.8.0") !=
+        std::string::npos);
+  CHECK(commands[2].dump().find("\"ipv6\"") !=
+        std::string::npos);
+  CHECK(commands[3]["add"]["rule"]["expr"].back().contains(
+      "redirect"));
+  CHECK(commands[4]["add"]["rule"]["expr"].back().contains(
+      "redirect"));
 }
 
 TEST_CASE("nft modern mark merge uses numeric direction and preserves foreign bits") {

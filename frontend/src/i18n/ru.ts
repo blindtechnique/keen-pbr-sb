@@ -950,6 +950,7 @@ export const ruTranslation = {
         "Не удалось перечитать актуальную конфигурацию. Ничего не изменено.",
       add: "Добавить",
       added: "Добавлено списков: {{count}}",
+      installed: "Уже добавлено",
       priorityGuard: {
         title: "Приоритет блокировок учтён",
         description:
@@ -973,7 +974,12 @@ export const ruTranslation = {
         applying: "Добавляю…",
         previewReady: "Настройка проверена",
         previewSummary:
-          "Списков: {{lists}}. Маршрут: {{route}}. DNS: {{dns}}.",
+          "Будет добавлено списков: {{lists}}. Маршрут: {{route}}. DNS: {{dns}}.",
+        applied: "Настройка каталога применена",
+        alreadyInstalledTitle: "Уже добавлено",
+        alreadyInstalled:
+          "{{lists}} уже есть в конфигурации. Дубликаты не создаются; предпросмотр ниже показывает, нужны ли ещё связанные правила.",
+        alreadyInstalledButton: "Уже добавлено",
         noRoute: "не создаётся",
         noDnsRule: "правило не создаётся",
         automaticDnsHint:
@@ -1177,7 +1183,7 @@ export const ruTranslation = {
           "Этот интерфейс сохранён в конфиге, но сейчас отсутствует в живом списке интерфейсов системы.",
         internalVpnServersTitle: "Внутренние VPN-серверы",
         internalVpnServersDescription:
-          "Укажите, должен ли трафик и DNS-запросы клиентов нативных VPN-серверов Keenetic проходить через keen-pbr-sb. Поддерживаются WireGuard, AmneziaWG, OpenVPN, IKE, L2TP, SSTP и OpenConnect. Переключатели применятся только после общего сохранения настроек.",
+          "Укажите, должен ли трафик и DNS-запросы клиентов нативных VPN-серверов Keenetic с собственным системным интерфейсом проходить через keen-pbr-sb. Переключатели применятся только после общего сохранения настроек.",
         internalVpnServersEmptyTitle: "VPN-серверы не найдены",
         internalVpnServersEmptyDescription:
           "KeeneticOS не сообщил ни одного поддерживаемого VPN-сервера с доступным системным интерфейсом.",
@@ -1212,6 +1218,41 @@ export const ruTranslation = {
         internalVpnServersToggleAriaLabel:
           "Пропускать клиентов {{server}} через keen-pbr-sb",
         internalVpnServersInheritAriaLabel:
+          "Вернуть для {{server}} наследуемую настройку",
+        internalVpnServicesTitle:
+          "Серверы L2TP, IKEv1/IKEv2, SSTP и OpenConnect",
+        internalVpnServicesDescription:
+          "Эти серверы не имеют отдельного Linux-интерфейса в состоянии покоя. keen-pbr-sb безопасно определяет их по актуальным клиентским пулам KeeneticOS и не смешивает с обычным трафиком локальной сети.",
+        internalVpnServicesEmptyTitle:
+          "Поддерживаемые серверы с клиентскими пулами не найдены",
+        internalVpnServicesEmptyDescription:
+          "В текущей конфигурации KeeneticOS нет включённых поддерживаемых серверов с корректным пулом клиентских адресов.",
+        internalVpnServicesLoadingTitle: "Загрузка серверов KeeneticOS",
+        internalVpnServicesLoadingDescription:
+          "Ожидаем актуальную конфигурацию L2TP, IKEv1/IKEv2, SSTP и OpenConnect. Сохранённые правила не изменяются.",
+        internalVpnServicesUnavailableTitle: "Конфигурация серверов недоступна",
+        internalVpnServicesUnavailableDescription:
+          "KeeneticOS не предоставила свежую безопасную конфигурацию серверов. Новые переключатели временно недоступны.",
+        internalVpnServicesStaleTitle:
+          "Показана последняя известная конфигурация серверов",
+        internalVpnServicesStaleDescription:
+          "Свежий ответ KeeneticOS недоступен. Сохранённую настройку можно вернуть к наследуемой, но новые изменения заблокированы.",
+        internalVpnServicesLoadErrorTitle:
+          "Не удалось загрузить серверы с клиентскими пулами",
+        internalVpnServicesLoadErrorDescription:
+          "Проверьте доступ keen-pbr-sb к NDMS. Сохранённые правила не удаляются автоматически.",
+        internalVpnServicesProcessLabel: "Через keen-pbr-sb",
+        internalVpnServicesInheritLabel: "Наследовать",
+        internalVpnServicesStatusEnabled: "Включён",
+        internalVpnServicesStatusDisabled: "Отключён",
+        internalVpnServicesStatusMissing: "Отсутствует",
+        internalVpnServicesPoolLabel: "Пул клиентов",
+        internalVpnServicesBoundInterfaceLabel: "Привязан к",
+        internalVpnServicesUnavailableHint:
+          "Изменение недоступно, пока сервер выключен или его клиентский пул не подтверждён свежими данными KeeneticOS.",
+        internalVpnServicesToggleAriaLabel:
+          "Пропускать клиентов {{server}} через keen-pbr-sb",
+        internalVpnServicesInheritAriaLabel:
           "Вернуть для {{server}} наследуемую настройку",
       },
       autoupdate: {
@@ -2094,14 +2135,25 @@ export const ruTranslation = {
         title: "Быстрая настройка правил",
         description:
           "Необязательно создайте связанные правила одновременно со списком. Все изменения сохраняются одной операцией.",
+        recommendedDescription:
+          "Для стабильной работы простой режим создаёт отдельные правила маршрутизации и DNS для этого списка.",
         createRouteRule: "Создать правило маршрутизации для этого списка",
         selectOutbound: "Выберите маршрут или резервирование",
         createDnsRule: "Создать DNS-правило для этого списка",
         selectDnsServer: "Выберите DNS-сервер",
         noDnsServers:
           "Сначала создайте DNS-сервер — после этого его можно будет выбрать здесь.",
+        noCompatibleDnsServer:
+          "Для выбранного маршрута нет DNS-сервера с таким же выходом. Сначала создайте совместимый DNS-сервер или откройте расширенный редактор.",
+        createDnsServerFromPreset: "DNS-сервер для выбранного маршрута",
+        createDnsServerFromPresetHint:
+          "Совместимый обычный DNS-сервер будет создан вместе со списком и привязан к выбранному маршруту. Ничего не сохранится, если вся настройка не пройдёт проверку.",
+        dnsCreateFailed:
+          "Не удалось подготовить совместимый DNS-сервер. Проверьте маршрут и выбранный шаблон.",
         manualHint:
           "Оставьте флажки выключенными, чтобы настроить правила вручную после создания списка.",
+        recommendedHint:
+          "Тонкая настройка и независимые правила доступны в расширенном редакторе.",
         routeRequired:
           "Выберите маршрут или резервирование для правила маршрутизации.",
         dnsRequired: "Выберите DNS-сервер для DNS-правила.",

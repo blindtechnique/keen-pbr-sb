@@ -1,3 +1,4 @@
 #!/bin/sh
 
-exec /usr/lib/keen-pbr/firewall.sh
+KEEN_PBR_FIREWALL_POST_RELOAD=1 \
+    exec "${KEEN_PBR_FIREWALL_SCRIPT:-/usr/lib/keen-pbr/firewall.sh}"

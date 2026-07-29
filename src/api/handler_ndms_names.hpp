@@ -3,6 +3,7 @@
 #ifdef WITH_API
 
 #include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "handlers.hpp"
 #include "server.hpp"
 
@@ -25,6 +26,9 @@ void register_ndms_names_handler_for_tests(ApiServer& server,
                                            NdmsCatalogCache& cache,
                                            std::vector<std::string>
                                                runtime_interface_names = {});
+void register_ndms_vpn_server_services_handler_for_tests(
+    ApiServer& server,
+    NdmsVpnServerServiceCache& cache);
 #endif
 
 } // namespace keen_pbr3

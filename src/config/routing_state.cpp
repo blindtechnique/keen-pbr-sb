@@ -664,6 +664,14 @@ bool is_interface_outbound_reachable(
 FirewallGlobalPrefilter build_firewall_global_prefilter(
     const Config& cfg,
     const std::vector<InternalVpnServer>& internal_servers) {
+    return build_firewall_global_prefilter_for_runtime_targets(
+        cfg,
+        internal_vpn_interface_runtime_targets(internal_servers));
+}
+
+FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
+    const Config& cfg,
+    const std::vector<InternalVpnRuntimeTarget>& internal_targets) {
     FirewallGlobalPrefilter prefilter;
     prefilter.skip_established_or_dnat = true;
     prefilter.skip_marked_packets = cfg.daemon.value_or(DaemonConfig{}).skip_marked_packets.value_or(true);
@@ -677,28 +685,69 @@ FirewallGlobalPrefilter build_firewall_global_prefilter(
     }
 
     std::set<std::string> bypass_interfaces;
-    for (const auto& server : internal_servers) {
-        if (!server.process_clients) {
-            bypass_interfaces.insert(server.interface);
+    std::set<std::string> include_sources_v4;
+    std::set<std::string> include_sources_v6;
+    std::set<std::pair<std::string, std::string>>
+        bypass_sources_v4;
+    std::set<std::pair<std::string, std::string>>
+        bypass_sources_v6;
+    for (const auto& target : internal_targets) {
+        if (target.match_kind == InternalVpnRuntimeMatchKind::interface &&
+            target.interface.has_value() &&
+            !target.process_clients) {
+            bypass_interfaces.insert(*target.interface);
+            continue;
+        }
+        if (target.match_kind != InternalVpnRuntimeMatchKind::source_pool) {
+            continue;
+        }
+        if (target.process_clients) {
+            include_sources_v4.insert(
+                target.source_cidrs_v4.begin(),
+                target.source_cidrs_v4.end());
+            include_sources_v6.insert(
+                target.source_cidrs_v6.begin(),
+                target.source_cidrs_v6.end());
+        } else if (target.interface.has_value()) {
+            for (const auto& cidr : target.source_cidrs_v4) {
+                bypass_sources_v4.emplace(*target.interface, cidr);
+            }
+            for (const auto& cidr : target.source_cidrs_v6) {
+                bypass_sources_v6.emplace(*target.interface, cidr);
+            }
         }
     }
 
     prefilter.bypass_inbound_interfaces.assign(
         bypass_interfaces.begin(), bypass_interfaces.end());
+    prefilter.include_source_cidrs_v4.assign(
+        include_sources_v4.begin(), include_sources_v4.end());
+    prefilter.include_source_cidrs_v6.assign(
+        include_sources_v6.begin(), include_sources_v6.end());
+    for (const auto& [interface, cidr] : bypass_sources_v4) {
+        prefilter.bypass_source_selectors_v4.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, cidr] : bypass_sources_v6) {
+        prefilter.bypass_source_selectors_v6.push_back(
+            {interface, cidr});
+    }
 
     if (legacy_inbound_is_restricted) {
         auto& inbound_interfaces = *prefilter.inbound_interfaces;
-        for (const auto& server : internal_servers) {
-            if (!server.process_clients ||
-                bypass_interfaces.find(server.interface) !=
+        for (const auto& target : internal_targets) {
+            if (target.match_kind != InternalVpnRuntimeMatchKind::interface ||
+                !target.interface.has_value() ||
+                !target.process_clients ||
+                bypass_interfaces.find(*target.interface) !=
                     bypass_interfaces.end() ||
                 std::find(
                     inbound_interfaces.begin(),
                     inbound_interfaces.end(),
-                    server.interface) != inbound_interfaces.end()) {
+                    *target.interface) != inbound_interfaces.end()) {
                 continue;
             }
-            inbound_interfaces.push_back(server.interface);
+            inbound_interfaces.push_back(*target.interface);
         }
     }
 

@@ -14,7 +14,17 @@ import type { CatalogSetupRouteRuleSummary } from './catalogSetupRouteRuleSummar
 export interface CatalogSetupSummary {
   mode: CatalogSetupMode;
   lists: CatalogSetupListSummary[];
+  /** Compatibility projection of the first created route rule.
+   */
   route_rule?: CatalogSetupRouteRuleSummary;
+  /** Independently editable route rules created by the plan. A beginner setup creates at most one route rule for each selected list.
+   */
+  route_rules?: CatalogSetupRouteRuleSummary[];
+  /** Compatibility projection of the first created DNS rule.
+   */
   dns_rule?: CatalogSetupDnsRuleSummary;
+  /** Independently editable DNS rules created by the plan. A beginner setup creates at most one DNS rule for each selected list.
+   */
+  dns_rules?: CatalogSetupDnsRuleSummary[];
   blackhole?: CatalogSetupBlackholeSummary;
 }

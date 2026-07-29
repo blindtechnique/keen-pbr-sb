@@ -253,12 +253,20 @@ std::string IptablesFirewall::build_dns_nat_script(
     const FirewallGlobalPrefilter& prefilter,
     bool dns_redirect,
     bool router_origin_snat,
-    const std::vector<std::string>& snat_interfaces) {
+    const std::vector<std::string>& snat_interfaces,
+    bool ipv6,
+    uint32_t fwmark_mask) {
     std::vector<std::string> iface_frags;
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
         for (const auto& iface : *prefilter.inbound_interfaces) {
             iface_frags.push_back(" -i " + iface);
+        }
+        const auto& source_cidrs = ipv6
+            ? prefilter.include_source_cidrs_v6
+            : prefilter.include_source_cidrs_v4;
+        for (const auto& cidr : source_cidrs) {
+            iface_frags.push_back(" -s " + cidr);
         }
     } else {
         iface_frags.push_back("");
@@ -277,6 +285,8 @@ std::string IptablesFirewall::build_dns_nat_script(
             DNS_NAT_CHAIN_NAME);
         s += build_bypass_inbound_interface_lines(
             prefilter, DNS_NAT_CHAIN_NAME);
+        s += build_bypass_source_lines(
+            prefilter, DNS_NAT_CHAIN_NAME, ipv6);
         for (const auto& iface_frag : iface_frags) {
             for (const char* proto : {"udp", "tcp"}) {
                 s += keen_pbr3::format(
@@ -301,8 +311,9 @@ std::string IptablesFirewall::build_dns_nat_script(
         // Flows the firmware already translated keep their conntrack entry and
         // are unaffected, so this only fills the gap.
         for (const auto& iface : snat_interfaces) {
-            s += keen_pbr3::format("-A {} -o {} -j MASQUERADE\n",
-                                   SNAT_CHAIN_NAME, iface);
+            s += keen_pbr3::format(
+                "-A {} -o {} -m mark ! --mark 0x0/{:#x} -j MASQUERADE\n",
+                SNAT_CHAIN_NAME, iface, fwmark_mask);
         }
     }
     s += "COMMIT\n";
@@ -1334,6 +1345,169 @@ size_t IptablesFirewall::count_exact_jump(
     return count;
 }
 
+OwnedSnatState IptablesFirewall::inspect_owned_snat_state(
+    const char* command,
+    bool expected,
+    const std::vector<std::string>& expected_interfaces,
+    uint32_t expected_fwmark_mask) {
+    const std::vector<std::string> hook_args{
+        command, "-t", "nat", "-S", "POSTROUTING"};
+    const auto hook = run_iptables_control(hook_args);
+    if (command_reports_table_unavailable(hook) ||
+        command_reports_chain_missing(hook)) {
+        return expected
+            ? OwnedSnatState::missing
+            : OwnedSnatState::healthy;
+    }
+    if (classify_iptables_command(hook) !=
+        IptablesCommandOutcome::Success) {
+        return OwnedSnatState::unknown;
+    }
+
+    const auto hook_count = count_exact_jump(
+        hook.stdout_output, "POSTROUTING", SNAT_CHAIN_NAME);
+    size_t owned_hook_reference_count = 0U;
+    std::istringstream hook_rules(hook.stdout_output);
+    std::string line;
+    const std::string owned_jump = keen_pbr3::format(
+        "-j {}", SNAT_CHAIN_NAME);
+    while (std::getline(hook_rules, line)) {
+        if (line.find(owned_jump) != std::string::npos) {
+            ++owned_hook_reference_count;
+        }
+    }
+    const std::vector<std::string> chain_args{
+        command, "-t", "nat", "-S", SNAT_CHAIN_NAME};
+    const auto chain = run_iptables_control(chain_args);
+    if (command_reports_table_unavailable(chain) ||
+        command_reports_chain_missing(chain)) {
+        if (expected) {
+            return OwnedSnatState::missing;
+        }
+        return owned_hook_reference_count == 0U
+            ? OwnedSnatState::healthy
+            : OwnedSnatState::stale;
+    }
+    if (classify_iptables_command(chain) !=
+        IptablesCommandOutcome::Success) {
+        return OwnedSnatState::unknown;
+    }
+    if (chain.stdout_output.empty()) {
+        if (expected) {
+            return OwnedSnatState::missing;
+        }
+        return owned_hook_reference_count == 0U
+            ? OwnedSnatState::healthy
+            : OwnedSnatState::stale;
+    }
+
+    // A stale unhooked chain is still drift from the last applied contract.
+    if (!expected) {
+        return OwnedSnatState::stale;
+    }
+
+    std::vector<std::string> expected_rules;
+    expected_rules.push_back(keen_pbr3::format(
+        "-A {} -m mark --mark {:#x}/{:#x} -j MASQUERADE",
+        SNAT_CHAIN_NAME, kRouterOriginMark, kRouterOriginMark));
+    for (const auto& interface : expected_interfaces) {
+        expected_rules.push_back(keen_pbr3::format(
+            "-A {} -o {} -m mark ! --mark 0x0/{:#x} -j MASQUERADE",
+            SNAT_CHAIN_NAME, interface, expected_fwmark_mask));
+    }
+
+    size_t declaration_count = 0U;
+    bool unexpected_line = false;
+    std::vector<std::string> observed_rules;
+    std::istringstream chain_rules(chain.stdout_output);
+    while (std::getline(chain_rules, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        if (line == keen_pbr3::format("-N {}", SNAT_CHAIN_NAME)) {
+            ++declaration_count;
+            continue;
+        }
+        if (line.rfind(
+                keen_pbr3::format("-A {} ", SNAT_CHAIN_NAME),
+                0) == 0) {
+            observed_rules.push_back(line);
+            continue;
+        }
+        unexpected_line = true;
+    }
+
+    return hook_count == 1U &&
+           owned_hook_reference_count == 1U &&
+           declaration_count == 1U &&
+           !unexpected_line &&
+           observed_rules == expected_rules
+        ? OwnedSnatState::healthy
+        : OwnedSnatState::missing;
+}
+
+OwnedSnatState IptablesFirewall::combine_owned_snat_states(
+    OwnedSnatState ipv4,
+    OwnedSnatState ipv6) {
+    if (ipv4 == OwnedSnatState::unknown ||
+        ipv6 == OwnedSnatState::unknown) {
+        return OwnedSnatState::unknown;
+    }
+    if (ipv4 == OwnedSnatState::missing ||
+        ipv6 == OwnedSnatState::missing) {
+        return OwnedSnatState::missing;
+    }
+    if (ipv4 == OwnedSnatState::stale ||
+        ipv6 == OwnedSnatState::stale) {
+        return OwnedSnatState::stale;
+    }
+    return OwnedSnatState::healthy;
+}
+
+OwnedSnatState IptablesFirewall::inspect_owned_snat_state() const {
+    const auto ipv4 = inspect_owned_snat_state(
+        "iptables",
+        last_applied_snat_v4_expected_,
+        last_applied_snat_interfaces_,
+        last_applied_snat_fwmark_mask_);
+    const auto ipv6 =
+        (last_applied_snat_v6_managed_ ||
+         last_applied_snat_v6_expected_)
+        ? inspect_owned_snat_state(
+              "ip6tables",
+              last_applied_snat_v6_expected_,
+              last_applied_snat_interfaces_,
+              last_applied_snat_fwmark_mask_)
+        : OwnedSnatState::healthy;
+    return combine_owned_snat_states(ipv4, ipv6);
+}
+
+void IptablesFirewall::verify_owned_snat_after_apply(
+    const char* command,
+    bool expected,
+    const std::vector<std::string>& expected_interfaces,
+    uint32_t expected_fwmark_mask) {
+    const auto state = inspect_owned_snat_state(
+        command,
+        expected,
+        expected_interfaces,
+        expected_fwmark_mask);
+    if (state == OwnedSnatState::healthy) {
+        return;
+    }
+    if (state == OwnedSnatState::missing) {
+        throw TransientFirewallError(keen_pbr3::format(
+            "{} tunnel SNAT scaffold is missing after apply", command));
+    }
+    if (state == OwnedSnatState::stale) {
+        throw TransientFirewallError(keen_pbr3::format(
+            "{} stale tunnel SNAT scaffold remains after apply", command));
+    }
+    throw TransientFirewallError(keen_pbr3::format(
+        "{} tunnel SNAT scaffold could not be inspected after apply",
+        command));
+}
+
 void IptablesFirewall::reconcile_hook(
     const char* command,
     const char* table,
@@ -1897,9 +2071,11 @@ std::vector<std::string> IptablesFirewall::build_proto_port_fragments(
 std::string IptablesFirewall::build_prefilter_lines(
     const FirewallGlobalPrefilter& prefilter,
     const std::string& chain,
-    bool allow_conntrack) {
+    bool allow_conntrack,
+    bool ipv6) {
     std::string lines =
         build_bypass_inbound_interface_lines(prefilter, chain);
+    lines += build_bypass_source_lines(prefilter, chain, ipv6);
     // The raw table runs before conntrack. Classify every forwarded packet
     // there instead of emitting a matcher that cannot be valid at this hook.
     if (allow_conntrack) {
@@ -1915,7 +2091,10 @@ std::string IptablesFirewall::build_prefilter_lines(
 
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()
-        && prefilter.inbound_interfaces->size() == 1) {
+        && prefilter.inbound_interfaces->size() == 1
+        && (ipv6
+                ? prefilter.include_source_cidrs_v6.empty()
+                : prefilter.include_source_cidrs_v4.empty())) {
         lines += keen_pbr3::format(
             "-A {} ! -i {} -j RETURN\n",
             chain,
@@ -1977,6 +2156,24 @@ std::string IptablesFirewall::build_bypass_inbound_interface_lines(
     return lines;
 }
 
+std::string IptablesFirewall::build_bypass_source_lines(
+    const FirewallGlobalPrefilter& prefilter,
+    const std::string& chain,
+    bool ipv6) {
+    const auto& selectors = ipv6
+        ? prefilter.bypass_source_selectors_v6
+        : prefilter.bypass_source_selectors_v4;
+    std::string lines;
+    for (const auto& selector : selectors) {
+        lines += keen_pbr3::format(
+            "-A {} -i {} -s {} -j RETURN\n",
+            chain,
+            selector.interface,
+            selector.cidr);
+    }
+    return lines;
+}
+
 std::vector<std::string> IptablesFirewall::build_rule_lines(
     const PendingRule& pr,
     const FirewallGlobalPrefilter& prefilter,
@@ -1989,11 +2186,27 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
     std::vector<std::string> iface_frags;
     if (!pr.output
         && prefilter.has_inbound_interfaces()
-        && prefilter.inbound_interfaces.has_value()
-        && prefilter.inbound_interfaces->size() > 1) {
-        iface_frags.reserve(prefilter.inbound_interfaces->size());
+        && prefilter.inbound_interfaces.has_value()) {
+        const auto& source_cidrs = pr.ipv6
+            ? prefilter.include_source_cidrs_v6
+            : prefilter.include_source_cidrs_v4;
+        const bool needs_explicit_scope =
+            prefilter.inbound_interfaces->size() > 1 ||
+            !source_cidrs.empty();
+        if (!needs_explicit_scope) {
+            iface_frags.push_back("");
+        } else {
+            iface_frags.reserve(
+                prefilter.inbound_interfaces->size() +
+                source_cidrs.size());
+        }
         for (const auto& iface : *prefilter.inbound_interfaces) {
-            iface_frags.push_back(" -i " + iface);
+            if (needs_explicit_scope) {
+                iface_frags.push_back(" -i " + iface);
+            }
+        }
+        for (const auto& cidr : source_cidrs) {
+            iface_frags.push_back(" -s " + cidr);
         }
     } else {
         iface_frags.push_back("");
@@ -2136,7 +2349,8 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
     std::string s;
     s += keen_pbr3::format("*mangle\n:{} - [0:0]\n-A PREROUTING -j {}\n",
                            CHAIN_NAME, CHAIN_NAME);
-    s += build_prefilter_lines(prefilter);
+    s += build_prefilter_lines(
+        prefilter, CHAIN_NAME, /*allow_conntrack=*/true, ipv6);
     for (const auto& pr : rules) {
         if (pr.ipv6 != ipv6 || pr.output) continue;
         for (const auto& line : build_rule_lines(
@@ -2198,7 +2412,11 @@ std::string IptablesFirewall::build_generation_ipt_script(
         return line;
     };
 
-    std::istringstream prefilter_input(build_prefilter_lines(prefilter));
+    std::istringstream prefilter_input(build_prefilter_lines(
+        prefilter,
+        CHAIN_NAME,
+        /*allow_conntrack=*/true,
+        ipv6));
     std::string line;
     while (std::getline(prefilter_input, line)) {
         if (!line.empty()) {
@@ -2237,7 +2455,10 @@ std::string IptablesFirewall::build_raw_prerouting_script(
         RAW_CHAIN_NAME, prerouting_chain);
 
     script += build_prefilter_lines(
-        prefilter, prerouting_chain, /*allow_conntrack=*/false);
+        prefilter,
+        prerouting_chain,
+        /*allow_conntrack=*/false,
+        /*ipv6=*/false);
 
     for (const auto& rule : rules) {
         if (rule.ipv6 || rule.output) {
@@ -2271,6 +2492,8 @@ std::string IptablesFirewall::build_raw_conntrack_script(
 
     script += build_bypass_inbound_interface_lines(
         prefilter, RAW_CONNTRACK_CHAIN_NAME);
+    script += build_bypass_source_lines(
+        prefilter, RAW_CONNTRACK_CHAIN_NAME, /*ipv6=*/false);
     script += build_conntrack_prefilter_lines(
         prefilter, RAW_CONNTRACK_CHAIN_NAME);
     if (prefilter.restore_conntrack_mark &&
@@ -2331,15 +2554,30 @@ std::string IptablesFirewall::build_output_generation_script(
 void IptablesFirewall::apply_nat_rules(
     bool effective_ipv6,
     FirewallApplyMode mode) {
+    const bool snat_expected = router_origin_snat_requested_;
+    const auto expected_snat_interfaces = snat_interfaces_;
+    const uint32_t expected_snat_fwmark_mask = fwmark_mask();
     const bool nat_requested =
         dns_redirect_requested_ || router_origin_snat_requested_;
-    const std::string nat_script =
+    const std::string nat_script_v4 =
         nat_requested
             ? build_dns_nat_script(
                   global_prefilter_,
                   dns_redirect_requested_,
                   router_origin_snat_requested_,
-                  snat_interfaces_)
+                  snat_interfaces_,
+                  /*ipv6=*/false,
+                  fwmark_mask())
+            : std::string{};
+    const std::string nat_script_v6 =
+        nat_requested
+            ? build_dns_nat_script(
+                  global_prefilter_,
+                  dns_redirect_requested_,
+                  router_origin_snat_requested_,
+                  snat_interfaces_,
+                  /*ipv6=*/true,
+                  fwmark_mask())
             : std::string{};
 
     bool ipv6_nat_backend_available = false;
@@ -2355,6 +2593,12 @@ void IptablesFirewall::apply_nat_rules(
             Logger::instance().warn(
                 "IPv6 nat table is unavailable; continuing IPv4-only");
         }
+    } else {
+        // Absence is also part of the applied contract. Remember an
+        // inspectable IPv6 NAT family so a later firmware rebuild cannot
+        // leave an old keen-pbr SNAT chain unnoticed merely because SNAT is
+        // currently disabled.
+        ipv6_nat_backend_available = ipv6_nat_table_available();
     }
     const bool apply_ipv6_nat =
         effective_ipv6 && ipv6_nat_backend_available;
@@ -2362,9 +2606,9 @@ void IptablesFirewall::apply_nat_rules(
         // Phase 2 has converged, but the currently working NAT state is still
         // live. Validate both transactions before removing any active DNS
         // redirect or tunnel masquerade chain.
-        preflight_nat_restore("iptables-restore", nat_script);
+        preflight_nat_restore("iptables-restore", nat_script_v4);
         if (apply_ipv6_nat) {
-            preflight_nat_restore("ip6tables-restore", nat_script);
+            preflight_nat_restore("ip6tables-restore", nat_script_v6);
         }
     }
 
@@ -2417,13 +2661,23 @@ void IptablesFirewall::apply_nat_rules(
     if (nat_requested) {
         pipe_to_cmd(
             {"iptables-restore", "--noflush", "--counters"},
-            nat_script);
+            nat_script_v4);
         reconcile_nat_hooks("iptables", /*ipv6=*/false);
+        verify_owned_snat_after_apply(
+            "iptables",
+            snat_expected,
+            expected_snat_interfaces,
+            expected_snat_fwmark_mask);
         if (apply_ipv6_nat) {
             pipe_to_cmd(
                 {"ip6tables-restore", "--noflush", "--counters"},
-                nat_script);
+                nat_script_v6);
             reconcile_nat_hooks("ip6tables", /*ipv6=*/true);
+            verify_owned_snat_after_apply(
+                "ip6tables",
+                snat_expected,
+                expected_snat_interfaces,
+                expected_snat_fwmark_mask);
         } else if (ipv6_nat_backend_available) {
             // IPv6 was explicitly disabled while its NAT backend remains
             // available. Remove any generation retained from an earlier
@@ -2437,8 +2691,28 @@ void IptablesFirewall::apply_nat_rules(
             // apply into a permanent failure.
             dns_nat_v6_created_ = false;
         }
+    } else {
+        verify_owned_snat_after_apply(
+            "iptables",
+            /*expected=*/false,
+            {},
+            expected_snat_fwmark_mask);
+        if (ipv6_nat_backend_available) {
+            verify_owned_snat_after_apply(
+                "ip6tables",
+                /*expected=*/false,
+                {},
+                expected_snat_fwmark_mask);
+        }
     }
 
+    last_applied_snat_v4_expected_ = snat_expected;
+    last_applied_snat_v6_expected_ =
+        snat_expected && apply_ipv6_nat;
+    last_applied_snat_v6_managed_ =
+        ipv6_nat_backend_available;
+    last_applied_snat_interfaces_ = expected_snat_interfaces;
+    last_applied_snat_fwmark_mask_ = expected_snat_fwmark_mask;
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
@@ -2857,6 +3131,11 @@ void IptablesFirewall::cleanup_live_impl(bool preserve_dynamic_sets,
 void IptablesFirewall::cleanup_impl() {
     cleanup_live_impl(/*preserve_dynamic_sets=*/false);
 
+    last_applied_snat_v4_expected_ = false;
+    last_applied_snat_v6_expected_ = false;
+    last_applied_snat_v6_managed_ = false;
+    last_applied_snat_interfaces_.clear();
+    last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     created_sets_.clear();
 
     pending_sets_.clear();

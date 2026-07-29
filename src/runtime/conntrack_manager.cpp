@@ -2,6 +2,9 @@
 
 #include "../util/safe_exec.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <set>
 #include <utility>
 
 namespace keen_pbr3 {
@@ -24,12 +27,21 @@ ConntrackManager::ConntrackManager(CommandRunner runner)
     if (!runner_) {
         runner_ = [](const std::vector<std::string>& args) {
             constexpr size_t kMaxDiagnosticBytes = 1024;
+            // Conntrack retirement is best effort and can run on the serialized
+            // runtime control path after SNAT recovery. Never let a wedged
+            // utility stall firewall reconciliation for the global 30-second
+            // command timeout.
+            const SafeExecTimeouts cleanup_timeouts{
+                std::chrono::seconds{1},
+                std::chrono::milliseconds{100}};
             const auto result = safe_exec_capture(
                 args,
                 /*suppress_stderr=*/false,
                 kMaxDiagnosticBytes,
                 /*capture_stderr=*/true,
-                /*drain_after_limit=*/true);
+                /*drain_after_limit=*/true,
+                SafeExecFailureLog::DiagnosticOnly,
+                cleanup_timeouts);
             return CommandResult{result.exit_code, result.stdout_output};
         };
     }
@@ -62,56 +74,142 @@ uint32_t ConntrackManager::save_selected_mark(uint32_t ctmark,
 ConntrackCleanupResult ConntrackManager::delete_mark(
     uint32_t mark,
     uint32_t owned_mask) const {
-    // Never turn an invalid/custom fwmark configuration into a broad
-    // `--mark 0/<mask>` delete. That selector matches ordinary unmarked
-    // connections and would evict unrelated router traffic.
-    if (owned_mask == 0 || (mark & owned_mask) == 0) {
-        return ConntrackCleanupResult::Failed;
+    const auto summary = delete_marks_ordered(
+        std::vector<uint32_t>{mark}, owned_mask);
+    if (summary.command_unavailable) {
+        return ConntrackCleanupResult::CommandUnavailable;
     }
-
-    const std::string selector =
-        std::to_string(mark & owned_mask) + "/" +
-        std::to_string(owned_mask);
-    const auto delete_family = [this, &selector](const char* family) {
-        const auto result =
-            runner_({"conntrack", "-D", "-f", family, "--mark", selector});
-        if (result.exit_code == 127) {
-            return ConntrackCleanupResult::CommandUnavailable;
-        }
-        return result.exit_code == 0 || is_empty_delete_result(result)
-                   ? ConntrackCleanupResult::Succeeded
-                   : ConntrackCleanupResult::Failed;
-    };
-
-    const auto ipv4 = delete_family("ipv4");
-    if (ipv4 == ConntrackCleanupResult::CommandUnavailable) {
-        return ipv4;
-    }
-    // A family-specific failure must not prevent cleanup of the other family.
-    const auto ipv6 = delete_family("ipv6");
-    if (ipv6 == ConntrackCleanupResult::CommandUnavailable) {
-        return ipv6;
-    }
-    return ipv4 == ConntrackCleanupResult::Succeeded &&
-                   ipv6 == ConntrackCleanupResult::Succeeded
-               ? ConntrackCleanupResult::Succeeded
-               : ConntrackCleanupResult::Failed;
+    return summary.failed == 0U && !summary.budget_exhausted
+        ? ConntrackCleanupResult::Succeeded
+        : ConntrackCleanupResult::Failed;
 }
 
 ConntrackCleanupSummary ConntrackManager::delete_marks(
     const std::set<uint32_t>& marks,
-    uint32_t owned_mask) const {
+    uint32_t owned_mask,
+    ConntrackCleanupOptions options) const {
+    return delete_marks_ordered(
+        std::vector<uint32_t>{marks.begin(), marks.end()},
+        owned_mask,
+        options);
+}
+
+ConntrackCleanupSummary ConntrackManager::delete_marks_ordered(
+    const std::vector<uint32_t>& marks,
+    uint32_t owned_mask,
+    ConntrackCleanupOptions options) const {
     ConntrackCleanupSummary summary;
+    std::vector<uint32_t> ordered_marks;
+    std::set<uint32_t> seen;
+    ordered_marks.reserve(marks.size());
     for (const uint32_t mark : marks) {
-        const auto result = delete_mark(mark, owned_mask);
-        if (result == ConntrackCleanupResult::CommandUnavailable) {
-            summary.command_unavailable = true;
-            break;
-        }
-        if (result == ConntrackCleanupResult::Failed) {
-            ++summary.failed;
+        if (seen.insert(mark).second) {
+            ordered_marks.push_back(mark);
         }
     }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::max(options.budget, std::chrono::milliseconds{0});
+    const auto deadline_reached = [&deadline]() {
+        return std::chrono::steady_clock::now() >= deadline;
+    };
+    std::vector<uint32_t> failed_marks;
+    std::vector<uint32_t> unattempted_marks;
+    const auto retain_unattempted =
+        [&ordered_marks, &unattempted_marks](std::size_t first) {
+            unattempted_marks.insert(
+                unattempted_marks.end(),
+                ordered_marks.begin() +
+                    static_cast<std::ptrdiff_t>(first),
+                ordered_marks.end());
+        };
+
+    for (std::size_t index = 0; index < ordered_marks.size(); ++index) {
+        if (index >= options.max_marks) {
+            summary.skipped += ordered_marks.size() - index;
+            retain_unattempted(index);
+            break;
+        }
+        const uint32_t mark = ordered_marks[index];
+        // Never turn an invalid/custom fwmark configuration into a broad
+        // `--mark 0/<mask>` delete. That selector matches ordinary unmarked
+        // connections and would evict unrelated router traffic.
+        if (owned_mask == 0 || (mark & owned_mask) == 0) {
+            ++summary.failed;
+            failed_marks.push_back(mark);
+            continue;
+        }
+        if (deadline_reached()) {
+            summary.budget_exhausted = true;
+            summary.skipped += ordered_marks.size() - index;
+            retain_unattempted(index);
+            break;
+        }
+
+        const std::string selector =
+            std::to_string(mark & owned_mask) + "/" +
+            std::to_string(owned_mask);
+        const auto delete_family = [this, &selector](const char* family) {
+            const auto result =
+                runner_({"conntrack", "-D", "-f", family, "--mark", selector});
+            if (result.exit_code == 127) {
+                return ConntrackCleanupResult::CommandUnavailable;
+            }
+            return result.exit_code == 0 || is_empty_delete_result(result)
+                       ? ConntrackCleanupResult::Succeeded
+                       : ConntrackCleanupResult::Failed;
+        };
+
+        const auto ipv4 = delete_family("ipv4");
+        if (ipv4 == ConntrackCleanupResult::CommandUnavailable) {
+            summary.command_unavailable = true;
+            summary.skipped += ordered_marks.size() - index;
+            retain_unattempted(index);
+            break;
+        }
+
+        bool mark_failed = ipv4 == ConntrackCleanupResult::Failed;
+        if (options.ipv6_enabled) {
+            if (deadline_reached()) {
+                summary.budget_exhausted = true;
+                mark_failed = true;
+                summary.skipped += ordered_marks.size() - index - 1U;
+                retain_unattempted(index + 1U);
+            } else {
+                // A family-specific failure must not prevent cleanup of the
+                // other enabled family.
+                const auto ipv6 = delete_family("ipv6");
+                if (ipv6 == ConntrackCleanupResult::CommandUnavailable) {
+                    summary.command_unavailable = true;
+                    summary.skipped += ordered_marks.size() - index - 1U;
+                    failed_marks.push_back(mark);
+                    retain_unattempted(index + 1U);
+                    break;
+                }
+                mark_failed =
+                    mark_failed ||
+                    ipv6 == ConntrackCleanupResult::Failed;
+            }
+        }
+        if (mark_failed) {
+            ++summary.failed;
+            failed_marks.push_back(mark);
+        }
+        if (summary.budget_exhausted) {
+            break;
+        }
+    }
+    summary.remaining_marks.reserve(
+        unattempted_marks.size() + failed_marks.size());
+    summary.remaining_marks.insert(
+        summary.remaining_marks.end(),
+        unattempted_marks.begin(),
+        unattempted_marks.end());
+    summary.remaining_marks.insert(
+        summary.remaining_marks.end(),
+        failed_marks.begin(),
+        failed_marks.end());
     return summary;
 }
 

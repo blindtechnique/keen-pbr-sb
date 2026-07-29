@@ -70,6 +70,29 @@ void ConfigStore::stage_config(Config staged_config, std::string staged_config_j
     staged_base_revision_ = config_revision(active_config_);
 }
 
+bool ConfigStore::stage_config_if_visible_revision(
+    const std::string& expected_visible_revision,
+    Config staged_config,
+    std::string staged_config_json) {
+    KPBR_SHARED_UNIQUE_LOCK(lock, mutex_);
+    const bool replacing_draft = staged_config_.has_value();
+    const Config& visible =
+        replacing_draft ? *staged_config_ : active_config_;
+    if (config_revision(visible) != expected_visible_revision) {
+        return false;
+    }
+
+    staged_config_ = std::move(staged_config);
+    staged_config_json_ = std::move(staged_config_json);
+    // Editing an existing draft must not launder its original active base.
+    // Config save still has to reject the draft if active config changed
+    // after the first staging operation.
+    if (!replacing_draft || !staged_base_revision_.has_value()) {
+        staged_base_revision_ = config_revision(active_config_);
+    }
+    return true;
+}
+
 std::optional<std::pair<Config, std::string>> ConfigStore::staged_snapshot() const {
     KPBR_SHARED_LOCK(lock, mutex_);
     if (!staged_config_.has_value() || !staged_config_json_.has_value()) {

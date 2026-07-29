@@ -8,11 +8,13 @@ import { useStore } from "@tanstack/react-store"
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { InternalVpnServer } from "@/api/generated/model/internalVpnServer"
+import type { InternalVpnService } from "@/api/generated/model/internalVpnService"
 import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import {
   useGetConfig,
   useGetNdmsInterfaceInventory,
+  useGetNdmsVpnServerServices,
   useGetRuntimeInterfaces,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
@@ -36,6 +38,7 @@ import {
   InternalVpnServersField,
   type InternalVpnServerInventoryState,
 } from "@/components/settings/internal-vpn-servers-field"
+import { InternalVpnServicesField } from "@/components/settings/internal-vpn-services-field"
 import { LoggingSettingsCard } from "@/components/settings/logging-settings-card"
 import {
   BackupAndRestoreCard,
@@ -77,6 +80,7 @@ import {
   reconcileInternalVpnServerOverrides,
   type InternalVpnServerRuntimeState,
 } from "@/lib/internal-vpn-server-policy"
+import { reconcileInternalVpnServiceOverrides } from "@/lib/internal-vpn-service-policy"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
 import { getGeneralConfigActionState } from "@/pages/general-config-form-state"
 import { useSectionTab } from "@/hooks/use-section-tab"
@@ -92,6 +96,7 @@ type SettingsDraft = {
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
   internalVpnServers?: InternalVpnServer[]
+  internalVpnServices?: InternalVpnService[]
   listsAutoupdateEnabled: boolean
   cron: string
   fwmarkStart: string
@@ -121,6 +126,7 @@ const SETTINGS_FIELD_NAMES = {
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
   internalVpnServers: "internalVpnServers",
+  internalVpnServices: "internalVpnServices",
   listsAutoupdateEnabled: "listsAutoupdateEnabled",
   cron: "cron",
   fwmarkStart: "fwmarkStart",
@@ -190,6 +196,7 @@ function LoadedGeneralConfigPage({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
+  const ndmsVpnServicesQuery = useGetNdmsVpnServerServices()
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
   const authSettingsRef = useRef<SettingsSectionController>(null)
   const remoteAccessRef = useRef<SettingsSectionController>(null)
@@ -310,6 +317,18 @@ function LoadedGeneralConfigPage({
           runtimeInterfacesQuery.data?.status !== 200
         ? "error"
         : "ready"
+  const internalVpnServiceInventoryState: InternalVpnServerInventoryState =
+    ndmsVpnServicesQuery.isLoading
+      ? "loading"
+      : ndmsVpnServicesQuery.isError ||
+          ndmsVpnServicesQuery.data?.status !== 200
+        ? "error"
+        : ndmsVpnServicesQuery.data.data.catalog_status === "stale"
+          ? "stale"
+          : ndmsVpnServicesQuery.data.data.catalog_status === "fresh" &&
+              ndmsVpnServicesQuery.data.data.available
+            ? "ready"
+            : "unavailable"
   const runtimeInterfaces = useMemo(
     () =>
       runtimeInterfacesQuery.data?.status === 200
@@ -326,6 +345,13 @@ function LoadedGeneralConfigPage({
         runtimeInterfaces
       ),
     [ndmsInventoryQuery.data, runtimeInterfaces]
+  )
+  const nativeVpnServices = useMemo(
+    () =>
+      ndmsVpnServicesQuery.data?.status === 200
+        ? ndmsVpnServicesQuery.data.data.services
+        : [],
+    [ndmsVpnServicesQuery.data]
   )
 
   const handleCancel = () => {
@@ -620,28 +646,42 @@ function LoadedGeneralConfigPage({
                                   legacyInboundInterfaces: normalizedInterfaces,
                                   baselineLegacyInboundInterfaces:
                                     loadedConfig.route?.inbound_interfaces,
-                                  rolelessConfirmationNdmsIds:
-                                    [
-                                      ...new Set([
-                                        ...nativeInterfaces
-                                          .filter(
-                                            (nativeInterface) =>
-                                              nativeInterface.source
-                                                .internal_vpn_server_role_confirmation_required
-                                          )
-                                          .map(
-                                            (nativeInterface) =>
-                                              nativeInterface.source.id
-                                          ),
-                                        ...rolelessConfirmationNdmsIdsRef.current,
-                                      ]),
-                                    ],
+                                  rolelessConfirmationNdmsIds: [
+                                    ...new Set([
+                                      ...nativeInterfaces
+                                        .filter(
+                                          (nativeInterface) =>
+                                            nativeInterface.source
+                                              .internal_vpn_server_role_confirmation_required
+                                        )
+                                        .map(
+                                          (nativeInterface) =>
+                                            nativeInterface.source.id
+                                        ),
+                                      ...rolelessConfirmationNdmsIdsRef.current,
+                                    ]),
+                                  ],
+                                })
+                              const reconciledServiceOverrides =
+                                reconcileInternalVpnServiceOverrides({
+                                  overrides: form.getFieldValue(
+                                    SETTINGS_FIELD_NAMES.internalVpnServices
+                                  ),
+                                  baselineOverrides:
+                                    loadedConfig.route?.internal_vpn_services,
+                                  legacyInboundInterfaces: normalizedInterfaces,
+                                  baselineLegacyInboundInterfaces:
+                                    loadedConfig.route?.inbound_interfaces,
                                 })
 
                               field.handleChange(normalizedInterfaces)
                               form.setFieldValue(
                                 SETTINGS_FIELD_NAMES.internalVpnServers,
                                 reconciledOverrides
+                              )
+                              form.setFieldValue(
+                                SETTINGS_FIELD_NAMES.internalVpnServices,
+                                reconciledServiceOverrides
                               )
                             }}
                             addLabel={t(
@@ -681,6 +721,11 @@ function LoadedGeneralConfigPage({
                         <Field invalid={Boolean(error)}>
                           <FieldContent>
                             <InternalVpnServersField
+                              authoritativeServices={
+                                internalVpnServiceInventoryState === "ready"
+                                  ? nativeVpnServices
+                                  : undefined
+                              }
                               baselineOverrides={
                                 loadedConfig.route?.internal_vpn_servers
                               }
@@ -788,6 +833,110 @@ function LoadedGeneralConfigPage({
                               }}
                               overrides={field.state.value}
                               runtimeState={internalVpnServerRuntimeState}
+                            />
+                            <FieldHint error={error ?? null} />
+                          </FieldContent>
+                        </Field>
+                      )
+                    }}
+                  </form.Subscribe>
+                )}
+              </form.Field>
+
+              <FieldSeparator />
+
+              <form.Field name={SETTINGS_FIELD_NAMES.internalVpnServices}>
+                {(field) => (
+                  <form.Subscribe
+                    selector={(state) => state.values.inboundInterfaces}
+                  >
+                    {(legacyInboundInterfaces) => {
+                      const error = getFirstFieldError(field.state.meta.errors)
+                      return (
+                        <Field invalid={Boolean(error)}>
+                          <FieldContent>
+                            <InternalVpnServicesField
+                              baselineOverrides={
+                                loadedConfig.route?.internal_vpn_services
+                              }
+                              copy={{
+                                title: t(
+                                  "pages.settings.general.internalVpnServicesTitle"
+                                ),
+                                description: t(
+                                  "pages.settings.general.internalVpnServicesDescription"
+                                ),
+                                emptyTitle: t(
+                                  "pages.settings.general.internalVpnServicesEmptyTitle"
+                                ),
+                                emptyDescription: t(
+                                  "pages.settings.general.internalVpnServicesEmptyDescription"
+                                ),
+                                loadingTitle: t(
+                                  "pages.settings.general.internalVpnServicesLoadingTitle"
+                                ),
+                                loadingDescription: t(
+                                  "pages.settings.general.internalVpnServicesLoadingDescription"
+                                ),
+                                unavailableTitle: t(
+                                  "pages.settings.general.internalVpnServicesUnavailableTitle"
+                                ),
+                                unavailableDescription: t(
+                                  "pages.settings.general.internalVpnServicesUnavailableDescription"
+                                ),
+                                staleTitle: t(
+                                  "pages.settings.general.internalVpnServicesStaleTitle"
+                                ),
+                                staleDescription: t(
+                                  "pages.settings.general.internalVpnServicesStaleDescription"
+                                ),
+                                loadErrorTitle: t(
+                                  "pages.settings.general.internalVpnServicesLoadErrorTitle"
+                                ),
+                                loadErrorDescription: t(
+                                  "pages.settings.general.internalVpnServicesLoadErrorDescription"
+                                ),
+                                processLabel: t(
+                                  "pages.settings.general.internalVpnServicesProcessLabel"
+                                ),
+                                inheritLabel: t(
+                                  "pages.settings.general.internalVpnServicesInheritLabel"
+                                ),
+                                statusEnabled: t(
+                                  "pages.settings.general.internalVpnServicesStatusEnabled"
+                                ),
+                                statusDisabled: t(
+                                  "pages.settings.general.internalVpnServicesStatusDisabled"
+                                ),
+                                statusMissing: t(
+                                  "pages.settings.general.internalVpnServicesStatusMissing"
+                                ),
+                                poolLabel: t(
+                                  "pages.settings.general.internalVpnServicesPoolLabel"
+                                ),
+                                boundInterfaceLabel: t(
+                                  "pages.settings.general.internalVpnServicesBoundInterfaceLabel"
+                                ),
+                                unavailableHint: t(
+                                  "pages.settings.general.internalVpnServicesUnavailableHint"
+                                ),
+                                toggleAriaLabel: (serviceLabel) =>
+                                  t(
+                                    "pages.settings.general.internalVpnServicesToggleAriaLabel",
+                                    { server: serviceLabel }
+                                  ),
+                                inheritAriaLabel: (serviceLabel) =>
+                                  t(
+                                    "pages.settings.general.internalVpnServicesInheritAriaLabel",
+                                    { server: serviceLabel }
+                                  ),
+                              }}
+                              disabled={isPending}
+                              inventoryState={internalVpnServiceInventoryState}
+                              legacyInboundInterfaces={legacyInboundInterfaces}
+                              onChange={field.handleChange}
+                              overrides={field.state.value}
+                              services={nativeVpnServices}
                             />
                             <FieldHint error={error ?? null} />
                           </FieldContent>
@@ -1179,6 +1328,9 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     internalVpnServers: config.route?.internal_vpn_servers?.map((server) => ({
       ...server,
     })),
+    internalVpnServices: config.route?.internal_vpn_services?.map(
+      (service) => ({ ...service })
+    ),
     listsAutoupdateEnabled:
       config.lists_autoupdate?.enabled ?? fallbackDraft.listsAutoupdateEnabled,
     cron: config.lists_autoupdate?.cron ?? fallbackDraft.cron,
@@ -1215,6 +1367,7 @@ function buildUpdatedConfig(
         draft.inboundInterfaces
       ),
       internal_vpn_servers: draft.internalVpnServers,
+      internal_vpn_services: draft.internalVpnServices,
     },
     dns: {
       ...config.dns,
@@ -1292,6 +1445,13 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
     path.startsWith("route.internal_vpn_servers[")
   ) {
     return SETTINGS_FIELD_NAMES.internalVpnServers
+  }
+
+  if (
+    path === "route.internal_vpn_services" ||
+    path.startsWith("route.internal_vpn_services[")
+  ) {
+    return SETTINGS_FIELD_NAMES.internalVpnServices
   }
 
   switch (path) {

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,7 +32,19 @@ enum class ConntrackCleanupResult {
 
 struct ConntrackCleanupSummary {
     std::size_t failed{0};
+    std::size_t skipped{0};
     bool command_unavailable{false};
+    bool budget_exhausted{false};
+    // Exact, deduplicated selectors which were not completely retired. The
+    // order is retry-friendly: unattempted marks precede marks which failed,
+    // so one broken selector cannot starve the rest of a bounded batch.
+    std::vector<std::uint32_t> remaining_marks;
+};
+
+struct ConntrackCleanupOptions {
+    bool ipv6_enabled{true};
+    std::chrono::milliseconds budget{std::chrono::seconds{4}};
+    std::size_t max_marks{std::numeric_limits<std::size_t>::max()};
 };
 
 class ConntrackManager {
@@ -70,7 +84,15 @@ public:
     // outbound.
     ConntrackCleanupSummary delete_marks(
         const std::set<uint32_t>& marks,
-        uint32_t owned_mask) const;
+        uint32_t owned_mask,
+        ConntrackCleanupOptions options = {}) const;
+
+    // Ordered variant used by runtime recovery: marks from active forwarding
+    // and DNS rules are retired before background probe/download marks.
+    ConntrackCleanupSummary delete_marks_ordered(
+        const std::vector<uint32_t>& marks,
+        uint32_t owned_mask,
+        ConntrackCleanupOptions options = {}) const;
 
 private:
     ConntrackPolicy active_;

@@ -41,6 +41,8 @@ import type {
   ListRefreshRequest,
   ListRefreshResponse,
   NdmsInterfaceInventoryResponse,
+  NdmsVpnServerServiceInventoryResponse,
+  RecommendedListSetupRequest,
   ReloadResponse,
   RoutingHealthErrorResponse,
   RoutingHealthResponse,
@@ -748,6 +750,103 @@ export const usePostConfig = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostConfigMutationOptions(options), queryClient);
+    }
+
+/**
+ * Validates and stages a simple list candidate only when the selected list has one dedicated route rule and one dedicated DNS rule whose DNS server uses the same routable outbound. Advanced editors continue to use `/api/config`.
+
+ * @summary Stage a recommended beginner list setup
+ */
+export type postRecommendedListSetupResponse200 = {
+  data: ConfigUpdateResponse
+  status: 200
+}
+
+export type postRecommendedListSetupResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postRecommendedListSetupResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postRecommendedListSetupResponseSuccess = (postRecommendedListSetupResponse200) & {
+  headers: Headers;
+};
+export type postRecommendedListSetupResponseError = (postRecommendedListSetupResponse400 | postRecommendedListSetupResponse409) & {
+  headers: Headers;
+};
+
+export type postRecommendedListSetupResponse = (postRecommendedListSetupResponseSuccess | postRecommendedListSetupResponseError)
+
+export const getPostRecommendedListSetupUrl = () => {
+
+
+
+
+  return `/api/setup/list/stage`
+}
+
+export const postRecommendedListSetup = async (recommendedListSetupRequest: RecommendedListSetupRequest, options?: RequestInit): Promise<postRecommendedListSetupResponse> => {
+
+  return apiFetch<postRecommendedListSetupResponse>(getPostRecommendedListSetupUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      recommendedListSetupRequest,)
+  }
+);}
+
+
+
+
+export const getPostRecommendedListSetupMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRecommendedListSetup>>, TError,{data: RecommendedListSetupRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postRecommendedListSetup>>, TError,{data: RecommendedListSetupRequest}, TContext> => {
+
+const mutationKey = ['postRecommendedListSetup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postRecommendedListSetup>>, {data: RecommendedListSetupRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postRecommendedListSetup(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostRecommendedListSetupMutationResult = NonNullable<Awaited<ReturnType<typeof postRecommendedListSetup>>>
+    export type PostRecommendedListSetupMutationBody = RecommendedListSetupRequest
+    export type PostRecommendedListSetupMutationError = ErrorResponse
+
+    /**
+ * @summary Stage a recommended beginner list setup
+ */
+export const usePostRecommendedListSetup = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postRecommendedListSetup>>, TError,{data: RecommendedListSetupRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postRecommendedListSetup>>,
+        TError,
+        {data: RecommendedListSetupRequest},
+        TContext
+      > => {
+      return useMutation(getPostRecommendedListSetupMutationOptions(options), queryClient);
     }
 
 /**
@@ -1689,6 +1788,119 @@ export function useGetNdmsInterfaceInventory<TData = Awaited<ReturnType<typeof g
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetNdmsInterfaceInventoryQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns a strictly parsed, read-only inventory of enabled or configured L2TP, IKEv1/IKEv2, SSTP and OpenConnect server services. These services do not have a stable Linux ingress interface while idle, so their client traffic is identified by the address pools reported by NDMS. Secrets and credentials from the running configuration are never returned.
+
+ * @summary List native Keenetic VPN server services
+ */
+export type getNdmsVpnServerServicesResponse200 = {
+  data: NdmsVpnServerServiceInventoryResponse
+  status: 200
+}
+
+export type getNdmsVpnServerServicesResponseSuccess = (getNdmsVpnServerServicesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getNdmsVpnServerServicesResponse = (getNdmsVpnServerServicesResponseSuccess)
+
+export const getGetNdmsVpnServerServicesUrl = () => {
+
+
+
+
+  return `/api/system/ndms/vpn-server-services`
+}
+
+export const getNdmsVpnServerServices = async ( options?: RequestInit): Promise<getNdmsVpnServerServicesResponse> => {
+
+  return apiFetch<getNdmsVpnServerServicesResponse>(getGetNdmsVpnServerServicesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNdmsVpnServerServicesQueryKey = () => {
+    return [
+    `/api/system/ndms/vpn-server-services`
+    ] as const;
+    }
+
+
+export const getGetNdmsVpnServerServicesQueryOptions = <TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNdmsVpnServerServicesQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNdmsVpnServerServices>>> = ({ signal }) => getNdmsVpnServerServices({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetNdmsVpnServerServicesQueryResult = NonNullable<Awaited<ReturnType<typeof getNdmsVpnServerServices>>>
+export type GetNdmsVpnServerServicesQueryError = unknown
+
+
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>,
+          TError,
+          Awaited<ReturnType<typeof getNdmsVpnServerServices>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List native Keenetic VPN server services
+ */
+
+export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getNdmsVpnServerServices>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetNdmsVpnServerServicesQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

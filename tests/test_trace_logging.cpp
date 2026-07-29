@@ -114,6 +114,7 @@ TEST_CASE("blocking executor workers inherit daemon-managed signal mask") {
         return is_signal_blocked_for_current_thread(SIGTERM)
             && is_signal_blocked_for_current_thread(SIGINT)
             && is_signal_blocked_for_current_thread(SIGUSR1)
+            && is_signal_blocked_for_current_thread(SIGUSR2)
             && is_signal_blocked_for_current_thread(SIGHUP);
     });
 

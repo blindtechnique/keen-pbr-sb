@@ -6,11 +6,38 @@ import {
   getDnsPreset,
 } from "../src/data/dns-presets"
 import {
+  resolveDnsTemplateSelection,
   findSavedDnsTemplate,
   getSavedDnsTemplateSelection,
 } from "../src/components/dns/dns-preset-selection"
 
 describe("DNS presets", () => {
+  test("resolves built-in and saved templates through the shared picker model", () => {
+    expect(resolveDnsTemplateSelection("cloudflare", [])).toMatchObject({
+      name: "Cloudflare",
+      primaryAddress: "1.1.1.1",
+      technicalSeed: "cloudflare",
+    })
+
+    expect(
+      resolveDnsTemplateSelection(
+        getSavedDnsTemplateSelection({ name: "Office DNS" }),
+        [
+          {
+            name: "Office DNS",
+            primary_ipv4: "192.0.2.53",
+            secondary_ipv4: "192.0.2.54",
+          },
+        ]
+      )
+    ).toEqual({
+      name: "Office DNS",
+      primaryAddress: "192.0.2.53",
+      secondaryAddress: "192.0.2.54",
+      technicalSeed: "Office DNS",
+    })
+  })
+
   test("contains two distinct valid IPv4 addresses for every provider", () => {
     const ipv4Pattern =
       /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/

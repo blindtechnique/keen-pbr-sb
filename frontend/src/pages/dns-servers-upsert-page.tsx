@@ -6,7 +6,6 @@ import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsServer } from "@/api/generated/model/dnsServer"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
-import type { PlainDnsTemplate } from "@/api/generated/model/plainDnsTemplate"
 import { usePostConfigMutation } from "@/api/mutations"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
@@ -28,18 +27,12 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
+import { DnsPresetPicker } from "@/components/dns/dns-preset-picker"
 import {
-  DnsPresetPicker,
-} from "@/components/dns/dns-preset-picker"
-import {
-  findSavedDnsTemplate,
+  resolveDnsTemplateSelection,
   type DnsPresetSelection,
 } from "@/components/dns/dns-preset-selection"
-import {
-  findDnsPresetByAddress,
-  getDnsPreset,
-  type DnsPresetId,
-} from "@/data/dns-presets"
+import { findDnsPresetByAddress } from "@/data/dns-presets"
 import i18n from "@/i18n"
 import {
   applyFormApiErrors,
@@ -125,8 +118,7 @@ export function DnsServerUpsertPage({
         mode === "create"
           ? t("pages.dnsServerUpsert.createTitle")
           : t("pages.dnsServerUpsert.editCardTitle", {
-              tag:
-                existingDisplayName ?? t("pages.dnsServerUpsert.editTitle"),
+              tag: existingDisplayName ?? t("pages.dnsServerUpsert.editTitle"),
             })
       }
       description={t("pages.dnsServerUpsert.description")}
@@ -173,10 +165,9 @@ function DnsServerForm({
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null)
   const [baselineDraft] = useState(initialDraft)
   const initialPreset = findDnsPresetByAddress(initialDraft.address)
-  const [presetSelection, setPresetSelection] =
-    useState<DnsPresetSelection>(
-      initialPreset?.id ?? "custom"
-    )
+  const [presetSelection, setPresetSelection] = useState<DnsPresetSelection>(
+    initialPreset?.id ?? "custom"
+  )
   const [includeBackup, setIncludeBackup] = useState(
     mode === "create" && Boolean(initialPreset)
   )
@@ -184,8 +175,9 @@ function DnsServerForm({
   const [saveCustomTemplate, setSaveCustomTemplate] = useState(false)
   const configServers = config?.dns?.servers ?? []
   const savedTemplates = config?.ui_preferences?.plain_dns_templates ?? []
-  const normalizedCustomSecondaryAddress =
-    normalizePlainDnsTemplateAddress(customSecondaryAddress)
+  const normalizedCustomSecondaryAddress = normalizePlainDnsTemplateAddress(
+    customSecondaryAddress
+  )
   const customSecondaryInvalid =
     customSecondaryAddress.trim().length > 0 &&
     !normalizedCustomSecondaryAddress
@@ -335,10 +327,7 @@ function DnsServerForm({
     setIncludeBackup(Boolean(preset.secondaryAddress))
     setCustomSecondaryAddress("")
     setSaveCustomTemplate(false)
-    form.setFieldValue(
-      DNS_SERVER_FIELD_NAMES.displayName,
-      preset.name
-    )
+    form.setFieldValue(DNS_SERVER_FIELD_NAMES.displayName, preset.name)
     form.setFieldValue(DNS_SERVER_FIELD_NAMES.address, preset.primaryAddress)
     form.setFieldValue(
       DNS_SERVER_FIELD_NAMES.tag,
@@ -524,13 +513,9 @@ function DnsServerForm({
 
                 {mode === "create" && presetSelection === "custom" ? (
                   <>
-                    <Field
-                      invalid={customSecondaryInvalid}
-                    >
+                    <Field invalid={customSecondaryInvalid}>
                       <FieldLabel htmlFor="dns-server-secondary-address">
-                        {t(
-                          "pages.dnsServerUpsert.fields.secondaryAddress"
-                        )}
+                        {t("pages.dnsServerUpsert.fields.secondaryAddress")}
                       </FieldLabel>
                       <FieldContent>
                         <Input
@@ -574,14 +559,10 @@ function DnsServerForm({
                       />
                       <span className="space-y-0.5">
                         <span className="block text-sm font-medium">
-                          {t(
-                            "pages.dnsServerUpsert.presets.saveCustom"
-                          )}
+                          {t("pages.dnsServerUpsert.presets.saveCustom")}
                         </span>
                         <span className="block text-xs text-muted-foreground">
-                          {t(
-                            "pages.dnsServerUpsert.presets.saveCustomHint"
-                          )}
+                          {t("pages.dnsServerUpsert.presets.saveCustomHint")}
                         </span>
                       </span>
                     </label>
@@ -636,9 +617,7 @@ function DnsServerForm({
           >
             <Checkbox
               checked={includeBackup}
-              disabled={
-                presetSelection === "custom" && customSecondaryInvalid
-              }
+              disabled={presetSelection === "custom" && customSecondaryInvalid}
               id="dns-server-include-backup"
               onCheckedChange={(checked) => setIncludeBackup(checked === true)}
             />
@@ -698,44 +677,6 @@ function DnsServerForm({
       </div>
     </form>
   )
-}
-
-type ResolvedDnsTemplate = {
-  name: string
-  primaryAddress: string
-  secondaryAddress?: string
-  technicalSeed: string
-}
-
-function resolveDnsTemplateSelection(
-  selection: DnsPresetSelection,
-  savedTemplates: PlainDnsTemplate[]
-): ResolvedDnsTemplate | undefined {
-  if (selection === "custom") {
-    return undefined
-  }
-  if (selection.startsWith("saved:")) {
-    const template = findSavedDnsTemplate(selection, savedTemplates)
-    if (!template) {
-      return undefined
-    }
-    return {
-      name: template.name,
-      primaryAddress: template.primary_ipv4,
-      secondaryAddress: template.secondary_ipv4,
-      technicalSeed: template.name,
-    }
-  }
-
-  const preset = getDnsPreset(selection as DnsPresetId)
-  return preset
-    ? {
-        name: preset.name,
-        primaryAddress: preset.primaryAddress,
-        secondaryAddress: preset.secondaryAddress,
-        technicalSeed: preset.id,
-      }
-    : undefined
 }
 
 function getFirstFieldError(errors: unknown[]) {

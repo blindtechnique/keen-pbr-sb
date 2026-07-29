@@ -748,6 +748,21 @@ void Daemon::setup_api() {
         [this]() {
             return config_store_.staged_cas_snapshot();
         };
+    api_ctx_->stage_config_if_visible_revision_fn =
+        [this](
+            const std::string& expected_visible_revision,
+            Config staged_config,
+            std::string staged_config_json) {
+            const bool staged =
+                config_store_.stage_config_if_visible_revision(
+                    expected_visible_revision,
+                    std::move(staged_config),
+                    std::move(staged_config_json));
+            if (staged && status_stream_) {
+                status_stream_->reconcile();
+            }
+            return staged;
+        };
     api_ctx_->replace_interface_traffic_targets_fn =
         [this](std::string source, std::vector<std::string> names) {
             replace_interface_traffic_targets(

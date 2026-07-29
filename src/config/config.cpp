@@ -210,6 +210,24 @@ constexpr size_t MAX_HIDDEN_NATIVE_INTERFACE_IDS = 128;
 constexpr size_t MAX_NATIVE_INTERFACE_ID_CODE_POINTS = 128;
 constexpr size_t MAX_PLAIN_DNS_TEMPLATES = 32;
 constexpr size_t MAX_INTERNAL_VPN_SERVERS = 128;
+constexpr size_t MAX_INTERNAL_VPN_SERVICES = 32;
+
+bool is_valid_internal_vpn_service_id(const std::string& value) {
+    return !value.empty() && value.size() <= 128U &&
+           std::all_of(
+               value.begin(),
+               value.end(),
+               [](const unsigned char character) {
+                   const bool ascii_letter =
+                       (character >= 'A' && character <= 'Z') ||
+                       (character >= 'a' && character <= 'z');
+                   const bool ascii_digit =
+                       character >= '0' && character <= '9';
+                   return ascii_letter || ascii_digit ||
+                          character == '.' || character == '_' ||
+                          character == ':' || character == '-';
+               });
+}
 
 void validate_display_name(
     std::vector<ConfigValidationIssue>& issues,
@@ -866,6 +884,9 @@ namespace {
 void validate_route_internal_vpn_servers(
     const json& root,
     std::vector<ConfigValidationIssue>& issues);
+void validate_route_internal_vpn_services(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues);
 
 } // namespace
 
@@ -905,6 +926,7 @@ Config parse_config(const std::string& json_str) {
     validate_route_rule_specs(parsed_json, issues);
     validate_route_inbound_interfaces(parsed_json, issues);
     validate_route_internal_vpn_servers(parsed_json, issues);
+    validate_route_internal_vpn_services(parsed_json, issues);
 
     if (!issues.empty()) {
         throw ConfigValidationError(std::move(issues));
@@ -1143,6 +1165,73 @@ void validate_route_internal_vpn_servers(
     }
 }
 
+void validate_route_internal_vpn_services(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto route_it = root.find("route");
+    if (route_it == root.end() || !route_it->is_object()) {
+        return;
+    }
+    const auto services_it = route_it->find("internal_vpn_services");
+    if (services_it == route_it->end() || services_it->is_null()) {
+        return;
+    }
+    if (!services_it->is_array()) {
+        add_issue(
+            issues,
+            "route.internal_vpn_services",
+            "route.internal_vpn_services must be an array of objects");
+        return;
+    }
+    if (services_it->size() > MAX_INTERNAL_VPN_SERVICES) {
+        add_issue(
+            issues,
+            "route.internal_vpn_services",
+            "route.internal_vpn_services must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVICES) + " entries");
+    }
+
+    std::set<std::string> seen_ids;
+    for (size_t index = 0; index < services_it->size(); ++index) {
+        const auto& service = services_it->at(index);
+        const std::string path =
+            "route.internal_vpn_services[" + std::to_string(index) + "]";
+        if (!service.is_object()) {
+            add_issue(issues, path, path + " must be an object");
+            continue;
+        }
+        const auto id_it = service.find("service_id");
+        if (id_it == service.end() || !id_it->is_string()) {
+            add_issue(
+                issues,
+                path + ".service_id",
+                path + ".service_id must be a string");
+        } else {
+            const auto& id = id_it->get_ref<const std::string&>();
+            if (!is_valid_internal_vpn_service_id(id)) {
+                add_issue(
+                    issues,
+                    path + ".service_id",
+                    path +
+                        ".service_id must be 1-128 ASCII letters, digits, "
+                        "dot, underscore, colon or hyphen");
+            } else if (!seen_ids.insert(id).second) {
+                add_issue(
+                    issues,
+                    path + ".service_id",
+                    path + ".service_id duplicates service id '" + id + "'");
+            }
+        }
+        const auto process_it = service.find("process_clients");
+        if (process_it == service.end() || !process_it->is_boolean()) {
+            add_issue(
+                issues,
+                path + ".process_clients",
+                path + ".process_clients must be a boolean");
+        }
+    }
+}
+
 void validate_route_internal_vpn_servers(
     std::vector<ConfigValidationIssue>& issues,
     const std::optional<RouteConfig>& route) {
@@ -1222,6 +1311,42 @@ void validate_route_internal_vpn_servers(
     }
 }
 
+void validate_route_internal_vpn_services(
+    std::vector<ConfigValidationIssue>& issues,
+    const std::optional<RouteConfig>& route) {
+    if (!route.has_value() || !route->internal_vpn_services.has_value()) {
+        return;
+    }
+    const auto& services = *route->internal_vpn_services;
+    if (services.size() > MAX_INTERNAL_VPN_SERVICES) {
+        add_issue(
+            issues,
+            "route.internal_vpn_services",
+            "route.internal_vpn_services must not contain more than " +
+                std::to_string(MAX_INTERNAL_VPN_SERVICES) + " entries");
+    }
+    std::set<std::string> seen_ids;
+    for (size_t index = 0; index < services.size(); ++index) {
+        const auto& service = services[index];
+        const std::string path =
+            "route.internal_vpn_services[" + std::to_string(index) +
+            "].service_id";
+        if (!is_valid_internal_vpn_service_id(service.service_id)) {
+            add_issue(
+                issues,
+                path,
+                path +
+                    " must be 1-128 ASCII letters, digits, dot, underscore, "
+                    "colon or hyphen");
+        } else if (!seen_ids.insert(service.service_id).second) {
+            add_issue(
+                issues,
+                path,
+                path + " duplicates service id '" + service.service_id + "'");
+        }
+    }
+}
+
 } // namespace
 
 void validate_config(const Config& cfg) {
@@ -1229,6 +1354,7 @@ void validate_config(const Config& cfg) {
 
     validate_ui_preferences(issues, cfg.ui_preferences);
     validate_route_internal_vpn_servers(issues, cfg.route);
+    validate_route_internal_vpn_services(issues, cfg.route);
 
     if (cfg.daemon && cfg.daemon->firewall_verify_max_bytes.has_value() &&
         *cfg.daemon->firewall_verify_max_bytes < 0) {
@@ -1259,6 +1385,7 @@ void validate_config(const Config& cfg) {
         }
     }
 
+    std::map<std::string, std::string> first_catalog_identity_paths;
     for (const auto& [name, list_cfg] : cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
         const std::string list_path = name.empty() ? "lists" : "lists." + name;
         validate_tag(issues, list_path, "List name", name);
@@ -1267,6 +1394,40 @@ void validate_config(const Config& cfg) {
             list_path + ".display_name",
             "List display name",
             list_cfg.display_name);
+        if (list_cfg.catalog_identity.has_value()) {
+            const auto& identity = *list_cfg.catalog_identity;
+            const bool valid =
+                identity.size() == 64U &&
+                std::all_of(
+                    identity.begin(),
+                    identity.end(),
+                    [](const unsigned char character) {
+                        return std::isdigit(character) != 0 ||
+                               (character >= 'a' &&
+                                character <= 'f');
+                    });
+            if (!valid) {
+                add_issue(
+                    issues,
+                    list_path + ".catalog_identity",
+                    list_path +
+                        ".catalog_identity must be a lowercase SHA-256 digest");
+            } else {
+                const auto identity_path =
+                    list_path + ".catalog_identity";
+                const auto [first, inserted] =
+                    first_catalog_identity_paths.emplace(
+                        identity, identity_path);
+                if (!inserted) {
+                    add_issue(
+                        issues,
+                        identity_path,
+                        identity_path +
+                            " duplicates catalogue provenance first declared at " +
+                            first->second);
+                }
+            }
+        }
 
         const bool has_url = list_cfg.url.has_value();
         const bool has_file = list_cfg.file.has_value();

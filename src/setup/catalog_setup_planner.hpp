@@ -53,6 +53,8 @@ enum class CatalogSetupErrorCode {
     outbound_not_routable,
     dns_server_required,
     dns_server_not_found,
+    dns_automatic_unavailable,
+    dns_detour_mismatch,
 };
 
 class CatalogSetupPlanError final : public std::runtime_error {
@@ -89,6 +91,7 @@ struct CatalogListPlanSummary {
     std::string preset_id;
     std::string technical_id;
     std::string display_name;
+    bool already_installed{false};
     bool url_backed{false};
     bool has_inline_domains{false};
     bool has_inline_cidrs{false};
@@ -118,6 +121,11 @@ struct CatalogBlackholePlanSummary {
 struct CatalogSetupSummary {
     CatalogSetupMode mode{CatalogSetupMode::none};
     std::vector<CatalogListPlanSummary> lists;
+    // One list receives one independently editable rule. The singular fields
+    // remain as a compatibility projection for clients predating sb.12:
+    // they contain the only rule, or the first rule of a multi-list plan.
+    std::vector<CatalogRouteRulePlanSummary> route_rules;
+    std::vector<CatalogDnsRulePlanSummary> dns_rules;
     std::optional<CatalogRouteRulePlanSummary> route_rule;
     std::optional<CatalogDnsRulePlanSummary> dns_rule;
     std::optional<CatalogBlackholePlanSummary> blackhole;
@@ -133,6 +141,13 @@ struct CatalogSetupPlan {
     std::string candidate_revision;
 };
 
+// Stable provenance for one preset in an authoritative catalogue snapshot.
+// The planner and the read-only catalogue response share this helper so the
+// UI cannot drift from duplicate-prevention semantics.
+std::string catalog_preset_identity(
+    const nlohmann::json& catalog_snapshot,
+    const std::string& preset_id);
+
 // Pure planner: it performs no I/O and does not stage or save configuration.
 // catalog_snapshot accepts either the catalogue array itself or the exact
 // GET /api/catalog response object containing a "presets" array.
@@ -140,5 +155,14 @@ CatalogSetupPlan plan_catalog_setup(
     const CatalogSetupIntent& intent,
     const nlohmann::json& catalog_snapshot,
     const Config& active_config);
+
+// Validates the deliberately narrow beginner setup contract used by the
+// simple list dialog. Advanced editors continue to stage any configuration
+// accepted by validate_config(). A beginner list must have exactly one
+// dedicated route rule and one dedicated DNS rule, and both must use the same
+// routable outbound path.
+void validate_recommended_list_setup(
+    const Config& candidate,
+    const std::string& list_id);
 
 } // namespace keen_pbr3::setup

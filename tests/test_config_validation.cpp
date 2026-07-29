@@ -182,6 +182,67 @@ TEST_CASE("list display_name supports unicode and round-trips") {
     CHECK(*reparsed.lists->at("ai_services").display_name == "Сервисы ИИ");
 }
 
+TEST_CASE("catalog list identity is a lowercase SHA-256 digest") {
+    const std::string valid_identity(64U, 'a');
+    const auto parsed = parse_test_config(
+        list_config_json(
+            "catalog_list",
+            nlohmann::json{
+                {"catalog_identity", valid_identity},
+                {"domains", nlohmann::json::array({"example.com"})},
+            }
+                .dump()));
+    REQUIRE(parsed.lists->at("catalog_list").catalog_identity.has_value());
+    CHECK(
+        *parsed.lists->at("catalog_list").catalog_identity ==
+        valid_identity);
+
+    const auto uppercase = validate_issues(
+        list_config_json(
+            "catalog_list",
+            nlohmann::json{
+                {"catalog_identity", std::string(64U, 'A')},
+                {"domains", nlohmann::json::array({"example.com"})},
+            }
+                .dump()));
+    REQUIRE(uppercase.size() == 1U);
+    CHECK(uppercase.front().path == "lists.catalog_list.catalog_identity");
+
+    const auto short_identity = validate_issues(
+        list_config_json(
+            "catalog_list",
+            nlohmann::json{
+                {"catalog_identity", std::string(63U, 'a')},
+                {"domains", nlohmann::json::array({"example.com"})},
+            }
+                .dump()));
+    REQUIRE(short_identity.size() == 1U);
+    CHECK(
+        short_identity.front().path ==
+        "lists.catalog_list.catalog_identity");
+}
+
+TEST_CASE("catalog list identity is unique across configured lists") {
+    const std::string identity(64U, 'c');
+    nlohmann::json config;
+    config["lists"] = {
+        {"first",
+         {{"catalog_identity", identity},
+          {"domains", nlohmann::json::array({"first.example"})}}},
+        {"second",
+         {{"catalog_identity", identity},
+          {"domains", nlohmann::json::array({"second.example"})}}},
+    };
+
+    const auto issues = validate_issues(config.dump());
+    REQUIRE(issues.size() == 1U);
+    CHECK(issues.front().path == "lists.second.catalog_identity");
+    CHECK(
+        issues.front().message ==
+        "lists.second.catalog_identity duplicates catalogue provenance "
+        "first declared at lists.first.catalog_identity");
+}
+
 TEST_CASE("list display_name rejects blank and ASCII control values") {
     const auto blank = validate_issues(
         list_config_json(
@@ -401,6 +462,114 @@ TEST_CASE("hidden native interface preferences permit stale inventory ids") {
     REQUIRE(reparsed.ui_preferences->hidden_native_interface_ids.has_value());
     CHECK(*reparsed.ui_preferences->hidden_native_interface_ids ==
           std::vector<std::string>{"FormerTunnel", "Wireguard0"});
+}
+
+TEST_CASE("native VPN service policies round-trip with stable NDMS ids") {
+    const auto config = parse_test_config(R"({
+        "route": {
+            "internal_vpn_services": [
+                {
+                    "service_id": "ndms-crypto-map:RemoteUsers",
+                    "process_clients": true
+                },
+                {
+                    "service_id": "ndms-service:sstp-server",
+                    "process_clients": false
+                }
+            ]
+        }
+    })");
+
+    REQUIRE(config.route.has_value());
+    REQUIRE(config.route->internal_vpn_services.has_value());
+    REQUIRE(config.route->internal_vpn_services->size() == 2U);
+    CHECK(config.route->internal_vpn_services->at(0).service_id ==
+          "ndms-crypto-map:RemoteUsers");
+    CHECK(config.route->internal_vpn_services->at(0).process_clients);
+    CHECK_FALSE(config.route->internal_vpn_services->at(1).process_clients);
+
+    const auto reparsed = parse_test_config(nlohmann::json(config).dump());
+    REQUIRE(reparsed.route->internal_vpn_services.has_value());
+    CHECK(reparsed.route->internal_vpn_services->at(1).service_id ==
+          "ndms-service:sstp-server");
+}
+
+TEST_CASE("native VPN service policies reject duplicates and invalid ids") {
+    const auto duplicate = validate_issues(R"({
+        "route": {
+            "internal_vpn_services": [
+                {
+                    "service_id": "ndms-service:sstp-server",
+                    "process_clients": true
+                },
+                {
+                    "service_id": "ndms-service:sstp-server",
+                    "process_clients": false
+                }
+            ]
+        }
+    })");
+    CHECK(find_issue(
+              duplicate,
+              "route.internal_vpn_services[1].service_id") != nullptr);
+
+    const auto invalid = parse_issues(R"({
+        "route": {
+            "internal_vpn_services": [
+                {
+                    "service_id": "ndms service with spaces",
+                    "process_clients": true
+                }
+            ]
+        }
+    })");
+    CHECK(find_issue(
+              invalid,
+              "route.internal_vpn_services[0].service_id") != nullptr);
+
+    const auto non_ascii = parse_issues(R"({
+        "route": {
+            "internal_vpn_services": [
+                {
+                    "service_id": "ndms-service:сервер",
+                    "process_clients": true
+                }
+            ]
+        }
+    })");
+    CHECK(find_issue(
+              non_ascii,
+              "route.internal_vpn_services[0].service_id") != nullptr);
+
+    const auto wrong_type = parse_issues(R"({
+        "route": {
+            "internal_vpn_services": [
+                {
+                    "service_id": "ndms-service:sstp-server",
+                    "process_clients": "yes"
+                }
+            ]
+        }
+    })");
+    CHECK(find_issue(
+              wrong_type,
+              "route.internal_vpn_services[0].process_clients") != nullptr);
+}
+
+TEST_CASE("native VPN service policy count is bounded") {
+    nlohmann::json config;
+    config["route"]["internal_vpn_services"] = nlohmann::json::array();
+    for (std::size_t index = 0; index < 33U; ++index) {
+        config["route"]["internal_vpn_services"].push_back({
+            {"service_id", "ndms-service:test-" + std::to_string(index)},
+            {"process_clients", true},
+        });
+    }
+
+    const auto issues = parse_issues(config.dump());
+    CHECK(find_issue(
+              issues,
+              "route.internal_vpn_services") != nullptr);
 }
 
 TEST_CASE("UI preferences reject invalid or duplicate hidden native interface ids") {

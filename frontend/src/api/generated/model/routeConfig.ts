@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { InternalVpnServer } from './internalVpnServer';
+import type { InternalVpnService } from './internalVpnService';
 import type { RouteRule } from './routeRule';
 
 export interface RouteConfig {
@@ -18,5 +19,11 @@ export interface RouteConfig {
      * @maxItems 128
      */
   internal_vpn_servers?: InternalVpnServer[];
+  /**
+     * Participation overrides for native L2TP, IKEv1/IKEv2, SSTP and OpenConnect server services that have no stable Linux ingress interface while idle. The live source pools are resolved from a fresh, strictly parsed NDMS inventory; user-supplied ranges are never trusted.
+
+     * @maxItems 32
+     */
+  internal_vpn_services?: InternalVpnService[];
   rules?: RouteRule[];
 }

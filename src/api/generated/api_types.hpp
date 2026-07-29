@@ -161,6 +161,7 @@ namespace api {
     };
 
     struct CatalogSetupListSummary {
+        bool already_installed;
         std::string display_name;
         bool has_inline_cidrs;
         bool has_inline_domains;
@@ -185,9 +186,11 @@ namespace api {
     struct Summary {
         std::optional<CatalogSetupBlackholeSummary> blackhole;
         std::optional<CatalogSetupDnsRuleSummary> dns_rule;
+        std::optional<std::vector<CatalogSetupDnsRuleSummary>> dns_rules;
         std::vector<CatalogSetupListSummary> lists;
         CatalogSetupModeEnum mode;
         std::optional<RouteRule> route_rule;
+        std::optional<std::vector<RouteRule>> route_rules;
     };
 
     enum class Code : int { DNS_AUTOMATIC_UNAVAILABLE, DNS_DETOUR_MISMATCH, DNS_DETOUR_MISSING, DNS_IGNORED_FOR_BLOCK, SOURCE_DETOUR_NOT_APPLICABLE, SOURCE_DETOUR_NOT_FOUND, SOURCE_DETOUR_NOT_ROUTABLE };
@@ -282,6 +285,7 @@ namespace api {
     };
 
     struct ListConfigValue {
+        std::optional<std::string> catalog_identity;
         std::optional<std::string> detour;
         std::optional<std::string> display_name;
         std::optional<std::vector<std::string>> domains;
@@ -339,6 +343,11 @@ namespace api {
         bool process_clients;
     };
 
+    struct InternalVpnServiceElement {
+        bool process_clients;
+        std::string service_id;
+    };
+
     struct RouteRuleElement {
         std::optional<std::string> dest_addr;
         std::optional<std::string> dest_port;
@@ -356,6 +365,7 @@ namespace api {
     struct Route {
         std::optional<std::vector<std::string>> inbound_interfaces;
         std::optional<std::vector<InternalVpnServerElement>> internal_vpn_servers;
+        std::optional<std::vector<InternalVpnServiceElement>> internal_vpn_services;
         std::optional<std::vector<RouteRuleElement>> rules;
     };
 
@@ -394,6 +404,7 @@ namespace api {
         ConfigObject config;
         bool is_draft;
         std::optional<std::map<std::string, ListRefreshStateValue>> list_refresh_state;
+        std::string revision;
     };
 
     enum class ConfigUpdateResponseStatus : int { OK };
@@ -637,6 +648,25 @@ namespace api {
         std::vector<RequiredGuard> required_guards;
     };
 
+    enum class NdmsVpnServerKind : int { IKEV1, IKEV2, L2_TP, OPENCONNECT, SSTP };
+
+    struct NdmsVpnServerService {
+        std::optional<std::string> bound_interface_id;
+        bool enabled;
+        std::string id;
+        std::string inventory_revision;
+        NdmsVpnServerKind kind;
+        std::string label;
+        std::vector<std::string> source_cidrs;
+    };
+
+    struct NdmsVpnServerServiceInventoryResponse {
+        bool available;
+        NdmsCatalogStatus catalog_status;
+        bool read_only;
+        std::vector<NdmsVpnServerService> services;
+    };
+
     struct PolicyRuleCheck {
         std::optional<std::string> detail;
         int64_t expected_table;
@@ -646,6 +676,12 @@ namespace api {
         bool rule_present_v4;
         bool rule_present_v6;
         CheckStatus status;
+    };
+
+    struct RecommendedListSetupRequest {
+        std::string base_revision;
+        ConfigObject config;
+        std::string list_id;
     };
 
     struct ReloadResponse {
@@ -1030,6 +1066,7 @@ namespace api {
         std::optional<Fwmark> fwmark_config;
         std::optional<HealthResponse> health_response;
         std::optional<InternalVpnServerElement> internal_vpn_server;
+        std::optional<InternalVpnServiceElement> internal_vpn_service;
         std::optional<Iproute> iproute_config;
         std::optional<LifecycleOperation> lifecycle_operation;
         std::optional<LifecycleOperationStageElement> lifecycle_operation_stage;
@@ -1046,10 +1083,14 @@ namespace api {
         std::optional<NdmsManagementBlockerElement> ndms_management_blocker;
         std::optional<NdmsTunnelInterfaceElement> ndms_tunnel_interface;
         std::optional<Kind> ndms_tunnel_kind;
+        std::optional<NdmsVpnServerKind> ndms_vpn_server_kind;
+        std::optional<NdmsVpnServerService> ndms_vpn_server_service;
+        std::optional<NdmsVpnServerServiceInventoryResponse> ndms_vpn_server_service_inventory_response;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
         std::optional<PlainDnsTemplateElement> plain_dns_template;
         std::optional<PolicyRuleCheck> policy_rule_check;
+        std::optional<RecommendedListSetupRequest> recommended_list_setup_request;
         std::optional<ReloadResponse> reload_response;
         std::optional<ResolverConfigProbeStatus> resolver_config_probe_status;
         std::optional<ResolverConfigSyncState> resolver_config_sync_state;
@@ -1194,6 +1235,9 @@ namespace api {
     void from_json(const json & j, InternalVpnServerElement & x);
     void to_json(json & j, const InternalVpnServerElement & x);
 
+    void from_json(const json & j, InternalVpnServiceElement & x);
+    void to_json(json & j, const InternalVpnServiceElement & x);
+
     void from_json(const json & j, RouteRuleElement & x);
     void to_json(json & j, const RouteRuleElement & x);
 
@@ -1284,8 +1328,17 @@ namespace api {
     void from_json(const json & j, NdmsInterfaceInventoryResponse & x);
     void to_json(json & j, const NdmsInterfaceInventoryResponse & x);
 
+    void from_json(const json & j, NdmsVpnServerService & x);
+    void to_json(json & j, const NdmsVpnServerService & x);
+
+    void from_json(const json & j, NdmsVpnServerServiceInventoryResponse & x);
+    void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x);
+
     void from_json(const json & j, PolicyRuleCheck & x);
     void to_json(json & j, const PolicyRuleCheck & x);
+
+    void from_json(const json & j, RecommendedListSetupRequest & x);
+    void to_json(json & j, const RecommendedListSetupRequest & x);
 
     void from_json(const json & j, ReloadResponse & x);
     void to_json(json & j, const ReloadResponse & x);
@@ -1493,6 +1546,9 @@ namespace api {
 
     void from_json(const json & j, RequiredGuard & x);
     void to_json(json & j, const RequiredGuard & x);
+
+    void from_json(const json & j, NdmsVpnServerKind & x);
+    void to_json(json & j, const NdmsVpnServerKind & x);
 
     void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
     void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
@@ -1713,6 +1769,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, CatalogSetupListSummary& x) {
+        x.already_installed = j.at("already_installed").get<bool>();
         x.display_name = j.at("display_name").get<std::string>();
         x.has_inline_cidrs = j.at("has_inline_cidrs").get<bool>();
         x.has_inline_domains = j.at("has_inline_domains").get<bool>();
@@ -1724,6 +1781,7 @@ namespace api {
 
     inline void to_json(json & j, const CatalogSetupListSummary & x) {
         j = json::object();
+        j["already_installed"] = x.already_installed;
         j["display_name"] = x.display_name;
         j["has_inline_cidrs"] = x.has_inline_cidrs;
         j["has_inline_domains"] = x.has_inline_domains;
@@ -1762,18 +1820,22 @@ namespace api {
     inline void from_json(const json & j, Summary& x) {
         x.blackhole = get_stack_optional<CatalogSetupBlackholeSummary>(j, "blackhole");
         x.dns_rule = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "dns_rule");
+        x.dns_rules = get_stack_optional<std::vector<CatalogSetupDnsRuleSummary>>(j, "dns_rules");
         x.lists = j.at("lists").get<std::vector<CatalogSetupListSummary>>();
         x.mode = j.at("mode").get<CatalogSetupModeEnum>();
         x.route_rule = get_stack_optional<RouteRule>(j, "route_rule");
+        x.route_rules = get_stack_optional<std::vector<RouteRule>>(j, "route_rules");
     }
 
     inline void to_json(json & j, const Summary & x) {
         j = json::object();
         j["blackhole"] = x.blackhole;
         j["dns_rule"] = x.dns_rule;
+        j["dns_rules"] = x.dns_rules;
         j["lists"] = x.lists;
         j["mode"] = x.mode;
         j["route_rule"] = x.route_rule;
+        j["route_rules"] = x.route_rules;
     }
 
     inline void from_json(const json & j, CatalogSetupWarningElement& x) {
@@ -1955,6 +2017,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, ListConfigValue& x) {
+        x.catalog_identity = get_stack_optional<std::string>(j, "catalog_identity");
         x.detour = get_stack_optional<std::string>(j, "detour");
         x.display_name = get_stack_optional<std::string>(j, "display_name");
         x.domains = get_stack_optional<std::vector<std::string>>(j, "domains");
@@ -1967,6 +2030,7 @@ namespace api {
 
     inline void to_json(json & j, const ListConfigValue & x) {
         j = json::object();
+        j["catalog_identity"] = x.catalog_identity;
         j["detour"] = x.detour;
         j["display_name"] = x.display_name;
         j["domains"] = x.domains;
@@ -2064,6 +2128,17 @@ namespace api {
         j["process_clients"] = x.process_clients;
     }
 
+    inline void from_json(const json & j, InternalVpnServiceElement& x) {
+        x.process_clients = j.at("process_clients").get<bool>();
+        x.service_id = j.at("service_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const InternalVpnServiceElement & x) {
+        j = json::object();
+        j["process_clients"] = x.process_clients;
+        j["service_id"] = x.service_id;
+    }
+
     inline void from_json(const json & j, RouteRuleElement& x) {
         x.dest_addr = get_stack_optional<std::string>(j, "dest_addr");
         x.dest_port = get_stack_optional<std::string>(j, "dest_port");
@@ -2096,6 +2171,7 @@ namespace api {
     inline void from_json(const json & j, Route& x) {
         x.inbound_interfaces = get_stack_optional<std::vector<std::string>>(j, "inbound_interfaces");
         x.internal_vpn_servers = get_stack_optional<std::vector<InternalVpnServerElement>>(j, "internal_vpn_servers");
+        x.internal_vpn_services = get_stack_optional<std::vector<InternalVpnServiceElement>>(j, "internal_vpn_services");
         x.rules = get_stack_optional<std::vector<RouteRuleElement>>(j, "rules");
     }
 
@@ -2103,6 +2179,7 @@ namespace api {
         j = json::object();
         j["inbound_interfaces"] = x.inbound_interfaces;
         j["internal_vpn_servers"] = x.internal_vpn_servers;
+        j["internal_vpn_services"] = x.internal_vpn_services;
         j["rules"] = x.rules;
     }
 
@@ -2176,6 +2253,7 @@ namespace api {
         x.config = j.at("config").get<ConfigObject>();
         x.is_draft = j.at("is_draft").get<bool>();
         x.list_refresh_state = get_stack_optional<std::map<std::string, ListRefreshStateValue>>(j, "list_refresh_state");
+        x.revision = j.at("revision").get<std::string>();
     }
 
     inline void to_json(json & j, const ConfigStateResponse & x) {
@@ -2183,6 +2261,7 @@ namespace api {
         j["config"] = x.config;
         j["is_draft"] = x.is_draft;
         j["list_refresh_state"] = x.list_refresh_state;
+        j["revision"] = x.revision;
     }
 
     inline void from_json(const json & j, ConfigUpdateResponse& x) {
@@ -2602,6 +2681,42 @@ namespace api {
         j["required_guards"] = x.required_guards;
     }
 
+    inline void from_json(const json & j, NdmsVpnServerService& x) {
+        x.bound_interface_id = get_stack_optional<std::string>(j, "bound_interface_id");
+        x.enabled = j.at("enabled").get<bool>();
+        x.id = j.at("id").get<std::string>();
+        x.inventory_revision = j.at("inventory_revision").get<std::string>();
+        x.kind = j.at("kind").get<NdmsVpnServerKind>();
+        x.label = j.at("label").get<std::string>();
+        x.source_cidrs = j.at("source_cidrs").get<std::vector<std::string>>();
+    }
+
+    inline void to_json(json & j, const NdmsVpnServerService & x) {
+        j = json::object();
+        j["bound_interface_id"] = x.bound_interface_id;
+        j["enabled"] = x.enabled;
+        j["id"] = x.id;
+        j["inventory_revision"] = x.inventory_revision;
+        j["kind"] = x.kind;
+        j["label"] = x.label;
+        j["source_cidrs"] = x.source_cidrs;
+    }
+
+    inline void from_json(const json & j, NdmsVpnServerServiceInventoryResponse& x) {
+        x.available = j.at("available").get<bool>();
+        x.catalog_status = j.at("catalog_status").get<NdmsCatalogStatus>();
+        x.read_only = j.at("read_only").get<bool>();
+        x.services = j.at("services").get<std::vector<NdmsVpnServerService>>();
+    }
+
+    inline void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x) {
+        j = json::object();
+        j["available"] = x.available;
+        j["catalog_status"] = x.catalog_status;
+        j["read_only"] = x.read_only;
+        j["services"] = x.services;
+    }
+
     inline void from_json(const json & j, PolicyRuleCheck& x) {
         x.detail = get_stack_optional<std::string>(j, "detail");
         x.expected_table = j.at("expected_table").get<int64_t>();
@@ -2623,6 +2738,19 @@ namespace api {
         j["rule_present_v4"] = x.rule_present_v4;
         j["rule_present_v6"] = x.rule_present_v6;
         j["status"] = x.status;
+    }
+
+    inline void from_json(const json & j, RecommendedListSetupRequest& x) {
+        x.base_revision = j.at("base_revision").get<std::string>();
+        x.config = j.at("config").get<ConfigObject>();
+        x.list_id = j.at("list_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const RecommendedListSetupRequest & x) {
+        j = json::object();
+        j["base_revision"] = x.base_revision;
+        j["config"] = x.config;
+        j["list_id"] = x.list_id;
     }
 
     inline void from_json(const json & j, ReloadResponse& x) {
@@ -3272,6 +3400,7 @@ namespace api {
         x.fwmark_config = get_stack_optional<Fwmark>(j, "FwmarkConfig");
         x.health_response = get_stack_optional<HealthResponse>(j, "HealthResponse");
         x.internal_vpn_server = get_stack_optional<InternalVpnServerElement>(j, "InternalVpnServer");
+        x.internal_vpn_service = get_stack_optional<InternalVpnServiceElement>(j, "InternalVpnService");
         x.iproute_config = get_stack_optional<Iproute>(j, "IprouteConfig");
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "LifecycleOperation");
         x.lifecycle_operation_stage = get_stack_optional<LifecycleOperationStageElement>(j, "LifecycleOperationStage");
@@ -3288,10 +3417,14 @@ namespace api {
         x.ndms_management_blocker = get_stack_optional<NdmsManagementBlockerElement>(j, "NdmsManagementBlocker");
         x.ndms_tunnel_interface = get_stack_optional<NdmsTunnelInterfaceElement>(j, "NdmsTunnelInterface");
         x.ndms_tunnel_kind = get_stack_optional<Kind>(j, "NdmsTunnelKind");
+        x.ndms_vpn_server_kind = get_stack_optional<NdmsVpnServerKind>(j, "NdmsVpnServerKind");
+        x.ndms_vpn_server_service = get_stack_optional<NdmsVpnServerService>(j, "NdmsVpnServerService");
+        x.ndms_vpn_server_service_inventory_response = get_stack_optional<NdmsVpnServerServiceInventoryResponse>(j, "NdmsVpnServerServiceInventoryResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
         x.plain_dns_template = get_stack_optional<PlainDnsTemplateElement>(j, "PlainDnsTemplate");
         x.policy_rule_check = get_stack_optional<PolicyRuleCheck>(j, "PolicyRuleCheck");
+        x.recommended_list_setup_request = get_stack_optional<RecommendedListSetupRequest>(j, "RecommendedListSetupRequest");
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
         x.resolver_config_probe_status = get_stack_optional<ResolverConfigProbeStatus>(j, "ResolverConfigProbeStatus");
         x.resolver_config_sync_state = get_stack_optional<ResolverConfigSyncState>(j, "ResolverConfigSyncState");
@@ -3393,6 +3526,7 @@ namespace api {
         j["FwmarkConfig"] = x.fwmark_config;
         j["HealthResponse"] = x.health_response;
         j["InternalVpnServer"] = x.internal_vpn_server;
+        j["InternalVpnService"] = x.internal_vpn_service;
         j["IprouteConfig"] = x.iproute_config;
         j["LifecycleOperation"] = x.lifecycle_operation;
         j["LifecycleOperationStage"] = x.lifecycle_operation_stage;
@@ -3409,10 +3543,14 @@ namespace api {
         j["NdmsManagementBlocker"] = x.ndms_management_blocker;
         j["NdmsTunnelInterface"] = x.ndms_tunnel_interface;
         j["NdmsTunnelKind"] = x.ndms_tunnel_kind;
+        j["NdmsVpnServerKind"] = x.ndms_vpn_server_kind;
+        j["NdmsVpnServerService"] = x.ndms_vpn_server_service;
+        j["NdmsVpnServerServiceInventoryResponse"] = x.ndms_vpn_server_service_inventory_response;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
         j["PlainDnsTemplate"] = x.plain_dns_template;
         j["PolicyRuleCheck"] = x.policy_rule_check;
+        j["RecommendedListSetupRequest"] = x.recommended_list_setup_request;
         j["ReloadResponse"] = x.reload_response;
         j["ResolverConfigProbeStatus"] = x.resolver_config_probe_status;
         j["ResolverConfigSyncState"] = x.resolver_config_sync_state;
@@ -4010,6 +4148,26 @@ namespace api {
             case RequiredGuard::OWNERSHIP_CHECK: j = "ownership_check"; break;
             case RequiredGuard::TYPED_RCI: j = "typed_rci"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RequiredGuard\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, NdmsVpnServerKind & x) {
+        if (j == "ikev1") x = NdmsVpnServerKind::IKEV1;
+        else if (j == "ikev2") x = NdmsVpnServerKind::IKEV2;
+        else if (j == "l2tp") x = NdmsVpnServerKind::L2_TP;
+        else if (j == "openconnect") x = NdmsVpnServerKind::OPENCONNECT;
+        else if (j == "sstp") x = NdmsVpnServerKind::SSTP;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"NdmsVpnServerKind\""); }
+    }
+
+    inline void to_json(json & j, const NdmsVpnServerKind & x) {
+        switch (x) {
+            case NdmsVpnServerKind::IKEV1: j = "ikev1"; break;
+            case NdmsVpnServerKind::IKEV2: j = "ikev2"; break;
+            case NdmsVpnServerKind::L2_TP: j = "l2tp"; break;
+            case NdmsVpnServerKind::OPENCONNECT: j = "openconnect"; break;
+            case NdmsVpnServerKind::SSTP: j = "sstp"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"NdmsVpnServerKind\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

@@ -14,6 +14,30 @@ export type {
   CatalogSetupWarning,
 } from "@/api/generated/model"
 
+export function getCatalogSetupInstallState(
+  preview: CatalogSetupPreviewResponse
+) {
+  const installed = preview.summary.lists.filter(
+    (list) => list.already_installed
+  )
+  const pending = preview.summary.lists.filter(
+    (list) => !list.already_installed
+  )
+  const allInstalled = installed.length > 0 && pending.length === 0
+  const policyChanges =
+    (preview.summary.route_rules?.length ?? 0) > 0 ||
+    (preview.summary.dns_rules?.length ?? 0) > 0 ||
+    Boolean(preview.summary.route_rule) ||
+    Boolean(preview.summary.dns_rule) ||
+    Boolean(preview.summary.blackhole?.created)
+  return {
+    installed,
+    pending,
+    allInstalled,
+    noChanges: allInstalled && !policyChanges,
+  } as const
+}
+
 export async function previewCatalogSetup(
   intent: CatalogSetupIntent
 ): Promise<CatalogSetupPreviewResponse> {

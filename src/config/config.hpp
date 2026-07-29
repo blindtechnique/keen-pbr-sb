@@ -55,6 +55,7 @@ using DnsRule              = api::DnsRuleElement;
 using DnsConfig            = api::Dns;
 using RouteRule            = api::RouteRuleElement;
 using InternalVpnServer    = api::InternalVpnServerElement;
+using InternalVpnService   = api::InternalVpnServiceElement;
 using RouteConfig          = api::Route;
 using FwmarkConfig         = api::Fwmark;
 using IprouteConfig        = api::Iproute;

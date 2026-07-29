@@ -5,6 +5,7 @@
 #include "../config/config.hpp"
 #include "../http/http_client.hpp"
 #include "../log/logger.hpp"
+#include "../setup/catalog_setup_planner.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -25,6 +26,10 @@ namespace {
 constexpr const char* kCatalogUrl =
     "https://raw.githubusercontent.com/hoaxisr/awg-manager/master/"
     "internal/presets/defaults.json";
+// Unlike the cache/bundled transport source, this identity describes the
+// logical authoritative catalogue and remains stable across refreshes.
+constexpr const char* kCatalogIdentity =
+    "github:hoaxisr/awg-manager:internal/presets/defaults.json";
 
 constexpr const char* kCachePath = "/opt/var/cache/keen-pbr/catalog.json";
 constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/catalog-source.json";
@@ -117,6 +122,7 @@ nlohmann::json load_catalog_snapshot_locked() {
 
     nlohmann::json response;
     response["source"] = source;
+    response["catalog_id"] = kCatalogIdentity;
 
     if (const auto mtime =
             file_mtime(source == "cache" ? kCachePath : kBundledPath)) {
@@ -128,6 +134,19 @@ nlohmann::json load_catalog_snapshot_locked() {
 
     try {
         response["presets"] = nlohmann::json::parse(payload);
+        if (response["presets"].is_array()) {
+            for (auto& preset : response["presets"]) {
+                if (!preset.is_object()) continue;
+                const auto id = preset.find("id");
+                if (id == preset.end() || !id->is_string() ||
+                    id->get_ref<const std::string&>().empty()) {
+                    continue;
+                }
+                preset["catalog_identity"] =
+                    setup::catalog_preset_identity(
+                        response, id->get_ref<const std::string&>());
+            }
+        }
     } catch (const std::exception&) {
         response["presets"] = nlohmann::json::array();
         response["error"] = "catalogue is unavailable";

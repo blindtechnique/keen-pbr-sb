@@ -936,6 +936,7 @@ export const enTranslation = {
         "Could not reload the current configuration. Nothing was changed.",
       add: "Add",
       added: "Lists added: {{count}}",
+      installed: "Already added",
       priorityGuard: {
         title: "Blocking-rule priority accounted for",
         description:
@@ -959,7 +960,12 @@ export const enTranslation = {
         applying: "Adding…",
         previewReady: "Setup checked",
         previewSummary:
-          "Lists: {{lists}}. Route: {{route}}. DNS: {{dns}}.",
+          "Lists to add: {{lists}}. Route: {{route}}. DNS: {{dns}}.",
+        applied: "Catalog setup applied",
+        alreadyInstalledTitle: "Already installed",
+        alreadyInstalled:
+          "{{lists}} already exists in the configuration. Duplicates will not be created; the preview below shows whether any related rules are still missing.",
+        alreadyInstalledButton: "Already installed",
         noRoute: "not created",
         noDnsRule: "rule not created",
         automaticDnsHint:
@@ -976,8 +982,7 @@ export const enTranslation = {
             "The selected list has no remote file, so it does not need a download route.",
           dnsAutomaticUnavailable:
             "No matching DNS server was found for this route. The list and route will be added without a DNS rule.",
-          dnsIgnoredForBlock:
-            "A DNS rule is not created for a blocking list.",
+          dnsIgnoredForBlock: "A DNS rule is not created for a blocking list.",
           dnsDetourMissing:
             "The selected DNS server is not attached to the route. Check that it can resolve domains through the intended output.",
           dnsDetourMismatch:
@@ -1160,7 +1165,7 @@ export const enTranslation = {
           "This interface is saved in config but is not present in the current live interface inventory.",
         internalVpnServersTitle: "Internal VPN servers",
         internalVpnServersDescription:
-          "Choose whether traffic and DNS requests from clients of native Keenetic VPN servers are processed by keen-pbr-sb. WireGuard, AmneziaWG, OpenVPN, IKE, L2TP, SSTP and OpenConnect are supported. Switches take effect only after the shared settings form is saved.",
+          "Choose whether traffic and DNS requests from native Keenetic VPN servers with a dedicated system interface are processed by keen-pbr-sb. Switches take effect only after the shared settings form is saved.",
         internalVpnServersEmptyTitle: "No VPN servers found",
         internalVpnServersEmptyDescription:
           "KeeneticOS did not report a supported VPN server with a resolved system interface.",
@@ -1196,6 +1201,42 @@ export const enTranslation = {
         internalVpnServersToggleAriaLabel:
           "Process clients of {{server}} through keen-pbr-sb",
         internalVpnServersInheritAriaLabel:
+          "Return {{server}} to the inherited policy",
+        internalVpnServicesTitle:
+          "L2TP, IKEv1/IKEv2, SSTP and OpenConnect servers",
+        internalVpnServicesDescription:
+          "These servers have no dedicated Linux interface while idle. keen-pbr-sb safely identifies them by fresh KeeneticOS client pools without treating ordinary LAN traffic as VPN traffic.",
+        internalVpnServicesEmptyTitle:
+          "No supported server with a client pool found",
+        internalVpnServicesEmptyDescription:
+          "The current KeeneticOS configuration has no enabled supported server with a valid client address pool.",
+        internalVpnServicesLoadingTitle: "Loading KeeneticOS servers",
+        internalVpnServicesLoadingDescription:
+          "Waiting for the current L2TP, IKEv1/IKEv2, SSTP and OpenConnect configuration. Saved policies remain unchanged.",
+        internalVpnServicesUnavailableTitle:
+          "Server configuration is unavailable",
+        internalVpnServicesUnavailableDescription:
+          "KeeneticOS did not provide a fresh authoritative server configuration. New switches are temporarily disabled.",
+        internalVpnServicesStaleTitle:
+          "Showing the last known server configuration",
+        internalVpnServicesStaleDescription:
+          "A fresh KeeneticOS response is unavailable. A saved policy can be returned to inherited behavior, but new changes are disabled.",
+        internalVpnServicesLoadErrorTitle:
+          "Could not load servers with client pools",
+        internalVpnServicesLoadErrorDescription:
+          "Check keen-pbr-sb access to NDMS. Saved policies are never removed automatically.",
+        internalVpnServicesProcessLabel: "Through keen-pbr-sb",
+        internalVpnServicesInheritLabel: "Inherit",
+        internalVpnServicesStatusEnabled: "Enabled",
+        internalVpnServicesStatusDisabled: "Disabled",
+        internalVpnServicesStatusMissing: "Missing",
+        internalVpnServicesPoolLabel: "Client pool",
+        internalVpnServicesBoundInterfaceLabel: "Bound to",
+        internalVpnServicesUnavailableHint:
+          "Changes are disabled until the server is enabled and its client pool is confirmed by a fresh KeeneticOS response.",
+        internalVpnServicesToggleAriaLabel:
+          "Process clients of {{server}} through keen-pbr-sb",
+        internalVpnServicesInheritAriaLabel:
           "Return {{server}} to the inherited policy",
       },
       autoupdate: {
@@ -2056,14 +2097,25 @@ export const enTranslation = {
         title: "Quick rule setup",
         description:
           "Optionally create linked rules together with the list. All changes are saved in one operation.",
+        recommendedDescription:
+          "For a stable default, simple mode creates dedicated routing and DNS rules for this list.",
         createRouteRule: "Create a routing rule for this list",
         selectOutbound: "Select a route or failover target",
         createDnsRule: "Create a DNS rule for this list",
         selectDnsServer: "Select a DNS server",
         noDnsServers:
           "Create a DNS server first, then it will become available here.",
+        noCompatibleDnsServer:
+          "The selected route has no DNS server using the same outbound. Create a compatible DNS server first or use the advanced editor.",
+        createDnsServerFromPreset: "DNS server for the selected route",
+        createDnsServerFromPresetHint:
+          "A compatible plain DNS server will be created with the list and attached to the selected route. Nothing is saved unless the complete setup validates.",
+        dnsCreateFailed:
+          "Could not prepare a compatible DNS server. Check the route and selected preset.",
         manualHint:
           "Leave the checkboxes off to configure rules manually after creating the list.",
+        recommendedHint:
+          "Fine tuning and independent rules remain available in the advanced editor.",
         routeRequired:
           "Select a route or failover target for the routing rule.",
         dnsRequired: "Select a DNS server for the DNS rule.",

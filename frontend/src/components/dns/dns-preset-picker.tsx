@@ -27,12 +27,14 @@ export function DnsPresetPicker({
   label,
   onValueChange,
   savedTemplates = [],
+  showCustom = true,
   value,
 }: {
   customLabel: string
   label: string
   onValueChange: (value: DnsPresetSelection) => void
   savedTemplates?: PlainDnsTemplate[]
+  showCustom?: boolean
   value: DnsPresetSelection
 }) {
   return (
@@ -79,21 +81,23 @@ export function DnsPresetPicker({
             </button>
           )
         })}
-        <button
-          aria-pressed={value === "custom"}
-          className={cn(
-            "flex min-h-16 items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition-[border-color,background-color,box-shadow] hover:border-primary/60 hover:shadow-sm",
-            value === "custom" &&
-              "border-primary bg-primary/8 shadow-[inset_0_0_0_1px_var(--color-primary)]"
-          )}
-          onClick={() => onValueChange("custom")}
-          type="button"
-        >
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted text-primary">
-            <ServerCog className="size-5" />
-          </span>
-          <span className="min-w-0 text-sm font-medium">{customLabel}</span>
-        </button>
+        {showCustom ? (
+          <button
+            aria-pressed={value === "custom"}
+            className={cn(
+              "flex min-h-16 items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition-[border-color,background-color,box-shadow] hover:border-primary/60 hover:shadow-sm",
+              value === "custom" &&
+                "border-primary bg-primary/8 shadow-[inset_0_0_0_1px_var(--color-primary)]"
+            )}
+            onClick={() => onValueChange("custom")}
+            type="button"
+          >
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted text-primary">
+              <ServerCog className="size-5" />
+            </span>
+            <span className="min-w-0 text-sm font-medium">{customLabel}</span>
+          </button>
+        ) : null}
       </div>
     </fieldset>
   )

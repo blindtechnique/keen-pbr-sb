@@ -63,6 +63,46 @@ describe("notification collector", () => {
     expect(notices[0]?.text).toContain("line 41 failed")
   })
 
+  test("keeps exact-domain-only SRS mapping in the journal", () => {
+    const notices = collectNotices(
+      [
+        "2026-07-29 12:00:00.000 [W] List 'github_2': SRS import is lossy: mapped 30 exact domain(s) to keen-pbr root-and-subdomain semantics",
+        "2026-07-29 12:00:01.000 [W] List 'broken': failed to refresh https://example.test/broken.srs: SRS contains no safely representable domain, domain suffix or IP/CIDR entries",
+      ],
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.text).toContain("failed to refresh")
+  })
+
+  test("keeps materially lossy SRS conversion visible", () => {
+    const notices = collectNotices(
+      [
+        "2026-07-29 12:00:00.000 [W] List 'geosite_category_ai_nocn': SRS import is lossy: mapped 28 exact domain(s) to keen-pbr root-and-subdomain semantics; skipped 1 unsupported condition(s)",
+        "2026-07-29 12:00:01.000 [W] List 'unsupported': SRS import is lossy: skipped 2 unsupported condition(s)",
+        "2026-07-29 12:00:02.000 [W] List 'rules': SRS import is lossy: skipped 3 rule(s), including 1 inverted rule(s)",
+        "2026-07-29 12:00:03.000 [W] List 'domains': SRS import is lossy: skipped 4 invalid domain value(s)",
+      ],
+      undefined,
+      undefined,
+      0,
+      new Set(),
+      t
+    )
+
+    expect(notices.map((notice) => notice.text)).toEqual([
+      "List 'domains': SRS import is lossy: skipped 4 invalid domain value(s)",
+      "List 'rules': SRS import is lossy: skipped 3 rule(s), including 1 inverted rule(s)",
+      "List 'unsupported': SRS import is lossy: skipped 2 unsupported condition(s)",
+      "List 'geosite_category_ai_nocn': SRS import is lossy: mapped 28 exact domain(s) to keen-pbr root-and-subdomain semantics; skipped 1 unsupported condition(s)",
+    ])
+  })
+
   test("adds a stable version-specific nfqws2 update notice", () => {
     const notices = collectNotices(
       [],

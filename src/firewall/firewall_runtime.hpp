@@ -2,6 +2,7 @@
 
 #include "../cache/cache_manager.hpp"
 #include "../config/config.hpp"
+#include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../routing/firewall_state.hpp"
 #include "firewall.hpp"
 
@@ -22,6 +23,8 @@ std::vector<RuleState> apply_runtime_firewall(
     Firewall& firewall,
     FirewallApplyMode mode,
     const std::vector<InternalVpnServer>*
-        effective_internal_vpn_servers = nullptr);
+        effective_internal_vpn_servers = nullptr,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets = nullptr);
 
 } // namespace keen_pbr3

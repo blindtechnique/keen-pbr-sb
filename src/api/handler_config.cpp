@@ -11,6 +11,7 @@
 #include "../config/config_writer.hpp"
 #include "../crypto/sha256.hpp"
 #include "../log/logger.hpp"
+#include "../setup/catalog_setup_planner.hpp"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -36,6 +37,17 @@ namespace fs = std::filesystem;
 
 constexpr const char* kRecoveryStateRoot =
     "/opt/var/lib/keen-pbr/recovery";
+
+bool is_lowercase_sha256_digest(const std::string& value) {
+    return value.size() == 64U &&
+           std::all_of(
+               value.begin(),
+               value.end(),
+               [](const char ch) {
+                   return (ch >= '0' && ch <= '9') ||
+                          (ch >= 'a' && ch <= 'f');
+               });
+}
 
 enum class ConfigSaveCheckpoint {
     wal_started,
@@ -1024,13 +1036,14 @@ static void register_config_handler_impl(
         nlohmann::json response = {
             {"config", nlohmann::json(visible_config)},
             {"is_draft", visible_snapshot.is_draft},
+            {"revision", visible_snapshot.revision},
             {"list_refresh_state", nlohmann::json(list_refresh_state)},
         };
         return response.dump();
     });
 
-    // POST /api/config - validate and stage in memory only
-    server.post("/api/config", [&ctx](const std::string& body) -> std::string {
+    const auto parse_validated_candidate =
+        [](const std::string& body) -> Config {
         Config staged;
         try {
             staged = parse_config(body);
@@ -1046,7 +1059,15 @@ static void register_config_handler_impl(
             };
             throw ApiError(e.what(), 400, payload.dump());
         }
+        return staged;
+    };
 
+    // POST /api/config - validate and stage in memory only
+    server.post(
+        "/api/config",
+        [&ctx, parse_validated_candidate](
+            const std::string& body) -> std::string {
+        Config staged = parse_validated_candidate(body);
         std::string formatted_config = serialize_config_pretty(staged);
         ConfigOperationGuard config_operation(ctx);
         ctx.stage_config(std::move(staged), std::move(formatted_config));
@@ -1057,6 +1078,99 @@ static void register_config_handler_impl(
         resp.message = "Config staged in memory";
         return nlohmann::json(resp).dump();
     });
+
+    // The simple list dialog uses a narrower, backend-authoritative contract
+    // than the advanced editor. It cannot stage a route-only configuration:
+    // the candidate must contain one dedicated route rule and one compatible
+    // DNS rule for the new list.
+    server.post(
+        "/api/setup/list/stage",
+        [&ctx, parse_validated_candidate](
+            const std::string& body) -> std::string {
+            nlohmann::json request;
+            try {
+                request = nlohmann::json::parse(body);
+            } catch (const nlohmann::json::exception& error) {
+                throw ApiError(
+                    std::string("Invalid JSON request: ") + error.what(),
+                    400);
+            }
+            if (!request.is_object() ||
+                !request.contains("config") ||
+                !request.at("config").is_object() ||
+                !request.contains("list_id") ||
+                !request.at("list_id").is_string() ||
+                request.at("list_id").get_ref<const std::string&>().empty() ||
+                !request.contains("base_revision") ||
+                !request.at("base_revision").is_string() ||
+                !is_lowercase_sha256_digest(
+                    request.at("base_revision").get_ref<
+                        const std::string&>())) {
+                throw ApiError(
+                    "Recommended list setup requires config, list_id, and "
+                    "a lowercase SHA-256 base_revision",
+                    400,
+                    nlohmann::json{
+                        {"error",
+                         "Recommended list setup requires config, list_id, "
+                         "and a lowercase SHA-256 base_revision"},
+                        {"reason", "recommended_list_setup_invalid"},
+                    }
+                        .dump());
+            }
+
+            Config staged = parse_validated_candidate(
+                request.at("config").dump());
+            try {
+                setup::validate_recommended_list_setup(
+                    staged,
+                    request.at("list_id").get<std::string>());
+            } catch (const std::invalid_argument& error) {
+                throw ApiError(
+                    error.what(),
+                    400,
+                    nlohmann::json{
+                        {"error", error.what()},
+                        {"reason", "recommended_list_setup_invalid"},
+                    }
+                        .dump());
+            }
+
+            std::string formatted_config =
+                serialize_config_pretty(staged);
+            ConfigOperationGuard config_operation(ctx);
+            const std::string requested_base_revision =
+                request.at("base_revision").get<std::string>();
+            if (!ctx.stage_config_if_visible_revision(
+                    requested_base_revision,
+                    std::move(staged),
+                    std::move(formatted_config))) {
+                const VisibleConfigSnapshot current =
+                    ctx.get_visible_config_snapshot();
+                const std::string message =
+                    "The visible configuration changed after this list "
+                    "setup was opened";
+                throw ApiError(
+                    message,
+                    409,
+                    nlohmann::json{
+                        {"error", message},
+                        {"reason", "base_revision_mismatch"},
+                        {"base_revision", requested_base_revision},
+                        {"current_base_revision", current.revision},
+                        {"draft_preserved", current.is_draft},
+                        {"staged", false},
+                    }
+                        .dump());
+            }
+            config_operation.finish();
+
+            api::ConfigUpdateResponse response;
+            response.status = api::ConfigUpdateResponseStatus::OK;
+            response.message =
+                "Recommended list setup staged in memory";
+            return nlohmann::json(response).dump();
+        });
 
     // POST /api/config/save - persist the staged candidate through the shared
     // durable commit coordinator used by composite transport creation.

@@ -1,3 +1,4 @@
+import type { NdmsVpnServerService } from "@/api/generated/model/ndmsVpnServerService"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -50,6 +51,7 @@ export interface InternalVpnServersFieldCopy {
 
 interface InternalVpnServersFieldProps {
   readonly nativeInterfaces: readonly NativeInterfaceModel[]
+  readonly authoritativeServices?: readonly NdmsVpnServerService[]
   readonly overrides?: readonly InternalVpnServerPolicyOverride[]
   readonly baselineOverrides?: readonly InternalVpnServerPolicyOverride[]
   readonly legacyInboundInterfaces?: readonly string[]
@@ -73,6 +75,7 @@ interface InternalVpnServersFieldProps {
  */
 export function InternalVpnServersField({
   nativeInterfaces,
+  authoritativeServices,
   overrides,
   baselineOverrides,
   legacyInboundInterfaces,
@@ -86,6 +89,7 @@ export function InternalVpnServersField({
   const servers = buildInternalVpnServerOptions({
     nativeInterfaces,
     overrides,
+    authoritativeServices,
   })
   const inventoryNotice =
     inventoryState === "loading"

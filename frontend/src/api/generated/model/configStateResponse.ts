@@ -13,6 +13,12 @@ export interface ConfigStateResponse {
   /** Whether the returned config is a staged in-memory draft rather than the currently persisted config.
    */
   is_draft: boolean;
+  /**
+     * Stable revision of the returned visible configuration. Narrow setup endpoints use it for compare-and-swap protection.
+
+     * @pattern ^[0-9a-f]{64}$
+     */
+  revision: string;
   /** URL list refresh metadata keyed by list name. Present only for URL-backed lists visible in the returned config.
    */
   list_refresh_state?: ConfigStateResponseListRefreshState;

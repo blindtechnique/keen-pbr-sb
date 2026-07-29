@@ -1,5 +1,6 @@
 import type {
   InternalVpnServer,
+  NdmsVpnServerService,
   RuntimeInterfaceInventoryEntry,
 } from "@/api/generated/model"
 import type { NativeInterfaceModel } from "@/lib/native-interfaces"
@@ -25,6 +26,13 @@ export interface InternalVpnServerOption {
 interface BuildServerOptions {
   readonly nativeInterfaces: readonly NativeInterfaceModel[]
   readonly overrides?: readonly InternalVpnServerPolicyOverride[]
+  /**
+   * Pass only a fresh, authoritative running-config observation. Pooled
+   * L2TP/IKE/SSTP/OpenConnect services supersede their legacy interface row;
+   * saved interface overrides remain untouched and return as fallback if the
+   * service observation later disappears.
+   */
+  readonly authoritativeServices?: readonly NdmsVpnServerService[]
 }
 
 interface ProcessClientsOptions {
@@ -77,6 +85,7 @@ export type InternalVpnServerStatus = "up" | "down" | "missing" | "unknown"
 export function buildInternalVpnServerOptions({
   nativeInterfaces,
   overrides,
+  authoritativeServices,
 }: BuildServerOptions): InternalVpnServerOption[] {
   const options: InternalVpnServerOption[] = []
   const normalizedOverrides = normalizeInternalVpnServerOverrides(
@@ -85,9 +94,25 @@ export function buildInternalVpnServerOptions({
   const consumedOverrides = new Set<string>()
   const visibleNdmsIds = new Set<string>()
   const visibleInterfaces = new Set<string>()
+  const supersededNdmsIds = new Set<string>()
+  const supersededInterfaces = new Set<string>()
 
   for (const nativeInterface of nativeInterfaces) {
     const ndmsId = normalizeOptionalValue(nativeInterface.source.id)
+    if (
+      nativeVpnInterfaceIsSupersededByService(
+        nativeInterface,
+        authoritativeServices ?? []
+      )
+    ) {
+      if (ndmsId) {
+        supersededNdmsIds.add(ndmsId)
+      }
+      if (nativeInterface.kernelName) {
+        supersededInterfaces.add(nativeInterface.kernelName)
+      }
+      continue
+    }
     if (
       !nativeInterface.source.internal_vpn_server_candidate ||
       !isSupportedNativeVpnServerKind(nativeInterface.source.kind) ||
@@ -129,6 +154,12 @@ export function buildInternalVpnServerOptions({
     }
 
     const ndmsId = normalizeOptionalValue(override.ndms_id)
+    if (
+      (ndmsId && supersededNdmsIds.has(ndmsId)) ||
+      supersededInterfaces.has(override.interface)
+    ) {
+      continue
+    }
     options.push({
       key: ndmsId ? `missing:ndms:${ndmsId}` : `missing:${override.interface}`,
       ndmsId,
@@ -140,6 +171,41 @@ export function buildInternalVpnServerOptions({
   }
 
   return options
+}
+
+export function nativeVpnInterfaceIsSupersededByService(
+  nativeInterface: NativeInterfaceModel,
+  authoritativeServices: readonly NdmsVpnServerService[]
+): boolean {
+  const identifiers = new Set(
+    [
+      nativeInterface.source.id,
+      nativeInterface.source.firmware_interface_name,
+      nativeInterface.logicalName,
+      nativeInterface.kernelName,
+    ]
+      .map(normalizeOptionalValue)
+      .filter((value): value is string => Boolean(value))
+  )
+
+  return authoritativeServices.some((service) => {
+    const boundInterface = normalizeOptionalValue(service.bound_interface_id)
+    if (boundInterface && identifiers.has(boundInterface)) {
+      return true
+    }
+    switch (service.kind) {
+      case "l2tp":
+        return nativeInterface.source.kind === "l2tp"
+      case "ikev1":
+      case "ikev2":
+        return nativeInterface.source.kind === "ike"
+      case "sstp":
+        return nativeInterface.source.kind === "sstp"
+      case "openconnect":
+        return nativeInterface.source.kind === "openconnect"
+    }
+    return false
+  })
 }
 
 /**
@@ -538,7 +604,7 @@ function isSupportedNativeVpnServerKind(kind: string): boolean {
   )
 }
 
-function normalizeOptionalValue(value?: string): string | undefined {
+function normalizeOptionalValue(value?: string | null): string | undefined {
   const normalized = value?.trim()
   return normalized ? normalized : undefined
 }

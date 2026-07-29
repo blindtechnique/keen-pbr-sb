@@ -112,6 +112,7 @@ nlohmann::json catalog_snapshot(
         "https://repo.hoaxisr.ru/rulesets/srs/ai.srs") {
     return {
         {"source", "test"},
+        {"catalog_id", "test:catalog"},
         {"presets",
          nlohmann::json::array(
              {{{"id", "category-ai"},
@@ -371,6 +372,8 @@ TEST_CASE(
     REQUIRE(persisted.lists.has_value());
     const auto& list = persisted.lists->at("category_ai");
     CHECK(list.display_name == "AI-сервисы");
+    REQUIRE(list.catalog_identity.has_value());
+    CHECK(list.catalog_identity->size() == 64U);
     CHECK(
         list.url ==
         "https://repo.hoaxisr.ru/rulesets/srs/ai.srs");
@@ -385,6 +388,290 @@ TEST_CASE(
     CHECK(
         persisted.dns->rules->front().display_name ==
         "DNS для AI");
+}
+
+TEST_CASE(
+    "catalog setup reuses a legacy list and applies missing route and DNS policies") {
+    constexpr int api_port = 18479;
+    CatalogSetupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    auto initial = catalog_base_config();
+    ListConfig legacy;
+    legacy.display_name = "Existing AI";
+    legacy.url =
+        "https://repo.hoaxisr.ru/rulesets/srs/ai.srs";
+    initial.lists = std::map<std::string, ListConfig>{
+        {"existing_ai", std::move(legacy)}};
+    validate_config(initial);
+    write_text(
+        config_path,
+        serialize_config_for_persistence(initial));
+
+    ConfigStore store(initial);
+    SseBroadcaster broadcaster;
+    ConfigOperationGate operation_gate;
+    std::size_t apply_calls = 0;
+    auto context = make_catalog_context(
+        config_path.string(),
+        broadcaster,
+        store,
+        operation_gate,
+        apply_calls);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_catalog_test_handler(
+        server,
+        context,
+        [] { return catalog_snapshot(); },
+        directory);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto intent = catalog_intent();
+    const auto preview_response = client.Post(
+        "/api/setup/catalog/preview",
+        nlohmann::json{{"intent", intent}}.dump(),
+        "application/json");
+    REQUIRE(preview_response != nullptr);
+    REQUIRE(preview_response->status == 200);
+    const auto preview =
+        nlohmann::json::parse(preview_response->body);
+    const auto& summary = preview.at("summary");
+    CHECK(
+        summary.at("lists").at(0).at("already_installed") ==
+        true);
+    CHECK(
+        summary.at("lists").at(0).at("technical_id") ==
+        "existing_ai");
+    REQUIRE(summary.contains("route_rule"));
+    REQUIRE(summary.contains("dns_rule"));
+
+    const auto apply_response = client.Post(
+        "/api/setup/catalog/apply",
+        apply_request(intent, preview, false).dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(apply_response != nullptr);
+    CHECK(apply_response->status == 200);
+    CHECK(apply_calls == 1U);
+    REQUIRE(store.active_config().lists.has_value());
+    CHECK(store.active_config().lists->size() == 1U);
+    REQUIRE(store.active_config().route->rules.has_value());
+    REQUIRE(store.active_config().route->rules->size() == 1U);
+    REQUIRE(
+        store.active_config().route->rules->front().list.has_value());
+    CHECK(
+        *store.active_config().route->rules->front().list ==
+        std::vector<std::string>{"existing_ai"});
+    REQUIRE(store.active_config().dns->rules.has_value());
+    REQUIRE(store.active_config().dns->rules->size() == 1U);
+    CHECK(
+        store.active_config().dns->rules->front().list ==
+        std::vector<std::string>{"existing_ai"});
+}
+
+TEST_CASE(
+    "catalog setup reports an installed preset and refuses a duplicate no-op apply") {
+    constexpr int api_port = 18480;
+    CatalogSetupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto initial = catalog_base_config();
+    write_text(
+        config_path,
+        serialize_config_for_persistence(initial));
+
+    ConfigStore store(initial);
+    SseBroadcaster broadcaster;
+    ConfigOperationGate operation_gate;
+    std::size_t apply_calls = 0;
+    auto context = make_catalog_context(
+        config_path.string(),
+        broadcaster,
+        store,
+        operation_gate,
+        apply_calls);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_catalog_test_handler(
+        server,
+        context,
+        [] { return catalog_snapshot(); },
+        directory);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto intent = catalog_intent();
+    const auto first_preview_response = client.Post(
+        "/api/setup/catalog/preview",
+        nlohmann::json{{"intent", intent}}.dump(),
+        "application/json");
+    REQUIRE(first_preview_response != nullptr);
+    REQUIRE(first_preview_response->status == 200);
+    const auto first_preview =
+        nlohmann::json::parse(first_preview_response->body);
+    const auto first_apply = client.Post(
+        "/api/setup/catalog/apply",
+        apply_request(intent, first_preview, false).dump(),
+        "application/json");
+    REQUIRE(first_apply != nullptr);
+    REQUIRE(first_apply->status == 200);
+
+    const auto duplicate_preview_response = client.Post(
+        "/api/setup/catalog/preview",
+        nlohmann::json{{"intent", intent}}.dump(),
+        "application/json");
+    REQUIRE(duplicate_preview_response != nullptr);
+    REQUIRE(duplicate_preview_response->status == 200);
+    const auto duplicate_preview =
+        nlohmann::json::parse(duplicate_preview_response->body);
+    const auto& summary = duplicate_preview.at("summary");
+    REQUIRE(summary.at("lists").size() == 1U);
+    CHECK(
+        summary.at("lists").at(0).at("already_installed") ==
+        true);
+    CHECK_FALSE(summary.contains("route_rule"));
+    CHECK_FALSE(summary.contains("dns_rule"));
+
+    const auto duplicate_apply = client.Post(
+        "/api/setup/catalog/apply",
+        apply_request(intent, duplicate_preview, false).dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(duplicate_apply != nullptr);
+    CHECK(duplicate_apply->status == 409);
+    CHECK(
+        nlohmann::json::parse(duplicate_apply->body).at("reason") ==
+        "already_installed");
+    CHECK(apply_calls == 1U);
+    REQUIRE(store.active_config().lists.has_value());
+    CHECK(store.active_config().lists->size() == 1U);
+    REQUIRE(store.active_config().route->rules.has_value());
+    CHECK(store.active_config().route->rules->size() == 1U);
+    REQUIRE(store.active_config().dns->rules.has_value());
+    CHECK(store.active_config().dns->rules->size() == 1U);
+}
+
+TEST_CASE(
+    "parallel catalog applies serialize and create one preset only") {
+    constexpr int api_port = 18481;
+    CatalogSetupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto initial = catalog_base_config();
+    write_text(
+        config_path,
+        serialize_config_for_persistence(initial));
+
+    ConfigStore store(initial);
+    SseBroadcaster broadcaster;
+    ConfigOperationGate operation_gate;
+    std::size_t apply_calls = 0;
+    auto context = make_catalog_context(
+        config_path.string(),
+        broadcaster,
+        store,
+        operation_gate,
+        apply_calls);
+
+    std::mutex apply_mutex;
+    std::condition_variable apply_condition;
+    bool first_apply_entered = false;
+    bool release_first_apply = false;
+    context.enqueue_apply_validated_config_fn =
+        [&](Config config, std::string serialized) {
+            {
+                std::unique_lock<std::mutex> lock(apply_mutex);
+                ++apply_calls;
+                first_apply_entered = true;
+                apply_condition.notify_all();
+                apply_condition.wait(
+                    lock, [&] { return release_first_apply; });
+            }
+            auto marks = allocate_outbound_marks(
+                config.fwmark.value_or(FwmarkConfig{}),
+                config.outbounds.value_or(
+                    std::vector<Outbound>{}));
+            store.replace_active(
+                std::move(config), std::move(marks));
+            store.clear_staged_if_matches(serialized);
+            ConfigApplyResult result;
+            result.applied = true;
+            return result;
+        };
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_catalog_test_handler(
+        server,
+        context,
+        [] { return catalog_snapshot(); },
+        directory);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto intent = catalog_intent();
+    const auto preview_response = client.Post(
+        "/api/setup/catalog/preview",
+        nlohmann::json{{"intent", intent}}.dump(),
+        "application/json");
+    REQUIRE(preview_response != nullptr);
+    REQUIRE(preview_response->status == 200);
+    const auto preview =
+        nlohmann::json::parse(preview_response->body);
+    const auto request =
+        apply_request(intent, preview, false).dump();
+
+    int first_status = -1;
+    std::thread first([&] {
+        httplib::Client first_client("127.0.0.1", api_port);
+        const auto response = first_client.Post(
+            "/api/setup/catalog/apply",
+            request,
+            "application/json");
+        if (response != nullptr) first_status = response->status;
+    });
+    {
+        std::unique_lock<std::mutex> lock(apply_mutex);
+        apply_condition.wait(
+            lock, [&] { return first_apply_entered; });
+    }
+
+    httplib::Client second_client("127.0.0.1", api_port);
+    const auto second = second_client.Post(
+        "/api/setup/catalog/apply",
+        request,
+        "application/json");
+    REQUIRE(second != nullptr);
+    CHECK(second->status == 409);
+    CHECK(
+        nlohmann::json::parse(second->body).at("reason") ==
+        "config_operation_in_progress");
+
+    {
+        std::lock_guard<std::mutex> lock(apply_mutex);
+        release_first_apply = true;
+    }
+    apply_condition.notify_all();
+    first.join();
+    server.stop();
+
+    CHECK(first_status == 200);
+    CHECK(apply_calls == 1U);
+    REQUIRE(store.active_config().lists.has_value());
+    CHECK(store.active_config().lists->size() == 1U);
+    REQUIRE(store.active_config().route->rules.has_value());
+    CHECK(store.active_config().route->rules->size() == 1U);
+    REQUIRE(store.active_config().dns->rules.has_value());
+    CHECK(store.active_config().dns->rules->size() == 1U);
 }
 
 TEST_CASE(

@@ -17,14 +17,16 @@ inline sigset_t daemon_signal_mask() {
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGUSR1);
+    sigaddset(&mask, SIGUSR2);
     sigaddset(&mask, SIGHUP);
     return mask;
 }
 
-inline sigset_t sigusr1_signal_mask() {
+inline sigset_t firewall_refresh_signal_mask() {
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
+    sigaddset(&mask, SIGUSR2);
     return mask;
 }
 

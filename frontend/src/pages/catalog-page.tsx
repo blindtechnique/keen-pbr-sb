@@ -32,11 +32,13 @@ import { cn } from "@/lib/utils"
 import {
   getCatalogPresetSourceSummary,
   getCatalogSelectionMode,
+  isCatalogPresetInstalled,
   isCatalogRoutableOutboundType,
   type CatalogPreset,
 } from "@/pages/catalog-model"
 import {
   applyCatalogSetup,
+  getCatalogSetupInstallState,
   previewCatalogSetup,
   type CatalogSetupPreview,
   type CatalogSetupWarning,
@@ -180,8 +182,7 @@ export function CatalogPage() {
         preview,
         acceptWarnings: accepted,
       }),
-    onSuccess: async (_, variables) => {
-      const addedCount = variables.intent.selections.length
+    onSuccess: async () => {
       setSelected(new Set())
       setupIntentRef.current = null
       setSetupIntent(null)
@@ -200,7 +201,7 @@ export function CatalogPage() {
         }),
         queryClient.invalidateQueries({ queryKey: ["catalog"] }),
       ])
-      toast.success(t("pages.catalog.added", { count: addedCount }))
+      toast.success(t("pages.catalog.setup.applied"))
     },
     onError: (error: ApiError) => {
       // A conflict means the authoritative config or catalogue changed after
@@ -215,6 +216,13 @@ export function CatalogPage() {
 
   const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
   const selectedMode = getCatalogSelectionMode(presets, selected)
+  const installedPresetIds = new Set(
+    presets
+      .filter((preset) =>
+        isCatalogPresetInstalled(preset, config?.lists)
+      )
+      .map((preset) => preset.id)
+  )
 
   const categories = useMemo(() => {
     const present = new Set(presets.map((preset) => preset.category))
@@ -349,6 +357,10 @@ export function CatalogPage() {
     }
   }
 
+  const setupInstallState = setupPreview
+    ? getCatalogSetupInstallState(setupPreview)
+    : null
+
   return (
     <div className="space-y-3">
       <PageHeader
@@ -444,6 +456,7 @@ export function CatalogPage() {
         {visible.map((preset) => {
           const sourceSummary = getCatalogPresetSourceSummary(preset)
           const blocks = preset.engines?.singbox?.action === "reject"
+          const installed = installedPresetIds.has(preset.id)
 
           return (
             <label
@@ -456,7 +469,14 @@ export function CatalogPage() {
                 onChange={() => toggle(preset.id)}
                 type="checkbox"
               />
-              <span className="min-w-0 flex-1 truncate">{preset.name}</span>
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="truncate">{preset.name}</span>
+                {installed ? (
+                  <span className="shrink-0 text-xs font-medium text-success">
+                    {t("pages.catalog.installed")}
+                  </span>
+                ) : null}
+              </span>
               <span className="shrink-0 text-xs text-muted-foreground">
                 {sourceSummary.urlBacked
                   ? t("pages.catalog.ruleSet")
@@ -649,7 +669,7 @@ export function CatalogPage() {
                     </AlertTitle>
                     <AlertDescription>
                       {t("pages.catalog.setup.previewSummary", {
-                        lists: setupPreview.summary.lists.length,
+                        lists: setupInstallState?.pending.length ?? 0,
                         route: setupPreview.summary.route_rule
                           ? (outboundDisplayNames.get(
                               setupPreview.summary.route_rule.outbound
@@ -666,6 +686,23 @@ export function CatalogPage() {
                       })}
                     </AlertDescription>
                   </Alert>
+
+                  {setupInstallState &&
+                  setupInstallState.installed.length > 0 ? (
+                    <Alert>
+                      <ShieldCheckIcon className="size-4" />
+                      <AlertTitle>
+                        {t("pages.catalog.setup.alreadyInstalledTitle")}
+                      </AlertTitle>
+                      <AlertDescription>
+                        {t("pages.catalog.setup.alreadyInstalled", {
+                          lists: setupInstallState.installed
+                            .map((list) => list.display_name)
+                            .join(", "),
+                        })}
+                      </AlertDescription>
+                    </Alert>
+                  ) : null}
 
                   {setupPreview.warnings.map((warning) => (
                     <Alert
@@ -721,6 +758,7 @@ export function CatalogPage() {
                 configMutationPending ||
                 previewMutation.isPending ||
                 applyMutation.isPending ||
+                Boolean(setupInstallState?.noChanges) ||
                 Boolean(
                   setupPreview?.requires_warning_acceptance && !acceptWarnings
                 )
@@ -729,9 +767,11 @@ export function CatalogPage() {
             >
               {applyMutation.isPending
                 ? t("pages.catalog.setup.applying")
-                : setupPreview
-                  ? t("pages.catalog.naming.confirm")
-                  : t("pages.catalog.setup.preview")}
+                : setupInstallState?.noChanges
+                  ? t("pages.catalog.setup.alreadyInstalledButton")
+                  : setupPreview
+                    ? t("pages.catalog.naming.confirm")
+                    : t("pages.catalog.setup.preview")}
             </Button>
           </DialogFooter>
         </DialogContent>

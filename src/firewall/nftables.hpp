@@ -2,6 +2,7 @@
 
 #include "firewall.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -40,6 +41,7 @@ public:
     void create_dns_redirect_rules() override;
     void create_tunnel_snat_rules(
         const std::vector<std::string>& interfaces) override;
+    OwnedSnatState inspect_owned_snat_state() const override;
     // Buffer a pass-through verdict rule that matches the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -134,7 +136,20 @@ private:
     static nlohmann::json build_snat_chain_json();
     static nlohmann::json build_delete_snat_chain_json();
     static nlohmann::json build_snat_rule_json();
-    static nlohmann::json build_interface_snat_rule_json(const std::string& interface);
+    static nlohmann::json build_interface_snat_rule_json(
+        const std::string& interface,
+        uint32_t fwmark_mask);
+    static OwnedSnatState parse_owned_snat_state(
+        const std::string& document,
+        bool expected,
+        const std::vector<std::string>& expected_interfaces,
+        uint32_t expected_fwmark_mask);
+    OwnedSnatState inspect_owned_snat_state(
+        bool expected,
+        const std::vector<std::string>& expected_interfaces,
+        uint32_t expected_fwmark_mask) const;
+    static std::chrono::milliseconds owned_snat_inspect_timeout();
+    static std::chrono::milliseconds owned_snat_inspect_kill_grace();
     // Build all prerouting rule add-commands, including global prefilter rules.
     static nlohmann::json build_rule_add_commands(
         const FirewallGlobalPrefilter& prefilter,
@@ -198,6 +213,12 @@ private:
     bool dns_redirect_requested_ = false;
     bool router_origin_snat_requested_ = false;
     std::vector<std::string> snat_interfaces_;
+    // Last successfully applied SNAT contract. It is intentionally not reset
+    // by prepare_apply(), so the runtime monitor observes the live generation
+    // until a replacement transaction has committed.
+    bool last_applied_snat_expected_ = false;
+    std::vector<std::string> last_applied_snat_interfaces_;
+    uint32_t last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     CapabilityProbe mark_merge_capability_probe_;
     std::optional<MarkMergeMode> mark_merge_mode_;
 

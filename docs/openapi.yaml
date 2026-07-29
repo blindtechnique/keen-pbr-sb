@@ -166,6 +166,41 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/setup/list/stage:
+    post:
+      summary: Stage a recommended beginner list setup
+      description: >
+        Validates and stages a simple list candidate only when the selected
+        list has one dedicated route rule and one dedicated DNS rule whose DNS
+        server uses the same routable outbound. Advanced editors continue to
+        use `/api/config`.
+      operationId: postRecommendedListSetup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecommendedListSetupRequest"
+      responses:
+        "200":
+          description: Recommended list setup staged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigUpdateResponse"
+        "400":
+          description: Invalid or incomplete recommended setup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The visible configuration changed after the dialog was opened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/config/dependencies:
     post:
       summary: Analyze configuration dependencies before a mutation
@@ -376,6 +411,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NdmsInterfaceInventoryResponse"
+
+  /api/system/ndms/vpn-server-services:
+    get:
+      summary: List native Keenetic VPN server services
+      description: >
+        Returns a strictly parsed, read-only inventory of enabled or configured
+        L2TP, IKEv1/IKEv2, SSTP and OpenConnect server services. These
+        services do not have a stable Linux ingress interface while idle, so
+        their client traffic is identified by the address pools reported by
+        NDMS. Secrets and credentials from the running configuration are never
+        returned.
+      operationId: getNdmsVpnServerServices
+      responses:
+        "200":
+          description: Native VPN server service inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NdmsVpnServerServiceInventoryResponse"
 
   /api/status/events:
     get:
@@ -798,6 +852,7 @@ components:
         - preset_id
         - technical_id
         - display_name
+        - already_installed
         - url_backed
         - has_inline_domains
         - has_inline_cidrs
@@ -808,6 +863,13 @@ components:
           type: string
         display_name:
           type: string
+        already_installed:
+          type: boolean
+          description: >
+            True when the authoritative preset is already represented by an
+            existing list. The planner reuses that list, never creates a
+            duplicate, and may still add a requested route or DNS rule that is
+            missing.
         url_backed:
           type: boolean
         has_inline_domains:
@@ -881,8 +943,26 @@ components:
             $ref: "#/components/schemas/CatalogSetupListSummary"
         route_rule:
           $ref: "#/components/schemas/CatalogSetupRouteRuleSummary"
+          description: >
+            Compatibility projection of the first created route rule.
+        route_rules:
+          type: array
+          description: >
+            Independently editable route rules created by the plan. A beginner
+            setup creates at most one route rule for each selected list.
+          items:
+            $ref: "#/components/schemas/CatalogSetupRouteRuleSummary"
         dns_rule:
           $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
+          description: >
+            Compatibility projection of the first created DNS rule.
+        dns_rules:
+          type: array
+          description: >
+            Independently editable DNS rules created by the plan. A beginner
+            setup creates at most one DNS rule for each selected list.
+          items:
+            $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
         blackhole:
           $ref: "#/components/schemas/CatalogSetupBlackholeSummary"
 
@@ -1613,6 +1693,14 @@ components:
             contain ASCII control characters. It never replaces the list key
             in routing or DNS references.
           example: "Сервисы ИИ"
+        catalog_identity:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Internal immutable provenance identity for catalogue-created
+            lists. It is derived from the authoritative catalogue source and
+            preset ID, and is used to prevent duplicate installation. Manual
+            lists normally omit this field.
         url:
           type: string
           description: URL to a remote list file to download and cache.
@@ -1935,6 +2023,29 @@ components:
             native VPN server are processed by keen-pbr. False is an explicit
             early bypass and takes precedence over inbound_interfaces.
 
+    InternalVpnService:
+      type: object
+      additionalProperties: false
+      required:
+        - service_id
+        - process_clients
+      properties:
+        service_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._:-]+$"
+          description: >
+            Stable NDMS identity of an L2TP, IKEv1/IKEv2, SSTP or OpenConnect
+            server service.
+            Unlike interface-based servers, these services are resolved to
+            their current client address pools at runtime.
+        process_clients:
+          type: boolean
+          description: >
+            Whether traffic and DNS requests from the service client pool are
+            processed by keen-pbr. False installs an early source-pool bypass.
+
     RouteConfig:
       type: object
       properties:
@@ -1958,6 +2069,17 @@ components:
             bypasses both route classification and client DNS redirection.
           items:
             $ref: "#/components/schemas/InternalVpnServer"
+        internal_vpn_services:
+          type: array
+          maxItems: 32
+          description: >
+            Participation overrides for native L2TP, IKEv1/IKEv2, SSTP and
+            OpenConnect server services that have no stable Linux ingress
+            interface while idle.
+            The live source pools are resolved from a fresh, strictly parsed
+            NDMS inventory; user-supplied ranges are never trusted.
+          items:
+            $ref: "#/components/schemas/InternalVpnService"
         rules:
           type: array
           items:
@@ -2889,6 +3011,73 @@ components:
       type: string
       enum: [fresh, stale, unavailable]
 
+    NdmsVpnServerKind:
+      type: string
+      enum: [l2tp, ikev1, ikev2, sstp, openconnect]
+
+    NdmsVpnServerService:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - label
+        - enabled
+        - source_cidrs
+        - inventory_revision
+      properties:
+        id:
+          type: string
+          description: Stable NDMS service or crypto-map identity.
+        kind:
+          $ref: "#/components/schemas/NdmsVpnServerKind"
+        label:
+          type: string
+        enabled:
+          type: boolean
+        source_cidrs:
+          type: array
+          maxItems: 128
+          items:
+            type: string
+          description: >
+            Canonical non-overlapping client source CIDRs derived from the
+            bounded NDMS address pool. Empty means the service cannot safely be
+            offered as a policy target.
+        bound_interface_id:
+          type: string
+          nullable: true
+          description: Logical NDMS interface to which the service is bound.
+        inventory_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Digest of the strict non-secret fields used to build this row.
+
+    NdmsVpnServerServiceInventoryResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - catalog_status
+        - read_only
+        - services
+      properties:
+        available:
+          type: boolean
+          description: >
+            True only when this response comes from a fresh authoritative NDMS
+            observation.
+        catalog_status:
+          $ref: "#/components/schemas/NdmsCatalogStatus"
+        read_only:
+          type: boolean
+          enum: [true]
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/NdmsVpnServerService"
+
     NdmsInterfaceInventoryResponse:
       type: object
       required:
@@ -3137,7 +3326,7 @@ components:
 
     ConfigStateResponse:
       type: object
-      required: [config, is_draft]
+      required: [config, is_draft, revision]
       properties:
         config:
           $ref: "#/components/schemas/ConfigObject"
@@ -3147,6 +3336,12 @@ components:
             Whether the returned config is a staged in-memory draft rather than
             the currently persisted config.
           example: false
+        revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Stable revision of the returned visible configuration. Narrow
+            setup endpoints use it for compare-and-swap protection.
         list_refresh_state:
           type: object
           description: >
@@ -3173,6 +3368,23 @@ components:
             Present for `POST /api/config/save`: server-authoritative Unix
             timestamp (seconds) when apply started.
           example: 1712345680
+
+    RecommendedListSetupRequest:
+      type: object
+      required: [config, list_id, base_revision]
+      properties:
+        config:
+          $ref: "#/components/schemas/ConfigObject"
+        list_id:
+          type: string
+          minLength: 1
+          description: Technical ID of the list created by the simple dialog.
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Revision returned by GET /api/config for the exact visible
+            configuration on which this candidate is based.
 
     DependencyEntityKind:
       title: DependencyEntityKind

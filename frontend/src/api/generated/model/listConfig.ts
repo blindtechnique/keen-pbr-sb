@@ -18,6 +18,12 @@ export interface ListConfig {
      * @maxLength 80
      */
   display_name?: string;
+  /**
+     * Internal immutable provenance identity for catalogue-created lists. It is derived from the authoritative catalogue source and preset ID, and is used to prevent duplicate installation. Manual lists normally omit this field.
+
+     * @pattern ^[0-9a-f]{64}$
+     */
+  catalog_identity?: string;
   /** URL to a remote list file to download and cache. */
   url?: string;
   /** Inline list of domain patterns (supports `*.` wildcards). */

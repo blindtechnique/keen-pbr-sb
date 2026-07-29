@@ -100,8 +100,11 @@ load_metadata_helper() {
         fail "keen-pbr cannot load portable metadata support"
 }
 
+# Netfilter refreshes only signal the already running daemon and do not touch
+# package rescue state. Running the persistent recovery guard recursively from
+# an NDMS netfilter hook would instead risk delaying or re-entering recovery.
 case "${1:-}" in
-    start|restart|restartall|reload|reapply-firewall|reapply-dnsmasq-config) ;;
+    start|restart|restartall|reload|reapply-dnsmasq-config) ;;
     *) exit 0 ;;
 esac
 

@@ -10,6 +10,9 @@ export interface CatalogSetupListSummary {
   preset_id: string;
   technical_id: string;
   display_name: string;
+  /** True when the authoritative preset is already represented by an existing list. The planner reuses that list, never creates a duplicate, and may still add a requested route or DNS rule that is missing.
+   */
+  already_installed: boolean;
   url_backed: boolean;
   has_inline_domains: boolean;
   has_inline_cidrs: boolean;

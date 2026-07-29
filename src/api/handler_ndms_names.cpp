@@ -5,6 +5,7 @@
 #include "../keenetic/ndms_catalog_cache.hpp"
 #include "../keenetic/ndms_interface_inventory.hpp"
 #include "../keenetic/ndms_interface_management.hpp"
+#include "../keenetic/ndms_vpn_server_service_cache.hpp"
 
 #include <nlohmann/json.hpp>
 #include <utility>
@@ -62,6 +63,23 @@ api::NdmsCatalogStatus api_catalog_status(
         return api::NdmsCatalogStatus::UNAVAILABLE;
     }
     return api::NdmsCatalogStatus::UNAVAILABLE;
+}
+
+api::NdmsVpnServerKind api_vpn_server_kind(
+    NdmsVpnServerServiceKind kind) {
+    switch (kind) {
+    case NdmsVpnServerServiceKind::l2tp:
+        return api::NdmsVpnServerKind::L2_TP;
+    case NdmsVpnServerServiceKind::ikev1:
+        return api::NdmsVpnServerKind::IKEV1;
+    case NdmsVpnServerServiceKind::ikev2:
+        return api::NdmsVpnServerKind::IKEV2;
+    case NdmsVpnServerServiceKind::sstp:
+        return api::NdmsVpnServerKind::SSTP;
+    case NdmsVpnServerServiceKind::openconnect:
+        return api::NdmsVpnServerKind::OPENCONNECT;
+    }
+    throw std::runtime_error("unsupported NDMS VPN server service kind");
 }
 
 const char* catalog_status_name(NdmsCatalogCacheStatus status) noexcept {
@@ -166,6 +184,40 @@ api::NdmsInterfaceInventoryResponse typed_inventory(
     return response;
 }
 
+api::NdmsVpnServerServiceInventoryResponse typed_vpn_service_inventory(
+    const NdmsVpnServerServiceCatalog& catalog,
+    NdmsCatalogCacheStatus catalog_status) {
+    api::NdmsVpnServerServiceInventoryResponse response{};
+    response.available =
+        catalog.firmware_available &&
+        catalog_status == NdmsCatalogCacheStatus::fresh;
+    response.catalog_status = api_catalog_status(catalog_status);
+    response.read_only = true;
+    response.services.reserve(catalog.services.size());
+    for (const auto& service : catalog.services) {
+        api::NdmsVpnServerService item{};
+        item.id = service.id;
+        item.kind = api_vpn_server_kind(service.kind);
+        item.label = service.label;
+        item.enabled = service.enabled;
+        item.bound_interface_id = service.bound_interface_id;
+        item.inventory_revision = service.inventory_revision;
+        item.source_cidrs.reserve(
+            service.source_cidrs_v4.size() +
+            service.source_cidrs_v6.size());
+        item.source_cidrs.insert(
+            item.source_cidrs.end(),
+            service.source_cidrs_v4.begin(),
+            service.source_cidrs_v4.end());
+        item.source_cidrs.insert(
+            item.source_cidrs.end(),
+            service.source_cidrs_v6.begin(),
+            service.source_cidrs_v6.end());
+        response.services.push_back(std::move(item));
+    }
+    return response;
+}
+
 using RuntimeInterfaceNamesFn = std::function<std::vector<std::string>()>;
 using TrafficInterfacesObserver =
     std::function<void(std::vector<std::string>)>;
@@ -239,6 +291,20 @@ void register_ndms_names_routes(
         });
 }
 
+void register_ndms_vpn_server_services_route(
+    ApiServer& server,
+    NdmsVpnServerServiceCache& cache) {
+    server.get(
+        "/api/system/ndms/vpn-server-services",
+        [&cache]() -> std::string {
+            const auto snapshot = cache.get();
+            return nlohmann::json(
+                       typed_vpn_service_inventory(
+                           snapshot.catalog, snapshot.status))
+                .dump();
+        });
+}
+
 } // namespace
 
 void register_ndms_names_handler(ApiServer& server, ApiContext& ctx) {
@@ -258,6 +324,8 @@ void register_ndms_names_handler(ApiServer& server, ApiContext& ctx) {
             ctx.replace_interface_traffic_targets(
                 "native-tunnels", std::move(names));
         });
+    register_ndms_vpn_server_services_route(
+        server, shared_ndms_vpn_server_service_cache());
 }
 
 #ifdef KEEN_PBR3_TESTING
@@ -271,6 +339,12 @@ void register_ndms_names_handler_for_tests(ApiServer& server,
         [runtime_interface_names = std::move(runtime_interface_names)] {
             return runtime_interface_names;
         });
+}
+
+void register_ndms_vpn_server_services_handler_for_tests(
+    ApiServer& server,
+    NdmsVpnServerServiceCache& cache) {
+    register_ndms_vpn_server_services_route(server, cache);
 }
 #endif
 

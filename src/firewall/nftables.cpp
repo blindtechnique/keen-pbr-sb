@@ -7,7 +7,9 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <limits>
 #include <optional>
+#include <set>
 #include <string>
 #include <sys/socket.h>
 #include <utility>
@@ -15,6 +17,8 @@
 namespace keen_pbr3 {
 
 namespace {
+
+constexpr const char* kNftTableName = "KeenPbrTable";
 
 bool is_ipv6_addr(const std::string& addr) {
     return addr.find(':') != std::string::npos;
@@ -56,6 +60,123 @@ nlohmann::json interface_name_rhs(
         rhs["set"].push_back(interface);
     }
     return rhs;
+}
+
+// Single CIDR -> prefix expression. Multiple CIDRs -> nft set expression.
+nlohmann::json cidr_list_to_nft_rhs(
+    const std::vector<std::string>& addrs) {
+    auto addr_to_rhs = [](const std::string& addr) -> nlohmann::json {
+        const auto slash = addr.find('/');
+        if (slash != std::string::npos) {
+            return {{"prefix", {
+                {"addr", addr.substr(0, slash)},
+                {"len", std::stoi(addr.substr(slash + 1))}
+            }}};
+        }
+        const bool ipv6 = addr.find(':') != std::string::npos;
+        return {{"prefix", {
+            {"addr", addr},
+            {"len", ipv6 ? 128 : 32}
+        }}};
+    };
+
+    if (addrs.size() == 1U) return addr_to_rhs(addrs.front());
+    nlohmann::json values = nlohmann::json::array();
+    for (const auto& address : addrs) {
+        values.push_back(addr_to_rhs(address));
+    }
+    return {{"set", values}};
+}
+
+nlohmann::json source_address_match(
+    const char* protocol,
+    const char* operation,
+    const std::vector<std::string>& cidrs) {
+    return {{"match", {
+        {"op", operation},
+        {"left", {{"payload", {
+            {"protocol", protocol},
+            {"field", "saddr"}
+        }}}},
+        {"right", cidr_list_to_nft_rhs(cidrs)}
+    }}};
+}
+
+void append_source_bypass_rules(
+    nlohmann::json& commands,
+    const FirewallGlobalPrefilter& prefilter,
+    const char* chain) {
+    const auto append_family =
+        [&commands, chain](
+            const char* protocol,
+            const std::vector<FirewallIngressSourceSelector>& selectors) {
+            for (const auto& selector : selectors) {
+                nlohmann::json expr = nlohmann::json::array();
+                expr.push_back({{"match", {
+                    {"op", "=="},
+                    {"left", {{"meta", {{"key", "iifname"}}}}},
+                    {"right", selector.interface}
+                }}});
+                expr.push_back(source_address_match(
+                    protocol, "==", {selector.cidr}));
+                expr.push_back({{"counter", nullptr}});
+                expr.push_back({{"accept", nullptr}});
+                commands.push_back({{"add", {{"rule", {
+                    {"family", "inet"},
+                    {"table", kNftTableName},
+                    {"chain", chain},
+                    {"expr", expr}
+                }}}}});
+            }
+        };
+    append_family("ip", prefilter.bypass_source_selectors_v4);
+    append_family("ip6", prefilter.bypass_source_selectors_v6);
+}
+
+void append_extended_inbound_guard_rules(
+    nlohmann::json& commands,
+    const FirewallGlobalPrefilter& prefilter,
+    const char* chain) {
+    if (!prefilter.has_inbound_interfaces() ||
+        !prefilter.inbound_interfaces.has_value() ||
+        !prefilter.has_include_source_cidrs()) {
+        return;
+    }
+
+    const auto append_family =
+        [&commands, &prefilter, chain](
+            const char* nfproto,
+            const char* protocol,
+            const std::vector<std::string>& include_cidrs) {
+            nlohmann::json expr = nlohmann::json::array();
+            expr.push_back({{"match", {
+                {"op", "=="},
+                {"left", {{"meta", {{"key", "nfproto"}}}}},
+                {"right", nfproto}
+            }}});
+            expr.push_back({{"match", {
+                {"op", "!="},
+                {"left", {{"meta", {{"key", "iifname"}}}}},
+                {"right", interface_name_rhs(
+                    *prefilter.inbound_interfaces)}
+            }}});
+            if (!include_cidrs.empty()) {
+                expr.push_back(source_address_match(
+                    protocol, "!=", include_cidrs));
+            }
+            expr.push_back({{"counter", nullptr}});
+            expr.push_back({{"accept", nullptr}});
+            commands.push_back({{"add", {{"rule", {
+                {"family", "inet"},
+                {"table", kNftTableName},
+                {"chain", chain},
+                {"expr", expr}
+            }}}}});
+        };
+    append_family(
+        "ipv4", "ip", prefilter.include_source_cidrs_v4);
+    append_family(
+        "ipv6", "ip6", prefilter.include_source_cidrs_v6);
 }
 
 } // namespace
@@ -535,12 +656,21 @@ nlohmann::json NftablesFirewall::build_snat_rule_json() {
 }
 
 nlohmann::json NftablesFirewall::build_interface_snat_rule_json(
-    const std::string& interface) {
+    const std::string& interface,
+    uint32_t fwmark_mask) {
     nlohmann::json expr = nlohmann::json::array();
     expr.push_back({{"match", {
         {"op", "=="},
         {"left", {{"meta", {{"key", "oifname"}}}}},
         {"right", interface}
+    }}});
+    expr.push_back({{"match", {
+        {"op", "!="},
+        {"left", {{"&", nlohmann::json::array({
+            {{"meta", {{"key", "mark"}}}},
+            fwmark_mask
+        })}}},
+        {"right", 0}
     }}});
     expr.push_back({{"counter", nullptr}});
     expr.push_back({{"masquerade", nlohmann::json::object()}});
@@ -573,10 +703,15 @@ nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
             {"expr", bypass_expr}
         }}}}});
     }
+    append_source_bypass_rules(
+        commands, prefilter, DNS_NAT_CHAIN_NAME);
+    append_extended_inbound_guard_rules(
+        commands, prefilter, DNS_NAT_CHAIN_NAME);
 
     nlohmann::json iface_match = nullptr;
     if (prefilter.has_inbound_interfaces()
-        && prefilter.inbound_interfaces.has_value()) {
+        && prefilter.inbound_interfaces.has_value()
+        && !prefilter.has_include_source_cidrs()) {
         iface_match = {{"match", {
             {"op", "=="},
             {"left", {{"meta", {{"key", "iifname"}}}}},
@@ -635,6 +770,7 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
             {"expr", bypass_expr}
         }}}}});
     }
+    append_source_bypass_rules(commands, prefilter, CHAIN_NAME);
 
     const auto append_conntrack_restore =
         [&commands, &prefilter, &rules, mark_merge_mode](
@@ -804,7 +940,8 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
     }
 
     if (prefilter.has_inbound_interfaces()
-        && prefilter.inbound_interfaces.has_value()) {
+        && prefilter.inbound_interfaces.has_value()
+        && !prefilter.has_include_source_cidrs()) {
         nlohmann::json iface_expr = nlohmann::json::array();
         iface_expr.push_back({{"match", {
             {"op", "!="},
@@ -819,6 +956,9 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
             {"chain", CHAIN_NAME},
             {"expr", iface_expr}
         }}}}});
+    } else {
+        append_extended_inbound_guard_rules(
+            commands, prefilter, CHAIN_NAME);
     }
 
     for (const auto& pr : rules) {
@@ -912,27 +1052,6 @@ nlohmann::json NftablesFirewall::build_port_match_exprs(L4Proto proto,
         exprs.push_back({{"match", {{"op", op}, {"left", {{"payload", {{"protocol", payload_proto}, {"field", "dport"}}}}}, {"right", port_spec_to_nft_rhs(dst_port)}}}});
     }
     return exprs;
-}
-
-// Convert a CIDR list to an nftables JSON right-hand side value.
-// Single CIDR → plain string.  Multiple CIDRs → {"set": ["cidr1", "cidr2"]}.
-static nlohmann::json cidr_list_to_nft_rhs(const std::vector<std::string>& addrs) {
-    auto addr_to_rhs = [](const std::string& addr) -> nlohmann::json {
-        const auto slash = addr.find('/');
-        if (slash != std::string::npos) {
-            const std::string base = addr.substr(0, slash);
-            const int len = std::stoi(addr.substr(slash + 1));
-            return {{"prefix", {{"addr", base}, {"len", len}}}};
-        }
-
-        const bool ipv6 = addr.find(':') != std::string::npos;
-        return {{"prefix", {{"addr", addr}, {"len", ipv6 ? 128 : 32}}}};
-    };
-
-    if (addrs.size() == 1) return addr_to_rhs(addrs[0]);
-    nlohmann::json arr = nlohmann::json::array();
-    for (const auto& a : addrs) arr.push_back(addr_to_rhs(a));
-    return {{"set", arr}};
 }
 
 nlohmann::json NftablesFirewall::build_addr_match_exprs(const std::string& ip_proto,
@@ -1117,6 +1236,221 @@ bool NftablesFirewall::table_exists() const {
                      /*suppress_output=*/true) == 0;
 }
 
+OwnedSnatState NftablesFirewall::parse_owned_snat_state(
+    const std::string& document,
+    bool expected,
+    const std::vector<std::string>& expected_interfaces,
+    uint32_t expected_fwmark_mask) {
+    nlohmann::json doc;
+    try {
+        doc = nlohmann::json::parse(document);
+    } catch (const nlohmann::json::parse_error&) {
+        return OwnedSnatState::unknown;
+    }
+
+    const auto nftables_it = doc.find("nftables");
+    if (nftables_it == doc.end() || !nftables_it->is_array()) {
+        return OwnedSnatState::unknown;
+    }
+
+    bool table_found = false;
+    size_t snat_chain_count = 0U;
+    bool snat_chain_valid = false;
+    bool owned_rule_invalid = false;
+    std::vector<nlohmann::json> observed_rule_exprs;
+
+    const auto normalize_rule_expr = [](
+        nlohmann::json expr) -> std::optional<nlohmann::json> {
+        if (!expr.is_array()) {
+            return std::nullopt;
+        }
+        for (auto& expression : expr) {
+            if (!expression.is_object() || expression.size() != 1U) {
+                return std::nullopt;
+            }
+            if (expression.contains("counter")) {
+                // `nft list` expands a counter to packets/bytes while the
+                // builder uses null. Counter placement is contractual; only
+                // its volatile values are ignored.
+                const auto& counter = expression["counter"];
+                bool counter_is_canonical =
+                    counter.is_null() || counter.is_object();
+                if (counter.is_object()) {
+                    for (auto it = counter.begin();
+                         it != counter.end();
+                         ++it) {
+                        if (it.key() != "packets" &&
+                            it.key() != "bytes") {
+                            counter_is_canonical = false;
+                            break;
+                        }
+                    }
+                }
+                if (!counter_is_canonical) {
+                    return std::nullopt;
+                }
+                expression["counter"] = nullptr;
+            } else if (expression.contains("masquerade")) {
+                // Different nft releases render a flag-less masquerade as
+                // either null or an empty object.
+                const auto& masquerade = expression["masquerade"];
+                if (!masquerade.is_null() &&
+                    (!masquerade.is_object() ||
+                     !masquerade.empty())) {
+                    return std::nullopt;
+                }
+                expression["masquerade"] =
+                    nlohmann::json::object();
+            }
+        }
+        return expr;
+    };
+
+    for (const auto& item : *nftables_it) {
+        if (!item.is_object()) {
+            continue;
+        }
+        if (const auto table_it = item.find("table");
+            table_it != item.end() && table_it->is_object()) {
+            const auto& table = *table_it;
+            table_found =
+                table_found ||
+                (table.value("family", "") == "inet" &&
+                 table.value("name", "") == TABLE_NAME);
+            continue;
+        }
+        if (const auto chain_it = item.find("chain");
+            chain_it != item.end() && chain_it->is_object()) {
+            const auto& chain = *chain_it;
+            if (chain.value("family", "") == "inet" &&
+                chain.value("table", "") == TABLE_NAME &&
+                chain.value("name", "") == SNAT_CHAIN_NAME) {
+                ++snat_chain_count;
+                snat_chain_valid =
+                    snat_chain_count == 1U &&
+                    chain.value("type", "") == "nat" &&
+                    chain.value("hook", "") == "postrouting" &&
+                    chain.value("prio", std::numeric_limits<int>::min()) ==
+                        100 &&
+                    chain.value("policy", "") == "accept";
+            }
+            continue;
+        }
+        if (const auto rule_it = item.find("rule");
+            rule_it != item.end() && rule_it->is_object()) {
+            const auto& rule = *rule_it;
+            if (rule.value("family", "") != "inet" ||
+                rule.value("table", "") != TABLE_NAME ||
+                rule.value("chain", "") != SNAT_CHAIN_NAME) {
+                continue;
+            }
+            const auto expr_it = rule.find("expr");
+            if (expr_it == rule.end()) {
+                owned_rule_invalid = true;
+                continue;
+            }
+            const auto normalized = normalize_rule_expr(*expr_it);
+            if (!normalized.has_value()) {
+                owned_rule_invalid = true;
+                continue;
+            }
+            observed_rule_exprs.push_back(*normalized);
+        }
+    }
+
+    // A successful `nft list table` response must identify the requested
+    // table. Treat a structurally valid but unrelated/empty document as an
+    // inspection failure, not as evidence that owned state is absent.
+    if (!table_found) {
+        return OwnedSnatState::unknown;
+    }
+
+    if (!expected) {
+        return snat_chain_count == 0U &&
+               observed_rule_exprs.empty() &&
+               !owned_rule_invalid
+            ? OwnedSnatState::healthy
+            : OwnedSnatState::stale;
+    }
+
+    std::vector<nlohmann::json> expected_rule_exprs;
+    const auto append_expected =
+        [&expected_rule_exprs, &normalize_rule_expr](
+            const nlohmann::json& command) {
+            const auto normalized = normalize_rule_expr(
+                command["add"]["rule"]["expr"]);
+            if (normalized.has_value()) {
+                expected_rule_exprs.push_back(*normalized);
+            }
+        };
+    append_expected(build_snat_rule_json());
+    for (const auto& interface : expected_interfaces) {
+        append_expected(build_interface_snat_rule_json(
+            interface, expected_fwmark_mask));
+    }
+
+    return snat_chain_count == 1U &&
+           snat_chain_valid &&
+           !owned_rule_invalid &&
+           observed_rule_exprs == expected_rule_exprs
+        ? OwnedSnatState::healthy
+        : OwnedSnatState::missing;
+}
+
+OwnedSnatState NftablesFirewall::inspect_owned_snat_state(
+    bool expected,
+    const std::vector<std::string>& expected_interfaces,
+    uint32_t expected_fwmark_mask) const {
+    const auto result = safe_exec_capture(
+        {"nft", "-j", "-t", "list", "table", "inet",
+         std::string(TABLE_NAME)},
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/256U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::DiagnosticOnly,
+        SafeExecTimeouts{
+            owned_snat_inspect_timeout(),
+            owned_snat_inspect_kill_grace()});
+    if (result.timed_out || result.truncated) {
+        return OwnedSnatState::unknown;
+    }
+    if (result.exit_code != 0) {
+        const bool absent =
+            result.stdout_output.find("No such file or directory") !=
+                std::string::npos ||
+            result.stdout_output.find("does not exist") != std::string::npos ||
+            result.stdout_output.find("not found") != std::string::npos;
+        return absent
+            ? (expected
+                   ? OwnedSnatState::missing
+                   : OwnedSnatState::healthy)
+            : OwnedSnatState::unknown;
+    }
+    return parse_owned_snat_state(
+        result.stdout_output,
+        expected,
+        expected_interfaces,
+        expected_fwmark_mask);
+}
+
+std::chrono::milliseconds
+NftablesFirewall::owned_snat_inspect_timeout() {
+    return std::chrono::seconds{2};
+}
+
+std::chrono::milliseconds
+NftablesFirewall::owned_snat_inspect_kill_grace() {
+    return std::chrono::milliseconds{500};
+}
+
+OwnedSnatState NftablesFirewall::inspect_owned_snat_state() const {
+    return inspect_owned_snat_state(
+        last_applied_snat_expected_,
+        last_applied_snat_interfaces_,
+        last_applied_snat_fwmark_mask_);
+}
+
 NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const {
     LiveTableState state;
     const auto result = safe_exec_capture(
@@ -1290,7 +1624,8 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         // Forwarded traffic from networks the firmware does not masquerade for
         // this interface, such as clients of a VPN server on the router.
         for (const auto& iface : snat_interfaces_) {
-            arr.push_back(build_interface_snat_rule_json(iface));
+            arr.push_back(
+                build_interface_snat_rule_json(iface, fwmark_mask()));
         }
     }
 
@@ -1327,6 +1662,9 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 }
 
 void NftablesFirewall::apply(FirewallApplyMode mode) {
+    const bool snat_expected = router_origin_snat_requested_;
+    const auto expected_snat_interfaces = snat_interfaces_;
+    const uint32_t expected_snat_fwmark_mask = fwmark_mask();
     const MarkMergeMode active_mark_merge_mode = mark_merge_mode();
     const LiveTableState live_state = read_live_table_state();
     const bool emit_full_table = !live_state.table_exists;
@@ -1383,6 +1721,23 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
                                     status, error_output));
     }
 
+    const auto snat_state = inspect_owned_snat_state(
+        snat_expected,
+        expected_snat_interfaces,
+        expected_snat_fwmark_mask);
+    if (snat_state == OwnedSnatState::missing ||
+        snat_state == OwnedSnatState::stale) {
+        throw TransientFirewallError(
+            "nftables SNAT state does not match the applied contract");
+    }
+    if (snat_state == OwnedSnatState::unknown) {
+        throw TransientFirewallError(
+            "nftables SNAT state could not be inspected after apply");
+    }
+
+    last_applied_snat_expected_ = snat_expected;
+    last_applied_snat_interfaces_ = expected_snat_interfaces;
+    last_applied_snat_fwmark_mask_ = expected_snat_fwmark_mask;
     // Clear pending buffers
     pending_sets_.clear();
     pending_elements_.clear();
@@ -1404,6 +1759,9 @@ void NftablesFirewall::cleanup_live_impl() {
 void NftablesFirewall::cleanup_impl() {
     cleanup_live_impl();
 
+    last_applied_snat_expected_ = false;
+    last_applied_snat_interfaces_.clear();
+    last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     created_sets_.clear();
     pending_sets_.clear();
     pending_elements_.clear();

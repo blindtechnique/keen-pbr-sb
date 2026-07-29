@@ -144,6 +144,51 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
     CHECK(plan.warnings.empty());
     CHECK(plan.candidate_revision.size() == 64U);
     CHECK_NOTHROW(validate_config(plan.candidate));
+    CHECK_NOTHROW(validate_recommended_list_setup(
+        plan.candidate, "category_ai"));
+}
+
+TEST_CASE(
+    "recommended list setup rejects route-only and mismatched DNS candidates") {
+    const auto planned = plan_catalog_setup(
+        outbound_intent(),
+        nlohmann::json::array({routing_preset()}),
+        base_config());
+
+    auto route_only = planned.candidate;
+    REQUIRE(route_only.dns.has_value());
+    route_only.dns->rules = std::vector<DnsRule>{};
+    CHECK_THROWS_WITH(
+        validate_recommended_list_setup(
+            route_only, "category_ai"),
+        "Beginner setup requires one dedicated DNS rule for the list");
+
+    auto mismatched = planned.candidate;
+    REQUIRE(mismatched.dns->rules.has_value());
+    mismatched.dns->rules->front().server = "direct_dns";
+    CHECK_THROWS_WITH(
+        validate_recommended_list_setup(
+            mismatched, "category_ai"),
+        "Beginner setup DNS server must use the same outbound as the route; "
+        "create or select a compatible DNS server");
+}
+
+TEST_CASE(
+    "recommended list setup rejects a route with an extra selector") {
+    const auto planned = plan_catalog_setup(
+        outbound_intent(),
+        nlohmann::json::array({routing_preset()}),
+        base_config());
+
+    auto candidate = planned.candidate;
+    REQUIRE(candidate.route.has_value());
+    REQUIRE(candidate.route->rules.has_value());
+    candidate.route->rules->front().proto = "tcp";
+
+    CHECK_THROWS_WITH(
+        validate_recommended_list_setup(
+            candidate, "category_ai"),
+        "Beginner setup requires one dedicated route rule for the list");
 }
 
 TEST_CASE("catalog planner prefers SRS when authoritative preset also has raw subscription") {
@@ -535,9 +580,20 @@ TEST_CASE("source detour applies only to URL-backed lists") {
     CHECK(plan.summary.lists[0].display_name == "Каталог AI");
     CHECK(plan.summary.lists[1].display_name == "Встроенные домены");
     REQUIRE(plan.summary.route_rule.has_value());
-    CHECK(plan.summary.route_rule->display_name == "Маршрут AI");
+    REQUIRE(plan.summary.route_rules.size() == 2U);
+    CHECK(plan.summary.route_rules[0].display_name == "Каталог AI");
+    CHECK(plan.summary.route_rules[1].display_name == "Встроенные домены");
     REQUIRE(plan.summary.dns_rule.has_value());
-    CHECK(plan.summary.dns_rule->display_name == "DNS для AI");
+    REQUIRE(plan.summary.dns_rules.size() == 2U);
+    CHECK(plan.summary.dns_rules[0].display_name == "Каталог AI");
+    CHECK(plan.summary.dns_rules[1].display_name == "Встроенные домены");
+    for (const auto& rule : *plan.candidate.route->rules) {
+        REQUIRE(rule.list.has_value());
+        CHECK(rule.list->size() == 1U);
+    }
+    for (const auto& rule : *plan.candidate.dns->rules) {
+        CHECK(rule.list.size() == 1U);
+    }
 }
 
 TEST_CASE("unusable source detour is omitted with an exact warning") {
@@ -558,39 +614,48 @@ TEST_CASE("unusable source detour is omitted with an exact warning") {
         "Source detour 'missing' was not used because the outbound does not exist");
 }
 
-TEST_CASE("explicit DNS server mismatch is preserved and warned") {
+TEST_CASE("explicit DNS server mismatch is rejected") {
     auto intent = outbound_intent();
     intent.dns_mode = CatalogDnsMode::explicit_server;
     intent.dns_server_tag = "direct_dns";
-    const auto plan = plan_catalog_setup(
-        intent,
-        nlohmann::json::array({routing_preset()}),
-        base_config());
-
-    REQUIRE(plan.summary.dns_rule.has_value());
-    CHECK(plan.summary.dns_rule->server == "direct_dns");
-    const auto* found =
-        warning(plan, CatalogSetupWarningCode::dns_detour_missing);
-    REQUIRE(found != nullptr);
-    CHECK(found->path == "intent.dns_server_tag");
+    try {
+        static_cast<void>(plan_catalog_setup(
+            intent,
+            nlohmann::json::array({routing_preset()}),
+            base_config()));
+        FAIL("mismatched explicit DNS unexpectedly produced a plan");
+    } catch (const CatalogSetupPlanError& error) {
+        CHECK(
+            error.code() ==
+            CatalogSetupErrorCode::dns_detour_mismatch);
+        CHECK(error.path() == "intent.dns_server_tag");
+        CHECK(
+            std::string(error.what()) ==
+            "DNS server 'direct_dns' has no detour while the route uses "
+            "outbound 'proxy'");
+    }
 }
 
-TEST_CASE("automatic DNS omission is explicit when no server follows route") {
+TEST_CASE("automatic DNS fails closed when no server follows route") {
     auto config = base_config();
     config.dns->servers->front().detour = "backup";
     validate_config(config);
-    const auto plan = plan_catalog_setup(
-        outbound_intent(),
-        nlohmann::json::array({routing_preset()}),
-        config);
-
-    CHECK_FALSE(plan.summary.dns_rule.has_value());
-    const auto* found =
-        warning(plan, CatalogSetupWarningCode::dns_automatic_unavailable);
-    REQUIRE(found != nullptr);
-    CHECK(
-        found->message ==
-        "No DNS server is detoured through outbound 'proxy'");
+    try {
+        static_cast<void>(plan_catalog_setup(
+            outbound_intent(),
+            nlohmann::json::array({routing_preset()}),
+            config));
+        FAIL("automatic DNS unexpectedly produced a partial plan");
+    } catch (const CatalogSetupPlanError& error) {
+        CHECK(
+            error.code() ==
+            CatalogSetupErrorCode::dns_automatic_unavailable);
+        CHECK(error.path() == "intent.dns_mode");
+        CHECK(
+            std::string(error.what()) ==
+            "No DNS server is detoured through outbound 'proxy'; "
+            "create or select a compatible DNS server first");
+    }
 }
 
 TEST_CASE("none mode adds only lists and supports API catalog response snapshot") {
@@ -646,5 +711,327 @@ TEST_CASE("reject catalog preset requires block mode") {
             plan_catalog_setup(intent, catalog, base_config()),
             "A reject catalogue preset must use block mode",
             CatalogSetupPlanError);
+    }
+}
+
+TEST_CASE(
+    "catalog planner persists provenance and makes a repeated preset a no-op") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:authoritative-catalog"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    const auto first =
+        plan_catalog_setup(outbound_intent(), catalog, base_config());
+
+    REQUIRE(first.summary.lists.size() == 1U);
+    CHECK_FALSE(first.summary.lists.front().already_installed);
+    const auto technical_id =
+        first.summary.lists.front().technical_id;
+    const auto& installed =
+        first.candidate.lists->at(technical_id);
+    REQUIRE(installed.catalog_identity.has_value());
+    CHECK(installed.catalog_identity->size() == 64U);
+
+    const auto repeated = plan_catalog_setup(
+        outbound_intent(), catalog, first.candidate);
+    REQUIRE(repeated.summary.lists.size() == 1U);
+    CHECK(repeated.summary.lists.front().already_installed);
+    CHECK(
+        repeated.summary.lists.front().technical_id ==
+        technical_id);
+    CHECK_FALSE(repeated.summary.route_rule.has_value());
+    CHECK_FALSE(repeated.summary.dns_rule.has_value());
+    CHECK_FALSE(repeated.summary.blackhole.has_value());
+    CHECK(
+        nlohmann::json(repeated.candidate) ==
+        nlohmann::json(first.candidate));
+    CHECK(
+        repeated.candidate_revision ==
+        first.candidate_revision);
+}
+
+TEST_CASE(
+    "catalog planner reuses a legacy list and adds its missing policies") {
+    auto config = base_config();
+    ListConfig legacy;
+    legacy.display_name = "Переименовано пользователем";
+    legacy.url =
+        "https://repo.hoaxisr.ru/rulesets/srs/ai.srs";
+    legacy.domains =
+        std::vector<std::string>{"old-inline.example"};
+    config.lists =
+        std::map<std::string, ListConfig>{{"my_custom_ai", legacy}};
+    validate_config(config);
+
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:authoritative-catalog"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    const auto plan =
+        plan_catalog_setup(outbound_intent(), catalog, config);
+
+    REQUIRE(plan.summary.lists.size() == 1U);
+    CHECK(plan.summary.lists.front().already_installed);
+    CHECK(
+        plan.summary.lists.front().technical_id ==
+        "my_custom_ai");
+    CHECK(
+        plan.summary.lists.front().display_name ==
+        "Переименовано пользователем");
+    CHECK(plan.candidate.lists->size() == 1U);
+    REQUIRE(plan.summary.route_rule.has_value());
+    REQUIRE(plan.summary.dns_rule.has_value());
+    const auto& route_rule =
+        plan.candidate.route->rules->at(
+            plan.summary.route_rule->insertion_index);
+    REQUIRE(route_rule.list.has_value());
+    CHECK(
+        *route_rule.list ==
+        std::vector<std::string>{"my_custom_ai"});
+    const auto& dns_rule =
+        plan.candidate.dns->rules->at(
+            plan.summary.dns_rule->insertion_index);
+    CHECK(
+        dns_rule.list ==
+        std::vector<std::string>{"my_custom_ai"});
+}
+
+TEST_CASE(
+    "catalog planner adds requested policies to a provenance list-only install") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:list-only-catalog"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    auto list_only_intent = outbound_intent();
+    list_only_intent.mode = CatalogSetupMode::none;
+    list_only_intent.outbound_tag.reset();
+    list_only_intent.dns_mode = CatalogDnsMode::none;
+    const auto list_only =
+        plan_catalog_setup(list_only_intent, catalog, base_config());
+    CHECK_FALSE(list_only.summary.route_rule.has_value());
+    CHECK_FALSE(list_only.summary.dns_rule.has_value());
+
+    const auto with_policies = plan_catalog_setup(
+        outbound_intent(), catalog, list_only.candidate);
+    REQUIRE(with_policies.summary.lists.size() == 1U);
+    CHECK(with_policies.summary.lists.front().already_installed);
+    CHECK(
+        with_policies.summary.lists.front().technical_id ==
+        list_only.summary.lists.front().technical_id);
+    REQUIRE(with_policies.summary.route_rule.has_value());
+    REQUIRE(with_policies.summary.dns_rule.has_value());
+    CHECK(with_policies.candidate.lists->size() == 1U);
+
+    const auto covered = plan_catalog_setup(
+        outbound_intent(), catalog, with_policies.candidate);
+    CHECK(covered.summary.lists.front().already_installed);
+    CHECK_FALSE(covered.summary.route_rule.has_value());
+    CHECK_FALSE(covered.summary.dns_rule.has_value());
+    CHECK(
+        nlohmann::json(covered.candidate) ==
+        nlohmann::json(with_policies.candidate));
+}
+
+TEST_CASE(
+    "catalog planner creates only a missing DNS policy for an installed list") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:partial-policy-catalog"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    const auto installed =
+        plan_catalog_setup(outbound_intent(), catalog, base_config());
+    auto route_only = installed.candidate;
+    route_only.dns->rules = std::vector<DnsRule>{};
+    validate_config(route_only);
+
+    const auto repaired =
+        plan_catalog_setup(outbound_intent(), catalog, route_only);
+    CHECK(repaired.summary.lists.front().already_installed);
+    CHECK_FALSE(repaired.summary.route_rule.has_value());
+    REQUIRE(repaired.summary.dns_rule.has_value());
+    REQUIRE(repaired.candidate.route->rules.has_value());
+    CHECK(repaired.candidate.route->rules->size() == 1U);
+    REQUIRE(repaired.candidate.dns->rules.has_value());
+    CHECK(repaired.candidate.dns->rules->size() == 1U);
+}
+
+TEST_CASE(
+    "multi-list rules do not count as dedicated catalogue coverage") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:exact-policy-catalog"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    auto list_only_intent = outbound_intent();
+    list_only_intent.mode = CatalogSetupMode::none;
+    list_only_intent.outbound_tag.reset();
+    list_only_intent.dns_mode = CatalogDnsMode::none;
+    const auto list_only =
+        plan_catalog_setup(list_only_intent, catalog, base_config());
+
+    auto config = list_only.candidate;
+    ListConfig other;
+    other.domains = std::vector<std::string>{"other.example"};
+    config.lists->emplace("other", std::move(other));
+
+    RouteRule shared_route;
+    shared_route.enabled = true;
+    shared_route.list =
+        std::vector<std::string>{"category_ai", "other"};
+    shared_route.outbound = "proxy";
+    config.route->rules = std::vector<RouteRule>{shared_route};
+
+    DnsRule shared_dns;
+    shared_dns.enabled = true;
+    shared_dns.list =
+        std::vector<std::string>{"category_ai", "other"};
+    shared_dns.server = "proxy_dns";
+    config.dns->rules = std::vector<DnsRule>{shared_dns};
+    validate_config(config);
+
+    const auto repaired =
+        plan_catalog_setup(outbound_intent(), catalog, config);
+    REQUIRE(repaired.summary.route_rule.has_value());
+    REQUIRE(repaired.summary.dns_rule.has_value());
+    const auto& dedicated_route =
+        repaired.candidate.route->rules->at(
+            repaired.summary.route_rule->insertion_index);
+    const auto& dedicated_dns =
+        repaired.candidate.dns->rules->at(
+            repaired.summary.dns_rule->insertion_index);
+    CHECK(
+        dedicated_route.list ==
+        std::optional<std::vector<std::string>>{{"category_ai"}});
+    CHECK(
+        dedicated_dns.list ==
+        std::vector<std::string>{"category_ai"});
+}
+
+TEST_CASE(
+    "same preset id from a different authoritative source is not conflated") {
+    const nlohmann::json first_catalog = {
+        {"catalog_id", "test:catalog-a"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    auto different_preset = routing_preset(
+        "category-ai",
+        "Нейросети B",
+        "https://repo.hoaxisr.ru/rulesets/srs/ai-b.srs");
+    const nlohmann::json second_catalog = {
+        {"catalog_id", "test:catalog-b"},
+        {"presets", nlohmann::json::array({different_preset})},
+    };
+
+    const auto first = plan_catalog_setup(
+        outbound_intent(), first_catalog, base_config());
+    const auto second = plan_catalog_setup(
+        outbound_intent(), second_catalog, first.candidate);
+
+    REQUIRE(second.summary.lists.size() == 1U);
+    CHECK_FALSE(second.summary.lists.front().already_installed);
+    CHECK(second.candidate.lists->size() == 2U);
+    CHECK(
+        second.candidate.lists
+            ->at(second.summary.lists.front().technical_id)
+            .catalog_identity !=
+        first.candidate.lists
+            ->at(first.summary.lists.front().technical_id)
+            .catalog_identity);
+}
+
+TEST_CASE(
+    "mixed catalogue selection only wires rules for presets still to install") {
+    const auto first_preset = routing_preset();
+    const auto second_preset = routing_preset(
+        "category-video",
+        "Видео",
+        "https://repo.hoaxisr.ru/rulesets/srs/video.srs");
+    const nlohmann::json first_catalog = {
+        {"catalog_id", "test:mixed-catalog"},
+        {"presets", nlohmann::json::array({first_preset})},
+    };
+    const nlohmann::json mixed_catalog = {
+        {"catalog_id", "test:mixed-catalog"},
+        {"presets",
+         nlohmann::json::array({first_preset, second_preset})},
+    };
+
+    const auto installed = plan_catalog_setup(
+        outbound_intent(), first_catalog, base_config());
+    auto mixed_intent = outbound_intent();
+    mixed_intent.selections.push_back(
+        {"category-video", std::nullopt});
+    const auto mixed = plan_catalog_setup(
+        mixed_intent, mixed_catalog, installed.candidate);
+
+    REQUIRE(mixed.summary.lists.size() == 2U);
+    CHECK(mixed.summary.lists.at(0).already_installed);
+    CHECK_FALSE(mixed.summary.lists.at(1).already_installed);
+    REQUIRE(mixed.summary.route_rule.has_value());
+    REQUIRE(mixed.summary.dns_rule.has_value());
+    REQUIRE(mixed.summary.route_rules.size() == 1U);
+    REQUIRE(mixed.summary.dns_rules.size() == 1U);
+    const auto& route_rule =
+        mixed.candidate.route->rules->at(
+            mixed.summary.route_rule->insertion_index);
+    REQUIRE(route_rule.list.has_value());
+    CHECK(
+        *route_rule.list ==
+        std::vector<std::string>{"category_video"});
+    const auto& dns_rule =
+        mixed.candidate.dns->rules->at(
+            mixed.summary.dns_rule->insertion_index);
+    CHECK(
+        dns_rule.list ==
+        std::vector<std::string>{"category_video"});
+}
+
+TEST_CASE(
+    "mixed catalogue selection wires an uncovered legacy list with the new list") {
+    auto config = base_config();
+    ListConfig legacy;
+    legacy.display_name = "Existing AI";
+    legacy.url =
+        "https://repo.hoaxisr.ru/rulesets/srs/ai.srs";
+    config.lists =
+        std::map<std::string, ListConfig>{{"existing_ai", legacy}};
+    validate_config(config);
+
+    const auto first_preset = routing_preset();
+    const auto second_preset = routing_preset(
+        "category-video",
+        "Видео",
+        "https://repo.hoaxisr.ru/rulesets/srs/video.srs");
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:mixed-uncovered-catalog"},
+        {"presets",
+         nlohmann::json::array({first_preset, second_preset})},
+    };
+    auto intent = outbound_intent();
+    intent.selections.push_back({"category-video", std::nullopt});
+
+    const auto plan = plan_catalog_setup(intent, catalog, config);
+
+    REQUIRE(plan.summary.lists.size() == 2U);
+    CHECK(plan.summary.lists.at(0).already_installed);
+    CHECK(
+        plan.summary.lists.at(0).technical_id ==
+        "existing_ai");
+    CHECK_FALSE(plan.summary.lists.at(1).already_installed);
+    REQUIRE(plan.summary.route_rule.has_value());
+    REQUIRE(plan.summary.route_rules.size() == 2U);
+    for (const auto& summary : plan.summary.route_rules) {
+        const auto& route_rule =
+            plan.candidate.route->rules->at(
+                summary.insertion_index);
+        REQUIRE(route_rule.list.has_value());
+        CHECK(route_rule.list->size() == 1U);
+    }
+    REQUIRE(plan.summary.dns_rule.has_value());
+    REQUIRE(plan.summary.dns_rules.size() == 2U);
+    for (const auto& summary : plan.summary.dns_rules) {
+        const auto& dns_rule =
+            plan.candidate.dns->rules->at(
+                summary.insertion_index);
+        CHECK(dns_rule.list.size() == 1U);
     }
 }

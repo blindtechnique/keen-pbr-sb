@@ -2,7 +2,9 @@
 
 #include "runtime/conntrack_manager.hpp"
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -112,6 +114,8 @@ TEST_CASE("ConntrackManager cleans a deduplicated set and summarizes failures") 
 
     CHECK(summary.failed == 1);
     CHECK_FALSE(summary.command_unavailable);
+    CHECK(summary.remaining_marks ==
+          std::vector<std::uint32_t>{0x30000U});
     CHECK(marks == std::vector<std::string>{
                        "131072/16711680",
                        "131072/16711680",
@@ -131,7 +135,98 @@ TEST_CASE("ConntrackManager stops a mark batch when the utility is unavailable")
 
     CHECK(summary.failed == 0);
     CHECK(summary.command_unavailable);
+    CHECK(summary.skipped == 2);
+    CHECK(summary.remaining_marks ==
+          std::vector<std::uint32_t>{0x20000U, 0x30000U});
     CHECK(marks == std::vector<std::string>{"131072/16711680"});
+}
+
+TEST_CASE("ConntrackManager skips IPv6 cleanup when IPv6 is disabled") {
+    std::vector<std::string> families;
+    ConntrackManager manager([&families](const std::vector<std::string>& args) {
+        families.push_back(args[3]);
+        return ConntrackManager::CommandResult{0, {}};
+    });
+
+    const auto summary = manager.delete_marks_ordered(
+        {0x30000, 0x20000},
+        0xFF0000,
+        ConntrackCleanupOptions{
+            /*ipv6_enabled=*/false,
+            std::chrono::seconds{4}});
+
+    CHECK(summary.failed == 0);
+    CHECK(summary.skipped == 0);
+    CHECK_FALSE(summary.budget_exhausted);
+    CHECK(summary.remaining_marks.empty());
+    CHECK(families == std::vector<std::string>{"ipv4", "ipv4"});
+}
+
+TEST_CASE("ConntrackManager bounds best-effort batch cleanup") {
+    std::vector<std::string> marks;
+    ConntrackManager manager([&marks](const std::vector<std::string>& args) {
+        marks.push_back(args[5]);
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        return ConntrackManager::CommandResult{0, {}};
+    });
+
+    const auto summary = manager.delete_marks_ordered(
+        {0x10000, 0x20000, 0x30000},
+        0xFF0000,
+        ConntrackCleanupOptions{
+            /*ipv6_enabled=*/true,
+            std::chrono::milliseconds{1}});
+
+    CHECK(summary.budget_exhausted);
+    CHECK(summary.failed == 1);
+    CHECK(summary.skipped == 2);
+    CHECK(summary.remaining_marks ==
+          std::vector<std::uint32_t>{0x20000U, 0x30000U, 0x10000U});
+    CHECK(marks == std::vector<std::string>{"65536/16711680"});
+}
+
+TEST_CASE("ConntrackManager returns a retry-friendly bounded remainder") {
+    std::vector<std::string> marks;
+    ConntrackManager manager([&marks](const std::vector<std::string>& args) {
+        marks.push_back(args[5]);
+        const bool fail = args[5].rfind("131072/", 0) == 0;
+        return ConntrackManager::CommandResult{
+            fail ? 1 : 0,
+            fail ? "Operation not permitted" : ""};
+    });
+
+    const auto first = manager.delete_marks_ordered(
+        {0x20000U, 0x30000U, 0x40000U, 0x50000U},
+        0xFF0000U,
+        ConntrackCleanupOptions{
+            /*ipv6_enabled=*/false,
+            std::chrono::seconds{4},
+            /*max_marks=*/2});
+
+    CHECK(first.failed == 1);
+    CHECK(first.skipped == 2);
+    CHECK(first.remaining_marks ==
+          std::vector<std::uint32_t>{
+              0x40000U, 0x50000U, 0x20000U});
+    CHECK(marks == std::vector<std::string>{
+                       "131072/16711680",
+                       "196608/16711680"});
+
+    marks.clear();
+    const auto second = manager.delete_marks_ordered(
+        first.remaining_marks,
+        0xFF0000U,
+        ConntrackCleanupOptions{
+            /*ipv6_enabled=*/false,
+            std::chrono::seconds{4},
+            /*max_marks=*/2});
+    CHECK(second.failed == 0);
+    CHECK(second.skipped == 1);
+    CHECK(second.remaining_marks ==
+          std::vector<std::uint32_t>{0x20000U});
+    CHECK(marks == std::vector<std::string>{
+                       "262144/16711680",
+                       "327680/16711680"});
 }
 
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {

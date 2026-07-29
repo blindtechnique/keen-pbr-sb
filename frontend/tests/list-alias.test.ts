@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import type { ConfigObject } from "../src/api/generated/model/configObject"
 import { semanticJsonEqual } from "../src/lib/semantic-json"
 import {
+  addRecommendedDnsServer,
   buildUpdatedConfigForListUpsert,
   createListDnsServerSelectItems,
   createListDraft,
@@ -25,6 +26,71 @@ const baselineDraft: ListDraft = {
 }
 
 describe("list aliases", () => {
+  test("creates a compatible preset DNS server in the same candidate config", () => {
+    const result = addRecommendedDnsServer(
+      {
+        dns: {
+          servers: [
+            {
+              tag: "cloudflare_vpn",
+              display_name: "Existing DNS",
+              type: "static",
+              address: "9.9.9.9",
+              detour: "other_vpn",
+            },
+          ],
+        },
+      },
+      {
+        name: "Cloudflare",
+        primaryAddress: "1.1.1.1",
+        technicalSeed: "cloudflare",
+      },
+      "vpn",
+      "Основной VPN"
+    )
+
+    expect(result?.serverTag).toBe("cloudflare_vpn_2")
+    expect(result?.config.dns?.servers?.[1]).toEqual({
+      tag: "cloudflare_vpn_2",
+      display_name: "Cloudflare · Основной VPN",
+      type: "static",
+      address: "1.1.1.1",
+      detour: "vpn",
+    })
+  })
+
+  test("reuses an exact compatible DNS definition instead of duplicating it", () => {
+    const config: ConfigObject = {
+      dns: {
+        servers: [
+          {
+            tag: "existing_cloudflare",
+            type: "static",
+            address: "1.1.1.1",
+            detour: "vpn",
+          },
+        ],
+      },
+    }
+    const result = addRecommendedDnsServer(
+      config,
+      {
+        name: "Cloudflare",
+        primaryAddress: "1.1.1.1",
+        technicalSeed: "cloudflare",
+      },
+      "vpn",
+      "VPN"
+    )
+
+    expect(result).toEqual({
+      config,
+      serverTag: "existing_cloudflare",
+    })
+    expect(result?.config.dns?.servers).toHaveLength(1)
+  })
+
   test("renders the no-DNS sentinel as a localized label", () => {
     expect(createListDnsServerSelectItems([], "Не выбрано")).toEqual([
       { value: "__none__", label: "Не выбрано" },
@@ -144,6 +210,86 @@ describe("list aliases", () => {
     expect(list?.display_name).toBe("Новое название")
     expect(updated.route?.rules?.[0]?.list).toEqual(["ai_services"])
     expect(updated.dns?.rules?.[0]?.list).toEqual(["ai_services"])
+  })
+
+  test("keeps catalogue provenance for metadata-only edits", () => {
+    const catalogIdentity = "a".repeat(64)
+    const config: ConfigObject = {
+      lists: {
+        ai_services: {
+          catalog_identity: catalogIdentity,
+          display_name: "Old alias",
+          ttl_ms: 7200000,
+          detour: "primary",
+          fallback_detours: ["backup"],
+          url: "https://example.test/ai.srs",
+          domains: ["chatgpt.com", "oaistatic.com"],
+          ip_cidrs: ["203.0.113.0/24"],
+        },
+      },
+    }
+
+    const updated = buildUpdatedConfigForListUpsert(
+      config,
+      "edit",
+      {
+        displayName: "New alias",
+        name: "ignored",
+        ttlMs: "3600000",
+        detour: "other_primary",
+        fallbackDetours: ["other_backup"],
+        url: "https://example.test/ai.srs",
+        file: "",
+        domains: "oaistatic.com\nchatgpt.com",
+        ipCidrs: "203.0.113.0/24",
+      },
+      "ai_services"
+    )
+
+    expect(updated.lists?.ai_services?.catalog_identity).toBe(catalogIdentity)
+  })
+
+  test("clears catalogue provenance when actual list source changes", () => {
+    const catalogIdentity = "b".repeat(64)
+    const baseline: ConfigObject = {
+      lists: {
+        ai_services: {
+          catalog_identity: catalogIdentity,
+          url: "https://example.test/ai.srs",
+          domains: ["chatgpt.com"],
+          ip_cidrs: ["203.0.113.0/24"],
+        },
+      },
+    }
+    const original = getDraftFromMapEntry(
+      "ai_services",
+      baseline.lists?.ai_services
+    )
+    expect(original).not.toBeNull()
+
+    const changedUrl = buildUpdatedConfigForListUpsert(
+      baseline,
+      "edit",
+      {
+        ...original!,
+        url: "https://example.test/ai-v2.srs",
+      },
+      "ai_services"
+    )
+    expect(changedUrl.lists?.ai_services?.catalog_identity).toBeUndefined()
+
+    const changedInlineContent = buildUpdatedConfigForListUpsert(
+      baseline,
+      "edit",
+      {
+        ...original!,
+        domains: "chatgpt.com\noaistatic.com",
+      },
+      "ai_services"
+    )
+    expect(
+      changedInlineContent.lists?.ai_services?.catalog_identity
+    ).toBeUndefined()
   })
 
   test("quick setup gives the generated routing rule an alias and stable ID", () => {

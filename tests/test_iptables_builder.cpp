@@ -246,9 +246,44 @@ public:
       const FirewallGlobalPrefilter &prefilter,
       bool dns_redirect = true,
       bool router_origin_snat = false,
-      const std::vector<std::string> &snat_interfaces = {}) {
+      const std::vector<std::string> &snat_interfaces = {},
+      bool ipv6 = false,
+      uint32_t fwmark_mask = 0xFFFFFFFFu) {
     return IptablesFirewall::build_dns_nat_script(
-        prefilter, dns_redirect, router_origin_snat, snat_interfaces);
+        prefilter,
+        dns_redirect,
+        router_origin_snat,
+        snat_interfaces,
+        ipv6,
+        fwmark_mask);
+  }
+
+  static OwnedSnatState inspect_owned_snat_state(
+      bool expected = false,
+      const std::vector<std::string>& expected_interfaces = {},
+      uint32_t expected_fwmark_mask = 0xFFFFFFFFu) {
+    return IptablesFirewall::inspect_owned_snat_state(
+        "iptables",
+        expected,
+        expected_interfaces,
+        expected_fwmark_mask);
+  }
+
+  static OwnedSnatState combine_owned_snat_states(
+      OwnedSnatState ipv4,
+      OwnedSnatState ipv6) {
+    return IptablesFirewall::combine_owned_snat_states(ipv4, ipv6);
+  }
+
+  static OwnedSnatState inspect_owned_snat_families(
+      bool ipv4_expected,
+      bool ipv6_expected,
+      bool ipv6_managed) {
+    IptablesFirewall fw;
+    fw.last_applied_snat_v4_expected_ = ipv4_expected;
+    fw.last_applied_snat_v6_expected_ = ipv6_expected;
+    fw.last_applied_snat_v6_managed_ = ipv6_managed;
+    return fw.inspect_owned_snat_state();
   }
 
   static std::size_t tunnel_snat_interface_count(
@@ -388,7 +423,7 @@ public:
     return IptablesFirewall::build_nat_validation_script(nat_script);
   }
 
-  static void apply_preserve_nat_for_test() {
+  static OwnedSnatState apply_preserve_nat_for_test() {
     IptablesFirewall fw;
     fw.set_ipv6_enabled(false);
     fw.dns_nat_v4_created_ = true;
@@ -398,6 +433,7 @@ public:
     fw.apply_nat_rules(
         /*effective_ipv6=*/false,
         FirewallApplyMode::PreserveSets);
+    return fw.inspect_owned_snat_state();
   }
 
   static void apply_preserve_ipv6_nat_for_test() {
@@ -505,7 +541,8 @@ TEST_CASE("NAT legacy preflight uses deterministic unhooked validation chains") 
             "-A KeenPbrDnsValidate -p udp --dport 53 "
             "-j REDIRECT --to-ports 53\n") != std::string::npos);
   CHECK(validation.find(
-            "-A KeenPbrSnatValidate -o nwg2 -j MASQUERADE\n") !=
+            "-A KeenPbrSnatValidate -o nwg2 -m mark ! "
+            "--mark 0x0/0xffffffff -j MASQUERADE\n") !=
         std::string::npos);
   CHECK(validation.find("-F KeenPbrDnsValidate\n") != std::string::npos);
   CHECK(validation.find("-F KeenPbrSnatValidate\n") != std::string::npos);
@@ -807,6 +844,14 @@ TEST_CASE("IPv4 NAT apply succeeds when ip6tables is absent") {
       "  '-t nat -S POSTROUTING')\n"
       "    echo '-A POSTROUTING -j KeenPbrSnat'\n"
       "    ;;\n"
+  "  '-t nat -S KeenPbrSnat')\n"
+      "    printf '%s\\n' "
+      "'-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xffffffff -j MASQUERADE'\n"
+      "    ;;\n"
       "esac\n"
       "exit 0\n");
   write_iptables_test_executable(
@@ -824,8 +869,80 @@ TEST_CASE("IPv4 NAT apply succeeds when ip6tables is absent") {
   IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
 
   testing::reset_restore_wait_option_probe_for_test();
-  CHECK_NOTHROW(T::apply_preserve_nat_for_test());
+  CHECK(T::apply_preserve_nat_for_test() == OwnedSnatState::healthy);
   CHECK_FALSE(read_iptables_test_file(restore_calls).empty());
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("preserve apply restores an externally removed SNAT chain and hook") {
+  IptablesTestTempDir temp;
+  const auto dns_hook = temp.path() / "dns-hook";
+  const auto snat_hook = temp.path() / "snat-hook";
+  const auto snat_chain = temp.path() / "snat-chain";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  '-t nat -S PREROUTING')\n"
+      "    [ -f \"$KPBR_DNS_HOOK\" ] && "
+      "echo '-A PREROUTING -j KeenPbrDnsRdr'\n"
+      "    ;;\n"
+      "  '-t nat -A PREROUTING -j KeenPbrDnsRdr')\n"
+      "    : > \"$KPBR_DNS_HOOK\"\n"
+      "    ;;\n"
+      "  '-t nat -S POSTROUTING')\n"
+      "    [ -f \"$KPBR_SNAT_HOOK\" ] && "
+      "echo '-A POSTROUTING -j KeenPbrSnat'\n"
+      "    ;;\n"
+      "  '-t nat -A POSTROUTING -j KeenPbrSnat')\n"
+      "    : > \"$KPBR_SNAT_HOOK\"\n"
+      "    ;;\n"
+      "  '-t nat -S KeenPbrSnat')\n"
+      "    if [ -f \"$KPBR_SNAT_CHAIN\" ]; then\n"
+      "      printf '%s\\n' "
+      "'-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xffffffff -j MASQUERADE'\n"
+      "    else\n"
+      "      echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "      exit 1\n"
+      "    fi\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  write_iptables_test_executable(
+      temp.path() / "iptables-restore",
+      "#!/bin/sh\n"
+      "payload=\"$KPBR_SNAT_CHAIN.payload\"\n"
+      "/bin/cat > \"$payload\"\n"
+      "if /bin/grep -q '^:KeenPbrSnat ' \"$payload\"; then\n"
+      "  : > \"$KPBR_SNAT_CHAIN\"\n"
+      "fi\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment dns_hook_env("KPBR_DNS_HOOK");
+  IptablesTestEnvironment snat_hook_env("KPBR_SNAT_HOOK");
+  IptablesTestEnvironment snat_chain_env("KPBR_SNAT_CHAIN");
+  path.set(temp.path().string());
+  dns_hook_env.set(dns_hook.string());
+  snat_hook_env.set(snat_hook.string());
+  snat_chain_env.set(snat_chain.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  testing::reset_restore_wait_option_probe_for_test();
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            /*expected_interfaces=*/{"nwg2"}) ==
+        OwnedSnatState::missing);
+  CHECK(T::apply_preserve_nat_for_test() == OwnedSnatState::healthy);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            /*expected_interfaces=*/{"nwg2"}) ==
+        OwnedSnatState::healthy);
+  CHECK(std::filesystem::exists(snat_chain));
+  CHECK(std::filesystem::exists(snat_hook));
   testing::reset_restore_wait_option_probe_for_test();
 }
 
@@ -1711,6 +1828,71 @@ TEST_CASE("build_dns_nat_script: internal VPN bypass precedes every DNS redirect
   CHECK(second_bypass < tcp_redirect);
 }
 
+TEST_CASE("build_dns_nat_script: service source pools extend and bypass DNS scope") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces =
+      std::vector<std::string>{"br0"};
+  prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
+  prefilter.bypass_source_selectors_v4 = {
+      {"Sstp0", "172.16.1.0/24"}};
+
+  const auto s = T::build_dns_nat_script(prefilter);
+  const auto bypass =
+      s.find(
+          "-A KeenPbrDnsRdr -i Sstp0 -s 172.16.1.0/24 -j RETURN\n");
+  const auto included =
+      s.find("-A KeenPbrDnsRdr -s 172.20.8.0/23 -p udp --dport 53 -j REDIRECT --to-ports 53\n");
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(included != std::string::npos);
+  CHECK(bypass < included);
+  CHECK(s.find("-A KeenPbrDnsRdr -i br0 -p udp") !=
+        std::string::npos);
+
+  const auto ipv6 = T::build_dns_nat_script(
+      prefilter,
+      /*dns_redirect=*/true,
+      /*router_origin_snat=*/false,
+      {},
+      /*ipv6=*/true);
+  CHECK(ipv6.find("172.20.8.0/23") == std::string::npos);
+  CHECK(ipv6.find("172.16.1.0/24") == std::string::npos);
+}
+
+TEST_CASE("iptables policy rules classify verified service source pools") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.inbound_interfaces =
+      std::vector<std::string>{"br0"};
+  prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
+  prefilter.bypass_source_selectors_v4 = {
+      {"Sstp0", "172.16.1.0/24"}};
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00ff0000;
+
+  const auto s = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+
+  const auto bypass =
+      s.find(
+          "-A KeenPbrTable -i Sstp0 -s 172.16.1.0/24 -j RETURN\n");
+  const auto restore = s.find("CONNMARK --restore-mark");
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(restore != std::string::npos);
+  CHECK(bypass < restore);
+  CHECK(s.find("-A KeenPbrTable ! -i br0 -j RETURN") ==
+        std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrTable -m set --match-set kpbr4_local dst -i br0") !=
+        std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrTable -m set --match-set kpbr4_local dst -s 172.20.8.0/23") !=
+        std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK") ==
+        std::string::npos);
+}
+
 TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {
   auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
                                    /*router_origin_snat=*/true);
@@ -1727,14 +1909,254 @@ TEST_CASE("build_dns_nat_script: tunnel interfaces masquerade forwarded traffic"
   // masquerades for these interfaces, so keen-pbr has to do it itself.
   auto s = T::build_dns_nat_script({}, /*dns_redirect=*/false,
                                    /*router_origin_snat=*/true,
-                                   {"nwg2", "mooo_vless"});
-  CHECK(s.find("-A KeenPbrSnat -o nwg2 -j MASQUERADE\n") != std::string::npos);
-  CHECK(s.find("-A KeenPbrSnat -o mooo_vless -j MASQUERADE\n") !=
+                                   {"nwg2", "mooo_vless"},
+                                   /*ipv6=*/false,
+                                   /*fwmark_mask=*/0x00FF0000u);
+  CHECK(s.find(
+            "-A KeenPbrSnat -o nwg2 -m mark ! "
+            "--mark 0x0/0xff0000 -j MASQUERADE\n") != std::string::npos);
+  CHECK(s.find(
+            "-A KeenPbrSnat -o mooo_vless -m mark ! "
+            "--mark 0x0/0xff0000 -j MASQUERADE\n") !=
+        std::string::npos);
+  CHECK(s.find("-A KeenPbrSnat -o nwg2 -j MASQUERADE\n") ==
         std::string::npos);
 }
 
 TEST_CASE("create_tunnel_snat_rules: deduplicates interfaces") {
   CHECK(T::tunnel_snat_interface_count({"nwg2", "nwg2", "nwg3"}) == 2);
+}
+
+TEST_CASE("owned SNAT inspection distinguishes healthy missing and unknown") {
+  IptablesTestTempDir temp;
+  const auto mode = temp.path() / "snat-state";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "case \"$(cat \"$KPBR_SNAT_STATE\" 2>/dev/null)\" in\n"
+      "  healthy)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  interface)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xff0000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  interfaces-reversed)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg3 -m mark ! "
+      "--mark 0x0/0xff0000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -o nwg2 -m mark ! "
+      "--mark 0x0/0xff0000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  empty)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat') echo '-N KeenPbrSnat' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  extra)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -j ACCEPT' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  conditional-hook)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -p tcp -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  missing)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING') exit 0 ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "        exit 1 ;;\n"
+      "    esac\n"
+      "    ;;\n"
+      "  *)\n"
+      "    echo 'xtables lock is temporarily unavailable' >&2\n"
+      "    exit 4\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_SNAT_STATE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(mode.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  {
+    std::ofstream out(mode);
+    out << "healthy";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::healthy);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/false) == OwnedSnatState::stale);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "interface";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg2"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "interfaces-reversed";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg2", "nwg3"},
+            0x00FF0000u) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {"nwg3", "nwg2"},
+            0x00FF0000u) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "empty";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "extra";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/false) == OwnedSnatState::stale);
+  {
+    std::ofstream out(mode);
+    out << "conditional-hook";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  {
+    std::ofstream out(mode);
+    out << "missing";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/false) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "unknown";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true) == OwnedSnatState::unknown);
+}
+
+TEST_CASE("owned SNAT family aggregation is fail closed") {
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::healthy,
+            OwnedSnatState::healthy) == OwnedSnatState::healthy);
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::stale,
+            OwnedSnatState::healthy) == OwnedSnatState::stale);
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::stale,
+            OwnedSnatState::missing) == OwnedSnatState::missing);
+  CHECK(T::combine_owned_snat_states(
+            OwnedSnatState::missing,
+            OwnedSnatState::unknown) == OwnedSnatState::unknown);
+}
+
+TEST_CASE("owned SNAT inspection includes the last managed IPv6 family") {
+  IptablesTestTempDir temp;
+  const std::string executable =
+      "#!/bin/sh\n"
+      "state=\"$KPBR_SNAT_V4_STATE\"\n"
+      "case \"${0##*/}\" in ip6tables) state=\"$KPBR_SNAT_V6_STATE\" ;; esac\n"
+      "case \"$state:$*\" in\n"
+      "  'healthy:-t nat -S POSTROUTING')\n"
+      "    echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "  'healthy:-t nat -S KeenPbrSnat')\n"
+      "    printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' ;;\n"
+      "  'missing:-t nat -S POSTROUTING') exit 0 ;;\n"
+      "  'missing:-t nat -S KeenPbrSnat')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 1 ;;\n"
+      "  unknown:*) echo 'xtables lock unavailable' >&2; exit 4 ;;\n"
+      "esac\n"
+      "exit 0\n";
+  write_iptables_test_executable(temp.path() / "iptables", executable);
+  write_iptables_test_executable(temp.path() / "ip6tables", executable);
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment ipv4("KPBR_SNAT_V4_STATE");
+  IptablesTestEnvironment ipv6("KPBR_SNAT_V6_STATE");
+  use_iptables_test_path(path, temp.path());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  ipv4.set("healthy");
+  ipv6.set("missing");
+  CHECK(T::inspect_owned_snat_families(
+            /*ipv4_expected=*/true,
+            /*ipv6_expected=*/true,
+            /*ipv6_managed=*/true) == OwnedSnatState::missing);
+
+  ipv4.set("missing");
+  ipv6.set("unknown");
+  CHECK(T::inspect_owned_snat_families(
+            /*ipv4_expected=*/true,
+            /*ipv6_expected=*/true,
+            /*ipv6_managed=*/true) == OwnedSnatState::unknown);
+
+  // Unsupported/unmanaged IPv6 must not turn a valid IPv4-only contract into
+  // an inspection failure.
+  ipv4.set("healthy");
+  ipv6.set("unknown");
+  CHECK(T::inspect_owned_snat_families(
+            /*ipv4_expected=*/true,
+            /*ipv6_expected=*/false,
+            /*ipv6_managed=*/false) == OwnedSnatState::healthy);
 }
 
 TEST_CASE("create_output_mark_rule: carries the router-origin bit for masquerading") {

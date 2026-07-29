@@ -40,6 +40,10 @@ public:
 
     void replace_active(Config active_config, OutboundMarkMap outbound_marks);
     void stage_config(Config staged_config, std::string staged_config_json);
+    bool stage_config_if_visible_revision(
+        const std::string& expected_visible_revision,
+        Config staged_config,
+        std::string staged_config_json);
     std::optional<std::pair<Config, std::string>> staged_snapshot() const;
     std::optional<StagedConfigSnapshot> staged_cas_snapshot() const;
     void clear_staged();

@@ -284,6 +284,10 @@ const char* error_code_name(CatalogSetupErrorCode code) {
         return "dns_server_required";
     case CatalogSetupErrorCode::dns_server_not_found:
         return "dns_server_not_found";
+    case CatalogSetupErrorCode::dns_automatic_unavailable:
+        return "dns_automatic_unavailable";
+    case CatalogSetupErrorCode::dns_detour_mismatch:
+        return "dns_detour_mismatch";
     }
     return "unknown";
 }
@@ -295,6 +299,7 @@ nlohmann::json summary_json(const CatalogSetupPlan& plan) {
             {"preset_id", list.preset_id},
             {"technical_id", list.technical_id},
             {"display_name", list.display_name},
+            {"already_installed", list.already_installed},
             {"url_backed", list.url_backed},
             {"has_inline_domains", list.has_inline_domains},
             {"has_inline_cidrs", list.has_inline_cidrs},
@@ -309,6 +314,31 @@ nlohmann::json summary_json(const CatalogSetupPlan& plan) {
         {"mode", mode_name(plan.summary.mode)},
         {"lists", std::move(lists)},
     };
+    nlohmann::json route_rules = nlohmann::json::array();
+    for (const auto& route : plan.summary.route_rules) {
+        route_rules.push_back({
+            {"technical_id", route.technical_id},
+            {"display_name", route.display_name},
+            {"outbound", route.outbound},
+            {"insertion_index", route.insertion_index},
+            {"blocking", route.blocking},
+        });
+    }
+    if (!route_rules.empty()) {
+        summary["route_rules"] = std::move(route_rules);
+    }
+    nlohmann::json dns_rules = nlohmann::json::array();
+    for (const auto& dns : plan.summary.dns_rules) {
+        dns_rules.push_back({
+            {"technical_id", dns.technical_id},
+            {"display_name", dns.display_name},
+            {"server", dns.server},
+            {"insertion_index", dns.insertion_index},
+        });
+    }
+    if (!dns_rules.empty()) {
+        summary["dns_rules"] = std::move(dns_rules);
+    }
     if (plan.summary.route_rule.has_value()) {
         const auto& route = *plan.summary.route_rule;
         summary["route_rule"] = {
@@ -347,6 +377,21 @@ nlohmann::json warnings_json(const CatalogSetupPlan& plan) {
         });
     }
     return warnings;
+}
+
+bool catalog_plan_has_changes(const CatalogSetupPlan& plan) {
+    return std::any_of(
+               plan.summary.lists.begin(),
+               plan.summary.lists.end(),
+               [](const setup::CatalogListPlanSummary& list) {
+                   return !list.already_installed;
+               }) ||
+           plan.summary.route_rule.has_value() ||
+           plan.summary.dns_rule.has_value() ||
+           !plan.summary.route_rules.empty() ||
+           !plan.summary.dns_rules.empty() ||
+           (plan.summary.blackhole.has_value() &&
+            plan.summary.blackhole->created);
 }
 
 struct CatalogSetupPreview {
@@ -548,6 +593,20 @@ void register_catalog_setup_handler_impl(
                         stale_preview(
                             "preview_token_mismatch",
                             preview);
+                    }
+                    if (!catalog_plan_has_changes(preview.plan)) {
+                        throw ApiError(
+                            "Selected catalog presets and requested policies "
+                            "are already configured",
+                            409,
+                            nlohmann::json{
+                                {"error",
+                                 "Selected catalog presets and requested "
+                                 "policies are already configured"},
+                                {"reason", "already_installed"},
+                                {"summary", preview.summary},
+                            }
+                                .dump());
                     }
                     if (!preview.plan.warnings.empty() &&
                         !request.accept_warnings) {

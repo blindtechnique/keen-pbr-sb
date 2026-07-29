@@ -17,10 +17,18 @@ import { toast } from "sonner"
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { Outbound } from "@/api/generated/model/outbound"
-import { usePostConfigMutation } from "@/api/mutations"
+import {
+  usePostConfigMutation,
+  usePostRecommendedListSetupMutation,
+} from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
-import { selectConfig } from "@/api/selectors"
+import { selectConfig, selectConfigRevision } from "@/api/selectors"
+import { DnsPresetPicker } from "@/components/dns/dns-preset-picker"
+import {
+  resolveDnsTemplateSelection,
+  type DnsPresetSelection,
+} from "@/components/dns/dns-preset-selection"
 import { OutboundSelect } from "@/components/shared/outbound-select"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
 import {
@@ -76,6 +84,7 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   NO_DNS_RULE,
+  addRecommendedDnsServer,
   buildUpdatedConfigForListUpsert,
   createListDnsServerSelectItems,
   createListDraft,
@@ -140,8 +149,9 @@ export function ListUpsertPage({
   const [dirty, setDirty] = useState(false)
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
+  const loadedConfigRevision = selectConfigRevision(configQuery.data)
 
-  if (!loadedConfig) {
+  if (!loadedConfig || !loadedConfigRevision) {
     return (
       <UpsertPage
         cardDescription={t(
@@ -232,6 +242,7 @@ export function ListUpsertPage({
         existingListNames={Object.keys(listsMap)}
         listId={listId}
         loadedConfig={loadedConfig}
+        loadedConfigRevision={loadedConfigRevision}
         mode={mode}
         onDirtyChange={setDirty}
         presentation={presentation}
@@ -247,6 +258,7 @@ function ListForm({
   existingListNames,
   listId,
   loadedConfig,
+  loadedConfigRevision,
   onDirtyChange,
   presentation,
 }: {
@@ -256,6 +268,7 @@ function ListForm({
   existingListNames: string[]
   listId?: string
   loadedConfig: ConfigObject
+  loadedConfigRevision: string
   onDirtyChange: (dirty: boolean) => void
   presentation: UpsertPagePresentation
 }) {
@@ -263,17 +276,37 @@ function ListForm({
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
   const close = useUpsertPageClose()
+  const recommendedSetup = presentation === "dialog" && mode === "create"
   const [activeSourceGroups, setActiveSourceGroups] = useState<
     ListSourceGroup[]
   >(() => getActiveSourceGroupsFromDraft(draft))
   const postConfigMutation = usePostConfigMutation()
+  const postRecommendedListSetupMutation = usePostRecommendedListSetupMutation()
   const isMobile = useIsMobile()
   const dnsServers = loadedConfig.dns?.servers ?? []
+  const savedDnsTemplates =
+    loadedConfig.ui_preferences?.plain_dns_templates ?? []
   const dnsServerTags = dnsServers.map((server) => server.tag)
   const dnsServerSelectItems = createListDnsServerSelectItems(
     dnsServers,
     t("pages.listUpsert.dnsRule.none")
   )
+  const downloadOutbounds = outbounds.filter(
+    (outbound) =>
+      outbound.type === "interface" ||
+      outbound.type === "table" ||
+      outbound.type === "urltest"
+  )
+  const downloadOutboundByTag = new Map(
+    downloadOutbounds.map((outbound) => [outbound.tag, outbound])
+  )
+  const recommendedPair = downloadOutbounds
+    .map((outbound) => ({
+      outbound: outbound.tag,
+      dnsServer:
+        dnsServers.find((server) => server.detour === outbound.tag)?.tag ?? "",
+    }))
+    .find((candidate) => candidate.dnsServer)
   const [baselineDraft] = useState<ListDraft>(() => {
     if (mode !== "create" || draft.name.trim()) {
       return draft
@@ -283,12 +316,21 @@ function ListForm({
   const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
     useState(false)
   const [initialQuickSetup] = useState<QuickSetup>(() => ({
-    createRouteRule: false,
-    routeOutbound: "",
-    createDnsRule: false,
-    dnsServer: dnsServerTags[0] ?? "",
+    createRouteRule: recommendedSetup,
+    routeOutbound: recommendedSetup ? (recommendedPair?.outbound ?? "") : "",
+    createDnsRule: recommendedSetup,
+    dnsServer: recommendedSetup
+      ? (recommendedPair?.dnsServer ?? "")
+      : (dnsServerTags[0] ?? ""),
   }))
   const [quickSetup, setQuickSetup] = useState<QuickSetup>(initialQuickSetup)
+  const [initialRecommendedDnsPreset] =
+    useState<DnsPresetSelection>("cloudflare")
+  const [recommendedDnsPreset, setRecommendedDnsPreset] =
+    useState<DnsPresetSelection>(initialRecommendedDnsPreset)
+  const compatibleDnsServers = quickSetup.routeOutbound
+    ? dnsServers.filter((server) => server.detour === quickSetup.routeOutbound)
+    : []
   // DNS rules are edited where they belong — next to the list they apply to —
   // instead of in a separate section listing every rule at once.
   const currentDnsServer =
@@ -300,16 +342,6 @@ function ListForm({
     initialDnsServerForList
   )
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
-  const downloadOutbounds = outbounds.filter(
-    (outbound) =>
-      outbound.type === "interface" ||
-      outbound.type === "table" ||
-      outbound.type === "urltest"
-  )
-  const downloadOutboundByTag = new Map(
-    downloadOutbounds.map((outbound) => [outbound.tag, outbound])
-  )
-
   const form = useForm({
     defaultValues: baselineDraft,
     validators: {
@@ -371,7 +403,7 @@ function ListForm({
         }
         if (
           mode === "create" &&
-          quickSetup.createRouteRule &&
+          (recommendedSetup || quickSetup.createRouteRule) &&
           !quickSetup.routeOutbound
         ) {
           toast.error(t("pages.listUpsert.quickSetup.routeRequired"), {
@@ -379,27 +411,74 @@ function ListForm({
           })
           return undefined
         }
+        const selectedRecommendedDnsTemplate = recommendedSetup
+          ? resolveDnsTemplateSelection(recommendedDnsPreset, savedDnsTemplates)
+          : undefined
         if (
           mode === "create" &&
-          quickSetup.createDnsRule &&
-          !quickSetup.dnsServer
+          (recommendedSetup || quickSetup.createDnsRule) &&
+          !quickSetup.dnsServer &&
+          !selectedRecommendedDnsTemplate
         ) {
           toast.error(t("pages.listUpsert.quickSetup.dnsRequired"), {
             richColors: true,
           })
           return undefined
         }
+        let configForList = loadedConfig
+        let quickSetupForSave = quickSetup
+        if (
+          recommendedSetup &&
+          quickSetup.createDnsRule &&
+          !quickSetup.dnsServer &&
+          selectedRecommendedDnsTemplate
+        ) {
+          const outbound = downloadOutboundByTag.get(quickSetup.routeOutbound)
+          if (!outbound) {
+            toast.error(t("pages.listUpsert.quickSetup.routeRequired"), {
+              richColors: true,
+            })
+            return undefined
+          }
+          const dnsServerResult = addRecommendedDnsServer(
+            loadedConfig,
+            selectedRecommendedDnsTemplate,
+            outbound.tag,
+            getOutboundDisplayName(outbound)
+          )
+          if (!dnsServerResult) {
+            toast.error(t("pages.listUpsert.quickSetup.dnsCreateFailed"), {
+              richColors: true,
+            })
+            return undefined
+          }
+          configForList = dnsServerResult.config
+          quickSetupForSave = {
+            ...quickSetup,
+            dnsServer: dnsServerResult.serverTag,
+          }
+        }
         const updatedConfig = buildUpdatedConfigForListUpsert(
-          loadedConfig,
+          configForList,
           mode,
           valueToPersist,
           listId,
-          mode === "create" ? quickSetup : undefined,
+          mode === "create" ? quickSetupForSave : undefined,
           mode === "edit" ? dnsServerForList : undefined
         )
 
         try {
-          await postConfigMutation.mutateAsync({ data: updatedConfig })
+          if (recommendedSetup) {
+            await postRecommendedListSetupMutation.mutateAsync({
+              data: {
+                base_revision: loadedConfigRevision,
+                config: updatedConfig,
+                list_id: valueToPersist.name,
+              },
+            })
+          } else {
+            await postConfigMutation.mutateAsync({ data: updatedConfig })
+          }
           toast.success(
             mode === "create"
               ? t("pages.listUpsert.messages.created")
@@ -475,7 +554,15 @@ function ListForm({
       equals: semanticJsonEqual,
       normalize: normalizeQuickSetupForComparison,
     })
-  const isDirty = formIsDirty || hasDnsServerChange || hasQuickSetupChange
+  const hasRecommendedDnsPresetChange =
+    recommendedSetup &&
+    recommendedDnsPreset !== initialRecommendedDnsPreset &&
+    compatibleDnsServers.length === 0
+  const isDirty =
+    formIsDirty ||
+    hasDnsServerChange ||
+    hasQuickSetupChange ||
+    hasRecommendedDnsPresetChange
 
   useEffect(() => {
     onDirtyChange(isDirty)
@@ -1056,7 +1143,11 @@ function ListForm({
           <CardHeader>
             <CardTitle>{t("pages.listUpsert.quickSetup.title")}</CardTitle>
             <CardDescription>
-              {t("pages.listUpsert.quickSetup.description")}
+              {t(
+                recommendedSetup
+                  ? "pages.listUpsert.quickSetup.recommendedDescription"
+                  : "pages.listUpsert.quickSetup.description"
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
@@ -1064,6 +1155,7 @@ function ListForm({
               <div className="flex items-center gap-3">
                 <Checkbox
                   checked={quickSetup.createRouteRule}
+                  disabled={recommendedSetup}
                   id="list-create-route-rule"
                   onCheckedChange={(checked) =>
                     setQuickSetup((current) => ({
@@ -1085,6 +1177,10 @@ function ListForm({
                     setQuickSetup((current) => ({
                       ...current,
                       routeOutbound: value,
+                      dnsServer: recommendedSetup
+                        ? (dnsServers.find((server) => server.detour === value)
+                            ?.tag ?? "")
+                        : current.dnsServer,
                     }))
                   }
                   outbounds={outbounds}
@@ -1098,7 +1194,10 @@ function ListForm({
               <div className="flex items-center gap-3">
                 <Checkbox
                   checked={quickSetup.createDnsRule}
-                  disabled={dnsServerTags.length === 0}
+                  disabled={
+                    recommendedSetup ||
+                    (!recommendedSetup && dnsServerTags.length === 0)
+                  }
                   id="list-create-dns-rule"
                   onCheckedChange={(checked) =>
                     setQuickSetup((current) => ({
@@ -1114,7 +1213,8 @@ function ListForm({
                   {t("pages.listUpsert.quickSetup.createDnsRule")}
                 </FieldLabel>
               </div>
-              {quickSetup.createDnsRule ? (
+              {quickSetup.createDnsRule &&
+              (!recommendedSetup || compatibleDnsServers.length > 0) ? (
                 <Select
                   onValueChange={(value) =>
                     setQuickSetup((current) => ({
@@ -1133,16 +1233,40 @@ function ListForm({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      {dnsServerTags.map((tag) => (
-                        <SelectItem key={tag} value={tag}>
-                          {tag}
+                      {(recommendedSetup
+                        ? compatibleDnsServers
+                        : dnsServers
+                      ).map((server) => (
+                        <SelectItem key={server.tag} value={server.tag}>
+                          {server.display_name?.trim() || server.tag}
                         </SelectItem>
                       ))}
                     </SelectGroup>
                   </SelectContent>
                 </Select>
               ) : null}
-              {dnsServerTags.length === 0 ? (
+              {recommendedSetup &&
+              quickSetup.createDnsRule &&
+              quickSetup.routeOutbound &&
+              compatibleDnsServers.length === 0 ? (
+                <>
+                  <DnsPresetPicker
+                    customLabel={t("pages.dnsServerUpsert.presets.custom")}
+                    label={t(
+                      "pages.listUpsert.quickSetup.createDnsServerFromPreset"
+                    )}
+                    onValueChange={setRecommendedDnsPreset}
+                    savedTemplates={savedDnsTemplates}
+                    showCustom={false}
+                    value={recommendedDnsPreset}
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    {t(
+                      "pages.listUpsert.quickSetup.createDnsServerFromPresetHint"
+                    )}
+                  </p>
+                </>
+              ) : !recommendedSetup && dnsServerTags.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   {t("pages.listUpsert.quickSetup.noDnsServers")}
                 </p>
@@ -1150,7 +1274,11 @@ function ListForm({
             </div>
 
             <p className="text-sm text-muted-foreground">
-              {t("pages.listUpsert.quickSetup.manualHint")}
+              {t(
+                recommendedSetup
+                  ? "pages.listUpsert.quickSetup.recommendedHint"
+                  : "pages.listUpsert.quickSetup.manualHint"
+              )}
             </p>
           </CardContent>
         </Card>
@@ -1173,11 +1301,17 @@ function ListForm({
         <form.Subscribe selector={(state) => state.canSubmit}>
           {(canSubmit) => (
             <Button
-              disabled={postConfigMutation.isPending || !isDirty || !canSubmit}
+              disabled={
+                postConfigMutation.isPending ||
+                postRecommendedListSetupMutation.isPending ||
+                !isDirty ||
+                !canSubmit
+              }
               size="xl"
               type="submit"
             >
-              {postConfigMutation.isPending
+              {postConfigMutation.isPending ||
+              postRecommendedListSetupMutation.isPending
                 ? t("pages.listUpsert.actions.saving")
                 : mode === "create"
                   ? t("pages.listUpsert.actions.create")

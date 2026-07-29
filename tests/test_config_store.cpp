@@ -59,4 +59,68 @@ TEST_CASE("config store visible snapshot identifies active and draft states") {
     CHECK(store.visible_config().daemon->cache_dir == "/tmp/draft");
 }
 
+TEST_CASE(
+    "config store compare-and-stage rejects stale state without mutation") {
+    const auto active = config_named("active");
+    ConfigStore store(active);
+    const std::string stale_revision =
+        store.visible_snapshot().revision;
+
+    const auto reloaded = config_named("reloaded");
+    store.replace_active(
+        reloaded,
+        allocate_outbound_marks(
+            reloaded.fwmark.value_or(FwmarkConfig{}),
+            reloaded.outbounds.value_or(
+                std::vector<Outbound>{})));
+
+    const auto candidate = config_named("candidate");
+    CHECK_FALSE(store.stage_config_if_visible_revision(
+        stale_revision,
+        candidate,
+        staged_json(candidate)));
+    CHECK_FALSE(store.staged_cas_snapshot().has_value());
+    CHECK(
+        store.active_config().daemon->cache_dir ==
+        "/tmp/reloaded");
+}
+
+TEST_CASE(
+    "config store compare-and-stage preserves the original draft base") {
+    const auto active = config_named("active");
+    ConfigStore store(active);
+    const std::string active_revision =
+        store.visible_snapshot().revision;
+
+    const auto first_draft = config_named("first-draft");
+    REQUIRE(store.stage_config_if_visible_revision(
+        active_revision,
+        first_draft,
+        staged_json(first_draft)));
+    const std::string first_draft_revision =
+        store.visible_snapshot().revision;
+
+    const auto reloaded = config_named("reloaded");
+    store.replace_active(
+        reloaded,
+        allocate_outbound_marks(
+            reloaded.fwmark.value_or(FwmarkConfig{}),
+            reloaded.outbounds.value_or(
+                std::vector<Outbound>{})));
+
+    const auto second_draft = config_named("second-draft");
+    REQUIRE(store.stage_config_if_visible_revision(
+        first_draft_revision,
+        second_draft,
+        staged_json(second_draft)));
+
+    const auto staged = store.staged_cas_snapshot();
+    REQUIRE(staged.has_value());
+    CHECK(staged->base_revision == active_revision);
+    CHECK(staged->active_revision != staged->base_revision);
+    CHECK(
+        staged->config.daemon->cache_dir ==
+        "/tmp/second-draft");
+}
+
 } // namespace keen_pbr3

@@ -221,8 +221,10 @@ std::string resolver_fallback_reason(const std::string& error) {
 int main(int argc, char* argv[]) {
     try {
         set_signal_action(SIGPIPE, SIG_IGN);
-        sigset_t startup_sigusr1_mask = keen_pbr3::sigusr1_signal_mask();
-        keen_pbr3::set_signal_mask_for_current_thread(SIG_BLOCK, startup_sigusr1_mask);
+        sigset_t startup_firewall_refresh_mask =
+            keen_pbr3::firewall_refresh_signal_mask();
+        keen_pbr3::set_signal_mask_for_current_thread(
+            SIG_BLOCK, startup_firewall_refresh_mask);
         keen_pbr3::crash_diagnostics::warm_up();
         keen_pbr3::crash_diagnostics::install_fatal_signal_handlers();
         cpptrace::register_terminate_handler();
@@ -230,7 +232,9 @@ int main(int argc, char* argv[]) {
         CliOptions opts = parse_args(argc, argv);
         if (!opts.run_service) {
             set_signal_action(SIGUSR1, SIG_IGN);
-            keen_pbr3::set_signal_mask_for_current_thread(SIG_UNBLOCK, startup_sigusr1_mask);
+            set_signal_action(SIGUSR2, SIG_IGN);
+            keen_pbr3::set_signal_mask_for_current_thread(
+                SIG_UNBLOCK, startup_firewall_refresh_mask);
         }
 
         if (opts.show_version) {

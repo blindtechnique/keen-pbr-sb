@@ -1,10 +1,14 @@
 import type { PlainDnsTemplate } from "@/api/generated/model/plainDnsTemplate"
-import type { DnsPresetId } from "@/data/dns-presets"
+import { getDnsPreset, type DnsPresetId } from "@/data/dns-presets"
 
-export type DnsPresetSelection =
-  | DnsPresetId
-  | `saved:${string}`
-  | "custom"
+export type DnsPresetSelection = DnsPresetId | `saved:${string}` | "custom"
+
+export type ResolvedDnsTemplate = {
+  name: string
+  primaryAddress: string
+  secondaryAddress?: string
+  technicalSeed: string
+}
 
 export function getSavedDnsTemplateSelection(
   template: Pick<PlainDnsTemplate, "name">
@@ -29,6 +33,37 @@ export function findSavedDnsTemplate(
   return templates.find(
     (template) => normalizeTemplateName(template.name) === selectedName
   )
+}
+
+export function resolveDnsTemplateSelection(
+  selection: DnsPresetSelection,
+  savedTemplates: readonly PlainDnsTemplate[]
+): ResolvedDnsTemplate | undefined {
+  if (selection === "custom") {
+    return undefined
+  }
+  if (selection.startsWith("saved:")) {
+    const template = findSavedDnsTemplate(selection, savedTemplates)
+    if (!template) {
+      return undefined
+    }
+    return {
+      name: template.name,
+      primaryAddress: template.primary_ipv4,
+      secondaryAddress: template.secondary_ipv4,
+      technicalSeed: template.name,
+    }
+  }
+
+  const preset = getDnsPreset(selection as DnsPresetId)
+  return preset
+    ? {
+        name: preset.name,
+        primaryAddress: preset.primaryAddress,
+        secondaryAddress: preset.secondaryAddress,
+        technicalSeed: preset.id,
+      }
+    : undefined
 }
 
 function normalizeTemplateName(name: string): string {

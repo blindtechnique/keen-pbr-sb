@@ -1,9 +1,11 @@
 import {
   getNdmsInterfaceInventory,
+  getNdmsVpnServerServices,
   getHealthService,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
   useGetNdmsInterfaceInventory as useGeneratedNdmsInterfaceInventory,
+  useGetNdmsVpnServerServices as useGeneratedNdmsVpnServerServices,
   useGetHealthService as useGeneratedHealthService,
   useGetRuntimeInterfaces as useGeneratedRuntimeInterfaces,
   useGetRuntimeOutbounds as useGeneratedRuntimeOutbounds,
@@ -15,6 +17,7 @@ export {
   getHealthRouting,
   getHealthService,
   getNdmsInterfaceInventory,
+  getNdmsVpnServerServices,
   getRuntimeInterfaces,
   getRuntimeOutbounds,
   getTransports,
@@ -24,6 +27,7 @@ export {
   getGetHealthRoutingQueryOptions,
   getGetHealthServiceQueryOptions,
   getGetNdmsInterfaceInventoryQueryOptions,
+  getGetNdmsVpnServerServicesQueryOptions,
   getGetRuntimeInterfacesQueryOptions,
   getGetRuntimeOutboundsQueryOptions,
   getGetTransportsQueryOptions,
@@ -43,6 +47,20 @@ export function useGetNdmsInterfaceInventory() {
       // NDMS metadata changes only when the firmware configuration changes.
       // Live link state comes from the shared runtime SSE snapshot instead of
       // adding another polling loop on a resource-constrained router.
+      refetchOnReconnect: false,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+  })
+}
+
+export function useGetNdmsVpnServerServices() {
+  return useGeneratedNdmsVpnServerServices<
+    Awaited<ReturnType<typeof getNdmsVpnServerServices>>
+  >({
+    query: {
+      // The service inventory is configuration metadata. A page visit obtains
+      // one authoritative snapshot; steady-state traffic remains event driven.
       refetchOnReconnect: false,
       refetchOnWindowFocus: false,
       staleTime: Number.POSITIVE_INFINITY,

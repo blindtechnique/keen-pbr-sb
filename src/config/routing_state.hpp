@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../config/config.hpp"
+#include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/policy_rule.hpp"
@@ -58,6 +59,10 @@ FirewallGlobalPrefilter build_firewall_global_prefilter(const Config& cfg);
 FirewallGlobalPrefilter build_firewall_global_prefilter(
     const Config& cfg,
     const std::vector<InternalVpnServer>& effective_internal_vpn_servers);
+FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
+    const Config& cfg,
+    const std::vector<InternalVpnRuntimeTarget>&
+        effective_internal_vpn_targets);
 
 // Build the realized firewall selector criteria for a route rule.
 FirewallRuleCriteria build_firewall_rule_criteria(const RouteRule& rule);

@@ -22,6 +22,7 @@
 #include "../health/interface_probe.hpp"
 #include "pid_file.hpp"
 #include "../health/url_tester.hpp"
+#include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
@@ -51,6 +52,7 @@ class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
 struct NdmsCatalogSnapshot;
+struct NdmsVpnServerServiceSnapshot;
 enum class ResolverType;
 
 #ifdef WITH_API
@@ -125,6 +127,11 @@ enum class InternalVpnRuntimeResolutionState : std::uint8_t {
     authoritative_negative,
 };
 
+enum class NetfilterRefreshReason : std::uint8_t {
+    full = 1U << 0U,
+    nat_only = 1U << 1U,
+};
+
 struct InternalVpnRuntimeResolution {
     std::vector<InternalVpnServer> effective_servers;
     InternalVpnRuntimeResolutionState state{
@@ -133,10 +140,19 @@ struct InternalVpnRuntimeResolution {
     std::vector<std::string> retain_verified_include_ndms_ids;
 };
 
+struct InternalVpnServiceRuntimeResolution {
+    std::vector<InternalVpnRuntimeTarget> effective_targets;
+    InternalVpnRuntimeResolutionState state{
+        InternalVpnRuntimeResolutionState::degraded};
+    std::vector<InternalVpnRuntimeTarget> verified_includes_for_lkg;
+    std::vector<std::string> retain_verified_include_service_ids;
+};
+
 struct PreparedRuntimeInputs {
     Config config;
     OutboundMarkMap outbound_marks;
     InternalVpnRuntimeResolution internal_vpn_resolution;
+    InternalVpnServiceRuntimeResolution internal_vpn_service_resolution;
     bool remote_lists_refreshed{false};
 };
 
@@ -207,6 +223,29 @@ inline bool config_has_stable_internal_vpn_server_policy(
         [](const InternalVpnServer& server) {
             return server.ndms_id.has_value();
         });
+}
+
+inline bool config_requires_internal_vpn_service_inventory(
+    const Config& config) {
+    if (!config.route.has_value()) {
+        return false;
+    }
+    const auto services = config.route->internal_vpn_services.value_or(
+        std::vector<InternalVpnService>{});
+    if (!services.empty()) {
+        return true;
+    }
+    // With an explicit ingress allowlist, unconfigured native service pools
+    // inherit bypass. They must be observed to keep a shared Home/Bridge
+    // ingress from accidentally opting those clients into keen-pbr.
+    return config.route->inbound_interfaces.has_value() &&
+           !config.route->inbound_interfaces->empty();
+}
+
+inline bool config_has_native_vpn_catalog_policy(
+    const Config& config) {
+    return config_has_stable_internal_vpn_server_policy(config) ||
+           config_requires_internal_vpn_service_inventory(config);
 }
 
 inline bool internal_vpn_resolution_requires_catalog_refresh(
@@ -302,7 +341,11 @@ private:
 
     // Signal handlers
     void handle_sigusr1();
-    void schedule_sigusr1_runtime_refresh();
+    void handle_sigusr2();
+    void schedule_netfilter_runtime_refresh(NetfilterRefreshReason reason);
+    void schedule_owned_snat_health_check();
+    void cancel_owned_snat_health_check();
+    void check_owned_snat_health();
     void handle_sighup();
     void handle_interface_monitor_events(uint32_t events);
     void reconnect_interface_monitor();
@@ -311,12 +354,17 @@ private:
     void schedule_interface_monitor_reconnect_retry();
     void recover_internal_vpn_catalog_after_observation_gap();
     void handle_interface_event(const InterfaceMonitor::Event& event);
-    void refresh_iproute_and_firewall_runtime(
+    bool refresh_iproute_and_firewall_runtime(
         std::size_t retry_attempt = 0,
         std::optional<InternalVpnRuntimeResolution>
-            prepared_internal_vpn_resolution = std::nullopt);
+            prepared_internal_vpn_resolution = std::nullopt,
+        std::optional<InternalVpnServiceRuntimeResolution>
+            prepared_internal_vpn_service_resolution = std::nullopt,
+        bool schedule_catalog_refresh = true,
+        OwnedSnatRecovery snat_recovery = {});
     void schedule_runtime_firewall_retry(std::size_t attempt,
-                                         std::uint64_t runtime_generation);
+                                         std::uint64_t runtime_generation,
+                                         OwnedSnatRecovery snat_recovery);
     void cancel_runtime_firewall_retry();
     void schedule_resolver_reload_retry(std::size_t attempt,
                                         std::uint64_t runtime_generation);
@@ -358,9 +406,29 @@ private:
         const InternalVpnRuntimeResolution& resolution) noexcept;
     InternalVpnRuntimeResolution
     prepare_internal_vpn_server_resolution_from_cache();
+    InternalVpnServiceRuntimeResolution
+    resolve_internal_vpn_services_for_runtime(
+        const Config& config,
+        bool allow_catalog_refresh,
+        const std::vector<InternalVpnRuntimeTarget>&
+            previous_verified_includes = {});
+    InternalVpnServiceRuntimeResolution
+    resolve_internal_vpn_services_for_runtime(
+        const Config& config,
+        const NdmsVpnServerServiceSnapshot& snapshot,
+        const std::vector<InternalVpnRuntimeTarget>&
+            previous_verified_includes = {});
+    std::vector<InternalVpnRuntimeTarget>
+    snapshot_internal_vpn_service_verified_includes_lkg() const;
+    void update_internal_vpn_service_verified_includes_lkg(
+        const InternalVpnServiceRuntimeResolution& resolution) noexcept;
+    InternalVpnServiceRuntimeResolution
+    prepare_internal_vpn_service_resolution_from_cache();
     void schedule_internal_vpn_catalog_refresh();
     void schedule_internal_vpn_catalog_refresh_if_needed(
-        InternalVpnRuntimeResolutionState state);
+        InternalVpnRuntimeResolutionState interface_state,
+        InternalVpnRuntimeResolutionState service_state =
+            InternalVpnRuntimeResolutionState::verified);
     void schedule_internal_vpn_catalog_refresh_retry(
         std::uint64_t runtime_generation);
     void cancel_internal_vpn_catalog_refresh_retry();
@@ -372,8 +440,21 @@ private:
     void stop_routing_runtime();
     void restart_routing_runtime();
     bool routing_runtime_active() const;
+    OwnedConntrackCleanupSnapshot
+    snapshot_owned_conntrack_marks() const;
     void warn_conntrack_unavailable_once();
+    ConntrackCleanupSummary cleanup_owned_conntrack_snapshot(
+        const OwnedConntrackCleanupSnapshot& snapshot,
+        const char* context,
+        bool allow_retry = true);
     void cleanup_owned_conntrack_marks(const char* context);
+    void schedule_owned_conntrack_cleanup_retry(
+        const OwnedConntrackCleanupSnapshot& snapshot,
+        std::vector<std::uint32_t> remaining_marks,
+        std::size_t no_progress_attempt = 0);
+    void run_owned_conntrack_cleanup_retry();
+    void cancel_owned_conntrack_cleanup_retry();
+    void complete_pending_snat_recovery_before_generation_change();
     bool run_system_resolver_hook(std::string_view action,
                                   bool manage_ipc_gate = true);
     bool run_system_resolver_hook_stream(std::string_view action);
@@ -481,10 +562,24 @@ private:
     int resolver_config_hash_actual_task_id_{-1};
     // Exponential retry step for resolver convergence probes.
     std::uint32_t resolver_config_hash_actual_retry_attempt_{0};
-    // Debounced runtime refresh triggered by SIGUSR1.
-    int sigusr1_refresh_task_id_{-1};
+    // One debounce window coalesces firmware mangle/full and nat-only events.
+    int netfilter_refresh_task_id_{-1};
+    std::uint8_t pending_netfilter_refresh_reasons_{0};
+    // Low-frequency fallback for firmware NAT rebuilds that do not invoke the
+    // netfilter hook. The callback runs on the control/event-loop thread.
+    int owned_snat_health_task_id_{-1};
     // One bounded retry chain for races with NDMS firewall publication.
     int runtime_firewall_retry_task_id_{-1};
+    // Best-effort targeted conntrack retirement can be incomplete under a
+    // short embedded-router command budget. Retain only exact owned marks and
+    // retry them on this runtime generation; never flush global conntrack.
+    int owned_conntrack_cleanup_retry_task_id_{-1};
+    std::optional<OwnedConntrackCleanupRetry>
+        pending_owned_conntrack_cleanup_retry_;
+    // Latches a confirmed firmware NAT loss across retry cancellation,
+    // observation-gap recovery, and a concurrent transactional config apply.
+    // Cleared only after the desired SNAT state is verified live.
+    OwnedSnatRecovery pending_owned_snat_recovery_;
     // Separate bounded repair chain for a resolver hook that failed after
     // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq.
     int resolver_reload_retry_task_id_{-1};
@@ -562,6 +657,11 @@ private:
     mutable TracedMutex internal_vpn_lkg_mutex_;
     std::vector<InternalVpnServer>
         internal_vpn_verified_includes_lkg_
+            GUARDED_BY(internal_vpn_lkg_mutex_);
+    std::vector<InternalVpnRuntimeTarget>
+        resolved_internal_vpn_service_targets_;
+    std::vector<InternalVpnRuntimeTarget>
+        internal_vpn_service_verified_includes_lkg_
             GUARDED_BY(internal_vpn_lkg_mutex_);
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;

@@ -291,6 +291,10 @@ signal_service() {
         log_error "Cannot send $signal to keen-pbr: PID file $PIDFILE does not contain a PID"
         return 1
     fi
+    if ! pid_is_keen_pbr "$pid"; then
+        log_error "Cannot send $signal: PID $pid from $PIDFILE is stale or is not keen-pbr"
+        return 1
+    fi
 
     if ! kill "-$signal" "$pid"; then
         log_error "Failed to send $signal to keen-pbr PID $pid from $PIDFILE"
@@ -432,8 +436,11 @@ case "$1" in
         exit $?
         ;;
     reapply-firewall)
-        run_recovery_guard reapply-firewall || exit 1
         signal_service SIGUSR1
+        exit $?
+        ;;
+    reapply-nat)
+        signal_service SIGUSR2
         exit $?
         ;;
     reapply-dnsmasq-config)

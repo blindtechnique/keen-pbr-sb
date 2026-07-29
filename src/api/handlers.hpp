@@ -119,6 +119,13 @@ struct ApiContext {
     // embedders. Production wiring supplies the atomic draft/base snapshot.
     std::function<std::optional<StagedConfigSnapshot>()>
         get_staged_config_cas_snapshot_fn;
+    // Narrow setup endpoints compare and replace the visible config under the
+    // ConfigStore mutex. A separate snapshot check followed by stage_config()
+    // would allow an active reload to race between the two calls.
+    std::function<bool(
+        const std::string&,
+        Config,
+        std::string)> stage_config_if_visible_revision_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -176,6 +183,20 @@ struct ApiContext {
             {},
             {},
         };
+    }
+
+    bool stage_config_if_visible_revision(
+        const std::string& expected_visible_revision,
+        Config config,
+        std::string staged_config_json) const {
+        if (!stage_config_if_visible_revision_fn) {
+            throw std::runtime_error(
+                "Atomic config compare-and-stage is unavailable");
+        }
+        return stage_config_if_visible_revision_fn(
+            expected_visible_revision,
+            std::move(config),
+            std::move(staged_config_json));
     }
 
     void validate_candidate_config(const Config& config) const {

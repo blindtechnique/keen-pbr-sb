@@ -49,6 +49,7 @@ public:
     // Buffer NAT MASQUERADE rules for traffic leaving via tunnel interfaces.
     void create_tunnel_snat_rules(
         const std::vector<std::string>& interfaces) override;
+    OwnedSnatState inspect_owned_snat_state() const override;
     // Buffer an iptables/ip6tables -j RETURN rule for the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -151,11 +152,16 @@ private:
     static std::string build_bypass_inbound_interface_lines(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain);
+    static std::string build_bypass_source_lines(
+        const FirewallGlobalPrefilter& prefilter,
+        const std::string& chain,
+        bool ipv6);
     // Build early RETURN lines for the global prefilter.
     static std::string build_prefilter_lines(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain = CHAIN_NAME,
-        bool allow_conntrack = true);
+        bool allow_conntrack = true,
+        bool ipv6 = false);
     // Build the proto/port fragments for a single rule (single proto, not
     // tcp/udp). Oversized positive multiport lists expand into alternative
     // rules; negated chunks stay in one fragment so their AND semantics are
@@ -208,6 +214,19 @@ private:
         const char* table,
         const char* builtin_chain,
         const char* target_chain);
+    static OwnedSnatState inspect_owned_snat_state(
+        const char* command,
+        bool expected,
+        const std::vector<std::string>& expected_interfaces,
+        uint32_t expected_fwmark_mask);
+    static OwnedSnatState combine_owned_snat_states(
+        OwnedSnatState ipv4,
+        OwnedSnatState ipv6);
+    static void verify_owned_snat_after_apply(
+        const char* command,
+        bool expected,
+        const std::vector<std::string>& expected_interfaces,
+        uint32_t expected_fwmark_mask);
     static void remove_all_hooks(
         const char* command,
         const char* table,
@@ -260,6 +279,17 @@ private:
     bool router_origin_snat_requested_ = false;
     // Tunnel interfaces whose egress needs masquerading.
     std::vector<std::string> snat_interfaces_;
+    // Last successfully applied SNAT contract. Runtime health inspection must
+    // validate the desired state, including the intentional absence of SNAT.
+    bool last_applied_snat_v4_expected_ = false;
+    bool last_applied_snat_v6_expected_ = false;
+    // An IPv6 family which participated in the last successful transaction
+    // remains part of runtime inspection even when its desired SNAT state is
+    // absence. This lets the monitor distinguish stale IPv6 artifacts from a
+    // lost expected IPv6 scaffold without probing unsupported routers.
+    bool last_applied_snat_v6_managed_ = false;
+    std::vector<std::string> last_applied_snat_interfaces_;
+    uint32_t last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     bool dns_nat_v4_created_ = false;
     bool dns_nat_v6_created_ = false;
 
@@ -269,7 +299,9 @@ private:
         const FirewallGlobalPrefilter& prefilter,
         bool dns_redirect,
         bool router_origin_snat,
-        const std::vector<std::string>& snat_interfaces);
+        const std::vector<std::string>& snat_interfaces,
+        bool ipv6 = false,
+        uint32_t fwmark_mask = 0xFFFFFFFFu);
     static std::string build_nat_validation_script(
         const std::string& nat_script);
     static void preflight_nat_restore(

@@ -13,8 +13,10 @@
 #include "../firewall/firewall.hpp"
 #include "../firewall/firewall_runtime.hpp"
 #include "../keenetic/internal_vpn_server_resolver.hpp"
+#include "../keenetic/internal_vpn_service_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_generation.hpp"
 #include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../log/logger.hpp"
 #include "../routing/urltest_manager.hpp"
 #ifdef WITH_API
@@ -49,6 +51,17 @@ constexpr std::array<std::chrono::seconds, 5>
         std::chrono::seconds{8},
         std::chrono::seconds{16},
     };
+constexpr std::array<std::chrono::seconds, 5>
+    OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS{
+        std::chrono::seconds{2},
+        std::chrono::seconds{4},
+        std::chrono::seconds{8},
+        std::chrono::seconds{16},
+        std::chrono::seconds{30},
+    };
+constexpr std::size_t OWNED_CONNTRACK_CLEANUP_RETRY_BATCH_SIZE = 4U;
+constexpr auto OWNED_CONNTRACK_CLEANUP_RETRY_BUDGET =
+    std::chrono::milliseconds{750};
 
 class ResolverIpcGate {
 public:
@@ -95,6 +108,26 @@ bool same_internal_vpn_runtime_servers(
                    return left.interface == right.interface &&
                           left.ndms_id == right.ndms_id &&
                           left.process_clients == right.process_clients;
+               });
+}
+
+bool same_internal_vpn_runtime_targets(
+    const std::vector<InternalVpnRuntimeTarget>& lhs,
+    const std::vector<InternalVpnRuntimeTarget>& rhs) {
+    return lhs.size() == rhs.size() &&
+           std::equal(
+               lhs.begin(),
+               lhs.end(),
+               rhs.begin(),
+               [](const auto& left, const auto& right) {
+                   return left.stable_id == right.stable_id &&
+                          left.match_kind == right.match_kind &&
+                          left.process_clients == right.process_clients &&
+                          left.bound_interface_id ==
+                              right.bound_interface_id &&
+                          left.interface == right.interface &&
+                          left.source_cidrs_v4 == right.source_cidrs_v4 &&
+                          left.source_cidrs_v6 == right.source_cidrs_v6;
                });
 }
 
@@ -226,44 +259,409 @@ void Daemon::warn_conntrack_unavailable_once() {
         "path until they expire");
 }
 
-void Daemon::cleanup_owned_conntrack_marks(const char* context) {
-    std::set<uint32_t> owned_marks;
-    for (const auto& [tag, mark] : outbound_marks_) {
-        (void)tag;
-        owned_marks.insert(mark);
+OwnedConntrackCleanupSnapshot
+Daemon::snapshot_owned_conntrack_marks() const {
+    OwnedConntrackCleanupSnapshot snapshot;
+    snapshot.runtime_generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    snapshot.owned_mask =
+        fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
+    snapshot.ipv6_enabled = resolve_ipv6_support(config_).enabled;
+
+    const auto add_mark = [&](uint32_t mark, bool priority) {
+        if ((mark & snapshot.owned_mask) != 0U) {
+            snapshot.marks.insert(mark);
+            if (priority) {
+                snapshot.priority_marks.insert(mark);
+            }
+        }
+    };
+    const auto add_tag = [&](const std::string& tag, bool priority) {
+        const auto mark = outbound_marks_.find(tag);
+        if (mark != outbound_marks_.end()) {
+            add_mark(mark->second, priority);
+        }
+    };
+
+    // First retire marks that actively carried forwarded or resolver traffic.
+    for (const auto& rule : firewall_state_.get_rules()) {
+        if (rule.action_type == RuleActionType::Mark) {
+            add_mark(rule.fwmark, /*priority=*/true);
+        }
     }
-    if (owned_marks.empty()) {
-        return;
+    const auto& selections = firewall_state_.get_urltest_selections();
+    const auto& outbounds =
+        config_.outbounds.value_or(std::vector<Outbound>{});
+    if (config_.dns.has_value()) {
+        for (const auto& server :
+             config_.dns->servers.value_or(std::vector<DnsServer>{})) {
+            if (!server.detour.has_value()) {
+                continue;
+            }
+            std::string effective_tag = *server.detour;
+            const auto outbound = std::find_if(
+                outbounds.begin(),
+                outbounds.end(),
+                [&effective_tag](const Outbound& candidate) {
+                    return candidate.tag == effective_tag;
+                });
+            if (outbound != outbounds.end() &&
+                outbound->type == OutboundType::URLTEST) {
+                const auto selected = selections.find(effective_tag);
+                if (selected != selections.end() &&
+                    !selected->second.empty()) {
+                    effective_tag = selected->second;
+                }
+            }
+            add_tag(effective_tag, /*priority=*/true);
+        }
     }
 
-    const uint32_t owned_mask =
-        fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
+    // Interface marks are used by health probes even when no route rule
+    // currently references them. Remote-list detours use SO_MARK directly,
+    // including the literal urltest mark when a list points at a selector.
+    for (const auto& outbound : outbounds) {
+        if (outbound.type == OutboundType::INTERFACE) {
+            add_tag(outbound.tag, /*priority=*/false);
+        }
+    }
+    if (config_.lists.has_value()) {
+        for (const auto& [name, list] : *config_.lists) {
+            (void)name;
+            if (list.detour.has_value()) {
+                add_tag(*list.detour, /*priority=*/false);
+            }
+            for (const auto& fallback :
+                 list.fallback_detours.value_or(
+                     std::vector<std::string>{})) {
+                add_tag(fallback, /*priority=*/false);
+            }
+        }
+    }
+    for (const auto& [urltest, selected] : selections) {
+        (void)urltest;
+        add_tag(selected, /*priority=*/false);
+    }
+    return snapshot;
+}
+
+void Daemon::cleanup_owned_conntrack_marks(const char* context) {
+    const auto snapshot = snapshot_owned_conntrack_marks();
+    if (!snapshot.valid()) {
+        return;
+    }
+    (void)cleanup_owned_conntrack_snapshot(snapshot, context);
+}
+
+ConntrackCleanupSummary Daemon::cleanup_owned_conntrack_snapshot(
+    const OwnedConntrackCleanupSnapshot& snapshot,
+    const char* context,
+    bool allow_retry) {
+    ConntrackCleanupSummary cleanup;
+    if (!snapshot.valid()) {
+        return cleanup;
+    }
+    std::vector<uint32_t> ordered_marks;
+    ordered_marks.reserve(snapshot.marks.size());
+    ordered_marks.insert(
+        ordered_marks.end(),
+        snapshot.priority_marks.begin(),
+        snapshot.priority_marks.end());
+    for (const auto mark : snapshot.marks) {
+        if (snapshot.priority_marks.count(mark) == 0U) {
+            ordered_marks.push_back(mark);
+        }
+    }
     try {
-        const auto cleanup =
-            conntrack_manager_.delete_marks(owned_marks, owned_mask);
+        cleanup =
+            conntrack_manager_.delete_marks_ordered(
+                ordered_marks,
+                snapshot.owned_mask,
+                ConntrackCleanupOptions{
+                    snapshot.ipv6_enabled,
+                    std::chrono::seconds{4}});
         if (cleanup.command_unavailable) {
             warn_conntrack_unavailable_once();
         }
-        if (cleanup.failed == 0U) {
-            return;
+        if (cleanup.failed == 0U &&
+            cleanup.skipped == 0U) {
+            return cleanup;
         }
         Logger::instance().info(
-            "Best-effort conntrack cleanup failed for {} owned mark(s) {}; "
+            "Best-effort conntrack cleanup left {} failed and {} skipped "
+            "owned mark(s) {}; "
             "existing flows may keep their previous path until they expire",
             cleanup.failed,
+            cleanup.skipped,
             context);
     } catch (const std::exception& error) {
+        cleanup.failed = ordered_marks.size();
+        cleanup.remaining_marks = ordered_marks;
         Logger::instance().info(
             "Best-effort conntrack cleanup {} raised an error: {}; existing "
             "flows may keep their previous path until they expire",
             context,
             error.what());
     }
+    if (allow_retry &&
+        !cleanup.command_unavailable &&
+        !cleanup.remaining_marks.empty()) {
+        schedule_owned_conntrack_cleanup_retry(
+            snapshot,
+            cleanup.remaining_marks);
+    }
+    return cleanup;
+}
+
+void Daemon::schedule_owned_conntrack_cleanup_retry(
+    const OwnedConntrackCleanupSnapshot& source_snapshot,
+    std::vector<std::uint32_t> remaining_marks,
+    std::size_t no_progress_attempt) {
+    if (!source_snapshot.valid() || remaining_marks.empty()) {
+        return;
+    }
+
+    std::vector<std::uint32_t> filtered_marks;
+    std::set<std::uint32_t> seen;
+    filtered_marks.reserve(remaining_marks.size());
+    for (const auto mark : remaining_marks) {
+        if ((mark & source_snapshot.owned_mask) != 0U &&
+            seen.insert(mark).second) {
+            filtered_marks.push_back(mark);
+        }
+    }
+    if (filtered_marks.empty()) {
+        return;
+    }
+
+    OwnedConntrackCleanupSnapshot filtered_snapshot = source_snapshot;
+    filtered_snapshot.marks = std::set<std::uint32_t>{
+        filtered_marks.begin(), filtered_marks.end()};
+    for (auto it = filtered_snapshot.priority_marks.begin();
+         it != filtered_snapshot.priority_marks.end();) {
+        if (filtered_snapshot.marks.count(*it) == 0U) {
+            it = filtered_snapshot.priority_marks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    OwnedConntrackCleanupRetry candidate{
+        std::move(filtered_snapshot),
+        std::move(filtered_marks),
+        no_progress_attempt};
+
+    if (pending_owned_conntrack_cleanup_retry_.has_value()) {
+        auto& pending = *pending_owned_conntrack_cleanup_retry_;
+        if (pending.snapshot.runtime_generation ==
+                candidate.snapshot.runtime_generation &&
+            pending.snapshot.owned_mask == candidate.snapshot.owned_mask) {
+            std::set<std::uint32_t> pending_marks{
+                pending.ordered_marks.begin(),
+                pending.ordered_marks.end()};
+            for (const auto mark : candidate.ordered_marks) {
+                if (pending_marks.insert(mark).second) {
+                    pending.ordered_marks.push_back(mark);
+                    pending.snapshot.marks.insert(mark);
+                    if (candidate.snapshot.priority_marks.count(mark) != 0U) {
+                        pending.snapshot.priority_marks.insert(mark);
+                    }
+                }
+            }
+            pending.snapshot.ipv6_enabled =
+                pending.snapshot.ipv6_enabled ||
+                candidate.snapshot.ipv6_enabled;
+            pending.no_progress_attempt =
+                std::min(
+                    pending.no_progress_attempt,
+                    candidate.no_progress_attempt);
+        } else {
+            cancel_owned_conntrack_cleanup_retry();
+            pending_owned_conntrack_cleanup_retry_ = std::move(candidate);
+        }
+    } else {
+        pending_owned_conntrack_cleanup_retry_ = std::move(candidate);
+    }
+
+    if (owned_conntrack_cleanup_retry_task_id_ >= 0 ||
+        !pending_owned_conntrack_cleanup_retry_.has_value()) {
+        return;
+    }
+    const auto attempt =
+        pending_owned_conntrack_cleanup_retry_->no_progress_attempt;
+    if (attempt >= OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS.size()) {
+        Logger::instance().info(
+            "Best-effort conntrack cleanup exhausted its targeted retry "
+            "budget; remaining owned flows will expire naturally.");
+        pending_owned_conntrack_cleanup_retry_.reset();
+        return;
+    }
+    owned_conntrack_cleanup_retry_task_id_ = scheduler_->schedule_oneshot(
+        OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS[attempt],
+        [this]() {
+            owned_conntrack_cleanup_retry_task_id_ = -1;
+            run_owned_conntrack_cleanup_retry();
+        },
+        "owned-conntrack-cleanup-retry");
+}
+
+void Daemon::run_owned_conntrack_cleanup_retry() {
+    if (!pending_owned_conntrack_cleanup_retry_.has_value()) {
+        return;
+    }
+    auto retry = std::move(*pending_owned_conntrack_cleanup_retry_);
+    pending_owned_conntrack_cleanup_retry_.reset();
+    if (!owned_conntrack_cleanup_retry_is_current(
+            routing_runtime_active_,
+            retry,
+            runtime_generation_.load(std::memory_order_acquire))) {
+        return;
+    }
+
+    ConntrackCleanupSummary cleanup;
+    try {
+        cleanup = conntrack_manager_.delete_marks_ordered(
+            retry.ordered_marks,
+            retry.snapshot.owned_mask,
+            ConntrackCleanupOptions{
+                retry.snapshot.ipv6_enabled,
+                OWNED_CONNTRACK_CLEANUP_RETRY_BUDGET,
+                OWNED_CONNTRACK_CLEANUP_RETRY_BATCH_SIZE});
+    } catch (...) {
+        cleanup.failed = retry.ordered_marks.size();
+        cleanup.remaining_marks = retry.ordered_marks;
+    }
+    if (cleanup.command_unavailable) {
+        warn_conntrack_unavailable_once();
+        return;
+    }
+    if (cleanup.remaining_marks.empty() ||
+        !owned_conntrack_cleanup_retry_is_current(
+            routing_runtime_active_,
+            retry,
+            runtime_generation_.load(std::memory_order_acquire))) {
+        return;
+    }
+
+    const bool made_progress =
+        cleanup.remaining_marks.size() < retry.ordered_marks.size();
+    const auto next_attempt =
+        made_progress ? 0U : retry.no_progress_attempt + 1U;
+    schedule_owned_conntrack_cleanup_retry(
+        retry.snapshot,
+        std::move(cleanup.remaining_marks),
+        next_attempt);
+}
+
+void Daemon::cancel_owned_conntrack_cleanup_retry() {
+    if (owned_conntrack_cleanup_retry_task_id_ >= 0) {
+        scheduler_->cancel(owned_conntrack_cleanup_retry_task_id_);
+        owned_conntrack_cleanup_retry_task_id_ = -1;
+    }
+    pending_owned_conntrack_cleanup_retry_.reset();
+}
+
+void Daemon::complete_pending_snat_recovery_before_generation_change() {
+    // An earlier verified repair may have restored the SNAT scaffold while
+    // its exact conntrack retirement remained incomplete. That remainder is
+    // independent of pending_owned_snat_recovery_: it must be drained before
+    // numerical marks can be reused by a newer generation.
+    if (pending_owned_conntrack_cleanup_retry_.has_value()) {
+        const auto retry = *pending_owned_conntrack_cleanup_retry_;
+        cancel_owned_conntrack_cleanup_retry();
+        if (retry.snapshot.runtime_generation ==
+            runtime_generation_.load(std::memory_order_acquire)) {
+            const auto cleanup = cleanup_owned_conntrack_snapshot(
+                retry.snapshot,
+                "before configuration generation change",
+                /*allow_retry=*/false);
+            if (!cleanup.remaining_marks.empty()) {
+                schedule_owned_conntrack_cleanup_retry(
+                    retry.snapshot,
+                    cleanup.remaining_marks,
+                    retry.no_progress_attempt);
+                throw TransientFirewallError(
+                    "owned conntrack cleanup is incomplete before "
+                    "configuration generation change");
+            }
+        }
+    }
+
+    if (!pending_owned_snat_recovery_.requested) {
+        return;
+    }
+
+    auto recovery = pending_owned_snat_recovery_;
+    const auto before = firewall_->inspect_owned_snat_state();
+    recovery = observe_owned_snat_state(
+        std::move(recovery),
+        before,
+        before == OwnedSnatState::missing
+            ? std::optional<OwnedConntrackCleanupSnapshot>{
+                  snapshot_owned_conntrack_marks()}
+            : std::nullopt);
+    if (before == OwnedSnatState::unknown) {
+        throw TransientFirewallError(
+            "tunnel SNAT state is unavailable before configuration "
+            "generation change");
+    }
+    if (before == OwnedSnatState::missing) {
+        retry_hot_apply_firewall(
+            [this]() {
+                apply_firewall(FirewallApplyMode::PreserveSets);
+            },
+            [](std::chrono::milliseconds delay) {
+                std::this_thread::sleep_for(delay);
+            },
+            [](std::size_t retry,
+               std::chrono::milliseconds delay,
+               const TransientFirewallError& error) {
+                Logger::instance().info(
+                    "Pre-apply SNAT repair deferred after a concurrent "
+                    "firmware change: {}. Retry {} in {}ms.",
+                    error.what(),
+                    retry,
+                    delay.count());
+            });
+        if (firewall_->inspect_owned_snat_state() !=
+            OwnedSnatState::healthy) {
+            throw TransientFirewallError(
+                "tunnel SNAT could not be verified before configuration "
+                "generation change");
+        }
+    }
+
+    // This is the only synchronous hot cleanup path. It is a strict barrier
+    // before outbound marks can be reassigned to the next configuration.
+    if (recovery.missing_observed &&
+        recovery.cleanup_snapshot.has_value()) {
+        const auto cleanup = cleanup_owned_conntrack_snapshot(
+            *recovery.cleanup_snapshot,
+            "before configuration generation change",
+            /*allow_retry=*/false);
+        if (!cleanup.remaining_marks.empty()) {
+            // Keep the exact old-generation selectors retryable, but do not
+            // let the caller publish a generation which may reuse their
+            // numerical marks. The next apply can proceed only after this
+            // targeted cleanup has converged; global conntrack is never
+            // flushed.
+            schedule_owned_conntrack_cleanup_retry(
+                *recovery.cleanup_snapshot,
+                cleanup.remaining_marks);
+            throw TransientFirewallError(
+                "owned conntrack cleanup is incomplete before configuration "
+                "generation change");
+        }
+    }
+    pending_owned_snat_recovery_ = {};
+    cancel_runtime_firewall_retry();
 }
 
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
+    cancel_owned_snat_health_check();
+    cancel_owned_conntrack_cleanup_retry();
     cancel_runtime_firewall_retry();
+    pending_owned_snat_recovery_ = {};
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
     if (!routing_runtime_active_) {
@@ -281,6 +679,7 @@ void Daemon::stop_routing_runtime() {
     }
     urltest_apply_incidents_.clear();
     cleanup_owned_conntrack_marks("while stopping routing");
+    cancel_owned_conntrack_cleanup_retry();
     policy_rules_.clear();
     route_table_.clear();
     firewall_->cleanup();
@@ -309,6 +708,7 @@ void Daemon::stop_routing_runtime() {
 void Daemon::start_routing_runtime() {
     auto& log = Logger::instance();
     if (routing_runtime_active_) {
+        schedule_owned_snat_health_check();
         return;
     }
 
@@ -316,13 +716,20 @@ void Daemon::start_routing_runtime() {
     publish_runtime_state();
 
     try {
+        cancel_owned_conntrack_cleanup_retry();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
 
         const auto internal_vpn_resolution =
             prepare_internal_vpn_server_resolution_from_cache();
+        const auto internal_vpn_service_resolution =
+            prepare_internal_vpn_service_resolution_from_cache();
         InternalVpnRuntimeGenerationTransaction internal_vpn_generation(
             resolved_internal_vpn_servers_,
             internal_vpn_resolution.effective_servers);
+        InternalVpnRuntimeTargetGenerationTransaction
+            internal_vpn_service_generation(
+                resolved_internal_vpn_service_targets_,
+                internal_vpn_service_resolution.effective_targets);
         normalize_urltest_selections();
         setup_static_routing();
         register_urltest_outbounds();
@@ -363,11 +770,16 @@ void Daemon::start_routing_runtime() {
         }
 
         internal_vpn_generation.commit();
+        internal_vpn_service_generation.commit();
         update_internal_vpn_verified_includes_lkg(
             internal_vpn_resolution);
+        update_internal_vpn_service_verified_includes_lkg(
+            internal_vpn_service_resolution);
         routing_runtime_active_ = true;
+        schedule_owned_snat_health_check();
         schedule_internal_vpn_catalog_refresh_if_needed(
-            internal_vpn_resolution.state);
+            internal_vpn_resolution.state,
+            internal_vpn_service_resolution.state);
         transition_runtime_or_throw(RuntimeState::running, "runtime start complete");
         schedule_keenetic_dns_refresh();
         refresh_resolver_config_hash_actual_async();
@@ -407,6 +819,8 @@ void Daemon::start_routing_runtime() {
             log.warn("System resolver fallback recovery failed");
         }
         routing_runtime_active_ = false;
+        cancel_owned_snat_health_check();
+        cancel_owned_conntrack_cleanup_retry();
         refresh_resolver_config_hash_actual_async();
         try {
             transition_runtime_or_throw(RuntimeState::broken, "runtime start failed");
@@ -438,13 +852,21 @@ void Daemon::restart_routing_runtime() {
         // This is a same-config replacement. Keeping the generation stable is
         // required so a URLTEST transition already committed by the probe
         // manager cannot be discarded while its control task is queued.
-        cancel_runtime_firewall_retry();
+        if (!pending_owned_snat_recovery_.requested) {
+            cancel_runtime_firewall_retry();
+        }
         cancel_resolver_reload_retry();
         const auto internal_vpn_resolution =
             prepare_internal_vpn_server_resolution_from_cache();
+        const auto internal_vpn_service_resolution =
+            prepare_internal_vpn_service_resolution_from_cache();
         InternalVpnRuntimeGenerationTransaction internal_vpn_generation(
             resolved_internal_vpn_servers_,
             internal_vpn_resolution.effective_servers);
+        InternalVpnRuntimeTargetGenerationTransaction
+            internal_vpn_service_generation(
+                resolved_internal_vpn_service_targets_,
+                internal_vpn_service_resolution.effective_targets);
 
         apply_runtime_replacement(
             [this]() {
@@ -474,15 +896,20 @@ void Daemon::restart_routing_runtime() {
             [this,
              &log,
              &internal_vpn_generation,
+             &internal_vpn_service_generation,
              &internal_vpn_resolution,
+             &internal_vpn_service_resolution,
              &kernel_generation_committed]() {
                 // apply_runtime_replacement invokes this callback only after
                 // the firewall transaction reached COMMIT. Publish the
                 // matching in-memory ingress generation at that boundary,
                 // before the secondary resolver reload can fail.
                 internal_vpn_generation.commit();
+                internal_vpn_service_generation.commit();
                 update_internal_vpn_verified_includes_lkg(
                     internal_vpn_resolution);
+                update_internal_vpn_service_verified_includes_lkg(
+                    internal_vpn_service_resolution);
                 kernel_generation_committed = true;
                 apply_started_ts_.store(
                     unix_timestamp_now_seconds(),
@@ -508,11 +935,21 @@ void Daemon::restart_routing_runtime() {
 
         routing_runtime_active_ = true;
         schedule_internal_vpn_catalog_refresh_if_needed(
-            internal_vpn_resolution.state);
+            internal_vpn_resolution.state,
+            internal_vpn_service_resolution.state);
         refresh_resolver_config_hash_actual_async();
         transition_runtime_or_throw(
             RuntimeState::running, "transactional runtime restart complete");
         publish_runtime_state();
+        if (pending_owned_snat_recovery_.requested &&
+            runtime_firewall_retry_task_id_ < 0) {
+            (void)refresh_iproute_and_firewall_runtime(
+                0,
+                std::nullopt,
+                std::nullopt,
+                /*schedule_catalog_refresh=*/false,
+                pending_owned_snat_recovery_);
+        }
         log.info(
             "Routing runtime restarted in place without a forwarding teardown.");
     } catch (const std::exception& error) {
@@ -526,13 +963,14 @@ void Daemon::restart_routing_runtime() {
         }
         routing_runtime_active_ = true;
         if (!kernel_generation_committed &&
-            config_has_stable_internal_vpn_server_policy(config_)) {
+            config_has_native_vpn_catalog_policy(config_)) {
             // Keep a bounded retry pending so either a pre-COMMIT failure or a
             // post-COMMIT resolver failure converges without waiting for an
             // unrelated interface event.
             schedule_runtime_firewall_retry(
                 0,
-                runtime_generation_.load(std::memory_order_acquire));
+                runtime_generation_.load(std::memory_order_acquire),
+                OwnedSnatRecovery{});
         }
         if (kernel_generation_committed) {
             schedule_resolver_reload_retry(
@@ -606,6 +1044,24 @@ void Daemon::reconcile_static_routing() {
 }
 
 void Daemon::apply_firewall(FirewallApplyMode mode) {
+    const auto interface_snapshot =
+        shared_ndms_catalog_cache().peek();
+    const auto service_snapshot =
+        shared_ndms_vpn_server_service_cache().peek();
+    const auto effective_interface_servers =
+        prefer_authoritative_internal_vpn_service_inventory(
+            resolved_internal_vpn_servers_,
+            interface_snapshot.catalog,
+            service_snapshot.catalog,
+            service_snapshot.status ==
+                NdmsCatalogCacheStatus::fresh);
+    auto runtime_targets =
+        internal_vpn_interface_runtime_targets(
+            effective_interface_servers);
+    runtime_targets.insert(
+        runtime_targets.end(),
+        resolved_internal_vpn_service_targets_.begin(),
+        resolved_internal_vpn_service_targets_.end());
     firewall_state_.set_rules(apply_runtime_firewall(
         config_,
         outbound_marks_,
@@ -613,7 +1069,8 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         list_service_.cache_manager(),
         *firewall_,
         mode,
-        &resolved_internal_vpn_servers_));
+        &effective_interface_servers,
+        &runtime_targets));
 
 #ifdef WITH_API
     // The firmware reapplies its own firewall on every network event and drops
@@ -1048,18 +1505,28 @@ void Daemon::schedule_startup_firewall_retry(
             try {
                 const auto internal_vpn_resolution =
                     prepare_internal_vpn_server_resolution_from_cache();
+                const auto internal_vpn_service_resolution =
+                    prepare_internal_vpn_service_resolution_from_cache();
                 InternalVpnRuntimeGenerationTransaction
                     internal_vpn_generation(
                         resolved_internal_vpn_servers_,
                         internal_vpn_resolution.effective_servers);
+                InternalVpnRuntimeTargetGenerationTransaction
+                    internal_vpn_service_generation(
+                        resolved_internal_vpn_service_targets_,
+                        internal_vpn_service_resolution.effective_targets);
                 schedule_internal_vpn_catalog_refresh_if_needed(
-                    internal_vpn_resolution.state);
+                    internal_vpn_resolution.state,
+                    internal_vpn_service_resolution.state);
                 apply_firewall(FirewallApplyMode::PreserveSets);
                 cleanup_owned_conntrack_marks(
                     "after delayed startup firewall activation");
+                internal_vpn_generation.commit();
+                internal_vpn_service_generation.commit();
                 update_internal_vpn_verified_includes_lkg(
                     internal_vpn_resolution);
-                internal_vpn_generation.commit();
+                update_internal_vpn_service_verified_includes_lkg(
+                    internal_vpn_service_resolution);
                 log.info("Firewall rules and routing applied on retry {}.", attempt);
             } catch (const TransientFirewallError& e) {
                 if (attempt >= kMaxAttempts) {
@@ -1070,7 +1537,7 @@ void Daemon::schedule_startup_firewall_retry(
                 log.info("Firewall retry {} failed: {}. Trying again.", attempt, e.what());
                 schedule_startup_firewall_retry(attempt + 1, generation);
             } catch (const std::exception& e) {
-                if (config_has_stable_internal_vpn_server_policy(config_) &&
+                if (config_has_native_vpn_catalog_policy(config_) &&
                     attempt < kMaxAttempts) {
                     log.info(
                         "Stable native VPN generation retry {} failed: {}. "
@@ -1367,6 +1834,11 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
             config,
             !preparing_on_control_loop,
             snapshot_internal_vpn_verified_includes_lkg());
+    prepared.internal_vpn_service_resolution =
+        resolve_internal_vpn_services_for_runtime(
+            config,
+            !preparing_on_control_loop,
+            snapshot_internal_vpn_service_verified_includes_lkg());
 
     if (list_mode != RemoteListPreparationMode::None) {
         KPBR_SHARED_UNIQUE_LOCK(
@@ -1572,18 +2044,159 @@ Daemon::prepare_internal_vpn_server_resolution_from_cache() {
         snapshot_internal_vpn_verified_includes_lkg());
 }
 
+InternalVpnServiceRuntimeResolution
+Daemon::resolve_internal_vpn_services_for_runtime(
+    const Config& config,
+    bool allow_catalog_refresh,
+    const std::vector<InternalVpnRuntimeTarget>&
+        previous_verified_includes) {
+    if (!config_requires_internal_vpn_service_inventory(config)) {
+        return {
+            {},
+            InternalVpnRuntimeResolutionState::verified,
+        };
+    }
+    auto& cache = shared_ndms_vpn_server_service_cache();
+    const auto snapshot =
+        allow_catalog_refresh ? cache.force_refresh() : cache.peek();
+    return resolve_internal_vpn_services_for_runtime(
+        config, snapshot, previous_verified_includes);
+}
+
+InternalVpnServiceRuntimeResolution
+Daemon::resolve_internal_vpn_services_for_runtime(
+    const Config& config,
+    const NdmsVpnServerServiceSnapshot& snapshot,
+    const std::vector<InternalVpnRuntimeTarget>&
+        previous_verified_includes) {
+    if (!config_requires_internal_vpn_service_inventory(config)) {
+        return {
+            {},
+            InternalVpnRuntimeResolutionState::verified,
+        };
+    }
+    const auto route = config.route.value_or(RouteConfig{});
+    const auto configured = route.internal_vpn_services.value_or(
+        std::vector<InternalVpnService>{});
+    const bool default_process_clients =
+        internal_vpn_service_default_process_clients(config);
+    auto resolution = resolve_internal_vpn_service_policies(
+        configured,
+        snapshot.catalog,
+        snapshot.status == NdmsCatalogCacheStatus::fresh,
+        default_process_clients,
+        internal_vpn_inbound_observation(
+            config, netlink_.dump_interfaces()));
+    auto generation = select_internal_vpn_service_generation(
+        configured,
+        resolution,
+        previous_verified_includes,
+        default_process_clients);
+
+    InternalVpnRuntimeResolutionState state =
+        InternalVpnRuntimeResolutionState::verified;
+    if (!resolution.complete()) {
+        std::string detail;
+        for (const auto& issue : resolution.issues) {
+            if (!detail.empty()) detail += "; ";
+            detail += describe_internal_vpn_service_resolution_issue(issue);
+        }
+        const bool authoritative_negative = std::any_of(
+            resolution.issues.begin(),
+            resolution.issues.end(),
+            [](const auto& issue) {
+                return issue.error !=
+                       InternalVpnServiceResolutionError::
+                           catalog_not_authoritative;
+            });
+        if (authoritative_negative) {
+            state =
+                InternalVpnRuntimeResolutionState::authoritative_negative;
+            Logger::instance().warn(
+                "Native VPN service inventory is incomplete; every "
+                "unverified source-pool bypass is disabled: {}",
+                detail);
+        } else if (
+            generation.source ==
+            InternalVpnServiceGenerationSource::
+                retained_previous_includes) {
+            state =
+                InternalVpnRuntimeResolutionState::
+                    retained_verified_includes;
+            Logger::instance().info(
+                "Native VPN service inventory is temporarily unavailable; "
+                "retaining only previously verified include pools: {}",
+                detail);
+        } else {
+            state = InternalVpnRuntimeResolutionState::degraded;
+            Logger::instance().warn(
+                "Native VPN service inventory is unavailable; no unverified "
+                "source-pool bypass is active: {}",
+                detail);
+        }
+    }
+
+    return {
+        std::move(generation.effective_targets),
+        state,
+        std::move(resolution.verified_includes_for_lkg),
+        std::move(resolution.retain_verified_include_service_ids),
+    };
+}
+
+std::vector<InternalVpnRuntimeTarget>
+Daemon::snapshot_internal_vpn_service_verified_includes_lkg() const {
+    KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
+    return internal_vpn_service_verified_includes_lkg_;
+}
+
+void Daemon::update_internal_vpn_service_verified_includes_lkg(
+    const InternalVpnServiceRuntimeResolution& resolution) noexcept {
+    try {
+        if (resolution.state !=
+                InternalVpnRuntimeResolutionState::verified &&
+            resolution.state !=
+                InternalVpnRuntimeResolutionState::authoritative_negative) {
+            return;
+        }
+        KPBR_LOCK_GUARD(internal_vpn_lkg_mutex_);
+        internal_vpn_service_verified_includes_lkg_ =
+            merge_internal_vpn_service_verified_includes_lkg(
+                internal_vpn_service_verified_includes_lkg_,
+                resolution.verified_includes_for_lkg,
+                resolution.retain_verified_include_service_ids);
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().warn(
+                "Could not publish native VPN service verified-pool cache: "
+                "{}. The committed runtime generation remains active.",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            Logger::instance().warn(
+                "Could not publish native VPN service verified-pool cache. "
+                "The committed runtime generation remains active.");
+        } catch (...) {
+        }
+    }
+}
+
+InternalVpnServiceRuntimeResolution
+Daemon::prepare_internal_vpn_service_resolution_from_cache() {
+    return resolve_internal_vpn_services_for_runtime(
+        config_,
+        false,
+        snapshot_internal_vpn_service_verified_includes_lkg());
+}
+
 void Daemon::schedule_internal_vpn_catalog_refresh() {
-    const auto configured = config_.route.has_value()
-        ? config_.route->internal_vpn_servers.value_or(
-              std::vector<InternalVpnServer>{})
-        : std::vector<InternalVpnServer>{};
-    const bool has_stable_identity = std::any_of(
-        configured.begin(),
-        configured.end(),
-        [](const InternalVpnServer& server) {
-            return server.ndms_id.has_value();
-        });
-    if (!has_stable_identity) {
+    const bool needs_interface_catalog =
+        config_has_stable_internal_vpn_server_policy(config_);
+    const bool needs_service_catalog =
+        config_requires_internal_vpn_service_inventory(config_);
+    if (!needs_interface_catalog && !needs_service_catalog) {
         return;
     }
     if (!internal_vpn_catalog_refresh_gate_.request()) {
@@ -1592,14 +2205,26 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
 
     const bool enqueued = blocking_executor_.try_post(
         "internal-vpn-ndms-refresh",
-        [this]() {
+        [this, needs_interface_catalog, needs_service_catalog]() {
             // force_refresh() is single-flight and rate-limited by the cache;
             // this worker is the only place where an interface event may lead
             // to loopback RCI/network I/O.
-            auto snapshot =
-                shared_ndms_catalog_cache().force_refresh();
+            std::optional<NdmsCatalogSnapshot> interface_snapshot;
+            std::optional<NdmsVpnServerServiceSnapshot> service_snapshot;
+            if (needs_interface_catalog) {
+                interface_snapshot =
+                    shared_ndms_catalog_cache().force_refresh();
+            }
+            if (needs_service_catalog) {
+                service_snapshot =
+                    shared_ndms_vpn_server_service_cache().force_refresh();
+            }
             post_control_task(
-                [this, worker_snapshot = std::move(snapshot)]() {
+                [this,
+                 worker_interface_snapshot =
+                     std::move(interface_snapshot),
+                 worker_service_snapshot =
+                     std::move(service_snapshot)]() {
                     // Finish the single-flight generation only on the control
                     // loop. A topology event observed while the worker was
                     // blocked becomes one immediate replacement generation;
@@ -1610,19 +2235,32 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     const bool rerun_is_valid =
                         rerun_requested &&
                         routing_runtime_active_ &&
-                        config_has_stable_internal_vpn_server_policy(config_);
+                        config_has_native_vpn_catalog_policy(config_);
                     if (rerun_is_valid) {
                         schedule_internal_vpn_catalog_refresh();
                     }
 
                     if (!routing_runtime_active_ ||
-                        !config_has_stable_internal_vpn_server_policy(
-                            config_)) {
+                        !config_has_native_vpn_catalog_policy(config_)) {
                         return;
                     }
-                    if (worker_snapshot.status !=
-                            NdmsCatalogCacheStatus::fresh ||
-                        !worker_snapshot.refreshed) {
+                    const bool current_needs_interface =
+                        config_has_stable_internal_vpn_server_policy(config_);
+                    const bool current_needs_service =
+                        config_requires_internal_vpn_service_inventory(
+                            config_);
+                    const bool worker_is_fresh =
+                        (!current_needs_interface ||
+                         (worker_interface_snapshot.has_value() &&
+                          worker_interface_snapshot->status ==
+                              NdmsCatalogCacheStatus::fresh &&
+                          worker_interface_snapshot->refreshed)) &&
+                        (!current_needs_service ||
+                         (worker_service_snapshot.has_value() &&
+                          worker_service_snapshot->status ==
+                              NdmsCatalogCacheStatus::fresh &&
+                          worker_service_snapshot->refreshed));
+                    if (!worker_is_fresh) {
                         if (!rerun_is_valid) {
                             schedule_internal_vpn_catalog_refresh_retry(
                                 runtime_generation_.load(
@@ -1636,10 +2274,16 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     // cache-only snapshot also makes this commit valid after
                     // a concurrent API apply changed runtime_generation_: it
                     // resolves the current config, never the worker's old one.
-                    const auto snapshot =
+                    const auto interface_snapshot =
                         shared_ndms_catalog_cache().peek();
-                    if (snapshot.status !=
-                        NdmsCatalogCacheStatus::fresh) {
+                    const auto service_snapshot =
+                        shared_ndms_vpn_server_service_cache().peek();
+                    if ((current_needs_interface &&
+                         interface_snapshot.status !=
+                             NdmsCatalogCacheStatus::fresh) ||
+                        (current_needs_service &&
+                         service_snapshot.status !=
+                             NdmsCatalogCacheStatus::fresh)) {
                         if (!rerun_is_valid) {
                             schedule_internal_vpn_catalog_refresh_retry(
                                 runtime_generation_.load(
@@ -1651,17 +2295,28 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     auto resolution =
                         resolve_internal_vpn_servers_for_runtime(
                             config_,
-                            snapshot,
+                            interface_snapshot,
                             snapshot_internal_vpn_verified_includes_lkg());
-                    const bool changed =
+                    auto service_resolution =
+                        resolve_internal_vpn_services_for_runtime(
+                            config_,
+                            service_snapshot,
+                            snapshot_internal_vpn_service_verified_includes_lkg());
+                    const bool interface_changed =
                         !same_internal_vpn_runtime_servers(
                             resolved_internal_vpn_servers_,
                             resolution.effective_servers);
-                    if (!changed) {
+                    const bool service_changed =
+                        !same_internal_vpn_runtime_targets(
+                            resolved_internal_vpn_service_targets_,
+                            service_resolution.effective_targets);
+                    if (!interface_changed && !service_changed) {
                         // No kernel replacement is needed, so publishing the
                         // newly verified LKG cannot diverge from forwarding.
                         update_internal_vpn_verified_includes_lkg(
                             resolution);
+                        update_internal_vpn_service_verified_includes_lkg(
+                            service_resolution);
                         publish_runtime_state();
                         return;
                     }
@@ -1671,7 +2326,9 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
                     // route/firewall succeeds and restores the previous map
                     // on every failure path.
                     refresh_iproute_and_firewall_runtime(
-                        0, std::move(resolution));
+                        0,
+                        std::move(resolution),
+                        std::move(service_resolution));
                 },
                 "internal-vpn-ndms-refresh-commit");
         });
@@ -1683,7 +2340,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
             "is unavailable");
         if (rerun_requested &&
             routing_runtime_active_ &&
-            config_has_stable_internal_vpn_server_policy(config_)) {
+            config_has_native_vpn_catalog_policy(config_)) {
             schedule_internal_vpn_catalog_refresh();
             return;
         }
@@ -1693,13 +2350,20 @@ void Daemon::schedule_internal_vpn_catalog_refresh() {
 }
 
 void Daemon::schedule_internal_vpn_catalog_refresh_if_needed(
-    InternalVpnRuntimeResolutionState state) {
+    InternalVpnRuntimeResolutionState interface_state,
+    InternalVpnRuntimeResolutionState service_state) {
     // Central lifecycle invariant: no cache-only, non-authoritative stable-ID
     // generation may remain active without a pending authoritative refresh.
     // The helper is deliberately a no-op before activation so failed starts do
     // not leave workers targeting a runtime that never committed.
+    const bool interface_needs_refresh =
+        internal_vpn_resolution_requires_catalog_refresh(
+            config_, interface_state);
+    const bool service_needs_refresh =
+        config_requires_internal_vpn_service_inventory(config_) &&
+        service_state != InternalVpnRuntimeResolutionState::verified;
     if (!routing_runtime_active_ ||
-        !internal_vpn_resolution_requires_catalog_refresh(config_, state)) {
+        (!interface_needs_refresh && !service_needs_refresh)) {
         return;
     }
     schedule_internal_vpn_catalog_refresh();
@@ -1769,25 +2433,32 @@ void Daemon::schedule_resolver_reload_retry(
         delay,
         [this, attempt, runtime_generation]() {
             resolver_reload_retry_task_id_ = -1;
-            if (!routing_runtime_active_ ||
-                runtime_generation !=
-                    runtime_generation_.load(std::memory_order_acquire)) {
+            const auto outcome = evaluate_resolver_reload_retry(
+                routing_runtime_active_,
+                runtime_generation,
+                runtime_generation_.load(std::memory_order_acquire),
+                attempt,
+                RESOLVER_RELOAD_RETRY_DELAYS.size(),
+                [this, attempt]() {
+                    try {
+                        update_resolver_config_hash();
+                        return run_system_resolver_hook_reload();
+                    } catch (const std::exception& error) {
+                        Logger::instance().info(
+                            "Resolver reload recovery attempt {} failed: {}",
+                            attempt + 1,
+                            error.what());
+                        return false;
+                    }
+                });
+
+            if (outcome ==
+                ResolverReloadRetryOutcome::stale_generation) {
                 Logger::instance().verbose(
                     "Discarding stale resolver reload recovery retry.");
                 return;
             }
-
-            bool reloaded = false;
-            try {
-                update_resolver_config_hash();
-                reloaded = run_system_resolver_hook_reload();
-            } catch (const std::exception& error) {
-                Logger::instance().info(
-                    "Resolver reload recovery attempt {} failed: {}",
-                    attempt + 1,
-                    error.what());
-            }
-            if (reloaded) {
+            if (outcome == ResolverReloadRetryOutcome::recovered) {
                 refresh_resolver_config_hash_actual_async();
                 publish_runtime_state();
                 Logger::instance().info(
@@ -1795,18 +2466,18 @@ void Daemon::schedule_resolver_reload_retry(
                     "replacement.");
                 return;
             }
-
-            if (attempt + 1 < RESOLVER_RELOAD_RETRY_DELAYS.size()) {
+            if (outcome == ResolverReloadRetryOutcome::retry) {
                 schedule_resolver_reload_retry(
                     attempt + 1, runtime_generation);
-            } else {
-                Logger::instance().error(
-                    "Resolver reload did not recover after {} bounded "
-                    "attempts; routing remains active but DNS needs attention.",
-                    RESOLVER_RELOAD_RETRY_DELAYS.size());
-                refresh_resolver_config_hash_actual_async();
-                publish_runtime_state();
+                return;
             }
+
+            Logger::instance().error(
+                "Resolver reload did not recover after {} bounded "
+                "attempts; routing remains active but DNS needs attention.",
+                RESOLVER_RELOAD_RETRY_DELAYS.size());
+            refresh_resolver_config_hash_actual_async();
+            publish_runtime_state();
         },
         "resolver-reload-recovery");
     Logger::instance().info(
@@ -1832,10 +2503,24 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
                 false,
                 snapshot_internal_vpn_verified_includes_lkg());
     }
+    if (config_requires_internal_vpn_service_inventory(prepared.config)) {
+        prepared.internal_vpn_service_resolution =
+            resolve_internal_vpn_services_for_runtime(
+                prepared.config,
+                false,
+                snapshot_internal_vpn_service_verified_includes_lkg());
+    }
+    // Repair and retire any flows from a previously observed SNAT loss before
+    // publishing `applying` or reassigning numerical marks. A transient
+    // firmware race here must reject the save while the old runtime remains
+    // active, not falsely publish a broken state.
+    complete_pending_snat_recovery_before_generation_change();
+
     transition_runtime_or_throw(RuntimeState::applying, "configuration apply started");
     publish_runtime_state();
 
     try {
+    cancel_owned_conntrack_cleanup_retry();
     runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
     cancel_runtime_firewall_retry();
     cancel_resolver_reload_retry();
@@ -1859,10 +2544,15 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     // accidentally clear it.
     const auto internal_vpn_lkg_update =
         prepared.internal_vpn_resolution;
+    const auto internal_vpn_service_lkg_update =
+        prepared.internal_vpn_service_resolution;
     outbound_marks_ = std::move(prepared.outbound_marks);
     resolved_internal_vpn_servers_ =
         std::move(
             prepared.internal_vpn_resolution.effective_servers);
+    resolved_internal_vpn_service_targets_ =
+        std::move(
+            prepared.internal_vpn_service_resolution.effective_targets);
     config_ = std::move(prepared.config);
     firewall_state_.set_outbound_marks(outbound_marks_);
     firewall_state_.set_fwmark_mask(fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{})));
@@ -1923,15 +2613,30 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     // intact for rollback preparation.
     update_internal_vpn_verified_includes_lkg(
         internal_vpn_lkg_update);
+    update_internal_vpn_service_verified_includes_lkg(
+        internal_vpn_service_lkg_update);
     config_store_.replace_active(config_, outbound_marks_);
 #ifdef WITH_API
     refresh_interface_traffic_config_targets(config_);
 #endif
     routing_runtime_active_ = true;
     schedule_internal_vpn_catalog_refresh_if_needed(
-        internal_vpn_lkg_update.state);
+        internal_vpn_lkg_update.state,
+        internal_vpn_service_lkg_update.state);
     transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
     publish_runtime_state();
+    if (pending_owned_snat_recovery_.requested) {
+        // The transactional save may have replaced the firewall while a
+        // firmware-NAT recovery retry was pending. Reconcile once against the
+        // newly committed generation so the latched missing-SNAT observation
+        // still reaches verified conntrack cleanup.
+        (void)refresh_iproute_and_firewall_runtime(
+            0,
+            std::nullopt,
+            std::nullopt,
+            /*schedule_catalog_refresh=*/false,
+            pending_owned_snat_recovery_);
+    }
     } catch (...) {
         routing_runtime_active_ = false;
         try {

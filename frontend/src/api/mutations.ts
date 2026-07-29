@@ -8,6 +8,7 @@ import {
   postListsRefresh,
   postConfig,
   postConfigSave,
+  postRecommendedListSetup,
   postRoutingTest,
   postTransportAction,
   postTransportConfigApply,
@@ -15,6 +16,7 @@ import {
   usePostListsRefresh,
   usePostConfig,
   usePostConfigSave,
+  usePostRecommendedListSetup,
   usePostRoutingTest,
   usePostTransportAction,
   usePostTransportConfigApply,
@@ -38,6 +40,9 @@ import { apiFetch, type ApiError } from "@/api/client"
 type UsePostListsRefreshOptions = Parameters<typeof usePostListsRefresh>[0]
 type UsePostConfigOptions = Parameters<typeof usePostConfig>[0]
 type UsePostConfigSaveOptions = Parameters<typeof usePostConfigSave>[0]
+type UsePostRecommendedListSetupOptions = Parameters<
+  typeof usePostRecommendedListSetup
+>[0]
 type UsePostRoutingTestOptions = Parameters<typeof usePostRoutingTest>[0]
 type UsePostTransportActionOptions = Parameters<
   typeof usePostTransportAction
@@ -97,6 +102,7 @@ export const usePostTransportConfigApplyMutation = () => {
 export {
   postConfig,
   postConfigSave,
+  postRecommendedListSetup,
   postListsRefresh,
   postRoutingTest,
   postTransportAction,
@@ -195,6 +201,31 @@ export const usePostConfigMutation = (options?: UsePostConfigOptions) => {
   const queryClient = useQueryClient()
 
   return usePostConfig({
+    ...options,
+    mutation: {
+      ...options?.mutation,
+      onSuccess: async (data, variables, onMutateResult, context) => {
+        for (const queryKey of invalidationKeysAfterConfigMutation) {
+          await queryClient.invalidateQueries({ queryKey })
+        }
+
+        await options?.mutation?.onSuccess?.(
+          data,
+          variables,
+          onMutateResult,
+          context
+        )
+      },
+    },
+  })
+}
+
+export const usePostRecommendedListSetupMutation = (
+  options?: UsePostRecommendedListSetupOptions
+) => {
+  const queryClient = useQueryClient()
+
+  return usePostRecommendedListSetup({
     ...options,
     mutation: {
       ...options?.mutation,

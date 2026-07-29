@@ -1,8 +1,10 @@
+import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { OutboundType } from "@/api/generated/model/outboundType"
 
 export type CatalogPreset = {
   id: string
   name: string
+  catalog_identity?: string
   category?: string
   engines?: {
     dns?: {
@@ -73,4 +75,62 @@ export function getCatalogPresetSourceSummary(
     domainCount: preset.engines?.dns?.domains?.length ?? 0,
     cidrCount: preset.engines?.dns?.subnets?.length ?? 0,
   }
+}
+
+/**
+ * Fast visual hint only. The transactional backend planner repeats the exact
+ * provenance/content comparison before changing the configuration.
+ */
+export function isCatalogPresetInstalled(
+  preset: CatalogPreset,
+  lists: Readonly<Record<string, ListConfig>> | undefined
+): boolean {
+  if (!lists) {
+    return false
+  }
+
+  const configuredLists = Object.values(lists)
+  if (
+    preset.catalog_identity &&
+    configuredLists.some(
+      (list) => list.catalog_identity === preset.catalog_identity
+    )
+  ) {
+    return true
+  }
+
+  const sourceUrl =
+    preset.engines?.singbox?.ruleSets?.[0]?.url?.trim() ||
+    preset.engines?.dns?.subscriptionUrl?.trim()
+  const domains = normalizedValues(preset.engines?.dns?.domains)
+  const cidrs = normalizedValues(preset.engines?.dns?.subnets)
+
+  return configuredLists.some((list) => {
+    if (list.catalog_identity) {
+      return false
+    }
+    if (sourceUrl) {
+      return list.url?.trim() === sourceUrl
+    }
+    if (list.url || list.file) {
+      return false
+    }
+    return (
+      sameValues(normalizedValues(list.domains), domains) &&
+      sameValues(normalizedValues(list.ip_cidrs), cidrs)
+    )
+  })
+}
+
+function normalizedValues(values: readonly string[] | undefined): string[] {
+  return [...new Set((values ?? []).map((value) => value.trim()))]
+    .filter(Boolean)
+    .sort()
+}
+
+function sameValues(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  )
 }

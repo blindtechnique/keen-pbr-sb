@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../config/config.hpp"
+#include "internal_vpn_runtime_target.hpp"
 
 #include <utility>
 #include <vector>
@@ -12,40 +13,46 @@ namespace keen_pbr3 {
 // destruction restores the exact previous in-memory generation. This keeps
 // the daemon's effective identity map aligned with the generation that is
 // actually forwarding in the kernel.
-class InternalVpnRuntimeGenerationTransaction {
+template <typename Value>
+class InternalVpnVectorGenerationTransaction {
 public:
-    InternalVpnRuntimeGenerationTransaction(
-        std::vector<InternalVpnServer>& active,
-        const std::vector<InternalVpnServer>& candidate)
+    InternalVpnVectorGenerationTransaction(
+        std::vector<Value>& active,
+        const std::vector<Value>& candidate)
         : active_(active),
           previous_(active) {
         active_ = candidate;
     }
 
-    ~InternalVpnRuntimeGenerationTransaction() {
+    ~InternalVpnVectorGenerationTransaction() {
         if (!committed_) {
             active_ = std::move(previous_);
         }
     }
 
-    InternalVpnRuntimeGenerationTransaction(
-        const InternalVpnRuntimeGenerationTransaction&) = delete;
-    InternalVpnRuntimeGenerationTransaction& operator=(
-        const InternalVpnRuntimeGenerationTransaction&) = delete;
-    InternalVpnRuntimeGenerationTransaction(
-        InternalVpnRuntimeGenerationTransaction&&) = delete;
-    InternalVpnRuntimeGenerationTransaction& operator=(
-        InternalVpnRuntimeGenerationTransaction&&) = delete;
+    InternalVpnVectorGenerationTransaction(
+        const InternalVpnVectorGenerationTransaction&) = delete;
+    InternalVpnVectorGenerationTransaction& operator=(
+        const InternalVpnVectorGenerationTransaction&) = delete;
+    InternalVpnVectorGenerationTransaction(
+        InternalVpnVectorGenerationTransaction&&) = delete;
+    InternalVpnVectorGenerationTransaction& operator=(
+        InternalVpnVectorGenerationTransaction&&) = delete;
 
     void commit() noexcept {
         committed_ = true;
     }
 
 private:
-    std::vector<InternalVpnServer>& active_;
-    std::vector<InternalVpnServer> previous_;
+    std::vector<Value>& active_;
+    std::vector<Value> previous_;
     bool committed_{false};
 };
+
+using InternalVpnRuntimeGenerationTransaction =
+    InternalVpnVectorGenerationTransaction<InternalVpnServer>;
+using InternalVpnRuntimeTargetGenerationTransaction =
+    InternalVpnVectorGenerationTransaction<InternalVpnRuntimeTarget>;
 
 template <typename ApplyKernelGeneration, typename PublishMemoryGeneration>
 void commit_internal_vpn_runtime_generation(

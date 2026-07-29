@@ -14,6 +14,8 @@ add_executable(keen-pbr-tests
   test_keenetic_dns.cpp
   test_ndms_interface_inventory.cpp
   test_internal_vpn_server_resolver.cpp
+  test_ndms_vpn_server_service.cpp
+  test_internal_vpn_service_resolver.cpp
   test_ndms_interface_management.cpp
   test_ndms_rci_observation.cpp
   test_ndms_rci_restorable_snapshot.cpp
@@ -138,6 +140,9 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_interface_inventory.cpp
   ../src/keenetic/ndms_catalog_cache.cpp
   ../src/keenetic/internal_vpn_server_resolver.cpp
+  ../src/keenetic/ndms_vpn_server_service.cpp
+  ../src/keenetic/ndms_vpn_server_service_cache.cpp
+  ../src/keenetic/internal_vpn_service_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
   ../src/keenetic/ndms_rci_observation.cpp
   ../src/keenetic/ndms_rci_restorable_snapshot.cpp
@@ -295,6 +300,18 @@ add_test(
     ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
     ${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh
     ${CMAKE_SOURCE_DIR}/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
+)
+
+add_test(
+  NAME keen-pbr-netfilter-hook-signals
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-netfilter-hook-signals.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
+    ${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/etc/init.d/keen-pbr
+    ${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/firewall.sh
+    ${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/etc/hotplug.d/firewall/70-keen-pbr
 )
 
 set_target_properties(keen-pbr-tests PROPERTIES

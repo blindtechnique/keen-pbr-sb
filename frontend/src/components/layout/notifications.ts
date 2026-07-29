@@ -34,7 +34,18 @@ const LEGACY_TRANSIENT_FIREWALL_MARKERS = [
   "failed to synchronize live iptables",
 ] as const
 
-function isInternalRecoveryMessage(text: string): boolean {
+const BENIGN_SRS_EXACT_DOMAIN_MAPPING =
+  /^List '[^'\r\n]+': SRS import is lossy: mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics$/
+
+function isDiagnosticOnlyMessage(text: string): boolean {
+  // Mapping an exact SRS domain to keen-pbr's root-and-subdomain semantics is
+  // the only expected conversion warning. Keep it in the journal, but do not
+  // treat it as an incident. Any additional clause means that data was skipped
+  // or changed materially and must remain visible in the notification bell.
+  if (BENIGN_SRS_EXACT_DOMAIN_MAPPING.test(text)) {
+    return true
+  }
+
   if (
     LEGACY_INTERNAL_RECOVERY_PREFIXES.some((prefix) =>
       text.startsWith(prefix)
@@ -115,7 +126,7 @@ export function collectNotices(
     // Older builds recorded automatic recovery as warnings/errors. Keep those
     // historical details in the downloadable journal without showing them as
     // current, actionable notifications after an upgrade.
-    if (isInternalRecoveryMessage(text)) {
+    if (isDiagnosticOnlyMessage(text)) {
       continue
     }
     // The log keeps its history; dismissing only hides what was already read.

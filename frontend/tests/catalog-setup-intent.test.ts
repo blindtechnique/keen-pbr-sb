@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   getCatalogPresetSourceSummary,
   getCatalogSelectionMode,
+  isCatalogPresetInstalled,
   isCatalogRoutableOutboundType,
   type CatalogPreset,
 } from "../src/pages/catalog-model"
@@ -151,6 +152,42 @@ describe("catalog setup intent", () => {
       domainCount: 0,
       cidrCount: 2,
     })
+  })
+
+  test("recognizes catalogue provenance and exact legacy sources", () => {
+    const preset: CatalogPreset = {
+      id: "github",
+      name: "GitHub",
+      catalog_identity: "a".repeat(64),
+      engines: {
+        dns: {
+          subscriptionUrl: "https://example.test/github.srs",
+        },
+      },
+    }
+
+    expect(
+      isCatalogPresetInstalled(preset, {
+        renamed: {
+          display_name: "Любое имя",
+          catalog_identity: "a".repeat(64),
+        },
+      })
+    ).toBe(true)
+    expect(
+      isCatalogPresetInstalled(preset, {
+        legacy: {
+          url: "https://example.test/github.srs",
+        },
+      })
+    ).toBe(true)
+    expect(
+      isCatalogPresetInstalled(preset, {
+        other: {
+          url: "https://example.test/other.srs",
+        },
+      })
+    ).toBe(false)
   })
 
   test("keeps routing and blocking selections as separate operations", () => {

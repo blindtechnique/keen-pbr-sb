@@ -71,6 +71,57 @@ describe("internal VPN server policy", () => {
     ])
   })
 
+  test("fresh pooled service inventory hides its duplicate legacy toggle", () => {
+    const l2tp = nativeInterface({
+      id: "L2TP0",
+      kind: "l2tp",
+      kernelName: "L2tp0",
+    })
+    const wireguard = nativeInterface({
+      id: "Wireguard0",
+      kind: "wireguard",
+      kernelName: "nwg0",
+    })
+    const authoritativeServices = [
+      {
+        id: "ndms-crypto-map:l2tp:server",
+        kind: "l2tp" as const,
+        label: "L2TP server",
+        enabled: true,
+        bound_interface_id: "L2tp0",
+        source_cidrs: ["172.16.0.0/24"],
+        inventory_revision: "a".repeat(64),
+      },
+    ]
+
+    expect(
+      buildInternalVpnServerOptions({
+        nativeInterfaces: [l2tp, wireguard],
+        overrides: [
+          {
+            interface: "L2tp0",
+            ndms_id: "L2TP0",
+            process_clients: false,
+          },
+        ],
+        authoritativeServices,
+      }).map(({ key }) => key)
+    ).toEqual(["Wireguard0"])
+
+    expect(
+      buildInternalVpnServerOptions({
+        nativeInterfaces: [l2tp, wireguard],
+        overrides: [
+          {
+            interface: "L2tp0",
+            ndms_id: "L2TP0",
+            process_clients: false,
+          },
+        ],
+      }).map(({ key }) => key)
+    ).toEqual(["L2TP0", "Wireguard0"])
+  })
+
   test("keeps a saved proxy policy synthetic and removable", () => {
     const [option] = buildInternalVpnServerOptions({
       nativeInterfaces: [

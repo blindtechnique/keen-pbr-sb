@@ -6,6 +6,7 @@
 
 #include "../src/api/handler_ndms_names.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -29,6 +30,46 @@ std::string ndms_payload(const std::string& label = "Office VPN") {
           {"role", "client"},
           {"connected", "yes"},
           {"link", true}}},
+    }.dump();
+}
+
+std::string ndms_vpn_services_payload() {
+    return nlohmann::json{
+        {"message",
+         {
+             "crypto ike policy VPNL2TPServer",
+             "    mode ikev1",
+             "crypto ike policy VirtualIPServer",
+             "    mode ikev1",
+             "crypto ike policy VirtualIPServerIKE2",
+             "    mode ikev2",
+             "crypto map VPNL2TPServer",
+             "    set-profile VPNL2TPServer",
+             "    l2tp-server range 172.16.2.33 172.16.2.34",
+             "    l2tp-server interface Home",
+             "    l2tp-server enable",
+             "    enable",
+             "crypto map VirtualIPServer",
+             "    set-profile VirtualIPServer",
+             "    virtual-ip range 172.20.0.1 172.20.0.2",
+             "    virtual-ip interface Bridge0",
+             "    virtual-ip enable",
+             "    enable",
+             "crypto map VirtualIPServerIKE2",
+             "    set-profile VirtualIPServerIKE2",
+             "    virtual-ip range 172.20.8.1 172.20.8.2",
+             "    virtual-ip interface Bridge0",
+             "    virtual-ip enable",
+             "    enable",
+             "sstp-server",
+             "    interface Home",
+             "    pool-range 172.16.1.33 2",
+             "service sstp-server",
+             "oc-server",
+             "    interface Home",
+             "    pool-range 172.30.0.17 3",
+             "service oc-server",
+         }},
     }.dump();
 }
 
@@ -649,6 +690,80 @@ TEST_CASE("NDMS stale endpoint keeps rows but revokes server-candidate authority
         stale["interfaces"][0]
              ["internal_vpn_server_role_confirmation_required"] ==
         false);
+}
+
+TEST_CASE("NDMS VPN service endpoint exposes only typed non-secret pools") {
+    int fetch_count = 0;
+    NdmsVpnServerServiceCache cache([&] {
+        ++fetch_count;
+        return ndms_vpn_services_payload();
+    });
+
+    CHECK(
+        cache.peek().status ==
+        NdmsCatalogCacheStatus::unavailable);
+    CHECK(fetch_count == 0);
+
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18197");
+    ApiServer server(config);
+    register_ndms_vpn_server_services_handler_for_tests(
+        server, cache);
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18197);
+    const auto response =
+        client.Get("/api/system/ndms/vpn-server-services");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    CHECK(fetch_count == 1);
+    const auto inventory = nlohmann::json::parse(response->body);
+    CHECK(inventory["available"] == true);
+    CHECK(inventory["catalog_status"] == "fresh");
+    CHECK(inventory["read_only"] == true);
+    REQUIRE(inventory["services"].size() == 5);
+
+    const auto l2tp = std::find_if(
+        inventory["services"].begin(),
+        inventory["services"].end(),
+        [](const auto& item) {
+            return item["kind"] == "l2tp";
+        });
+    REQUIRE(l2tp != inventory["services"].end());
+    CHECK(
+        (*l2tp)["id"] ==
+        "ndms-crypto-map:l2tp:VPNL2TPServer");
+    CHECK((*l2tp)["enabled"] == true);
+    CHECK((*l2tp)["bound_interface_id"] == "Home");
+    CHECK((*l2tp)["source_cidrs"] ==
+          nlohmann::json::array({"172.16.2.33/32",
+                                 "172.16.2.34/32"}));
+    CHECK(l2tp->find("secret") == l2tp->end());
+
+    const auto ikev1 = std::find_if(
+        inventory["services"].begin(),
+        inventory["services"].end(),
+        [](const auto& item) {
+            return item["kind"] == "ikev1";
+        });
+    REQUIRE(ikev1 != inventory["services"].end());
+    CHECK((*ikev1)["source_cidrs"] ==
+          nlohmann::json::array({
+              "172.20.0.1/32", "172.20.0.2/32"}));
+
+    const auto openconnect = std::find_if(
+        inventory["services"].begin(),
+        inventory["services"].end(),
+        [](const auto& item) {
+            return item["kind"] == "openconnect";
+        });
+    REQUIRE(openconnect != inventory["services"].end());
+    CHECK((*openconnect)["id"] == "ndms-service:oc-server");
+    CHECK((*openconnect)["source_cidrs"] ==
+          nlohmann::json::array({
+              "172.30.0.17/32", "172.30.0.18/31"}));
 }
 
 } // namespace keen_pbr3
