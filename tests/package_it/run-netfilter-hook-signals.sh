@@ -131,6 +131,10 @@ fi
 
 openwrt_firewall_calls="$work/openwrt-firewall-calls"
 fake_openwrt_init="$work/fake-openwrt-init"
+installed_openwrt_firewall="$work/firewall.sh"
+cp "$openwrt_firewall" "$installed_openwrt_firewall"
+chmod +x "$installed_openwrt_firewall"
+
 cat > "$fake_openwrt_init" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -155,7 +159,7 @@ fi
 env \
     PATH="$work:$PATH" \
     ACTION=reload \
-    KEEN_PBR_FIREWALL_SCRIPT="$openwrt_firewall" \
+    KEEN_PBR_FIREWALL_SCRIPT="$installed_openwrt_firewall" \
     KEEN_PBR_INIT_SCRIPT="$fake_openwrt_init" \
     KEEN_PBR_TEST_CALLS="$openwrt_firewall_calls" \
     /bin/sh "$openwrt_hotplug"
