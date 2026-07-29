@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	configpkg "github.com/infaprim/mykeenpbr/internal/config"
 	"github.com/infaprim/mykeenpbr/internal/transport"
 )
 
@@ -25,6 +26,7 @@ type TransportRuntime interface {
 	Status(context.Context, string) (transport.Status, error)
 	Up(context.Context, string) error
 	Down(context.Context, string) error
+	Restart(context.Context, string) error
 }
 
 type TransportAdmin interface {
@@ -72,6 +74,14 @@ type TransportConfigValidator interface {
 	) (revision string, matched bool, err error)
 }
 
+type TransportRuntimeSettingsAdmin interface {
+	Settings() configpkg.RuntimeSettings
+	SetSingBoxProcessMode(
+		context.Context,
+		configpkg.SingBoxProcessMode,
+	) (configpkg.RuntimeSettings, error)
+}
+
 func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Handler {
 	var admin TransportAdmin
 	if len(admins) > 0 {
@@ -91,7 +101,48 @@ func New(manager TransportRuntime, key string, admins ...TransportAdmin) http.Ha
 	mux.HandleFunc("POST /v1/config/transports", a.createConfig)
 	mux.HandleFunc("PUT /v1/config/transports/{tag}", a.updateConfig)
 	mux.HandleFunc("DELETE /v1/config/transports/{tag}", a.deleteConfig)
+	mux.HandleFunc("GET /v1/config/settings", a.getSettings)
+	mux.HandleFunc("PUT /v1/config/settings", a.updateSettings)
 	return a.auth(mux)
+}
+
+func (a *API) getSettings(w http.ResponseWriter, _ *http.Request) {
+	admin, ok := a.admin.(TransportRuntimeSettingsAdmin)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport settings unavailable"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	write(w, http.StatusOK, admin.Settings())
+}
+
+func (a *API) updateSettings(w http.ResponseWriter, r *http.Request) {
+	admin, ok := a.admin.(TransportRuntimeSettingsAdmin)
+	if !ok {
+		write(w, http.StatusServiceUnavailable, map[string]string{"error": "transport settings unavailable"})
+		return
+	}
+	var request struct {
+		SingBoxProcessMode configpkg.SingBoxProcessMode `json:"sing_box_process_mode"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport settings JSON"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		write(w, http.StatusBadRequest, map[string]string{"error": "invalid transport settings JSON"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	settings, err := admin.SetSingBoxProcessMode(ctx, request.SingBoxProcessMode)
+	if err != nil {
+		write(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	write(w, http.StatusOK, settings)
 }
 
 func (a *API) exportConfig(w http.ResponseWriter, _ *http.Request) {
@@ -445,10 +496,7 @@ func (a *API) action(w http.ResponseWriter, r *http.Request) {
 	case "down":
 		err = a.manager.Down(ctx, r.PathValue("tag"))
 	case "restart":
-		err = a.manager.Down(ctx, r.PathValue("tag"))
-		if err == nil {
-			err = a.manager.Up(ctx, r.PathValue("tag"))
-		}
+		err = a.manager.Restart(ctx, r.PathValue("tag"))
 	default:
 		write(w, http.StatusNotFound, map[string]string{"error": "unknown action"})
 		return

@@ -687,6 +687,64 @@ TEST_CASE("hash changes when domain list content changes") {
     CHECK(hash1 != hash2);
 }
 
+TEST_CASE("trusted VPN interfaces are emitted canonically and hashed") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer1(cache);
+    ListStreamer streamer2(cache);
+
+    const std::string list_name = "mylist";
+    auto route_cfg = make_route_cfg(list_name);
+    auto dns_cfg = make_empty_dns_cfg();
+    auto lists = std::map<std::string, ListConfig>{
+        {list_name, make_list_cfg({"example.com"})}};
+    DnsServerRegistry reg1(dns_cfg);
+    DnsServerRegistry reg2(dns_cfg);
+
+    DnsmasqGenerator baseline(
+        reg1, streamer1, route_cfg, dns_cfg, lists);
+    DnsmasqGenerator trusted(
+        reg2,
+        streamer2,
+        route_cfg,
+        dns_cfg,
+        lists,
+        ResolverType::DNSMASQ_IPSET,
+        KEEN_PBR3_VERSION_FULL_STRING,
+        {},
+        {"xfrms1", "br*", "br*"});
+
+    const auto output = run_generate(trusted);
+    CHECK(
+        output.find("interface=br*\ninterface=xfrms1\n\n") !=
+        std::string::npos);
+    CHECK(
+        baseline.compute_config_hash() !=
+        trusted.compute_config_hash());
+}
+
+TEST_CASE("trusted VPN interface selectors reject config injection") {
+    CacheManager cache("/nonexistent/cache");
+    ListStreamer streamer(cache);
+    const auto route_cfg = make_route_cfg("mylist");
+    const auto dns_cfg = make_empty_dns_cfg();
+    const auto lists = std::map<std::string, ListConfig>{
+        {"mylist", make_list_cfg({"example.com"})}};
+    DnsServerRegistry registry(dns_cfg);
+
+    CHECK_THROWS_AS(
+        DnsmasqGenerator(
+            registry,
+            streamer,
+            route_cfg,
+            dns_cfg,
+            lists,
+            ResolverType::DNSMASQ_IPSET,
+            KEEN_PBR3_VERSION_FULL_STRING,
+            {},
+            {"br0\ninterface=eth3"}),
+        std::invalid_argument);
+}
+
 
 TEST_CASE("hash is identical for ipset and nftset output modes") {
     CacheManager cache("/nonexistent/cache");

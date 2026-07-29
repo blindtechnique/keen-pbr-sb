@@ -359,6 +359,31 @@ export const enTranslation = {
     add: "Add tunnel or proxy",
     unavailable: "Tunnel and proxy manager unavailable",
     empty: "No tunnels or proxies configured.",
+    processMode: {
+      action: "sing-box mode",
+      unavailable:
+        "Process mode settings are unavailable. Update keen-pbr-sb and transport-manager.",
+      title: "sing-box process mode",
+      description:
+        "Choose how managed sing-box proxies run. This setting does not affect native KeeneticOS tunnels.",
+      modes: {
+        isolated: {
+          label: "Isolated",
+          description:
+            "Each proxy runs in its own process. This uses more memory, but one proxy failure does not stop the others.",
+        },
+        shared: {
+          label: "Shared",
+          description:
+            "All managed proxies run in one process. This uses less memory, but the process becomes a shared failure boundary.",
+        },
+      },
+      restartWarning:
+        "Applying this setting restarts every managed sing-box proxy and interrupts its current sessions.",
+      apply: "Apply",
+      applying: "Applying…",
+      applied: "sing-box process mode changed",
+    },
     interface: "Interface",
     server: "Server",
     connection: "Connection",

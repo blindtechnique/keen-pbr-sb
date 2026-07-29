@@ -708,12 +708,19 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
             include_sources_v6.insert(
                 target.source_cidrs_v6.begin(),
                 target.source_cidrs_v6.end());
-        } else if (target.interface.has_value()) {
-            for (const auto& cidr : target.source_cidrs_v4) {
-                bypass_sources_v4.emplace(*target.interface, cidr);
-            }
-            for (const auto& cidr : target.source_cidrs_v6) {
-                bypass_sources_v6.emplace(*target.interface, cidr);
+        } else {
+            // A source pool alone is not ingress ownership proof. Bind every
+            // bypass to an exact, live server-owned interface. When no such
+            // interface is verified the target fails closed until Netlink
+            // reconciliation supplies one.
+            for (const auto& interface :
+                 target.verified_ingress_interfaces) {
+                for (const auto& cidr : target.source_cidrs_v4) {
+                    bypass_sources_v4.emplace(interface, cidr);
+                }
+                for (const auto& cidr : target.source_cidrs_v6) {
+                    bypass_sources_v6.emplace(interface, cidr);
+                }
             }
         }
     }

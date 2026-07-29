@@ -121,6 +121,51 @@ func TestTransportListWithAuthentication(t *testing.T) {
 	}
 }
 
+func TestProcessModeUpdateIsDurableAndExplicitlyRequiresRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	cfg := configpkg.Config{
+		APIKey:             "secret",
+		SingBoxProcessMode: configpkg.SingBoxProcessModeIsolated,
+		SingBoxBinary:      "sing-box",
+		RuntimeDir:         t.TempDir(),
+	}
+	if err := configpkg.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	supervisor := transport.NewSupervisor(manager)
+	admin := configpkg.NewAdmin(path, cfg, manager, supervisor)
+	handler := New(supervisor, "secret", admin)
+
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/v1/config/settings",
+		strings.NewReader(`{"sing_box_process_mode":"shared"}`),
+	)
+	request.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("update settings returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response configpkg.RuntimeSettings
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.SingBoxProcessMode != configpkg.SingBoxProcessModeShared ||
+		response.RunningSingBoxProcessMode != configpkg.SingBoxProcessModeIsolated ||
+		!response.RestartRequired || !response.RuntimeReady {
+		t.Fatalf("unsafe or ambiguous mode response: %#v", response)
+	}
+	stored, err := configpkg.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SingBoxProcessMode != configpkg.SingBoxProcessModeShared {
+		t.Fatalf("process mode was not persisted: %#v", stored)
+	}
+}
+
 func TestUnknownTransportReturnsNotFound(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/v1/transports/missing", nil)

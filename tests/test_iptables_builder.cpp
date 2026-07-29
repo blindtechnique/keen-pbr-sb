@@ -1834,12 +1834,12 @@ TEST_CASE("build_dns_nat_script: service source pools extend and bypass DNS scop
       std::vector<std::string>{"br0"};
   prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
   prefilter.bypass_source_selectors_v4 = {
-      {"Sstp0", "172.16.1.0/24"}};
+      {"br0", "172.16.1.0/24"}};
 
   const auto s = T::build_dns_nat_script(prefilter);
   const auto bypass =
       s.find(
-          "-A KeenPbrDnsRdr -i Sstp0 -s 172.16.1.0/24 -j RETURN\n");
+          "-A KeenPbrDnsRdr -i br0 -s 172.16.1.0/24 -j RETURN\n");
   const auto included =
       s.find("-A KeenPbrDnsRdr -s 172.20.8.0/23 -p udp --dport 53 -j REDIRECT --to-ports 53\n");
   REQUIRE(bypass != std::string::npos);
@@ -1864,7 +1864,7 @@ TEST_CASE("iptables policy rules classify verified service source pools") {
       std::vector<std::string>{"br0"};
   prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
   prefilter.bypass_source_selectors_v4 = {
-      {"Sstp0", "172.16.1.0/24"}};
+      {"xfrms1", "172.16.1.0/24"}};
   prefilter.restore_conntrack_mark = true;
   prefilter.conntrack_mark_mask = 0x00ff0000;
 
@@ -1875,7 +1875,7 @@ TEST_CASE("iptables policy rules classify verified service source pools") {
 
   const auto bypass =
       s.find(
-          "-A KeenPbrTable -i Sstp0 -s 172.16.1.0/24 -j RETURN\n");
+          "-A KeenPbrTable -i xfrms1 -s 172.16.1.0/24 -j RETURN\n");
   const auto restore = s.find("CONNMARK --restore-mark");
   REQUIRE(bypass != std::string::npos);
   REQUIRE(restore != std::string::npos);
@@ -1891,6 +1891,24 @@ TEST_CASE("iptables policy rules classify verified service source pools") {
   CHECK(s.find(
             "-A KeenPbrTable -m set --match-set kpbr4_local dst -j MARK") ==
         std::string::npos);
+}
+
+TEST_CASE("iptables pooled VPN bypass fails closed without exact ingress") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_source_selectors_v4 = {
+      {"", "172.16.1.0/24"}};
+
+  const auto routing = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+  const auto dns = T::build_dns_nat_script(prefilter);
+  CHECK(
+      routing.find("-s 172.16.1.0/24 -j RETURN") ==
+      std::string::npos);
+  CHECK(
+      dns.find("-s 172.16.1.0/24 -j RETURN") ==
+      std::string::npos);
 }
 
 TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {

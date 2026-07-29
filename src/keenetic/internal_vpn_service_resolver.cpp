@@ -562,14 +562,6 @@ InternalVpnServiceResolution resolve_internal_vpn_service_policies(
             });
             continue;
         }
-        if (!target.process_clients && !target.interface.has_value()) {
-            result.issues.push_back({
-                InternalVpnServiceResolutionError::
-                    source_pool_bypass_unverified_ingress,
-                policy.service_id,
-            });
-            continue;
-        }
         candidates.push_back({
             std::move(target),
             std::move(*target_cidrs),
@@ -772,10 +764,6 @@ std::string describe_internal_vpn_service_resolution_issue(
         source_pool_overlaps_inbound_network:
         return identity +
                " overlaps a configured inbound interface network";
-    case InternalVpnServiceResolutionError::
-        source_pool_bypass_unverified_ingress:
-        return identity +
-               " cannot bypass routing without a verified ingress interface";
     }
     return "Native VPN service resolution failed";
 }

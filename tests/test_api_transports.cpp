@@ -139,6 +139,15 @@ std::string valid_transport_core_config(
         "\n";
 }
 
+std::string transport_mode_from_file(
+    const std::filesystem::path& path) {
+    return nlohmann::json::parse(
+               read_transport_test_text(path))
+        .value(
+            "sing_box_process_mode",
+            std::string("isolated"));
+}
+
 } // namespace
 
 TEST_CASE("transports handler proxies authenticated companion response") {
@@ -311,6 +320,267 @@ TEST_CASE("transports handler proxies authenticated companion response") {
     CHECK(nlohmann::json::parse(create_response->body)["status"] == "created");
     REQUIRE(invalid_alias_response != nullptr);
     CHECK(invalid_alias_response->status == 400);
+}
+
+TEST_CASE(
+    "sing-box process mode switch restarts the companion and verifies the active mode") {
+    constexpr int api_port = 18224;
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        ("keen-pbr-transport-mode-switch-" +
+         std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto config_path = directory / "config.json";
+    const auto transports_path =
+        directory / "transports.json";
+    write_transport_test_text(config_path, "{}\n");
+
+    httplib::Server companion;
+    const int companion_port =
+        companion.bind_to_any_port("127.0.0.1");
+    REQUIRE(companion_port > 0);
+    const auto initial_config =
+        nlohmann::json{
+            {"listen",
+             "127.0.0.1:" +
+                 std::to_string(companion_port)},
+            {"api_key", "test-secret"},
+            {"sing_box_process_mode", "isolated"},
+            {"transports", nlohmann::json::array()},
+        }
+            .dump(2) +
+        "\n";
+    write_transport_test_text(
+        transports_path, initial_config);
+
+    std::mutex runtime_mutex;
+    std::string running_mode = "isolated";
+    bool runtime_ready = true;
+    std::string locally_unready_mode;
+    bool fail_next_restart = false;
+    const auto require_auth =
+        [](const httplib::Request& request,
+           httplib::Response& response) {
+            if (request.get_header_value(
+                    "Authorization") !=
+                "Bearer test-secret") {
+                response.status = 401;
+                return false;
+            }
+            return true;
+        };
+    companion.Get(
+        "/healthz",
+        [&](const httplib::Request&,
+            httplib::Response& response) {
+            const auto data =
+                read_transport_test_text(
+                    transports_path);
+            response.set_content(
+                nlohmann::json{
+                    {"status", "ok"},
+                    {"config_revision",
+                     Sha256::hex(data)},
+                }
+                    .dump(),
+                "application/json");
+        });
+    companion.Get(
+        "/v1/config/settings",
+        [&](const httplib::Request& request,
+            httplib::Response& response) {
+            if (!require_auth(request, response)) {
+                return;
+            }
+            const auto configured =
+                transport_mode_from_file(
+                    transports_path);
+            std::lock_guard<std::mutex> lock(
+                runtime_mutex);
+            response.set_content(
+                nlohmann::json{
+                    {"sing_box_process_mode",
+                     configured},
+                    {"running_sing_box_process_mode",
+                     running_mode},
+                    {"restart_required",
+                     configured != running_mode},
+                    {"runtime_ready",
+                     runtime_ready},
+                }
+                    .dump(),
+                "application/json");
+        });
+    companion.Put(
+        "/v1/config/settings",
+        [&](const httplib::Request& request,
+            httplib::Response& response) {
+            if (!require_auth(request, response)) {
+                return;
+            }
+            const auto body =
+                nlohmann::json::parse(request.body);
+            const auto mode = body.value(
+                "sing_box_process_mode",
+                std::string{});
+            if (mode != "isolated" &&
+                mode != "shared") {
+                response.status = 400;
+                return;
+            }
+            auto config = nlohmann::json::parse(
+                read_transport_test_text(
+                    transports_path));
+            config["sing_box_process_mode"] = mode;
+            write_transport_test_text(
+                transports_path,
+                config.dump(2) + "\n");
+            std::lock_guard<std::mutex> lock(
+                runtime_mutex);
+            response.set_content(
+                nlohmann::json{
+                    {"sing_box_process_mode", mode},
+                    {"running_sing_box_process_mode",
+                     running_mode},
+                    {"restart_required",
+                     mode != running_mode},
+                    {"runtime_ready",
+                     runtime_ready},
+                }
+                    .dump(),
+                "application/json");
+        });
+    std::thread companion_thread([&companion]() {
+        companion.listen_after_bind();
+    });
+    while (!companion.is_running()) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(10));
+    }
+
+    SseBroadcaster broadcaster;
+    auto context =
+        make_transports_test_context(
+            broadcaster, config_path.string());
+    context.transport_runtime_ready_wait_attempts = 3U;
+    context.transport_runtime_ready_wait_interval_ms = 1U;
+    int restarts = 0;
+    context.restart_restore_service_fn =
+        [&](const std::string& script) {
+            CHECK(
+                script ==
+                "/opt/etc/init.d/S79transport-manager");
+            ++restarts;
+            std::lock_guard<std::mutex> lock(
+                runtime_mutex);
+            if (fail_next_restart) {
+                fail_next_restart = false;
+                return 1;
+            }
+            running_mode =
+                transport_mode_from_file(
+                    transports_path);
+            runtime_ready =
+                running_mode != locally_unready_mode;
+            return 0;
+        };
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" +
+        std::to_string(api_port);
+    ApiServer server(api_config);
+    register_transports_handler(
+        server, context);
+    server.start();
+
+    httplib::Client client(
+        "127.0.0.1", api_port);
+    const auto before =
+        client.Get("/api/transports/settings");
+    const auto switched = client.Post(
+        "/api/transports/settings",
+        nlohmann::json{
+            {"sing_box_process_mode", "shared"}}
+            .dump(),
+        "application/json");
+    {
+        std::lock_guard<std::mutex> lock(
+            runtime_mutex);
+        locally_unready_mode = "isolated";
+    }
+    const auto locally_unready = client.Post(
+        "/api/transports/settings",
+        nlohmann::json{
+            {"sing_box_process_mode", "isolated"}}
+            .dump(),
+        "application/json");
+    {
+        std::lock_guard<std::mutex> lock(
+            runtime_mutex);
+        locally_unready_mode.clear();
+        fail_next_restart = true;
+    }
+    const auto rolled_back = client.Post(
+        "/api/transports/settings",
+        nlohmann::json{
+            {"sing_box_process_mode", "isolated"}}
+            .dump(),
+        "application/json");
+    const auto invalid = client.Post(
+        "/api/transports/settings",
+        nlohmann::json{
+            {"sing_box_process_mode", "invalid"}}
+            .dump(),
+        "application/json");
+
+    server.stop();
+    companion.stop();
+    companion_thread.join();
+
+    REQUIRE(before != nullptr);
+    CHECK(before->status == 200);
+    CHECK(
+        nlohmann::json::parse(before->body)
+            .value(
+                "running_sing_box_process_mode",
+                "") == "isolated");
+    REQUIRE(switched != nullptr);
+    CHECK(switched->status == 200);
+    const auto switched_body =
+        nlohmann::json::parse(switched->body);
+    CHECK(
+        switched_body.value(
+            "sing_box_process_mode", "") ==
+        "shared");
+    CHECK(
+        switched_body.value(
+            "running_sing_box_process_mode",
+            "") == "shared");
+    CHECK_FALSE(
+        switched_body.value(
+            "restart_required", true));
+    CHECK(
+        switched_body.value(
+            "runtime_ready", false));
+    REQUIRE(locally_unready != nullptr);
+    CHECK(locally_unready->status == 500);
+    REQUIRE(rolled_back != nullptr);
+    CHECK(rolled_back->status == 500);
+    CHECK(restarts == 5);
+    CHECK(
+        transport_mode_from_file(
+            transports_path) == "shared");
+    {
+        std::lock_guard<std::mutex> lock(
+            runtime_mutex);
+        CHECK(running_mode == "shared");
+    }
+    REQUIRE(invalid != nullptr);
+    CHECK(invalid->status == 400);
+
+    std::filesystem::remove_all(directory);
 }
 
 TEST_CASE("transport aliases use Unicode code points and reject controls") {

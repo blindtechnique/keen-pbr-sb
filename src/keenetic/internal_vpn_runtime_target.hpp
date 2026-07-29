@@ -27,6 +27,10 @@ struct InternalVpnRuntimeTarget {
     // verifies an exact match in `interface`.
     std::optional<std::string> bound_interface_id;
     std::optional<std::string> interface;
+    // Exact, live kernel interfaces verified as server-owned ingress for a
+    // source-pool service. This runtime-only set is used by both firewall and
+    // dnsmasq policy; a firmware LAN binding such as br0 is never copied here.
+    std::vector<std::string> verified_ingress_interfaces;
     std::vector<std::string> source_cidrs_v4;
     std::vector<std::string> source_cidrs_v6;
 };

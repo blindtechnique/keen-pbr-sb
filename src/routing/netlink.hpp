@@ -123,8 +123,18 @@ struct DumpedInterface {
     bool admin_up{false};              // True when IFF_UP is set
     std::optional<std::string> oper_state; // Kernel operstate label when available
     std::optional<bool> carrier;       // Link carrier state when reported by kernel
+    // Exact kernel master (normally a bridge) resolved from IFLA_MASTER.
+    // This is intentionally a name rather than a raw ifindex so runtime
+    // policy can verify L2-to-L3 topology without a second lookup.
+    std::optional<std::string> master_interface;
     std::vector<std::string> ipv4_addresses; // IPv4 addresses in CIDR form
     std::vector<std::string> ipv6_addresses; // IPv6 addresses in CIDR form
+    // Remote endpoint addresses reported by IFA_ADDRESS on point-to-point
+    // links. These are intentionally separate from local addresses: native
+    // L2TP/SSTP/OpenConnect server peers can be admitted to dnsmasq only when
+    // the live remote endpoint belongs to an authoritative NDMS client pool.
+    std::vector<std::string> ipv4_peer_addresses;
+    std::vector<std::string> ipv6_peer_addresses;
 };
 
 // Low-level netlink route and policy rule management via libnl

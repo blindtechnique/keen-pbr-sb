@@ -2,10 +2,42 @@ package transport
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestSingBoxLocalRuntimeReadinessChecksOnlyLocalState(t *testing.T) {
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &SingBox{
+		spec:    TransportSpec{Tag: "proxy", Interface: "vless1"},
+		cmd:     &exec.Cmd{Process: process},
+		state:   StateUp,
+		updated: time.Now().UTC(),
+		interfaceByName: func(name string) (*net.Interface, error) {
+			return &net.Interface{Name: name}, nil
+		},
+		runtimeRulesPresent: func(string) bool { return true },
+		healthEndpoint: RoutingHealthEndpoint{
+			URL: "http://127.0.0.1:1/external-health-must-not-be-used",
+		},
+	}
+	if !s.LocalRuntimeReady() {
+		t.Fatal("complete local runtime was not reported ready")
+	}
+	s.runtimeRulesPresent = func(string) bool { return false }
+	if s.LocalRuntimeReady() {
+		t.Fatal("missing local runtime rules were reported ready")
+	}
+}
 
 func TestSingBoxConfigUsesGVisorForPolicyRoutedTun(t *testing.T) {
 	s := &SingBox{spec: TransportSpec{
@@ -173,5 +205,18 @@ func TestMatchesOwnedSingBoxCommand(t *testing.T) {
 	}
 	if matchesOwnedSingBoxCommand([]byte("/bin/sh\x00-c\x00/run/keen-pbr/proxy.json\x00"), owned) {
 		t.Fatal("non-sing-box process must not match")
+	}
+}
+
+func TestOwnedSingBoxConfigPathsIncludesEmptySharedRuntimeOnlyInSharedMode(t *testing.T) {
+	runtimeDir := filepath.Join("run", "keen-pbr")
+	isolated := ownedSingBoxConfigPaths(nil, runtimeDir, false)
+	if len(isolated) != 0 {
+		t.Fatalf("empty isolated mode unexpectedly owns configs: %#v", isolated)
+	}
+	shared := ownedSingBoxConfigPaths(nil, runtimeDir, true)
+	sharedPath := filepath.Join(runtimeDir, "shared.json")
+	if len(shared) != 1 || !shared[sharedPath] {
+		t.Fatalf("empty shared mode does not own its exact crash-recovery config: %#v", shared)
 	}
 }

@@ -4,6 +4,8 @@
 #include "handler_config.hpp"
 #include "maintenance_api.hpp"
 
+#include "../config/config_writer.hpp"
+#include "../crypto/sha256.hpp"
 #include "../util/display_name.hpp"
 #include "../util/safe_exec.hpp"
 
@@ -14,6 +16,7 @@
 #include <functional>
 #include <httplib.h>
 #include <initializer_list>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
@@ -175,6 +178,29 @@ bool valid_revision(const std::string& revision) {
                });
 }
 
+bool valid_sing_box_process_mode(const nlohmann::json& value) {
+    return string_in(value, {"isolated", "shared"});
+}
+
+void validate_transport_runtime_settings(
+    const nlohmann::json& settings) {
+    if (!settings.is_object() ||
+        !settings.contains("sing_box_process_mode") ||
+        !valid_sing_box_process_mode(
+            settings.at("sing_box_process_mode")) ||
+        !settings.contains("running_sing_box_process_mode") ||
+        !valid_sing_box_process_mode(
+            settings.at("running_sing_box_process_mode")) ||
+        !settings.contains("restart_required") ||
+        !settings.at("restart_required").is_boolean() ||
+        !settings.contains("runtime_ready") ||
+        !settings.at("runtime_ready").is_boolean()) {
+        throw ApiError(
+            "transport manager returned invalid runtime settings",
+            502);
+    }
+}
+
 class TransportManagerClient final {
 public:
     explicit TransportManagerClient(
@@ -262,6 +288,113 @@ public:
         throw ApiError(
             "transport manager did not load the expected "
             "configuration revision",
+            503);
+    }
+
+    nlohmann::json settings() const {
+        httplib::Client client(endpoint_.host, endpoint_.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(3, 0);
+        const httplib::Headers headers{
+            {"Authorization",
+             "Bearer " + endpoint_.api_key},
+        };
+        const auto response =
+            client.Get("/v1/config/settings", headers);
+        if (!response) {
+            throw ApiError(
+                "transport manager is unavailable", 503);
+        }
+        if (response->status < 200 ||
+            response->status >= 300) {
+            throw ApiError(
+                "transport manager returned HTTP " +
+                    std::to_string(response->status),
+                response->status == 503 ? 503 : 502,
+                response->body);
+        }
+        auto body =
+            parse_json_response(*response, "runtime settings");
+        validate_transport_runtime_settings(body);
+        return body;
+    }
+
+    nlohmann::json set_sing_box_process_mode(
+        const std::string& mode) const {
+        httplib::Client client(endpoint_.host, endpoint_.port);
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(30, 0);
+        const httplib::Headers headers{
+            {"Authorization",
+             "Bearer " + endpoint_.api_key},
+        };
+        const auto response = client.Put(
+            "/v1/config/settings",
+            headers,
+            nlohmann::json{
+                {"sing_box_process_mode", mode}}
+                .dump(),
+            "application/json");
+        if (!response) {
+            throw ApiError(
+                "transport manager is unavailable", 503);
+        }
+        if (response->status < 200 ||
+            response->status >= 300) {
+            throw ApiError(
+                "transport manager rejected sing-box process mode",
+                response->status == 400
+                    ? 400
+                    : response->status == 503 ? 503 : 502,
+                response->body);
+        }
+        auto body =
+            parse_json_response(*response, "runtime settings");
+        validate_transport_runtime_settings(body);
+        return body;
+    }
+
+    nlohmann::json wait_for_runtime_mode(
+        const std::string& expected_mode,
+        std::size_t attempts,
+        std::chrono::milliseconds interval) const {
+        if ((expected_mode != "isolated" &&
+             expected_mode != "shared") ||
+            attempts == 0U) {
+            throw ApiError(
+                "invalid expected transport runtime mode",
+                500);
+        }
+        for (std::size_t attempt = 0;
+             attempt < attempts;
+             ++attempt) {
+            try {
+                auto current = settings();
+                if (current.at("sing_box_process_mode")
+                            .get<std::string>() ==
+                        expected_mode &&
+                    current.at(
+                               "running_sing_box_process_mode")
+                            .get<std::string>() ==
+                        expected_mode &&
+                    !current.at("restart_required")
+                         .get<bool>() &&
+                    current.at("runtime_ready")
+                        .get<bool>()) {
+                    return current;
+                }
+            } catch (const ApiError&) {
+                if (attempt + 1U == attempts) {
+                    throw;
+                }
+            }
+            if (attempt + 1U < attempts) {
+                std::this_thread::sleep_for(interval);
+            }
+        }
+        throw ApiError(
+            "transport manager did not make the requested "
+            "sing-box runtime locally ready",
             503);
     }
 
@@ -384,11 +517,26 @@ void restart_transport_manager_and_wait(
                   true);
     if (status != 0) {
         throw std::runtime_error(
-            "transport manager rollback restart failed");
+            "transport manager restart failed");
     }
     TransportManagerClient(
         load_endpoint(ctx.config_path))
         .wait_for_revision(expected_revision);
+}
+
+nlohmann::json restart_transport_manager_and_wait_for_runtime(
+    ApiContext& ctx,
+    const std::string& expected_revision,
+    const std::string& expected_mode) {
+    restart_transport_manager_and_wait(
+        ctx, expected_revision);
+    return TransportManagerClient(
+               load_endpoint(ctx.config_path))
+        .wait_for_runtime_mode(
+            expected_mode,
+            ctx.transport_runtime_ready_wait_attempts,
+            std::chrono::milliseconds(
+                ctx.transport_runtime_ready_wait_interval_ms));
 }
 
 } // namespace
@@ -426,6 +574,177 @@ static void register_transports_handler_impl(
                               {"transport_api_version", 2}}
             .dump();
     });
+
+    server.get("/api/transports/settings", [&ctx]() -> std::string {
+        return TransportManagerClient(
+                   load_endpoint(ctx.config_path))
+            .settings()
+            .dump();
+    });
+
+    server.post(
+        "/api/transports/settings",
+        [&ctx](const std::string& request_body) -> std::string {
+            nlohmann::json request;
+            try {
+                request =
+                    nlohmann::json::parse(request_body);
+            } catch (const nlohmann::json::exception&) {
+                throw ApiError(
+                    "invalid transport settings JSON", 400);
+            }
+            if (!request.is_object() ||
+                request.size() != 1U ||
+                !request.contains(
+                    "sing_box_process_mode") ||
+                !valid_sing_box_process_mode(
+                    request.at(
+                        "sing_box_process_mode"))) {
+                throw ApiError(
+                    "sing_box_process_mode must be "
+                    "'isolated' or 'shared'",
+                    400);
+            }
+            const auto requested_mode =
+                request.at("sing_box_process_mode")
+                    .get<std::string>();
+
+            try {
+                auto maintenance =
+                    ctx.acquire_maintenance_lease(
+                        "transport-runtime-settings");
+                (void)maintenance->reserve(
+                    maintenance->base_generation());
+
+                const auto transports_path =
+                    std::filesystem::path(
+                        ctx.config_path)
+                        .parent_path() /
+                    "transports.json";
+                std::ifstream previous_input(
+                    transports_path,
+                    std::ios::binary);
+                if (!previous_input) {
+                    throw ApiError(
+                        "transport manager config not found",
+                        503);
+                }
+                const std::string previous_data{
+                    std::istreambuf_iterator<char>(
+                        previous_input),
+                    std::istreambuf_iterator<char>()};
+                if (!previous_input.eof() &&
+                    previous_input.fail()) {
+                    throw ApiError(
+                        "could not read transport manager "
+                        "config",
+                        500);
+                }
+
+                const auto endpoint =
+                    load_endpoint(ctx.config_path);
+                TransportManagerClient client(endpoint);
+                const auto before = client.settings();
+                if (before.at(
+                        "sing_box_process_mode")
+                            .get<std::string>() ==
+                        requested_mode &&
+                    before.at(
+                        "running_sing_box_process_mode")
+                        .get<std::string>() ==
+                        requested_mode &&
+                    !before.at("restart_required")
+                         .get<bool>() &&
+                    before.at("runtime_ready")
+                        .get<bool>()) {
+                    maintenance->verify_held();
+                    return before.dump();
+                }
+
+                const auto staged =
+                    client.set_sing_box_process_mode(
+                        requested_mode);
+                const auto candidate_revision =
+                    client.current_revision();
+                const auto previous_mode =
+                    before.at("sing_box_process_mode")
+                        .get<std::string>();
+                try {
+                    nlohmann::json applied;
+                    if (staged.at("restart_required")
+                            .get<bool>() ||
+                        !staged.at("runtime_ready")
+                             .get<bool>()) {
+                        applied =
+                            restart_transport_manager_and_wait_for_runtime(
+                                ctx,
+                                candidate_revision,
+                                requested_mode);
+                    } else {
+                        applied =
+                            client.wait_for_runtime_mode(
+                                requested_mode,
+                                ctx.transport_runtime_ready_wait_attempts,
+                                std::chrono::milliseconds(
+                                    ctx.transport_runtime_ready_wait_interval_ms));
+                    }
+                    if (applied.at(
+                            "sing_box_process_mode")
+                                .get<std::string>() !=
+                            requested_mode ||
+                        applied.at(
+                            "running_sing_box_process_mode")
+                                .get<std::string>() !=
+                            requested_mode ||
+                        applied.at("restart_required")
+                            .get<bool>() ||
+                        !applied.at("runtime_ready")
+                             .get<bool>()) {
+                        throw std::runtime_error(
+                            "transport manager did not "
+                            "activate the requested "
+                            "sing-box process mode");
+                    }
+                    maintenance->verify_held();
+                    return applied.dump();
+                } catch (const std::exception&
+                             apply_error) {
+                    try {
+                        write_file_atomically(
+                            transports_path.string(),
+                            previous_data);
+                        (void)restart_transport_manager_and_wait_for_runtime(
+                            ctx,
+                            Sha256::hex(previous_data),
+                            previous_mode);
+                    } catch (const std::exception&
+                                 rollback_error) {
+                        throw ApiError(
+                            "sing-box process mode switch "
+                            "failed and rollback also "
+                            "failed",
+                            500,
+                            nlohmann::json{
+                                {"apply_error",
+                                 apply_error.what()},
+                                {"rollback_error",
+                                 rollback_error.what()}}
+                                .dump());
+                    }
+                    throw ApiError(
+                        "sing-box process mode switch "
+                        "failed; the previous mode was "
+                        "restored",
+                        500,
+                        nlohmann::json{
+                            {"error",
+                             apply_error.what()}}
+                            .dump());
+                }
+            } catch (const MaintenanceLockError& error) {
+                throw_maintenance_api_error(error);
+            }
+        });
 
     server.get("/api/transports", [&ctx]() -> std::string {
         const auto endpoint = load_endpoint(ctx.config_path);

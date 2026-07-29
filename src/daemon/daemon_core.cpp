@@ -32,6 +32,7 @@
 #include "../cache/cache_manager.hpp"
 #include "../cmd/test_routing.hpp"
 #include "../dns/dns_router.hpp"
+#include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/dnsmasq_gen.hpp"
 #include "../firewall/firewall.hpp"
 #include "../firewall/firewall_verifier.hpp"
@@ -702,7 +703,8 @@ void Daemon::handle_ipc_control_socket() {
                                     lists,
                                     type,
                                     KEEN_PBR3_VERSION_FULL_STRING,
-                                    generation->ipv6_policy);
+                                    generation->ipv6_policy,
+                                    generation->trusted_dns_interfaces);
                                 generator.generate(output);
                                 output
                                     << "txt-record=resolver-state.keen.pbr,"
@@ -1343,6 +1345,19 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                 internal_vpn_resolution.state,
                 internal_vpn_service_resolution.state);
         }
+        const auto next_resolver_access_policy =
+            build_dnsmasq_trusted_interfaces(
+                internal_vpn_resolution.effective_servers,
+                internal_vpn_service_resolution.effective_targets);
+        const auto current_resolver_access_policy =
+            resolver_generation_snapshot_
+                ? resolver_generation_snapshot_->trusted_dns_interfaces
+                : build_dnsmasq_trusted_interfaces(
+                    resolved_internal_vpn_servers_,
+                    resolved_internal_vpn_service_targets_);
+        const bool resolver_access_policy_changed =
+            current_resolver_access_policy !=
+            next_resolver_access_policy;
         InternalVpnRuntimeGenerationTransaction
             internal_vpn_generation(
                 resolved_internal_vpn_servers_,
@@ -1397,6 +1412,38 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             internal_vpn_resolution);
         update_internal_vpn_service_verified_includes_lkg(
             internal_vpn_service_resolution);
+        if (resolver_access_policy_changed) {
+            // A live NDMS catalog refresh can add, remove or rename a dynamic
+            // SSTP/IKE/L2TP/OpenConnect ingress without changing config.json.
+            // Firewall and the in-memory inventory have already committed, so
+            // publish the matching dnsmasq interface ACL as the same runtime
+            // generation. A resolver failure must not roll back working
+            // forwarding; the bounded resolver reconciler will converge it.
+            apply_started_ts_.store(
+                unix_timestamp_now_seconds(), std::memory_order_release);
+            cancel_resolver_reload_retry();
+            try {
+                update_resolver_config_hash();
+                if (run_system_resolver_hook_reload()) {
+                    refresh_resolver_config_hash_actual_async();
+                } else {
+                    log.info(
+                        "Native VPN DNS access policy did not converge during "
+                        "runtime refresh; scheduling a bounded resolver retry.");
+                    schedule_resolver_reload_retry(
+                        0,
+                        runtime_generation_.load(
+                            std::memory_order_acquire));
+                }
+            } catch (const std::exception& error) {
+                log.info(
+                    "Native VPN DNS access policy refresh was deferred: {}",
+                    error.what());
+                schedule_resolver_reload_retry(
+                    0,
+                    runtime_generation_.load(std::memory_order_acquire));
+            }
+        }
         if (should_cleanup_conntrack_after_snat_repair(
                 snat_recovery, snat_after)) {
             if (snat_recovery.cleanup_snapshot.has_value()) {
@@ -1552,6 +1599,7 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
         interface_event_affects_managed_runtime(
             config_,
             resolved_internal_vpn_servers_,
+            resolved_internal_vpn_service_targets_,
             event.interface_name);
     const bool refresh_stable_catalog =
         config_has_stable_internal_vpn_server_policy(config_);

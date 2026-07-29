@@ -7,6 +7,7 @@ add_executable(keen-pbr-tests
   test_addr_spec.cpp
   test_base64.cpp
   test_dnsmasq_gen.cpp
+  test_dnsmasq_access_policy.cpp
   test_dnsmasq_helper_packages.cpp
   test_dns_txt_client.cpp
   test_dns_server.cpp
@@ -108,6 +109,7 @@ add_executable(keen-pbr-tests
   ../src/log/logger.cpp
   ../src/log/trace.cpp
   ../src/dns/dnsmasq_gen.cpp
+  ../src/dns/dnsmasq_access_policy.cpp
   ../src/dns/dns_txt_client.cpp
   ../src/dns/dns_router.cpp
   ../src/dns/dns_server.cpp
@@ -143,6 +145,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_vpn_server_service.cpp
   ../src/keenetic/ndms_vpn_server_service_cache.cpp
   ../src/keenetic/internal_vpn_service_resolver.cpp
+  ../src/keenetic/internal_vpn_ingress_resolver.cpp
   ../src/keenetic/ndms_interface_management.cpp
   ../src/keenetic/ndms_rci_observation.cpp
   ../src/keenetic/ndms_rci_restorable_snapshot.cpp

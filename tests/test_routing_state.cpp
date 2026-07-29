@@ -2,6 +2,7 @@
 
 #include "../src/config/config.hpp"
 #include "../src/config/routing_state.hpp"
+#include "../src/keenetic/internal_vpn_ingress_resolver.hpp"
 #include "../src/routing/netlink.hpp"
 #include "../src/routing/policy_rule.hpp"
 #include "../src/routing/route_table.hpp"
@@ -336,6 +337,7 @@ TEST_CASE("build_firewall_global_prefilter: service pools extend an explicit ing
     bypass.match_kind = InternalVpnRuntimeMatchKind::source_pool;
     bypass.process_clients = false;
     bypass.interface = "Sstp0";
+    bypass.verified_ingress_interfaces = {"br0"};
     bypass.source_cidrs_v4 = {"172.16.1.0/24"};
 
     const auto prefilter =
@@ -350,11 +352,67 @@ TEST_CASE("build_firewall_global_prefilter: service pools extend an explicit ing
           std::vector<std::string>{"2001:db8:20::/64"});
     REQUIRE(prefilter.bypass_source_selectors_v4.size() == 1U);
     CHECK(
-        prefilter.bypass_source_selectors_v4.front().interface ==
-        "Sstp0");
+        prefilter.bypass_source_selectors_v4[0].interface ==
+        "br0");
     CHECK(
-        prefilter.bypass_source_selectors_v4.front().cidr ==
+        prefilter.bypass_source_selectors_v4[0].cidr ==
         "172.16.1.0/24");
+}
+
+TEST_CASE(
+    "build_firewall_global_prefilter: pooled bypass fails closed "
+    "without verified server ingress") {
+    auto cfg = parse_minimal_config(
+        R"({"route":{"rules":[]}})");
+    InternalVpnRuntimeTarget bypass;
+    bypass.stable_id = "ndms-service:sstp-server";
+    bypass.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    bypass.process_clients = false;
+    bypass.interface = "br0";
+    bypass.source_cidrs_v4 = {"172.16.1.0/24"};
+
+    const auto prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, {bypass});
+    CHECK_FALSE(prefilter.has_bypass_source_cidrs());
+    CHECK(prefilter.bypass_inbound_interfaces.empty());
+}
+
+TEST_CASE(
+    "bridged SSTP exclusion cannot be forged by a LAN source address") {
+    auto cfg = parse_minimal_config(
+        R"({"route":{"rules":[]}})");
+    InternalVpnRuntimeTarget sstp;
+    sstp.stable_id = "ndms-service:sstp-server";
+    sstp.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    sstp.process_clients = false;
+    sstp.interface = "br1";
+    sstp.source_cidrs_v4 = {"172.16.1.0/24"};
+
+    DumpedInterface bridge;
+    bridge.name = "sstp-bridge";
+    DumpedInterface peer_link;
+    peer_link.name = "sstp-peer-link";
+    peer_link.master_interface = "sstp-bridge";
+    DumpedInterface br_link;
+    br_link.name = "sstp-br-link";
+    br_link.master_interface = "br1";
+    DumpedInterface lan;
+    lan.name = "br1";
+    DumpedInterface session;
+    session.name = "sstp3";
+    session.master_interface = "sstp-bridge";
+    session.ipv4_peer_addresses = {"172.16.1.33/32"};
+
+    std::vector<InternalVpnRuntimeTarget> targets{sstp};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {bridge, peer_link, br_link, lan, session});
+    REQUIRE(targets.front().verified_ingress_interfaces.empty());
+
+    const auto prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, targets);
+    CHECK_FALSE(prefilter.has_bypass_source_cidrs());
 }
 
 TEST_CASE("build_firewall_global_prefilter: inherited service include preserves default-all") {

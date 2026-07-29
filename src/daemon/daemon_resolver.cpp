@@ -1,6 +1,7 @@
 #include "daemon.hpp"
 
 #include "../dns/dns_router.hpp"
+#include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "../dns/dnsmasq_gen.hpp"
@@ -49,6 +50,10 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
         resolve_ipv6_support(snapshot.config);
     log_ipv6_support_decision_once(ipv6_decision);
     snapshot.ipv6_policy = resolver_ipv6_policy(ipv6_decision);
+    snapshot.trusted_dns_interfaces =
+        build_dnsmasq_trusted_interfaces(
+            resolved_internal_vpn_servers_,
+            resolved_internal_vpn_service_targets_);
     snapshot.generation =
         runtime_generation_.load(std::memory_order_acquire);
     ListStreamer streamer(list_service_.cache_manager());
@@ -68,7 +73,8 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
         lists,
         snapshot.resolver_type,
         KEEN_PBR3_VERSION_FULL_STRING,
-        snapshot.ipv6_policy);
+        snapshot.ipv6_policy,
+        snapshot.trusted_dns_interfaces);
     snapshot.expected_hash = generator.compute_config_hash();
     return snapshot;
 }

@@ -394,7 +394,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "source pool bypass fails closed without verified ingress") {
+    "authoritative non-overlapping source pool bypasses dynamic ingress") {
     NdmsVpnServerServiceCatalog catalog;
     catalog.firmware_available = true;
     catalog.services = {
@@ -415,17 +415,16 @@ TEST_CASE(
             {{"br0", "192.168.1.1/24"}},
         });
 
-    CHECK_FALSE(result.complete());
-    CHECK(result.effective_targets.empty());
-    REQUIRE(result.issues.size() == 1U);
-    CHECK(
-        result.issues.front().error ==
-        InternalVpnServiceResolutionError::
-            source_pool_bypass_unverified_ingress);
+    REQUIRE(result.complete());
+    REQUIRE(result.effective_targets.size() == 1U);
+    CHECK_FALSE(result.effective_targets.front().process_clients);
+    CHECK_FALSE(result.effective_targets.front().interface.has_value());
+    CHECK(result.effective_targets.front().source_cidrs_v4 ==
+          std::vector<std::string>{"172.16.1.0/24"});
 }
 
 TEST_CASE(
-    "live NDMS Bridge binding becomes an exact verified kernel bypass") {
+    "firmware LAN binding never grants a pooled service bypass") {
     const auto catalog = parse_ndms_vpn_server_service_catalog(
         live_like_service_config());
     const auto result = resolve_internal_vpn_service_policies(
@@ -456,23 +455,12 @@ TEST_CASE(
     const auto prefilter =
         build_firewall_global_prefilter_for_runtime_targets(
             Config{}, result.effective_targets);
-    REQUIRE_FALSE(prefilter.bypass_source_selectors_v4.empty());
-    CHECK(std::all_of(
-        prefilter.bypass_source_selectors_v4.begin(),
-        prefilter.bypass_source_selectors_v4.end(),
-        [](const auto& selector) {
-            return selector.interface == "br0";
-        }));
-    CHECK(std::any_of(
-        prefilter.bypass_source_selectors_v4.begin(),
-        prefilter.bypass_source_selectors_v4.end(),
-        [](const auto& selector) {
-            return selector.cidr == "172.16.1.33/32";
-        }));
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+    CHECK(prefilter.bypass_source_selectors_v6.empty());
 }
 
 TEST_CASE(
-    "typical NDMS numbered bindings still require an exact kernel match") {
+    "numbered NDMS binding remains diagnostic when client ingress is dynamic") {
     NdmsVpnServerServiceCatalog catalog;
     catalog.firmware_available = true;
     catalog.services = {
@@ -494,19 +482,17 @@ TEST_CASE(
     CHECK(verified.effective_targets.front().interface ==
           std::optional<std::string>{"ovpn3"});
 
-    const auto absent = resolve_internal_vpn_service_policies(
+    const auto dynamic = resolve_internal_vpn_service_policies(
         {policy("ndms-service:sstp-server", false)},
         catalog,
         /*catalog_authoritative=*/true,
         /*default_process_clients=*/true,
         InternalVpnInboundObservation{{"ovpn2"}, {}});
-    CHECK_FALSE(absent.complete());
-    CHECK(absent.effective_targets.empty());
-    REQUIRE(absent.issues.size() == 1U);
-    CHECK(
-        absent.issues.front().error ==
-        InternalVpnServiceResolutionError::
-            source_pool_bypass_unverified_ingress);
+    REQUIRE(dynamic.complete());
+    REQUIRE(dynamic.effective_targets.size() == 1U);
+    CHECK_FALSE(dynamic.effective_targets.front().interface.has_value());
+    CHECK(dynamic.effective_targets.front().source_cidrs_v4 ==
+          std::vector<std::string>{"172.16.1.0/24"});
 }
 
 TEST_CASE("service pools overlapping an inbound LAN network fail closed") {

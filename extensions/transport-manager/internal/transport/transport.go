@@ -104,12 +104,38 @@ type Transport interface {
 	Status(context.Context) Status
 }
 
+type transportRestarter interface {
+	Restart(context.Context) error
+}
+
+type groupedTransport interface {
+	SupervisorGroup() supervisorGroup
+}
+
+// localRuntimeReadiness deliberately excludes external routing and server
+// health. A lifecycle transaction only needs proof that the local process,
+// TUN device and owned runtime rules were installed.
+type localRuntimeReadiness interface {
+	LocalRuntimeReady() bool
+}
+
 type Manager struct {
 	mu         sync.RWMutex
 	transports map[string]Transport
+	shared     *SharedSingBoxGroup
 }
 
 func NewManager() *Manager { return &Manager{transports: make(map[string]Transport)} }
+
+func (m *Manager) SetSharedGroup(group *SharedSingBoxGroup) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.shared != nil && m.shared != group {
+		return errors.New("shared sing-box group is already registered")
+	}
+	m.shared = group
+	return nil
+}
 
 func (m *Manager) Add(t Transport) error {
 	m.mu.Lock()
@@ -169,6 +195,32 @@ func (m *Manager) Status(ctx context.Context, tag string) (Status, error) {
 	return t.Status(ctx), nil
 }
 
+// RuntimeReady verifies only the requested live transport objects. An empty
+// set is ready by definition for installations without autostart proxies.
+func (m *Manager) RuntimeReady(tags []string) bool {
+	if len(tags) == 0 {
+		return true
+	}
+	m.mu.RLock()
+	items := make([]Transport, 0, len(tags))
+	for _, tag := range tags {
+		item, exists := m.transports[tag]
+		if !exists {
+			m.mu.RUnlock()
+			return false
+		}
+		items = append(items, item)
+	}
+	m.mu.RUnlock()
+	for _, item := range items {
+		ready, ok := item.(localRuntimeReadiness)
+		if !ok || !ready.LocalRuntimeReady() {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Manager) Start(ctx context.Context, tags []string) error {
 	var wg sync.WaitGroup
 	errorsChannel := make(chan error, len(tags))
@@ -207,6 +259,23 @@ func (m *Manager) Down(ctx context.Context, tag string) error {
 	return t.Down(ctx)
 }
 
+// Restart gives transports with a coordinated lifecycle one atomic restart
+// operation. Falling back to Down+Up keeps the isolated and native behaviour
+// unchanged, while shared sing-box avoids two complete group rebuilds.
+func (m *Manager) Restart(ctx context.Context, tag string) error {
+	t, err := m.get(tag)
+	if err != nil {
+		return err
+	}
+	if restarter, ok := t.(transportRestarter); ok {
+		return restarter.Restart(ctx)
+	}
+	if err := t.Down(ctx); err != nil {
+		return err
+	}
+	return t.Up(ctx)
+}
+
 func (m *Manager) Remove(ctx context.Context, tag string) error {
 	t, err := m.get(tag)
 	if err != nil {
@@ -223,17 +292,64 @@ func (m *Manager) Remove(ctx context.Context, tag string) error {
 	return nil
 }
 
+// Forget removes only the logical registry entry. It is used after a shared
+// group has already applied a whole-inventory deletion transaction.
+func (m *Manager) Forget(tag string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.transports[tag]; !exists {
+		return fmt.Errorf("transport %q not found", tag)
+	}
+	delete(m.transports, tag)
+	return nil
+}
+
+func (m *Manager) SharedGroup() *SharedSingBoxGroup {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.shared != nil {
+		return m.shared
+	}
+	for _, item := range m.transports {
+		member, ok := item.(*SharedSingBoxMember)
+		if ok {
+			return member.group
+		}
+	}
+	return nil
+}
+
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.RLock()
 	items := make([]Transport, 0, len(m.transports))
 	for _, t := range m.transports {
 		items = append(items, t)
 	}
+	shared := m.shared
 	m.mu.RUnlock()
 	var errs []error
+	closedGroups := make(map[supervisorGroup]bool)
 	for _, t := range items {
+		if grouped, ok := t.(groupedTransport); ok {
+			group := grouped.SupervisorGroup()
+			if closedGroups[group] {
+				continue
+			}
+			closedGroups[group] = true
+			if closer, ok := group.(interface{ Close(context.Context) error }); ok {
+				if err := closer.Close(ctx); err != nil {
+					errs = append(errs, fmt.Errorf("%s: %w", group.Key(), err))
+				}
+				continue
+			}
+		}
 		if err := t.Down(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", t.Tag(), err))
+		}
+	}
+	if shared != nil && !closedGroups[shared] {
+		if err := shared.Close(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", shared.Key(), err))
 		}
 	}
 	return errors.Join(errs...)

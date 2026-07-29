@@ -2165,6 +2165,11 @@ std::string IptablesFirewall::build_bypass_source_lines(
         : prefilter.bypass_source_selectors_v4;
     std::string lines;
     for (const auto& selector : selectors) {
+        if (selector.interface.empty()) {
+            // Fail closed: a source pool is not sufficient proof that the
+            // packet arrived from the native VPN server.
+            continue;
+        }
         lines += keen_pbr3::format(
             "-A {} -i {} -s {} -j RETURN\n",
             chain,

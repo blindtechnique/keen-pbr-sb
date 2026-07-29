@@ -50,6 +50,7 @@ type fakeTransport struct {
 	upError error
 	mu      sync.Mutex
 	started bool
+	ready   bool
 }
 
 func (f *fakeTransport) Tag() string { return f.tag }
@@ -73,6 +74,11 @@ func (f *fakeTransport) Status(context.Context) Status {
 		state = StateUp
 	}
 	return Status{Tag: f.tag, State: state, UpdatedAt: time.Now().UTC()}
+}
+func (f *fakeTransport) LocalRuntimeReady() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ready
 }
 
 func TestManagerRejectsDuplicateTags(t *testing.T) {
@@ -103,6 +109,29 @@ func TestManagerStartsRequestedTransports(t *testing.T) {
 	}
 	if status, _ := manager.Status(context.Background(), "second"); status.State != StateDown {
 		t.Fatalf("second transport state is %s", status.State)
+	}
+}
+
+func TestManagerRuntimeReadyIsLocalAndEmptyInventoryIsReady(t *testing.T) {
+	manager := NewManager()
+	if !manager.RuntimeReady(nil) {
+		t.Fatal("empty autostart inventory must be ready")
+	}
+	item := &fakeTransport{tag: "proxy", ready: false}
+	if err := manager.Add(item); err != nil {
+		t.Fatal(err)
+	}
+	if manager.RuntimeReady([]string{"proxy"}) {
+		t.Fatal("locally unready transport was accepted")
+	}
+	item.mu.Lock()
+	item.ready = true
+	item.mu.Unlock()
+	if !manager.RuntimeReady([]string{"proxy"}) {
+		t.Fatal("locally ready transport was rejected")
+	}
+	if manager.RuntimeReady([]string{"missing"}) {
+		t.Fatal("missing autostart transport was accepted")
 	}
 }
 

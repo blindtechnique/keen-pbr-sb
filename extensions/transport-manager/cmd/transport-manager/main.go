@@ -28,12 +28,41 @@ func main() {
 
 	manager := transport.NewManager()
 	supervisor := transport.NewSupervisor(manager)
-	if err := transport.CleanupOrphanProcesses(cfg.Transports, cfg.RuntimeDir); err != nil {
+	if err := transport.CleanupOrphanProcessesForMode(
+		cfg.Transports,
+		cfg.RuntimeDir,
+		cfg.SingBoxProcessMode == config.SingBoxProcessModeShared,
+	); err != nil {
 		log.Fatalf("clean up orphan sing-box processes: %v", err)
 	}
 	transport.CleanupForwardingRules(cfg.Transports)
+	var sharedGroup *transport.SharedSingBoxGroup
+	if cfg.SingBoxProcessMode == config.SingBoxProcessModeShared {
+		sharedGroup, err = transport.NewSharedSingBoxGroup(
+			cfg.Transports,
+			cfg.SingBoxBinary,
+			cfg.RuntimeDir,
+			cfg.HealthEndpoint(),
+		)
+		if err != nil {
+			log.Fatalf("create shared sing-box runtime: %v", err)
+		}
+		if err := manager.SetSharedGroup(sharedGroup); err != nil {
+			log.Fatalf("register shared sing-box runtime: %v", err)
+		}
+	}
 	for _, item := range cfg.Transports {
-		managed, err := transport.NewFromSpec(item, cfg.SingBoxBinary, cfg.RuntimeDir, cfg.HealthEndpoint())
+		var managed transport.Transport
+		if sharedGroup != nil && (item.Type == "sing-box" || item.Type == "sing-box-vless-reality") {
+			managed, err = sharedGroup.Member(item.Tag)
+		} else {
+			managed, err = transport.NewFromSpec(
+				item,
+				cfg.SingBoxBinary,
+				cfg.RuntimeDir,
+				cfg.HealthEndpoint(),
+			)
+		}
 		if err != nil {
 			log.Fatalf("transport %q: %v", item.Tag, err)
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -27,8 +28,43 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SingBoxBinary != "/opt/bin/sing-box" {
 		t.Fatalf("unexpected sing-box binary: %s", cfg.SingBoxBinary)
 	}
+	if cfg.SingBoxProcessMode != SingBoxProcessModeIsolated {
+		t.Fatalf("unexpected sing-box process mode: %s", cfg.SingBoxProcessMode)
+	}
 	if cfg.RuntimeDir != "/opt/var/run/keen-pbr/transports" {
 		t.Fatalf("unexpected runtime directory: %s", cfg.RuntimeDir)
+	}
+}
+
+func TestLoadRejectsUnknownSingBoxProcessMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+		"api_key":"secret",
+		"sing_box_process_mode":"pooled",
+		"transports":[]
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown sing-box process mode to be rejected")
+	}
+}
+
+func TestLoadAcceptsSharedMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{
+		"api_key":"secret",
+		"sing_box_process_mode":"shared",
+		"transports":[]
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SingBoxProcessMode != SingBoxProcessModeShared {
+		t.Fatalf("unexpected process mode: %q", cfg.SingBoxProcessMode)
 	}
 }
 
@@ -473,5 +509,146 @@ func TestValidateUpdatePreservesSecretsWithoutMutation(t *testing.T) {
 	}
 	if admin.Revision() != revision || admin.Specs()[0].DisplayName != "" {
 		t.Fatal("update validation changed in-memory config")
+	}
+}
+
+func TestSharedAdminValidatesCompleteCandidateBeforeMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transports.json")
+	first := transport.TransportSpec{
+		Tag:       "proxy_one",
+		Type:      "sing-box",
+		Interface: "vless1",
+		OutboundJSON: `{"type":"vless","server":"one.example","server_port":443,` +
+			`"uuid":"11111111-1111-1111-1111-111111111111"}`,
+	}
+	cfg := Config{
+		APIKey:             "secret",
+		SingBoxBinary:      "sing-box",
+		SingBoxProcessMode: SingBoxProcessModeShared,
+		RuntimeDir:         t.TempDir(),
+		Transports:         []transport.TransportSpec{first},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	group, err := transport.NewSharedSingBoxGroup(
+		cfg.Transports,
+		cfg.SingBoxBinary,
+		cfg.RuntimeDir,
+		cfg.HealthEndpoint(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	if err := manager.SetSharedGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	member, err := group.Member(first.Tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Add(member); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := transport.NewSupervisor(manager)
+	supervisor.Register(first)
+	admin := NewAdmin(path, cfg, manager, supervisor)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conflicting := transport.TransportSpec{
+		Tag:       "proxy_two",
+		Type:      "sing-box",
+		Interface: first.Interface,
+		OutboundJSON: `{"type":"vless","server":"two.example","server_port":443,` +
+			`"uuid":"22222222-2222-2222-2222-222222222222"}`,
+	}
+	if err := admin.Create(context.Background(), conflicting); err == nil {
+		t.Fatal("expected whole-group TUN ownership conflict")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || len(admin.Specs()) != 1 {
+		t.Fatal("rejected shared candidate mutated durable or in-memory config")
+	}
+	if _, exists := manager.Get(conflicting.Tag); exists {
+		t.Fatal("rejected shared candidate reached the runtime manager")
+	}
+}
+
+func TestCreateSharedJoinsRollbackFailure(t *testing.T) {
+	group, err := transport.NewSharedSingBoxGroup(
+		nil,
+		"sing-box",
+		t.TempDir(),
+		transport.RoutingHealthEndpoint{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := transport.NewManager()
+	if err := manager.SetSharedGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	admin := NewAdmin(
+		filepath.Join(t.TempDir(), "transports.json"),
+		Config{SingBoxProcessMode: SingBoxProcessModeShared},
+		manager,
+		transport.NewSupervisor(manager),
+	)
+	rollbackFailure := errors.New("rollback inventory failed")
+	admin.rollbackSharedInventory = func([]transport.TransportSpec) error {
+		return rollbackFailure
+	}
+	spec := transport.TransportSpec{
+		Tag: "missing_proxy", Type: "sing-box", Interface: "vless1",
+	}
+	err = admin.createSharedLocked(context.Background(), spec, nil)
+	if err == nil || !errors.Is(err, rollbackFailure) {
+		t.Fatalf("rollback failure was lost: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not a shared sing-box transport") {
+		t.Fatalf("original create failure was lost: %v", err)
+	}
+}
+
+func TestRuntimeSettingsRequireOnlyAutostartManagedProxies(t *testing.T) {
+	spec := transport.TransportSpec{
+		Tag: "proxy_one", Type: "sing-box", Interface: "vless1",
+		OutboundJSON: `{"type":"direct"}`,
+	}
+	manager := transport.NewManager()
+	managed, err := transport.NewFromSpec(
+		spec, "sing-box", t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Add(managed); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		SingBoxProcessMode: SingBoxProcessModeIsolated,
+		Transports:         []transport.TransportSpec{spec},
+	}
+	admin := NewAdmin(
+		filepath.Join(t.TempDir(), "transports.json"),
+		cfg,
+		manager,
+		transport.NewSupervisor(manager),
+	)
+	if !admin.Settings().RuntimeReady {
+		t.Fatal("manual managed proxy must not block runtime readiness")
+	}
+	admin.mu.Lock()
+	admin.config.Transports[0].AutoStart = true
+	admin.mu.Unlock()
+	if admin.Settings().RuntimeReady {
+		t.Fatal("stopped autostart managed proxy was reported ready")
 	}
 }

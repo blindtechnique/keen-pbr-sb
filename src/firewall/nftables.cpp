@@ -111,6 +111,11 @@ void append_source_bypass_rules(
             const char* protocol,
             const std::vector<FirewallIngressSourceSelector>& selectors) {
             for (const auto& selector : selectors) {
+                if (selector.interface.empty()) {
+                    // Fail closed: source-address ownership is not enough to
+                    // grant a native-VPN bypass.
+                    continue;
+                }
                 nlohmann::json expr = nlohmann::json::array();
                 expr.push_back({{"match", {
                     {"op", "=="},

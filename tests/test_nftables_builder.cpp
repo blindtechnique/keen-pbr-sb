@@ -704,7 +704,7 @@ TEST_CASE("nft service pools bypass before conntrack and extend route scope") {
       std::vector<std::string>{"br0"};
   prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
   prefilter.bypass_source_selectors_v4 = {
-      {"Sstp0", "172.16.1.0/24"}};
+      {"br0", "172.16.1.0/24"}};
   prefilter.restore_conntrack_mark = true;
   prefilter.conntrack_mark_mask = 0x00FF0000;
 
@@ -720,7 +720,7 @@ TEST_CASE("nft service pools bypass before conntrack and extend route scope") {
     CHECK(bypass_dump.find("172.16.1.0") != std::string::npos);
     CHECK(bypass_dump.find("\"saddr\"") != std::string::npos);
     CHECK(bypass_dump.find("\"iifname\"") != std::string::npos);
-    CHECK(bypass_dump.find("Sstp0") != std::string::npos);
+    CHECK(bypass_dump.find("br0") != std::string::npos);
 
   bool found_ipv4_guard = false;
   bool found_ipv6_guard = false;
@@ -753,7 +753,7 @@ TEST_CASE("nft DNS redirect applies service include and bypass source pools") {
       std::vector<std::string>{"br0"};
   prefilter.include_source_cidrs_v4 = {"172.20.8.0/23"};
   prefilter.bypass_source_selectors_v4 = {
-      {"Sstp0", "172.16.1.0/24"}};
+      {"xfrms1", "172.16.1.0/24"}};
 
   const auto commands =
       T::build_dns_redirect_rules_json(prefilter);
@@ -761,7 +761,9 @@ TEST_CASE("nft DNS redirect applies service include and bypass source pools") {
   REQUIRE(commands.size() == 5);
     CHECK(commands[0].dump().find("172.16.1.0") !=
           std::string::npos);
-    CHECK(commands[0].dump().find("Sstp0") !=
+    CHECK(commands[0].dump().find("\"iifname\"") !=
+          std::string::npos);
+    CHECK(commands[0].dump().find("xfrms1") !=
           std::string::npos);
   CHECK(commands[1].dump().find("172.20.8.0") !=
         std::string::npos);
@@ -771,6 +773,20 @@ TEST_CASE("nft DNS redirect applies service include and bypass source pools") {
       "redirect"));
   CHECK(commands[4]["add"]["rule"]["expr"].back().contains(
       "redirect"));
+}
+
+TEST_CASE("nft pooled VPN bypass fails closed without exact ingress") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_source_selectors_v4 = {
+      {"", "172.16.1.0/24"}};
+
+  const auto routing = T::build_rule_add_commands(
+      prefilter,
+      {mark_rule("myset", AF_INET, 0x00120000)},
+      /*register_merge=*/true);
+  const auto dns = T::build_dns_redirect_rules_json(prefilter);
+  CHECK(routing.dump().find("172.16.1.0") == std::string::npos);
+  CHECK(dns.dump().find("172.16.1.0") == std::string::npos);
 }
 
 TEST_CASE("nft modern mark merge uses numeric direction and preserves foreign bits") {

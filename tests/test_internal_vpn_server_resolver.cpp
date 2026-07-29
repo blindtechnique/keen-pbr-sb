@@ -874,4 +874,35 @@ TEST_CASE("interface events remain relevant for non-outbound internal VPN server
     CHECK(config_has_stable_internal_vpn_server_policy(config));
 }
 
+TEST_CASE(
+    "native service ingress events trigger exact Netlink reconciliation") {
+    Config config{};
+    RouteConfig route{};
+    InternalVpnService sstp{};
+    sstp.service_id = "ndms-service:sstp-server";
+    route.internal_vpn_services =
+        std::vector<InternalVpnService>{sstp};
+    config.route = route;
+
+    CHECK(interface_event_affects_managed_runtime(
+        config, "sstp-bridge"));
+    CHECK(interface_event_affects_managed_runtime(
+        config, "sstp-br-link"));
+    CHECK(interface_event_affects_managed_runtime(
+        config, "sstp-peer-link"));
+    CHECK(interface_event_affects_managed_runtime(config, "sstp8"));
+    CHECK(interface_event_affects_managed_runtime(config, "l2tp7"));
+    CHECK(interface_event_affects_managed_runtime(config, "xfrms1"));
+    CHECK(interface_event_affects_managed_runtime(config, "xfrms2"));
+    CHECK_FALSE(interface_event_affects_managed_runtime(config, "ppp0"));
+    CHECK_FALSE(interface_event_affects_managed_runtime(config, "xfrms3"));
+
+    InternalVpnRuntimeTarget active{};
+    active.stable_id = "ndms-service:sstp-server";
+    active.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    active.verified_ingress_interfaces = {"sstp42"};
+    CHECK(interface_event_affects_managed_runtime(
+        Config{}, {}, {active}, "sstp42"));
+}
+
 } // namespace keen_pbr3

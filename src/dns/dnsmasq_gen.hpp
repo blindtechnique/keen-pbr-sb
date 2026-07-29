@@ -35,7 +35,8 @@ public:
                      const std::map<std::string, ListConfig>& lists,
                      ResolverType resolver_type = ResolverType::DNSMASQ_IPSET,
                      std::string hash_version = KEEN_PBR3_VERSION_FULL_STRING,
-                     ResolverIpv6Policy ipv6_policy = {});
+                     ResolverIpv6Policy ipv6_policy = {},
+                     std::vector<std::string> trusted_interfaces = {});
 
     // Generate dnsmasq configuration and stream it to the output.
     // Produces ipset=/nftset= and server= directives for all matched domains.
@@ -53,7 +54,8 @@ public:
         const DnsConfig& dns_config,
         const std::map<std::string, ListConfig>& lists,
         std::string hash_version = KEEN_PBR3_VERSION_FULL_STRING,
-        ResolverIpv6Policy ipv6_policy = {});
+        ResolverIpv6Policy ipv6_policy = {},
+        std::vector<std::string> trusted_interfaces = {});
 
     // Build the dynamic (dnsmasq-populated) IPv4/IPv6 set names for a given list name.
     // These are the sets referenced by ipset=/nftset= directives in dnsmasq config.
@@ -85,6 +87,7 @@ private:
     ResolverType resolver_type_;
     std::string hash_version_;
     ResolverIpv6Policy ipv6_policy_;
+    std::vector<std::string> trusted_interfaces_;
 };
 
 } // namespace keen_pbr3

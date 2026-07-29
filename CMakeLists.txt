@@ -247,6 +247,7 @@ set(SOURCES
   src/keenetic/ndms_vpn_server_service.cpp
   src/keenetic/ndms_vpn_server_service_cache.cpp
   src/keenetic/internal_vpn_service_resolver.cpp
+  src/keenetic/internal_vpn_ingress_resolver.cpp
   src/keenetic/ndms_interface_management.cpp
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
@@ -305,6 +306,7 @@ set(SOURCES
   src/dns/dns_probe_server.cpp
   src/dns/dns_router.cpp
   src/dns/dnsmasq_gen.cpp
+  src/dns/dnsmasq_access_policy.cpp
   src/daemon/config_store.cpp
   src/daemon/pid_file.cpp
   src/daemon/daemon_core.cpp

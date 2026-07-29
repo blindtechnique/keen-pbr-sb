@@ -14,6 +14,7 @@
 #include "status_stream.hpp"
 #include "server.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -126,6 +127,10 @@ struct ApiContext {
         const std::string&,
         Config,
         std::string)> stage_config_if_visible_revision_fn;
+    // Companion mode switches wait for process + TUN + owned runtime rules.
+    // Tests shorten this bounded poll without weakening production defaults.
+    std::size_t transport_runtime_ready_wait_attempts{60U};
+    std::uint32_t transport_runtime_ready_wait_interval_ms{250U};
 
     Config get_visible_config() const {
         return get_visible_config_fn();

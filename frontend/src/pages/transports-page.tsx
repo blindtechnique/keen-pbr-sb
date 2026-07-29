@@ -6,6 +6,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   RefreshCwIcon,
+  Settings2Icon,
   ShieldCheckIcon,
   TrashIcon,
   UploadIcon,
@@ -36,6 +37,13 @@ import {
   usePostConfigMutation,
 } from "@/api/mutations"
 import {
+  getTransportRuntimeSettings,
+  setTransportRuntimeSettings,
+  transportRuntimeSettingsQueryKey,
+  type SingBoxProcessMode,
+  type TransportRuntimeSettings,
+} from "@/api/transport-runtime-settings"
+import {
   useGetConfig,
   useGetNdmsInterfaceInventory,
   useGetRuntimeInterfaces,
@@ -59,6 +67,7 @@ import {
 import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
 import { formatTransportPath } from "@/components/transports/transport-path"
 import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
+import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
@@ -175,6 +184,9 @@ export function TransportsPage() {
   const { t, i18n } = useTranslation()
   const [, navigate] = useLocation()
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [processModeDialogOpen, setProcessModeDialogOpen] = useState(false)
+  const [selectedProcessMode, setSelectedProcessMode] =
+    useState<SingBoxProcessMode>("isolated")
   const [editing, setEditing] = useState<TransportSpec | undefined>()
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
   const [transportExportPending, setTransportExportPending] = useState(false)
@@ -192,6 +204,13 @@ export function TransportsPage() {
       refetchInterval: 3_000,
       refetchIntervalInBackground: false,
     },
+  })
+  const processModeQuery = useQuery({
+    queryKey: transportRuntimeSettingsQueryKey,
+    queryFn: getTransportRuntimeSettings,
+    retry: false,
+    refetchOnWindowFocus: false,
+    staleTime: 30_000,
   })
   const items: TransportStatus[] = useMemo(
     () => (query.data?.status === 200 ? query.data.data : []),
@@ -499,6 +518,38 @@ export function TransportsPage() {
       },
     },
   })
+  const processModeMutation = useMutation<
+    TransportRuntimeSettings,
+    ApiError,
+    SingBoxProcessMode
+  >({
+    mutationFn: setTransportRuntimeSettings,
+    onSuccess: async (settings) => {
+      queryClient.setQueryData(transportRuntimeSettingsQueryKey, settings)
+      setSelectedProcessMode(settings.sing_box_process_mode)
+      setProcessModeDialogOpen(false)
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.transports(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.runtimeInterfaces(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.runtimeOutbounds(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.healthService(),
+        }),
+      ])
+      toast.success(t("transports.processMode.applied"))
+    },
+    onError: (mutationError) => {
+      toast.error(getApiErrorMessage(mutationError), {
+        richColors: true,
+      })
+    },
+  })
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
@@ -789,16 +840,51 @@ export function TransportsPage() {
           {t("transports.add")}
         </Button>
         <Button
+          aria-describedby={
+            processModeQuery.isError
+              ? "transport-process-mode-unavailable"
+              : undefined
+          }
+          disabled={
+            processModeQuery.isPending ||
+            processModeQuery.isError ||
+            !processModeQuery.data ||
+            processModeMutation.isPending
+          }
+          onClick={() => {
+            const settings = processModeQuery.data
+            if (!settings) return
+            setSelectedProcessMode(settings.sing_box_process_mode)
+            setProcessModeDialogOpen(true)
+          }}
+          title={
+            processModeQuery.isError
+              ? t("transports.processMode.unavailable")
+              : undefined
+          }
+          variant="outline"
+        >
+          <Settings2Icon />
+          {t("transports.processMode.action")}
+        </Button>
+        {processModeQuery.isError ? (
+          <span className="sr-only" id="transport-process-mode-unavailable">
+            {t("transports.processMode.unavailable")}
+          </span>
+        ) : null}
+        <Button
           disabled={
             query.isFetching ||
             ndmsInventoryQuery.isFetching ||
-            runtimeInterfacesQuery.isFetching
+            runtimeInterfacesQuery.isFetching ||
+            processModeQuery.isFetching
           }
           onClick={() => {
             void query.refetch()
             void configQuery.refetch()
             void ndmsInventoryQuery.refetch()
             void runtimeInterfacesQuery.refetch()
+            void processModeQuery.refetch()
           }}
           variant="outline"
         >
@@ -806,7 +892,8 @@ export function TransportsPage() {
             className={
               query.isFetching ||
               ndmsInventoryQuery.isFetching ||
-              runtimeInterfacesQuery.isFetching
+              runtimeInterfacesQuery.isFetching ||
+              processModeQuery.isFetching
                 ? "animate-spin"
                 : ""
             }
@@ -1248,6 +1335,18 @@ export function TransportsPage() {
           onSubmit={saveTransport}
           open
           singBoxAvailable={environmentQuery.data?.sing_box_installed !== false}
+        />
+      ) : null}
+      {processModeQuery.data ? (
+        <SingBoxProcessModeDialog
+          currentMode={processModeQuery.data.sing_box_process_mode}
+          onModeChange={setSelectedProcessMode}
+          onOpenChange={setProcessModeDialogOpen}
+          onSubmit={() => processModeMutation.mutate(selectedProcessMode)}
+          open={processModeDialogOpen}
+          pending={processModeMutation.isPending}
+          restartRequired={processModeQuery.data.restart_required}
+          selectedMode={selectedProcessMode}
         />
       ) : null}
       <DeleteImpactDialog

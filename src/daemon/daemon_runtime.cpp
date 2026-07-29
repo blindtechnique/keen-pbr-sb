@@ -12,6 +12,7 @@
 #include "../config/routing_state.hpp"
 #include "../firewall/firewall.hpp"
 #include "../firewall/firewall_runtime.hpp"
+#include "../keenetic/internal_vpn_ingress_resolver.hpp"
 #include "../keenetic/internal_vpn_server_resolver.hpp"
 #include "../keenetic/internal_vpn_service_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_generation.hpp"
@@ -126,6 +127,8 @@ bool same_internal_vpn_runtime_targets(
                           left.bound_interface_id ==
                               right.bound_interface_id &&
                           left.interface == right.interface &&
+                          left.verified_ingress_interfaces ==
+                              right.verified_ingress_interfaces &&
                           left.source_cidrs_v4 == right.source_cidrs_v4 &&
                           left.source_cidrs_v6 == right.source_cidrs_v6;
                });
@@ -2080,18 +2083,21 @@ Daemon::resolve_internal_vpn_services_for_runtime(
         std::vector<InternalVpnService>{});
     const bool default_process_clients =
         internal_vpn_service_default_process_clients(config);
+    const auto live_interfaces = netlink_.dump_interfaces();
     auto resolution = resolve_internal_vpn_service_policies(
         configured,
         snapshot.catalog,
         snapshot.status == NdmsCatalogCacheStatus::fresh,
         default_process_clients,
         internal_vpn_inbound_observation(
-            config, netlink_.dump_interfaces()));
+            config, live_interfaces));
     auto generation = select_internal_vpn_service_generation(
         configured,
         resolution,
         previous_verified_includes,
         default_process_clients);
+    refresh_internal_vpn_service_ingress_interfaces(
+        generation.effective_targets, live_interfaces);
 
     InternalVpnRuntimeResolutionState state =
         InternalVpnRuntimeResolutionState::verified;

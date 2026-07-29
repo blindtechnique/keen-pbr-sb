@@ -65,6 +65,10 @@ struct FirewallRuleCriteria {
 using ProtoPortFilter = FirewallRuleCriteria;
 
 struct FirewallIngressSourceSelector {
+    // Service bypass selectors always contain a live, server-owned kernel
+    // ingress plus its authoritative client pool. Source-only bypass is
+    // forbidden because a spoofed/private source on another interface must
+    // never escape keen-pbr classification.
     std::string interface;
     std::string cidr;
 };
@@ -74,9 +78,11 @@ struct FirewallGlobalPrefilter {
     // Explicit ingress interfaces that must bypass keen-pbr before conntrack
     // mark restoration, route classification, and client DNS redirection.
     std::vector<std::string> bypass_inbound_interfaces;
-    // Service-based NDMS VPN servers have stable client pools. Inclusion may
-    // use a verified pool directly; bypass is stricter and is always scoped to
-    // the exact ingress interface verified in the current Netlink inventory.
+    // Service-based NDMS VPN servers have stable client pools. The resolver
+    // accepts them only from an authoritative NDMS inventory, rejects
+    // overlapping pools, and binds bypass to exact live L2TP/IKE or direct
+    // SSTP ingress. Bridged SSTP fails closed until a physical bridge-port
+    // selector is available in both firewall backends.
     std::vector<std::string> include_source_cidrs_v4;
     std::vector<std::string> include_source_cidrs_v6;
     std::vector<FirewallIngressSourceSelector>

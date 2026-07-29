@@ -22,6 +22,7 @@
 #include "../health/interface_probe.hpp"
 #include "pid_file.hpp"
 #include "../health/url_tester.hpp"
+#include "../keenetic/internal_vpn_ingress_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
@@ -173,6 +174,8 @@ inline bool interface_event_requires_runtime_observation(
 inline bool interface_event_affects_managed_runtime(
     const Config& config,
     const std::vector<InternalVpnServer>& effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>&
+        effective_internal_vpn_service_targets,
     const std::string& interface_name) {
     const auto outbounds =
         config.outbounds.value_or(std::vector<Outbound>{});
@@ -201,14 +204,48 @@ inline bool interface_event_affects_managed_runtime(
             effective_internal_vpn_servers.begin(),
             effective_internal_vpn_servers.end(),
             matches_interface);
-    return is_managed_outbound || is_internal_vpn_interface;
+    const bool service_inventory_configured =
+        config.route.has_value() &&
+        (!config.route->internal_vpn_services
+              .value_or(std::vector<InternalVpnService>{})
+              .empty() ||
+         (config.route->inbound_interfaces.has_value() &&
+          !config.route->inbound_interfaces->empty()));
+    const bool is_internal_vpn_service_interface =
+        std::any_of(
+            effective_internal_vpn_service_targets.begin(),
+            effective_internal_vpn_service_targets.end(),
+            [&interface_name](const auto& target) {
+                return std::find(
+                           target.verified_ingress_interfaces.begin(),
+                           target.verified_ingress_interfaces.end(),
+                           interface_name) !=
+                       target.verified_ingress_interfaces.end();
+            }) ||
+        (service_inventory_configured &&
+         internal_vpn_service_interface_may_affect_ingress(
+             interface_name));
+    return is_managed_outbound ||
+           is_internal_vpn_interface ||
+           is_internal_vpn_service_interface;
+}
+
+inline bool interface_event_affects_managed_runtime(
+    const Config& config,
+    const std::vector<InternalVpnServer>& effective_internal_vpn_servers,
+    const std::string& interface_name) {
+    return interface_event_affects_managed_runtime(
+        config,
+        effective_internal_vpn_servers,
+        {},
+        interface_name);
 }
 
 inline bool interface_event_affects_managed_runtime(
     const Config& config,
     const std::string& interface_name) {
     return interface_event_affects_managed_runtime(
-        config, {}, interface_name);
+        config, {}, {}, interface_name);
 }
 
 inline bool config_has_stable_internal_vpn_server_policy(
@@ -259,6 +296,7 @@ struct ResolverGenerationSnapshot {
     Config config;
     ResolverType resolver_type;
     ResolverIpv6Policy ipv6_policy;
+    std::vector<std::string> trusted_dns_interfaces;
     std::string expected_hash;
     std::uint64_t generation{0};
     std::uint64_t stream_epoch{0};

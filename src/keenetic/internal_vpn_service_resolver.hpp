@@ -19,7 +19,6 @@ enum class InternalVpnServiceResolutionError : std::uint8_t {
     duplicate_service_id,
     overlapping_source_pool,
     source_pool_overlaps_inbound_network,
-    source_pool_bypass_unverified_ingress,
 };
 
 struct InternalVpnServiceResolutionIssue {

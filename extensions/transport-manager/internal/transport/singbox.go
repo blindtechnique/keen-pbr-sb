@@ -69,24 +69,26 @@ type VLESSSpec struct {
 }
 
 type SingBox struct {
-	opMu               sync.Mutex
-	mu                 sync.Mutex
-	spec               TransportSpec
-	binary, runtimeDir string
-	cmd                *exec.Cmd
-	done               chan error
-	state              State
-	lastErr            string
-	updated            time.Time
-	healthEndpoint     RoutingHealthEndpoint
-	healthFailures     int
-	server             string
-	serverPort         int
-	protocol           string
-	security           string
-	sni                string
-	path               TransportPath
-	network            string
+	opMu                sync.Mutex
+	mu                  sync.Mutex
+	spec                TransportSpec
+	binary, runtimeDir  string
+	cmd                 *exec.Cmd
+	done                chan error
+	state               State
+	lastErr             string
+	updated             time.Time
+	healthEndpoint      RoutingHealthEndpoint
+	healthFailures      int
+	server              string
+	serverPort          int
+	protocol            string
+	security            string
+	sni                 string
+	path                TransportPath
+	network             string
+	interfaceByName     func(string) (*net.Interface, error)
+	runtimeRulesPresent func(string) bool
 }
 
 type RoutingHealthEndpoint struct {
@@ -121,7 +123,12 @@ func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...Routing
 	if _, err := tunAddressForSpec(spec); err != nil {
 		return nil, err
 	}
-	result := &SingBox{spec: spec, binary: binary, runtimeDir: runtimeDir, state: StateDown, updated: time.Now().UTC()}
+	result := &SingBox{
+		spec: spec, binary: binary, runtimeDir: runtimeDir,
+		state: StateDown, updated: time.Now().UTC(),
+		interfaceByName:     net.InterfaceByName,
+		runtimeRulesPresent: forwardingRulesPresent,
+	}
 	if server, ok := outbound["server"].(string); ok {
 		result.server = server
 	}
@@ -141,13 +148,7 @@ func NewSingBox(spec TransportSpec, binary, runtimeDir string, health ...Routing
 }
 
 func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...RoutingHealthEndpoint) (Transport, error) {
-	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
-		return nil, fmt.Errorf("invalid tag or interface")
-	}
-	if err := ValidateDisplayName(spec.DisplayName); err != nil {
-		return nil, err
-	}
-	if err := validateGeoSpec(spec); err != nil {
+	if err := ValidateTransportSpec(spec); err != nil {
 		return nil, err
 	}
 	switch spec.Type {
@@ -158,6 +159,91 @@ func NewFromSpec(spec TransportSpec, binary, runtimeDir string, health ...Routin
 	default:
 		return nil, fmt.Errorf("unsupported type %q", spec.Type)
 	}
+}
+
+// ValidateTransportSpec is the common validation boundary for isolated,
+// shared and native transport construction. Shared mode must not silently
+// accept metadata that the default isolated mode rejects.
+func ValidateTransportSpec(spec TransportSpec) error {
+	if !validTag.MatchString(spec.Tag) || !validInterface.MatchString(spec.Interface) {
+		return fmt.Errorf("invalid tag or interface")
+	}
+	if err := ValidateDisplayName(spec.DisplayName); err != nil {
+		return err
+	}
+	if err := validateGeoSpec(spec); err != nil {
+		return err
+	}
+	switch spec.Type {
+	case "native", "sing-box", "sing-box-vless-reality":
+		return nil
+	default:
+		return fmt.Errorf("unsupported type %q", spec.Type)
+	}
+}
+
+// ValidateIsolatedSingBoxInventory checks every managed transport in the exact
+// configuration shape used by isolated mode. It is used before staging a mode
+// switch so a restart cannot discover an incompatible config only after the
+// previous shared runtime has already been stopped.
+func ValidateIsolatedSingBoxInventory(
+	ctx context.Context,
+	specs []TransportSpec,
+	binary string,
+	runtimeDir string,
+	health ...RoutingHealthEndpoint,
+) error {
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		if !isManagedSingBoxSpec(spec) {
+			continue
+		}
+		managed, err := NewSingBox(spec, binary, runtimeDir, health...)
+		if err != nil {
+			return fmt.Errorf("transport %q: %w", spec.Tag, err)
+		}
+		config, err := managed.buildConfig()
+		if err != nil {
+			return fmt.Errorf("transport %q: %w", spec.Tag, err)
+		}
+		data, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			return fmt.Errorf("transport %q: encode sing-box config: %w", spec.Tag, err)
+		}
+		file, err := os.CreateTemp(runtimeDir, ".isolated-check-*.json")
+		if err != nil {
+			return fmt.Errorf("transport %q: %w", spec.Tag, err)
+		}
+		path := file.Name()
+		if chmodErr := file.Chmod(0600); chmodErr != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return fmt.Errorf("transport %q: %w", spec.Tag, chmodErr)
+		}
+		if _, writeErr := file.Write(data); writeErr != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return fmt.Errorf("transport %q: %w", spec.Tag, writeErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			_ = os.Remove(path)
+			return fmt.Errorf("transport %q: %w", spec.Tag, closeErr)
+		}
+		command := exec.CommandContext(ctx, binary, "check", "-c", path)
+		output, checkErr := command.CombinedOutput()
+		_ = os.Remove(path)
+		if checkErr != nil {
+			return fmt.Errorf(
+				"transport %q: sing-box config check: %w: %s",
+				spec.Tag,
+				checkErr,
+				string(output),
+			)
+		}
+	}
+	return nil
 }
 
 func ValidateDisplayName(value string) error {
@@ -389,8 +475,11 @@ func (s *SingBox) EnsureRuntimeRules() error {
 }
 
 func (s *SingBox) truncateRuntimeLog() {
+	truncateRuntimeLogFile(filepath.Join(s.runtimeDir, s.spec.Tag+".log"))
+}
+
+func truncateRuntimeLogFile(path string) {
 	const maximumLogBytes = 2 * 1024 * 1024
-	path := filepath.Join(s.runtimeDir, s.spec.Tag+".log")
 	if info, err := os.Stat(path); err == nil && info.Size() > maximumLogBytes {
 		_ = os.Truncate(path, 0)
 	}
@@ -402,6 +491,26 @@ func (s *SingBox) removeForwardingRules() {
 
 func forwardingRuleArgs(interfaceName string) []string {
 	return []string{"FORWARD", "-o", interfaceName, "-m", "comment", "--comment", "keen-pbr-sb:" + interfaceName, "-j", "ACCEPT"}
+}
+
+func forwardingRulesPresent(interfaceName string) bool {
+	for _, binary := range []string{"iptables", "ip6tables"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			if binary == "iptables" {
+				return false
+			}
+			continue
+		}
+		marked := forwardingRuleArgs(interfaceName)
+		if exec.Command(binary, append([]string{"-C"}, marked...)...).Run() == nil {
+			continue
+		}
+		legacy := []string{"FORWARD", "-o", interfaceName, "-j", "ACCEPT"}
+		if exec.Command(binary, append([]string{"-C"}, legacy...)...).Run() != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func removeForwardingRules(interfaceName string, includeLegacy bool) {
@@ -437,15 +546,21 @@ func CleanupForwardingRules(specs []TransportSpec) {
 // unclean transport-manager exit. Matching is restricted to the exact config
 // paths owned by configured transports in our runtime directory.
 func CleanupOrphanProcesses(specs []TransportSpec, runtimeDir string) error {
+	return CleanupOrphanProcessesForMode(specs, runtimeDir, false)
+}
+
+// CleanupOrphanProcessesForMode also owns shared.json when shared mode is
+// configured with an empty inventory. This closes the crash-recovery edge case
+// without broad process-name matching that could kill an unrelated sing-box.
+func CleanupOrphanProcessesForMode(
+	specs []TransportSpec,
+	runtimeDir string,
+	sharedMode bool,
+) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
-	ownedConfigs := make(map[string]bool)
-	for _, spec := range specs {
-		if spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality" {
-			ownedConfigs[filepath.Join(runtimeDir, spec.Tag+".json")] = true
-		}
-	}
+	ownedConfigs := ownedSingBoxConfigPaths(specs, runtimeDir, sharedMode)
 	if len(ownedConfigs) == 0 {
 		return nil
 	}
@@ -470,9 +585,54 @@ func CleanupOrphanProcesses(specs []TransportSpec, runtimeDir string) error {
 		}
 		if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			errs = append(errs, fmt.Errorf("kill orphan sing-box pid %d: %w", pid, err))
+			continue
+		}
+		if !waitForOwnedProcessExit(pid, ownedConfigs, 2*time.Second) {
+			errs = append(
+				errs,
+				fmt.Errorf("orphan sing-box pid %d did not exit after kill", pid),
+			)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func ownedSingBoxConfigPaths(
+	specs []TransportSpec,
+	runtimeDir string,
+	sharedMode bool,
+) map[string]bool {
+	ownedConfigs := make(map[string]bool)
+	hasManaged := false
+	for _, spec := range specs {
+		if spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality" {
+			hasManaged = true
+			ownedConfigs[filepath.Join(runtimeDir, spec.Tag+".json")] = true
+		}
+	}
+	if hasManaged || sharedMode {
+		ownedConfigs[filepath.Join(runtimeDir, "shared.json")] = true
+	}
+	return ownedConfigs
+}
+
+func waitForOwnedProcessExit(pid int, ownedConfigs map[string]bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	path := filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
+	for {
+		cmdline, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return true
+		}
+		if err == nil && !matchesOwnedSingBoxCommand(cmdline, ownedConfigs) {
+			// The PID disappeared or was reused by an unrelated process.
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func matchesOwnedSingBoxCommand(cmdline []byte, ownedConfigs map[string]bool) bool {
@@ -541,6 +701,27 @@ func (s *SingBox) Status(ctx context.Context) Status {
 		s.applyRoutingHealth(ctx, &status)
 	}
 	return status
+}
+
+// LocalRuntimeReady intentionally bypasses Status because Status also applies
+// external keen-pbr routing health. A mode switch only needs proof that its
+// local process, TUN device and owned forwarding rules are live.
+func (s *SingBox) LocalRuntimeReady() bool {
+	s.mu.Lock()
+	state := s.state
+	cmd := s.cmd
+	interfaceByName := s.interfaceByName
+	rulesPresent := s.runtimeRulesPresent
+	interfaceName := s.spec.Interface
+	s.mu.Unlock()
+	if state != StateUp || cmd == nil || cmd.Process == nil ||
+		interfaceByName == nil || rulesPresent == nil {
+		return false
+	}
+	if _, err := interfaceByName(interfaceName); err != nil {
+		return false
+	}
+	return rulesPresent(interfaceName)
 }
 
 func (s *SingBox) applyRoutingHealth(ctx context.Context, status *Status) {
@@ -628,25 +809,18 @@ func (s *SingBox) routingHealth(ctx context.Context) (string, string, bool) {
 }
 
 func (s *SingBox) buildConfig() (map[string]any, error) {
-	mtu := s.spec.MTU
-	if mtu == 0 && s.spec.VLESS != nil {
-		mtu = s.spec.VLESS.MTU
-	}
-	if mtu == 0 {
-		mtu = 1420
-	}
 	outbound, err := outboundFromSpec(s.spec)
 	if err != nil {
 		return nil, err
 	}
 	outbound["tag"] = "proxy-out"
-	tunAddress, err := tunAddressForSpec(s.spec)
+	tun, err := tunInboundFromSpec(s.spec, "tun-in")
 	if err != nil {
 		return nil, err
 	}
 	config := map[string]any{
 		"log":       map[string]any{"level": "info", "timestamp": true},
-		"inbounds":  []any{map[string]any{"type": "tun", "tag": "tun-in", "interface_name": s.spec.Interface, "address": []string{tunAddress}, "mtu": mtu, "stack": "gvisor", "auto_route": false, "strict_route": false}},
+		"inbounds":  []any{tun},
 		"outbounds": []any{outbound},
 		"route":     map[string]any{"auto_detect_interface": true, "final": "proxy-out"},
 	}

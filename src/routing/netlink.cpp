@@ -572,6 +572,26 @@ std::vector<DumpedInterface> NetlinkManager::dump_interfaces() {
         interfaces->insert_or_assign(ifindex, std::move(dumped));
     }, &interfaces_by_index);
 
+    // Resolve bridge/master ownership in a second pass: libnl does not
+    // guarantee that the master link appears before its port in the cache.
+    nl_cache_foreach(link_cache.get(), [](struct nl_object* obj, void* arg) {
+        auto* interfaces = static_cast<std::map<int, DumpedInterface>*>(arg);
+        auto* link = reinterpret_cast<struct rtnl_link*>(obj);
+        const int ifindex = rtnl_link_get_ifindex(link);
+        const int master_ifindex = rtnl_link_get_master(link);
+        if (ifindex <= 0 || master_ifindex <= 0) {
+            return;
+        }
+        const auto interface_it = interfaces->find(ifindex);
+        const auto master_it = interfaces->find(master_ifindex);
+        if (interface_it == interfaces->end() ||
+            master_it == interfaces->end()) {
+            return;
+        }
+        interface_it->second.master_interface =
+            master_it->second.name;
+    }, &interfaces_by_index);
+
     nl_cache_foreach(addr_cache.get(), [](struct nl_object* obj, void* arg) {
         auto* interfaces = static_cast<std::map<int, DumpedInterface>*>(arg);
         auto* addr = reinterpret_cast<struct rtnl_addr*>(obj);
@@ -585,6 +605,7 @@ std::vector<DumpedInterface> NetlinkManager::dump_interfaces() {
         if (!local) {
             return;
         }
+        struct nl_addr* peer = rtnl_addr_get_peer(addr);
 
         auto interface_it = interfaces->find(ifindex);
         if (interface_it == interfaces->end()) {
@@ -606,9 +627,23 @@ std::vector<DumpedInterface> NetlinkManager::dump_interfaces() {
         switch (nl_addr_get_family(local)) {
         case AF_INET:
             interface_it->second.ipv4_addresses.push_back(rendered);
+            if (peer != nullptr) {
+                const std::string rendered_peer = nl_addr_to_str(peer);
+                if (!rendered_peer.empty() && rendered_peer != rendered) {
+                    interface_it->second.ipv4_peer_addresses.push_back(
+                        rendered_peer);
+                }
+            }
             break;
         case AF_INET6:
             interface_it->second.ipv6_addresses.push_back(rendered);
+            if (peer != nullptr) {
+                const std::string rendered_peer = nl_addr_to_str(peer);
+                if (!rendered_peer.empty() && rendered_peer != rendered) {
+                    interface_it->second.ipv6_peer_addresses.push_back(
+                        rendered_peer);
+                }
+            }
             break;
         default:
             break;
@@ -621,6 +656,22 @@ std::vector<DumpedInterface> NetlinkManager::dump_interfaces() {
         (void)ifindex;
         std::sort(dumped.ipv4_addresses.begin(), dumped.ipv4_addresses.end());
         std::sort(dumped.ipv6_addresses.begin(), dumped.ipv6_addresses.end());
+        std::sort(
+            dumped.ipv4_peer_addresses.begin(),
+            dumped.ipv4_peer_addresses.end());
+        dumped.ipv4_peer_addresses.erase(
+            std::unique(
+                dumped.ipv4_peer_addresses.begin(),
+                dumped.ipv4_peer_addresses.end()),
+            dumped.ipv4_peer_addresses.end());
+        std::sort(
+            dumped.ipv6_peer_addresses.begin(),
+            dumped.ipv6_peer_addresses.end());
+        dumped.ipv6_peer_addresses.erase(
+            std::unique(
+                dumped.ipv6_peer_addresses.begin(),
+                dumped.ipv6_peer_addresses.end()),
+            dumped.ipv6_peer_addresses.end());
         result.push_back(std::move(dumped));
     }
 
