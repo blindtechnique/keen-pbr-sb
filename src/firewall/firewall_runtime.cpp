@@ -32,15 +32,32 @@ const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
     return nullptr;
 }
 
+bool needs_native_vpn_direct_egress_snat(std::string_view stable_id) {
+    constexpr std::string_view kSstpServiceId{
+        "ndms-service:sstp-server"};
+    constexpr std::string_view kL2tpServicePrefix{
+        "ndms-crypto-map:l2tp:"};
+    constexpr std::string_view kIkev1ServicePrefix{
+        "ndms-crypto-map:ikev1:"};
+
+    if (stable_id == kSstpServiceId) {
+        return true;
+    }
+    const auto has_nonempty_suffix =
+        [stable_id](std::string_view prefix) {
+            return stable_id.size() > prefix.size() &&
+                   stable_id.compare(0, prefix.size(), prefix) == 0;
+        };
+    return has_nonempty_suffix(kL2tpServicePrefix) ||
+           has_nonempty_suffix(kIkev1ServicePrefix);
+}
+
 } // namespace
 
 std::vector<FirewallSourceEgressSnatSelector>
-select_sstp_direct_egress_snat_selectors(
+select_native_vpn_direct_egress_snat_selectors(
     const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
     const std::vector<std::string>& wan_interfaces) {
-    constexpr std::string_view kSstpServiceId{
-        "ndms-service:sstp-server"};
-
     std::vector<FirewallSourceEgressSnatSelector> result;
     std::set<std::pair<std::string, std::string>> seen;
     for (const auto& interface : wan_interfaces) {
@@ -48,12 +65,13 @@ select_sstp_direct_egress_snat_selectors(
             continue;
         }
         for (const auto& target : internal_vpn_targets) {
-            if (target.stable_id != kSstpServiceId) {
+            if (!needs_native_vpn_direct_egress_snat(
+                    target.stable_id)) {
                 continue;
             }
             // `process_clients` intentionally does not participate here:
             // disabling policy routing must restore ordinary WAN reachability,
-            // not remove the source NAT required by the firmware SSTP pool.
+            // not remove the source NAT required by the firmware VPN pool.
             for (const auto& cidr : target.source_cidrs_v4) {
                 if (cidr.empty() ||
                     !seen.emplace(interface, cidr).second) {
@@ -67,10 +85,35 @@ select_sstp_direct_egress_snat_selectors(
 }
 
 std::vector<FirewallSourceEgressSnatSelector>
-select_sstp_direct_egress_snat_selectors(
+select_native_vpn_direct_egress_snat_selectors(
     const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets) {
-    return select_sstp_direct_egress_snat_selectors(
+    return select_native_vpn_direct_egress_snat_selectors(
         internal_vpn_targets, default_route_interfaces());
+}
+
+std::vector<std::string>
+changed_native_vpn_direct_egress_source_cidrs(
+    const std::vector<FirewallSourceEgressSnatSelector>& previous,
+    const std::vector<FirewallSourceEgressSnatSelector>& current) {
+    const std::set<FirewallSourceEgressSnatSelector> previous_set(
+        previous.begin(), previous.end());
+    const std::set<FirewallSourceEgressSnatSelector> current_set(
+        current.begin(), current.end());
+    std::set<std::string> changed_sources;
+
+    for (const auto& selector : previous_set) {
+        if (current_set.find(selector) == current_set.end() &&
+            !selector.cidr.empty()) {
+            changed_sources.insert(selector.cidr);
+        }
+    }
+    for (const auto& selector : current_set) {
+        if (previous_set.find(selector) == previous_set.end() &&
+            !selector.cidr.empty()) {
+            changed_sources.insert(selector.cidr);
+        }
+    }
+    return {changed_sources.begin(), changed_sources.end()};
 }
 
 std::vector<RuleState> apply_runtime_firewall(
@@ -83,7 +126,9 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::vector<InternalVpnServer>*
         effective_internal_vpn_servers,
     const std::vector<InternalVpnRuntimeTarget>*
-        effective_internal_vpn_targets) {
+        effective_internal_vpn_targets,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors) {
     ListStreamer list_streamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
@@ -312,9 +357,12 @@ std::vector<RuleState> apply_runtime_firewall(
         }
         firewall.create_tunnel_snat_rules(tunnel_interfaces);
     }
-    if (effective_internal_vpn_targets != nullptr) {
+    if (native_vpn_direct_egress_snat_selectors != nullptr) {
         firewall.create_source_egress_snat_rules(
-            select_sstp_direct_egress_snat_selectors(
+            *native_vpn_direct_egress_snat_selectors);
+    } else if (effective_internal_vpn_targets != nullptr) {
+        firewall.create_source_egress_snat_rules(
+            select_native_vpn_direct_egress_snat_selectors(
                 *effective_internal_vpn_targets));
     }
 

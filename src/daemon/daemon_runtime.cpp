@@ -362,41 +362,36 @@ void Daemon::cleanup_owned_conntrack_marks(const char* context) {
     (void)cleanup_owned_conntrack_snapshot(snapshot, context);
 }
 
-void Daemon::reconcile_sstp_direct_egress_conntrack(
+void Daemon::reconcile_native_vpn_direct_egress_conntrack(
     const std::vector<FirewallSourceEgressSnatSelector>& selectors) {
-    if (selectors == applied_sstp_direct_egress_snat_selectors_) {
+    if (selectors == applied_native_vpn_direct_egress_snat_selectors_) {
         return;
     }
 
-    std::set<std::string> affected_sources;
-    for (const auto& selector :
-         applied_sstp_direct_egress_snat_selectors_) {
-        affected_sources.insert(selector.cidr);
-    }
-    for (const auto& selector : selectors) {
-        affected_sources.insert(selector.cidr);
-    }
-    applied_sstp_direct_egress_snat_selectors_ = selectors;
+    const auto affected_sources =
+        changed_native_vpn_direct_egress_source_cidrs(
+            applied_native_vpn_direct_egress_snat_selectors_,
+            selectors);
+    applied_native_vpn_direct_egress_snat_selectors_ = selectors;
     if (affected_sources.empty()) {
         return;
     }
 
-    const std::vector<std::string> source_cidrs(
-        affected_sources.begin(), affected_sources.end());
     const auto cleanup = conntrack_manager_.delete_ipv4_source_cidrs(
-        source_cidrs,
+        affected_sources,
         ConntrackSourceCleanupOptions{
             std::chrono::seconds{4},
             /*max_source_cidrs=*/32U});
     if (cleanup.command_unavailable) {
         Logger::instance().info(
-            "SSTP direct-egress SNAT changed, but targeted conntrack cleanup "
-            "is unavailable; existing SSTP flows will converge as they expire");
+            "Native VPN direct-egress SNAT changed, but targeted conntrack "
+            "cleanup is unavailable; existing flows will converge as they "
+            "expire");
         return;
     }
     if (cleanup.failed != 0U || cleanup.skipped != 0U) {
         Logger::instance().info(
-            "SSTP direct-egress SNAT changed; targeted conntrack cleanup "
+            "Native VPN direct-egress SNAT changed; targeted conntrack cleanup "
             "left {} failed and {} skipped source selector(s)",
             cleanup.failed,
             cleanup.skipped);
@@ -1112,8 +1107,9 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         runtime_targets.end(),
         resolved_internal_vpn_service_targets_.begin(),
         resolved_internal_vpn_service_targets_.end());
-    const auto sstp_direct_egress_snat_selectors =
-        select_sstp_direct_egress_snat_selectors(runtime_targets);
+    const auto native_vpn_direct_egress_snat_selectors =
+        select_native_vpn_direct_egress_snat_selectors(
+            runtime_targets);
     firewall_state_.set_rules(apply_runtime_firewall(
         config_,
         outbound_marks_,
@@ -1122,9 +1118,10 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         *firewall_,
         mode,
         &effective_interface_servers,
-        &runtime_targets));
-    reconcile_sstp_direct_egress_conntrack(
-        sstp_direct_egress_snat_selectors);
+        &runtime_targets,
+        &native_vpn_direct_egress_snat_selectors));
+    reconcile_native_vpn_direct_egress_conntrack(
+        native_vpn_direct_egress_snat_selectors);
 
 #ifdef WITH_API
     // The firmware reapplies its own firewall on every network event and drops
