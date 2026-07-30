@@ -57,6 +57,8 @@ public:
     // Buffer NAT MASQUERADE rules for traffic leaving via tunnel interfaces.
     void create_tunnel_snat_rules(
         const std::vector<std::string>& interfaces) override;
+    void create_source_egress_snat_rules(
+        const std::vector<FirewallSourceEgressSnatSelector>& selectors) override;
     OwnedSnatState inspect_owned_snat_state() const override;
     // Buffer an iptables/ip6tables -j RETURN rule for the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
@@ -234,6 +236,8 @@ private:
         const char* command,
         bool expected,
         const std::vector<std::string>& expected_interfaces,
+        const std::vector<FirewallSourceEgressSnatSelector>&
+            expected_source_egress_selectors,
         uint32_t expected_fwmark_mask);
     static OwnedSnatState combine_owned_snat_states(
         OwnedSnatState ipv4,
@@ -242,6 +246,8 @@ private:
         const char* command,
         bool expected,
         const std::vector<std::string>& expected_interfaces,
+        const std::vector<FirewallSourceEgressSnatSelector>&
+            expected_source_egress_selectors,
         uint32_t expected_fwmark_mask);
     static void remove_all_hooks(
         const char* command,
@@ -295,6 +301,9 @@ private:
     bool router_origin_snat_requested_ = false;
     // Tunnel interfaces whose egress needs masquerading.
     std::vector<std::string> snat_interfaces_;
+    // Native-VPN source pools whose direct egress needs masquerading.
+    std::vector<FirewallSourceEgressSnatSelector>
+        source_egress_snat_selectors_;
     // Last successfully applied SNAT contract. Runtime health inspection must
     // validate the desired state, including the intentional absence of SNAT.
     bool last_applied_snat_v4_expected_ = false;
@@ -305,6 +314,10 @@ private:
     // lost expected IPv6 scaffold without probing unsupported routers.
     bool last_applied_snat_v6_managed_ = false;
     std::vector<std::string> last_applied_snat_interfaces_;
+    std::vector<FirewallSourceEgressSnatSelector>
+        last_applied_source_egress_snat_selectors_v4_;
+    std::vector<FirewallSourceEgressSnatSelector>
+        last_applied_source_egress_snat_selectors_v6_;
     uint32_t last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     bool dns_nat_v4_created_ = false;
     bool dns_nat_v6_created_ = false;
@@ -317,7 +330,9 @@ private:
         bool router_origin_snat,
         const std::vector<std::string>& snat_interfaces,
         bool ipv6 = false,
-        uint32_t fwmark_mask = 0xFFFFFFFFu);
+        uint32_t fwmark_mask = 0xFFFFFFFFu,
+        const std::vector<FirewallSourceEgressSnatSelector>&
+            source_egress_snat_selectors = {});
     static std::string build_nat_validation_script(
         const std::string& nat_script);
     static void preflight_nat_restore(

@@ -248,24 +248,30 @@ public:
       bool router_origin_snat = false,
       const std::vector<std::string> &snat_interfaces = {},
       bool ipv6 = false,
-      uint32_t fwmark_mask = 0xFFFFFFFFu) {
+      uint32_t fwmark_mask = 0xFFFFFFFFu,
+      const std::vector<FirewallSourceEgressSnatSelector>
+          &source_egress_snat_selectors = {}) {
     return IptablesFirewall::build_dns_nat_script(
         prefilter,
         dns_redirect,
         router_origin_snat,
         snat_interfaces,
         ipv6,
-        fwmark_mask);
+        fwmark_mask,
+        source_egress_snat_selectors);
   }
 
   static OwnedSnatState inspect_owned_snat_state(
       bool expected = false,
       const std::vector<std::string>& expected_interfaces = {},
-      uint32_t expected_fwmark_mask = 0xFFFFFFFFu) {
+      uint32_t expected_fwmark_mask = 0xFFFFFFFFu,
+      const std::vector<FirewallSourceEgressSnatSelector>
+          &expected_source_egress_selectors = {}) {
     return IptablesFirewall::inspect_owned_snat_state(
         "iptables",
         expected,
         expected_interfaces,
+        expected_source_egress_selectors,
         expected_fwmark_mask);
   }
 
@@ -291,6 +297,21 @@ public:
     IptablesFirewall fw;
     fw.create_tunnel_snat_rules(interfaces);
     return fw.snat_interfaces_.size();
+  }
+
+  static std::vector<FirewallSourceEgressSnatSelector>
+  source_egress_snat_selectors(
+      const std::vector<FirewallSourceEgressSnatSelector> &selectors) {
+    IptablesFirewall fw;
+    fw.create_source_egress_snat_rules(selectors);
+    return fw.source_egress_snat_selectors_;
+  }
+
+  static bool source_egress_snat_requested(
+      const std::vector<FirewallSourceEgressSnatSelector> &selectors) {
+    IptablesFirewall fw;
+    fw.create_source_egress_snat_rules(selectors);
+    return fw.router_origin_snat_requested_;
   }
 
   static std::string build_output_mark_script_with_snat(
@@ -2119,6 +2140,60 @@ TEST_CASE("create_tunnel_snat_rules: deduplicates interfaces") {
   CHECK(T::tunnel_snat_interface_count({"nwg2", "nwg2", "nwg3"}) == 2);
 }
 
+TEST_CASE("source-egress SNAT matches an authoritative pool and egress") {
+  const std::vector<FirewallSourceEgressSnatSelector> selectors{
+      {"eth3", "172.16.1.0/24"},
+      {"eth4", "fd00:16:1::/64"},
+  };
+
+  const auto ipv4 = T::build_dns_nat_script(
+      {},
+      /*dns_redirect=*/false,
+      /*router_origin_snat=*/true,
+      {},
+      /*ipv6=*/false,
+      /*fwmark_mask=*/0x00FF0000u,
+      selectors);
+  CHECK(ipv4.find(
+            "-A KeenPbrSnat -s 172.16.1.0/24 -o eth3 "
+            "-j MASQUERADE\n") != std::string::npos);
+  CHECK(ipv4.find("fd00:16:1::/64") == std::string::npos);
+  CHECK(ipv4.find(
+            "-s 172.16.1.0/24 -o eth3 -m mark") == std::string::npos);
+
+  const auto ipv6 = T::build_dns_nat_script(
+      {},
+      /*dns_redirect=*/false,
+      /*router_origin_snat=*/true,
+      {},
+      /*ipv6=*/true,
+      /*fwmark_mask=*/0x00FF0000u,
+      selectors);
+  CHECK(ipv6.find(
+            "-A KeenPbrSnat -s fd00:16:1::/64 -o eth4 "
+            "-j MASQUERADE\n") != std::string::npos);
+  CHECK(ipv6.find("172.16.1.0/24") == std::string::npos);
+}
+
+TEST_CASE("source-egress SNAT selectors are filtered sorted and deduplicated") {
+  const auto selectors = T::source_egress_snat_selectors({
+      {"eth4", "172.16.2.0/24"},
+      {"", "172.16.9.0/24"},
+      {"eth3", ""},
+      {"eth3", "172.16.1.0/24"},
+      {"eth4", "172.16.2.0/24"},
+  });
+  REQUIRE(selectors.size() == 2);
+  CHECK((selectors[0] ==
+         FirewallSourceEgressSnatSelector{"eth3", "172.16.1.0/24"}));
+  CHECK((selectors[1] ==
+         FirewallSourceEgressSnatSelector{"eth4", "172.16.2.0/24"}));
+  CHECK(T::source_egress_snat_requested(
+      {{"eth3", "172.16.1.0/24"}}));
+  CHECK_FALSE(T::source_egress_snat_requested(
+      {{"", "172.16.1.0/24"}, {"eth3", ""}}));
+}
+
 TEST_CASE("owned SNAT inspection distinguishes healthy missing and unknown") {
   IptablesTestTempDir temp;
   const auto mode = temp.path() / "snat-state";
@@ -2147,6 +2222,19 @@ TEST_CASE("owned SNAT inspection distinguishes healthy missing and unknown") {
       "0x1000000/0x1000000 -j MASQUERADE' "
       "'-A KeenPbrSnat -o nwg2 -m mark ! "
       "--mark 0x0/0xff0000 -j MASQUERADE' ;;\n"
+      "    esac\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  source-egress)\n"
+      "    case \"$*\" in\n"
+      "      '-t nat -S POSTROUTING')\n"
+      "        echo '-A POSTROUTING -j KeenPbrSnat' ;;\n"
+      "      '-t nat -S KeenPbrSnat')\n"
+      "        printf '%s\\n' '-N KeenPbrSnat' "
+      "'-A KeenPbrSnat -m mark --mark "
+      "0x1000000/0x1000000 -j MASQUERADE' "
+      "'-A KeenPbrSnat -s 172.16.1.0/24 -o eth3 "
+      "-j MASQUERADE' ;;\n"
       "    esac\n"
       "    exit 0\n"
       "    ;;\n"
@@ -2228,6 +2316,11 @@ TEST_CASE("owned SNAT inspection distinguishes healthy missing and unknown") {
             /*expected=*/true,
             {"nwg2"},
             0x00FF0000u) == OwnedSnatState::missing);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {},
+            0x00FF0000u,
+            {{"eth3", "172.16.1.0/24"}}) == OwnedSnatState::missing);
   {
     std::ofstream out(mode);
     out << "interface";
@@ -2236,6 +2329,19 @@ TEST_CASE("owned SNAT inspection distinguishes healthy missing and unknown") {
             /*expected=*/true,
             {"nwg2"},
             0x00FF0000u) == OwnedSnatState::healthy);
+  {
+    std::ofstream out(mode);
+    out << "source-egress";
+  }
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {},
+            0x00FF0000u,
+            {{"eth3", "172.16.1.0/24"}}) == OwnedSnatState::healthy);
+  CHECK(T::inspect_owned_snat_state(
+            /*expected=*/true,
+            {},
+            0x00FF0000u) == OwnedSnatState::missing);
   {
     std::ofstream out(mode);
     out << "interfaces-reversed";

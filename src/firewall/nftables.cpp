@@ -306,6 +306,7 @@ void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
+    source_egress_snat_selectors_.clear();
 }
 
 NftablesFirewall::~NftablesFirewall() {
@@ -423,6 +424,27 @@ void NftablesFirewall::create_tunnel_snat_rules(
             snat_interfaces_.end()) {
             snat_interfaces_.push_back(iface);
         }
+    }
+}
+
+void NftablesFirewall::create_source_egress_snat_rules(
+    const std::vector<FirewallSourceEgressSnatSelector>& selectors) {
+    for (const auto& selector : selectors) {
+        if (selector.interface.empty() || selector.cidr.empty()) {
+            continue;
+        }
+        source_egress_snat_selectors_.push_back(selector);
+    }
+    std::sort(
+        source_egress_snat_selectors_.begin(),
+        source_egress_snat_selectors_.end());
+    source_egress_snat_selectors_.erase(
+        std::unique(
+            source_egress_snat_selectors_.begin(),
+            source_egress_snat_selectors_.end()),
+        source_egress_snat_selectors_.end());
+    if (!source_egress_snat_selectors_.empty()) {
+        router_origin_snat_requested_ = true;
     }
 }
 
@@ -677,6 +699,34 @@ nlohmann::json NftablesFirewall::build_interface_snat_rule_json(
             fwmark_mask
         })}}},
         {"right", 0}
+    }}});
+    expr.push_back({{"counter", nullptr}});
+    expr.push_back({{"masquerade", nlohmann::json::object()}});
+    return {{"add", {{"rule", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"chain", SNAT_CHAIN_NAME},
+        {"expr", expr}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_source_egress_snat_rule_json(
+    const FirewallSourceEgressSnatSelector& selector) {
+    const std::string ip_proto =
+        is_ipv6_addr(selector.cidr) ? "ip6" : "ip";
+    nlohmann::json expr = nlohmann::json::array();
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"payload", {
+            {"protocol", ip_proto},
+            {"field", "saddr"}
+        }}}},
+        {"right", cidr_list_to_nft_rhs({selector.cidr})}
+    }}});
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"meta", {{"key", "oifname"}}}}},
+        {"right", selector.interface}
     }}});
     expr.push_back({{"counter", nullptr}});
     expr.push_back({{"masquerade", nlohmann::json::object()}});
@@ -1257,6 +1307,8 @@ OwnedSnatState NftablesFirewall::parse_owned_snat_state(
     const std::string& document,
     bool expected,
     const std::vector<std::string>& expected_interfaces,
+    const std::vector<FirewallSourceEgressSnatSelector>&
+        expected_source_egress_selectors,
     uint32_t expected_fwmark_mask) {
     nlohmann::json doc;
     try {
@@ -1405,6 +1457,9 @@ OwnedSnatState NftablesFirewall::parse_owned_snat_state(
         append_expected(build_interface_snat_rule_json(
             interface, expected_fwmark_mask));
     }
+    for (const auto& selector : expected_source_egress_selectors) {
+        append_expected(build_source_egress_snat_rule_json(selector));
+    }
 
     return snat_chain_count == 1U &&
            snat_chain_valid &&
@@ -1417,6 +1472,8 @@ OwnedSnatState NftablesFirewall::parse_owned_snat_state(
 OwnedSnatState NftablesFirewall::inspect_owned_snat_state(
     bool expected,
     const std::vector<std::string>& expected_interfaces,
+    const std::vector<FirewallSourceEgressSnatSelector>&
+        expected_source_egress_selectors,
     uint32_t expected_fwmark_mask) const {
     const auto result = safe_exec_capture(
         {"nft", "-j", "-t", "list", "table", "inet",
@@ -1448,6 +1505,7 @@ OwnedSnatState NftablesFirewall::inspect_owned_snat_state(
         result.stdout_output,
         expected,
         expected_interfaces,
+        expected_source_egress_selectors,
         expected_fwmark_mask);
 }
 
@@ -1465,6 +1523,7 @@ OwnedSnatState NftablesFirewall::inspect_owned_snat_state() const {
     return inspect_owned_snat_state(
         last_applied_snat_expected_,
         last_applied_snat_interfaces_,
+        last_applied_source_egress_snat_selectors_,
         last_applied_snat_fwmark_mask_);
 }
 
@@ -1654,6 +1713,10 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
             arr.push_back(
                 build_interface_snat_rule_json(iface, fwmark_mask()));
         }
+        for (const auto& selector : source_egress_snat_selectors_) {
+            arr.push_back(
+                build_source_egress_snat_rule_json(selector));
+        }
     }
 
     // Rules
@@ -1691,6 +1754,8 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 void NftablesFirewall::apply(FirewallApplyMode mode) {
     const bool snat_expected = router_origin_snat_requested_;
     const auto expected_snat_interfaces = snat_interfaces_;
+    const auto expected_source_egress_snat_selectors =
+        source_egress_snat_selectors_;
     const uint32_t expected_snat_fwmark_mask = fwmark_mask();
     const MarkMergeMode active_mark_merge_mode = mark_merge_mode();
     if (!global_prefilter_.bypass_bridge_source_selectors_v4.empty() ||
@@ -1757,6 +1822,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     const auto snat_state = inspect_owned_snat_state(
         snat_expected,
         expected_snat_interfaces,
+        expected_source_egress_snat_selectors,
         expected_snat_fwmark_mask);
     if (snat_state == OwnedSnatState::missing ||
         snat_state == OwnedSnatState::stale) {
@@ -1770,6 +1836,8 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
 
     last_applied_snat_expected_ = snat_expected;
     last_applied_snat_interfaces_ = expected_snat_interfaces;
+    last_applied_source_egress_snat_selectors_ =
+        expected_source_egress_snat_selectors;
     last_applied_snat_fwmark_mask_ = expected_snat_fwmark_mask;
     // Clear pending buffers
     pending_sets_.clear();
@@ -1778,6 +1846,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
+    source_egress_snat_selectors_.clear();
     table_created_ = true;
 }
 
@@ -1794,11 +1863,13 @@ void NftablesFirewall::cleanup_impl() {
 
     last_applied_snat_expected_ = false;
     last_applied_snat_interfaces_.clear();
+    last_applied_source_egress_snat_selectors_.clear();
     last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     created_sets_.clear();
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    source_egress_snat_selectors_.clear();
 }
 
 void NftablesFirewall::cleanup() {

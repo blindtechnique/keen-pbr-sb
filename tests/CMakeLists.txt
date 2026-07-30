@@ -1,6 +1,7 @@
 add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_verifier.cpp
+  test_firewall_runtime.cpp
   test_nftables_builder.cpp
   test_iptables_builder.cpp
   test_cron.cpp
@@ -479,6 +480,7 @@ add_executable(keen-pbr-firewall-it
   ../src/util/firewall_backend_utils.cpp
   ../src/util/ipv6_support.cpp
   ../src/util/last_command_failure.cpp
+  ../src/util/network_routes.cpp
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
 )

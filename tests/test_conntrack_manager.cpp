@@ -229,6 +229,127 @@ TEST_CASE("ConntrackManager returns a retry-friendly bounded remainder") {
                        "327680/16711680"});
 }
 
+TEST_CASE("ConntrackManager deletes canonical deduplicated IPv4 source CIDRs") {
+    std::vector<std::vector<std::string>> commands;
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        });
+
+    const auto summary = manager.delete_ipv4_source_cidrs({
+        " 172.16.1.33/24 ",
+        "172.16.1.0/24",
+        "10.0.0.7",
+    });
+
+    CHECK(summary.failed == 0);
+    CHECK(summary.skipped == 0);
+    CHECK_FALSE(summary.command_unavailable);
+    CHECK_FALSE(summary.budget_exhausted);
+    CHECK(summary.remaining_source_cidrs.empty());
+    CHECK(commands == std::vector<std::vector<std::string>>{
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "172.16.1.0/24"},
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "10.0.0.7/32"}});
+}
+
+TEST_CASE("ConntrackManager source cleanup rejects broad or non-IPv4 selectors") {
+    std::vector<std::vector<std::string>> commands;
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        });
+
+    const auto summary = manager.delete_ipv4_source_cidrs({
+        "0.0.0.0/0",
+        "2001:db8::/64",
+        "not-a-network",
+        "192.0.2.4/32",
+    });
+
+    CHECK(summary.failed == 3);
+    CHECK(summary.skipped == 0);
+    CHECK(summary.remaining_source_cidrs ==
+          std::vector<std::string>{
+              "0.0.0.0/0", "2001:db8::/64", "not-a-network"});
+    CHECK(commands == std::vector<std::vector<std::string>>{
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "192.0.2.4/32"}});
+}
+
+TEST_CASE("ConntrackManager source cleanup stops when conntrack is unavailable") {
+    std::vector<std::string> selectors;
+    ConntrackManager manager(
+        [&selectors](const std::vector<std::string>& args) {
+            selectors.push_back(args[5]);
+            return ConntrackManager::CommandResult{127, {}};
+        });
+
+    const auto summary = manager.delete_ipv4_source_cidrs({
+        "172.16.1.0/24",
+        "10.0.0.0/8",
+    });
+
+    CHECK(summary.failed == 0);
+    CHECK(summary.skipped == 2);
+    CHECK(summary.command_unavailable);
+    CHECK(summary.remaining_source_cidrs ==
+          std::vector<std::string>{"172.16.1.0/24", "10.0.0.0/8"});
+    CHECK(selectors == std::vector<std::string>{"172.16.1.0/24"});
+}
+
+TEST_CASE("ConntrackManager bounds source cleanup and returns retry order") {
+    std::vector<std::string> selectors;
+    ConntrackManager manager(
+        [&selectors](const std::vector<std::string>& args) {
+            selectors.push_back(args[5]);
+            const bool fail = args[5] == "172.16.1.0/24";
+            return ConntrackManager::CommandResult{
+                fail ? 1 : 0,
+                fail ? "Operation not permitted" : ""};
+        });
+
+    const auto summary = manager.delete_ipv4_source_cidrs(
+        {"172.16.1.0/24", "10.0.0.0/8", "192.0.2.0/24"},
+        ConntrackSourceCleanupOptions{
+            std::chrono::seconds{4},
+            /*max_source_cidrs=*/2});
+
+    CHECK(summary.failed == 1);
+    CHECK(summary.skipped == 1);
+    CHECK_FALSE(summary.command_unavailable);
+    CHECK_FALSE(summary.budget_exhausted);
+    CHECK(summary.remaining_source_cidrs ==
+          std::vector<std::string>{"192.0.2.0/24", "172.16.1.0/24"});
+    CHECK(selectors ==
+          std::vector<std::string>{"172.16.1.0/24", "10.0.0.0/8"});
+}
+
+TEST_CASE("ConntrackManager source cleanup honors an exhausted time budget") {
+    std::size_t calls = 0;
+    ConntrackManager manager(
+        [&calls](const std::vector<std::string>&) {
+            ++calls;
+            return ConntrackManager::CommandResult{0, {}};
+        });
+
+    const auto summary = manager.delete_ipv4_source_cidrs(
+        {"172.16.1.0/24", "10.0.0.0/8"},
+        ConntrackSourceCleanupOptions{
+            std::chrono::milliseconds{0},
+            /*max_source_cidrs=*/2});
+
+    CHECK(summary.failed == 0);
+    CHECK(summary.skipped == 2);
+    CHECK(summary.budget_exhausted);
+    CHECK(summary.remaining_source_cidrs ==
+          std::vector<std::string>{"172.16.1.0/24", "10.0.0.0/8"});
+    CHECK(calls == 0);
+}
+
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {
     constexpr uint32_t owned = 0x00FF0000U;
     CHECK(ConntrackManager::restore_original_mark(

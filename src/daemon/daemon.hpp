@@ -496,6 +496,8 @@ private:
         const char* context,
         bool allow_retry = true);
     void cleanup_owned_conntrack_marks(const char* context);
+    void reconcile_sstp_direct_egress_conntrack(
+        const std::vector<FirewallSourceEgressSnatSelector>& selectors);
     void schedule_owned_conntrack_cleanup_retry(
         const OwnedConntrackCleanupSnapshot& snapshot,
         std::vector<std::uint32_t> remaining_marks,
@@ -708,6 +710,11 @@ private:
             GUARDED_BY(internal_vpn_lkg_mutex_);
     std::vector<InternalVpnRuntimeTarget>
         resolved_internal_vpn_service_targets_;
+    // Last source-scoped SSTP SNAT contract committed to the firewall. A
+    // contract change retires only flows from the affected SSTP pool so old
+    // un-NATed conntrack entries cannot mask a successful repair.
+    std::vector<FirewallSourceEgressSnatSelector>
+        applied_sstp_direct_egress_snat_selectors_;
     std::vector<InternalVpnRuntimeTarget>
         internal_vpn_service_verified_includes_lkg_
             GUARDED_BY(internal_vpn_lkg_mutex_);

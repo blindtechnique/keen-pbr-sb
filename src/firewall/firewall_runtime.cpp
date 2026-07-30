@@ -6,12 +6,15 @@
 #include "../lists/list_set_usage.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../util/ipv6_support.hpp"
+#include "../util/network_routes.hpp"
 
 #include <arpa/inet.h>
 
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,6 +33,45 @@ const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
 }
 
 } // namespace
+
+std::vector<FirewallSourceEgressSnatSelector>
+select_sstp_direct_egress_snat_selectors(
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
+    const std::vector<std::string>& wan_interfaces) {
+    constexpr std::string_view kSstpServiceId{
+        "ndms-service:sstp-server"};
+
+    std::vector<FirewallSourceEgressSnatSelector> result;
+    std::set<std::pair<std::string, std::string>> seen;
+    for (const auto& interface : wan_interfaces) {
+        if (interface.empty()) {
+            continue;
+        }
+        for (const auto& target : internal_vpn_targets) {
+            if (target.stable_id != kSstpServiceId) {
+                continue;
+            }
+            // `process_clients` intentionally does not participate here:
+            // disabling policy routing must restore ordinary WAN reachability,
+            // not remove the source NAT required by the firmware SSTP pool.
+            for (const auto& cidr : target.source_cidrs_v4) {
+                if (cidr.empty() ||
+                    !seen.emplace(interface, cidr).second) {
+                    continue;
+                }
+                result.push_back({interface, cidr});
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<FirewallSourceEgressSnatSelector>
+select_sstp_direct_egress_snat_selectors(
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets) {
+    return select_sstp_direct_egress_snat_selectors(
+        internal_vpn_targets, default_route_interfaces());
+}
 
 std::vector<RuleState> apply_runtime_firewall(
     const Config& config,
@@ -269,6 +311,11 @@ std::vector<RuleState> apply_runtime_firewall(
             tunnel_interfaces.push_back(*outbound.interface);
         }
         firewall.create_tunnel_snat_rules(tunnel_interfaces);
+    }
+    if (effective_internal_vpn_targets != nullptr) {
+        firewall.create_source_egress_snat_rules(
+            select_sstp_direct_egress_snat_selectors(
+                *effective_internal_vpn_targets));
     }
 
     firewall.apply(mode);

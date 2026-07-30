@@ -41,6 +41,8 @@ public:
     void create_dns_redirect_rules() override;
     void create_tunnel_snat_rules(
         const std::vector<std::string>& interfaces) override;
+    void create_source_egress_snat_rules(
+        const std::vector<FirewallSourceEgressSnatSelector>& selectors) override;
     OwnedSnatState inspect_owned_snat_state() const override;
     // Buffer a pass-through verdict rule that matches the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
@@ -139,14 +141,20 @@ private:
     static nlohmann::json build_interface_snat_rule_json(
         const std::string& interface,
         uint32_t fwmark_mask);
+    static nlohmann::json build_source_egress_snat_rule_json(
+        const FirewallSourceEgressSnatSelector& selector);
     static OwnedSnatState parse_owned_snat_state(
         const std::string& document,
         bool expected,
         const std::vector<std::string>& expected_interfaces,
+        const std::vector<FirewallSourceEgressSnatSelector>&
+            expected_source_egress_selectors,
         uint32_t expected_fwmark_mask);
     OwnedSnatState inspect_owned_snat_state(
         bool expected,
         const std::vector<std::string>& expected_interfaces,
+        const std::vector<FirewallSourceEgressSnatSelector>&
+            expected_source_egress_selectors,
         uint32_t expected_fwmark_mask) const;
     static std::chrono::milliseconds owned_snat_inspect_timeout();
     static std::chrono::milliseconds owned_snat_inspect_kill_grace();
@@ -213,11 +221,15 @@ private:
     bool dns_redirect_requested_ = false;
     bool router_origin_snat_requested_ = false;
     std::vector<std::string> snat_interfaces_;
+    std::vector<FirewallSourceEgressSnatSelector>
+        source_egress_snat_selectors_;
     // Last successfully applied SNAT contract. It is intentionally not reset
     // by prepare_apply(), so the runtime monitor observes the live generation
     // until a replacement transaction has committed.
     bool last_applied_snat_expected_ = false;
     std::vector<std::string> last_applied_snat_interfaces_;
+    std::vector<FirewallSourceEgressSnatSelector>
+        last_applied_source_egress_snat_selectors_;
     uint32_t last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     CapabilityProbe mark_merge_capability_probe_;
     std::optional<MarkMergeMode> mark_merge_mode_;

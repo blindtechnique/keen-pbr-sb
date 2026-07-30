@@ -27,4 +27,20 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::vector<InternalVpnRuntimeTarget>*
         effective_internal_vpn_targets = nullptr);
 
+// Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP
+// server. SSTP clients need this on the ordinary WAN path regardless of
+// whether policy routing is enabled for them. Other native VPN services are
+// deliberately excluded so their existing firmware/runtime paths remain
+// unchanged.
+std::vector<FirewallSourceEgressSnatSelector>
+select_sstp_direct_egress_snat_selectors(
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,
+    const std::vector<std::string>& wan_interfaces);
+
+// Runtime convenience overload. It uses the same current main-table default
+// route inventory as the nfqws WAN configuration.
+std::vector<FirewallSourceEgressSnatSelector>
+select_sstp_direct_egress_snat_selectors(
+    const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets);
+
 } // namespace keen_pbr3

@@ -82,6 +82,26 @@ struct FirewallBridgeIngressSourceSelector {
     std::string cidr;
 };
 
+struct FirewallSourceEgressSnatSelector {
+    // Both values come from runtime-owned observations: the source CIDR from
+    // the native VPN service inventory and the egress interface from the live
+    // routing inventory. Backends match both fields so this rule cannot turn
+    // into a broad source-only masquerade.
+    std::string interface;
+    std::string cidr;
+
+    bool operator==(
+        const FirewallSourceEgressSnatSelector& other) const {
+        return interface == other.interface && cidr == other.cidr;
+    }
+
+    bool operator<(
+        const FirewallSourceEgressSnatSelector& other) const {
+        return interface < other.interface ||
+               (interface == other.interface && cidr < other.cidr);
+    }
+};
+
 struct FirewallGlobalPrefilter {
     std::optional<std::vector<std::string>> inbound_interfaces;
     // Explicit ingress interfaces that must bypass keen-pbr before conntrack
@@ -271,6 +291,12 @@ public:
     // a private source address and never receive an answer.
     virtual void create_tunnel_snat_rules(
         const std::vector<std::string>& interfaces) = 0;
+    // Masquerade traffic from an authoritative native-VPN source pool only
+    // when it leaves through an explicitly observed egress interface. This is
+    // intentionally independent of keen-pbr marks: direct/bypass traffic must
+    // retain ordinary Internet access too.
+    virtual void create_source_egress_snat_rules(
+        const std::vector<FirewallSourceEgressSnatSelector>& selectors) = 0;
     virtual OwnedSnatState inspect_owned_snat_state() const = 0;
 
     // Create a firewall rule that stops keen-pbr processing for matching packets

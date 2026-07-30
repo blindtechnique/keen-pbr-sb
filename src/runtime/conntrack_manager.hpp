@@ -47,6 +47,23 @@ struct ConntrackCleanupOptions {
     std::size_t max_marks{std::numeric_limits<std::size_t>::max()};
 };
 
+struct ConntrackSourceCleanupSummary {
+    std::size_t failed{0};
+    std::size_t skipped{0};
+    bool command_unavailable{false};
+    bool budget_exhausted{false};
+    // Exact, deduplicated IPv4 source selectors which were not completely
+    // retired. Unattempted selectors precede failed selectors so bounded
+    // retries cannot be starved by one persistent failure.
+    std::vector<std::string> remaining_source_cidrs;
+};
+
+struct ConntrackSourceCleanupOptions {
+    std::chrono::milliseconds budget{std::chrono::seconds{4}};
+    std::size_t max_source_cidrs{
+        std::numeric_limits<std::size_t>::max()};
+};
+
 class ConntrackManager {
 public:
     struct CommandResult {
@@ -93,6 +110,15 @@ public:
         const std::vector<uint32_t>& marks,
         uint32_t owned_mask,
         ConntrackCleanupOptions options = {}) const;
+
+    // Best-effort retirement of IPv4 flows whose original source belongs to
+    // one of the authoritative CIDRs. Selectors are validated, canonicalized
+    // and deduplicated before invoking `conntrack -D -f ipv4 -s <CIDR>`.
+    // A zero-prefix selector is rejected so this API can never become a
+    // disguised global conntrack flush.
+    ConntrackSourceCleanupSummary delete_ipv4_source_cidrs(
+        const std::vector<std::string>& source_cidrs,
+        ConntrackSourceCleanupOptions options = {}) const;
 
 private:
     ConntrackPolicy active_;

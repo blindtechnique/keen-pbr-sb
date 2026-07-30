@@ -170,15 +170,38 @@ public:
         interface, fwmark_mask);
   }
 
+  static nlohmann::json build_source_egress_snat_rule_json(
+      const FirewallSourceEgressSnatSelector& selector) {
+    return NftablesFirewall::build_source_egress_snat_rule_json(selector);
+  }
+
+  static std::vector<FirewallSourceEgressSnatSelector>
+  source_egress_snat_selectors(
+      const std::vector<FirewallSourceEgressSnatSelector>& selectors) {
+    NftablesFirewall fw;
+    fw.create_source_egress_snat_rules(selectors);
+    return fw.source_egress_snat_selectors_;
+  }
+
+  static bool source_egress_snat_requested(
+      const std::vector<FirewallSourceEgressSnatSelector>& selectors) {
+    NftablesFirewall fw;
+    fw.create_source_egress_snat_rules(selectors);
+    return fw.router_origin_snat_requested_;
+  }
+
   static OwnedSnatState parse_owned_snat_state(
       const nlohmann::json& document,
       bool expected = false,
       const std::vector<std::string>& expected_interfaces = {},
-      uint32_t expected_fwmark_mask = 0xFFFFFFFFu) {
+      uint32_t expected_fwmark_mask = 0xFFFFFFFFu,
+      const std::vector<FirewallSourceEgressSnatSelector>
+          &expected_source_egress_selectors = {}) {
     return NftablesFirewall::parse_owned_snat_state(
         document.dump(),
         expected,
         expected_interfaces,
+        expected_source_egress_selectors,
         expected_fwmark_mask);
   }
 
@@ -503,6 +526,45 @@ TEST_CASE("nft tunnel SNAT only masquerades keen-pbr-marked traffic") {
   CHECK(expr[3].contains("masquerade"));
 }
 
+TEST_CASE("nft source-egress SNAT matches an authoritative pool and egress") {
+  const auto command = T::build_source_egress_snat_rule_json(
+      {"eth3", "172.16.1.0/24"});
+  const auto& expr = command["add"]["rule"]["expr"];
+  REQUIRE(expr.size() == 4);
+  CHECK(expr[0]["match"]["left"]["payload"]["protocol"] == "ip");
+  CHECK(expr[0]["match"]["left"]["payload"]["field"] == "saddr");
+  CHECK(expr[0]["match"]["right"]["prefix"]["addr"] == "172.16.1.0");
+  CHECK(expr[0]["match"]["right"]["prefix"]["len"] == 24);
+  CHECK(expr[1]["match"]["left"]["meta"]["key"] == "oifname");
+  CHECK(expr[1]["match"]["right"] == "eth3");
+  CHECK(expr[2].contains("counter"));
+  CHECK(expr[3].contains("masquerade"));
+
+  const auto ipv6 = T::build_source_egress_snat_rule_json(
+      {"eth4", "fd00:16:1::/64"});
+  CHECK(ipv6["add"]["rule"]["expr"][0]["match"]["left"]["payload"]
+            ["protocol"] == "ip6");
+}
+
+TEST_CASE("nft source-egress SNAT selectors are filtered sorted and deduplicated") {
+  const auto selectors = T::source_egress_snat_selectors({
+      {"eth4", "172.16.2.0/24"},
+      {"", "172.16.9.0/24"},
+      {"eth3", ""},
+      {"eth3", "172.16.1.0/24"},
+      {"eth4", "172.16.2.0/24"},
+  });
+  REQUIRE(selectors.size() == 2);
+  CHECK((selectors[0] ==
+         FirewallSourceEgressSnatSelector{"eth3", "172.16.1.0/24"}));
+  CHECK((selectors[1] ==
+         FirewallSourceEgressSnatSelector{"eth4", "172.16.2.0/24"}));
+  CHECK(T::source_egress_snat_requested(
+      {{"eth3", "172.16.1.0/24"}}));
+  CHECK_FALSE(T::source_egress_snat_requested(
+      {{"", "172.16.1.0/24"}, {"eth3", ""}}));
+}
+
 TEST_CASE("nft owned SNAT state requires the managed postrouting nat chain") {
   const nlohmann::json healthy = {
       {"nftables", nlohmann::json::array({
@@ -549,6 +611,12 @@ TEST_CASE("nft owned SNAT state requires the managed postrouting nat chain") {
             /*expected=*/true,
             {"nwg2"},
             0x00FF0000u) == OwnedSnatState::missing);
+  CHECK(T::parse_owned_snat_state(
+            healthy,
+            /*expected=*/true,
+            {},
+            0x00FF0000u,
+            {{"eth3", "172.16.1.0/24"}}) == OwnedSnatState::missing);
 
   auto with_interface = healthy;
   with_interface["nftables"].push_back({{"rule", {
@@ -578,6 +646,23 @@ TEST_CASE("nft owned SNAT state requires the managed postrouting nat chain") {
             /*expected=*/true,
             {"nwg2"},
             0x00FF0000u) == OwnedSnatState::healthy);
+
+  auto with_source_egress = healthy;
+  const auto source_egress_command =
+      T::build_source_egress_snat_rule_json(
+          {"eth3", "172.16.1.0/24"});
+  with_source_egress["nftables"].push_back({
+      {"rule", source_egress_command["add"]["rule"]},
+  });
+  CHECK(T::parse_owned_snat_state(
+            with_source_egress,
+            /*expected=*/true,
+            {},
+            0x00FF0000u,
+            {{"eth3", "172.16.1.0/24"}}) == OwnedSnatState::healthy);
+  CHECK(T::parse_owned_snat_state(
+            with_source_egress,
+            /*expected=*/true) == OwnedSnatState::missing);
 
   auto with_live_counters = with_interface;
   with_live_counters["nftables"][2]["rule"]["expr"][1]["counter"] = {

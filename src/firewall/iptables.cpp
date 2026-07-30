@@ -43,6 +43,19 @@ std::vector<std::string> filter_addrs_by_family(const std::vector<std::string>& 
     return filtered;
 }
 
+std::vector<FirewallSourceEgressSnatSelector>
+filter_source_egress_snat_selectors_by_family(
+    const std::vector<FirewallSourceEgressSnatSelector>& selectors,
+    bool ipv6) {
+    std::vector<FirewallSourceEgressSnatSelector> filtered;
+    for (const auto& selector : selectors) {
+        if (is_ipv6_addr(selector.cidr) == ipv6) {
+            filtered.push_back(selector);
+        }
+    }
+    return filtered;
+}
+
 std::vector<L4Proto> expand_l4_protos(L4Proto proto) {
     if (proto == L4Proto::TcpUdp) {
         return {L4Proto::Tcp, L4Proto::Udp};
@@ -99,6 +112,7 @@ void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
+    source_egress_snat_selectors_.clear();
 
     target_v4_generation_ = mode == FirewallApplyMode::Destructive
         ? FirewallSetGeneration::A
@@ -247,6 +261,27 @@ void IptablesFirewall::create_tunnel_snat_rules(
     }
 }
 
+void IptablesFirewall::create_source_egress_snat_rules(
+    const std::vector<FirewallSourceEgressSnatSelector>& selectors) {
+    for (const auto& selector : selectors) {
+        if (selector.interface.empty() || selector.cidr.empty()) {
+            continue;
+        }
+        source_egress_snat_selectors_.push_back(selector);
+    }
+    std::sort(
+        source_egress_snat_selectors_.begin(),
+        source_egress_snat_selectors_.end());
+    source_egress_snat_selectors_.erase(
+        std::unique(
+            source_egress_snat_selectors_.begin(),
+            source_egress_snat_selectors_.end()),
+        source_egress_snat_selectors_.end());
+    if (!source_egress_snat_selectors_.empty()) {
+        router_origin_snat_requested_ = true;
+    }
+}
+
 void IptablesFirewall::create_dns_redirect_rules() {
     dns_redirect_requested_ = true;
 }
@@ -257,7 +292,9 @@ std::string IptablesFirewall::build_dns_nat_script(
     bool router_origin_snat,
     const std::vector<std::string>& snat_interfaces,
     bool ipv6,
-    uint32_t fwmark_mask) {
+    uint32_t fwmark_mask,
+    const std::vector<FirewallSourceEgressSnatSelector>&
+        source_egress_snat_selectors) {
     std::vector<std::string> iface_frags;
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
@@ -331,6 +368,16 @@ std::string IptablesFirewall::build_dns_nat_script(
             s += keen_pbr3::format(
                 "-A {} -o {} -m mark ! --mark 0x0/{:#x} -j MASQUERADE\n",
                 SNAT_CHAIN_NAME, iface, fwmark_mask);
+        }
+        for (const auto& selector : source_egress_snat_selectors) {
+            if (is_ipv6_addr(selector.cidr) != ipv6) {
+                continue;
+            }
+            s += keen_pbr3::format(
+                "-A {} -s {} -o {} -j MASQUERADE\n",
+                SNAT_CHAIN_NAME,
+                selector.cidr,
+                selector.interface);
         }
     }
     s += "COMMIT\n";
@@ -1487,6 +1534,8 @@ OwnedSnatState IptablesFirewall::inspect_owned_snat_state(
     const char* command,
     bool expected,
     const std::vector<std::string>& expected_interfaces,
+    const std::vector<FirewallSourceEgressSnatSelector>&
+        expected_source_egress_selectors,
     uint32_t expected_fwmark_mask) {
     const std::vector<std::string> hook_args{
         command, "-t", "nat", "-S", "POSTROUTING"};
@@ -1553,6 +1602,13 @@ OwnedSnatState IptablesFirewall::inspect_owned_snat_state(
             "-A {} -o {} -m mark ! --mark 0x0/{:#x} -j MASQUERADE",
             SNAT_CHAIN_NAME, interface, expected_fwmark_mask));
     }
+    for (const auto& selector : expected_source_egress_selectors) {
+        expected_rules.push_back(keen_pbr3::format(
+            "-A {} -s {} -o {} -j MASQUERADE",
+            SNAT_CHAIN_NAME,
+            selector.cidr,
+            selector.interface));
+    }
 
     size_t declaration_count = 0U;
     bool unexpected_line = false;
@@ -1607,6 +1663,7 @@ OwnedSnatState IptablesFirewall::inspect_owned_snat_state() const {
         "iptables",
         last_applied_snat_v4_expected_,
         last_applied_snat_interfaces_,
+        last_applied_source_egress_snat_selectors_v4_,
         last_applied_snat_fwmark_mask_);
     const auto ipv6 =
         (last_applied_snat_v6_managed_ ||
@@ -1615,6 +1672,7 @@ OwnedSnatState IptablesFirewall::inspect_owned_snat_state() const {
               "ip6tables",
               last_applied_snat_v6_expected_,
               last_applied_snat_interfaces_,
+              last_applied_source_egress_snat_selectors_v6_,
               last_applied_snat_fwmark_mask_)
         : OwnedSnatState::healthy;
     return combine_owned_snat_states(ipv4, ipv6);
@@ -1624,11 +1682,14 @@ void IptablesFirewall::verify_owned_snat_after_apply(
     const char* command,
     bool expected,
     const std::vector<std::string>& expected_interfaces,
+    const std::vector<FirewallSourceEgressSnatSelector>&
+        expected_source_egress_selectors,
     uint32_t expected_fwmark_mask) {
     const auto state = inspect_owned_snat_state(
         command,
         expected,
         expected_interfaces,
+        expected_source_egress_selectors,
         expected_fwmark_mask);
     if (state == OwnedSnatState::healthy) {
         return;
@@ -2728,6 +2789,12 @@ void IptablesFirewall::apply_nat_rules(
     const FirewallGlobalPrefilter& prefilter) {
     const bool snat_expected = router_origin_snat_requested_;
     const auto expected_snat_interfaces = snat_interfaces_;
+    const auto expected_source_egress_snat_selectors_v4 =
+        filter_source_egress_snat_selectors_by_family(
+            source_egress_snat_selectors_, /*ipv6=*/false);
+    const auto expected_source_egress_snat_selectors_v6 =
+        filter_source_egress_snat_selectors_by_family(
+            source_egress_snat_selectors_, /*ipv6=*/true);
     const uint32_t expected_snat_fwmark_mask = fwmark_mask();
     const bool nat_requested =
         dns_redirect_requested_ || router_origin_snat_requested_;
@@ -2739,7 +2806,8 @@ void IptablesFirewall::apply_nat_rules(
                   router_origin_snat_requested_,
                   snat_interfaces_,
                   /*ipv6=*/false,
-                  fwmark_mask())
+                  fwmark_mask(),
+                  source_egress_snat_selectors_)
             : std::string{};
     const std::string nat_script_v6 =
         nat_requested
@@ -2749,7 +2817,8 @@ void IptablesFirewall::apply_nat_rules(
                   router_origin_snat_requested_,
                   snat_interfaces_,
                   /*ipv6=*/true,
-                  fwmark_mask())
+                  fwmark_mask(),
+                  source_egress_snat_selectors_)
             : std::string{};
 
     bool ipv6_nat_backend_available = false;
@@ -2839,6 +2908,7 @@ void IptablesFirewall::apply_nat_rules(
             "iptables",
             snat_expected,
             expected_snat_interfaces,
+            expected_source_egress_snat_selectors_v4,
             expected_snat_fwmark_mask);
         if (apply_ipv6_nat) {
             pipe_to_cmd(
@@ -2849,6 +2919,7 @@ void IptablesFirewall::apply_nat_rules(
                 "ip6tables",
                 snat_expected,
                 expected_snat_interfaces,
+                expected_source_egress_snat_selectors_v6,
                 expected_snat_fwmark_mask);
         } else if (ipv6_nat_backend_available) {
             // IPv6 was explicitly disabled while its NAT backend remains
@@ -2868,11 +2939,13 @@ void IptablesFirewall::apply_nat_rules(
             "iptables",
             /*expected=*/false,
             {},
+            {},
             expected_snat_fwmark_mask);
         if (ipv6_nat_backend_available) {
             verify_owned_snat_after_apply(
                 "ip6tables",
                 /*expected=*/false,
+                {},
                 {},
                 expected_snat_fwmark_mask);
         }
@@ -2884,10 +2957,15 @@ void IptablesFirewall::apply_nat_rules(
     last_applied_snat_v6_managed_ =
         ipv6_nat_backend_available;
     last_applied_snat_interfaces_ = expected_snat_interfaces;
+    last_applied_source_egress_snat_selectors_v4_ =
+        expected_source_egress_snat_selectors_v4;
+    last_applied_source_egress_snat_selectors_v6_ =
+        expected_source_egress_snat_selectors_v6;
     last_applied_snat_fwmark_mask_ = expected_snat_fwmark_mask;
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
+    source_egress_snat_selectors_.clear();
 }
 
 void IptablesFirewall::apply_nat_rules(
@@ -3320,12 +3398,15 @@ void IptablesFirewall::cleanup_impl() {
     last_applied_snat_v6_expected_ = false;
     last_applied_snat_v6_managed_ = false;
     last_applied_snat_interfaces_.clear();
+    last_applied_source_egress_snat_selectors_v4_.clear();
+    last_applied_source_egress_snat_selectors_v6_.clear();
     last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     created_sets_.clear();
 
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    source_egress_snat_selectors_.clear();
 }
 
 void IptablesFirewall::cleanup() {

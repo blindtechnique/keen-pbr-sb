@@ -3,8 +3,12 @@
 #include "../util/safe_exec.hpp"
 
 #include <algorithm>
+#include <arpa/inet.h>
+#include <charconv>
 #include <chrono>
+#include <optional>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace keen_pbr3 {
@@ -18,6 +22,71 @@ bool is_empty_delete_result(const ConntrackManager::CommandResult& result) {
     return result.exit_code == 1 &&
            result.output.find("0 flow entries have been deleted") !=
                std::string::npos;
+}
+
+std::string trim_ascii_whitespace(std::string_view value) {
+    constexpr std::string_view whitespace{" \t\r\n"};
+    const auto first = value.find_first_not_of(whitespace);
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(whitespace);
+    return std::string{value.substr(first, last - first + 1U)};
+}
+
+std::optional<std::string> normalize_targeted_ipv4_cidr(
+    std::string_view raw) {
+    const std::string cidr = trim_ascii_whitespace(raw);
+    if (cidr.empty()) {
+        return std::nullopt;
+    }
+
+    const auto slash = cidr.find('/');
+    if (slash != std::string::npos &&
+        cidr.find('/', slash + 1U) != std::string::npos) {
+        return std::nullopt;
+    }
+    const std::string ip =
+        slash == std::string::npos ? cidr : cidr.substr(0, slash);
+    int prefix = 32;
+    if (slash != std::string::npos) {
+        const std::string_view prefix_text{
+            cidr.data() + slash + 1U,
+            cidr.size() - slash - 1U};
+        if (prefix_text.empty()) {
+            return std::nullopt;
+        }
+        const auto [end, error] = std::from_chars(
+            prefix_text.data(),
+            prefix_text.data() + prefix_text.size(),
+            prefix);
+        if (error != std::errc{} ||
+            end != prefix_text.data() + prefix_text.size()) {
+            return std::nullopt;
+        }
+    }
+    // /0 would select every IPv4 flow and is deliberately outside the
+    // contract of this targeted cleanup API.
+    if (prefix <= 0 || prefix > 32) {
+        return std::nullopt;
+    }
+
+    in_addr address{};
+    if (::inet_pton(AF_INET, ip.c_str(), &address) != 1) {
+        return std::nullopt;
+    }
+    const std::uint32_t mask =
+        prefix == 32
+            ? std::numeric_limits<std::uint32_t>::max()
+            : std::numeric_limits<std::uint32_t>::max() << (32 - prefix);
+    address.s_addr = ::htonl(::ntohl(address.s_addr) & mask);
+
+    char normalized[INET_ADDRSTRLEN]{};
+    if (::inet_ntop(AF_INET, &address, normalized, sizeof(normalized)) ==
+        nullptr) {
+        return std::nullopt;
+    }
+    return std::string{normalized} + "/" + std::to_string(prefix);
 }
 
 } // namespace
@@ -210,6 +279,91 @@ ConntrackCleanupSummary ConntrackManager::delete_marks_ordered(
         summary.remaining_marks.end(),
         failed_marks.begin(),
         failed_marks.end());
+    return summary;
+}
+
+ConntrackSourceCleanupSummary ConntrackManager::delete_ipv4_source_cidrs(
+    const std::vector<std::string>& source_cidrs,
+    ConntrackSourceCleanupOptions options) const {
+    struct SourceSelector {
+        std::string value;
+        bool valid{false};
+    };
+
+    std::vector<SourceSelector> selectors;
+    std::set<std::string> seen;
+    selectors.reserve(source_cidrs.size());
+    for (const auto& raw : source_cidrs) {
+        const auto normalized = normalize_targeted_ipv4_cidr(raw);
+        const std::string value =
+            normalized.has_value() ? *normalized : trim_ascii_whitespace(raw);
+        if (seen.insert(value).second) {
+            selectors.push_back(SourceSelector{
+                value,
+                normalized.has_value()});
+        }
+    }
+
+    ConntrackSourceCleanupSummary summary;
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::max(options.budget, std::chrono::milliseconds{0});
+    const auto deadline_reached = [&deadline]() {
+        return std::chrono::steady_clock::now() >= deadline;
+    };
+    std::vector<std::string> failed_selectors;
+    std::vector<std::string> unattempted_selectors;
+    const auto retain_unattempted =
+        [&selectors, &unattempted_selectors](std::size_t first) {
+            for (std::size_t index = first; index < selectors.size(); ++index) {
+                unattempted_selectors.push_back(selectors[index].value);
+            }
+        };
+
+    for (std::size_t index = 0; index < selectors.size(); ++index) {
+        if (index >= options.max_source_cidrs) {
+            summary.skipped += selectors.size() - index;
+            retain_unattempted(index);
+            break;
+        }
+
+        const auto& selector = selectors[index];
+        if (!selector.valid) {
+            ++summary.failed;
+            failed_selectors.push_back(selector.value);
+            continue;
+        }
+        if (deadline_reached()) {
+            summary.budget_exhausted = true;
+            summary.skipped += selectors.size() - index;
+            retain_unattempted(index);
+            break;
+        }
+
+        const auto result = runner_({
+            "conntrack", "-D", "-f", "ipv4", "-s", selector.value});
+        if (result.exit_code == 127) {
+            summary.command_unavailable = true;
+            summary.skipped += selectors.size() - index;
+            retain_unattempted(index);
+            break;
+        }
+        if (result.exit_code != 0 && !is_empty_delete_result(result)) {
+            ++summary.failed;
+            failed_selectors.push_back(selector.value);
+        }
+    }
+
+    summary.remaining_source_cidrs.reserve(
+        unattempted_selectors.size() + failed_selectors.size());
+    summary.remaining_source_cidrs.insert(
+        summary.remaining_source_cidrs.end(),
+        unattempted_selectors.begin(),
+        unattempted_selectors.end());
+    summary.remaining_source_cidrs.insert(
+        summary.remaining_source_cidrs.end(),
+        failed_selectors.begin(),
+        failed_selectors.end());
     return summary;
 }
 
