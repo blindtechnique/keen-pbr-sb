@@ -140,6 +140,10 @@ TEST_CASE("dnsmasq access policy resolves bridged SSTP at its L3 ingress") {
     refresh_internal_vpn_service_ingress_interfaces(
         targets, {bridge, peer_link, br_link, lan, session});
     CHECK(targets.front().verified_ingress_interfaces.empty());
+    CHECK(
+        targets.front().verified_bridge_ingress_interfaces ==
+        std::vector<InternalVpnVerifiedBridgeIngress>{
+            {"br1", "sstp-br-link"}});
 
     // A direct, non-bridged SSTP peer remains an exact L3 ingress.
     sstp.interface.reset();
@@ -150,6 +154,7 @@ TEST_CASE("dnsmasq access policy resolves bridged SSTP at its L3 ingress") {
     CHECK(
         targets.front().verified_ingress_interfaces ==
         std::vector<std::string>{"sstp4"});
+    CHECK(targets.front().verified_bridge_ingress_interfaces.empty());
 
     // A half-created veth topology must not grant a shared bridge bypass.
     sstp.interface = "br0";
@@ -157,6 +162,7 @@ TEST_CASE("dnsmasq access policy resolves bridged SSTP at its L3 ingress") {
     refresh_internal_vpn_service_ingress_interfaces(
         targets, {bridge, peer_link, lan});
     CHECK(targets.front().verified_ingress_interfaces.empty());
+    CHECK(targets.front().verified_bridge_ingress_interfaces.empty());
 }
 
 TEST_CASE("dnsmasq access policy ignores unsafe interface text") {
@@ -196,6 +202,67 @@ TEST_CASE("dnsmasq access policy follows exact live server peers") {
     CHECK(
         build_dnsmasq_trusted_interfaces({}, targets) ==
         std::vector<std::string>{"br*"});
+}
+
+TEST_CASE(
+    "addressless IKE ingress bypasses DNS redirect only until it has a "
+    "usable local address") {
+    InternalVpnRuntimeTarget ikev2;
+    ikev2.stable_id =
+        "ndms-crypto-map:ikev2:VirtualIPServerIKE2";
+    ikev2.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    ikev2.process_clients = true;
+    ikev2.source_cidrs_v4 = {"172.20.8.0/23"};
+    ikev2.source_cidrs_v6 = {"2001:db8:20::/64"};
+
+    DumpedInterface xfrms;
+    xfrms.name = "xfrms1";
+    xfrms.ipv6_addresses = {"fe80::1/64"};
+
+    std::vector<InternalVpnRuntimeTarget> targets{ikev2};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {xfrms});
+    CHECK(
+        targets.front().verified_ingress_interfaces ==
+        std::vector<std::string>{"xfrms1"});
+    CHECK(
+        targets.front().dns_redirect_bypass_ingress_v4 ==
+        std::vector<std::string>{"xfrms1"});
+    // A link-local IPv6 address cannot receive a redirect for the server's
+    // client pool and therefore remains DNS-unsafe.
+    CHECK(
+        targets.front().dns_redirect_bypass_ingress_v6 ==
+        std::vector<std::string>{"xfrms1"});
+
+    xfrms.ipv4_addresses = {"10.0.0.1/32"};
+    xfrms.ipv6_addresses = {"2001:db8::1/128"};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {xfrms});
+    CHECK(targets.front().dns_redirect_bypass_ingress_v4.empty());
+    CHECK(targets.front().dns_redirect_bypass_ingress_v6.empty());
+}
+
+TEST_CASE(
+    "addressless non-IKE service ingress never receives DNS-only bypass") {
+    InternalVpnRuntimeTarget l2tp;
+    l2tp.stable_id =
+        "ndms-crypto-map:l2tp:VirtualIPServerL2TP";
+    l2tp.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    l2tp.process_clients = true;
+    l2tp.source_cidrs_v4 = {"172.16.2.32/27"};
+
+    DumpedInterface peer;
+    peer.name = "l2tp7";
+    peer.ipv4_peer_addresses = {"172.16.2.33/32"};
+
+    std::vector<InternalVpnRuntimeTarget> targets{l2tp};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {peer});
+    CHECK(
+        targets.front().verified_ingress_interfaces ==
+        std::vector<std::string>{"l2tp7"});
+    CHECK(targets.front().dns_redirect_bypass_ingress_v4.empty());
+    CHECK(targets.front().dns_redirect_bypass_ingress_v6.empty());
 }
 
 TEST_CASE("dnsmasq access policy never emits VPN wildcard selectors") {

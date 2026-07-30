@@ -104,8 +104,9 @@ nlohmann::json source_address_match(
 
 void append_source_bypass_rules(
     nlohmann::json& commands,
-    const FirewallGlobalPrefilter& prefilter,
-    const char* chain) {
+    const char* chain,
+    const std::vector<FirewallIngressSourceSelector>& selectors_v4,
+    const std::vector<FirewallIngressSourceSelector>& selectors_v6) {
     const auto append_family =
         [&commands, chain](
             const char* protocol,
@@ -134,8 +135,8 @@ void append_source_bypass_rules(
                 }}}}});
             }
         };
-    append_family("ip", prefilter.bypass_source_selectors_v4);
-    append_family("ip6", prefilter.bypass_source_selectors_v6);
+    append_family("ip", selectors_v4);
+    append_family("ip6", selectors_v6);
 }
 
 void append_extended_inbound_guard_rules(
@@ -709,7 +710,15 @@ nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
         }}}}});
     }
     append_source_bypass_rules(
-        commands, prefilter, DNS_NAT_CHAIN_NAME);
+        commands,
+        DNS_NAT_CHAIN_NAME,
+        prefilter.bypass_source_selectors_v4,
+        prefilter.bypass_source_selectors_v6);
+    append_source_bypass_rules(
+        commands,
+        DNS_NAT_CHAIN_NAME,
+        prefilter.dns_redirect_bypass_source_selectors_v4,
+        prefilter.dns_redirect_bypass_source_selectors_v6);
     append_extended_inbound_guard_rules(
         commands, prefilter, DNS_NAT_CHAIN_NAME);
 
@@ -775,8 +784,11 @@ nlohmann::json NftablesFirewall::build_rule_add_commands(
             {"expr", bypass_expr}
         }}}}});
     }
-    append_source_bypass_rules(commands, prefilter, CHAIN_NAME);
-
+    append_source_bypass_rules(
+        commands,
+        CHAIN_NAME,
+        prefilter.bypass_source_selectors_v4,
+        prefilter.bypass_source_selectors_v6);
     const auto append_conntrack_restore =
         [&commands, &prefilter, &rules, mark_merge_mode](
             const char* chain,
@@ -1613,10 +1625,20 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     // Chain with output hook (router-originated traffic, e.g. DNS detour)
     arr.push_back(build_output_chain_json());
 
+    // An exact bridge-port equivalent of xt_physdev is not available in our
+    // inet/prerouting nftables pipeline. `ibrname` is a bridge-family-only
+    // expression and `sdifname` is not a safe replacement at this hook.
+    // Keep bridged SSTP bypass fail-closed instead of weakening it to a shared
+    // bridge name plus a forgeable source address.
+    auto effective_prefilter = global_prefilter_;
+    effective_prefilter.bypass_bridge_source_selectors_v4.clear();
+    effective_prefilter.bypass_bridge_source_selectors_v6.clear();
+
     // DNS redirect nat chain (client DNS enforcement)
     if (dns_redirect_requested_) {
         arr.push_back(build_dns_nat_chain_json());
-        for (const auto& cmd : build_dns_redirect_rules_json(global_prefilter_)) {
+        for (const auto& cmd :
+             build_dns_redirect_rules_json(effective_prefilter)) {
             arr.push_back(cmd);
         }
     }
@@ -1636,7 +1658,7 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 
     // Rules
     for (const auto& cmd : build_rule_add_commands(
-             global_prefilter_, pending_rules_, mark_merge_mode)) {
+             effective_prefilter, pending_rules_, mark_merge_mode)) {
         arr.push_back(cmd);
     }
 
@@ -1671,6 +1693,12 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     const auto expected_snat_interfaces = snat_interfaces_;
     const uint32_t expected_snat_fwmark_mask = fwmark_mask();
     const MarkMergeMode active_mark_merge_mode = mark_merge_mode();
+    if (!global_prefilter_.bypass_bridge_source_selectors_v4.empty() ||
+        !global_prefilter_.bypass_bridge_source_selectors_v6.empty()) {
+        Logger::instance().verbose(
+            "nftables has no safe inet/prerouting bridge-port selector; "
+            "keeping bridged SSTP bypass fail-closed");
+    }
     const LiveTableState live_state = read_live_table_state();
     const bool emit_full_table = !live_state.table_exists;
     const bool destructive_apply = mode == FirewallApplyMode::Destructive;

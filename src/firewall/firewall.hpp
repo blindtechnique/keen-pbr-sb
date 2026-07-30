@@ -73,6 +73,15 @@ struct FirewallIngressSourceSelector {
     std::string cidr;
 };
 
+struct FirewallBridgeIngressSourceSelector {
+    // Both names come from a verified live bridge topology. The source CIDR
+    // comes from authoritative NDMS inventory. Backends must match all three
+    // fields or fail closed.
+    std::string interface;
+    std::string bridge_port;
+    std::string cidr;
+};
+
 struct FirewallGlobalPrefilter {
     std::optional<std::vector<std::string>> inbound_interfaces;
     // Explicit ingress interfaces that must bypass keen-pbr before conntrack
@@ -89,6 +98,18 @@ struct FirewallGlobalPrefilter {
         bypass_source_selectors_v4;
     std::vector<FirewallIngressSourceSelector>
         bypass_source_selectors_v6;
+    std::vector<FirewallBridgeIngressSourceSelector>
+        bypass_bridge_source_selectors_v4;
+    std::vector<FirewallBridgeIngressSourceSelector>
+        bypass_bridge_source_selectors_v6;
+    // DNS-only passthrough. Unlike bypass_source_selectors_* these selectors
+    // do not disable route classification, mark stickiness, or tunnel SNAT.
+    // They only avoid an unsafe NAT REDIRECT on an addressless verified VPN
+    // ingress (for example Keenetic IKE xfrms devices).
+    std::vector<FirewallIngressSourceSelector>
+        dns_redirect_bypass_source_selectors_v4;
+    std::vector<FirewallIngressSourceSelector>
+        dns_redirect_bypass_source_selectors_v6;
     bool skip_established_or_dnat{false};
     bool skip_marked_packets{false};
     // Restore only the keen-pbr-owned portion of the conntrack mark before
@@ -112,7 +133,14 @@ struct FirewallGlobalPrefilter {
 
     bool has_bypass_source_cidrs() const {
         return !bypass_source_selectors_v4.empty() ||
-               !bypass_source_selectors_v6.empty();
+               !bypass_source_selectors_v6.empty() ||
+               !bypass_bridge_source_selectors_v4.empty() ||
+               !bypass_bridge_source_selectors_v6.empty();
+    }
+
+    bool has_dns_redirect_bypass_source_cidrs() const {
+        return !dns_redirect_bypass_source_selectors_v4.empty() ||
+               !dns_redirect_bypass_source_selectors_v6.empty();
     }
 
     bool empty() const {
@@ -120,7 +148,8 @@ struct FirewallGlobalPrefilter {
             && !restore_conntrack_mark && !has_inbound_interfaces()
             && !has_bypass_inbound_interfaces()
             && !has_include_source_cidrs()
-            && !has_bypass_source_cidrs();
+            && !has_bypass_source_cidrs()
+            && !has_dns_redirect_bypass_source_cidrs();
     }
 };
 

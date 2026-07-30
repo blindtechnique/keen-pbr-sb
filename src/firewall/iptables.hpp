@@ -88,6 +88,10 @@ private:
     void cleanup_impl();
     void cleanup_rules_impl(bool sweep_live_state = false);
     void cleanup_nat_rules_impl(bool sweep_live_state = false);
+    void apply_nat_rules(
+        bool effective_ipv6,
+        FirewallApplyMode mode,
+        const FirewallGlobalPrefilter& prefilter);
     void apply_nat_rules(bool effective_ipv6, FirewallApplyMode mode);
     void cleanup_saved_sets(bool preserve_dynamic_sets);
     static void cleanup_legacy_generation_chains(const char* command);
@@ -153,6 +157,10 @@ private:
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain);
     static std::string build_bypass_source_lines(
+        const FirewallGlobalPrefilter& prefilter,
+        const std::string& chain,
+        bool ipv6);
+    static std::string build_bypass_bridge_source_lines(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain,
         bool ipv6);

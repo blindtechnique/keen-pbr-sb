@@ -360,6 +360,39 @@ TEST_CASE("build_firewall_global_prefilter: service pools extend an explicit ing
 }
 
 TEST_CASE(
+    "build_firewall_global_prefilter: addressless IKE keeps route scope "
+    "while bypassing DNS redirect only") {
+    auto cfg = parse_minimal_config(
+        R"({"route":{"inbound_interfaces":["br0"],"rules":[]}})");
+
+    InternalVpnRuntimeTarget ikev2;
+    ikev2.stable_id =
+        "ndms-crypto-map:ikev2:VirtualIPServerIKE2";
+    ikev2.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    ikev2.process_clients = true;
+    ikev2.verified_ingress_interfaces = {"xfrms1"};
+    ikev2.dns_redirect_bypass_ingress_v4 = {"xfrms1"};
+    ikev2.source_cidrs_v4 = {"172.20.8.0/23"};
+
+    const auto prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, {ikev2});
+    CHECK(
+        prefilter.include_source_cidrs_v4 ==
+        std::vector<std::string>{"172.20.8.0/23"});
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+    REQUIRE(
+        prefilter.dns_redirect_bypass_source_selectors_v4.size() ==
+        1U);
+    CHECK(
+        prefilter.dns_redirect_bypass_source_selectors_v4[0]
+            .interface == "xfrms1");
+    CHECK(
+        prefilter.dns_redirect_bypass_source_selectors_v4[0].cidr ==
+        "172.20.8.0/23");
+}
+
+TEST_CASE(
     "build_firewall_global_prefilter: pooled bypass fails closed "
     "without verified server ingress") {
     auto cfg = parse_minimal_config(
@@ -379,7 +412,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "bridged SSTP exclusion cannot be forged by a LAN source address") {
+    "bridged SSTP exclusion requires the verified physical bridge port") {
     auto cfg = parse_minimal_config(
         R"({"route":{"rules":[]}})");
     InternalVpnRuntimeTarget sstp;
@@ -408,10 +441,39 @@ TEST_CASE(
     refresh_internal_vpn_service_ingress_interfaces(
         targets, {bridge, peer_link, br_link, lan, session});
     REQUIRE(targets.front().verified_ingress_interfaces.empty());
+    REQUIRE(
+        targets.front().verified_bridge_ingress_interfaces ==
+        std::vector<InternalVpnVerifiedBridgeIngress>{
+            {"br1", "sstp-br-link"}});
 
-    const auto prefilter =
+    auto prefilter =
         build_firewall_global_prefilter_for_runtime_targets(
             cfg, targets);
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+    REQUIRE(
+        prefilter.bypass_bridge_source_selectors_v4.size() == 1U);
+    CHECK(
+        prefilter.bypass_bridge_source_selectors_v4[0].interface ==
+        "br1");
+    CHECK(
+        prefilter.bypass_bridge_source_selectors_v4[0].bridge_port ==
+        "sstp-br-link");
+    CHECK(
+        prefilter.bypass_bridge_source_selectors_v4[0].cidr ==
+        "172.16.1.0/24");
+
+    // The client pool plus only half of the veth topology is not ownership
+    // proof. Do not degrade to a weak bridge-name/source-only bypass.
+    targets = {sstp};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {bridge, peer_link, lan, session});
+    REQUIRE(targets.front().verified_ingress_interfaces.empty());
+    REQUIRE(targets.front().verified_bridge_ingress_interfaces.empty());
+    prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, targets);
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+    CHECK(prefilter.bypass_bridge_source_selectors_v4.empty());
     CHECK_FALSE(prefilter.has_bypass_source_cidrs());
 }
 

@@ -129,6 +129,12 @@ bool same_internal_vpn_runtime_targets(
                           left.interface == right.interface &&
                           left.verified_ingress_interfaces ==
                               right.verified_ingress_interfaces &&
+                          left.verified_bridge_ingress_interfaces ==
+                              right.verified_bridge_ingress_interfaces &&
+                          left.dns_redirect_bypass_ingress_v4 ==
+                              right.dns_redirect_bypass_ingress_v4 &&
+                          left.dns_redirect_bypass_ingress_v6 ==
+                              right.dns_redirect_bypass_ingress_v6 &&
                           left.source_cidrs_v4 == right.source_cidrs_v4 &&
                           left.source_cidrs_v6 == right.source_cidrs_v6;
                });

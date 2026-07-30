@@ -903,6 +903,16 @@ TEST_CASE(
     active.verified_ingress_interfaces = {"sstp42"};
     CHECK(interface_event_affects_managed_runtime(
         Config{}, {}, {active}, "sstp42"));
+
+    active.verified_ingress_interfaces.clear();
+    active.verified_bridge_ingress_interfaces = {
+        {"br1", "sstp-br-link"}};
+    CHECK(interface_event_affects_managed_runtime(
+        Config{}, {}, {active}, "br1"));
+    CHECK(interface_event_affects_managed_runtime(
+        Config{}, {}, {active}, "sstp-br-link"));
+    CHECK_FALSE(interface_event_affects_managed_runtime(
+        Config{}, {}, {active}, "br0"));
 }
 
 } // namespace keen_pbr3

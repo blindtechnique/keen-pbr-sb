@@ -1858,6 +1858,31 @@ TEST_CASE("build_dns_nat_script: service source pools extend and bypass DNS scop
   CHECK(ipv6.find("172.16.1.0/24") == std::string::npos);
 }
 
+TEST_CASE(
+    "iptables addressless IKE bypass affects DNS redirect but not routing") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.dns_redirect_bypass_source_selectors_v4 = {
+      {"xfrms1", "172.20.8.0/23"}};
+
+  const auto dns = T::build_dns_nat_script(prefilter);
+  const auto dns_bypass = dns.find(
+      "-A KeenPbrDnsRdr -i xfrms1 -s 172.20.8.0/23 -j RETURN\n");
+  const auto dns_redirect = dns.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT "
+      "--to-ports 53\n");
+  REQUIRE(dns_bypass != std::string::npos);
+  REQUIRE(dns_redirect != std::string::npos);
+  CHECK(dns_bypass < dns_redirect);
+
+  const auto routing = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+  CHECK(routing.find("xfrms1") == std::string::npos);
+  CHECK(routing.find("172.20.8.0/23") == std::string::npos);
+  CHECK(routing.find("kpbr4_local") != std::string::npos);
+}
+
 TEST_CASE("iptables policy rules classify verified service source pools") {
   FirewallGlobalPrefilter prefilter;
   prefilter.inbound_interfaces =
@@ -1909,6 +1934,83 @@ TEST_CASE("iptables pooled VPN bypass fails closed without exact ingress") {
   CHECK(
       dns.find("-s 172.16.1.0/24 -j RETURN") ==
       std::string::npos);
+}
+
+TEST_CASE(
+    "iptables bridged SSTP bypass always matches L3 bridge and physdev port") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_bridge_source_selectors_v4 = {
+      {"br1", "sstp-br-link", "172.16.1.0/24"}};
+  prefilter.bypass_bridge_source_selectors_v6 = {
+      {"br1", "sstp-br-link", "2001:db8:16::/64"}};
+
+  const auto exact_rule = std::string{
+      "-i br1 -m physdev --physdev-in sstp-br-link "
+      "-s 172.16.1.0/24 -j RETURN\n"};
+  const auto weak_rule = std::string{
+      "-i br1 -s 172.16.1.0/24 -j RETURN\n"};
+
+  const auto routing = T::build_ipt_script(
+      false,
+      {mark_rule("kpbr4_local", false, 0x10000)},
+      prefilter);
+  CHECK(
+      routing.find("-A KeenPbrTable " + exact_rule) !=
+      std::string::npos);
+  CHECK(routing.find("-A KeenPbrTable " + weak_rule) ==
+        std::string::npos);
+
+  const auto raw =
+      T::build_raw_generation_scripts(false, prefilter).first;
+  CHECK(
+      raw.find("-A KeenPbrRaw_A " + exact_rule) !=
+      std::string::npos);
+  CHECK(raw.find("-A KeenPbrRaw_A " + weak_rule) ==
+        std::string::npos);
+
+  const auto dns = T::build_dns_nat_script(prefilter);
+  const auto exact_dns =
+      dns.find("-A KeenPbrDnsRdr " + exact_rule);
+  const auto redirect =
+      dns.find("-A KeenPbrDnsRdr -p udp --dport 53 "
+               "-j REDIRECT --to-ports 53\n");
+  REQUIRE(exact_dns != std::string::npos);
+  REQUIRE(redirect != std::string::npos);
+  CHECK(exact_dns < redirect);
+  CHECK(dns.find("-A KeenPbrDnsRdr " + weak_rule) ==
+        std::string::npos);
+
+  const auto exact_rule_v6 = std::string{
+      "-i br1 -m physdev --physdev-in sstp-br-link "
+      "-s 2001:db8:16::/64 -j RETURN\n"};
+  const auto weak_rule_v6 = std::string{
+      "-i br1 -s 2001:db8:16::/64 -j RETURN\n"};
+  const auto routing_v6 = T::build_ipt_script(
+      true,
+      {mark_rule("kpbr6_local", true, 0x10000)},
+      prefilter);
+  CHECK(
+      routing_v6.find("-A KeenPbrTable " + exact_rule_v6) !=
+      std::string::npos);
+  CHECK(routing_v6.find("-A KeenPbrTable " + weak_rule_v6) ==
+        std::string::npos);
+
+  const auto dns_v6 = T::build_dns_nat_script(
+      prefilter,
+      /*dns_redirect=*/true,
+      /*router_origin_snat=*/false,
+      {},
+      /*ipv6=*/true);
+  const auto exact_dns_v6 =
+      dns_v6.find("-A KeenPbrDnsRdr " + exact_rule_v6);
+  const auto redirect_v6 =
+      dns_v6.find("-A KeenPbrDnsRdr -p udp --dport 53 "
+                  "-j REDIRECT --to-ports 53\n");
+  REQUIRE(exact_dns_v6 != std::string::npos);
+  REQUIRE(redirect_v6 != std::string::npos);
+  CHECK(exact_dns_v6 < redirect_v6);
+  CHECK(dns_v6.find("-A KeenPbrDnsRdr " + weak_rule_v6) ==
+        std::string::npos);
 }
 
 TEST_CASE("build_dns_nat_script: router-origin traffic is masqueraded") {

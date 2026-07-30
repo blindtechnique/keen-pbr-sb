@@ -14,6 +14,17 @@ enum class InternalVpnRuntimeMatchKind : std::uint8_t {
     source_pool,
 };
 
+struct InternalVpnVerifiedBridgeIngress {
+    std::string interface;
+    std::string bridge_port;
+
+    bool operator==(
+        const InternalVpnVerifiedBridgeIngress& other) const {
+        return interface == other.interface &&
+               bridge_port == other.bridge_port;
+    }
+};
+
 // Runtime-only, verified ingress selector. Persisted configuration stores a
 // stable NDMS identity; source pools are always re-derived from a fresh,
 // bounded firmware observation.
@@ -31,6 +42,19 @@ struct InternalVpnRuntimeTarget {
     // source-pool service. This runtime-only set is used by both firewall and
     // dnsmasq policy; a firmware LAN binding such as br0 is never copied here.
     std::vector<std::string> verified_ingress_interfaces;
+    // Exact L3 bridge plus its verified server-owned physical bridge port.
+    // This is required for a safe SSTP bypass on a bridge shared with LAN:
+    // neither the bridge name nor the source pool alone proves ownership.
+    std::vector<InternalVpnVerifiedBridgeIngress>
+        verified_bridge_ingress_interfaces;
+    // Exact verified ingress interfaces where NAT REDIRECT cannot safely
+    // select a local resolver address for the corresponding family. IKE
+    // xfrms devices are normally addressless. Such clients still participate
+    // in keen-pbr routing, but their DNS packets must continue through the
+    // native Keenetic resolver path instead of being redirected to an
+    // unusable address.
+    std::vector<std::string> dns_redirect_bypass_ingress_v4;
+    std::vector<std::string> dns_redirect_bypass_ingress_v6;
     std::vector<std::string> source_cidrs_v4;
     std::vector<std::string> source_cidrs_v6;
 };

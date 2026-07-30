@@ -287,6 +287,21 @@ std::string IptablesFirewall::build_dns_nat_script(
             prefilter, DNS_NAT_CHAIN_NAME);
         s += build_bypass_source_lines(
             prefilter, DNS_NAT_CHAIN_NAME, ipv6);
+        s += build_bypass_bridge_source_lines(
+            prefilter, DNS_NAT_CHAIN_NAME, ipv6);
+        const auto& dns_only_bypass_selectors = ipv6
+            ? prefilter.dns_redirect_bypass_source_selectors_v6
+            : prefilter.dns_redirect_bypass_source_selectors_v4;
+        for (const auto& selector : dns_only_bypass_selectors) {
+            if (selector.interface.empty()) {
+                continue;
+            }
+            s += keen_pbr3::format(
+                "-A {} -i {} -s {} -j RETURN\n",
+                DNS_NAT_CHAIN_NAME,
+                selector.interface,
+                selector.cidr);
+        }
         for (const auto& iface_frag : iface_frags) {
             for (const char* proto : {"udp", "tcp"}) {
                 s += keen_pbr3::format(
@@ -844,6 +859,121 @@ static void pipe_to_cmd(const std::vector<std::string>& args, const std::string&
 }
 
 namespace {
+
+bool physdev_match_available(
+    const char* restore_command,
+    bool ipv6) {
+    static std::atomic<int> ipv4_support{-1}; // -1 unknown, 0 no, 1 yes
+    static std::atomic<int> ipv6_support{-1};
+    auto& support_cache =
+        ipv6 ? ipv6_support : ipv4_support;
+    const int cached = support_cache.load(std::memory_order_acquire);
+    if (cached >= 0) {
+        return cached == 1;
+    }
+
+    // Loading the userspace extension is not enough: old firmware may still
+    // reject physdev in-kernel and then fail the whole real transaction.
+    // Validate the exact hook and matcher without modifying live rules.
+    const std::string probe = keen_pbr3::format(
+        "*mangle\n"
+        "-A PREROUTING -i br0 -m physdev "
+        "--physdev-in sstp-br-link -s {} -j RETURN\n"
+        "COMMIT\n",
+        ipv6 ? "2001:db8::/64" : "192.0.2.0/24");
+    if (!restore_test_option_supported(restore_command)) {
+        support_cache.store(0, std::memory_order_release);
+        Logger::instance().verbose(
+            "{} cannot validate SSTP physdev without --test; "
+            "keeping bridged bypass fail-closed",
+            restore_command);
+        return false;
+    }
+    const std::vector<std::string> base_args{
+        restore_command, "--test", "--noflush"};
+    const bool wait_supported =
+        restore_wait_option_supported(restore_command);
+    const auto args =
+        wait_supported ? with_wait_option(base_args) : base_args;
+    const SafeExecTimeouts timeouts{
+        wait_supported
+            ? std::chrono::seconds{12}
+            : std::chrono::seconds{2},
+        std::chrono::milliseconds{500}};
+    for (std::size_t attempt = 0;
+         attempt <= restore_retry_delays.size();
+         ++attempt) {
+        std::string error_output;
+        SafeExecFailureDetail failure_detail;
+        const int status = safe_exec_pipe_stdin(
+            args,
+            probe,
+            &error_output,
+            SafeExecFailureLog::Suppressed,
+            &failure_detail,
+            timeouts);
+        if (status == 0) {
+            support_cache.store(1, std::memory_order_release);
+            return true;
+        }
+        const bool transient =
+            status < 0 || status == 4 ||
+            restore_failure_is_transient(error_output, probe);
+        const bool final_attempt =
+            attempt == restore_retry_delays.size() ||
+            status < 0 ||
+            (wait_supported && status == 4);
+        if (transient && final_attempt) {
+            throw TransientFirewallError(
+                describe_restore_failure(
+                    restore_command, status, error_output, probe));
+        }
+        if (!transient) {
+            support_cache.store(0, std::memory_order_release);
+            Logger::instance().verbose(
+                "{} rejected the SSTP physdev probe; keeping bridged "
+                "bypass fail-closed: {}",
+                restore_command,
+                error_output.empty()
+                    ? keen_pbr3::format(
+                          "test exited with status {}", status)
+                    : error_output);
+            return false;
+        }
+        std::this_thread::sleep_for(
+            restore_retry_delays[attempt]);
+    }
+    return false;
+}
+
+FirewallGlobalPrefilter iptables_effective_prefilter(
+    const FirewallGlobalPrefilter& requested,
+    bool effective_ipv6) {
+    FirewallGlobalPrefilter effective = requested;
+    if (!effective.bypass_bridge_source_selectors_v4.empty()) {
+        const bool ipv4_physdev_available =
+            physdev_match_available(
+                "iptables-restore", /*ipv6=*/false);
+        if (!ipv4_physdev_available) {
+            Logger::instance().verbose(
+                "iptables physdev match is unavailable; keeping bridged "
+                "SSTP bypass fail-closed");
+            effective.bypass_bridge_source_selectors_v4.clear();
+        }
+    }
+    if (!effective.bypass_bridge_source_selectors_v6.empty()) {
+        if (!effective_ipv6) {
+            effective.bypass_bridge_source_selectors_v6.clear();
+        } else if (!physdev_match_available(
+                       "ip6tables-restore", /*ipv6=*/true)) {
+            Logger::instance().verbose(
+                "ip6tables physdev match is unavailable; keeping bridged "
+                "SSTP bypass fail-closed");
+            effective.bypass_bridge_source_selectors_v6.clear();
+        }
+    }
+    return effective;
+}
 
 class NatValidationCleanup final {
 public:
@@ -2076,6 +2206,8 @@ std::string IptablesFirewall::build_prefilter_lines(
     std::string lines =
         build_bypass_inbound_interface_lines(prefilter, chain);
     lines += build_bypass_source_lines(prefilter, chain, ipv6);
+    lines += build_bypass_bridge_source_lines(
+        prefilter, chain, ipv6);
     // The raw table runs before conntrack. Classify every forwarded packet
     // there instead of emitting a matcher that cannot be valid at this hook.
     if (allow_conntrack) {
@@ -2174,6 +2306,30 @@ std::string IptablesFirewall::build_bypass_source_lines(
             "-A {} -i {} -s {} -j RETURN\n",
             chain,
             selector.interface,
+            selector.cidr);
+    }
+    return lines;
+}
+
+std::string IptablesFirewall::build_bypass_bridge_source_lines(
+    const FirewallGlobalPrefilter& prefilter,
+    const std::string& chain,
+    bool ipv6) {
+    const auto& selectors = ipv6
+        ? prefilter.bypass_bridge_source_selectors_v6
+        : prefilter.bypass_bridge_source_selectors_v4;
+    std::string lines;
+    for (const auto& selector : selectors) {
+        if (selector.interface.empty() ||
+            selector.bridge_port.empty()) {
+            continue;
+        }
+        lines += keen_pbr3::format(
+            "-A {} -i {} -m physdev --physdev-in {} "
+            "-s {} -j RETURN\n",
+            chain,
+            selector.interface,
+            selector.bridge_port,
             selector.cidr);
     }
     return lines;
@@ -2499,6 +2655,8 @@ std::string IptablesFirewall::build_raw_conntrack_script(
         prefilter, RAW_CONNTRACK_CHAIN_NAME);
     script += build_bypass_source_lines(
         prefilter, RAW_CONNTRACK_CHAIN_NAME, /*ipv6=*/false);
+    script += build_bypass_bridge_source_lines(
+        prefilter, RAW_CONNTRACK_CHAIN_NAME, /*ipv6=*/false);
     script += build_conntrack_prefilter_lines(
         prefilter, RAW_CONNTRACK_CHAIN_NAME);
     if (prefilter.restore_conntrack_mark &&
@@ -2558,7 +2716,8 @@ std::string IptablesFirewall::build_output_generation_script(
 
 void IptablesFirewall::apply_nat_rules(
     bool effective_ipv6,
-    FirewallApplyMode mode) {
+    FirewallApplyMode mode,
+    const FirewallGlobalPrefilter& prefilter) {
     const bool snat_expected = router_origin_snat_requested_;
     const auto expected_snat_interfaces = snat_interfaces_;
     const uint32_t expected_snat_fwmark_mask = fwmark_mask();
@@ -2567,7 +2726,7 @@ void IptablesFirewall::apply_nat_rules(
     const std::string nat_script_v4 =
         nat_requested
             ? build_dns_nat_script(
-                  global_prefilter_,
+                  prefilter,
                   dns_redirect_requested_,
                   router_origin_snat_requested_,
                   snat_interfaces_,
@@ -2577,7 +2736,7 @@ void IptablesFirewall::apply_nat_rules(
     const std::string nat_script_v6 =
         nat_requested
             ? build_dns_nat_script(
-                  global_prefilter_,
+                  prefilter,
                   dns_redirect_requested_,
                   router_origin_snat_requested_,
                   snat_interfaces_,
@@ -2723,6 +2882,16 @@ void IptablesFirewall::apply_nat_rules(
     snat_interfaces_.clear();
 }
 
+void IptablesFirewall::apply_nat_rules(
+    bool effective_ipv6,
+    FirewallApplyMode mode) {
+    apply_nat_rules(
+        effective_ipv6,
+        mode,
+        iptables_effective_prefilter(
+            global_prefilter_, effective_ipv6));
+}
+
 void IptablesFirewall::apply(FirewallApplyMode mode) {
     if (!apply_prepared_) {
         throw FirewallError("iptables apply was not prepared");
@@ -2735,6 +2904,9 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
             "IPv6 iptables backend is unavailable; skipping IPv6 firewall state and continuing IPv4-only");
         effective_ipv6 = false;
     }
+    const auto effective_prefilter =
+        iptables_effective_prefilter(
+            global_prefilter_, effective_ipv6);
 
     // `create -exist` rejects incompatible existing set schemas. Detect a
     // dnsmasq-owned mismatch before cleanup or inactive-slot staging mutates
@@ -2821,21 +2993,21 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
                 {"iptables-restore", "--noflush", "--counters"},
                 build_raw_conntrack_script(
                     /*replace_active_chain=*/true,
-                    global_prefilter_));
+                    effective_prefilter));
             pipe_to_cmd(
                 {"iptables-restore", "--noflush", "--counters"},
                 build_output_generation_script(
                     output_chain,
                     /*replace_active_chain=*/true,
                     pending_rules_,
-                    global_prefilter_));
+                    effective_prefilter));
             pipe_to_cmd(
                 {"iptables-restore", "--noflush", "--counters"},
                 build_raw_prerouting_script(
                     raw_generation_prerouting_chain(target_v4_generation_),
                     /*replace_active_chain=*/true,
                     pending_rules_,
-                    global_prefilter_));
+                    effective_prefilter));
         } else {
             const std::string prerouting_chain =
                 generation_prerouting_chain(target_v4_generation_);
@@ -2843,7 +3015,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
                         build_generation_ipt_script(
                             false, prerouting_chain, output_chain,
                             /*replace_active_chains=*/true,
-                            pending_rules_, global_prefilter_));
+                            pending_rules_, effective_prefilter));
         }
         chain_v4_created_ = true;
     }
@@ -2856,7 +3028,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
                     build_generation_ipt_script(
                         true, prerouting_chain, output_chain,
                         /*replace_active_chains=*/true,
-                        pending_rules_, global_prefilter_));
+                        pending_rules_, effective_prefilter));
         chain_v6_created_ = true;
     }
 
@@ -2877,7 +3049,7 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     // Phase 3: nat rules — client DNS enforcement and the masquerade that keeps
     // router-originated detour traffic usable. Preserve-set applies validate
     // the replacement first and only then remove the active NAT generation.
-    apply_nat_rules(effective_ipv6, mode);
+    apply_nat_rules(effective_ipv6, mode, effective_prefilter);
 
     // Clear pending buffers
     pending_sets_.clear();

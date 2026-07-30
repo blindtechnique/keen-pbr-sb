@@ -91,6 +91,32 @@ public:
         destructive_apply, clear_dynamic_sets);
   }
 
+  static nlohmann::json build_bridge_filter_document(
+      FirewallGlobalPrefilter prefilter) {
+    NftablesFirewall fw;
+    fw.global_prefilter_ = std::move(prefilter);
+    fw.dns_redirect_requested_ = true;
+
+    NftablesFirewall::PendingRule route_rule;
+    route_rule.family = AF_INET;
+    route_rule.action = NftablesFirewall::PendingRule::Mark;
+    route_rule.fwmark = 0x00120000;
+    route_rule.criteria.dst_set_name = "sstp_test";
+    fw.pending_rules_.push_back(std::move(route_rule));
+
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = true;
+    live.chain_exists = true;
+    live.output_chain_exists = true;
+    live.dns_nat_chain_exists = true;
+    return fw.build_apply_document(
+        live,
+        /*emit_full_table=*/false,
+        /*destructive_apply=*/false,
+        /*clear_dynamic_sets=*/false,
+        NftablesFirewall::MarkMergeMode::LegacyConstant);
+  }
+
   struct RuleDesc {
     std::string set_name;
     int family;
@@ -775,6 +801,40 @@ TEST_CASE("nft DNS redirect applies service include and bypass source pools") {
       "redirect"));
 }
 
+TEST_CASE(
+    "nft addressless IKE bypass affects DNS redirect but not routing") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.dns_redirect_bypass_source_selectors_v4 = {
+      {"xfrms1", "172.20.8.0/23"}};
+
+  const auto dns = T::build_dns_redirect_rules_json(prefilter);
+  REQUIRE(dns.is_array());
+  REQUIRE_FALSE(dns.empty());
+  const auto first_rule = dns.front().dump();
+  CHECK(first_rule.find("xfrms1") != std::string::npos);
+  CHECK(first_rule.find("172.20.8.0") != std::string::npos);
+  CHECK(first_rule.find("\"accept\"") != std::string::npos);
+
+  std::size_t first_redirect = dns.size();
+  for (std::size_t index = 0; index < dns.size(); ++index) {
+    if (dns[index].dump().find("\"redirect\"") !=
+        std::string::npos) {
+      first_redirect = index;
+      break;
+    }
+  }
+  REQUIRE(first_redirect < dns.size());
+  CHECK(first_redirect > 0U);
+
+  const auto routing = T::build_rule_add_commands(
+      prefilter,
+      {mark_rule("myset", AF_INET, 0x00120000)},
+      /*register_merge=*/true);
+  CHECK(routing.dump().find("xfrms1") == std::string::npos);
+  CHECK(routing.dump().find("172.20.8.0") == std::string::npos);
+  CHECK(routing.dump().find("@myset") != std::string::npos);
+}
+
 TEST_CASE("nft pooled VPN bypass fails closed without exact ingress") {
   FirewallGlobalPrefilter prefilter;
   prefilter.bypass_source_selectors_v4 = {
@@ -787,6 +847,24 @@ TEST_CASE("nft pooled VPN bypass fails closed without exact ingress") {
   const auto dns = T::build_dns_redirect_rules_json(prefilter);
   CHECK(routing.dump().find("172.16.1.0") == std::string::npos);
   CHECK(dns.dump().find("172.16.1.0") == std::string::npos);
+}
+
+TEST_CASE(
+    "nft bridged SSTP bypass remains fail closed without an exact "
+    "inet prerouting bridge-port selector") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.bypass_bridge_source_selectors_v4 = {
+      {"br1", "sstp-br-link", "172.16.1.0/24"}};
+
+  const auto document =
+      T::build_bridge_filter_document(prefilter).dump();
+  CHECK(document.find("\"ibrname\"") == std::string::npos);
+  CHECK(document.find("\"sdifname\"") == std::string::npos);
+  CHECK(document.find("sstp-br-link") == std::string::npos);
+  CHECK(document.find("172.16.1.0") == std::string::npos);
+  // Only the unsafe bypass is omitted. Normal routing remains in the same
+  // transaction instead of silently disabling the whole apply.
+  CHECK(document.find("@sstp_test") != std::string::npos);
 }
 
 TEST_CASE("nft modern mark merge uses numeric direction and preserves foreign bits") {

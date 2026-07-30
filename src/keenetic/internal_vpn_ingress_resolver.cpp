@@ -119,6 +119,38 @@ bool address_belongs_to_any_pool(
         });
 }
 
+bool has_usable_local_address(
+    const DumpedInterface& interface,
+    int family) {
+    const auto& addresses =
+        family == AF_INET
+            ? interface.ipv4_addresses
+            : interface.ipv6_addresses;
+    return std::any_of(
+        addresses.begin(),
+        addresses.end(),
+        [family](const auto& address) {
+            const auto parsed = parse_network(address);
+            if (!parsed || parsed->family != family) {
+                return false;
+            }
+            if (family == AF_INET) {
+                return std::any_of(
+                    parsed->bytes.begin(),
+                    parsed->bytes.begin() + 4,
+                    [](std::uint8_t byte) { return byte != 0U; });
+            }
+            const bool unspecified = std::all_of(
+                parsed->bytes.begin(),
+                parsed->bytes.end(),
+                [](std::uint8_t byte) { return byte == 0U; });
+            const bool link_local =
+                parsed->bytes[0] == 0xfeU &&
+                (parsed->bytes[1] & 0xc0U) == 0x80U;
+            return !unspecified && !link_local;
+        });
+}
+
 bool interface_peer_belongs_to_target(
     const DumpedInterface& interface,
     const InternalVpnRuntimeTarget& target) {
@@ -197,7 +229,8 @@ bool interface_has_master(
            *found->master_interface == master;
 }
 
-std::optional<std::string> sstp_bridge_l3_interface(
+std::optional<InternalVpnVerifiedBridgeIngress>
+sstp_bridge_ingress(
     const InternalVpnRuntimeTarget& target,
     const std::vector<DumpedInterface>& interfaces) {
     // Keenetic terminates SSTP sessions on an isolated L2 bridge and joins it
@@ -206,9 +239,10 @@ std::optional<std::string> sstp_bridge_l3_interface(
     //   sstpN -> sstp-bridge/sstp-peer-link
     //         -> sstp-br-link/bound brN -> L3 PREROUTING
     //
-    // iptables/nft see the bound BridgeN kernel interface, not sstp-bridge,
-    // as the routed input interface. The BridgeN -> brN mapping was already
-    // verified against live NDMS inventory by the service resolver.
+    // The L3 routing stack sees the bound BridgeN kernel interface, not
+    // sstp-bridge, as the routed input interface. The BridgeN -> brN mapping
+    // was already verified against live NDMS inventory by the service
+    // resolver.
     if (!target.interface.has_value() ||
         find_interface(interfaces, *target.interface) == nullptr ||
         find_interface(interfaces, "sstp-bridge") == nullptr ||
@@ -218,7 +252,9 @@ std::optional<std::string> sstp_bridge_l3_interface(
             interfaces, "sstp-br-link", *target.interface)) {
         return std::nullopt;
     }
-    return target.interface;
+    return InternalVpnVerifiedBridgeIngress{
+        *target.interface,
+        "sstp-br-link"};
 }
 
 } // namespace
@@ -231,9 +267,9 @@ std::vector<std::string> resolve_internal_vpn_service_ingress_interfaces(
     }
 
     std::vector<std::string> result;
-    const auto sstp_bridge_l3 =
+    const auto sstp_bridge =
         is_sstp_service(target.stable_id)
-            ? sstp_bridge_l3_interface(target, live_interfaces)
+            ? sstp_bridge_ingress(target, live_interfaces)
             : std::nullopt;
     for (const auto& interface : live_interfaces) {
         if (is_ike_service(target.stable_id) &&
@@ -246,15 +282,15 @@ std::vector<std::string> resolve_internal_vpn_service_ingress_interfaces(
             if (is_sstp_service(target.stable_id) &&
                 interface.master_interface ==
                     std::optional<std::string>{"sstp-bridge"}) {
-                if (sstp_bridge_l3 && target.process_clients) {
-                    result.push_back(*sstp_bridge_l3);
+                if (sstp_bridge && target.process_clients) {
+                    result.push_back(sstp_bridge->interface);
                 }
                 // An enslaved SSTP peer never reaches L3 PREROUTING under its
                 // own name. A source pool plus shared BridgeN is not enough to
                 // prove per-packet SSTP ownership: a LAN host could spoof the
-                // pool source. Until both firewall backends support a verified
-                // physical bridge-port selector, process_clients=false fails
-                // closed for bridged SSTP instead of installing that bypass.
+                // pool source. Backends without a verified physical
+                // bridge-port selector keep process_clients=false fail-closed
+                // instead of installing that weak bypass.
             } else {
                 result.push_back(interface.name);
             }
@@ -263,8 +299,8 @@ std::vector<std::string> resolve_internal_vpn_service_ingress_interfaces(
     // The bridge exists before the first client peer. Keep the verified L3
     // ingress stable across SSTP connect/disconnect cycles for processed
     // clients and resolver ACL generation.
-    if (sstp_bridge_l3 && target.process_clients) {
-        result.push_back(*sstp_bridge_l3);
+    if (sstp_bridge && target.process_clients) {
+        result.push_back(sstp_bridge->interface);
     }
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
@@ -278,6 +314,44 @@ void refresh_internal_vpn_service_ingress_interfaces(
         target.verified_ingress_interfaces =
             resolve_internal_vpn_service_ingress_interfaces(
                 target, live_interfaces);
+        target.verified_bridge_ingress_interfaces.clear();
+        if (target.match_kind ==
+                InternalVpnRuntimeMatchKind::source_pool &&
+            !target.process_clients &&
+            is_sstp_service(target.stable_id)) {
+            if (const auto bridge =
+                    sstp_bridge_ingress(target, live_interfaces);
+                bridge.has_value()) {
+                target.verified_bridge_ingress_interfaces.push_back(
+                    *bridge);
+            }
+        }
+        target.dns_redirect_bypass_ingress_v4.clear();
+        target.dns_redirect_bypass_ingress_v6.clear();
+        if (target.match_kind !=
+                InternalVpnRuntimeMatchKind::source_pool ||
+            !target.process_clients ||
+            !is_ike_service(target.stable_id)) {
+            continue;
+        }
+        for (const auto& interface_name :
+             target.verified_ingress_interfaces) {
+            const auto* interface =
+                find_interface(live_interfaces, interface_name);
+            if (interface == nullptr) {
+                continue;
+            }
+            if (!target.source_cidrs_v4.empty() &&
+                !has_usable_local_address(*interface, AF_INET)) {
+                target.dns_redirect_bypass_ingress_v4.push_back(
+                    interface_name);
+            }
+            if (!target.source_cidrs_v6.empty() &&
+                !has_usable_local_address(*interface, AF_INET6)) {
+                target.dns_redirect_bypass_ingress_v6.push_back(
+                    interface_name);
+            }
+        }
     }
 }
 

@@ -214,14 +214,24 @@ inline bool interface_event_affects_managed_runtime(
     const bool is_internal_vpn_service_interface =
         std::any_of(
             effective_internal_vpn_service_targets.begin(),
-            effective_internal_vpn_service_targets.end(),
-            [&interface_name](const auto& target) {
-                return std::find(
-                           target.verified_ingress_interfaces.begin(),
-                           target.verified_ingress_interfaces.end(),
-                           interface_name) !=
-                       target.verified_ingress_interfaces.end();
-            }) ||
+             effective_internal_vpn_service_targets.end(),
+             [&interface_name](const auto& target) {
+                 const bool direct_ingress =
+                     std::find(
+                         target.verified_ingress_interfaces.begin(),
+                         target.verified_ingress_interfaces.end(),
+                         interface_name) !=
+                     target.verified_ingress_interfaces.end();
+                 const bool bridge_ingress =
+                     std::any_of(
+                         target.verified_bridge_ingress_interfaces.begin(),
+                         target.verified_bridge_ingress_interfaces.end(),
+                         [&interface_name](const auto& ingress) {
+                             return ingress.interface == interface_name ||
+                                    ingress.bridge_port == interface_name;
+                         });
+                 return direct_ingress || bridge_ingress;
+             }) ||
         (service_inventory_configured &&
          internal_vpn_service_interface_may_affect_ingress(
              interface_name));

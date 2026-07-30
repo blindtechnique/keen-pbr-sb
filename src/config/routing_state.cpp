@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <set>
+#include <tuple>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -691,6 +692,14 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
         bypass_sources_v4;
     std::set<std::pair<std::string, std::string>>
         bypass_sources_v6;
+    std::set<std::tuple<std::string, std::string, std::string>>
+        bypass_bridge_sources_v4;
+    std::set<std::tuple<std::string, std::string, std::string>>
+        bypass_bridge_sources_v6;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_bypass_sources_v4;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_bypass_sources_v6;
     for (const auto& target : internal_targets) {
         if (target.match_kind == InternalVpnRuntimeMatchKind::interface &&
             target.interface.has_value() &&
@@ -708,6 +717,20 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
             include_sources_v6.insert(
                 target.source_cidrs_v6.begin(),
                 target.source_cidrs_v6.end());
+            for (const auto& interface :
+                 target.dns_redirect_bypass_ingress_v4) {
+                for (const auto& cidr : target.source_cidrs_v4) {
+                    dns_redirect_bypass_sources_v4.emplace(
+                        interface, cidr);
+                }
+            }
+            for (const auto& interface :
+                 target.dns_redirect_bypass_ingress_v6) {
+                for (const auto& cidr : target.source_cidrs_v6) {
+                    dns_redirect_bypass_sources_v6.emplace(
+                        interface, cidr);
+                }
+            }
         } else {
             // A source pool alone is not ingress ownership proof. Bind every
             // bypass to an exact, live server-owned interface. When no such
@@ -720,6 +743,21 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
                 }
                 for (const auto& cidr : target.source_cidrs_v6) {
                     bypass_sources_v6.emplace(interface, cidr);
+                }
+            }
+            for (const auto& ingress :
+                 target.verified_bridge_ingress_interfaces) {
+                for (const auto& cidr : target.source_cidrs_v4) {
+                    bypass_bridge_sources_v4.emplace(
+                        ingress.interface,
+                        ingress.bridge_port,
+                        cidr);
+                }
+                for (const auto& cidr : target.source_cidrs_v6) {
+                    bypass_bridge_sources_v6.emplace(
+                        ingress.interface,
+                        ingress.bridge_port,
+                        cidr);
                 }
             }
         }
@@ -737,6 +775,26 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
     }
     for (const auto& [interface, cidr] : bypass_sources_v6) {
         prefilter.bypass_source_selectors_v6.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, bridge_port, cidr] :
+         bypass_bridge_sources_v4) {
+        prefilter.bypass_bridge_source_selectors_v4.push_back(
+            {interface, bridge_port, cidr});
+    }
+    for (const auto& [interface, bridge_port, cidr] :
+         bypass_bridge_sources_v6) {
+        prefilter.bypass_bridge_source_selectors_v6.push_back(
+            {interface, bridge_port, cidr});
+    }
+    for (const auto& [interface, cidr] :
+         dns_redirect_bypass_sources_v4) {
+        prefilter.dns_redirect_bypass_source_selectors_v4.push_back(
+            {interface, cidr});
+    }
+    for (const auto& [interface, cidr] :
+         dns_redirect_bypass_sources_v6) {
+        prefilter.dns_redirect_bypass_source_selectors_v6.push_back(
             {interface, cidr});
     }
 
