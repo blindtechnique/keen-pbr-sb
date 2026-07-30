@@ -1386,6 +1386,70 @@ TEST_CASE("hook reconciliation verifies state after an ambiguous mutation") {
         "-t mangle -S OUTPUT\n");
 }
 
+TEST_CASE("vanished hook target is a transient publication race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t mangle -S PREROUTING') exit 0 ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrTable')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "PREROUTING", "KeenPbrTable"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) ==
+        "-t mangle -S PREROUTING\n"
+        "-t mangle -A PREROUTING -j KeenPbrTable\n");
+}
+
+TEST_CASE("vanished duplicate hook target is a transient publication race") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t mangle -S OUTPUT')\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput'\n"
+      "    echo '-A OUTPUT -j KeenPbrOutput'\n"
+      "    exit 0\n"
+      "    ;;\n"
+      "  '-t mangle -D OUTPUT -j KeenPbrOutput')\n"
+      "    echo 'iptables: No chain/target/match by that name.' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "OUTPUT", "KeenPbrOutput"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) ==
+        "-t mangle -S OUTPUT\n"
+        "-t mangle -D OUTPUT -j KeenPbrOutput\n");
+}
+
 TEST_CASE("hook reconciliation surfaces permanent command failures immediately") {
   IptablesTestTempDir temp;
   const auto calls = temp.path() / "calls";

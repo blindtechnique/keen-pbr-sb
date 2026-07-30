@@ -721,6 +721,11 @@ private:
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
     RuntimeIncidentLatch urltest_apply_incidents_{3};
+    // Event-loop-owned notification latches. Recovery itself is controlled by
+    // the existing generation-fenced retry state machines; these latches only
+    // prevent transient or repeated failures from flooding the WebUI bell.
+    RuntimeIncidentLatch runtime_firewall_incidents_{1};
+    RuntimeIncidentLatch internal_vpn_catalog_incidents_{5};
     BlockingExecutor blocking_executor_{2, 64};
     // Resolver hooks can synchronously request a generated configuration.
     // Keep command execution, streaming and TXT probes on independent queues.

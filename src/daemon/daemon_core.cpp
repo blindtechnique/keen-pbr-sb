@@ -1464,6 +1464,7 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         if (snat_recovery.requested) {
             pending_owned_snat_recovery_ = {};
         }
+        runtime_firewall_incidents_.clear();
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
         return true;
@@ -1485,11 +1486,26 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                     runtime_generation_.load(std::memory_order_acquire),
                     snat_recovery);
             } else {
-                log.error(
-                    "Runtime routing/firewall reconciliation failed after {} "
-                    "retries: {}",
-                    retry_attempt,
-                    e.what());
+                const auto incident =
+                    runtime_firewall_incidents_.record_failure(
+                        "runtime-firewall-reconciliation",
+                        /*notify_immediately=*/true);
+                if (incident.notify) {
+                    log.error(
+                        "Runtime routing/firewall reconciliation failed after "
+                        "{} retries: {}. The last committed runtime generation "
+                        "remains active; inspect firewall diagnostics before "
+                        "retrying Apply.",
+                        retry_attempt,
+                        e.what());
+                } else {
+                    log.info(
+                        "Runtime routing/firewall reconciliation is still "
+                        "unavailable after {} retries: {}. The existing "
+                        "notification remains active.",
+                        retry_attempt,
+                        e.what());
+                }
             }
             return false;
         }
@@ -1505,11 +1521,35 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         // visible to the user. Stable-ID changes also retain a bounded retry:
         // the generation guard has restored the previous in-memory map, so
         // kernel and memory still describe the same previous generation.
-        log.error(
-            "Runtime routing/firewall reconciliation failed permanently: {}",
-            e.what());
-        if (config_has_native_vpn_catalog_policy(config_) &&
-            retry_attempt < RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
+        const bool retry =
+            config_has_native_vpn_catalog_policy(config_) &&
+            retry_attempt < RUNTIME_FIREWALL_RETRY_DELAYS.size();
+        const auto incident =
+            runtime_firewall_incidents_.record_failure(
+                "runtime-firewall-reconciliation",
+                /*notify_immediately=*/true);
+        if (incident.notify) {
+            if (retry) {
+                log.error(
+                    "Runtime routing/firewall reconciliation failed: {}. A "
+                    "bounded retry will verify whether the failure clears. "
+                    "The last committed runtime generation remains active.",
+                    e.what());
+            } else {
+                log.error(
+                    "Runtime routing/firewall reconciliation failed "
+                    "permanently: {}. The last committed runtime generation "
+                    "remains active; inspect firewall diagnostics before "
+                    "retrying Apply.",
+                    e.what());
+            }
+        } else {
+            log.info(
+                "Runtime routing/firewall reconciliation remains failed: {}. "
+                "The existing notification remains active.",
+                e.what());
+        }
+        if (retry) {
             schedule_runtime_firewall_retry(
                 retry_attempt,
                 runtime_generation_.load(std::memory_order_acquire),

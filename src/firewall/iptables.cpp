@@ -1782,6 +1782,21 @@ void IptablesFirewall::reconcile_hook(
         if (mutation_outcome ==
             IptablesCommandOutcome::PermanentFailure) {
             record_iptables_control_failure(mutate_args, mutation);
+            // KeeneticOS can replace the firewall scaffold after the
+            // successful snapshot above but before this mutation. In that
+            // publication window xtables commonly reports exit 2 together
+            // with "No chain/target/match by that name". The builtin chain
+            // still exists; it is our target chain that vanished. Retrying
+            // only this append/delete cannot recreate the target, so surface
+            // the recognized race as transient and let the outer runtime
+            // reconciler rebuild the complete owned generation.
+            if (command_reports_chain_missing(mutation)) {
+                throw TransientFirewallError(keen_pbr3::format(
+                    "{} {}/{} hook target changed during reconciliation",
+                    command,
+                    table,
+                    builtin_chain));
+            }
             throw FirewallError(keen_pbr3::format(
                 "failed to reconcile {} {}/{} hook",
                 command, table, builtin_chain));

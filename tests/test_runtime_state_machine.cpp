@@ -353,6 +353,23 @@ TEST_CASE("runtime incident latch reports an immediate severe failure once") {
             .notify);
 }
 
+TEST_CASE("native VPN inventory grace suppresses transient refresh failures") {
+    RuntimeIncidentLatch incidents(5);
+
+    for (std::size_t attempt = 1; attempt < 5; ++attempt) {
+        const auto decision = incidents.record_failure("ndms-catalog");
+        CHECK(decision.consecutive_failures == attempt);
+        CHECK_FALSE(decision.notify);
+    }
+    const auto persistent = incidents.record_failure("ndms-catalog");
+    CHECK(persistent.consecutive_failures == 5U);
+    CHECK(persistent.notify);
+    CHECK_FALSE(incidents.record_failure("ndms-catalog").notify);
+
+    incidents.clear();
+    CHECK_FALSE(incidents.record_failure("ndms-catalog").notify);
+}
+
 TEST_CASE("hot apply retries only transient firewall failures with backoff") {
     std::size_t apply_attempts = 0;
     std::vector<std::chrono::milliseconds> waits;

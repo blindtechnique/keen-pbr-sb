@@ -825,6 +825,11 @@ void Daemon::start_routing_runtime() {
         schedule_internal_vpn_catalog_refresh_if_needed(
             internal_vpn_resolution.state,
             internal_vpn_service_resolution.state);
+        // A successful full lifecycle boundary supersedes any earlier
+        // reconciliation incident. Without resetting the notification latch,
+        // a later independent firewall failure with the same key would remain
+        // hidden from the WebUI bell.
+        runtime_firewall_incidents_.clear();
         transition_runtime_or_throw(RuntimeState::running, "runtime start complete");
         schedule_keenetic_dns_refresh();
         refresh_resolver_config_hash_actual_async();
@@ -983,6 +988,10 @@ void Daemon::restart_routing_runtime() {
             internal_vpn_resolution.state,
             internal_vpn_service_resolution.state);
         refresh_resolver_config_hash_actual_async();
+        // The replacement firewall generation is committed and the runtime is
+        // healthy again. Re-arm the incident latch for a future, independent
+        // reconciliation failure.
+        runtime_firewall_incidents_.clear();
         transition_runtime_or_throw(
             RuntimeState::running, "transactional runtime restart complete");
         publish_runtime_state();
@@ -2002,21 +2011,6 @@ Daemon::resolve_internal_vpn_servers_for_runtime(
                 "Native VPN server policy has no verified runtime generation: " +
                 detail);
         }
-        if (generation.source ==
-            InternalVpnServerGenerationSource::retained_previous) {
-            Logger::instance().info(
-                "Native VPN server inventory is temporarily inconclusive; "
-                "retaining previously verified include-only bindings while "
-                "dropping every unverified bypass: {}",
-                detail);
-        } else {
-            Logger::instance().warn(
-                "Native VPN server inventory is incomplete; continuing with "
-                "a conservative degraded policy (unverified bypasses are "
-                "disabled; an unresolved included server may be temporarily "
-                "outside keen-pbr processing): {}",
-                detail);
-        }
         const bool authoritative_negative = std::any_of(
             resolution.issues.begin(),
             resolution.issues.end(),
@@ -2025,6 +2019,29 @@ Daemon::resolve_internal_vpn_servers_for_runtime(
                        InternalVpnServerResolutionError::
                            catalog_not_authoritative;
             });
+        if (authoritative_negative) {
+            Logger::instance().warn(
+                "Native VPN server inventory is incomplete; continuing with "
+                "a conservative degraded policy (unverified bypasses are "
+                "disabled; an unresolved included server may be temporarily "
+                "outside keen-pbr processing): {}",
+                detail);
+        } else if (
+            generation.source ==
+            InternalVpnServerGenerationSource::retained_previous) {
+            Logger::instance().info(
+                "Native VPN server inventory is temporarily inconclusive; "
+                "retaining previously verified include-only bindings while "
+                "dropping every unverified bypass: {}",
+                detail);
+        } else {
+            Logger::instance().info(
+                "Native VPN server inventory is temporarily unavailable; "
+                "continuing with a conservative live-name policy while an "
+                "authoritative refresh is pending (unverified bypasses remain "
+                "disabled): {}",
+                detail);
+        }
         return {
             std::move(generation.effective_servers),
             authoritative_negative
@@ -2183,9 +2200,10 @@ Daemon::resolve_internal_vpn_services_for_runtime(
                 detail);
         } else {
             state = InternalVpnRuntimeResolutionState::degraded;
-            Logger::instance().warn(
-                "Native VPN service inventory is unavailable; no unverified "
-                "source-pool bypass is active: {}",
+            Logger::instance().info(
+                "Native VPN service inventory is temporarily unavailable; "
+                "no unverified source-pool bypass is active while an "
+                "authoritative refresh is pending: {}",
                 detail);
         }
     }
@@ -2434,6 +2452,18 @@ void Daemon::schedule_internal_vpn_catalog_refresh_retry(
         return;
     }
 
+    const auto incident =
+        internal_vpn_catalog_incidents_.record_failure(
+            "native-vpn-ndms-catalog");
+    if (incident.notify) {
+        Logger::instance().warn(
+            "{} authoritative native VPN inventory refresh attempts could "
+            "not produce a fresh catalog. keen-pbr is keeping its conservative "
+            "verified/live-name policy, unverified bypasses remain disabled, "
+            "and background recovery will continue.",
+            incident.consecutive_failures);
+    }
+
     const auto delay = INTERNAL_VPN_CATALOG_RETRY_DELAYS[
         std::min(
             internal_vpn_catalog_refresh_retry_attempt_,
@@ -2458,6 +2488,7 @@ void Daemon::schedule_internal_vpn_catalog_refresh_retry(
 
 void Daemon::cancel_internal_vpn_catalog_refresh_retry() {
     internal_vpn_catalog_refresh_retry_attempt_ = 0;
+    internal_vpn_catalog_incidents_.clear();
     if (!scheduler_ ||
         internal_vpn_catalog_refresh_retry_task_id_ < 0) {
         return;
