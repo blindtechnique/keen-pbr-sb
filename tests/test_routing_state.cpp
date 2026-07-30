@@ -434,6 +434,8 @@ TEST_CASE(
     lan.name = "br1";
     DumpedInterface session;
     session.name = "sstp3";
+    session.admin_up = true;
+    session.carrier = true;
     session.master_interface = "sstp-bridge";
     session.ipv4_peer_addresses = {"172.16.1.33/32"};
 

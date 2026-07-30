@@ -17,6 +17,14 @@ namespace testing {
 bool restore_wait_option_supported_for_test(const std::string& program);
 bool restore_test_option_supported_for_test(const std::string& program);
 void reset_restore_wait_option_probe_for_test();
+bool xtables_match_registered_for_test(
+    const std::string& inventory_path,
+    const std::string& match);
+FirewallGlobalPrefilter iptables_effective_prefilter_for_test(
+    const FirewallGlobalPrefilter& requested,
+    bool effective_ipv6,
+    const std::string& ipv4_inventory_path,
+    const std::string& ipv6_inventory_path);
 } // namespace testing
 #endif
 

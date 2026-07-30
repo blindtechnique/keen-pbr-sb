@@ -107,6 +107,8 @@ TEST_CASE("dnsmasq access policy resolves bridged SSTP at its L3 ingress") {
     lan.name = "br0";
     DumpedInterface session;
     session.name = "sstp4";
+    session.admin_up = true;
+    session.carrier = true;
     session.master_interface = "sstp-bridge";
     session.ipv4_peer_addresses = {"172.16.1.44/32"};
 
@@ -154,6 +156,40 @@ TEST_CASE("dnsmasq access policy resolves bridged SSTP at its L3 ingress") {
     CHECK(
         targets.front().verified_ingress_interfaces ==
         std::vector<std::string>{"sstp4"});
+    CHECK(targets.front().verified_bridge_ingress_interfaces.empty());
+
+    // Keenetic may keep the bridge/veth scaffold while the active SSTP peer
+    // is a direct point-to-point interface. That stale scaffold must not
+    // introduce a physdev rule into the firewall transaction.
+    sstp.interface = "br0";
+    br_link.master_interface = "br0";
+    lan.name = "br0";
+    targets = {sstp};
+    DumpedInterface direct_session;
+    direct_session.name = "sstp0";
+    direct_session.admin_up = true;
+    direct_session.carrier = true;
+    direct_session.ipv4_peer_addresses = {"172.16.1.33/32"};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets,
+        {
+            bridge,
+            peer_link,
+            br_link,
+            lan,
+            direct_session,
+        });
+    CHECK(
+        targets.front().verified_ingress_interfaces ==
+        std::vector<std::string>{"sstp0"});
+    CHECK(targets.front().verified_bridge_ingress_interfaces.empty());
+
+    // The complete persistent bridge/veth scaffold without an active sstpN
+    // session is not a live bridged ingress either.
+    targets = {sstp};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {bridge, peer_link, br_link, lan});
+    CHECK(targets.front().verified_ingress_interfaces.empty());
     CHECK(targets.front().verified_bridge_ingress_interfaces.empty());
 
     // A half-created veth topology must not grant a shared bridge bypass.

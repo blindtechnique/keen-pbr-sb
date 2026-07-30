@@ -1015,6 +1015,78 @@ TEST_CASE("explicit unsupported restore test option is cached") {
   testing::reset_restore_wait_option_probe_for_test();
 }
 
+TEST_CASE("xtables kernel matcher inventory requires an exact registration") {
+  IptablesTestTempDir temp;
+  const auto inventory = temp.path() / "ip_tables_matches";
+  const auto modprobe_calls = temp.path() / "modprobe-calls";
+  write_iptables_test_executable(
+      temp.path() / "modprobe",
+      "#!/bin/sh\n"
+      "printf x >> \"$KPBR_TEST_MODPROBE_CALLS\"\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_TEST_MODPROBE_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(modprobe_calls.string());
+  {
+    std::ofstream output(inventory);
+    output << "mark\nphysdev_extra\nconntrack\n";
+  }
+
+  CHECK_FALSE(testing::xtables_match_registered_for_test(
+      inventory.string(), "physdev"));
+  CHECK_FALSE(testing::xtables_match_registered_for_test(
+      (temp.path() / "missing").string(), "physdev"));
+
+  FirewallGlobalPrefilter bridged_sstp;
+  bridged_sstp.bypass_bridge_source_selectors_v4 = {
+      {"br0", "sstp-br-link", "172.16.1.0/24"}};
+  CHECK_THROWS_WITH_AS(
+      testing::iptables_effective_prefilter_for_test(
+          bridged_sstp,
+          /*effective_ipv6=*/false,
+          inventory.string(),
+          (temp.path() / "ip6_tables_matches").string()),
+      "Cannot exclude clients of a bridged SSTP server: this firmware "
+      "kernel does not provide the iptables physdev matcher. The previous "
+      "firewall ruleset was kept unchanged.",
+      FirewallError);
+  CHECK_FALSE(std::filesystem::exists(modprobe_calls));
+
+  FirewallGlobalPrefilter direct_sstp;
+  direct_sstp.bypass_source_selectors_v4 = {
+      {"sstp0", "172.16.1.0/24"}};
+  CHECK_NOTHROW(testing::iptables_effective_prefilter_for_test(
+      direct_sstp,
+      /*effective_ipv6=*/false,
+      (temp.path() / "missing").string(),
+      (temp.path() / "ip6_tables_matches").string()));
+  CHECK_FALSE(std::filesystem::exists(modprobe_calls));
+
+  {
+    std::ofstream output(inventory, std::ios::app);
+    output << "physdev\n";
+  }
+  CHECK(testing::xtables_match_registered_for_test(
+      inventory.string(), "physdev"));
+  const auto effective =
+      testing::iptables_effective_prefilter_for_test(
+          bridged_sstp,
+          /*effective_ipv6=*/false,
+          inventory.string(),
+          (temp.path() / "ip6_tables_matches").string());
+  REQUIRE(effective.bypass_bridge_source_selectors_v4.size() == 1U);
+  CHECK(
+      effective.bypass_bridge_source_selectors_v4.front().interface ==
+      "br0");
+  CHECK(
+      effective.bypass_bridge_source_selectors_v4.front().bridge_port ==
+      "sstp-br-link");
+  CHECK(
+      effective.bypass_bridge_source_selectors_v4.front().cidr ==
+      "172.16.1.0/24");
+}
+
 TEST_CASE("iptables restore wait capability cache is independent per tool") {
   IptablesTestTempDir temp;
   const auto v4_calls = temp.path() / "v4-calls";

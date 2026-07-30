@@ -229,6 +229,24 @@ bool interface_has_master(
            *found->master_interface == master;
 }
 
+bool has_live_enslaved_sstp_session(
+    const InternalVpnRuntimeTarget& target,
+    const std::vector<DumpedInterface>& interfaces) {
+    return std::any_of(
+        interfaces.begin(),
+        interfaces.end(),
+        [&target](const auto& interface) {
+            if (!interface.admin_up ||
+                interface.carrier == std::optional<bool>{false} ||
+                interface.master_interface !=
+                    std::optional<std::string>{"sstp-bridge"}) {
+                return false;
+            }
+            return is_server_peer_name(target, interface.name) &&
+                   interface_peer_belongs_to_target(interface, target);
+        });
+}
+
 std::optional<InternalVpnVerifiedBridgeIngress>
 sstp_bridge_ingress(
     const InternalVpnRuntimeTarget& target,
@@ -321,7 +339,9 @@ void refresh_internal_vpn_service_ingress_interfaces(
             is_sstp_service(target.stable_id)) {
             if (const auto bridge =
                     sstp_bridge_ingress(target, live_interfaces);
-                bridge.has_value()) {
+                bridge.has_value() &&
+                has_live_enslaved_sstp_session(
+                    target, live_interfaces)) {
                 target.verified_bridge_ingress_interfaces.push_back(
                     *bridge);
             }

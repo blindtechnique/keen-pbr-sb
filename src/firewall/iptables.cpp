@@ -14,6 +14,8 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -860,119 +862,100 @@ static void pipe_to_cmd(const std::vector<std::string>& args, const std::string&
 
 namespace {
 
-bool physdev_match_available(
-    const char* restore_command,
-    bool ipv6) {
-    static std::atomic<int> ipv4_support{-1}; // -1 unknown, 0 no, 1 yes
-    static std::atomic<int> ipv6_support{-1};
-    auto& support_cache =
-        ipv6 ? ipv6_support : ipv4_support;
-    const int cached = support_cache.load(std::memory_order_acquire);
-    if (cached >= 0) {
-        return cached == 1;
-    }
-
-    // Loading the userspace extension is not enough: old firmware may still
-    // reject physdev in-kernel and then fail the whole real transaction.
-    // Validate the exact hook and matcher without modifying live rules.
-    const std::string probe = keen_pbr3::format(
-        "*mangle\n"
-        "-A PREROUTING -i br0 -m physdev "
-        "--physdev-in sstp-br-link -s {} -j RETURN\n"
-        "COMMIT\n",
-        ipv6 ? "2001:db8::/64" : "192.0.2.0/24");
-    if (!restore_test_option_supported(restore_command)) {
-        support_cache.store(0, std::memory_order_release);
-        Logger::instance().verbose(
-            "{} cannot validate SSTP physdev without --test; "
-            "keeping bridged bypass fail-closed",
-            restore_command);
-        return false;
-    }
-    const std::vector<std::string> base_args{
-        restore_command, "--test", "--noflush"};
-    const bool wait_supported =
-        restore_wait_option_supported(restore_command);
-    const auto args =
-        wait_supported ? with_wait_option(base_args) : base_args;
-    const SafeExecTimeouts timeouts{
-        wait_supported
-            ? std::chrono::seconds{12}
-            : std::chrono::seconds{2},
-        std::chrono::milliseconds{500}};
-    for (std::size_t attempt = 0;
-         attempt <= restore_retry_delays.size();
-         ++attempt) {
-        std::string error_output;
-        SafeExecFailureDetail failure_detail;
-        const int status = safe_exec_pipe_stdin(
-            args,
-            probe,
-            &error_output,
-            SafeExecFailureLog::Suppressed,
-            &failure_detail,
-            timeouts);
-        if (status == 0) {
-            support_cache.store(1, std::memory_order_release);
+bool xtables_match_registered(
+    std::string_view inventory_path,
+    std::string_view match) {
+    std::ifstream inventory{std::string{inventory_path}};
+    std::string registered_match;
+    while (inventory >> registered_match) {
+        if (registered_match == match) {
             return true;
         }
-        const bool transient =
-            status < 0 || status == 4 ||
-            restore_failure_is_transient(error_output, probe);
-        const bool final_attempt =
-            attempt == restore_retry_delays.size() ||
-            status < 0 ||
-            (wait_supported && status == 4);
-        if (transient && final_attempt) {
-            throw TransientFirewallError(
-                describe_restore_failure(
-                    restore_command, status, error_output, probe));
-        }
-        if (!transient) {
-            support_cache.store(0, std::memory_order_release);
-            Logger::instance().verbose(
-                "{} rejected the SSTP physdev probe; keeping bridged "
-                "bypass fail-closed: {}",
-                restore_command,
-                error_output.empty()
-                    ? keen_pbr3::format(
-                          "test exited with status {}", status)
-                    : error_output);
-            return false;
-        }
-        std::this_thread::sleep_for(
-            restore_retry_delays[attempt]);
     }
     return false;
 }
 
-FirewallGlobalPrefilter iptables_effective_prefilter(
+bool physdev_match_available(
+    std::string_view inventory_path,
+    bool allow_module_load) {
+    // `iptables-restore --test` only validates the userspace extension on
+    // legacy xtables. It can accept `-m physdev` even when the running kernel
+    // has no registered matcher and the real transaction then fails at
+    // COMMIT. The proc inventory is the authoritative in-kernel capability.
+    if (xtables_match_registered(inventory_path, "physdev")) {
+        return true;
+    }
+
+    if (allow_module_load) {
+        // Some firmware images ship xt_physdev as a loadable module. Try it
+        // once per daemon lifetime, then trust only the refreshed kernel
+        // inventory. Custom inventory paths used by tests never reach this
+        // branch and therefore cannot mutate the host running the tests.
+        static std::once_flag physdev_module_load_once;
+        std::call_once(physdev_module_load_once, [] {
+            const int status = safe_exec(
+                {"modprobe", "xt_physdev"},
+                /*suppress_output=*/true);
+            Logger::instance().verbose(
+                "One-time xt_physdev module load attempt completed with "
+                "status {}",
+                status);
+        });
+        if (xtables_match_registered(inventory_path, "physdev")) {
+            return true;
+        }
+    }
+
+    Logger::instance().verbose(
+        "{} does not register the physdev matcher; keeping bridged "
+        "SSTP bypass fail-closed",
+        inventory_path);
+    return false;
+}
+
+FirewallGlobalPrefilter iptables_effective_prefilter_with_inventories(
     const FirewallGlobalPrefilter& requested,
-    bool effective_ipv6) {
+    bool effective_ipv6,
+    std::string_view ipv4_inventory_path,
+    std::string_view ipv6_inventory_path,
+    bool allow_module_load) {
     FirewallGlobalPrefilter effective = requested;
     if (!effective.bypass_bridge_source_selectors_v4.empty()) {
         const bool ipv4_physdev_available =
-            physdev_match_available(
-                "iptables-restore", /*ipv6=*/false);
+            physdev_match_available(ipv4_inventory_path, allow_module_load);
         if (!ipv4_physdev_available) {
-            Logger::instance().verbose(
-                "iptables physdev match is unavailable; keeping bridged "
-                "SSTP bypass fail-closed");
-            effective.bypass_bridge_source_selectors_v4.clear();
+            throw FirewallError(
+                "Cannot exclude clients of a bridged SSTP server: "
+                "this firmware kernel does not provide the iptables "
+                "physdev matcher. The previous firewall ruleset "
+                "was kept unchanged.");
         }
     }
     if (!effective.bypass_bridge_source_selectors_v6.empty()) {
         if (!effective_ipv6) {
             effective.bypass_bridge_source_selectors_v6.clear();
         } else if (!physdev_match_available(
-                       "ip6tables-restore", /*ipv6=*/true)) {
-            Logger::instance().verbose(
-                "ip6tables physdev match is unavailable; keeping bridged "
-                "SSTP bypass fail-closed");
-            effective.bypass_bridge_source_selectors_v6.clear();
+                       ipv6_inventory_path,
+                       allow_module_load)) {
+            throw FirewallError(
+                "Cannot exclude IPv6 clients of a bridged SSTP server: "
+                "this firmware kernel does not provide the ip6tables "
+                "physdev matcher. The previous firewall ruleset "
+                "was kept unchanged.");
         }
     }
     return effective;
+}
+
+FirewallGlobalPrefilter iptables_effective_prefilter(
+    const FirewallGlobalPrefilter& requested,
+    bool effective_ipv6) {
+    return iptables_effective_prefilter_with_inventories(
+        requested,
+        effective_ipv6,
+        "/proc/net/ip_tables_matches",
+        "/proc/net/ip6_tables_matches",
+        /*allow_module_load=*/true);
 }
 
 class NatValidationCleanup final {
@@ -1017,6 +1000,31 @@ private:
 };
 
 } // namespace
+
+#ifdef KEEN_PBR3_TESTING
+namespace testing {
+
+bool xtables_match_registered_for_test(
+    const std::string& inventory_path,
+    const std::string& match) {
+    return xtables_match_registered(inventory_path, match);
+}
+
+FirewallGlobalPrefilter iptables_effective_prefilter_for_test(
+    const FirewallGlobalPrefilter& requested,
+    bool effective_ipv6,
+    const std::string& ipv4_inventory_path,
+    const std::string& ipv6_inventory_path) {
+    return iptables_effective_prefilter_with_inventories(
+        requested,
+        effective_ipv6,
+        ipv4_inventory_path,
+        ipv6_inventory_path,
+        /*allow_module_load=*/false);
+}
+
+} // namespace testing
+#endif
 
 std::string IptablesFirewall::build_nat_validation_script(
     const std::string& nat_script) {
