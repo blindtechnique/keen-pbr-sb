@@ -4425,6 +4425,15 @@
       "threads",
       "whatsapp"
     ],
+    "routingCompanions": [
+      {
+        "id": "meta_whatsapp_ip",
+        "name": "Meta / WhatsApp IP",
+        "sourcePresetId": "whatsapp",
+        "include": "ip_cidrs",
+        "suppressDirectSelection": true
+      }
+    ],
     "origin": "",
     "engines": {
       "singbox": {
@@ -4613,15 +4622,6 @@
         "domains": [
           "t.me",
           "telegram.org"
-        ],
-        "subnets": [
-          "91.105.192.0/23",
-          "91.108.4.0/22",
-          "91.108.8.0/21",
-          "91.108.16.0/21",
-          "91.108.56.0/22",
-          "149.154.160.0/20",
-          "185.76.151.0/24"
         ]
       },
       "singbox": {
@@ -4633,7 +4633,14 @@
         ],
         "action": "tunnel"
       }
-    }
+    },
+    "routingCompanions": [
+      {
+        "id": "telegram_ip",
+        "name": "Telegram IP",
+        "url": "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-telegram.srs"
+      }
+    ]
   },
   {
     "id": "threads",
@@ -4711,6 +4718,14 @@
           "31.13.64.0/18",
           "45.64.40.0/22",
           "57.141.0.0/21",
+          "57.141.8.0/24",
+          "57.141.10.0/24",
+          "57.141.12.0/23",
+          "57.141.14.0/24",
+          "57.141.16.0/22",
+          "57.141.20.0/24",
+          "57.141.22.0/24",
+          "57.141.24.0/24",
           "57.144.0.0/14",
           "66.220.144.0/20",
           "69.63.176.0/20",

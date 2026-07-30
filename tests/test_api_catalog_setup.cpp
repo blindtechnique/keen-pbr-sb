@@ -3,12 +3,14 @@
 #include <doctest/doctest.h>
 #include <httplib.h>
 
+#include "../src/api/handler_catalog.hpp"
 #include "../src/api/handler_catalog_setup.hpp"
 #include "../src/api/handler_config.hpp"
 #include "../src/api/sse_broadcaster.hpp"
 #include "../src/config/config_writer.hpp"
 #include "../src/daemon/config_store.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
@@ -292,6 +294,140 @@ void register_catalog_test_handler(
 }
 
 } // namespace
+
+TEST_CASE(
+    "catalog handler enriches upstream-shaped snapshots with local routing companions") {
+    const nlohmann::json upstream = nlohmann::json::array({
+        {
+            {"id", "meta"},
+            {"name", "Meta"},
+            {"engines",
+             {{"singbox",
+               {{"ruleSets",
+                 {{{"url",
+                    "https://raw.githubusercontent.com/SagerNet/"
+                    "sing-geosite/rule-set/geosite-meta.srs"}}}}}}}},
+        },
+        {
+            {"id", "whatsapp"},
+            {"name", "WhatsApp"},
+            {"engines",
+             {{"dns",
+               {{"domains", {"whatsapp.com"}},
+                {"subnets", {"31.13.64.0/18"}}}}}},
+        },
+        {
+            {"id", "telegram"},
+            {"name", "Telegram"},
+            {"engines",
+             {{"dns",
+               {{"domains", {"t.me", "telegram.org"}},
+                {"subnets", {"91.108.4.0/22"}}}},
+              {"singbox",
+               {{"ruleSets",
+                 {{{"url",
+                    "https://repo.hoaxisr.ru/rulesets/srs/"
+                    "telegram.srs"}}}}}}}},
+        },
+        {
+            {"id", "unrelated"},
+            {"name", "Unrelated"},
+            {"engines",
+             {{"dns", {{"domains", {"example.test"}}}}}},
+        },
+    });
+    const nlohmann::json bundled = nlohmann::json::array({
+        {
+            {"id", "meta"},
+            {"name", "Meta"},
+            {"routingCompanions",
+             {{{"id", "meta_whatsapp_ip"},
+               {"name", "Meta / WhatsApp IP"},
+               {"sourcePresetId", "whatsapp"},
+               {"include", "ip_cidrs"},
+               {"suppressDirectSelection", true}}}},
+            {"engines",
+             {{"singbox",
+               {{"ruleSets",
+                 {{{"url",
+                    "https://raw.githubusercontent.com/SagerNet/"
+                    "sing-geosite/rule-set/geosite-meta.srs"}}}}}}}},
+        },
+        {
+            {"id", "whatsapp"},
+            {"name", "WhatsApp"},
+            {"engines",
+             {{"dns",
+               {{"domains", {"whatsapp.com", "whatsapp.net"}},
+                {"subnets",
+                 {"31.13.24.0/21", "57.141.24.0/24"}}}}}},
+        },
+        {
+            {"id", "telegram"},
+            {"name", "Telegram"},
+            {"routingCompanions",
+             {{{"id", "telegram_ip"},
+               {"name", "Telegram IP"},
+               {"url",
+                "https://raw.githubusercontent.com/runetfreedom/"
+                "russia-v2ray-rules-dat/release/sing-box/"
+                "rule-set-geoip/geoip-telegram.srs"}}}},
+            {"engines",
+             {{"dns", {{"domains", {"t.me", "telegram.org"}}}},
+              {"singbox",
+               {{"ruleSets",
+                 {{{"url",
+                    "https://repo.hoaxisr.ru/rulesets/srs/"
+                    "telegram.srs"}}}}}}}},
+        },
+    });
+
+    const auto enriched =
+        enrich_catalog_with_routing_companions(
+            upstream, bundled);
+    const auto preset =
+        [&](const std::string& id) -> const nlohmann::json& {
+            const auto found = std::find_if(
+                enriched.begin(),
+                enriched.end(),
+                [&](const nlohmann::json& candidate) {
+                    return candidate.value(
+                               "id", std::string{}) == id;
+                });
+            REQUIRE(found != enriched.end());
+            return *found;
+        };
+
+    CHECK(preset("meta").at("routingCompanions").size() == 1U);
+    CHECK(
+        preset("whatsapp")
+            .at("engines")
+            .at("dns")
+            .at("subnets") ==
+        nlohmann::json::array(
+            {"31.13.24.0/21", "57.141.24.0/24"}));
+    CHECK_FALSE(
+        preset("telegram")
+            .at("engines")
+            .at("dns")
+            .contains("subnets"));
+    CHECK(
+        preset("telegram")
+            .at("routingCompanions")
+            .at(0)
+            .at("id") == "telegram_ip");
+    CHECK(
+        preset("unrelated")
+            .at("engines")
+            .at("dns")
+            .at("domains")
+            .at(0) == "example.test");
+
+    const auto bundled_fallback =
+        enrich_catalog_with_routing_companions(
+            bundled, bundled);
+    CHECK(bundled_fallback == bundled);
+}
 
 TEST_CASE(
     "catalog setup preview and apply commit one authoritative candidate") {

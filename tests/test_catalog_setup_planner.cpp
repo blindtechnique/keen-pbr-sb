@@ -91,6 +91,124 @@ nlohmann::json blocking_preset() {
     };
 }
 
+const std::vector<std::string>& whatsapp_domains() {
+    static const std::vector<std::string> domains{
+        "whatsapp.com",
+        "whatsapp.net",
+    };
+    return domains;
+}
+
+const std::vector<std::string>& whatsapp_ipv4_cidrs() {
+    static const std::vector<std::string> cidrs{
+        "31.13.24.0/21",
+        "31.13.64.0/18",
+        "45.64.40.0/22",
+        "57.141.0.0/21",
+        "57.141.8.0/24",
+        "57.141.10.0/24",
+        "57.141.12.0/23",
+        "57.141.14.0/24",
+        "57.141.16.0/22",
+        "57.141.20.0/24",
+        "57.141.22.0/24",
+        "57.141.24.0/24",
+        "57.144.0.0/14",
+        "66.220.144.0/20",
+        "69.63.176.0/20",
+        "69.171.224.0/19",
+        "74.119.76.0/22",
+        "102.132.96.0/20",
+        "103.4.96.0/22",
+        "129.134.0.0/16",
+        "147.75.208.0/20",
+        "157.240.0.0/16",
+        "163.70.128.0/17",
+        "163.77.128.0/17",
+        "173.252.64.0/18",
+        "179.60.192.0/22",
+        "185.60.216.0/22",
+        "185.89.216.0/22",
+        "189.247.71.0/24",
+        "204.15.20.0/22",
+    };
+    return cidrs;
+}
+
+nlohmann::json whatsapp_preset() {
+    return {
+        {"id", "whatsapp"},
+        {"name", "WhatsApp"},
+        {"engines",
+         {
+             {"dns",
+              {
+                  {"domains", whatsapp_domains()},
+                  {"subnets", whatsapp_ipv4_cidrs()},
+              }},
+             {"singbox",
+              {
+                  {"action", "tunnel"},
+                  {"ruleSets",
+                   {{{"tag", "geosite-whatsapp"},
+                     {"url",
+                      "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"}}}},
+              }},
+         }},
+    };
+}
+
+nlohmann::json meta_preset() {
+    return {
+        {"id", "meta"},
+        {"name", "Meta (все сервисы)"},
+        {"covers", {"whatsapp"}},
+        {"routingCompanions",
+         {{{"id", "meta_whatsapp_ip"},
+           {"name", "Meta / WhatsApp IP"},
+           {"sourcePresetId", "whatsapp"},
+           {"include", "ip_cidrs"},
+           {"suppressDirectSelection", true}}}},
+        {"engines",
+         {{"singbox",
+           {
+               {"action", "tunnel"},
+               {"ruleSets",
+                {{{"tag", "geosite-meta"},
+                  {"url",
+                   "https://raw.githubusercontent.com/SagerNet/sing-geosite/"
+                   "rule-set/geosite-meta.srs"}}}},
+           }}}},
+    };
+}
+
+nlohmann::json telegram_preset() {
+    return {
+        {"id", "telegram"},
+        {"name", "Telegram"},
+        {"routingCompanions",
+         {{{"id", "telegram_ip"},
+           {"name", "Telegram IP"},
+           {"url",
+            "https://raw.githubusercontent.com/runetfreedom/"
+            "russia-v2ray-rules-dat/release/sing-box/"
+            "rule-set-geoip/geoip-telegram.srs"}}}},
+        {"engines",
+         {
+             {"dns", {{"domains", {"t.me", "telegram.org"}}}},
+             {"singbox",
+              {
+                  {"action", "tunnel"},
+                  {"ruleSets",
+                   {{{"tag", "geosite-telegram"},
+                     {"url",
+                      "https://repo.hoaxisr.ru/rulesets/srs/"
+                      "telegram.srs"}}}},
+              }},
+         }},
+    };
+}
+
 CatalogSetupIntent outbound_intent() {
     CatalogSetupIntent intent;
     intent.selections = {{"category-ai", std::nullopt}};
@@ -98,6 +216,12 @@ CatalogSetupIntent outbound_intent() {
     intent.outbound_tag = "proxy";
     intent.dns_mode = CatalogDnsMode::automatic;
     intent.source_detour_tag = "proxy";
+    return intent;
+}
+
+CatalogSetupIntent meta_outbound_intent() {
+    auto intent = outbound_intent();
+    intent.selections = {{"meta", std::nullopt}};
     return intent;
 }
 
@@ -146,6 +270,270 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
     CHECK_NOTHROW(validate_config(plan.candidate));
     CHECK_NOTHROW(validate_recommended_list_setup(
         plan.candidate, "category_ai"));
+}
+
+TEST_CASE(
+    "Meta uses a URL primary and an IP-only routing companion") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:meta-companion"},
+        {"presets",
+         nlohmann::json::array({meta_preset(), whatsapp_preset()})},
+    };
+    const auto plan = plan_catalog_setup(
+        meta_outbound_intent(),
+        catalog,
+        base_config());
+
+    REQUIRE(plan.candidate.lists.has_value());
+    REQUIRE(plan.candidate.lists->size() == 2U);
+    const auto& primary = plan.candidate.lists->at("meta");
+    const auto& companion =
+        plan.candidate.lists->at("meta_whatsapp_ip");
+    CHECK(
+        primary.url ==
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/"
+        "rule-set/geosite-meta.srs");
+    CHECK_FALSE(primary.domains.has_value());
+    CHECK_FALSE(primary.ip_cidrs.has_value());
+    CHECK(primary.detour == "proxy");
+    CHECK_FALSE(companion.url.has_value());
+    CHECK_FALSE(companion.domains.has_value());
+    REQUIRE(companion.ip_cidrs.has_value());
+    CHECK(companion.ip_cidrs->size() == 30U);
+    CHECK(*companion.ip_cidrs == whatsapp_ipv4_cidrs());
+    CHECK_FALSE(companion.detour.has_value());
+    REQUIRE(primary.catalog_identity.has_value());
+    REQUIRE(companion.catalog_identity.has_value());
+    CHECK(primary.catalog_identity != companion.catalog_identity);
+
+    REQUIRE(plan.summary.lists.size() == 2U);
+    CHECK(plan.summary.lists[0].preset_id == "meta");
+    CHECK(plan.summary.lists[0].technical_id == "meta");
+    CHECK(plan.summary.lists[0].url_backed);
+    CHECK_FALSE(plan.summary.lists[0].has_inline_domains);
+    CHECK_FALSE(plan.summary.lists[0].has_inline_cidrs);
+    CHECK(plan.summary.lists[1].preset_id == "meta_whatsapp_ip");
+    CHECK(plan.summary.lists[1].technical_id == "meta_whatsapp_ip");
+    CHECK_FALSE(plan.summary.lists[1].url_backed);
+    CHECK_FALSE(plan.summary.lists[1].has_inline_domains);
+    CHECK(plan.summary.lists[1].has_inline_cidrs);
+
+    REQUIRE(plan.summary.route_rules.size() == 2U);
+    for (const auto& summary : plan.summary.route_rules) {
+        const auto& rule =
+            plan.candidate.route->rules->at(summary.insertion_index);
+        CHECK(rule.outbound == "proxy");
+        REQUIRE(rule.list.has_value());
+        CHECK(rule.list->size() == 1U);
+    }
+    REQUIRE(plan.summary.dns_rules.size() == 1U);
+    const auto& dns_rule =
+        plan.candidate.dns->rules->at(
+            plan.summary.dns_rules.front().insertion_index);
+    CHECK(dns_rule.list == std::vector<std::string>{"meta"});
+    CHECK(dns_rule.server == "proxy_dns");
+    CHECK_NOTHROW(validate_config(plan.candidate));
+}
+
+TEST_CASE(
+    "Telegram uses separate domain and URL-backed IP lists") {
+    auto intent = outbound_intent();
+    intent.selections = {{"telegram", std::nullopt}};
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:telegram-companion"},
+        {"presets", nlohmann::json::array({telegram_preset()})},
+    };
+    const auto plan = plan_catalog_setup(
+        intent, catalog, base_config());
+
+    REQUIRE(plan.candidate.lists.has_value());
+    const auto& primary = plan.candidate.lists->at("telegram");
+    const auto& companion = plan.candidate.lists->at("telegram_ip");
+    CHECK(
+        primary.url ==
+        "https://repo.hoaxisr.ru/rulesets/srs/telegram.srs");
+    CHECK(
+        primary.domains ==
+        std::optional<std::vector<std::string>>{
+            {"t.me", "telegram.org"}});
+    CHECK_FALSE(primary.ip_cidrs.has_value());
+    CHECK(
+        companion.url ==
+        "https://raw.githubusercontent.com/runetfreedom/"
+        "russia-v2ray-rules-dat/release/sing-box/"
+        "rule-set-geoip/geoip-telegram.srs");
+    CHECK_FALSE(companion.domains.has_value());
+    CHECK_FALSE(companion.ip_cidrs.has_value());
+    CHECK(primary.detour == "proxy");
+    CHECK(companion.detour == "proxy");
+
+    REQUIRE(plan.summary.route_rules.size() == 2U);
+    REQUIRE(plan.summary.dns_rules.size() == 1U);
+    const auto& dns_rule =
+        plan.candidate.dns->rules->at(
+            plan.summary.dns_rules.front().insertion_index);
+    CHECK(dns_rule.list == std::vector<std::string>{"telegram"});
+}
+
+TEST_CASE(
+    "existing Meta primary receives its missing routing companion") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:meta-companion-upgrade"},
+        {"presets",
+         nlohmann::json::array({meta_preset(), whatsapp_preset()})},
+    };
+    const auto initial = plan_catalog_setup(
+        meta_outbound_intent(), catalog, base_config());
+    auto old_install = initial.candidate;
+    REQUIRE(old_install.lists.has_value());
+    old_install.lists->erase("meta_whatsapp_ip");
+    REQUIRE(old_install.route.has_value());
+    REQUIRE(old_install.route->rules.has_value());
+    auto& route_rules = *old_install.route->rules;
+    route_rules.erase(
+        std::remove_if(
+            route_rules.begin(),
+            route_rules.end(),
+            [](const RouteRule& rule) {
+                return rule.list ==
+                    std::optional<std::vector<std::string>>{
+                        {"meta_whatsapp_ip"}};
+            }),
+        route_rules.end());
+    validate_config(old_install);
+
+    const auto upgraded = plan_catalog_setup(
+        meta_outbound_intent(), catalog, old_install);
+    REQUIRE(upgraded.summary.lists.size() == 2U);
+    CHECK(upgraded.summary.lists[0].already_installed);
+    CHECK_FALSE(upgraded.summary.lists[1].already_installed);
+    CHECK(upgraded.summary.lists[0].technical_id == "meta");
+    CHECK(
+        upgraded.summary.lists[1].technical_id ==
+        "meta_whatsapp_ip");
+    REQUIRE(upgraded.summary.route_rules.size() == 1U);
+    CHECK(upgraded.summary.dns_rules.empty());
+    CHECK(
+        upgraded.candidate.lists->at("meta").url ==
+        old_install.lists->at("meta").url);
+    REQUIRE(
+        upgraded.candidate.lists
+            ->at("meta_whatsapp_ip")
+            .ip_cidrs.has_value());
+
+    const auto repeated = plan_catalog_setup(
+        meta_outbound_intent(), catalog, upgraded.candidate);
+    REQUIRE(repeated.summary.lists.size() == 2U);
+    CHECK(repeated.summary.lists[0].already_installed);
+    CHECK(repeated.summary.lists[1].already_installed);
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
+    CHECK(
+        nlohmann::json(repeated.candidate) ==
+        nlohmann::json(upgraded.candidate));
+}
+
+TEST_CASE(
+    "managed Telegram primary drops stale inline CIDRs during companion migration") {
+    auto intent = outbound_intent();
+    intent.selections = {{"telegram", std::nullopt}};
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:telegram-companion-migration"},
+        {"presets", nlohmann::json::array({telegram_preset()})},
+    };
+    const auto installed =
+        plan_catalog_setup(intent, catalog, base_config());
+    auto legacy = installed.candidate;
+    REQUIRE(legacy.lists.has_value());
+    legacy.lists->at("telegram").ip_cidrs =
+        std::vector<std::string>{
+            "91.108.4.0/22",
+            "149.154.160.0/20",
+        };
+    validate_config(legacy);
+
+    const auto reconciled =
+        plan_catalog_setup(intent, catalog, legacy);
+    REQUIRE(reconciled.summary.lists.size() == 2U);
+    CHECK(reconciled.summary.lists[0].already_installed);
+    CHECK(reconciled.summary.lists[1].already_installed);
+    CHECK_FALSE(
+        reconciled.candidate.lists
+            ->at("telegram")
+            .ip_cidrs.has_value());
+    CHECK(
+        reconciled.candidate.lists
+            ->at("telegram")
+            .domains ==
+        std::optional<std::vector<std::string>>{
+            {"t.me", "telegram.org"}});
+    CHECK(reconciled.summary.route_rules.empty());
+    CHECK(reconciled.summary.dns_rules.empty());
+
+    const auto repeated =
+        plan_catalog_setup(intent, catalog, reconciled.candidate);
+    CHECK(
+        nlohmann::json(repeated.candidate) ==
+        nlohmann::json(reconciled.candidate));
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
+}
+
+TEST_CASE(
+    "selecting Meta with covered WhatsApp does not duplicate IP routing") {
+    auto intent = meta_outbound_intent();
+    intent.selections.push_back({"whatsapp", std::nullopt});
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:meta-covered-selection"},
+        {"presets",
+         nlohmann::json::array({meta_preset(), whatsapp_preset()})},
+    };
+
+    const auto plan =
+        plan_catalog_setup(intent, catalog, base_config());
+    REQUIRE(plan.candidate.lists.has_value());
+    REQUIRE(plan.candidate.lists->size() == 2U);
+    CHECK(plan.candidate.lists->count("meta") == 1U);
+    CHECK(
+        plan.candidate.lists->count("meta_whatsapp_ip") ==
+        1U);
+    CHECK(plan.candidate.lists->count("whatsapp") == 0U);
+    REQUIRE(plan.summary.route_rules.size() == 2U);
+    REQUIRE(plan.summary.dns_rules.size() == 1U);
+    CHECK(
+        plan.candidate.dns->rules
+            ->at(plan.summary.dns_rules.front().insertion_index)
+            .list ==
+        std::vector<std::string>{"meta"});
+}
+
+TEST_CASE("routing companion metadata rejects unsafe or missing sources") {
+    SUBCASE("unknown inline source") {
+        auto meta = meta_preset();
+        meta["routingCompanions"][0]["sourcePresetId"] = "missing";
+        CHECK_THROWS_WITH_AS(
+            plan_catalog_setup(
+                meta_outbound_intent(),
+                nlohmann::json::array({std::move(meta)}),
+                base_config()),
+            "Catalogue routing companion references unknown preset 'missing'",
+            CatalogSetupPlanError);
+    }
+
+    SUBCASE("URL and inline source are mutually exclusive") {
+        auto meta = meta_preset();
+        meta["routingCompanions"][0]["url"] =
+            "https://repo.hoaxisr.ru/rulesets/srs/meta-ip.srs";
+        CHECK_THROWS_WITH_AS(
+            plan_catalog_setup(
+                meta_outbound_intent(),
+                nlohmann::json::array(
+                    {std::move(meta), whatsapp_preset()}),
+                base_config()),
+            "Catalogue routing companion must define exactly one of url or "
+            "sourcePresetId",
+            CatalogSetupPlanError);
+    }
 }
 
 TEST_CASE(

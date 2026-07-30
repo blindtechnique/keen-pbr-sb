@@ -36,6 +36,14 @@ std::string catalog_detour();
 // catalogue records from the client.
 nlohmann::json load_catalog_snapshot();
 
+// Applies the package-owned routing companion metadata to a downloaded
+// upstream catalogue. The upstream remains authoritative for ordinary
+// presets, while the small local overlay keeps split domain/IP routing
+// available both online and from the bundled fallback.
+nlohmann::json enrich_catalog_with_routing_companions(
+    nlohmann::json upstream_presets,
+    const nlohmann::json& bundled_presets);
+
 } // namespace keen_pbr3
 
 #endif

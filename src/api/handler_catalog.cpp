@@ -80,6 +80,66 @@ bool cache_is_fresh() {
     return std::chrono::system_clock::now() - *mtime < kMaxAge;
 }
 
+nlohmann::json* find_preset(
+    nlohmann::json& presets,
+    const std::string& id) {
+    if (!presets.is_array()) return nullptr;
+    for (auto& preset : presets) {
+        if (!preset.is_object()) continue;
+        const auto candidate = preset.find("id");
+        if (candidate != preset.end() &&
+            candidate->is_string() &&
+            candidate->get_ref<const std::string&>() == id) {
+            return &preset;
+        }
+    }
+    return nullptr;
+}
+
+const nlohmann::json* find_preset(
+    const nlohmann::json& presets,
+    const std::string& id) {
+    if (!presets.is_array()) return nullptr;
+    for (const auto& preset : presets) {
+        if (!preset.is_object()) continue;
+        const auto candidate = preset.find("id");
+        if (candidate != preset.end() &&
+            candidate->is_string() &&
+            candidate->get_ref<const std::string&>() == id) {
+            return &preset;
+        }
+    }
+    return nullptr;
+}
+
+const nlohmann::json* dns_subnets(
+    const nlohmann::json& preset) {
+    const auto engines = preset.find("engines");
+    if (engines == preset.end() || !engines->is_object()) {
+        return nullptr;
+    }
+    const auto dns = engines->find("dns");
+    if (dns == engines->end() || !dns->is_object()) {
+        return nullptr;
+    }
+    const auto subnets = dns->find("subnets");
+    return subnets == dns->end() ? nullptr : &*subnets;
+}
+
+void align_dns_subnets(
+    nlohmann::json& target,
+    const nlohmann::json& bundled) {
+    if (const auto* subnets = dns_subnets(bundled)) {
+        target["engines"]["dns"]["subnets"] = *subnets;
+        return;
+    }
+    const auto engines = target.find("engines");
+    if (engines == target.end() || !engines->is_object()) return;
+    const auto dns = engines->find("dns");
+    if (dns == engines->end() || !dns->is_object()) return;
+    dns->erase("subnets");
+}
+
 // Only replaces the cache when the payload parses as the expected array, so a
 // captive portal or an error page cannot wipe a working catalogue.
 bool store_if_valid(const std::string& payload) {
@@ -133,7 +193,23 @@ nlohmann::json load_catalog_snapshot_locked() {
     }
 
     try {
-        response["presets"] = nlohmann::json::parse(payload);
+        auto presets = nlohmann::json::parse(payload);
+        auto bundled = nlohmann::json::array();
+        try {
+            const auto bundled_payload = read_file(kBundledPath);
+            if (!bundled_payload.empty()) {
+                bundled =
+                    nlohmann::json::parse(bundled_payload);
+            }
+        } catch (const std::exception& error) {
+            Logger::instance().warn(
+                "List catalogue: bundled routing companion overlay is "
+                "unavailable: {}",
+                error.what());
+        }
+        response["presets"] =
+            enrich_catalog_with_routing_companions(
+                std::move(presets), bundled);
         if (response["presets"].is_array()) {
             for (auto& preset : response["presets"]) {
                 if (!preset.is_object()) continue;
@@ -157,6 +233,78 @@ nlohmann::json load_catalog_snapshot_locked() {
 }
 
 } // namespace
+
+nlohmann::json enrich_catalog_with_routing_companions(
+    nlohmann::json upstream_presets,
+    const nlohmann::json& bundled_presets) {
+    if (!upstream_presets.is_array() ||
+        !bundled_presets.is_array()) {
+        return upstream_presets;
+    }
+
+    for (const auto& bundled_parent : bundled_presets) {
+        if (!bundled_parent.is_object()) continue;
+        const auto companions =
+            bundled_parent.find("routingCompanions");
+        if (companions == bundled_parent.end() ||
+            !companions->is_array() ||
+            companions->empty()) {
+            continue;
+        }
+        const auto parent_id_value =
+            bundled_parent.find("id");
+        if (parent_id_value == bundled_parent.end() ||
+            !parent_id_value->is_string() ||
+            parent_id_value->get_ref<const std::string&>().empty()) {
+            continue;
+        }
+        const auto& parent_id =
+            parent_id_value->get_ref<const std::string&>();
+
+        auto* upstream_parent =
+            find_preset(upstream_presets, parent_id);
+        if (upstream_parent == nullptr) {
+            upstream_presets.push_back(bundled_parent);
+            upstream_parent = &upstream_presets.back();
+        } else {
+            (*upstream_parent)["routingCompanions"] =
+                *companions;
+            // Once IP matching is delegated to a companion, the primary must
+            // not retain stale upstream subnets and route them twice.
+            align_dns_subnets(*upstream_parent, bundled_parent);
+        }
+
+        for (const auto& companion : *companions) {
+            if (!companion.is_object()) continue;
+            const auto source_id_value =
+                companion.find("sourcePresetId");
+            if (source_id_value == companion.end() ||
+                !source_id_value->is_string() ||
+                source_id_value
+                    ->get_ref<const std::string&>()
+                    .empty()) {
+                continue;
+            }
+            const auto& source_id =
+                source_id_value->get_ref<const std::string&>();
+            const auto* bundled_source =
+                find_preset(bundled_presets, source_id);
+            if (bundled_source == nullptr) continue;
+            auto* upstream_source =
+                find_preset(upstream_presets, source_id);
+            if (upstream_source == nullptr) {
+                upstream_presets.push_back(*bundled_source);
+            } else {
+                // The bundled subnet set is deliberately curated and is the
+                // actual source of the inline companion. Keep it stable even
+                // when the downloaded catalogue lags behind.
+                align_dns_subnets(
+                    *upstream_source, *bundled_source);
+            }
+        }
+    }
+    return upstream_presets;
+}
 
 std::string catalog_detour() {
     try {

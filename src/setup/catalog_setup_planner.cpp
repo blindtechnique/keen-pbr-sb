@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <map>
 #include <set>
 #include <sstream>
@@ -21,10 +22,14 @@ constexpr std::size_t kMaxTechnicalIdLength = 24U;
 struct ParsedPreset {
     std::string id;
     std::string name;
+    std::string catalog_identity_id;
     std::optional<std::string> url;
     std::vector<std::string> domains;
     std::vector<std::string> ip_cidrs;
     bool rejects{false};
+    bool dns_eligible{true};
+    bool allow_legacy_adoption{true};
+    bool reconcile_managed_sources{false};
 };
 
 struct ResolvedPreset {
@@ -32,6 +37,14 @@ struct ResolvedPreset {
     std::string catalog_identity;
     std::optional<std::string> existing_technical_id;
 };
+
+struct CatalogPresetEntry {
+    const nlohmann::json* preset;
+    std::size_t index;
+};
+
+using CatalogPresetIndex =
+    std::map<std::string, std::vector<CatalogPresetEntry>>;
 
 [[noreturn]] void fail(CatalogSetupErrorCode code,
                        std::string path,
@@ -253,10 +266,12 @@ std::optional<std::string> find_installed_preset_list(
     // Lists created by the first sb.12 alpha did not persist provenance.
     // Adopt only an exact source/content match; aliases and technical IDs are
     // deliberately ignored because users may rename them.
-    for (const auto& [technical_id, list] : lists) {
-        if (!list.catalog_identity.has_value() &&
-            legacy_list_matches_preset(list, preset)) {
-            return technical_id;
+    if (preset.allow_legacy_adoption) {
+        for (const auto& [technical_id, list] : lists) {
+            if (!list.catalog_identity.has_value() &&
+                legacy_list_matches_preset(list, preset)) {
+                return technical_id;
+            }
         }
     }
     return std::nullopt;
@@ -490,6 +505,7 @@ ParsedPreset parse_preset(const nlohmann::json& preset,
     ParsedPreset result;
     result.id = expected_id;
     result.name = preset.at("name").get<std::string>();
+    result.catalog_identity_id = expected_id;
     if (!display_name::is_valid(result.name)) {
         fail(
             CatalogSetupErrorCode::malformed_preset,
@@ -500,12 +516,169 @@ ParsedPreset parse_preset(const nlohmann::json& preset,
     result.domains = parse_domains(preset, path);
     result.ip_cidrs = parse_subnets(preset, path);
     result.rejects = parse_reject_action(preset, path);
-    if (!result.url && result.domains.empty() && result.ip_cidrs.empty()) {
+    return result;
+}
+
+std::vector<ParsedPreset> parse_routing_companions(
+    const nlohmann::json& parent,
+    const ParsedPreset& parsed_parent,
+    std::size_t parent_index,
+    const CatalogPresetIndex& catalog) {
+    const std::string parent_path =
+        "catalog.presets[" + std::to_string(parent_index) + "]";
+    const auto companions = parent.find("routingCompanions");
+    if (companions == parent.end() || companions->is_null()) return {};
+    if (!companions->is_array()) {
         fail(
             CatalogSetupErrorCode::malformed_preset,
-            path + ".engines",
-            "Selected catalogue preset has no usable URL, inline domains, "
-            "or inline CIDRs");
+            parent_path + ".routingCompanions",
+            "Catalogue routing companions must be an array");
+    }
+
+    std::vector<ParsedPreset> result;
+    result.reserve(companions->size());
+    std::set<std::string> companion_ids;
+    for (std::size_t index = 0; index < companions->size(); ++index) {
+        const auto path =
+            parent_path + ".routingCompanions[" +
+            std::to_string(index) + "]";
+        const auto& definition = companions->at(index);
+        if (!definition.is_object()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                path,
+                "Catalogue routing companion must be an object");
+        }
+
+        const auto required_string =
+            [&](const char* key) {
+                const auto value = definition.find(key);
+                if (value == definition.end() || !value->is_string() ||
+                    trim_ascii(value->get<std::string>()).empty()) {
+                    fail(
+                        CatalogSetupErrorCode::malformed_preset,
+                        path + "." + key,
+                        "Catalogue routing companion " +
+                            std::string(key) +
+                            " must be a non-empty string");
+                }
+                return value->get<std::string>();
+            };
+
+        ParsedPreset companion;
+        companion.id = required_string("id");
+        companion.name = required_string("name");
+        if (!companion_ids.insert(companion.id).second) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                path + ".id",
+                "Catalogue routing companion id '" + companion.id +
+                    "' is duplicated");
+        }
+        if (!display_name::is_valid(companion.name)) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                path + ".name",
+                "Catalogue routing companion name is not a valid display "
+                "name");
+        }
+
+        companion.catalog_identity_id =
+            parsed_parent.id + "#routing-companion:" + companion.id;
+        companion.rejects = parsed_parent.rejects;
+        companion.dns_eligible = false;
+        companion.reconcile_managed_sources = true;
+        // Companions did not exist in older packages. Do not silently adopt
+        // an unrelated manual list merely because its URL/content happens to
+        // match the companion source.
+        companion.allow_legacy_adoption = false;
+
+        const auto url = definition.find("url");
+        const auto source_preset_id =
+            definition.find("sourcePresetId");
+        const bool has_url =
+            url != definition.end() && !url->is_null();
+        const bool has_source =
+            source_preset_id != definition.end() &&
+            !source_preset_id->is_null();
+        if (has_url == has_source) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                path,
+                "Catalogue routing companion must define exactly one of "
+                "url or sourcePresetId");
+        }
+        const auto suppress_direct =
+            definition.find("suppressDirectSelection");
+        if (suppress_direct != definition.end() &&
+            !suppress_direct->is_boolean()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                path + ".suppressDirectSelection",
+                "Catalogue routing companion suppressDirectSelection must "
+                "be a boolean");
+        }
+
+        if (has_url) {
+            if (!url->is_string() ||
+                trim_ascii(url->get<std::string>()).empty()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".url",
+                    "Catalogue routing companion URL must be a non-empty "
+                    "string");
+            }
+            companion.url = validate_catalog_url(
+                url->get<std::string>(), path + ".url");
+            if (definition.contains("include")) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".include",
+                    "Catalogue routing companion include is only valid with "
+                    "sourcePresetId");
+            }
+        } else {
+            const auto source_id = required_string("sourcePresetId");
+            const auto include = required_string("include");
+            if (include != "ip_cidrs") {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".include",
+                    "Catalogue routing companion currently supports only "
+                    "ip_cidrs");
+            }
+            const auto source = catalog.find(source_id);
+            if (source == catalog.end()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".sourcePresetId",
+                    "Catalogue routing companion references unknown preset '" +
+                        source_id + "'");
+            }
+            if (source->second.size() > 1U) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    "catalog.presets[" +
+                        std::to_string(source->second[1].index) + "].id",
+                    "Authoritative catalogue contains duplicate routing "
+                    "companion source id '" + source_id + "'");
+            }
+            const auto& source_entry = source->second.front();
+            const auto source_path =
+                "catalog.presets[" +
+                std::to_string(source_entry.index) + "]";
+            companion.ip_cidrs =
+                parse_subnets(*source_entry.preset, source_path);
+            if (companion.ip_cidrs.empty()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".sourcePresetId",
+                    "Catalogue routing companion source preset '" +
+                        source_id + "' has no inline CIDRs");
+            }
+        }
+
+        result.push_back(std::move(companion));
     }
     return result;
 }
@@ -549,17 +722,17 @@ std::vector<ParsedPreset> select_presets(
     }
 
     const auto& presets = preset_array(snapshot);
-    std::map<std::string, std::pair<const nlohmann::json*, std::size_t>>
-        selected_entries;
+    CatalogPresetIndex catalog_entries;
     for (std::size_t index = 0; index < presets.size(); ++index) {
         const auto& entry = presets.at(index);
         if (!entry.is_object()) continue;
         const auto id = entry.find("id");
         if (id == entry.end() || !id->is_string()) continue;
         const auto& value = id->get_ref<const std::string&>();
-        if (requested.find(value) == requested.end()) continue;
-        if (!selected_entries.emplace(
-                value, std::make_pair(&entry, index)).second) {
+        auto& entries = catalog_entries[value];
+        entries.push_back({&entry, index});
+        if (requested.find(value) != requested.end() &&
+            entries.size() > 1U) {
             fail(
                 CatalogSetupErrorCode::malformed_preset,
                 "catalog.presets[" + std::to_string(index) + "].id",
@@ -568,24 +741,75 @@ std::vector<ParsedPreset> select_presets(
         }
     }
 
+    std::set<std::string> suppressed_selections;
+    for (const auto& selection : intent.selections) {
+        const auto parent = catalog_entries.find(selection.preset_id);
+        if (parent == catalog_entries.end() ||
+            parent->second.empty()) {
+            continue;
+        }
+        const auto companions =
+            parent->second.front().preset->find("routingCompanions");
+        if (companions == parent->second.front().preset->end() ||
+            !companions->is_array()) {
+            continue;
+        }
+        for (const auto& companion : *companions) {
+            if (!companion.is_object()) {
+                continue;
+            }
+            const auto suppress =
+                companion.find("suppressDirectSelection");
+            if (suppress == companion.end() ||
+                !suppress->is_boolean() ||
+                !suppress->get<bool>()) {
+                continue;
+            }
+            const auto source = companion.find("sourcePresetId");
+            if (source != companion.end() && source->is_string() &&
+                requested.count(source->get<std::string>()) != 0U) {
+                suppressed_selections.insert(
+                    source->get<std::string>());
+            }
+        }
+    }
+
     std::vector<ParsedPreset> result;
-    result.reserve(intent.selections.size());
+    result.reserve(intent.selections.size() * 2U);
     for (const auto& selection : intent.selections) {
         const auto& id = selection.preset_id;
-        const auto found = selected_entries.find(id);
-        if (found == selected_entries.end()) {
+        if (suppressed_selections.count(id) != 0U) continue;
+        const auto found = catalog_entries.find(id);
+        if (found == catalog_entries.end()) {
             fail(
                 CatalogSetupErrorCode::preset_not_found,
                 "intent.selections",
                 "Catalogue preset '" + id +
                     "' is absent from the authoritative snapshot");
         }
+        const auto& entry = found->second.front();
         auto parsed =
-            parse_preset(*found->second.first, id, found->second.second);
+            parse_preset(*entry.preset, id, entry.index);
+        if (!parsed.url && parsed.domains.empty() &&
+            parsed.ip_cidrs.empty()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                "catalog.presets[" + std::to_string(entry.index) +
+                    "].engines",
+                "Selected catalogue preset has no usable URL, inline domains, "
+                "or inline CIDRs");
+        }
         if (selection.display_name.has_value()) {
             parsed.name = *selection.display_name;
         }
+        auto companions = parse_routing_companions(
+            *entry.preset, parsed, entry.index, catalog_entries);
+        parsed.reconcile_managed_sources = !companions.empty();
         result.push_back(std::move(parsed));
+        result.insert(
+            result.end(),
+            std::make_move_iterator(companions.begin()),
+            std::make_move_iterator(companions.end()));
     }
     return result;
 }
@@ -938,8 +1162,9 @@ CatalogSetupPlan plan_catalog_setup(
     std::vector<ParsedPreset> pending_presets;
     pending_presets.reserve(presets.size());
     for (const auto& preset : presets) {
-        const auto identity =
-            catalog_preset_identity(catalog_snapshot, preset.id);
+        const auto identity = catalog_preset_identity_for_source(
+            catalog_source_identity(catalog_snapshot),
+            preset.catalog_identity_id);
         const auto existing = find_installed_preset_list(
             active_lists, preset, identity);
         resolved.push_back({preset, identity, existing});
@@ -1009,8 +1234,27 @@ CatalogSetupPlan plan_catalog_setup(
     for (const auto& item : resolved) {
         const auto& preset = item.preset;
         if (item.existing_technical_id.has_value()) {
-            const auto& list =
+            const auto& active_list =
                 active_lists.at(*item.existing_technical_id);
+            if (preset.reconcile_managed_sources &&
+                active_list.catalog_identity ==
+                    item.catalog_identity) {
+                auto& managed =
+                    lists.at(*item.existing_technical_id);
+                managed.url = preset.url;
+                managed.domains =
+                    preset.domains.empty()
+                        ? std::optional<std::vector<std::string>>{}
+                        : std::optional<std::vector<std::string>>{
+                              preset.domains};
+                managed.ip_cidrs =
+                    preset.ip_cidrs.empty()
+                        ? std::optional<std::vector<std::string>>{}
+                        : std::optional<std::vector<std::string>>{
+                              preset.ip_cidrs};
+            }
+            const auto& list =
+                lists.at(*item.existing_technical_id);
             plan.summary.lists.push_back({
                 preset.id,
                 *item.existing_technical_id,
@@ -1074,7 +1318,12 @@ CatalogSetupPlan plan_catalog_setup(
     const auto missing_dns_list_ids = [&]() {
         std::vector<std::string> result;
         if (!dns_server.has_value()) return result;
-        for (const auto& list_id : unique_selected_ids) {
+        std::set<std::string> seen;
+        for (const auto& [list_id, preset] : selected_lists) {
+            if (!preset.dns_eligible ||
+                !seen.insert(list_id).second) {
+                continue;
+            }
             if (!dns_policy_covers_list(
                     active_config, list_id, *dns_server)) {
                 result.push_back(list_id);
