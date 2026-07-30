@@ -19,7 +19,6 @@ export type ActiveTrafficPath = Readonly<{
 
 export type InterfaceConnectionState = Readonly<{
   connected: boolean
-  connectedAtUnixMs?: number
 }>
 
 const ACTIVE_TRAFFIC_STATUS_TRANSLATION_KEYS = {
@@ -237,37 +236,11 @@ export function interfaceConnectionState(
       candidate.interface === interfaceName && candidate.type !== "native"
   )
   if (transport) {
-    return {
-      connected: transport.state === "up",
-      connectedAtUnixMs:
-        transport.state === "up"
-          ? parseTimestamp(transport.updated_at)
-          : undefined,
-    }
+    return { connected: transport.state === "up" }
   }
   return { connected: runtimeUp }
 }
 
-/**
- * Keenetic uses a compact `D.HH:MM:SS`-style duration in its connection badge.
- * Keeping the formatter locale-neutral avoids rerunning Intl on every second.
- */
-export function formatConnectionDuration(
-  totalSeconds: number,
-  daySuffix: string
-): string {
-  const safeSeconds = Math.max(0, Math.floor(totalSeconds))
-  const days = Math.floor(safeSeconds / 86_400)
-  const hours = Math.floor((safeSeconds % 86_400) / 3_600)
-  const minutes = Math.floor((safeSeconds % 3_600) / 60)
-  const seconds = safeSeconds % 60
-  const clock = [hours, minutes, seconds]
-    .map((part) => part.toString().padStart(2, "0"))
-    .join(":")
-  return days > 0 ? `${days} ${daySuffix} ${clock}` : clock
-}
-
-function parseTimestamp(value: string): number | undefined {
-  const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : undefined
-}
+// TransportStatus.updated_at is the latest state observation, not a
+// connected-since timestamp. Until runtime exposes an authoritative field, the
+// dashboard reports only the live connected state instead of inventing uptime.

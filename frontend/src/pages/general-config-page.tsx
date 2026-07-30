@@ -139,6 +139,7 @@ type SettingsFieldName =
 
 const SETTINGS_TAB_VALUES = [
   "general",
+  "incoming",
   "access",
   "logging",
   "advanced",
@@ -219,6 +220,10 @@ function LoadedGeneralConfigPage({
     {
       value: "general",
       label: t("pages.settings.tabs.general"),
+    },
+    {
+      value: "incoming",
+      label: t("pages.settings.tabs.incoming"),
     },
     {
       value: "access",
@@ -409,23 +414,35 @@ function LoadedGeneralConfigPage({
       />
 
       <div
-        aria-hidden={activeTab !== "general"}
+        aria-hidden={activeTab !== "general" && activeTab !== "incoming"}
         className="settings-sections"
-        hidden={activeTab !== "general"}
+        hidden={activeTab !== "general" && activeTab !== "incoming"}
         role="tabpanel"
       >
         <Card size="sm">
           <CardHeader>
-            <CardTitle>{t("pages.settings.general.title")}</CardTitle>
+            <CardTitle>
+              {t(
+                activeTab === "incoming"
+                  ? "pages.settings.incoming.title"
+                  : "pages.settings.general.title"
+              )}
+            </CardTitle>
             <CardDescription>
-              {t("pages.settings.general.description")}
+              {t(
+                activeTab === "incoming"
+                  ? "pages.settings.incoming.description"
+                  : "pages.settings.general.description"
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <FieldGroup>
               <form.Field name={SETTINGS_FIELD_NAMES.strictEnforcement}>
                 {(field) => (
-                  <Field>
+                  <Field
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
                     <FieldLabel>
                       {t("pages.settings.general.strictEnforcementLabel")}
                     </FieldLabel>
@@ -486,11 +503,15 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldSeparator />
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.skipMarkedPackets}>
                 {(field) => (
-                  <Field>
+                  <Field
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
                     <FieldContent>
                       <div className="flex items-center space-x-3">
                         <Checkbox
@@ -517,11 +538,15 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldSeparator />
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply}>
                 {(field) => (
-                  <Field>
+                  <Field
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
                     <FieldContent>
                       <div className="flex items-center space-x-3">
                         <Checkbox
@@ -550,11 +575,15 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldSeparator />
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.ipv6Enabled}>
                 {(field) => (
-                  <Field>
+                  <Field
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
                     <FieldContent>
                       <div className="flex items-center space-x-3">
                         <Checkbox
@@ -581,11 +610,15 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldSeparator />
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.clientDnsEnforcement}>
                 {(field) => (
-                  <Field>
+                  <Field
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
                     <FieldContent>
                       <div className="flex items-center space-x-3">
                         <Checkbox
@@ -614,13 +647,16 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldSeparator />
-
               <form.Field name={SETTINGS_FIELD_NAMES.inboundInterfaces}>
                 {(field) => {
                   const error = getFirstFieldError(field.state.meta.errors)
                   return (
-                    <Field invalid={Boolean(error)}>
+                    <Field
+                      className={
+                        activeTab === "incoming" ? undefined : "hidden"
+                      }
+                      invalid={Boolean(error)}
+                    >
                       <FieldLabel htmlFor="inbound-interfaces">
                         {t("pages.settings.general.inboundInterfacesLabel")}
                       </FieldLabel>
@@ -708,7 +744,9 @@ function LoadedGeneralConfigPage({
                 }}
               </form.Field>
 
-              <FieldSeparator />
+              <FieldSeparator
+                className={activeTab === "incoming" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.internalVpnServers}>
                 {(field) => (
@@ -718,7 +756,12 @@ function LoadedGeneralConfigPage({
                     {(legacyInboundInterfaces) => {
                       const error = getFirstFieldError(field.state.meta.errors)
                       return (
-                        <Field invalid={Boolean(error)}>
+                        <Field
+                          className={
+                            activeTab === "incoming" ? undefined : "hidden"
+                          }
+                          invalid={Boolean(error)}
+                        >
                           <FieldContent>
                             <InternalVpnServersField
                               authoritativeServices={
@@ -843,7 +886,9 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldSeparator />
+              <FieldSeparator
+                className={activeTab === "incoming" ? undefined : "hidden"}
+              />
 
               <form.Field name={SETTINGS_FIELD_NAMES.internalVpnServices}>
                 {(field) => (
@@ -853,7 +898,12 @@ function LoadedGeneralConfigPage({
                     {(legacyInboundInterfaces) => {
                       const error = getFirstFieldError(field.state.meta.errors)
                       return (
-                        <Field invalid={Boolean(error)}>
+                        <Field
+                          className={
+                            activeTab === "incoming" ? undefined : "hidden"
+                          }
+                          invalid={Boolean(error)}
+                        >
                           <FieldContent>
                             <InternalVpnServicesField
                               baselineOverrides={
@@ -950,7 +1000,7 @@ function LoadedGeneralConfigPage({
           </CardContent>
         </Card>
 
-        <Card size="sm">
+        <Card hidden={activeTab !== "general"} size="sm">
           <CardHeader>
             <CardTitle>{t("pages.settings.autoupdate.title")}</CardTitle>
             <CardDescription>

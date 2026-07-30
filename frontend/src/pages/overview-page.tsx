@@ -28,11 +28,12 @@ import { RoutingHealthCard } from "@/components/overview/routing-health-card"
 import { DnsCheckWidget } from "@/components/overview/dns-check-widget"
 import { OutboundStateList } from "@/components/overview/outbound-state-list"
 import { ServicesStatusCard } from "@/components/overview/services-status-card"
-import { RouterInfoCard } from "@/components/overview/router-info-card"
+import { RouterInfoPanel } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { SystemStatusSummary } from "@/components/overview/system-status-summary"
 import { ActiveInterfaceTraffic } from "@/components/overview/active-interface-traffic"
+import { dashboardSectionIds } from "@/components/overview/system-status-summary-model"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
 export function OverviewPage() {
@@ -112,16 +113,19 @@ export function OverviewPage() {
         configIsDraft={configIsDraft}
         listCount={Object.keys(loadedConfig?.lists ?? {}).length}
         outbounds={runtimeOutbounds}
+        outboundsQueryFailed={runtimeOutboundsQuery.isError}
         routingOverall={routingHealth?.overall}
         ruleCount={loadedConfig?.route?.rules?.length ?? 0}
         service={serviceHealth}
-      />
-
-      <RouterInfoCard />
+        serviceQueryFailed={serviceHealthQuery.isError}
+      >
+        <RouterInfoPanel />
+      </SystemStatusSummary>
 
       <div className="grid gap-3 xl:grid-cols-5">
         <SectionCard
-          className="h-full xl:col-span-3"
+          className="h-full scroll-mt-24 xl:col-span-3"
+          id={dashboardSectionIds.outbounds}
           title={t("overview.outbounds.title")}
         >
           {configQuery.isLoading ? <TableSkeleton /> : null}
@@ -165,7 +169,10 @@ export function OverviewPage() {
           ) : null}
         </SectionCard>
 
-        <div className="xl:col-span-2">
+        <div
+          className="scroll-mt-24 xl:col-span-2"
+          id={dashboardSectionIds.service}
+        >
           <ServicesStatusCard />
         </div>
       </div>
@@ -176,14 +183,17 @@ export function OverviewPage() {
       />
 
       <div className="grid gap-3 xl:grid-cols-3">
-        <DnsCheckWidget
-          dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
-          onStatusChange={setDnsCheckStatus}
-        />
+        <div className="scroll-mt-24" id={dashboardSectionIds.dns}>
+          <DnsCheckWidget
+            dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
+            onStatusChange={setDnsCheckStatus}
+          />
+        </div>
 
         <SectionCard
-          className="h-full xl:col-span-2"
+          className="h-full scroll-mt-24 xl:col-span-2"
           contentClassName="flex flex-1 flex-col"
+          id={dashboardSectionIds.routing}
           title={t("overview.routing.title")}
           action={
             <Button

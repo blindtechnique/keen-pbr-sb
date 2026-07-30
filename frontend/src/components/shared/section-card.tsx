@@ -16,6 +16,7 @@ export function SectionCard({
   description,
   className,
   contentClassName,
+  id,
   // Cards are reserved for the system overview; every other page renders the
   // same sections flat, the way KeeneticOS does.
   flat = false,
@@ -26,10 +27,12 @@ export function SectionCard({
   description?: ReactNode
   className?: string
   contentClassName?: string
+  id?: string
   flat?: boolean
 }) {
   return (
     <Card
+      id={id}
       className={cn(
         flat && "gap-4 rounded-none border-0 bg-transparent p-0 shadow-none",
         className
@@ -46,7 +49,9 @@ export function SectionCard({
           {action}
         </div>
       </CardHeader>
-      <CardContent className={cn("space-y-3", flat && "px-0", contentClassName)}>
+      <CardContent
+        className={cn("space-y-3", flat && "px-0", contentClassName)}
+      >
         {children}
       </CardContent>
     </Card>

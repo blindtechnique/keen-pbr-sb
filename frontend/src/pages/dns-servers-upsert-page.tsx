@@ -125,7 +125,6 @@ export function DnsServerUpsertPage({
       dirty={dirty}
       onClose={() => navigate("/dns-servers")}
       presentation={presentation}
-      showAdvancedEditor={false}
       title={
         mode === "create"
           ? t("pages.dnsServerUpsert.createTitle")
@@ -139,6 +138,7 @@ export function DnsServerUpsertPage({
         mode={mode}
         onDirtyChange={setDirty}
         onSaved={() => navigate("/dns-servers")}
+        presentation={presentation}
         serverTag={serverTag}
       />
     </UpsertPage>
@@ -152,6 +152,7 @@ function DnsServerForm({
   initialDraft,
   onDirtyChange,
   onSaved,
+  presentation,
 }: {
   mode: "create" | "edit"
   serverTag?: string
@@ -159,6 +160,7 @@ function DnsServerForm({
   initialDraft: DnsServerDraft
   onDirtyChange: (dirty: boolean) => void
   onSaved: () => void
+  presentation: UpsertPagePresentation
 }) {
   const { t } = useTranslation()
   const close = useUpsertPageClose()
@@ -409,8 +411,36 @@ function DnsServerForm({
               ),
           }}
         >
-          {(field) => {
-            return (
+          {(field) =>
+            presentation === "page" ? (
+              <Field
+                invalid={Boolean(getFirstFieldError(field.state.meta.errors))}
+              >
+                <FieldLabel htmlFor="dns-server-technical-id">
+                  {t("pages.dnsServerUpsert.fields.technicalId")}
+                </FieldLabel>
+                <FieldContent>
+                  <Input
+                    aria-invalid={Boolean(
+                      getFirstFieldError(field.state.meta.errors)
+                    )}
+                    id="dns-server-technical-id"
+                    onBlur={field.handleBlur}
+                    onChange={(event) => field.handleChange(event.target.value)}
+                    readOnly={mode === "edit"}
+                    value={field.state.value}
+                  />
+                  <FieldHint
+                    description={t(
+                      mode === "edit"
+                        ? "pages.dnsServerUpsert.fields.technicalIdEditHint"
+                        : "pages.dnsServerUpsert.fields.technicalIdCreateHint"
+                    )}
+                    error={getFirstFieldError(field.state.meta.errors)}
+                  />
+                </FieldContent>
+              </Field>
+            ) : (
               <input
                 name={field.name}
                 readOnly
@@ -418,7 +448,7 @@ function DnsServerForm({
                 value={field.state.value}
               />
             )
-          }}
+          }
         </form.Field>
 
         {mode === "create" ? (
@@ -511,7 +541,9 @@ function DnsServerForm({
                   }}
                 </form.Field>
 
-                {mode === "create" && presetSelection === "custom" ? (
+                {presentation === "page" &&
+                mode === "create" &&
+                presetSelection === "custom" ? (
                   <>
                     <Field invalid={customSecondaryInvalid}>
                       <FieldLabel htmlFor="dns-server-secondary-address">

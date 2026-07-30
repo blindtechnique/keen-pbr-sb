@@ -662,6 +662,13 @@ export const ruTranslation = {
       routing: "Маршрутизация",
       configuration: "{{lists}} списков · {{rules}} правил",
       draft: "Есть несохранённый черновик",
+      attention: {
+        ariaLabel: "Разделы, требующие внимания",
+        service: "Проверить службы",
+        dns: "Проверить DNS",
+        routing: "Проверить маршрутизацию",
+        outbounds: "Проблемные маршруты: {{count}}",
+      },
     },
     router: {
       title: "Роутер",
@@ -736,6 +743,8 @@ export const ruTranslation = {
     },
     outbounds: {
       liveTraffic: "Трафик используемых туннелей и прокси",
+      trafficCountersHint:
+        "Счётчики туннельного интерфейса показывают трафик только этого пути, а WAN — весь трафик физического подключения. Поэтому значения могут отличаться.",
       connected: "Подключено",
       connectedFor: "Подключено {{duration}}",
       disconnected: "Отключено",
@@ -756,7 +765,23 @@ export const ruTranslation = {
         ignore: "Трафик проходит без изменения маршрута",
         groupVia: "Идёт через {{active}}, запасной — {{backup}}",
         groupViaOnly: "Идёт через {{active}}",
+        groupBackup: "Запасной — {{backup}}",
         groupIdle: "Ни один выход в группе не отвечает",
+      },
+      activeMember: "Активен: {{name}}",
+      issue: {
+        interfaceUnreachable: "Интерфейс недоступен из основной таблицы",
+        routeMissing: "Активный маршрут не установлен",
+        selectionMismatch: "Выбранный выход не совпадает с активным маршрутом",
+        probeTimeout: "Проверка доступности превысила время ожидания",
+        connectionRefused: "Удалённый узел отклонил соединение",
+        networkUnreachable: "Сеть или узел сейчас недоступны",
+        dnsFailed: "Не удалось определить адрес удалённого узла",
+        permissionDenied: "Системе не удалось выполнить проверку доступа",
+        degraded: "Выход отвечает нестабильно",
+        unavailable: "Нет доступного выхода",
+        member: "{{name}}: {{reason}}",
+        open: "Открыть маршруты и резервирование",
       },
       members: "{{count}} в группе",
       kind: {
@@ -976,6 +1001,14 @@ export const ruTranslation = {
       add: "Добавить",
       added: "Добавлено списков: {{count}}",
       installed: "Уже добавлено",
+      refreshState: {
+        success: "Успешно: {{date}}",
+        attempt: "Последняя попытка: {{date}}",
+        attemptVia: "Последняя попытка: {{date}} · через {{detour}}",
+        error: "Ошибка: {{message}}",
+        neverSucceeded: "ещё не обновлялся",
+        neverAttempted: "ещё не выполнялась",
+      },
       priorityGuard: {
         title: "Приоритет блокировок учтён",
         description:
@@ -1044,10 +1077,16 @@ export const ruTranslation = {
       tabs: {
         ariaLabel: "Разделы настроек",
         general: "Основные",
+        incoming: "Входящие соединения",
         access: "Доступ",
         logging: "Журнал",
         advanced: "Дополнительно",
         maintenance: "Обслуживание",
+      },
+      incoming: {
+        title: "Входящие соединения",
+        description:
+          "Выберите входящие интерфейсы и настройте участие клиентов внутренних VPN-серверов Keenetic в маршрутизации keen-pbr-sb.",
       },
       backup: {
         title: "Резервное копирование",
@@ -1441,6 +1480,11 @@ export const ruTranslation = {
           "Это имя видно в интерфейсе. Технический идентификатор создаётся автоматически.",
         tag: "Название",
         tagHint: "Короткое название сервера для использования в DNS-правилах.",
+        technicalId: "Технический ID",
+        technicalIdCreateHint:
+          "Создаётся автоматически. Изменяйте только при необходимости совместимости с существующей конфигурацией.",
+        technicalIdEditHint:
+          "Постоянный идентификатор связей с DNS-правилами; после создания не изменяется.",
         type: "Тип DNS",
         typeHint:
           "Keenetic использует текущий встроенный DNS роутера. Plaintext DNS использует IP-адрес, введённый вручную.",
@@ -1522,6 +1566,8 @@ export const ruTranslation = {
       },
       headers: {
         order: "Порядок",
+        orderShort: "№",
+        name: "Название",
         criteria: "Условие",
         outbound: "Маршрут",
         runtime: "Состояние",
@@ -2179,6 +2225,15 @@ export const ruTranslation = {
           "Оставьте флажки выключенными, чтобы настроить правила вручную после создания списка.",
         recommendedHint:
           "Тонкая настройка и независимые правила доступны в расширенном редакторе.",
+        recommendedPlan: {
+          title: "Рекомендуемая схема",
+          description:
+            "Один список, одно правило маршрутизации и одно DNS-правило будут проверены и сохранены вместе.",
+          route: "Маршрут: {{route}}",
+          dnsReuse: "DNS: использовать {{dns}}",
+          dnsCreate: "DNS: создать {{dns}}",
+          notSelected: "не выбрано",
+        },
         routeRequired:
           "Выберите маршрут или резервирование для правила маршрутизации.",
         dnsRequired: "Выберите DNS-сервер для DNS-правила.",

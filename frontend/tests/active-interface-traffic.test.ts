@@ -8,7 +8,6 @@ import type {
 import {
   activeTrafficStatusTranslationKey,
   collectActiveTrafficPaths,
-  formatConnectionDuration,
   interfaceConnectionState,
 } from "@/components/overview/active-interface-traffic-model"
 
@@ -218,7 +217,7 @@ describe("dashboard active interface traffic", () => {
     ).toEqual([{ interfaceName: "tun0", label: "Two", status: "active" }])
   })
 
-  test("uses the managed transport state transition as connected-since time", () => {
+  test("does not use a transport observation time as connected-since", () => {
     expect(
       interfaceConnectionState("vless0", true, [
         {
@@ -231,10 +230,7 @@ describe("dashboard active interface traffic", () => {
           desired_up: true,
         },
       ])
-    ).toEqual({
-      connected: true,
-      connectedAtUnixMs: Date.parse("2026-07-27T10:00:00Z"),
-    })
+    ).toEqual({ connected: true })
   })
 
   test("does not claim an old uptime for a down managed transport", () => {
@@ -249,7 +245,7 @@ describe("dashboard active interface traffic", () => {
           desired_up: false,
         },
       ])
-    ).toEqual({ connected: false, connectedAtUnixMs: undefined })
+    ).toEqual({ connected: false })
   })
 
   test("does not treat a native status refresh as its connection start", () => {
@@ -265,12 +261,5 @@ describe("dashboard active interface traffic", () => {
         },
       ])
     ).toEqual({ connected: true })
-  })
-
-  test("formats the compact Keenetic-style elapsed time", () => {
-    expect(
-      formatConnectionDuration(3 * 86_400 + 3 * 3_600 + 14 * 60 + 10, "д.")
-    ).toBe("3 д. 03:14:10")
-    expect(formatConnectionDuration(65, "d")).toBe("00:01:05")
   })
 })

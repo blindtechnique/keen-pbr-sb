@@ -59,6 +59,8 @@ export function DataTable({
   headers,
   rows,
   compact = false,
+  fixedLayout = false,
+  columnClassNames = [],
   narrowColumns = [],
   selection,
   reorder,
@@ -66,6 +68,8 @@ export function DataTable({
   headers?: string[]
   rows: ReactNode[][]
   compact?: boolean
+  fixedLayout?: boolean
+  columnClassNames?: Array<string | undefined>
   narrowColumns?: number[]
   selection?: DataTableSelection
   reorder?: DataTableReorder
@@ -107,49 +111,84 @@ export function DataTable({
     visibleRowIds.every((rowId) => selection!.selectedIds.has(rowId))
 
   function headClass(headerIndex: number) {
+    const columnClassName =
+      headerIndex >= leadingColumns
+        ? columnClassNames[headerIndex - leadingColumns]
+        : undefined
+
     if (headerIndex < leadingColumns) {
+      if (fixedLayout) {
+        return compact
+          ? "h-8 w-8 px-0.5 font-semibold whitespace-nowrap"
+          : "w-8 px-0.5 font-semibold whitespace-nowrap"
+      }
+
       return compact
         ? "h-8 w-px px-1.5 font-semibold whitespace-nowrap"
         : "w-px px-2 font-semibold whitespace-nowrap"
     }
 
-    return headerIndex === lastColumnIndex
-      ? compact
-        ? "h-8 w-px text-right font-semibold"
-        : "w-px text-right font-semibold"
-      : narrowColumnSet.has(headerIndex)
+    return cn(
+      headerIndex === lastColumnIndex
         ? compact
-          ? "h-8 w-px font-semibold whitespace-nowrap"
-          : "w-px font-semibold whitespace-nowrap"
-        : compact
-          ? "h-8 font-semibold"
-          : "font-semibold"
+          ? "h-8 w-px text-right font-semibold"
+          : "w-px text-right font-semibold"
+        : narrowColumnSet.has(headerIndex)
+          ? compact
+            ? "h-8 w-px font-semibold whitespace-nowrap"
+            : "w-px font-semibold whitespace-nowrap"
+          : compact
+            ? "h-8 font-semibold"
+            : "font-semibold",
+      columnClassName
+    )
   }
 
   function cellClass(cellIndex: number) {
+    const columnClassName =
+      cellIndex >= leadingColumns
+        ? columnClassNames[cellIndex - leadingColumns]
+        : undefined
+
     if (cellIndex < leadingColumns) {
+      if (fixedLayout) {
+        return compact
+          ? "w-8 px-0.5 py-1.5 align-middle whitespace-nowrap"
+          : "w-8 px-0.5 py-3 align-middle whitespace-nowrap"
+      }
+
       return compact
         ? "w-px px-1.5 py-1.5 align-middle whitespace-nowrap"
         : "w-px px-2 py-3 align-middle whitespace-nowrap"
     }
 
-    return cellIndex === lastColumnIndex
-      ? compact
-        ? "w-px px-2 py-1.5 text-right align-middle whitespace-nowrap"
-        : "w-px p-3 text-right align-middle whitespace-nowrap"
-      : narrowColumnSet.has(cellIndex)
+    return cn(
+      cellIndex === lastColumnIndex
         ? compact
-          ? "w-px px-2 py-1.5 align-middle whitespace-nowrap"
-          : "w-px p-3 align-middle whitespace-nowrap"
-        : compact
-          ? "px-2 py-1.5 align-middle whitespace-normal"
-          : "p-3 align-middle whitespace-normal"
+          ? "w-px px-2 py-1.5 text-right align-middle whitespace-nowrap"
+          : "w-px p-3 text-right align-middle whitespace-nowrap"
+        : narrowColumnSet.has(cellIndex)
+          ? compact
+            ? "w-px px-2 py-1.5 align-middle whitespace-nowrap"
+            : "w-px p-3 align-middle whitespace-nowrap"
+          : compact
+            ? "px-2 py-1.5 align-middle whitespace-normal"
+            : "p-3 align-middle whitespace-normal",
+      columnClassName
+    )
   }
 
   return (
     <>
-      <div className="hidden max-w-full overflow-x-auto border-b md:block">
-        <Table className={compact ? "w-full text-sm" : "w-full text-sm"}>
+      <div
+        className={cn(
+          "hidden max-w-full border-b md:block",
+          fixedLayout
+            ? "overflow-x-hidden [&_[data-slot=table-container]]:overflow-x-hidden"
+            : "overflow-x-auto"
+        )}
+      >
+        <Table className={cn("w-full text-sm", fixedLayout && "table-fixed")}>
           {headersWithSelection && (
             <TableHeader className="bg-muted/70 text-xs tracking-wide text-muted-foreground uppercase">
               <TableRow>
@@ -164,6 +203,9 @@ export function DataTable({
                           aria-label={
                             selection!.selectAllLabel ??
                             "Select all visible rows"
+                          }
+                          className={
+                            fixedLayout ? "after:-inset-x-2" : undefined
                           }
                           checked={allVisibleSelected}
                           disabled={
@@ -212,7 +254,7 @@ export function DataTable({
                     <TableCell className={cellClass(0)}>
                       <button
                         aria-label={reorder!.handleLabel ?? "Reorder row"}
-                        className="flex cursor-grab touch-none items-center justify-center text-muted-foreground transition-colors hover:text-foreground active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+                        className="flex size-7 cursor-grab touch-none items-center justify-center text-muted-foreground transition-colors hover:text-foreground active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
                         disabled={reorder!.disabled}
                         title={reorder!.handleLabel ?? "Reorder row"}
                         type="button"
@@ -230,6 +272,9 @@ export function DataTable({
                             rowId
                               ? selection!.getRowLabel(rowId)
                               : (selection!.selectAllLabel ?? "Select row")
+                          }
+                          className={
+                            fixedLayout ? "after:-inset-x-2" : undefined
                           }
                           checked={
                             rowId ? selection!.selectedIds.has(rowId) : false

@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test"
 
 import {
   buildTrafficSeries,
+  findNearestTrafficSampleIndex,
   formatBitRate,
   formatTrafficBytes,
+  TRAFFIC_CHART_WIDTH,
+  trafficTooltipTop,
 } from "../src/components/transports/interface-traffic-model"
 
 describe("interface traffic presentation", () => {
@@ -96,5 +99,70 @@ describe("interface traffic presentation", () => {
     expect(series.oldestSampledAt).toBe(10_000)
     expect(series.newestSampledAt).toBe(20_000)
     expect(series.rxArea.startsWith("M 0 162 L ")).toBe(true)
+    expect(series.samples).toEqual([
+      {
+        x: 0,
+        rxY: 103.68,
+        txY: 158.76,
+        rxBitsPerSecond: 18_000,
+        txBitsPerSecond: 1_000,
+        sampledAtUnixMs: 10_000,
+      },
+      {
+        x: TRAFFIC_CHART_WIDTH,
+        rxY: 97.19676,
+        txY: 155.52,
+        rxBitsPerSecond: 20_001,
+        txBitsPerSecond: 2_000,
+        sampledAtUnixMs: 20_000,
+      },
+    ])
+  })
+
+  test("finds the nearest retained sample for hover and keyboard cursors", () => {
+    const series = buildTrafficSeries({
+      sampled_at_unix_ms: 30_000,
+      history: [
+        {
+          age_ms: 20_000,
+          rx_bits_per_second: 1_000,
+          tx_bits_per_second: 2_000,
+        },
+        {
+          age_ms: 5_000,
+          rx_bits_per_second: 3_000,
+          tx_bits_per_second: 4_000,
+        },
+        {
+          age_ms: 0,
+          rx_bits_per_second: 5_000,
+          tx_bits_per_second: 6_000,
+        },
+      ],
+    })
+
+    expect(findNearestTrafficSampleIndex(series.samples, -20)).toBe(0)
+    expect(findNearestTrafficSampleIndex(series.samples, 400)).toBe(1)
+    expect(
+      findNearestTrafficSampleIndex(series.samples, TRAFFIC_CHART_WIDTH + 20)
+    ).toBe(2)
+    expect(findNearestTrafficSampleIndex([], 100)).toBeUndefined()
+    expect(
+      findNearestTrafficSampleIndex(series.samples, Number.NaN)
+    ).toBeUndefined()
+    expect(series.samples[1]).toMatchObject({
+      rxBitsPerSecond: 3_000,
+      txBitsPerSecond: 4_000,
+      sampledAtUnixMs: 25_000,
+    })
+  })
+
+  test("tracks the pointer and clamps the tooltip inside its overlay area", () => {
+    expect(trafficTooltipTop(10, 78, 191)).toBe(26)
+    expect(trafficTooltipTop(80, 78, 191)).toBe(96)
+    expect(trafficTooltipTop(100, 78, 191)).toBe(113)
+    expect(trafficTooltipTop(150, 78, 191)).toBe(113)
+    expect(trafficTooltipTop(-20, 78, 191)).toBe(16)
+    expect(trafficTooltipTop(100, 500, 191)).toBe(0)
   })
 })

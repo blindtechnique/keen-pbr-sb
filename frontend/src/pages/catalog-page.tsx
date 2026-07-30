@@ -5,10 +5,11 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import type { ApiError } from "@/api/client"
+import type { ListRefreshState } from "@/api/generated/model/listRefreshState"
 import { useConfigMutationPending } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
-import { selectConfig } from "@/api/selectors"
+import { selectConfig, selectListRefreshState } from "@/api/selectors"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
@@ -30,9 +31,9 @@ import { getApiErrorMessage } from "@/lib/api-errors"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 import {
+  findCatalogPresetInstalledListId,
   getCatalogPresetSourceSummary,
   getCatalogSelectionMode,
-  isCatalogPresetInstalled,
   isCatalogRoutableOutboundType,
   type CatalogPreset,
 } from "@/pages/catalog-model"
@@ -80,12 +81,74 @@ const CATEGORY_ORDER = [
 const DIRECT = "__direct__"
 const EMPTY_PRESETS: readonly CatalogPreset[] = []
 
+function CatalogListRefreshSummary({
+  detour,
+  state,
+}: {
+  detour?: string
+  state?: ListRefreshState
+}) {
+  const { t } = useTranslation()
+  const successfulAt = formatRefreshTimestamp(
+    state?.last_updated,
+    t("pages.catalog.refreshState.neverSucceeded")
+  )
+  const attemptedAt = formatRefreshTimestamp(
+    state?.last_attempt,
+    t("pages.catalog.refreshState.neverAttempted")
+  )
+
+  return (
+    <span className="mt-1 block space-y-0.5 text-xs">
+      <span className="block text-muted-foreground">
+        {t("pages.catalog.refreshState.success", { date: successfulAt })}
+      </span>
+      <span className="block text-muted-foreground">
+        {t(
+          detour
+            ? "pages.catalog.refreshState.attemptVia"
+            : "pages.catalog.refreshState.attempt",
+          { date: attemptedAt, detour }
+        )}
+      </span>
+      {state?.last_error ? (
+        <span className="block break-words text-destructive">
+          {t("pages.catalog.refreshState.error", {
+            message: state.last_error,
+          })}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+function formatRefreshTimestamp(value: string | undefined, fallback: string) {
+  if (!value) {
+    return fallback
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(parsed)
+}
+
 export function CatalogPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
   const configQuery = useGetConfig()
   const config = selectConfig(configQuery.data)
+  const listRefreshState = selectListRefreshState(configQuery.data)
   const configMutationPending = useConfigMutationPending()
 
   const catalogQuery = useQuery<CatalogResponse>({
@@ -216,12 +279,11 @@ export function CatalogPage() {
 
   const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
   const selectedMode = getCatalogSelectionMode(presets, selected)
-  const installedPresetIds = new Set(
-    presets
-      .filter((preset) =>
-        isCatalogPresetInstalled(preset, config?.lists)
-      )
-      .map((preset) => preset.id)
+  const installedListIdByPresetId = new Map(
+    presets.flatMap((preset) => {
+      const listId = findCatalogPresetInstalledListId(preset, config?.lists)
+      return listId ? [[preset.id, listId] as const] : []
+    })
   )
 
   const categories = useMemo(() => {
@@ -456,7 +518,18 @@ export function CatalogPage() {
         {visible.map((preset) => {
           const sourceSummary = getCatalogPresetSourceSummary(preset)
           const blocks = preset.engines?.singbox?.action === "reject"
-          const installed = installedPresetIds.has(preset.id)
+          const installedListId = installedListIdByPresetId.get(preset.id)
+          const installedList = installedListId
+            ? config?.lists?.[installedListId]
+            : undefined
+          const installed = Boolean(installedListId)
+          const refreshState = installedListId
+            ? listRefreshState[installedListId]
+            : undefined
+          const refreshDetour = refreshState?.last_detour
+            ? (outboundDisplayNames.get(refreshState.last_detour) ??
+              refreshState.last_detour)
+            : undefined
 
           return (
             <label
@@ -469,12 +542,20 @@ export function CatalogPage() {
                 onChange={() => toggle(preset.id)}
                 type="checkbox"
               />
-              <span className="flex min-w-0 flex-1 items-center gap-2">
-                <span className="truncate">{preset.name}</span>
-                {installed ? (
-                  <span className="shrink-0 text-xs font-medium text-success">
-                    {t("pages.catalog.installed")}
-                  </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate">{preset.name}</span>
+                  {installed ? (
+                    <span className="shrink-0 text-xs font-medium text-success">
+                      {t("pages.catalog.installed")}
+                    </span>
+                  ) : null}
+                </span>
+                {installedList?.url ? (
+                  <CatalogListRefreshSummary
+                    detour={refreshDetour}
+                    state={refreshState}
+                  />
                 ) : null}
               </span>
               <span className="shrink-0 text-xs text-muted-foreground">

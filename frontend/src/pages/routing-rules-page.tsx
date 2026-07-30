@@ -409,9 +409,19 @@ function RoutingRulesEditor({
 
           <div className="hidden md:block">
             <DataTable
+              columnClassNames={[
+                "w-[3.25rem] px-0.5",
+                "w-12 px-1 text-center",
+                "w-[18%]",
+                undefined,
+                "w-[20%]",
+                "w-[5.5rem] px-2",
+              ]}
+              fixedLayout
               headers={[
                 "",
-                t("pages.routingRules.headers.order"),
+                t("pages.routingRules.headers.orderShort"),
+                t("pages.routingRules.headers.name"),
                 t("pages.routingRules.headers.criteria"),
                 t("pages.routingRules.headers.outbound"),
                 t("pages.routingRules.headers.actions"),
@@ -423,7 +433,10 @@ function RoutingRulesEditor({
                 onReorder: handleReorder,
               }}
               rows={tableRows.map((row: ReturnType<typeof getRouteRuleRow>) => [
-                <div className="flex items-center" key={`${row.id}-enabled`}>
+                <div
+                  className="flex items-center justify-center"
+                  key={`${row.id}-enabled`}
+                >
                   <Switch
                     aria-label={t(
                       row.enabled
@@ -431,6 +444,7 @@ function RoutingRulesEditor({
                         : "pages.routingRules.actions.enableRule"
                     )}
                     checked={row.enabled}
+                    className="after:-inset-x-2"
                     disabled={configMutationPending}
                     onCheckedChange={(checked) =>
                       handleEnabledChange(row.index, checked)
@@ -442,19 +456,23 @@ function RoutingRulesEditor({
                     )}
                   />
                 </div>,
-                <div className="min-w-0" key={`${row.id}-order`}>
-                  <span
-                    className="block truncate font-medium"
-                    title={row.technicalId}
-                  >
+                <span
+                  className="font-medium tabular-nums"
+                  key={`${row.id}-order`}
+                >
+                  #{row.order}
+                </span>,
+                <div
+                  className="min-w-0"
+                  key={`${row.id}-name`}
+                  title={row.technicalId}
+                >
+                  <span className="block truncate font-medium">
                     {row.displayName}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    #{row.order}
                   </span>
                 </div>,
                 <ul
-                  className="list-disc space-y-1 pl-5 text-sm"
+                  className="min-w-0 list-disc space-y-1 pl-5 text-sm break-words"
                   key={`${row.id}-conditions`}
                 >
                   {row.conditions.map((condition) => (
@@ -469,7 +487,7 @@ function RoutingRulesEditor({
                     </li>
                   ))}
                 </ul>,
-                <div key={`${row.id}-outbound`}>
+                <div className="min-w-0" key={`${row.id}-outbound`}>
                   <RuntimeOutboundEntry
                     runtimeState={row.runtimeState}
                     title={row.outbound}

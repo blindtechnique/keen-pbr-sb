@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  findCatalogPresetInstalledListId,
   getCatalogPresetSourceSummary,
   getCatalogSelectionMode,
   isCatalogPresetInstalled,
@@ -188,6 +189,56 @@ describe("catalog setup intent", () => {
         },
       })
     ).toBe(false)
+  })
+
+  test("maps catalogue refresh state only through reliable provenance or exact legacy source", () => {
+    const preset: CatalogPreset = {
+      id: "github",
+      name: "GitHub",
+      catalog_identity: "a".repeat(64),
+      engines: {
+        dns: {
+          subscriptionUrl: "https://example.test/github.srs",
+        },
+      },
+    }
+
+    expect(
+      findCatalogPresetInstalledListId(preset, {
+        renamed_by_user: {
+          catalog_identity: "a".repeat(64),
+          url: "https://mirror.test/github.srs",
+        },
+      })
+    ).toBe("renamed_by_user")
+    expect(
+      findCatalogPresetInstalledListId(preset, {
+        legacy_exact_source: {
+          url: "https://example.test/github.srs",
+        },
+      })
+    ).toBe("legacy_exact_source")
+    expect(
+      findCatalogPresetInstalledListId(preset, {
+        different_catalog_item: {
+          catalog_identity: "b".repeat(64),
+          url: "https://example.test/github.srs",
+        },
+      })
+    ).toBeUndefined()
+    expect(
+      findCatalogPresetInstalledListId(preset, {
+        unrelated: {
+          url: "https://example.test/other.srs",
+        },
+      })
+    ).toBeUndefined()
+    expect(
+      findCatalogPresetInstalledListId(
+        { id: "metadata-only", name: "Metadata only" },
+        { unrelated_empty_list: {} }
+      )
+    ).toBeUndefined()
   })
 
   test("keeps routing and blocking selections as separate operations", () => {

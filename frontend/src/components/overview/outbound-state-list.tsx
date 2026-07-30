@@ -1,4 +1,6 @@
 import { useTranslation } from "react-i18next"
+import { CircleAlert } from "lucide-react"
+import { Link } from "wouter"
 
 import type {
   Outbound,
@@ -6,7 +8,11 @@ import type {
   RuntimeInterfaceState,
   RuntimeOutboundState,
 } from "@/api/generated/model"
-import { outboundTrafficBucket } from "@/components/overview/outbound-state-model"
+import {
+  activeOutboundMember,
+  outboundRuntimeIssues,
+  outboundTrafficBucket,
+} from "@/components/overview/outbound-state-model"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import {
@@ -106,6 +112,19 @@ export function OutboundStateList({
 
       {important.map(({ outbound, runtime, lists, protocol }) => {
         const members = runtime?.interfaces ?? []
+        const activeMember = activeOutboundMember(runtime)
+        const activeMemberName = activeMember
+          ? (outboundDisplayNames.get(activeMember.outbound_tag) ??
+            activeMember.outbound_tag)
+          : undefined
+        const issues = outboundRuntimeIssues(runtime)
+        const hint = describeEntry(
+          outbound,
+          members,
+          outboundDisplayNames,
+          protocol,
+          t
+        )
 
         return (
           <div className="pt-1.5" key={outbound.tag}>
@@ -131,7 +150,19 @@ export function OutboundStateList({
                   {t("overview.outbounds.listCount", { count: lists })}
                 </span>
               ) : null}
-              <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+              {outbound.type === "urltest" && activeMemberName ? (
+                <Badge
+                  className="max-w-48 shrink truncate"
+                  size="xs"
+                  title={activeMemberName}
+                  variant="success"
+                >
+                  {t("overview.outbounds.activeMember", {
+                    name: activeMemberName,
+                  })}
+                </Badge>
+              ) : null}
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
                 {activeLatency(members) !== undefined
                   ? t("transports.latencyValue", {
                       value: activeLatency(members),
@@ -142,15 +173,45 @@ export function OutboundStateList({
                     )}
               </span>
             </div>
-            <p className="pl-4 text-xs text-muted-foreground">
-              {describeEntry(
-                outbound,
-                members,
-                outboundDisplayNames,
-                protocol,
-                t
-              )}
-            </p>
+            {hint ? (
+              <p className="pl-4 text-xs text-muted-foreground">{hint}</p>
+            ) : null}
+            {issues.length > 0 ? (
+              <div className="space-y-0.5 pt-0.5 pl-4 text-xs text-destructive">
+                {issues.map((issue) => {
+                  const reason = t(`overview.outbounds.issue.${issue.code}`)
+                  const memberName = issue.memberTag
+                    ? (outboundDisplayNames.get(issue.memberTag) ??
+                      issue.memberTag)
+                    : undefined
+                  return (
+                    <p
+                      className="flex items-start gap-1.5"
+                      key={`${issue.memberTag ?? "group"}:${issue.code}`}
+                    >
+                      <CircleAlert
+                        aria-hidden="true"
+                        className="mt-0.5 size-3 shrink-0"
+                      />
+                      <span className="min-w-0 break-words">
+                        {memberName
+                          ? t("overview.outbounds.issue.member", {
+                              name: memberName,
+                              reason,
+                            })
+                          : reason}
+                      </span>
+                    </p>
+                  )
+                })}
+                <Link
+                  className="inline-flex rounded font-medium text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                  href={outboundManagementHref(outbound)}
+                >
+                  {t("overview.outbounds.issue.open")}
+                </Link>
+              </div>
+            ) : null}
           </div>
         )
       })}
@@ -167,6 +228,12 @@ export function OutboundStateList({
       ) : null}
     </div>
   )
+}
+
+function outboundManagementHref(outbound: Outbound): string {
+  if (outbound.type === "interface") return "/outbounds#interfaces"
+  if (outbound.type === "urltest") return "/outbounds#failover"
+  return "/outbounds#system"
 }
 
 /**
@@ -197,21 +264,18 @@ function describeEntry(
   }
 
   const active = members.find((member) => member.status === "active")
-  const backup = members.find((member) => member.outbound_tag !== active?.outbound_tag)
+  const backup = members.find(
+    (member) => member.outbound_tag !== active?.outbound_tag
+  )
   if (!active) {
     return t("overview.outbounds.hint.groupIdle")
   }
   return backup
-    ? t("overview.outbounds.hint.groupVia", {
-        active:
-          outboundDisplayNames.get(active.outbound_tag) ?? active.outbound_tag,
+    ? t("overview.outbounds.hint.groupBackup", {
         backup:
           outboundDisplayNames.get(backup.outbound_tag) ?? backup.outbound_tag,
       })
-    : t("overview.outbounds.hint.groupViaOnly", {
-        active:
-          outboundDisplayNames.get(active.outbound_tag) ?? active.outbound_tag,
-      })
+    : ""
 }
 
 function HealthDot({ status }: { status?: string }) {

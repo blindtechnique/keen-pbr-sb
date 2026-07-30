@@ -1,8 +1,10 @@
 import {
+  ChevronRight,
   CircleAlert,
   CircleCheckBig,
   LoaderCircle,
 } from "lucide-react"
+import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
@@ -11,6 +13,7 @@ import type {
 } from "@/api/generated/model"
 import { useStatusEventConnectionState } from "@/api/status-event-connection"
 import { getHeaderHealthTone } from "@/components/layout/header-health-state"
+import { collectDashboardAttentionItems } from "@/components/overview/system-status-summary-model"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
@@ -20,28 +23,38 @@ export function SystemStatusSummary({
   configIsDraft,
   listCount,
   outbounds,
+  outboundsQueryFailed = false,
   routingOverall,
   ruleCount,
   service,
+  serviceQueryFailed = false,
+  children,
 }: {
   configIsDraft: boolean
   listCount: number
   outbounds?: readonly RuntimeOutboundState[]
+  outboundsQueryFailed?: boolean
   routingOverall?: string
   ruleCount: number
   service?: HealthResponse
+  serviceQueryFailed?: boolean
+  children?: ReactNode
 }) {
   const { t } = useTranslation()
   const statusEvents = useStatusEventConnectionState()
   const sharedHealthTone = getHeaderHealthTone({
     outbounds,
+    outboundsQueryFailed,
     service,
+    serviceQueryFailed,
     statusEvents,
   })
   const serviceFailed =
+    serviceQueryFailed ||
     service?.status === "stopped" ||
     service?.runtime_state === "stopped" ||
-    service?.runtime_state === "broken"
+    service?.runtime_state === "broken" ||
+    service?.lifecycle_operation?.status === "failed"
   const dnsFailed =
     service?.resolver_live_status === "degraded" ||
     service?.resolver_live_status === "unavailable" ||
@@ -52,8 +65,7 @@ export function SystemStatusSummary({
     !service ||
     service.resolver_live_status !== "healthy" ||
     service.resolver_config_sync_state !== "converged"
-  const routingFailed =
-    routingOverall !== undefined && routingOverall !== "ok"
+  const routingFailed = routingOverall !== undefined && routingOverall !== "ok"
   const tone: SummaryTone =
     routingFailed || sharedHealthTone === "failed"
       ? "degraded"
@@ -62,75 +74,117 @@ export function SystemStatusSummary({
           configIsDraft
         ? "waiting"
         : "healthy"
+  const attentionItems = collectDashboardAttentionItems({
+    outbounds,
+    outboundsQueryFailed,
+    routingOverall,
+    service,
+    serviceQueryFailed,
+  })
 
   return (
     <section
       data-slot="card"
       className={cn(
-        "flex flex-col gap-3 rounded-[6px] border bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
+        "rounded-[6px] border bg-card px-4 py-3",
         tone === "degraded" && "border-destructive/40",
         tone === "waiting" && "border-warning/40"
       )}
     >
-      <div className="flex min-w-0 items-center gap-3">
-        <StatusIcon tone={tone} />
-        <div className="min-w-0">
-          <h1
-            className="text-[20px] leading-7 font-bold text-foreground"
-            id="page-title"
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <StatusIcon tone={tone} />
+          <div className="min-w-0">
+            <h1
+              className="text-[20px] leading-7 font-bold text-foreground"
+              id="page-title"
+            >
+              {t(`overview.summary.${tone}.title`)}
+            </h1>
+            <p className="text-[13px] leading-5 text-muted-foreground">
+              {t(`overview.summary.${tone}.description`)}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
+          <Badge
+            size="xs"
+            variant={
+              serviceFailed
+                ? "destructive"
+                : service === undefined
+                  ? "secondary"
+                  : "success"
+            }
           >
-            {t(`overview.summary.${tone}.title`)}
-          </h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            {t(`overview.summary.${tone}.description`)}
-          </p>
+            keen-pbr
+          </Badge>
+          <Badge
+            size="xs"
+            variant={
+              routingFailed
+                ? "destructive"
+                : routingOverall
+                  ? "success"
+                  : "secondary"
+            }
+          >
+            {t("overview.summary.routing")}
+          </Badge>
+          <Badge
+            size="xs"
+            variant={
+              dnsFailed ? "destructive" : dnsWaiting ? "warning" : "success"
+            }
+          >
+            DNS
+          </Badge>
+          <Badge size="xs" variant="secondary">
+            {t("overview.summary.configuration", {
+              lists: listCount,
+              rules: ruleCount,
+            })}
+          </Badge>
+          {configIsDraft ? (
+            <Badge size="xs" variant="warning">
+              {t("overview.summary.draft")}
+            </Badge>
+          ) : null}
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-        <Badge
-          size="xs"
-          variant={
-            service === undefined
-              ? "secondary"
-              : serviceFailed
-                ? "destructive"
-                : "success"
-          }
+      {attentionItems.length > 0 ? (
+        <nav
+          aria-label={t("overview.summary.attention.ariaLabel")}
+          className="mt-3 flex flex-wrap gap-1.5 border-t border-border pt-2.5"
         >
-          keen-pbr
-        </Badge>
-        <Badge
-          size="xs"
-          variant={
-            routingFailed
-              ? "destructive"
-              : routingOverall
-                ? "success"
-                : "secondary"
-          }
-        >
-          {t("overview.summary.routing")}
-        </Badge>
-        <Badge
-          size="xs"
-          variant={
-            dnsFailed ? "destructive" : dnsWaiting ? "warning" : "success"
-          }
-        >
-          DNS
-        </Badge>
-        <Badge size="xs" variant="secondary">
-          {t("overview.summary.configuration", {
-            lists: listCount,
-            rules: ruleCount,
-          })}
-        </Badge>
-        {configIsDraft ? (
-          <Badge size="xs" variant="warning">
-            {t("overview.summary.draft")}
-          </Badge>
-        ) : null}
-      </div>
+          {attentionItems.map((item) => (
+            <a
+              className={cn(
+                "inline-flex min-h-7 items-center gap-1.5 rounded-[4px] border px-2 py-1 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                item.tone === "error"
+                  ? "border-destructive/25 bg-destructive/5 text-destructive hover:bg-destructive/10"
+                  : "border-warning/30 bg-warning/5 text-warning-foreground hover:bg-warning/10"
+              )}
+              href={`#${item.targetId}`}
+              key={item.id}
+            >
+              <CircleAlert aria-hidden="true" className="size-3.5" />
+              <span>
+                {t(`overview.summary.attention.${item.id}`, {
+                  count: item.count,
+                })}
+              </span>
+              <ChevronRight
+                aria-hidden="true"
+                className="size-3.5 opacity-60"
+              />
+            </a>
+          ))}
+        </nav>
+      ) : null}
+      {children ? (
+        <div className="mt-3 border-t border-border pt-3">{children}</div>
+      ) : null}
     </section>
   )
 }

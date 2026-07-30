@@ -331,6 +331,15 @@ function ListForm({
   const compatibleDnsServers = quickSetup.routeOutbound
     ? dnsServers.filter((server) => server.detour === quickSetup.routeOutbound)
     : []
+  const selectedQuickSetupOutbound = downloadOutboundByTag.get(
+    quickSetup.routeOutbound
+  )
+  const selectedQuickSetupDnsServer = dnsServers.find(
+    (server) => server.tag === quickSetup.dnsServer
+  )
+  const selectedRecommendedDnsTemplate = recommendedSetup
+    ? resolveDnsTemplateSelection(recommendedDnsPreset, savedDnsTemplates)
+    : undefined
   // DNS rules are edited where they belong — next to the list they apply to —
   // instead of in a separate section listing every rule at once.
   const currentDnsServer =
@@ -411,9 +420,6 @@ function ListForm({
           })
           return undefined
         }
-        const selectedRecommendedDnsTemplate = recommendedSetup
-          ? resolveDnsTemplateSelection(recommendedDnsPreset, savedDnsTemplates)
-          : undefined
         if (
           mode === "create" &&
           (recommendedSetup || quickSetup.createDnsRule) &&
@@ -1151,6 +1157,49 @@ function ListForm({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
+            {recommendedSetup ? (
+              <Alert className="border-primary/25 bg-primary/5">
+                <CheckCircle2Icon />
+                <AlertDescription className="space-y-2">
+                  <p className="font-medium text-foreground">
+                    {t("pages.listUpsert.quickSetup.recommendedPlan.title")}
+                  </p>
+                  <p>
+                    {t(
+                      "pages.listUpsert.quickSetup.recommendedPlan.description"
+                    )}
+                  </p>
+                  <div className="space-y-1 text-foreground">
+                    <p>
+                      {t("pages.listUpsert.quickSetup.recommendedPlan.route", {
+                        route: selectedQuickSetupOutbound
+                          ? getOutboundDisplayName(selectedQuickSetupOutbound)
+                          : t(
+                              "pages.listUpsert.quickSetup.recommendedPlan.notSelected"
+                            ),
+                      })}
+                    </p>
+                    <p>
+                      {t(
+                        selectedQuickSetupDnsServer
+                          ? "pages.listUpsert.quickSetup.recommendedPlan.dnsReuse"
+                          : "pages.listUpsert.quickSetup.recommendedPlan.dnsCreate",
+                        {
+                          dns: selectedQuickSetupDnsServer
+                            ? selectedQuickSetupDnsServer.display_name?.trim() ||
+                              selectedQuickSetupDnsServer.tag
+                            : (selectedRecommendedDnsTemplate?.name ??
+                              t(
+                                "pages.listUpsert.quickSetup.recommendedPlan.notSelected"
+                              )),
+                        }
+                      )}
+                    </p>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
             <div className="space-y-3">
               <div className="flex items-center gap-3">
                 <Checkbox

@@ -91,6 +91,66 @@ describe("list aliases", () => {
     expect(result?.config.dns?.servers).toHaveLength(1)
   })
 
+  test("builds one dedicated route and DNS rule while reusing compatible DNS", () => {
+    const baseline: ConfigObject = {
+      dns: {
+        servers: [
+          {
+            tag: "existing_cloudflare",
+            type: "static",
+            address: "1.1.1.1",
+            detour: "vpn",
+          },
+        ],
+        rules: [],
+      },
+      route: { rules: [] },
+    }
+    const dnsResult = addRecommendedDnsServer(
+      baseline,
+      {
+        name: "Cloudflare",
+        primaryAddress: "1.1.1.1",
+        technicalSeed: "cloudflare",
+      },
+      "vpn",
+      "VPN"
+    )
+    if (!dnsResult) {
+      throw new Error("expected compatible DNS result")
+    }
+
+    const updated = buildUpdatedConfigForListUpsert(
+      dnsResult.config,
+      "create",
+      {
+        ...baselineDraft,
+        displayName: "Нейросети",
+      },
+      undefined,
+      {
+        createRouteRule: true,
+        routeOutbound: "vpn",
+        createDnsRule: true,
+        dnsServer: dnsResult.serverTag,
+      }
+    )
+
+    expect(updated.dns?.servers).toHaveLength(1)
+    expect(updated.route?.rules).toEqual([
+      expect.objectContaining({
+        list: ["ai_services"],
+        outbound: "vpn",
+      }),
+    ])
+    expect(updated.dns?.rules).toEqual([
+      expect.objectContaining({
+        list: ["ai_services"],
+        server: "existing_cloudflare",
+      }),
+    ])
+  })
+
   test("renders the no-DNS sentinel as a localized label", () => {
     expect(createListDnsServerSelectItems([], "Не выбрано")).toEqual([
       { value: "__none__", label: "Не выбрано" },

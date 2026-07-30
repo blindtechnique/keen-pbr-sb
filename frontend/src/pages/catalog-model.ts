@@ -31,9 +31,7 @@ export interface CatalogPresetSourceSummary {
  * Fast UI affordance only. The backend planner remains authoritative and
  * repeats this check while producing and committing the candidate config.
  */
-export function isCatalogRoutableOutboundType(
-  type: OutboundType
-): boolean {
+export function isCatalogRoutableOutboundType(type: OutboundType): boolean {
   return type === "interface" || type === "table" || type === "urltest"
 }
 
@@ -70,7 +68,7 @@ export function getCatalogPresetSourceSummary(
   return {
     urlBacked: Boolean(
       preset.engines?.singbox?.ruleSets?.[0]?.url ||
-        preset.engines?.dns?.subscriptionUrl
+      preset.engines?.dns?.subscriptionUrl
     ),
     domainCount: preset.engines?.dns?.domains?.length ?? 0,
     cidrCount: preset.engines?.dns?.subnets?.length ?? 0,
@@ -85,18 +83,30 @@ export function isCatalogPresetInstalled(
   preset: CatalogPreset,
   lists: Readonly<Record<string, ListConfig>> | undefined
 ): boolean {
+  return findCatalogPresetInstalledListId(preset, lists) !== undefined
+}
+
+/**
+ * Resolves a catalogue item to its installed list without relying on a
+ * user-editable technical ID. Provenance is authoritative; the exact legacy
+ * source comparison only supports configs created before provenance existed.
+ */
+export function findCatalogPresetInstalledListId(
+  preset: CatalogPreset,
+  lists: Readonly<Record<string, ListConfig>> | undefined
+): string | undefined {
   if (!lists) {
-    return false
+    return undefined
   }
 
-  const configuredLists = Object.values(lists)
-  if (
-    preset.catalog_identity &&
-    configuredLists.some(
-      (list) => list.catalog_identity === preset.catalog_identity
+  const configuredLists = Object.entries(lists)
+  if (preset.catalog_identity) {
+    const provenanceMatch = configuredLists.find(
+      ([, list]) => list.catalog_identity === preset.catalog_identity
     )
-  ) {
-    return true
+    if (provenanceMatch) {
+      return provenanceMatch[0]
+    }
   }
 
   const sourceUrl =
@@ -104,8 +114,11 @@ export function isCatalogPresetInstalled(
     preset.engines?.dns?.subscriptionUrl?.trim()
   const domains = normalizedValues(preset.engines?.dns?.domains)
   const cidrs = normalizedValues(preset.engines?.dns?.subnets)
+  if (!sourceUrl && domains.length === 0 && cidrs.length === 0) {
+    return undefined
+  }
 
-  return configuredLists.some((list) => {
+  const legacyMatch = configuredLists.find(([, list]) => {
     if (list.catalog_identity) {
       return false
     }
@@ -120,6 +133,8 @@ export function isCatalogPresetInstalled(
       sameValues(normalizedValues(list.ip_cidrs), cidrs)
     )
   })
+
+  return legacyMatch?.[0]
 }
 
 function normalizedValues(values: readonly string[] | undefined): string[] {
@@ -128,7 +143,10 @@ function normalizedValues(values: readonly string[] | undefined): string[] {
     .sort()
 }
 
-function sameValues(left: readonly string[], right: readonly string[]): boolean {
+function sameValues(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
   return (
     left.length === right.length &&
     left.every((value, index) => value === right[index])

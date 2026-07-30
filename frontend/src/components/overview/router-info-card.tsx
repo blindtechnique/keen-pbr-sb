@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 
-import { SectionCard } from "@/components/shared/section-card"
 import { Skeleton } from "@/components/ui/skeleton"
 
 type RouterInfo = {
@@ -37,7 +36,7 @@ type RouterInfo = {
  * read-only: the controls it used to share the card with now live in the
  * services card, so this stays a place to look rather than to click.
  */
-export function RouterInfoCard() {
+export function RouterInfoPanel() {
   const { t } = useTranslation()
 
   const query = useQuery<RouterInfo>({
@@ -54,11 +53,7 @@ export function RouterInfoCard() {
   const info = query.data
 
   return (
-    <SectionCard
-      className="h-full"
-      contentClassName="flex flex-1 flex-col"
-      title={t("overview.router.title")}
-    >
+    <div>
       {query.isLoading ? (
         <div className="space-y-2">
           <Skeleton className="h-6 w-2/3" />
@@ -75,7 +70,7 @@ export function RouterInfoCard() {
       ) : null}
 
       {info?.available ? (
-        <div className="space-y-4">
+        <div className="space-y-3">
           <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
             <div className="text-[16px] leading-6 font-medium">
               {[info.vendor, info.model].filter(Boolean).join(" ")}
@@ -136,7 +131,7 @@ export function RouterInfoCard() {
           ) : null}
         </div>
       ) : null}
-    </SectionCard>
+    </div>
   )
 }
 

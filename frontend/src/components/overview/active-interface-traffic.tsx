@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
@@ -11,7 +11,6 @@ import type {
 import {
   activeTrafficStatusTranslationKey,
   collectActiveTrafficPaths,
-  formatConnectionDuration,
   interfaceConnectionState,
   type ActiveTrafficPath,
 } from "@/components/overview/active-interface-traffic-model"
@@ -42,7 +41,6 @@ export function ActiveInterfaceTraffic({
   const [expandedInterfaces, setExpandedInterfaces] = useState<
     ReadonlySet<string>
   >(() => new Set())
-  const nowUnixMs = useSecondTicker()
   const paths = collectActiveTrafficPaths(outbounds, rules, runtimeByTag)
 
   if (paths.length === 0) {
@@ -54,6 +52,9 @@ export function ActiveInterfaceTraffic({
       <div className="mb-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
         {t("overview.outbounds.liveTraffic")}
       </div>
+      <p className="mb-3 max-w-3xl text-xs leading-5 text-muted-foreground">
+        {t("overview.outbounds.trafficCountersHint")}
+      </p>
       <div className="grid gap-3 lg:grid-cols-2">
         {paths.map((path) => {
           const protocol = protocolOf(path.interfaceName)
@@ -67,13 +68,6 @@ export function ActiveInterfaceTraffic({
             runtimeInterface?.status === "up",
             transports
           )
-          const connectedSeconds =
-            connection.connectedAtUnixMs === undefined
-              ? undefined
-              : Math.max(
-                  0,
-                  Math.floor((nowUnixMs - connection.connectedAtUnixMs) / 1_000)
-                )
           return (
             <div className="min-w-0" key={path.interfaceName}>
               <div className="flex min-w-0 items-center justify-between gap-3">
@@ -93,14 +87,7 @@ export function ActiveInterfaceTraffic({
                     tone={connection.connected ? "success" : "neutral"}
                   >
                     {connection.connected
-                      ? connectedSeconds === undefined
-                        ? t("overview.outbounds.connected")
-                        : t("overview.outbounds.connectedFor", {
-                            duration: formatConnectionDuration(
-                              connectedSeconds,
-                              t("overview.outbounds.dayShort")
-                            ),
-                          })
+                      ? t("overview.outbounds.connected")
                       : t("overview.outbounds.disconnected")}
                   </KeeneticStatus>
                 </div>
@@ -215,15 +202,4 @@ function toggledSet(
 
 function safeDomId(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9_-]/g, "-")
-}
-
-function useSecondTicker(): number {
-  const [nowUnixMs, setNowUnixMs] = useState(() => Date.now())
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNowUnixMs(Date.now()), 1_000)
-    return () => window.clearInterval(timer)
-  }, [])
-
-  return nowUnixMs
 }

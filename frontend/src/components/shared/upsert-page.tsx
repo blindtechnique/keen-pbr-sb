@@ -7,7 +7,7 @@ import {
   useState,
 } from "react"
 import { useTranslation } from "react-i18next"
-import { useLocation } from "wouter"
+import { useLocation, useSearch } from "wouter"
 
 import { PageHeader } from "@/components/shared/page-header"
 import { UpsertCloseContext } from "@/components/shared/upsert-page-context"
@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dialog"
 import { useConfigMutationPending } from "@/api/mutations"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { buildAdvancedEditorHref } from "@/lib/upsert-presentation"
 
 export type UpsertPagePresentation = "page" | "dialog"
 
@@ -55,6 +56,7 @@ export function UpsertPage({
 }) {
   const { t } = useTranslation()
   const [location, navigate] = useLocation()
+  const search = useSearch()
   const isMobile = useIsMobile()
   const mutationPending = useConfigMutationPending()
   const [discardDialogOpen, setDiscardDialogOpen] = useState(false)
@@ -144,7 +146,9 @@ export function UpsertPage({
                   <Button
                     aria-label={t("common.openAdvancedEditor")}
                     disabled={dirty || mutationPending}
-                    onClick={() => navigate(`${location}?view=page`)}
+                    onClick={() =>
+                      navigate(buildAdvancedEditorHref(location, search))
+                    }
                     size={isMobile ? "icon-sm" : "sm"}
                     title={
                       dirty || mutationPending

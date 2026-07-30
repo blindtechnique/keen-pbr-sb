@@ -657,6 +657,13 @@ export const enTranslation = {
       routing: "Routing",
       configuration: "{{lists}} lists · {{rules}} rules",
       draft: "Unsaved draft",
+      attention: {
+        ariaLabel: "Sections requiring attention",
+        service: "Check services",
+        dns: "Check DNS",
+        routing: "Check routing",
+        outbounds: "Problem routes: {{count}}",
+      },
     },
     router: {
       title: "Router",
@@ -731,6 +738,8 @@ export const enTranslation = {
     },
     outbounds: {
       liveTraffic: "Traffic through used tunnels and proxies",
+      trafficCountersHint:
+        "A tunnel interface counts only traffic on that path, while WAN counts all traffic on the physical connection. The values therefore do not have to match.",
       connected: "Connected",
       connectedFor: "Connected {{duration}}",
       disconnected: "Disconnected",
@@ -751,7 +760,24 @@ export const enTranslation = {
         ignore: "Traffic passes without changing its route",
         groupVia: "Going through {{active}}, {{backup}} on standby",
         groupViaOnly: "Going through {{active}}",
+        groupBackup: "Backup: {{backup}}",
         groupIdle: "No exit in the group is answering",
+      },
+      activeMember: "Active: {{name}}",
+      issue: {
+        interfaceUnreachable:
+          "The interface is unreachable from the main routing table",
+        routeMissing: "No active route is installed",
+        selectionMismatch: "The selected route does not match the active route",
+        probeTimeout: "The availability check timed out",
+        connectionRefused: "The remote endpoint refused the connection",
+        networkUnreachable: "The network or endpoint is currently unreachable",
+        dnsFailed: "The remote endpoint address could not be resolved",
+        permissionDenied: "The system could not perform the access check",
+        degraded: "The route is responding unreliably",
+        unavailable: "No route is currently available",
+        member: "{{name}}: {{reason}}",
+        open: "Open routes and failover",
       },
       members: "{{count}} in group",
       kind: {
@@ -962,6 +988,14 @@ export const enTranslation = {
       add: "Add",
       added: "Lists added: {{count}}",
       installed: "Already added",
+      refreshState: {
+        success: "Succeeded: {{date}}",
+        attempt: "Last attempt: {{date}}",
+        attemptVia: "Last attempt: {{date}} · via {{detour}}",
+        error: "Error: {{message}}",
+        neverSucceeded: "not updated yet",
+        neverAttempted: "not attempted yet",
+      },
       priorityGuard: {
         title: "Blocking-rule priority accounted for",
         description:
@@ -1029,10 +1063,16 @@ export const enTranslation = {
       tabs: {
         ariaLabel: "Settings sections",
         general: "General",
+        incoming: "Incoming connections",
         access: "Access",
         logging: "Logging",
         advanced: "Advanced",
         maintenance: "Maintenance",
+      },
+      incoming: {
+        title: "Incoming connections",
+        description:
+          "Choose inbound interfaces and configure how clients of native Keenetic VPN servers participate in keen-pbr-sb routing.",
       },
       backup: {
         title: "Backup and restore",
@@ -1424,6 +1464,11 @@ export const enTranslation = {
           "This name is shown in the interface. The technical identifier is generated automatically.",
         tag: "Name",
         tagHint: "A short name for this server, used in DNS rules.",
+        technicalId: "Technical ID",
+        technicalIdCreateHint:
+          "Generated automatically. Change it only when compatibility with an existing configuration requires it.",
+        technicalIdEditHint:
+          "Stable identifier used by DNS rules; it cannot be changed after creation.",
         type: "DNS type",
         typeHint:
           "Keenetic reuses the router's current built-in DNS. Plaintext DNS uses a manually entered IP address.",
@@ -1504,6 +1549,8 @@ export const enTranslation = {
       },
       headers: {
         order: "Order",
+        orderShort: "#",
+        name: "Name",
         criteria: "Match",
         outbound: "Route",
         runtime: "Runtime",
@@ -2141,6 +2188,15 @@ export const enTranslation = {
           "Leave the checkboxes off to configure rules manually after creating the list.",
         recommendedHint:
           "Fine tuning and independent rules remain available in the advanced editor.",
+        recommendedPlan: {
+          title: "Recommended setup",
+          description:
+            "One list, one routing rule, and one DNS rule are validated and saved together.",
+          route: "Route: {{route}}",
+          dnsReuse: "DNS: reuse {{dns}}",
+          dnsCreate: "DNS: create {{dns}}",
+          notSelected: "not selected",
+        },
         routeRequired:
           "Select a route or failover target for the routing rule.",
         dnsRequired: "Select a DNS server for the DNS rule.",
