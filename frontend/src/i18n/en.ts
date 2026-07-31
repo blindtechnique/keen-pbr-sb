@@ -994,6 +994,9 @@ export const enTranslation = {
       ipCompanionBadge: "+ IP",
       ipCompanionHint:
         "A separate IP set will be added together with the primary list ({{count}}).",
+      ipCompanionInline: "Also included: {{name}} - {{count}} IP subnets",
+      ipCompanionRemote: "Also included: {{name}} - URL-updated IP list",
+      ipCompanionGeneric: "Also included: {{name}} - IP list",
       risks: {
         title: "Please note",
         broadTrafficScope:
@@ -1033,7 +1036,17 @@ export const enTranslation = {
         applying: "Adding…",
         previewReady: "Setup checked",
         previewSummary:
-          "Lists to add: {{lists}}. Route: {{route}}. DNS: {{dns}}.",
+          "New lists: {{lists}}. Routing rules: {{routes}}. Route: {{route}}. DNS rules: {{dnsRules}}; server: {{dns}}.",
+        planTitle: "Lists in the checked plan",
+        ipListCidrs: "IP list · {{count}} subnets",
+        ipListRemote: "IP list · updated from URL",
+        ipList: "IP list",
+        mixedList: "Domains and IP addresses",
+        domainList: "Domains",
+        remoteList: "URL-backed list",
+        localList: "Local list",
+        willAdd: "will be added",
+        willReuse: "already added",
         applied: "Catalog setup applied",
         alreadyInstalledTitle: "Already installed",
         alreadyInstalled:
@@ -2113,9 +2126,12 @@ export const enTranslation = {
         button: "Pick a ready-made list",
         title: "Ready-made lists",
         description:
-          "Ready-made lists, including `.srs` files that keen-pbr-sb reads without sing-box installed. Choose a service and its URL fills the field.",
+          "A regular template fills in its ready-made URL. Meta, WhatsApp and Telegram open in the catalog so their domain and IP sets are installed together.",
         search: "Search by name or address",
         add: "Select",
+        catalogManaged:
+          "Related domain and IP sets are installed together through the catalog.",
+        openCatalog: "Open catalog",
         empty: "Nothing found",
         categories: {
           ai: "AI services",

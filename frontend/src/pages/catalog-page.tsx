@@ -35,10 +35,12 @@ import {
   applyCatalogSelectionToggle,
   canSelectCatalogPreset,
   getCatalogPresetSourceSummary,
+  getCatalogRoutingCompanionSourceSummaries,
   getCatalogSelectionMode,
   isCatalogRoutableOutboundType,
   resolveCatalogAncestorMap,
   resolveCatalogInstallStates,
+  resolveSelectedCatalogRoutingCompanions,
   type CatalogPreset,
   type CatalogWarning,
 } from "@/pages/catalog-model"
@@ -178,7 +180,9 @@ export function CatalogPage() {
     },
   })
 
-  const [search, setSearch] = useState("")
+  const [search, setSearch] = useState(
+    () => new URLSearchParams(window.location.search).get("search") ?? ""
+  )
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [destination, setDestination] = useState("")
   const [sourceDetour, setSourceDetour] = useState<string | null>(null)
@@ -458,6 +462,20 @@ export function CatalogPage() {
   const setupInstallState = setupPreview
     ? getCatalogSetupInstallState(setupPreview)
     : null
+  const setupCompanions = resolveSelectedCatalogRoutingCompanions(
+    presets,
+    new Set(
+      setupIntent?.selections.map((selection) => selection.preset_id) ?? []
+    )
+  )
+  const setupRouteRuleCount = setupPreview
+    ? (setupPreview.summary.route_rules?.length ??
+      (setupPreview.summary.route_rule ? 1 : 0))
+    : 0
+  const setupDnsRuleCount = setupPreview
+    ? (setupPreview.summary.dns_rules?.length ??
+      (setupPreview.summary.dns_rule ? 1 : 0))
+    : 0
 
   return (
     <div className="space-y-3">
@@ -553,6 +571,10 @@ export function CatalogPage() {
       <div className="max-h-[55vh] divide-y overflow-y-auto border-y">
         {visible.map((preset) => {
           const sourceSummary = getCatalogPresetSourceSummary(preset)
+          const companionSummaries = getCatalogRoutingCompanionSourceSummaries(
+            preset,
+            presets
+          )
           const blocks = preset.engines?.singbox?.action === "reject"
           const installState = installStateByPresetId.get(preset.id)
           const installedListId = installState?.primaryListId
@@ -622,6 +644,26 @@ export function CatalogPage() {
                 {preset.notice ? (
                   <span className="mt-1 block text-xs text-muted-foreground">
                     {preset.notice}
+                  </span>
+                ) : null}
+                {companionSummaries.length > 0 ? (
+                  <span className="mt-1 block space-y-0.5 text-xs font-medium text-primary">
+                    {companionSummaries.map((companion) => (
+                      <span className="block" key={companion.id}>
+                        {companion.cidrCount > 0
+                          ? t("pages.catalog.ipCompanionInline", {
+                              name: companion.name,
+                              count: companion.cidrCount,
+                            })
+                          : companion.urlBacked
+                            ? t("pages.catalog.ipCompanionRemote", {
+                                name: companion.name,
+                              })
+                            : t("pages.catalog.ipCompanionGeneric", {
+                                name: companion.name,
+                              })}
+                      </span>
+                    ))}
                   </span>
                 ) : null}
                 {warningMessages.length > 0 ? (
@@ -863,6 +905,8 @@ export function CatalogPage() {
                     <AlertDescription>
                       {t("pages.catalog.setup.previewSummary", {
                         lists: setupInstallState?.pending.length ?? 0,
+                        routes: setupRouteRuleCount,
+                        dnsRules: setupDnsRuleCount,
                         route: setupPreview.summary.route_rule
                           ? (outboundDisplayNames.get(
                               setupPreview.summary.route_rule.outbound
@@ -880,6 +924,61 @@ export function CatalogPage() {
                       })}
                     </AlertDescription>
                   </Alert>
+
+                  <div className="overflow-hidden rounded-md border border-border">
+                    <div className="bg-secondary/45 px-3 py-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                      {t("pages.catalog.setup.planTitle")}
+                    </div>
+                    <div className="divide-y divide-border">
+                      {setupPreview.summary.lists.map((list) => {
+                        const companion = setupCompanions.get(list.preset_id)
+                        const typeLabel = companion
+                          ? companion.cidrCount > 0
+                            ? t("pages.catalog.setup.ipListCidrs", {
+                                count: companion.cidrCount,
+                              })
+                            : t("pages.catalog.setup.ipListRemote")
+                          : list.has_inline_domains && list.has_inline_cidrs
+                            ? t("pages.catalog.setup.mixedList")
+                            : list.has_inline_cidrs
+                              ? t("pages.catalog.setup.ipList")
+                              : list.has_inline_domains
+                                ? t("pages.catalog.setup.domainList")
+                                : list.url_backed
+                                  ? t("pages.catalog.setup.remoteList")
+                                  : t("pages.catalog.setup.localList")
+                        return (
+                          <div
+                            className="flex min-w-0 items-center justify-between gap-3 px-3 py-2 text-sm"
+                            key={`${list.preset_id}:${list.technical_id}`}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate font-medium">
+                                {list.display_name}
+                              </span>
+                              <span className="block text-xs text-muted-foreground">
+                                {typeLabel}
+                              </span>
+                            </span>
+                            <span
+                              className={cn(
+                                "shrink-0 text-xs font-medium",
+                                list.already_installed
+                                  ? "text-success"
+                                  : "text-primary"
+                              )}
+                            >
+                              {t(
+                                list.already_installed
+                                  ? "pages.catalog.setup.willReuse"
+                                  : "pages.catalog.setup.willAdd"
+                              )}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
 
                   {setupInstallState &&
                   setupInstallState.installed.length > 0 ? (

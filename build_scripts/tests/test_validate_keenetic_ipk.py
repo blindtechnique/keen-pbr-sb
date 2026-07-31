@@ -10,6 +10,10 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "validate-keenetic-ipk.py"
+SOURCE_CATALOG = (
+    Path(__file__).parents[2]
+    / "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/catalog.json"
+)
 SPEC = importlib.util.spec_from_file_location("validate_keenetic_ipk", SCRIPT)
 assert SPEC and SPEC.loader
 VALIDATOR = importlib.util.module_from_spec(SPEC)
@@ -55,12 +59,58 @@ def ar_archive(members: dict[str, bytes]) -> bytes:
     return bytes(result)
 
 
+def bundled_catalog() -> bytes:
+    return json.dumps(
+        [
+            {
+                "id": "meta",
+                "routingCompanions": [
+                    {
+                        "id": "meta_whatsapp_ip",
+                        "sourcePresetId": "whatsapp-ip-source",
+                        "include": "ip_cidrs",
+                    }
+                ],
+            },
+            {
+                "id": "whatsapp",
+                "routingCompanions": [
+                    {
+                        "id": "whatsapp_ip",
+                        "sourcePresetId": "whatsapp-ip-source",
+                        "include": "ip_cidrs",
+                        "catalogIdentityId": (
+                            "meta#routing-companion:meta_whatsapp_ip"
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "telegram",
+                "routingCompanions": [
+                    {
+                        "id": "telegram_ip",
+                        "url": (
+                            "https://example.test/geoip-telegram.srs"
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "whatsapp-ip-source",
+                "engines": {"dns": {"subnets": ["31.13.64.0/18"]}},
+            },
+        ]
+    ).encode()
+
+
 def make_ipk(
     path: Path,
     transport_binary: bytes | None = None,
     outer_tar: bool = False,
     data_root_name: str | None = None,
     control_depends: str = "conntrack, dnsmasq",
+    catalog: bytes | None = None,
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -83,6 +133,10 @@ def make_ipk(
         {
             "opt/etc/keen-pbr/config.json": (b"{}", 0o600),
             "opt/etc/keen-pbr/transports.json": (config, 0o600),
+            "opt/usr/share/keen-pbr/catalog.json": (
+                bundled_catalog() if catalog is None else catalog,
+                0o644,
+            ),
             "opt/usr/share/keen-pbr/frontend/index.html": (b"<!doctype html>", 0o644),
             "opt/usr/share/keen-pbr/nfqws-blobs/ACTIVE_DISCORD_UDP.bin": (
                 b"discord",
@@ -153,6 +207,11 @@ def make_ipk(
 
 
 class ValidateKeeneticIpkTest(unittest.TestCase):
+    def test_source_catalog_contains_required_ip_companions(self) -> None:
+        VALIDATOR.validate_bundled_catalog(
+            json.loads(SOURCE_CATALOG.read_text(encoding="utf-8"))
+        )
+
     def test_accepts_complete_aarch64_package(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory) / "keen-pbr.ipk"
@@ -222,6 +281,19 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 VALIDATOR.ValidationError,
                 "missing package dependencies: conntrack",
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_catalog_without_telegram_ip_companion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            catalog = json.loads(bundled_catalog())
+            telegram = next(item for item in catalog if item["id"] == "telegram")
+            telegram["routingCompanions"] = []
+            make_ipk(package, catalog=json.dumps(catalog).encode())
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "telegram is missing companion telegram_ip",
             ):
                 VALIDATOR.validate(package, "aarch64")
 

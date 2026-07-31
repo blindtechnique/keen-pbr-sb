@@ -1128,6 +1128,20 @@ function ListForm({
       ) : null}
 
       <TemplatePicker
+        onOpenCatalog={(presetId) => {
+          if (
+            isDirty &&
+            !window.confirm(
+              `${t("common.unsavedChanges.title")}\n\n${t(
+                "common.unsavedChanges.description"
+              )}`
+            )
+          ) {
+            return false
+          }
+          navigate(`/catalog?search=${encodeURIComponent(presetId)}`)
+          return true
+        }}
         onOpenChange={setTemplatePickerOpen}
         onSelect={(template) => {
           form.setFieldValue(LIST_FIELD_NAMES.url, template.url)

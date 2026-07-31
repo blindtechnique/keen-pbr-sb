@@ -1007,6 +1007,10 @@ export const ruTranslation = {
       ipCompanionBadge: "+ IP",
       ipCompanionHint:
         "Вместе с основным списком будет добавлен отдельный IP-набор ({{count}}).",
+      ipCompanionInline: "Дополнительно: {{name}} - {{count}} IP-подсетей",
+      ipCompanionRemote:
+        "Дополнительно: {{name}} - обновляемый IP-список по URL",
+      ipCompanionGeneric: "Дополнительно: {{name}} - IP-список",
       risks: {
         title: "Обратите внимание",
         broadTrafficScope:
@@ -1046,7 +1050,17 @@ export const ruTranslation = {
         applying: "Добавляю…",
         previewReady: "Настройка проверена",
         previewSummary:
-          "Будет добавлено списков: {{lists}}. Маршрут: {{route}}. DNS: {{dns}}.",
+          "Новых списков: {{lists}}. Правил маршрутизации: {{routes}}. Маршрут: {{route}}. DNS-правил: {{dnsRules}}; сервер: {{dns}}.",
+        planTitle: "Списки в проверенном плане",
+        ipListCidrs: "IP-список · {{count}} подсетей",
+        ipListRemote: "IP-список · обновляется по URL",
+        ipList: "IP-список",
+        mixedList: "Домены и IP-адреса",
+        domainList: "Домены",
+        remoteList: "Список по URL",
+        localList: "Локальный список",
+        willAdd: "будет добавлен",
+        willReuse: "уже добавлен",
         applied: "Настройка каталога применена",
         alreadyInstalledTitle: "Уже добавлено",
         alreadyInstalled:
@@ -2147,9 +2161,12 @@ export const ruTranslation = {
         button: "Выбрать из готовых",
         title: "Готовые списки",
         description:
-          "Готовые списки, включая `.srs`, которые keen-pbr-sb читает без установленного sing-box. Выберите сервис, и ссылка подставится в поле URL.",
+          "Обычный шаблон подставит готовую ссылку. Meta, WhatsApp и Telegram откроются в каталоге, чтобы домены и IP-наборы установились вместе.",
         search: "Поиск по названию или адресу",
         add: "Выбрать",
+        catalogManaged:
+          "Связанные доменные и IP-наборы устанавливаются через каталог.",
+        openCatalog: "Открыть каталог",
         empty: "Ничего не найдено",
         categories: {
           ai: "Нейросети",

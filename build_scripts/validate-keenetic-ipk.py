@@ -37,6 +37,7 @@ REQUIRED_EXECUTABLES = {
 REQUIRED_FILES = REQUIRED_EXECUTABLES | {
     "opt/etc/keen-pbr/config.json",
     "opt/etc/keen-pbr/transports.json",
+    "opt/usr/share/keen-pbr/catalog.json",
     "opt/usr/share/keen-pbr/frontend/index.html",
     "opt/usr/share/keen-pbr/nfqws-blobs/ACTIVE_DISCORD_UDP.bin",
     "opt/usr/share/keen-pbr/nfqws-blobs/quic_initial_steamcommunity_com.bin",
@@ -78,6 +79,66 @@ EXPECTED_OUTER_MEMBERS = {
 
 class ValidationError(RuntimeError):
     pass
+
+
+def validate_bundled_catalog(catalog: object) -> None:
+    if not isinstance(catalog, list):
+        raise ValidationError("bundled catalog must be a JSON array")
+
+    presets: dict[str, dict[str, object]] = {}
+    for item in catalog:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise ValidationError("bundled catalog contains a preset without an id")
+        preset_id = item["id"]
+        if preset_id in presets:
+            raise ValidationError(f"bundled catalog contains duplicate preset: {preset_id}")
+        presets[preset_id] = item
+
+    def companion(parent_id: str, companion_id: str) -> dict[str, object]:
+        parent = presets.get(parent_id)
+        if parent is None:
+            raise ValidationError(f"bundled catalog is missing preset: {parent_id}")
+        companions = parent.get("routingCompanions")
+        if not isinstance(companions, list):
+            raise ValidationError(
+                f"bundled catalog preset {parent_id} has no routing companions"
+            )
+        match = next(
+            (
+                value
+                for value in companions
+                if isinstance(value, dict) and value.get("id") == companion_id
+            ),
+            None,
+        )
+        if match is None:
+            raise ValidationError(
+                f"bundled catalog preset {parent_id} is missing companion {companion_id}"
+            )
+        return match
+
+    meta = companion("meta", "meta_whatsapp_ip")
+    whatsapp = companion("whatsapp", "whatsapp_ip")
+    telegram = companion("telegram", "telegram_ip")
+    if meta.get("sourcePresetId") != "whatsapp-ip-source" or meta.get("include") != "ip_cidrs":
+        raise ValidationError("Meta IP companion does not use the bundled WhatsApp CIDRs")
+    if (
+        whatsapp.get("sourcePresetId") != "whatsapp-ip-source"
+        or whatsapp.get("include") != "ip_cidrs"
+    ):
+        raise ValidationError("WhatsApp IP companion does not use the bundled WhatsApp CIDRs")
+    if whatsapp.get("catalogIdentityId") != "meta#routing-companion:meta_whatsapp_ip":
+        raise ValidationError("Meta and WhatsApp IP companions do not share one identity")
+    telegram_url = telegram.get("url")
+    if not isinstance(telegram_url, str) or "geoip-telegram.srs" not in telegram_url:
+        raise ValidationError("Telegram IP companion does not use the GeoIP rule set")
+
+    source = presets.get("whatsapp-ip-source")
+    engines = source.get("engines") if source else None
+    dns = engines.get("dns") if isinstance(engines, dict) else None
+    subnets = dns.get("subnets") if isinstance(dns, dict) else None
+    if not isinstance(subnets, list) or not subnets:
+        raise ValidationError("bundled WhatsApp IP source contains no CIDRs")
 
 
 def read_ar(path: Path) -> dict[str, bytes]:
@@ -236,6 +297,13 @@ def validate(path: Path, arch: str) -> None:
             raise ValidationError("transport manager must listen on 127.0.0.1:12122")
         if config.get("api_key") != "REPLACE_WITH_A_LONG_RANDOM_VALUE":
             raise ValidationError("transport API key placeholder is missing")
+
+        catalog_stream = data_tar.extractfile(
+            entries["opt/usr/share/keen-pbr/catalog.json"]
+        )
+        if catalog_stream is None:
+            raise ValidationError("cannot read bundled catalog.json")
+        validate_bundled_catalog(json.load(catalog_stream))
 
     with open_tar(find_archive(members, "control.tar")) as control_tar:
         entries = indexed_tar_members(control_tar, "control archive")

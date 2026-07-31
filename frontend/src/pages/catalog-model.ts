@@ -53,6 +53,13 @@ export interface CatalogPresetSourceSummary {
   readonly hasIpCompanion: boolean
 }
 
+export interface CatalogRoutingCompanionSourceSummary {
+  readonly id: string
+  readonly name: string
+  readonly urlBacked: boolean
+  readonly cidrCount: number
+}
+
 export type CatalogPresetInstallKind =
   | "installed"
   | "partial"
@@ -71,10 +78,7 @@ export function canSelectCatalogPreset(
   installState: CatalogPresetInstallState | undefined,
   selectedAncestor: CatalogPreset | undefined
 ): boolean {
-  return (
-    !selectedAncestor &&
-    installState?.kind !== "covered"
-  )
+  return !selectedAncestor && installState?.kind !== "covered"
 }
 
 interface CatalogRelationIndex {
@@ -132,6 +136,56 @@ export function getCatalogPresetSourceSummary(
     companionCount: companions.length,
     hasIpCompanion: companions.some(isIpRoutingCompanion),
   }
+}
+
+/**
+ * Resolves the package-owned IP units that are installed atomically with a
+ * visible catalogue entry. URL-backed companions (for example Telegram
+ * GeoIP) deliberately remain IP units even though their CIDRs are not decoded
+ * in the browser.
+ */
+export function getCatalogRoutingCompanionSourceSummaries(
+  preset: CatalogPreset,
+  presets: readonly CatalogPreset[]
+): readonly CatalogRoutingCompanionSourceSummary[] {
+  const byId = new Map(presets.map((candidate) => [candidate.id, candidate]))
+
+  return (preset.routingCompanions ?? [])
+    .filter(isIpRoutingCompanion)
+    .map((companion) => {
+      const source = companion.sourcePresetId
+        ? byId.get(companion.sourcePresetId)
+        : undefined
+      return {
+        id: companion.id,
+        name: companion.name,
+        urlBacked: Boolean(
+          companion.url ||
+          source?.engines?.singbox?.ruleSets?.[0]?.url ||
+          source?.engines?.dns?.subscriptionUrl
+        ),
+        cidrCount: source?.engines?.dns?.subnets?.length ?? 0,
+      }
+    })
+}
+
+export function resolveSelectedCatalogRoutingCompanions(
+  presets: readonly CatalogPreset[],
+  selectedIds: ReadonlySet<string>
+): ReadonlyMap<string, CatalogRoutingCompanionSourceSummary> {
+  const result = new Map<string, CatalogRoutingCompanionSourceSummary>()
+  for (const preset of presets) {
+    if (!selectedIds.has(preset.id)) {
+      continue
+    }
+    for (const companion of getCatalogRoutingCompanionSourceSummaries(
+      preset,
+      presets
+    )) {
+      result.set(companion.id, companion)
+    }
+  }
+  return result
 }
 
 /**

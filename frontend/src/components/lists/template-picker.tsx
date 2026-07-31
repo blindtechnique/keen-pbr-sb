@@ -21,6 +21,7 @@ export type ListTemplate = {
   description: string
   url: string
   category: string
+  catalogPresetId?: string
 }
 
 const CATEGORY_ORDER = [
@@ -40,10 +41,12 @@ const CATEGORY_ORDER = [
  */
 export function TemplatePicker({
   onSelect,
+  onOpenCatalog,
   open,
   onOpenChange,
 }: {
   onSelect: (template: ListTemplate) => void
+  onOpenCatalog: (presetId: string) => boolean
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
@@ -104,6 +107,12 @@ export function TemplatePicker({
                     className="flex w-full items-start gap-3 p-2.5 text-left hover:bg-muted/50"
                     key={template.id}
                     onClick={() => {
+                      if (template.catalogPresetId) {
+                        if (onOpenCatalog(template.catalogPresetId)) {
+                          onOpenChange(false)
+                        }
+                        return
+                      }
                       onSelect(template)
                       onOpenChange(false)
                     }}
@@ -118,12 +127,23 @@ export function TemplatePicker({
                           {template.description}
                         </div>
                       ) : null}
-                      <div className="truncate font-mono text-[11px] text-muted-foreground/80">
-                        {template.url}
-                      </div>
+                      {template.catalogPresetId ? (
+                        <div className="text-xs font-medium text-primary">
+                          {t("pages.listUpsert.templates.catalogManaged")}
+                        </div>
+                      ) : null}
+                      {!template.catalogPresetId ? (
+                        <div className="truncate font-mono text-[11px] text-muted-foreground/80">
+                          {template.url}
+                        </div>
+                      ) : null}
                     </div>
                     <Badge size="xs" variant="outline">
-                      {t("pages.listUpsert.templates.add")}
+                      {t(
+                        template.catalogPresetId
+                          ? "pages.listUpsert.templates.openCatalog"
+                          : "pages.listUpsert.templates.add"
+                      )}
                     </Badge>
                   </button>
                 ))}

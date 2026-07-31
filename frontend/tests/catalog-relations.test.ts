@@ -5,9 +5,11 @@ import {
   canSelectCatalogPreset,
   findNearestCatalogAncestor,
   getCatalogDescendantIds,
+  getCatalogRoutingCompanionSourceSummaries,
   getCatalogPresetSourceSummary,
   normalizeCatalogSelection,
   resolveCatalogInstallStates,
+  resolveSelectedCatalogRoutingCompanions,
   type CatalogPreset,
 } from "../src/pages/catalog-model"
 
@@ -27,7 +29,7 @@ const catalog: CatalogPreset[] = [
         name: "Meta / WhatsApp IP",
         catalog_identity: companionIdentity,
         include: "ip_cidrs",
-        sourcePresetId: "whatsapp",
+        sourcePresetId: "whatsapp-ip-source",
       },
     ],
     engines: {
@@ -63,10 +65,34 @@ const catalog: CatalogPreset[] = [
         name: "WhatsApp IP",
         catalog_identity: companionIdentity,
         include: "ip_cidrs",
+        sourcePresetId: "whatsapp-ip-source",
       },
     ],
     engines: {
       dns: { domains: ["whatsapp.com"] },
+    },
+  },
+  {
+    id: "telegram",
+    name: "Telegram",
+    routingCompanions: [
+      {
+        id: "telegram_ip",
+        name: "Telegram IP",
+        kind: "ip",
+        url: "https://example.test/geoip-telegram.srs",
+      },
+    ],
+    engines: {
+      dns: { domains: ["telegram.org"] },
+    },
+  },
+  {
+    id: "whatsapp-ip-source",
+    name: "WhatsApp IP source",
+    hidden: true,
+    engines: {
+      dns: { subnets: ["31.13.64.0/18", "157.240.0.0/16"] },
     },
   },
 ]
@@ -203,5 +229,36 @@ describe("catalog relationships", () => {
       companionCount: 1,
       hasIpCompanion: true,
     })
+
+    expect(
+      getCatalogRoutingCompanionSourceSummaries(catalog[0], catalog)
+    ).toEqual([
+      {
+        id: "meta_whatsapp_ip",
+        name: "Meta / WhatsApp IP",
+        urlBacked: false,
+        cidrCount: 2,
+      },
+    ])
+
+    expect(
+      getCatalogRoutingCompanionSourceSummaries(
+        catalog.find((preset) => preset.id === "telegram")!,
+        catalog
+      )
+    ).toEqual([
+      {
+        id: "telegram_ip",
+        name: "Telegram IP",
+        urlBacked: true,
+        cidrCount: 0,
+      },
+    ])
+
+    const selected = resolveSelectedCatalogRoutingCompanions(
+      catalog,
+      new Set(["meta", "telegram"])
+    )
+    expect([...selected.keys()]).toEqual(["meta_whatsapp_ip", "telegram_ip"])
   })
 })
