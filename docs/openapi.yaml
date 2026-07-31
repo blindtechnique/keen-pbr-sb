@@ -1518,6 +1518,23 @@ components:
             omitted or set to `null`.
           default: true
           example: true
+        reconnect_owned_flows_on_routing_change_lists:
+          type: array
+          nullable: true
+          maxItems: 128
+          uniqueItems: true
+          description: >
+            List IDs for the stronger, still targeted reconnect policy. After
+            a successfully committed routing or list-content change, matching
+            forwarded flows are reconnected when they are either completely
+            unmarked or carry a mark owned by keen-pbr. Foreign-only marks,
+            unrelated destinations, and the global conntrack table are never
+            touched. Omitting the field enables packaged recommendations such
+            as the authoritative WhatsApp IP companion; an explicit empty
+            array disables all recommendations.
+          items:
+            type: string
+          example: [meta_whatsapp_ip]
         ipv6_enabled:
           type: boolean
           nullable: true

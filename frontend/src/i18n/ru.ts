@@ -1415,7 +1415,35 @@ export const ruTranslation = {
         reconnectUnmarkedFlowsOnRoutingChangeLabel:
           "Переподключать прямые соединения после изменения маршрутов",
         reconnectUnmarkedFlowsOnRoutingChangeHint:
-          "После успешного применения keen-pbr-sb точечно завершает только ранее прямые соединения, которые теперь должны идти через новый маршрут. Приложения сразу подключаются заново. Если отключить настройку, старые соединения будут ждать естественного завершения.",
+          "Это главный переключатель переподключения после изменения маршрутов. Если его выключить, обычное переподключение прямых соединений и усиленное переподключение для выбранных ниже списков не выполняются; старые соединения ждут естественного завершения.",
+        reconnectOwnedFlowsOnRoutingChangeListsLabel:
+          "Списки для усиленного переподключения",
+        reconnectOwnedFlowsOnRoutingChangeModeLabel:
+          "Режим усиленного переподключения",
+        reconnectOwnedFlowsOnRoutingChangeModeOptions: {
+          automatic: "Автоматически (рекомендуется)",
+          manual: "Вручную",
+        },
+        reconnectOwnedFlowsOnRoutingChangeListsHint:
+          "Без этой меры WhatsApp/UDP может продолжать использовать старый путь. Если настройка не задана, установленный из каталога список WhatsApp выбирается автоматически. После успешного изменения маршрута или списка активный звонок может один раз переподключиться в момент фактической смены маршрута. Точечно завершаются только соединения, принадлежащие выбранным спискам: чужие метки и сервисы вне этих списков не затрагиваются, глобальная очистка conntrack не выполняется.",
+        reconnectOwnedFlowsOnRoutingChangeListsAddAction: "Добавить список",
+        reconnectOwnedFlowsOnRoutingChangeListsNoAvailable:
+          "Все доступные списки уже добавлены",
+        reconnectOwnedFlowsOnRoutingChangeListsEmptyTitle: "Списки не выбраны",
+        reconnectOwnedFlowsOnRoutingChangeListsEmptyDescription:
+          "Выберите списки, для соединений которых нужно усиленное переподключение.",
+        reconnectOwnedFlowsOnRoutingChangeListsRecommended:
+          "Автоматическая рекомендация: WhatsApp",
+        reconnectOwnedFlowsOnRoutingChangeListsAutomaticStatus:
+          "Сейчас WhatsApp выбран автоматически. Изменение выбора превратит его в явную настройку.",
+        reconnectOwnedFlowsOnRoutingChangeListsAutomaticUnavailableStatus:
+          "Автоматический режим включён, но установленный из каталога список WhatsApp не найден.",
+        reconnectOwnedFlowsOnRoutingChangeListsOptOutStatus:
+          "Сохранён явный отказ: усиленное переподключение отключено для всех списков.",
+        reconnectOwnedFlowsOnRoutingChangeListsExplicitStatus:
+          "Используется явный выбор. Удаление всех списков сохранит явный отказ.",
+        reconnectOwnedFlowsOnRoutingChangeListsDisabledStatus:
+          "Главный переключатель выключен, поэтому усиленное переподключение выбранных списков не выполняется.",
         fwmarkStartLabel: "Начальное значение firewall mark",
         fwmarkStartHint:
           "Начальное значение fwmark для первого маршрута. Каждый следующий маршрут получает следующее значение в диапазоне.",

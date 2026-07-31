@@ -149,4 +149,73 @@ TEST_CASE("list delete planner validates the full replacement set") {
         std::invalid_argument);
 }
 
+TEST_CASE(
+    "list delete planner rewrites reconnect policy using technical list ids") {
+    SUBCASE("replacement is persisted without duplicates") {
+        auto config = planner_fixture();
+        config.daemon = DaemonConfig{};
+        config.daemon
+            ->reconnect_owned_flows_on_routing_change_lists =
+            std::vector<std::string>{"instagram", "meta", "manual"};
+
+        const auto plan = plan_list_delete(
+            config,
+            {{"instagram", std::string{"meta"}}});
+
+        REQUIRE(plan.config.daemon.has_value());
+        REQUIRE(
+            plan.config.daemon
+                ->reconnect_owned_flows_on_routing_change_lists
+                .has_value());
+        CHECK(
+            *plan.config.daemon
+                 ->reconnect_owned_flows_on_routing_change_lists ==
+            std::vector<std::string>{"meta", "manual"});
+    }
+
+    SUBCASE("deleted reference is removed but explicit empty stays explicit") {
+        auto config = planner_fixture();
+        config.daemon = DaemonConfig{};
+        config.daemon
+            ->reconnect_owned_flows_on_routing_change_lists =
+            std::vector<std::string>{"instagram"};
+
+        const auto plan = plan_list_delete(
+            config,
+            {{"instagram", std::nullopt}});
+
+        REQUIRE(plan.config.daemon.has_value());
+        REQUIRE(
+            plan.config.daemon
+                ->reconnect_owned_flows_on_routing_change_lists
+                .has_value());
+        CHECK(
+            plan.config.daemon
+                ->reconnect_owned_flows_on_routing_change_lists
+                ->empty());
+    }
+
+    SUBCASE("an existing explicit empty policy is preserved") {
+        auto config = planner_fixture();
+        config.daemon = DaemonConfig{};
+        config.daemon
+            ->reconnect_owned_flows_on_routing_change_lists =
+            std::vector<std::string>{};
+
+        const auto plan = plan_list_delete(
+            config,
+            {{"instagram", std::nullopt}});
+
+        REQUIRE(plan.config.daemon.has_value());
+        REQUIRE(
+            plan.config.daemon
+                ->reconnect_owned_flows_on_routing_change_lists
+                .has_value());
+        CHECK(
+            plan.config.daemon
+                ->reconnect_owned_flows_on_routing_change_lists
+                ->empty());
+    }
+}
+
 } // namespace keen_pbr3

@@ -478,6 +478,93 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "catalog reconnect recommendation keeps automatic mode implicit") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:actual-companion-id"},
+        {"presets",
+         nlohmann::json::array(
+             {meta_preset(),
+              whatsapp_preset(),
+              whatsapp_ip_source_preset()})},
+    };
+    auto active = base_config();
+    ListConfig existing_companion;
+    existing_companion.display_name = "Existing WhatsApp networks";
+    existing_companion.catalog_identity = catalog_preset_identity(
+        catalog,
+        "meta#routing-companion:meta_whatsapp_ip");
+    existing_companion.ip_cidrs = whatsapp_ipv4_cidrs();
+    active.lists = std::map<std::string, ListConfig>{
+        {"custom_whatsapp_networks", existing_companion},
+    };
+
+    SUBCASE("WhatsApp reuses an existing companion") {
+        auto intent = outbound_intent();
+        intent.selections = {{"whatsapp", std::nullopt}};
+        const auto plan = plan_catalog_setup(intent, catalog, active);
+
+        const bool automatic_mode_remains_implicit =
+            !plan.candidate.daemon.has_value() ||
+            !plan.candidate.daemon
+                 ->reconnect_owned_flows_on_routing_change_lists
+                 .has_value();
+        CHECK(automatic_mode_remains_implicit);
+        REQUIRE(plan.summary.lists.size() == 2U);
+        CHECK(plan.summary.lists[1].already_installed);
+        CHECK(
+            plan.summary.lists[1].technical_id ==
+            "custom_whatsapp_networks");
+    }
+
+    SUBCASE("Meta reuses the same companion without duplicates") {
+        const auto plan = plan_catalog_setup(
+            meta_outbound_intent(), catalog, active);
+
+        const bool automatic_mode_remains_implicit =
+            !plan.candidate.daemon.has_value() ||
+            !plan.candidate.daemon
+                 ->reconnect_owned_flows_on_routing_change_lists
+                 .has_value();
+        CHECK(automatic_mode_remains_implicit);
+        REQUIRE(plan.summary.lists.size() == 2U);
+        CHECK(plan.summary.lists[1].already_installed);
+        CHECK(
+            plan.summary.lists[1].technical_id ==
+            "custom_whatsapp_networks");
+    }
+}
+
+TEST_CASE(
+    "catalog reconnect recommendation preserves an explicit empty policy") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:explicit-empty-reconnect"},
+        {"presets",
+         nlohmann::json::array(
+             {meta_preset(),
+              whatsapp_preset(),
+              whatsapp_ip_source_preset()})},
+    };
+    auto active = base_config();
+    active.daemon = DaemonConfig{};
+    active.daemon
+        ->reconnect_owned_flows_on_routing_change_lists =
+        std::vector<std::string>{};
+
+    const auto plan = plan_catalog_setup(
+        meta_outbound_intent(), catalog, active);
+
+    REQUIRE(plan.candidate.daemon.has_value());
+    REQUIRE(
+        plan.candidate.daemon
+            ->reconnect_owned_flows_on_routing_change_lists
+            .has_value());
+    CHECK(
+        plan.candidate.daemon
+            ->reconnect_owned_flows_on_routing_change_lists
+            ->empty());
+}
+
+TEST_CASE(
     "Telegram uses separate domain and URL-backed IP lists") {
     auto intent = outbound_intent();
     intent.selections = {{"telegram", std::nullopt}};

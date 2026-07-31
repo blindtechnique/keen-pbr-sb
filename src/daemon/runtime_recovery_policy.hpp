@@ -26,6 +26,32 @@ inline bool reconnect_unmarked_flows_on_routing_change_enabled(
         .reconnect_unmarked_flows_on_routing_change.value_or(true);
 }
 
+inline std::set<std::string>
+reconnect_owned_flows_on_routing_change_list_names(
+    const Config& config) {
+    const auto daemon = config.daemon.value_or(DaemonConfig{});
+    if (daemon.reconnect_owned_flows_on_routing_change_lists.has_value()) {
+        return {
+            daemon.reconnect_owned_flows_on_routing_change_lists->begin(),
+            daemon.reconnect_owned_flows_on_routing_change_lists->end()};
+    }
+
+    // Backward-compatible automatic recommendation for catalogue installs
+    // created before this setting existed. This is the immutable provenance
+    // identity shared by the packaged Meta/WhatsApp IP companion. New
+    // catalogue installs persist the resolved technical ID explicitly.
+    constexpr const char* whatsapp_ip_catalog_identity =
+        "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
+    std::set<std::string> recommended;
+    for (const auto& [list_name, list] :
+         config.lists.value_or(std::map<std::string, ListConfig>{})) {
+        if (list.catalog_identity == whatsapp_ip_catalog_identity) {
+            recommended.insert(list_name);
+        }
+    }
+    return recommended;
+}
+
 namespace runtime_recovery_detail {
 
 inline bool firewall_criteria_equal(
@@ -114,6 +140,81 @@ struct ConntrackDestinationRetirementCoverage {
                !truncated_static_list_names.empty();
     }
 };
+
+inline std::set<std::string>
+plan_conntrack_owned_destination_reconnect(
+    const std::vector<RuleState>& previous_rules,
+    const std::vector<RuleState>& current_rules,
+    const std::set<std::string>& selected_list_names,
+    const std::set<std::string>& changed_list_names = {},
+    const std::set<std::string>& newly_enabled_list_names = {}) {
+    using namespace runtime_recovery_detail;
+
+    const auto relevant_rules = [](const std::vector<RuleState>& rules,
+                                   const std::string& list_name) {
+        std::vector<const RuleState*> result;
+        for (const auto& rule : rules) {
+            if (rule.action_type != RuleActionType::Mark ||
+                std::find(
+                    rule.list_names.begin(),
+                    rule.list_names.end(),
+                    list_name) == rule.list_names.end()) {
+                continue;
+            }
+            result.push_back(&rule);
+        }
+        return result;
+    };
+
+    std::set<std::string> result;
+    for (const auto& list_name : selected_list_names) {
+        const auto previous = relevant_rules(previous_rules, list_name);
+        const auto current = relevant_rules(current_rules, list_name);
+        if (previous.empty() && current.empty()) continue;
+
+        bool policy_changed = previous.size() != current.size();
+        if (!policy_changed) {
+            for (std::size_t index = 0; index < current.size(); ++index) {
+                if (!firewall_rule_states_equal(
+                        *previous[index], *current[index])) {
+                    policy_changed = true;
+                    break;
+                }
+            }
+        }
+        if (policy_changed ||
+            changed_list_names.count(list_name) != 0U ||
+            newly_enabled_list_names.count(list_name) != 0U) {
+            result.insert(list_name);
+        }
+    }
+    return result;
+}
+
+inline ConntrackDestinationRetirementPlan
+destination_retirement_plan_for_lists(
+    const std::set<std::string>& list_names) {
+    ConntrackDestinationRetirementPlan plan;
+    plan.current_list_names = list_names;
+    return plan;
+}
+
+inline ConntrackDestinationRetirementCoverage
+merge_conntrack_destination_retirement_coverage(
+    ConntrackDestinationRetirementCoverage left,
+    const ConntrackDestinationRetirementCoverage& right) {
+    left.destination_selectors.insert(
+        left.destination_selectors.end(),
+        right.destination_selectors.begin(),
+        right.destination_selectors.end());
+    left.domain_backed_list_names.insert(
+        right.domain_backed_list_names.begin(),
+        right.domain_backed_list_names.end());
+    left.truncated_static_list_names.insert(
+        right.truncated_static_list_names.begin(),
+        right.truncated_static_list_names.end());
+    return left;
+}
 
 inline ConntrackDestinationRetirementPlan
 plan_conntrack_destination_retirement(

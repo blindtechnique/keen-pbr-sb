@@ -69,11 +69,13 @@ struct ConntrackForwardedFlowPair {
     std::string source;
     std::string destination;
     bool ipv6{false};
+    std::uint32_t mark{0};
 
     bool operator==(const ConntrackForwardedFlowPair& other) const {
         return source == other.source &&
                destination == other.destination &&
-               ipv6 == other.ipv6;
+               ipv6 == other.ipv6 &&
+               mark == other.mark;
     }
 };
 
@@ -165,13 +167,30 @@ public:
         const std::vector<std::string>& source_cidrs,
         ConntrackSourceCleanupOptions options = {}) const;
 
+    // Reconnect currently observed forwarded flows after a successfully
+    // committed destination-policy change. Fully unmarked flows are eligible
+    // only for normal_destination_cidrs. Flows carrying at least one
+    // keen-pbr-owned mark bit are additionally eligible for
+    // aggressive_destination_cidrs; foreign-only marks are never selected.
+    // The snapshot is read once and all matches share the same time/flow
+    // budget. Every deletion uses the exact original host pair and the full
+    // observed mark, so this API cannot become a global or masked-mark flush.
+    ConntrackForwardedFlowCleanupSummary delete_forwarded_destination_flows(
+        const std::vector<std::string>& normal_destination_cidrs,
+        const std::vector<std::string>& aggressive_destination_cidrs,
+        const std::vector<std::string>& local_interface_addresses,
+        uint32_t owned_mask,
+        ConntrackForwardedFlowCleanupOptions options = {}) const;
+
     // Reconnect only currently observed forwarded flows which are still fully
     // unmarked after a successful broad destination-policy change. The
     // snapshot parser keeps the original source/destination pair, rejects
     // missing marks, excludes every live local address, and deletes exact host
     // pairs with a full-width zero mark. It never expands a CIDR into a broad
     // conntrack delete and never touches router-originated or foreign-marked
-    // flows. Empty/invalid local-address authority fails closed.
+    // flows. Empty/invalid local-address authority fails closed. This legacy
+    // entry point delegates to delete_forwarded_destination_flows with no
+    // aggressive coverage.
     ConntrackForwardedFlowCleanupSummary
     delete_unmarked_forwarded_destination_flows(
         const std::vector<std::string>& destination_cidrs,

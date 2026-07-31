@@ -182,6 +182,21 @@ ListDeletePlan plan_list_delete(
         plan.config.dns->rules = std::move(rewritten_rules);
     }
 
+    if (plan.config.daemon &&
+        plan.config.daemon
+            ->reconnect_owned_flows_on_routing_change_lists.has_value()) {
+        auto& reconnect_lists =
+            *plan.config.daemon
+                 ->reconnect_owned_flows_on_routing_change_lists;
+        reconnect_lists = rewrite_list_references(
+            reconnect_lists,
+            replacements,
+            plan.summary.rebound_references);
+        // Keep an explicit empty array present. It means the user disabled
+        // catalogue recommendations and must not be converted back to the
+        // omitted/default state by deleting an unrelated list.
+    }
+
     for (const auto& [list_id, replacement] : replacements) {
         (void)replacement;
         plan.config.lists->erase(list_id);

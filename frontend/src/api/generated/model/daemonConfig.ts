@@ -28,6 +28,12 @@ export interface DaemonConfig {
   /** After a successfully committed destination-routing change, terminate only observed forwarded flows whose complete conntrack mark is zero and whose destination is newly governed by the changed route. Applications can then reconnect immediately through the new route. This never flushes the conntrack table or removes foreign marks. Defaults to `true` when omitted or set to `null`.
    */
   reconnect_unmarked_flows_on_routing_change?: boolean | null;
+  /**
+     * List IDs for the stronger, still targeted reconnect policy. After a successfully committed routing or list-content change, matching forwarded flows are reconnected when they are either completely unmarked or carry a mark owned by keen-pbr. Foreign-only marks, unrelated destinations, and the global conntrack table are never touched. Omitting the field enables packaged recommendations such as the authoritative WhatsApp IP companion; an explicit empty array disables all recommendations.
+
+     * @maxItems 128
+     */
+  reconnect_owned_flows_on_routing_change_lists?: string[] | null;
   /** Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6 resolver set targets. When disabled, managed dnsmasq also suppresses AAAA, SVCB, and HTTPS answers so clients cannot use IPv6 hints from service-binding records. This IPv4-only mode also disables automatic HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
    */
   ipv6_enabled?: boolean | null;

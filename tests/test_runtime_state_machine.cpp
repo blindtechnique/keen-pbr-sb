@@ -576,6 +576,109 @@ TEST_CASE("destination retirement plans only selectors newly governed by changed
     CHECK(removed.current_destination_selectors.empty());
 }
 
+TEST_CASE("strong reconnect targets only selected list policy changes") {
+    RuleState previous;
+    previous.rule_index = 0U;
+    previous.action_type = RuleActionType::Mark;
+    previous.list_names = {"whatsapp_ip"};
+    previous.outbound_tag = "awg";
+    previous.fwmark = 0x00010000U;
+
+    auto current = previous;
+    current.outbound_tag = "vless";
+    current.fwmark = 0x00020000U;
+
+    CHECK(
+        plan_conntrack_owned_destination_reconnect(
+            {previous},
+            {current},
+            {"whatsapp_ip"}) ==
+        std::set<std::string>{"whatsapp_ip"});
+    CHECK(
+        plan_conntrack_owned_destination_reconnect(
+            {previous},
+            {current},
+            {"telegram_ip"})
+            .empty());
+
+    current.action_type = RuleActionType::Pass;
+    current.fwmark = 0U;
+    CHECK(
+        plan_conntrack_owned_destination_reconnect(
+            {previous},
+            {current},
+            {"whatsapp_ip"}) ==
+        std::set<std::string>{"whatsapp_ip"});
+}
+
+TEST_CASE("strong reconnect reacts to content changes and first enablement") {
+    RuleState current;
+    current.rule_index = 0U;
+    current.action_type = RuleActionType::Mark;
+    current.list_names = {"whatsapp_ip"};
+    current.outbound_tag = "awg";
+    current.fwmark = 0x00010000U;
+
+    CHECK(
+        plan_conntrack_owned_destination_reconnect(
+            {current},
+            {current},
+            {"whatsapp_ip"},
+            {"whatsapp_ip"}) ==
+        std::set<std::string>{"whatsapp_ip"});
+    CHECK(
+        plan_conntrack_owned_destination_reconnect(
+            {current},
+            {current},
+            {"whatsapp_ip"},
+            {},
+            {"whatsapp_ip"}) ==
+        std::set<std::string>{"whatsapp_ip"});
+    CHECK(
+        plan_conntrack_owned_destination_reconnect(
+            {current},
+            {current},
+            {"whatsapp_ip"})
+            .empty());
+}
+
+TEST_CASE("strong reconnect catalogue recommendation remains opt-out") {
+    Config automatic;
+    ListConfig whatsapp;
+    whatsapp.catalog_identity =
+        "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
+    automatic.lists = std::map<std::string, ListConfig>{
+        {"friendly_whatsapp_ips", whatsapp}};
+    CHECK(
+        reconnect_owned_flows_on_routing_change_list_names(automatic) ==
+        std::set<std::string>{"friendly_whatsapp_ips"});
+
+    automatic.daemon = DaemonConfig{};
+    automatic.daemon
+        ->reconnect_owned_flows_on_routing_change_lists =
+        std::vector<std::string>{};
+    CHECK(
+        reconnect_owned_flows_on_routing_change_list_names(automatic)
+            .empty());
+}
+
+TEST_CASE("strong reconnect coverage merges old and new list addresses") {
+    AppliedListContentState previous;
+    previous.static_destinations = {
+        {"whatsapp_ip", {"31.13.64.0/18"}}};
+    AppliedListContentState current;
+    current.static_destinations = {
+        {"whatsapp_ip", {"57.144.0.0/14"}}};
+    const auto plan = destination_retirement_plan_for_lists(
+        {"whatsapp_ip"});
+    const auto merged = merge_conntrack_destination_retirement_coverage(
+        collect_conntrack_destination_retirement_coverage(plan, current),
+        collect_conntrack_destination_retirement_coverage(plan, previous));
+    CHECK(
+        merged.destination_selectors ==
+        std::vector<std::string>{"57.144.0.0/14", "31.13.64.0/18"});
+}
+
 TEST_CASE("destination retirement does not treat shifted unchanged rules as new") {
     RuleState existing;
     existing.rule_index = 0U;

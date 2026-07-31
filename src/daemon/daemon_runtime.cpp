@@ -4,6 +4,7 @@
 #include <array>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <map>
 #include <set>
 #include <sstream>
@@ -2623,6 +2624,19 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     const bool previous_runtime_active = routing_runtime_active_;
     const bool reconnect_unmarked_flows_on_routing_change =
         reconnect_unmarked_flows_on_routing_change_enabled(prepared.config);
+    const auto previous_owned_reconnect_list_names =
+        reconnect_owned_flows_on_routing_change_list_names(config_);
+    const auto current_owned_reconnect_list_names =
+        reconnect_owned_flows_on_routing_change_list_names(prepared.config);
+    std::set<std::string> newly_enabled_owned_reconnect_list_names;
+    std::set_difference(
+        current_owned_reconnect_list_names.begin(),
+        current_owned_reconnect_list_names.end(),
+        previous_owned_reconnect_list_names.begin(),
+        previous_owned_reconnect_list_names.end(),
+        std::inserter(
+            newly_enabled_owned_reconnect_list_names,
+            newly_enabled_owned_reconnect_list_names.end()));
     const bool previous_forwarded_scope_restricted =
         has_restricted_forwarded_scope(
             config_,
@@ -2775,6 +2789,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
             resolved_internal_vpn_servers_,
             resolved_internal_vpn_service_targets_);
     ConntrackDestinationRetirementCoverage destination_coverage;
+    ConntrackDestinationRetirementCoverage owned_destination_coverage;
     if (previous_runtime_active &&
         reconnect_unmarked_flows_on_routing_change) {
         std::set<std::string> changed_list_names;
@@ -2819,19 +2834,49 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
             collect_conntrack_destination_retirement_coverage(
                 destination_plan,
                 applied_list_content_state_);
+
+        const auto owned_reconnect_lists =
+            plan_conntrack_owned_destination_reconnect(
+                previous_routing_signature.firewall_rules,
+                current_routing_signature.firewall_rules,
+                current_owned_reconnect_list_names,
+                changed_list_names,
+                newly_enabled_owned_reconnect_list_names);
+        if (!owned_reconnect_lists.empty()) {
+            const auto owned_plan =
+                destination_retirement_plan_for_lists(
+                    owned_reconnect_lists);
+            // Include both sides of a list-content transition. Otherwise an
+            // address removed by a refresh could keep an already marked UDP
+            // flow pinned to the obsolete route until its natural timeout.
+            owned_destination_coverage =
+                merge_conntrack_destination_retirement_coverage(
+                    collect_conntrack_destination_retirement_coverage(
+                        owned_plan,
+                        applied_list_content_state_),
+                    collect_conntrack_destination_retirement_coverage(
+                        owned_plan,
+                        previous_list_content_state));
+        }
     }
     if (previous_runtime_active &&
-        destination_coverage.partial()) {
+        (destination_coverage.partial() ||
+         owned_destination_coverage.partial())) {
         Logger::instance().info(
             "Targeted routing-policy conntrack retirement has partial "
-            "coverage for {} domain-backed and {} statically truncated "
-            "changed list(s); only observed flows for tracked static "
-            "destinations are eligible for immediate reconnection",
+            "coverage: normal={}/{} and stronger={}/{} domain-backed/"
+            "statically-truncated changed list(s); only observed flows for "
+            "tracked static destinations are eligible for immediate "
+            "reconnection",
             destination_coverage.domain_backed_list_names.size(),
-            destination_coverage.truncated_static_list_names.size());
+            destination_coverage.truncated_static_list_names.size(),
+            owned_destination_coverage.domain_backed_list_names.size(),
+            owned_destination_coverage.
+                truncated_static_list_names.size());
     }
     if (previous_runtime_active &&
-        !destination_coverage.destination_selectors.empty()) {
+        (!destination_coverage.destination_selectors.empty() ||
+         !owned_destination_coverage.destination_selectors.empty())) {
         try {
             if (current_forwarded_scope_restricted) {
                 Logger::instance().info(
@@ -2854,8 +2899,10 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
 
                 const auto cleanup =
                     conntrack_manager_.
-                        delete_unmarked_forwarded_destination_flows(
+                        delete_forwarded_destination_flows(
                             destination_coverage.destination_selectors,
+                            owned_destination_coverage.
+                                destination_selectors,
                             local_interface_addresses,
                             current_routing_signature.owned_mask,
                             ConntrackForwardedFlowCleanupOptions{
@@ -2891,8 +2938,8 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
                 } else if (cleanup.attempted != 0U) {
                     Logger::instance().info(
                         "Targeted routing-policy conntrack retirement "
-                        "reconnected {} exact previously-direct forwarded "
-                        "flow(s)",
+                        "reconnected {} exact forwarded flow(s) after a "
+                        "committed policy change",
                         cleanup.attempted);
                 }
             }

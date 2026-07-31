@@ -1398,7 +1398,35 @@ export const enTranslation = {
         reconnectUnmarkedFlowsOnRoutingChangeLabel:
           "Reconnect direct flows after routing changes",
         reconnectUnmarkedFlowsOnRoutingChangeHint:
-          "After a successful apply, keen-pbr-sb terminates only previously direct flows that must now use the changed route, so applications reconnect immediately. When disabled, old flows wait for conntrack to expire naturally.",
+          "This is the master switch for reconnection after routing changes. When disabled, both regular reconnection of direct flows and enhanced reconnection for the lists below are turned off; old flows wait for conntrack to expire naturally.",
+        reconnectOwnedFlowsOnRoutingChangeListsLabel:
+          "Lists for enhanced reconnection",
+        reconnectOwnedFlowsOnRoutingChangeModeLabel:
+          "Enhanced reconnection mode",
+        reconnectOwnedFlowsOnRoutingChangeModeOptions: {
+          automatic: "Automatic (recommended)",
+          manual: "Manual",
+        },
+        reconnectOwnedFlowsOnRoutingChangeListsHint:
+          "WhatsApp/UDP can otherwise keep using the old path. When this setting is not specified, the catalog-installed WhatsApp list is selected automatically. An active call may reconnect once when the route actually switches after a successful route or list change. Only flows owned by the selected lists are terminated: foreign marks and services outside those lists are left untouched, and no global conntrack flush is performed.",
+        reconnectOwnedFlowsOnRoutingChangeListsAddAction: "Add a list",
+        reconnectOwnedFlowsOnRoutingChangeListsNoAvailable:
+          "All available lists have been added",
+        reconnectOwnedFlowsOnRoutingChangeListsEmptyTitle: "No lists selected",
+        reconnectOwnedFlowsOnRoutingChangeListsEmptyDescription:
+          "Select the lists whose connections should use enhanced reconnection.",
+        reconnectOwnedFlowsOnRoutingChangeListsRecommended:
+          "Automatic recommendation: WhatsApp",
+        reconnectOwnedFlowsOnRoutingChangeListsAutomaticStatus:
+          "WhatsApp is currently selected automatically. Changing the selection turns it into an explicit setting.",
+        reconnectOwnedFlowsOnRoutingChangeListsAutomaticUnavailableStatus:
+          "Automatic mode is active, but no catalog-installed WhatsApp list was found.",
+        reconnectOwnedFlowsOnRoutingChangeListsOptOutStatus:
+          "Explicit opt-out is saved: enhanced reconnection is disabled for all lists.",
+        reconnectOwnedFlowsOnRoutingChangeListsExplicitStatus:
+          "This is an explicit selection. Removing every list saves an explicit opt-out.",
+        reconnectOwnedFlowsOnRoutingChangeListsDisabledStatus:
+          "The master switch is off, so enhanced reconnection is disabled for the selected lists.",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
           "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",

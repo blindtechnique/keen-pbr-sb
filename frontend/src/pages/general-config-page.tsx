@@ -29,7 +29,9 @@ import {
 } from "@/components/shared/field"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
+import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
+import { MultiSelectList } from "@/components/shared/multi-select-list"
 import { PageHeader } from "@/components/shared/page-header"
 import { SchedulePicker } from "@/components/shared/schedule-picker"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
@@ -81,6 +83,7 @@ import {
   type InternalVpnServerRuntimeState,
 } from "@/lib/internal-vpn-server-policy"
 import { reconcileInternalVpnServiceOverrides } from "@/lib/internal-vpn-service-policy"
+import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
 import { getGeneralConfigActionState } from "@/pages/general-config-form-state"
 import { useSectionTab } from "@/hooks/use-section-tab"
@@ -88,11 +91,15 @@ import { toast } from "sonner"
 
 type StrictEnforcementOption = "automatic" | "enabled" | "disabled"
 
+const WHATSAPP_RECONNECT_CATALOG_IDENTITY =
+  "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe"
+
 type SettingsDraft = {
   strictEnforcement: StrictEnforcementOption
   skipMarkedPackets: boolean
   clearDynamicSetsOnApply: boolean
   reconnectUnmarkedFlowsOnRoutingChange: boolean
+  reconnectOwnedFlowsOnRoutingChangeLists: string[] | undefined
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
@@ -110,6 +117,7 @@ const fallbackDraft: SettingsDraft = {
   skipMarkedPackets: true,
   clearDynamicSetsOnApply: true,
   reconnectUnmarkedFlowsOnRoutingChange: true,
+  reconnectOwnedFlowsOnRoutingChangeLists: undefined,
   ipv6Enabled: true,
   clientDnsEnforcement: false,
   inboundInterfaces: [],
@@ -126,6 +134,8 @@ const SETTINGS_FIELD_NAMES = {
   clearDynamicSetsOnApply: "clearDynamicSetsOnApply",
   reconnectUnmarkedFlowsOnRoutingChange:
     "reconnectUnmarkedFlowsOnRoutingChange",
+  reconnectOwnedFlowsOnRoutingChangeLists:
+    "reconnectOwnedFlowsOnRoutingChangeLists",
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
@@ -361,6 +371,23 @@ function LoadedGeneralConfigPage({
         ? ndmsVpnServicesQuery.data.data.services
         : [],
     [ndmsVpnServicesQuery.data]
+  )
+  const reconnectListOptions = useMemo(
+    () =>
+      sortListIdsByDisplayName(
+        Object.keys(loadedConfig.lists ?? {}),
+        loadedConfig.lists
+      ),
+    [loadedConfig.lists]
+  )
+  const recommendedReconnectListIds = useMemo(
+    () =>
+      reconnectListOptions.filter(
+        (listId) =>
+          loadedConfig.lists?.[listId]?.catalog_identity ===
+          WHATSAPP_RECONNECT_CATALOG_IDENTITY
+      ),
+    [loadedConfig.lists, reconnectListOptions]
   )
 
   const handleCancel = () => {
@@ -1152,6 +1179,179 @@ function LoadedGeneralConfigPage({
 
               <FieldSeparator />
 
+              <form.Field
+                name={
+                  SETTINGS_FIELD_NAMES.reconnectOwnedFlowsOnRoutingChangeLists
+                }
+              >
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+
+                  return (
+                    <form.Subscribe
+                      selector={(state) =>
+                        state.values.reconnectUnmarkedFlowsOnRoutingChange
+                      }
+                    >
+                      {(reconnectEnabled) => {
+                        const configuredListIds = field.state.value
+                        const usesAutomaticRecommendation =
+                          configuredListIds === undefined
+                        const selectedListIds = usesAutomaticRecommendation
+                          ? recommendedReconnectListIds
+                          : configuredListIds
+                        const reconnectMode = usesAutomaticRecommendation
+                          ? "automatic"
+                          : "manual"
+                        const status = !reconnectEnabled
+                          ? t(
+                              "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsDisabledStatus"
+                            )
+                          : usesAutomaticRecommendation
+                            ? t(
+                                recommendedReconnectListIds.length > 0
+                                  ? "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsAutomaticStatus"
+                                  : "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsAutomaticUnavailableStatus"
+                              )
+                            : selectedListIds.length === 0
+                              ? t(
+                                  "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsOptOutStatus"
+                                )
+                              : t(
+                                  "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsExplicitStatus"
+                                )
+
+                        return (
+                          <Field invalid={Boolean(error)}>
+                            <FieldLabel id="reconnect-owned-flows-on-routing-change-lists-label">
+                              {t(
+                                "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsLabel"
+                              )}
+                            </FieldLabel>
+                            <FieldContent>
+                              <Select
+                                disabled={!reconnectEnabled}
+                                items={[
+                                  {
+                                    value: "automatic",
+                                    label: t(
+                                      "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeModeOptions.automatic"
+                                    ),
+                                  },
+                                  {
+                                    value: "manual",
+                                    label: t(
+                                      "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeModeOptions.manual"
+                                    ),
+                                  },
+                                ]}
+                                onValueChange={(value) => {
+                                  if (value === "automatic") {
+                                    field.handleChange(undefined)
+                                    return
+                                  }
+                                  if (value === "manual") {
+                                    field.handleChange([
+                                      ...recommendedReconnectListIds,
+                                    ])
+                                  }
+                                }}
+                                value={reconnectMode}
+                              >
+                                <SelectTrigger
+                                  aria-label={t(
+                                    "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeModeLabel"
+                                  )}
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectGroup>
+                                    <SelectItem value="automatic">
+                                      {t(
+                                        "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeModeOptions.automatic"
+                                      )}
+                                    </SelectItem>
+                                    <SelectItem value="manual">
+                                      {t(
+                                        "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeModeOptions.manual"
+                                      )}
+                                    </SelectItem>
+                                  </SelectGroup>
+                                </SelectContent>
+                              </Select>
+                              <fieldset
+                                aria-labelledby="reconnect-owned-flows-on-routing-change-lists-label"
+                                className="min-w-0 border-0 p-0 disabled:opacity-60"
+                                disabled={
+                                  !reconnectEnabled ||
+                                  usesAutomaticRecommendation
+                                }
+                              >
+                                <MultiSelectList
+                                  addLabel={t(
+                                    "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsAddAction"
+                                  )}
+                                  emptyMessage={t(
+                                    "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsNoAvailable"
+                                  )}
+                                  error={error}
+                                  getSearchText={(listId) =>
+                                    getListSearchText(
+                                      listId,
+                                      loadedConfig.lists
+                                    )
+                                  }
+                                  name={
+                                    SETTINGS_FIELD_NAMES.reconnectOwnedFlowsOnRoutingChangeLists
+                                  }
+                                  onChange={field.handleChange}
+                                  options={reconnectListOptions}
+                                  placeholderDescription={t(
+                                    "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsEmptyDescription"
+                                  )}
+                                  placeholderTitle={t(
+                                    "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsEmptyTitle"
+                                  )}
+                                  renderItem={(listId) => (
+                                    <ListIdentityLabel
+                                      lists={loadedConfig.lists}
+                                      technicalId={listId}
+                                    />
+                                  )}
+                                  usageSubtitle={(listId) =>
+                                    recommendedReconnectListIds.includes(listId)
+                                      ? t(
+                                          "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsRecommended"
+                                        )
+                                      : undefined
+                                  }
+                                  value={selectedListIds}
+                                />
+                              </fieldset>
+                              <FieldHint
+                                description={
+                                  <>
+                                    <span className="block">
+                                      {t(
+                                        "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsHint"
+                                      )}
+                                    </span>
+                                    <span className="mt-1 block">{status}</span>
+                                  </>
+                                }
+                              />
+                            </FieldContent>
+                          </Field>
+                        )
+                      }}
+                    </form.Subscribe>
+                  )
+                }}
+              </form.Field>
+
+              <FieldSeparator />
+
               <form.Field name={SETTINGS_FIELD_NAMES.fwmarkStart}>
                 {(field) => {
                   const error = getFirstFieldError(field.state.meta.errors)
@@ -1412,6 +1612,9 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     reconnectUnmarkedFlowsOnRoutingChange:
       config.daemon?.reconnect_unmarked_flows_on_routing_change ??
       fallbackDraft.reconnectUnmarkedFlowsOnRoutingChange,
+    reconnectOwnedFlowsOnRoutingChangeLists:
+      config.daemon?.reconnect_owned_flows_on_routing_change_lists ??
+      fallbackDraft.reconnectOwnedFlowsOnRoutingChangeLists,
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
@@ -1455,6 +1658,8 @@ function buildUpdatedConfig(
       clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
       reconnect_unmarked_flows_on_routing_change:
         draft.reconnectUnmarkedFlowsOnRoutingChange,
+      reconnect_owned_flows_on_routing_change_lists:
+        draft.reconnectOwnedFlowsOnRoutingChangeLists,
       ipv6_enabled: draft.ipv6Enabled,
     },
     route: {
@@ -1548,6 +1753,13 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
     path.startsWith("route.internal_vpn_services[")
   ) {
     return SETTINGS_FIELD_NAMES.internalVpnServices
+  }
+
+  if (
+    path === "daemon.reconnect_owned_flows_on_routing_change_lists" ||
+    path.startsWith("daemon.reconnect_owned_flows_on_routing_change_lists[")
+  ) {
+    return SETTINGS_FIELD_NAMES.reconnectOwnedFlowsOnRoutingChangeLists
   }
 
   switch (path) {

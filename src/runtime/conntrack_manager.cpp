@@ -8,6 +8,7 @@
 #include <charconv>
 #include <chrono>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -254,6 +255,12 @@ struct ParsedConntrackOriginalPair {
     NormalizedHostAddress source;
     NormalizedHostAddress destination;
     std::uint32_t mark{0};
+};
+
+struct NormalizedForwardedDestinationSelector {
+    NormalizedTargetCidr cidr;
+    bool allow_unmarked{false};
+    bool allow_owned_mark{false};
 };
 
 std::optional<ParsedConntrackOriginalPair> parse_conntrack_original_pair(
@@ -633,8 +640,9 @@ ConntrackSourceCleanupSummary ConntrackManager::delete_ipv4_source_cidrs(
 }
 
 ConntrackForwardedFlowCleanupSummary
-ConntrackManager::delete_unmarked_forwarded_destination_flows(
-    const std::vector<std::string>& destination_cidrs,
+ConntrackManager::delete_forwarded_destination_flows(
+    const std::vector<std::string>& normal_destination_cidrs,
+    const std::vector<std::string>& aggressive_destination_cidrs,
     const std::vector<std::string>& local_interface_addresses,
     uint32_t owned_mask,
     ConntrackForwardedFlowCleanupOptions options) const {
@@ -644,42 +652,80 @@ ConntrackManager::delete_unmarked_forwarded_destination_flows(
         return summary;
     }
 
-    std::vector<NormalizedTargetCidr> selectors;
-    std::set<std::string> seen_selectors;
-    const std::size_t input_limit =
-        std::min(
-            destination_cidrs.size(),
-            options.max_destination_input_cidrs);
-    selectors.reserve(input_limit);
-    if (input_limit < destination_cidrs.size()) {
-        summary.destination_input_truncated = true;
-        summary.skipped += destination_cidrs.size() - input_limit;
-    }
-    for (std::size_t input_index = 0;
-         input_index < input_limit;
-         ++input_index) {
-        const auto& raw = destination_cidrs[input_index];
-        const auto normalized = normalize_targeted_cidr(raw);
-        if (normalized.has_value() &&
-            normalized->family == TargetAddressFamily::Ipv6 &&
-            !options.ipv6_enabled) {
-            // IPv6 is intentionally outside the active runtime in this mode;
-            // omitting its selectors mirrors mark cleanup's family handling
-            // and does not create retry work which can never be attempted.
-            continue;
-        }
+    std::vector<NormalizedForwardedDestinationSelector> selectors;
+    std::map<std::string, std::size_t> selector_indices;
+    selectors.reserve(std::min(
+        normal_destination_cidrs.size() +
+            aggressive_destination_cidrs.size(),
+        options.max_destination_input_cidrs));
+    const auto append_selectors =
+        [&](const std::vector<std::string>& inputs,
+            bool allow_unmarked,
+            bool allow_owned_mark) {
+            // Each policy class gets the same bounded read allowance. This
+            // lets an overlapping normal/aggressive selector merge both
+            // permissions without consuming the unique-selector budget
+            // twice, while still bounding hostile or malformed input.
+            const std::size_t input_limit = std::min(
+                inputs.size(), options.max_destination_input_cidrs);
+            if (input_limit < inputs.size()) {
+                summary.destination_input_truncated = true;
+                summary.skipped += inputs.size() - input_limit;
+            }
+            for (std::size_t input_index = 0;
+                 input_index < input_limit;
+                 ++input_index) {
+                const auto normalized =
+                    normalize_targeted_cidr(inputs[input_index]);
+                if (normalized.has_value() &&
+                    normalized->family == TargetAddressFamily::Ipv6 &&
+                    !options.ipv6_enabled) {
+                    // IPv6 is intentionally outside the active runtime in
+                    // this mode; omitting its selectors mirrors mark cleanup's
+                    // family handling and creates no impossible retry work.
+                    continue;
+                }
+                if (!normalized.has_value()) {
+                    ++summary.failed;
+                    continue;
+                }
 
-        if (!normalized.has_value()) {
-            ++summary.failed;
-            continue;
-        }
-        const std::string key =
-            (normalized->family == TargetAddressFamily::Ipv6 ? "6:" : "4:") +
-            normalized->value;
-        if (seen_selectors.insert(key).second) {
-            selectors.push_back(*normalized);
-        }
-    }
+                const std::string key =
+                    (normalized->family == TargetAddressFamily::Ipv6
+                         ? "6:"
+                         : "4:") +
+                    normalized->value;
+                const auto position = selector_indices.find(key);
+                if (position == selector_indices.end()) {
+                    if (selectors.size() >=
+                        options.max_destination_input_cidrs) {
+                        summary.destination_input_truncated = true;
+                        ++summary.skipped;
+                        continue;
+                    }
+                    selector_indices.emplace(key, selectors.size());
+                    selectors.push_back(
+                        NormalizedForwardedDestinationSelector{
+                            *normalized,
+                            allow_unmarked,
+                            allow_owned_mark});
+                } else {
+                    auto& selector = selectors[position->second];
+                    selector.allow_unmarked =
+                        selector.allow_unmarked || allow_unmarked;
+                    selector.allow_owned_mark =
+                        selector.allow_owned_mark || allow_owned_mark;
+                }
+            }
+        };
+    append_selectors(
+        normal_destination_cidrs,
+        /*allow_unmarked=*/true,
+        /*allow_owned_mark=*/false);
+    append_selectors(
+        aggressive_destination_cidrs,
+        /*allow_unmarked=*/false,
+        /*allow_owned_mark=*/true);
     if (selectors.empty()) {
         return summary;
     }
@@ -736,7 +782,7 @@ ConntrackManager::delete_unmarked_forwarded_destination_flows(
             break;
         }
         const auto parsed = parse_conntrack_original_pair(line);
-        if (!parsed.has_value() || parsed->mark != 0U) {
+        if (!parsed.has_value()) {
             continue;
         }
         const bool ipv6 =
@@ -754,14 +800,23 @@ ConntrackManager::delete_unmarked_forwarded_destination_flows(
         }
         const bool destination_matches = std::any_of(
             selectors.begin(), selectors.end(),
-            [&parsed](const NormalizedTargetCidr& selector) {
-                return cidr_contains(selector, parsed->destination);
+            [&parsed, owned_mask](
+                const NormalizedForwardedDestinationSelector& selector) {
+                if (!cidr_contains(selector.cidr, parsed->destination)) {
+                    return false;
+                }
+                if (parsed->mark == 0U) {
+                    return selector.allow_unmarked;
+                }
+                return selector.allow_owned_mark &&
+                       (parsed->mark & owned_mask) != 0U;
             });
         if (!destination_matches) {
             continue;
         }
         const std::string flow_key = source_key + ">" +
-            parsed->destination.value;
+            parsed->destination.value + "#" +
+            std::to_string(parsed->mark);
         if (!seen_flows.insert(flow_key).second) {
             continue;
         }
@@ -773,7 +828,8 @@ ConntrackManager::delete_unmarked_forwarded_destination_flows(
         flows.push_back(ConntrackForwardedFlowPair{
             parsed->source.value,
             parsed->destination.value,
-            ipv6});
+            ipv6,
+            parsed->mark});
     }
 
     const auto retain_from =
@@ -791,10 +847,12 @@ ConntrackManager::delete_unmarked_forwarded_destination_flows(
             break;
         }
         const auto& flow = flows[index];
+        const std::string mark_selector =
+            std::to_string(flow.mark) + "/4294967295";
         const auto result = runner_({
             "conntrack", "-D", "-f", flow.ipv6 ? "ipv6" : "ipv4",
             "-s", flow.source, "-d", flow.destination,
-            "--mark", "0/4294967295"});
+            "--mark", mark_selector});
         ++summary.attempted;
         if (result.exit_code == 127) {
             summary.command_unavailable = true;
@@ -808,6 +866,20 @@ ConntrackManager::delete_unmarked_forwarded_destination_flows(
         }
     }
     return summary;
+}
+
+ConntrackForwardedFlowCleanupSummary
+ConntrackManager::delete_unmarked_forwarded_destination_flows(
+    const std::vector<std::string>& destination_cidrs,
+    const std::vector<std::string>& local_interface_addresses,
+    uint32_t owned_mask,
+    ConntrackForwardedFlowCleanupOptions options) const {
+    return delete_forwarded_destination_flows(
+        destination_cidrs,
+        {},
+        local_interface_addresses,
+        owned_mask,
+        options);
 }
 
 } // namespace keen_pbr3

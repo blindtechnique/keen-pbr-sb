@@ -410,6 +410,96 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "ConntrackManager reconnects owned marks only for aggressive destinations") {
+    std::vector<std::vector<std::string>> commands;
+    std::size_t snapshot_calls = 0U;
+    const std::string snapshot =
+        "ipv4 2 tcp 6 100 src=192.168.1.40 dst=31.13.64.10 "
+        "src=31.13.64.10 dst=192.168.1.40 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.41 dst=31.13.64.11 "
+        "src=31.13.64.11 dst=192.168.1.41 mark=65536 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.42 dst=31.13.65.20 "
+        "src=31.13.65.20 dst=192.168.1.42 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.43 dst=31.13.65.21 "
+        "src=31.13.65.21 dst=192.168.1.43 mark=65536 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.44 dst=31.13.65.22 "
+        "src=31.13.65.22 dst=192.168.1.44 mark=2768240640 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.45 dst=31.13.65.23 "
+        "src=31.13.65.23 dst=192.168.1.45 mark=2768306380 use=1\n";
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot, &snapshot_calls](std::size_t) {
+            ++snapshot_calls;
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto summary = manager.delete_forwarded_destination_flows(
+        {"31.13.64.0/24", "31.13.65.0/24"},
+        {"31.13.65.0/24"},
+        {"192.168.1.1/24"},
+        0x00FF0000U);
+
+    CHECK(snapshot_calls == 1U);
+    CHECK(summary.matched == 4U);
+    CHECK(summary.attempted == 4U);
+    CHECK(summary.failed == 0U);
+    CHECK(summary.skipped == 0U);
+    CHECK(commands == std::vector<std::vector<std::string>>{
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "192.168.1.40", "-d", "31.13.64.10", "--mark",
+                           "0/4294967295"},
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "192.168.1.42", "-d", "31.13.65.20", "--mark",
+                           "0/4294967295"},
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "192.168.1.43", "-d", "31.13.65.21", "--mark",
+                           "65536/4294967295"},
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "192.168.1.45", "-d", "31.13.65.23", "--mark",
+                          "2768306380/4294967295"}});
+}
+
+TEST_CASE(
+    "ConntrackManager merges overlapping reconnect policies before the unique selector limit") {
+    std::vector<std::vector<std::string>> commands;
+    const std::string snapshot =
+        "ipv4 2 udp 17 100 src=192.168.1.44 dst=31.13.64.10 "
+        "src=31.13.64.10 dst=192.168.1.44 mark=65536 use=1\n";
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto summary = manager.delete_forwarded_destination_flows(
+        {"31.13.64.0/24"},
+        {"31.13.64.0/24"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackForwardedFlowCleanupOptions{
+            true,
+            std::chrono::seconds{2},
+            256U,
+            /*max_destination_input_cidrs=*/1U,
+            2U * 1024U * 1024U,
+            8192U});
+
+    CHECK_FALSE(summary.destination_input_truncated);
+    CHECK(summary.matched == 1U);
+    CHECK(summary.attempted == 1U);
+    REQUIRE(commands.size() == 1U);
+    CHECK(commands.front().back() == "65536/4294967295");
+}
+
+TEST_CASE(
     "ConntrackManager requires explicit family original tuple and full zero mark") {
     std::vector<std::vector<std::string>> commands;
     const std::string snapshot =

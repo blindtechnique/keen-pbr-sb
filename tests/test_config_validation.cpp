@@ -2483,6 +2483,75 @@ TEST_CASE(
           "daemon.reconnect_unmarked_flows_on_routing_change");
 }
 
+TEST_CASE(
+    "daemon strong reconnect list selection accepts configured unique lists") {
+    const auto cfg = parse_test_config(R"({
+        "lists":{"whatsapp_ip":{"ip_cidrs":["31.13.64.0/18"]}},
+        "daemon":{
+            "reconnect_owned_flows_on_routing_change_lists":["whatsapp_ip"]
+        }
+    })");
+    REQUIRE(cfg.daemon.has_value());
+    REQUIRE(
+        cfg.daemon->reconnect_owned_flows_on_routing_change_lists.has_value());
+    CHECK(
+        *cfg.daemon->reconnect_owned_flows_on_routing_change_lists ==
+        std::vector<std::string>{"whatsapp_ip"});
+}
+
+TEST_CASE(
+    "daemon strong reconnect list selection preserves explicit empty opt-out") {
+    const auto cfg = parse_test_config(R"({
+        "daemon":{"reconnect_owned_flows_on_routing_change_lists":[]}
+    })");
+    REQUIRE(cfg.daemon.has_value());
+    REQUIRE(
+        cfg.daemon->reconnect_owned_flows_on_routing_change_lists.has_value());
+    CHECK(cfg.daemon->reconnect_owned_flows_on_routing_change_lists->empty());
+}
+
+TEST_CASE(
+    "daemon strong reconnect list selection rejects malformed references") {
+    const auto wrong_type = parse_issues(R"({
+        "daemon":{"reconnect_owned_flows_on_routing_change_lists":"all"}
+    })");
+    REQUIRE(wrong_type.size() == 1U);
+    CHECK(
+        wrong_type.front().path ==
+        "daemon.reconnect_owned_flows_on_routing_change_lists");
+
+    const auto non_string = parse_issues(R"({
+        "daemon":{"reconnect_owned_flows_on_routing_change_lists":[7]}
+    })");
+    REQUIRE(non_string.size() == 1U);
+    CHECK(
+        non_string.front().path ==
+        "daemon.reconnect_owned_flows_on_routing_change_lists[0]");
+
+    const auto unknown = validate_issues(R"({
+        "daemon":{
+            "reconnect_owned_flows_on_routing_change_lists":["missing"]
+        }
+    })");
+    REQUIRE(unknown.size() == 1U);
+    CHECK(
+        unknown.front().path ==
+        "daemon.reconnect_owned_flows_on_routing_change_lists[0]");
+
+    const auto duplicate = validate_issues(R"({
+        "lists":{"whatsapp_ip":{"ip_cidrs":["31.13.64.0/18"]}},
+        "daemon":{
+            "reconnect_owned_flows_on_routing_change_lists":[
+                "whatsapp_ip", "whatsapp_ip"
+            ]
+        }
+    })");
+    REQUIRE(duplicate.size() == 1U);
+    CHECK(
+        duplicate.front().path ==
+        "daemon.reconnect_owned_flows_on_routing_change_lists[1]");
+}
+
 TEST_CASE("daemon.ipv6_enabled: defaults to true behavior when absent") {
     auto cfg = parse_test_config(R"({"daemon":{}})");
     REQUIRE(cfg.daemon.has_value());

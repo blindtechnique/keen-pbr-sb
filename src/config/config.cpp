@@ -143,6 +143,30 @@ std::string trim_copy(const std::string& value) {
     return value.substr(begin, end - begin + 1);
 }
 
+void validate_optional_string_array_field(
+    const json& root,
+    const char* parent_key,
+    const char* child_key,
+    const std::string& path,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto parent_it = root.find(parent_key);
+    if (parent_it == root.end() || !parent_it->is_object()) return;
+    const auto child_it = parent_it->find(child_key);
+    if (child_it == parent_it->end() || child_it->is_null()) return;
+    if (!child_it->is_array()) {
+        add_issue(issues, path, path + " must be an array of strings");
+        return;
+    }
+    for (std::size_t index = 0; index < child_it->size(); ++index) {
+        if (!child_it->at(index).is_string()) {
+            add_issue(
+                issues,
+                path + "[" + std::to_string(index) + "]",
+                path + " must be an array of strings");
+        }
+    }
+}
+
 bool is_valid_iptables_interface_name(const std::string& interface_name) {
     if (interface_name.empty() || trim_copy(interface_name).empty() ||
         interface_name.size() >= IFNAMSIZ || interface_name == "." ||
@@ -925,6 +949,12 @@ Config parse_config(const std::string& json_str) {
     validate_optional_boolean_field(
         parsed_json, "daemon", "reconnect_unmarked_flows_on_routing_change",
         "daemon.reconnect_unmarked_flows_on_routing_change", issues);
+    validate_optional_string_array_field(
+        parsed_json,
+        "daemon",
+        "reconnect_owned_flows_on_routing_change_lists",
+        "daemon.reconnect_owned_flows_on_routing_change_lists",
+        issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "ipv6_enabled", "daemon.ipv6_enabled", issues);
     validate_route_rule_specs(parsed_json, issues);
@@ -1443,6 +1473,41 @@ void validate_config(const Config& cfg) {
             add_issue(issues, list_path,
                       "List '" + name +
                           "' must have at least one of: url, domains, ip_cidrs, file");
+        }
+    }
+
+    if (cfg.daemon &&
+        cfg.daemon->reconnect_owned_flows_on_routing_change_lists.has_value()) {
+        const auto& selected =
+            *cfg.daemon->reconnect_owned_flows_on_routing_change_lists;
+        constexpr std::size_t max_selected_lists = 128U;
+        if (selected.size() > max_selected_lists) {
+            add_issue(
+                issues,
+                "daemon.reconnect_owned_flows_on_routing_change_lists",
+                "daemon.reconnect_owned_flows_on_routing_change_lists must "
+                "not contain more than 128 entries");
+        }
+        const auto lists = cfg.lists.value_or(
+            std::map<std::string, ListConfig>{});
+        std::set<std::string> seen;
+        for (std::size_t index = 0; index < selected.size(); ++index) {
+            const auto& list_name = selected[index];
+            const auto path =
+                "daemon.reconnect_owned_flows_on_routing_change_lists[" +
+                std::to_string(index) + "]";
+            if (!seen.insert(list_name).second) {
+                add_issue(
+                    issues,
+                    path,
+                    path + " duplicates list '" + list_name + "'");
+            }
+            if (lists.count(list_name) == 0U) {
+                add_issue(
+                    issues,
+                    path,
+                    path + " references unknown list '" + list_name + "'");
+            }
         }
     }
 
