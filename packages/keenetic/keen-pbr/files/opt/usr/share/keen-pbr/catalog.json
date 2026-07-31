@@ -3408,6 +3408,59 @@
     }
   },
   {
+    "id": "kartina-tv",
+    "name": "Kartina.TV",
+    "iconSlug": "lucide-tv",
+    "category": "media",
+    "notice": "Kartina.TV: официальный сайт, API, стриминговые домены и 9 собственных IPv4-сетей.",
+    "routingCompanions": [
+      {
+        "id": "kartina_tv_ip",
+        "name": "Kartina.TV IP",
+        "sourcePresetId": "kartina-tv-ip-source",
+        "include": "ip_cidrs",
+        "suppressDirectSelection": true
+      }
+    ],
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
+        "domains": [
+          "cdn-imaze.com",
+          "iptv-kartina.tv",
+          "kartina.stream",
+          "kartina.tv",
+          "kartina2.com",
+          "kartina2.tv",
+          "streamktv.com"
+        ]
+      }
+    }
+  },
+  {
+    "id": "kartina-tv-ip-source",
+    "name": "Kartina.TV IP (служебный источник)",
+    "iconSlug": "lucide-tv",
+    "category": "media",
+    "hidden": true,
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
+        "subnets": [
+          "93.180.240.0/24",
+          "93.180.241.0/24",
+          "93.180.242.0/24",
+          "93.180.243.0/24",
+          "93.180.247.0/24",
+          "185.146.248.0/24",
+          "185.146.249.0/24",
+          "185.146.250.0/24",
+          "185.146.251.0/24"
+        ]
+      }
+    }
+  },
+  {
     "id": "kinopub",
     "name": "Kino.pub",
     "iconSlug": "kinopub",

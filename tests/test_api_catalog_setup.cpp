@@ -409,6 +409,31 @@ TEST_CASE(
              {{"dns", {{"domains", {"cloudflare.com"}}}}}},
         },
         {
+            {"id", "kartina-tv"},
+            {"name", "Kartina.TV"},
+            {"category", "media"},
+            {"routingCompanions",
+             {{{"id", "kartina_tv_ip"},
+               {"name", "Kartina.TV IP"},
+               {"sourcePresetId", "kartina-tv-ip-source"},
+               {"include", "ip_cidrs"},
+               {"suppressDirectSelection", true}}}},
+            {"engines",
+             {{"dns",
+               {{"domains",
+                 {"kartina.tv", "iptv-kartina.tv"}}}}}},
+        },
+        {
+            {"id", "kartina-tv-ip-source"},
+            {"name", "Kartina.TV IP source"},
+            {"category", "media"},
+            {"hidden", true},
+            {"engines",
+             {{"dns",
+               {{"subnets",
+                 {"93.180.240.0/24", "185.146.251.0/24"}}}}}},
+        },
+        {
             {"id", "telegram"},
             {"name", "Telegram"},
             {"routingCompanions",
@@ -493,6 +518,20 @@ TEST_CASE(
             .at("routingCompanions")
             .at(0)
             .at("id") == "telegram_ip");
+    CHECK(preset("kartina-tv").at("category") == "media");
+    CHECK(
+        preset("kartina-tv")
+            .at("routingCompanions")
+            .at(0)
+            .at("sourcePresetId") == "kartina-tv-ip-source");
+    CHECK(preset("kartina-tv-ip-source").at("hidden"));
+    CHECK(
+        preset("kartina-tv-ip-source")
+            .at("engines")
+            .at("dns")
+            .at("subnets") ==
+        nlohmann::json::array(
+            {"93.180.240.0/24", "185.146.251.0/24"}));
     CHECK(
         preset("unrelated")
             .at("engines")

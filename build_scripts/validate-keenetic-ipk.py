@@ -120,6 +120,7 @@ def validate_bundled_catalog(catalog: object) -> None:
     meta = companion("meta", "meta_whatsapp_ip")
     whatsapp = companion("whatsapp", "whatsapp_ip")
     telegram = companion("telegram", "telegram_ip")
+    kartina = companion("kartina-tv", "kartina_tv_ip")
     if meta.get("sourcePresetId") != "whatsapp-ip-source" or meta.get("include") != "ip_cidrs":
         raise ValidationError("Meta IP companion does not use the bundled WhatsApp CIDRs")
     if (
@@ -132,6 +133,11 @@ def validate_bundled_catalog(catalog: object) -> None:
     telegram_url = telegram.get("url")
     if not isinstance(telegram_url, str) or "geoip-telegram.srs" not in telegram_url:
         raise ValidationError("Telegram IP companion does not use the GeoIP rule set")
+    if (
+        kartina.get("sourcePresetId") != "kartina-tv-ip-source"
+        or kartina.get("include") != "ip_cidrs"
+    ):
+        raise ValidationError("Kartina.TV IP companion does not use its bundled CIDRs")
 
     source = presets.get("whatsapp-ip-source")
     engines = source.get("engines") if source else None
@@ -139,6 +145,62 @@ def validate_bundled_catalog(catalog: object) -> None:
     subnets = dns.get("subnets") if isinstance(dns, dict) else None
     if not isinstance(subnets, list) or not subnets:
         raise ValidationError("bundled WhatsApp IP source contains no CIDRs")
+
+    kartina_parent = presets["kartina-tv"]
+    kartina_engines = kartina_parent.get("engines")
+    kartina_dns = (
+        kartina_engines.get("dns") if isinstance(kartina_engines, dict) else None
+    )
+    kartina_domains = (
+        kartina_dns.get("domains") if isinstance(kartina_dns, dict) else None
+    )
+    required_kartina_domains = {
+        "cdn-imaze.com",
+        "iptv-kartina.tv",
+        "kartina.stream",
+        "kartina.tv",
+        "kartina2.com",
+        "kartina2.tv",
+        "streamktv.com",
+    }
+    if (
+        not isinstance(kartina_domains, list)
+        or set(kartina_domains) != required_kartina_domains
+    ):
+        raise ValidationError("bundled Kartina.TV preset has incomplete domains")
+
+    kartina_source = presets.get("kartina-tv-ip-source")
+    if not isinstance(kartina_source, dict):
+        raise ValidationError("bundled catalog is missing Kartina.TV IP source")
+    kartina_source_engines = kartina_source.get("engines")
+    kartina_source_dns = (
+        kartina_source_engines.get("dns")
+        if isinstance(kartina_source_engines, dict)
+        else None
+    )
+    kartina_subnets = (
+        kartina_source_dns.get("subnets")
+        if isinstance(kartina_source_dns, dict)
+        else None
+    )
+    required_kartina_subnets = {
+        "93.180.240.0/24",
+        "93.180.241.0/24",
+        "93.180.242.0/24",
+        "93.180.243.0/24",
+        "93.180.247.0/24",
+        "185.146.248.0/24",
+        "185.146.249.0/24",
+        "185.146.250.0/24",
+        "185.146.251.0/24",
+    }
+    if (
+        not isinstance(kartina_subnets, list)
+        or set(kartina_subnets) != required_kartina_subnets
+    ):
+        raise ValidationError("bundled Kartina.TV IP source has incomplete CIDRs")
+    if not kartina_source.get("hidden", False):
+        raise ValidationError("bundled Kartina.TV IP source must stay hidden")
 
 
 def read_ar(path: Path) -> dict[str, bytes]:

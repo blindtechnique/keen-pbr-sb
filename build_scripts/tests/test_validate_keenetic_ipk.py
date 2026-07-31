@@ -100,6 +100,48 @@ def bundled_catalog() -> bytes:
                 "id": "whatsapp-ip-source",
                 "engines": {"dns": {"subnets": ["31.13.64.0/18"]}},
             },
+            {
+                "id": "kartina-tv",
+                "routingCompanions": [
+                    {
+                        "id": "kartina_tv_ip",
+                        "sourcePresetId": "kartina-tv-ip-source",
+                        "include": "ip_cidrs",
+                    }
+                ],
+                "engines": {
+                    "dns": {
+                        "domains": [
+                            "cdn-imaze.com",
+                            "iptv-kartina.tv",
+                            "kartina.stream",
+                            "kartina.tv",
+                            "kartina2.com",
+                            "kartina2.tv",
+                            "streamktv.com",
+                        ]
+                    }
+                },
+            },
+            {
+                "id": "kartina-tv-ip-source",
+                "hidden": True,
+                "engines": {
+                    "dns": {
+                        "subnets": [
+                            "93.180.240.0/24",
+                            "93.180.241.0/24",
+                            "93.180.242.0/24",
+                            "93.180.243.0/24",
+                            "93.180.247.0/24",
+                            "185.146.248.0/24",
+                            "185.146.249.0/24",
+                            "185.146.250.0/24",
+                            "185.146.251.0/24",
+                        ]
+                    }
+                },
+            },
         ]
     ).encode()
 
@@ -294,6 +336,21 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 VALIDATOR.ValidationError,
                 "telegram is missing companion telegram_ip",
+            ):
+                VALIDATOR.validate(package, "aarch64")
+
+    def test_rejects_catalog_with_incomplete_kartina_networks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            catalog = json.loads(bundled_catalog())
+            source = next(
+                item for item in catalog if item["id"] == "kartina-tv-ip-source"
+            )
+            source["engines"]["dns"]["subnets"].pop()
+            make_ipk(package, catalog=json.dumps(catalog).encode())
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "Kartina.TV IP source has incomplete CIDRs",
             ):
                 VALIDATOR.validate(package, "aarch64")
 
