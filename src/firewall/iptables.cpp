@@ -733,8 +733,13 @@ static bool command_reports_table_unavailable(
 static bool command_reports_chain_missing(
     const ExecCaptureResult& result) {
     const std::string normalized = normalized_iptables_output(result);
+    const bool legacy_target_missing =
+        (normalized.find("couldn't load target") != std::string::npos ||
+         normalized.find("could not load target") != std::string::npos) &&
+        normalized.find("no such file or directory") != std::string::npos;
     return normalized.find("no chain/target/match") != std::string::npos ||
-           normalized.find("does a matching rule exist") != std::string::npos;
+           normalized.find("does a matching rule exist") != std::string::npos ||
+           legacy_target_missing;
 }
 
 static IptablesCommandOutcome classify_iptables_command(

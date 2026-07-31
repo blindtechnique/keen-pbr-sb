@@ -1416,6 +1416,37 @@ TEST_CASE("vanished hook target is a transient publication race") {
         "-t mangle -A PREROUTING -j KeenPbrTable\n");
 }
 
+TEST_CASE("legacy Keenetic iptables reports vanished hook target as transient") {
+  IptablesTestTempDir temp;
+  const auto calls = temp.path() / "calls";
+  write_iptables_test_executable(
+      temp.path() / "iptables",
+      "#!/bin/sh\n"
+      "printf '%s\\n' \"$*\" >> \"$KPBR_HOOK_CALLS\"\n"
+      "case \"$*\" in\n"
+      "  '-t mangle -S PREROUTING') exit 0 ;;\n"
+      "  '-t mangle -A PREROUTING -j KeenPbrTable')\n"
+      "    printf 'iptables v1.4.21: Couldn\\047t load target "
+      "\\140KeenPbrTable\\047:No such file or directory\\n' >&2\n"
+      "    exit 2\n"
+      "    ;;\n"
+      "esac\n"
+      "exit 0\n");
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment calls_env("KPBR_HOOK_CALLS");
+  use_iptables_test_path(path, temp.path());
+  calls_env.set(calls.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  CHECK_THROWS_AS(
+      T::reconcile_hook(
+          "iptables", "mangle", "PREROUTING", "KeenPbrTable"),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(calls) ==
+        "-t mangle -S PREROUTING\n"
+        "-t mangle -A PREROUTING -j KeenPbrTable\n");
+}
+
 TEST_CASE("vanished duplicate hook target is a transient publication race") {
   IptablesTestTempDir temp;
   const auto calls = temp.path() / "calls";
