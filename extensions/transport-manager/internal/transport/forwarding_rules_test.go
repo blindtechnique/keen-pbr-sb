@@ -13,28 +13,31 @@ import (
 )
 
 type fakeFirewallCall struct {
-	binary string
-	op     string
-	rule   []string
-	wait   bool
+	binary    string
+	op        string
+	rule      []string
+	wait      bool
+	waitValue string
 }
 
 type fakeFirewallRunner struct {
 	mu sync.Mutex
 
-	waitSupported    bool
-	commentSupported bool
-	rules            map[string]map[string]int
-	scripted         map[string][]firewallCommandResult
-	calls            []fakeFirewallCall
+	waitSupported      bool
+	waitValueSupported bool
+	commentSupported   bool
+	rules              map[string]map[string]int
+	scripted           map[string][]firewallCommandResult
+	calls              []fakeFirewallCall
 }
 
 func newFakeFirewallRunner() *fakeFirewallRunner {
 	return &fakeFirewallRunner{
-		waitSupported:    true,
-		commentSupported: true,
-		rules:            map[string]map[string]int{"iptables": {}},
-		scripted:         make(map[string][]firewallCommandResult),
+		waitSupported:      true,
+		waitValueSupported: true,
+		commentSupported:   true,
+		rules:              map[string]map[string]int{"iptables": {}},
+		scripted:           make(map[string][]firewallCommandResult),
 	}
 }
 
@@ -52,19 +55,27 @@ func (f *fakeFirewallRunner) Run(_ context.Context, binary string, args []string
 	defer f.mu.Unlock()
 
 	wait := false
-	if len(args) >= 2 && args[0] == "-w" {
+	waitValue := ""
+	if len(args) >= 1 && args[0] == "-w" {
 		wait = true
-		if args[1] == "0" && !f.waitSupported {
+		if !f.waitSupported {
 			return firewallCommandResult{exitCode: 2, output: "iptables: unrecognized option '-w'", err: errors.New("exit status 2")}
 		}
-		args = args[2:]
+		args = args[1:]
+		if len(args) > 0 && (args[0] == forwardingRuleProbeWaitSeconds || args[0] == forwardingRuleWaitSeconds) {
+			waitValue = args[0]
+			if !f.waitValueSupported {
+				return firewallCommandResult{exitCode: 2, output: "Bad argument `" + waitValue + "'", err: errors.New("exit status 2")}
+			}
+			args = args[1:]
+		}
 	}
 	if len(args) == 0 {
 		return firewallCommandResult{exitCode: 2, output: "missing operation", err: errors.New("exit status 2")}
 	}
 	op := args[0]
 	rule := append([]string(nil), args[1:]...)
-	f.calls = append(f.calls, fakeFirewallCall{binary: binary, op: op, rule: rule, wait: wait})
+	f.calls = append(f.calls, fakeFirewallCall{binary: binary, op: op, rule: rule, wait: wait, waitValue: waitValue})
 
 	scriptKey := fakeCommandKey(binary, op, rule)
 	if queue := f.scripted[scriptKey]; len(queue) > 0 {
@@ -346,6 +357,71 @@ func TestForwardingRuleManagerSupportsBusyBoxWithoutWaitOption(t *testing.T) {
 		if call.wait {
 			t.Fatalf("command %s unexpectedly used unsupported -w", call.op)
 		}
+	}
+}
+
+func TestForwardingRuleManagerSupportsBusyBoxWithBareWaitFlag(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	runner.waitValueSupported = false
+	manager := testForwardingRuleManager(runner)
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.waitSupport["iptables"]; got != xtablesWaitFlagOnly {
+		t.Fatalf("wait mode = %d, want bare flag mode %d", got, xtablesWaitFlagOnly)
+	}
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	for _, call := range runner.calls {
+		if call.wait && call.waitValue != "" {
+			t.Fatalf("command %s unexpectedly used wait value %q", call.op, call.waitValue)
+		}
+	}
+}
+
+func TestForwardingRuleManagerUsesNumericWaitWhenSupported(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.waitSupport["iptables"]; got != xtablesWaitWithTimeout {
+		t.Fatalf("wait mode = %d, want numeric timeout mode %d", got, xtablesWaitWithTimeout)
+	}
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	foundTimedOperation := false
+	for _, call := range runner.calls {
+		if call.op != "-S" && call.waitValue == forwardingRuleWaitSeconds {
+			foundTimedOperation = true
+		}
+	}
+	if !foundTimedOperation {
+		t.Fatal("no forwarding-rule operation used the numeric xtables wait timeout")
+	}
+}
+
+func TestWaitValueUnavailableMatchesOnlyTheProbedValue(t *testing.T) {
+	liveError := firewallCommandResult{
+		exitCode: 2,
+		output:   "Bad argument `1' Try `iptables -h' or 'iptables --help' for more information.",
+		err:      errors.New("exit status 2"),
+	}
+	if !isWaitValueUnavailable(liveError, "1") {
+		t.Fatal("exact Keenetic bad wait-value error was not recognized")
+	}
+	if isWaitValueUnavailable(liveError, "0") {
+		t.Fatal("error for wait value 1 was attributed to wait value 0")
+	}
+	if isWaitValueUnavailable(firewallCommandResult{exitCode: 2, output: "Bad argument `10'"}, "1") {
+		t.Fatal("error for wait value 10 was attributed to wait value 1")
+	}
+	if isWaitValueUnavailable(firewallCommandResult{exitCode: 2, output: "Bad argument `FORWARD'"}, "1") {
+		t.Fatal("unrelated bad argument was classified as unsupported wait value")
 	}
 }
 

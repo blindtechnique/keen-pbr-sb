@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	forwardingRuleCommandTimeout = 12 * time.Second
-	forwardingRuleWaitSeconds    = "10"
-	maximumForwardingRuleDeletes = 8192
+	forwardingRuleCommandTimeout   = 12 * time.Second
+	forwardingRuleWaitSeconds      = "10"
+	forwardingRuleProbeWaitSeconds = "1"
+	maximumForwardingRuleDeletes   = 8192
 )
 
 var forwardingRuleRetryDelays = []time.Duration{
@@ -23,11 +24,12 @@ var forwardingRuleRetryDelays = []time.Duration{
 	400 * time.Millisecond,
 }
 
-type xtablesWaitSupport uint8
+type xtablesWaitMode uint8
 
 const (
-	xtablesWaitUnknown xtablesWaitSupport = iota
-	xtablesWaitAvailable
+	xtablesWaitUnknown xtablesWaitMode = iota
+	xtablesWaitWithTimeout
+	xtablesWaitFlagOnly
 	xtablesWaitUnavailable
 )
 
@@ -74,7 +76,7 @@ type forwardingRuleManager struct {
 	runner      firewallCommandRunner
 	sleep       func(time.Duration)
 	retryDelays []time.Duration
-	waitSupport map[string]xtablesWaitSupport
+	waitSupport map[string]xtablesWaitMode
 }
 
 var systemForwardingRules = newForwardingRuleManager(execFirewallCommandRunner{})
@@ -84,7 +86,7 @@ func newForwardingRuleManager(runner firewallCommandRunner) *forwardingRuleManag
 		runner:      runner,
 		sleep:       time.Sleep,
 		retryDelays: append([]time.Duration(nil), forwardingRuleRetryDelays...),
-		waitSupport: make(map[string]xtablesWaitSupport),
+		waitSupport: make(map[string]xtablesWaitMode),
 	}
 }
 
@@ -379,30 +381,62 @@ func (m *forwardingRuleManager) runLocked(binary string, args []string) (firewal
 		return firewallCommandResult{}, err
 	}
 	commandArgs := append([]string(nil), args...)
-	if waitSupport == xtablesWaitAvailable {
+	switch waitSupport {
+	case xtablesWaitWithTimeout:
 		commandArgs = append([]string{"-w", forwardingRuleWaitSeconds}, commandArgs...)
+	case xtablesWaitFlagOnly:
+		commandArgs = append([]string{"-w"}, commandArgs...)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), forwardingRuleCommandTimeout)
 	defer cancel()
 	return m.runner.Run(ctx, binary, commandArgs), nil
 }
 
-func (m *forwardingRuleManager) waitSupportLocked(binary string) (xtablesWaitSupport, error) {
+func (m *forwardingRuleManager) waitSupportLocked(binary string) (xtablesWaitMode, error) {
 	if support := m.waitSupport[binary]; support != xtablesWaitUnknown {
 		return support, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), forwardingRuleCommandTimeout)
 	defer cancel()
-	result := m.runner.Run(ctx, binary, []string{"-w", "0", "-S", "FORWARD"})
+	result := m.runner.Run(ctx, binary, []string{"-w", forwardingRuleProbeWaitSeconds, "-S", "FORWARD"})
 	if result.exitCode == 0 || isKnownNoMutationLockFailure(result) {
-		m.waitSupport[binary] = xtablesWaitAvailable
-		return xtablesWaitAvailable, nil
+		m.waitSupport[binary] = xtablesWaitWithTimeout
+		return xtablesWaitWithTimeout, nil
+	}
+	if isWaitValueUnavailable(result, forwardingRuleProbeWaitSeconds) {
+		bareCtx, bareCancel := context.WithTimeout(context.Background(), forwardingRuleCommandTimeout)
+		defer bareCancel()
+		bareResult := m.runner.Run(bareCtx, binary, []string{"-w", "-S", "FORWARD"})
+		if bareResult.exitCode == 0 || isKnownNoMutationLockFailure(bareResult) {
+			m.waitSupport[binary] = xtablesWaitFlagOnly
+			return xtablesWaitFlagOnly, nil
+		}
+		if isWaitOptionUnavailable(bareResult) {
+			m.waitSupport[binary] = xtablesWaitUnavailable
+			return xtablesWaitUnavailable, nil
+		}
+		return xtablesWaitUnknown, fmt.Errorf("probe %s bare xtables wait support: %w", binary, firewallCommandError(binary, []string{"-w", "-S", "FORWARD"}, bareResult))
 	}
 	if isWaitOptionUnavailable(result) {
 		m.waitSupport[binary] = xtablesWaitUnavailable
 		return xtablesWaitUnavailable, nil
 	}
-	return xtablesWaitUnknown, fmt.Errorf("probe %s xtables wait support: %w", binary, firewallCommandError(binary, []string{"-w", "0", "-S", "FORWARD"}, result))
+	return xtablesWaitUnknown, fmt.Errorf("probe %s xtables wait support: %w", binary, firewallCommandError(binary, []string{"-w", forwardingRuleProbeWaitSeconds, "-S", "FORWARD"}, result))
+}
+
+func isWaitValueUnavailable(result firewallCommandResult, attemptedValue string) bool {
+	text := strings.ToLower(result.output)
+	if !(strings.Contains(text, "bad argument") ||
+		strings.Contains(text, "invalid argument") ||
+		strings.Contains(text, "invalid wait")) {
+		return false
+	}
+	for _, field := range strings.Fields(text) {
+		if strings.Trim(field, "`'\".,:;()[]") == attemptedValue {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueNonEmptyStrings(values []string) []string {
