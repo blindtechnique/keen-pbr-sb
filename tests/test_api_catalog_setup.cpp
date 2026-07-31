@@ -343,6 +343,19 @@ TEST_CASE(
              {{"dns", {{"domains", {"upstream-cloudflare.example"}}}}}},
         },
         {
+            {"id", "kinopub"},
+            {"name", "Kino.pub upstream"},
+            {"engines",
+             {{"dns",
+               {{"domains",
+                 {"kino.pub", "cdn2cdn.com", "kino.pub"}}}},
+              {"singbox",
+               {{"ruleSets",
+                 {{{"url",
+                    "https://raw.githubusercontent.com/SagerNet/"
+                    "sing-geosite/rule-set/geosite-kinopub.srs"}}}}}}}},
+        },
+        {
             {"id", "unrelated"},
             {"name", "Unrelated"},
             {"engines",
@@ -407,6 +420,30 @@ TEST_CASE(
                {"requiresAcceptance", true}}}},
             {"engines",
              {{"dns", {{"domains", {"cloudflare.com"}}}}}},
+        },
+        {
+            {"id", "kinopub"},
+            {"name", "Kino.pub"},
+            {"notice", "Full service including CDN"},
+            {"covers", {"kinopub-core"}},
+            {"domainSupplements",
+             {"ahc.ovh", "kino.pub", "kino.watch"}},
+            {"engines",
+             {{"dns", {{"domains", {"kino.pub"}}}},
+              {"singbox",
+               {{"ruleSets",
+                 {{{"url",
+                    "https://raw.githubusercontent.com/SagerNet/"
+                    "sing-geosite/rule-set/geosite-kinopub.srs"}}}}}}}},
+        },
+        {
+            {"id", "kinopub-core"},
+            {"name", "KinoPub without CDN"},
+            {"notice", "GUI and API only"},
+            {"engines",
+             {{"dns",
+               {{"domains",
+                 {"ahc.ovh", "kino.pub", "kino.watch"}}}}}},
         },
         {
             {"id", "kartina-tv"},
@@ -508,6 +545,38 @@ TEST_CASE(
             .at("dns")
             .at("domains")
             .at(0) == "upstream-cloudflare.example");
+    CHECK(
+        preset("kinopub").at("covers") ==
+        nlohmann::json::array({"kinopub-core"}));
+    CHECK(preset("kinopub").at("notice") == "Full service including CDN");
+    CHECK_FALSE(preset("kinopub").contains("domainSupplements"));
+    CHECK(
+        preset("kinopub")
+            .at("engines")
+            .at("dns")
+            .at("domains") ==
+        nlohmann::json::array(
+            {"kino.pub", "cdn2cdn.com", "ahc.ovh", "kino.watch"}));
+    CHECK(
+        preset("kinopub")
+            .at("engines")
+            .at("singbox")
+            .at("ruleSets")
+            .at(0)
+            .at("url") ==
+        "https://raw.githubusercontent.com/SagerNet/"
+        "sing-geosite/rule-set/geosite-kinopub.srs");
+    CHECK(
+        preset("kinopub-core")
+            .at("engines")
+            .at("dns")
+            .at("domains") ==
+        nlohmann::json::array(
+            {"ahc.ovh", "kino.pub", "kino.watch"}));
+    CHECK_FALSE(
+        preset("kinopub-core")
+            .at("engines")
+            .contains("singbox"));
     CHECK_FALSE(
         preset("telegram")
             .at("engines")
@@ -560,7 +629,18 @@ TEST_CASE(
     const auto bundled_fallback =
         enrich_catalog_with_routing_companions(
             bundled, bundled);
-    CHECK(bundled_fallback == bundled);
+    const auto bundled_kinopub = std::find_if(
+        bundled_fallback.begin(),
+        bundled_fallback.end(),
+        [](const nlohmann::json& candidate) {
+            return candidate.value("id", std::string{}) == "kinopub";
+        });
+    REQUIRE(bundled_kinopub != bundled_fallback.end());
+    CHECK_FALSE(bundled_kinopub->contains("domainSupplements"));
+    CHECK(
+        bundled_kinopub->at("engines").at("dns").at("domains") ==
+        nlohmann::json::array(
+            {"kino.pub", "ahc.ovh", "kino.watch"}));
 
     auto snapshot = nlohmann::json{
         {"catalog_id", "test:catalog-identities"},

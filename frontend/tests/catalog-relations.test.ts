@@ -7,6 +7,7 @@ import {
   getCatalogDescendantIds,
   getCatalogRoutingCompanionSourceSummaries,
   getCatalogPresetSourceSummary,
+  matchesCatalogSearch,
   normalizeCatalogSelection,
   resolveCatalogInstallStates,
   resolveSelectedCatalogRoutingCompanions,
@@ -98,6 +99,28 @@ const catalog: CatalogPreset[] = [
 ]
 
 describe("catalog relationships", () => {
+  test("finds related KinoPub presets by stable ID and explanatory notice", () => {
+    const presets: CatalogPreset[] = [
+      {
+        id: "kinopub",
+        name: "Kino.pub",
+        notice: "Полный сервис, включая CDN",
+      },
+      {
+        id: "kinopub-core",
+        name: "KinoPub без CDN",
+        notice: "Сайт, API и управляющие зеркала",
+      },
+      { id: "netflix", name: "Netflix" },
+    ]
+
+    expect(
+      presets.filter((preset) => matchesCatalogSearch(preset, "kinopub"))
+    ).toHaveLength(2)
+    expect(matchesCatalogSearch(presets[0], "полный сервис")).toBe(true)
+    expect(matchesCatalogSearch(presets[2], "kinopub")).toBe(false)
+  })
+
   test("resolves transitive descendants without looping on malformed cycles", () => {
     const withCycle: CatalogPreset[] = [
       ...catalog,

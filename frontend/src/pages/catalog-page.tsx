@@ -38,6 +38,7 @@ import {
   getCatalogRoutingCompanionSourceSummaries,
   getCatalogSelectionMode,
   isCatalogRoutableOutboundType,
+  matchesCatalogSearch,
   resolveCatalogAncestorMap,
   resolveCatalogInstallStates,
   resolveSelectedCatalogRoutingCompanions,
@@ -361,11 +362,10 @@ export function CatalogPage() {
   )
 
   const visible = useMemo(() => {
-    const needle = search.trim().toLowerCase()
     return displayPresets.filter(
       (preset) =>
         (category === "all" || preset.category === category) &&
-        (needle === "" || preset.name.toLowerCase().includes(needle))
+        matchesCatalogSearch(preset, search)
     )
   }, [displayPresets, category, search])
 

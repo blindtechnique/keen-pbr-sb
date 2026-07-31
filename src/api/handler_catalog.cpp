@@ -176,6 +176,46 @@ void align_dns_subnets(
     dns->erase("subnets");
 }
 
+void merge_domain_supplements(
+    nlohmann::json& target,
+    const nlohmann::json& bundled) {
+    const auto supplements = bundled.find("domainSupplements");
+    if (supplements == bundled.end() || !supplements->is_array()) {
+        target.erase("domainSupplements");
+        return;
+    }
+
+    auto& engines = target["engines"];
+    if (!engines.is_object()) engines = nlohmann::json::object();
+    auto& dns = engines["dns"];
+    if (!dns.is_object()) dns = nlohmann::json::object();
+
+    nlohmann::json merged = nlohmann::json::array();
+    std::set<std::string> seen;
+    const auto domains = dns.find("domains");
+    if (domains != dns.end() && domains->is_array()) {
+        for (const auto& domain : *domains) {
+            if (!domain.is_string()) continue;
+            const auto& value = domain.get_ref<const std::string&>();
+            if (!value.empty() && seen.insert(value).second) {
+                merged.push_back(value);
+            }
+        }
+    }
+    for (const auto& domain : *supplements) {
+        if (!domain.is_string()) continue;
+        const auto& value = domain.get_ref<const std::string&>();
+        if (!value.empty() && seen.insert(value).second) {
+            merged.push_back(value);
+        }
+    }
+    dns["domains"] = std::move(merged);
+
+    // domainSupplements is package-owned merge metadata, not part of the
+    // public catalogue contract consumed by the frontend and setup planner.
+    target.erase("domainSupplements");
+}
+
 // Only replaces the cache when the payload parses as the expected array, so a
 // captive portal or an error page cannot wipe a working catalogue.
 bool store_if_valid(const std::string& payload) {
@@ -325,8 +365,13 @@ nlohmann::json enrich_catalog_with_routing_companions(
             bundled_parent.contains("warnings");
         const bool owns_hidden =
             bundled_parent.contains("hidden");
+        const bool owns_notice =
+            bundled_parent.contains("notice");
+        const bool owns_domain_supplements =
+            bundled_parent.contains("domainSupplements");
         if (!owns_companions && !owns_covers &&
-            !owns_warnings && !owns_hidden) {
+            !owns_warnings && !owns_hidden && !owns_notice &&
+            !owns_domain_supplements) {
             continue;
         }
         const auto companions =
@@ -361,15 +406,19 @@ nlohmann::json enrich_catalog_with_routing_companions(
             if (owns_warnings) {
                 (*upstream_parent)["warnings"] =
                     bundled_parent.at("warnings");
-                if (bundled_parent.contains("notice")) {
-                    (*upstream_parent)["notice"] =
-                        bundled_parent.at("notice");
-                }
             }
             if (owns_hidden) {
                 (*upstream_parent)["hidden"] =
                     bundled_parent.at("hidden");
             }
+            if (owns_notice) {
+                (*upstream_parent)["notice"] =
+                    bundled_parent.at("notice");
+            }
+        }
+        if (owns_domain_supplements) {
+            merge_domain_supplements(
+                *upstream_parent, bundled_parent);
         }
 
         if (!owns_companions || !companions->is_array()) {

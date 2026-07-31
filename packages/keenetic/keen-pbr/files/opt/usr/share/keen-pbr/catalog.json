@@ -3465,6 +3465,30 @@
     "name": "Kino.pub",
     "iconSlug": "kinopub",
     "category": "media",
+    "notice": "Полный сервис, включая видео- и постерные CDN. Если CDN работает напрямую или через nfqws2, выберите «KinoPub без CDN».",
+    "covers": [
+      "kinopub-core"
+    ],
+    "domainSupplements": [
+      "ahc.ovh",
+      "alador.space",
+      "api.ios-kp.store",
+      "api.service-kp.com",
+      "api.srvkp.com",
+      "gfw.ovh",
+      "kino.pub",
+      "kino.watch",
+      "kinopub.online",
+      "kp-apps.xyz",
+      "kpapp.link",
+      "kpdl.cc",
+      "kpdl.link",
+      "mos-gorsud.co",
+      "mos-gorsud.site",
+      "proxykp.xyz",
+      "support-kp.com",
+      "tsx.ovh"
+    ],
     "origin": "",
     "engines": {
       "dns": {
@@ -3490,6 +3514,38 @@
           }
         ],
         "action": "tunnel"
+      }
+    }
+  },
+  {
+    "id": "kinopub-core",
+    "name": "KinoPub без CDN",
+    "iconSlug": "kinopub",
+    "category": "media",
+    "notice": "Сайт, авторизация, API и управляющие зеркала. Видео- и постерные CDN остаются на основном маршруте или nfqws2.",
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
+        "domains": [
+          "ahc.ovh",
+          "alador.space",
+          "api.ios-kp.store",
+          "api.service-kp.com",
+          "api.srvkp.com",
+          "gfw.ovh",
+          "kino.pub",
+          "kino.watch",
+          "kinopub.online",
+          "kp-apps.xyz",
+          "kpapp.link",
+          "kpdl.cc",
+          "kpdl.link",
+          "mos-gorsud.co",
+          "mos-gorsud.site",
+          "proxykp.xyz",
+          "support-kp.com",
+          "tsx.ovh"
+        ]
       }
     }
   },

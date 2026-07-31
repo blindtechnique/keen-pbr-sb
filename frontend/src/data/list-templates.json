@@ -215,9 +215,10 @@
   {
     "id": "kino_pub",
     "name": "Kino.pub",
-    "description": "",
+    "description": "Полный список и вариант без CDN доступны в каталоге.",
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-kinopub.srs",
-    "category": "media"
+    "category": "media",
+    "catalogPresetId": "kinopub"
   },
   {
     "id": "netflix",

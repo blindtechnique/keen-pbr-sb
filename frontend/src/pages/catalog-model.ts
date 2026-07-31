@@ -74,6 +74,19 @@ export interface CatalogPresetInstallState {
   readonly coveredBy?: CatalogPreset
 }
 
+export function matchesCatalogSearch(
+  preset: CatalogPreset,
+  query: string
+): boolean {
+  const needle = query.trim().toLowerCase()
+  if (!needle) {
+    return true
+  }
+  return [preset.id, preset.name, preset.notice ?? ""].some((value) =>
+    value.toLowerCase().includes(needle)
+  )
+}
+
 export function canSelectCatalogPreset(
   installState: CatalogPresetInstallState | undefined,
   selectedAncestor: CatalogPreset | undefined

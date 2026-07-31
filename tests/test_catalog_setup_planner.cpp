@@ -227,6 +227,38 @@ nlohmann::json telegram_preset() {
     };
 }
 
+nlohmann::json kinopub_full_preset() {
+    return {
+        {"id", "kinopub"},
+        {"name", "Kino.pub"},
+        {"covers", {"kinopub-core"}},
+        {"engines",
+         {
+             {"dns", {{"domains", {"kino.pub", "kino.watch"}}}},
+             {"singbox",
+              {
+                  {"action", "tunnel"},
+                  {"ruleSets",
+                   {{{"tag", "geosite-kinopub"},
+                     {"url",
+                      "https://raw.githubusercontent.com/SagerNet/"
+                      "sing-geosite/rule-set/geosite-kinopub.srs"}}}},
+              }},
+         }},
+    };
+}
+
+nlohmann::json kinopub_core_preset() {
+    return {
+        {"id", "kinopub-core"},
+        {"name", "KinoPub без CDN"},
+        {"engines",
+         {{"dns",
+           {{"domains",
+             {"ahc.ovh", "kino.pub", "kino.watch"}}}}}},
+    };
+}
+
 CatalogSetupIntent outbound_intent() {
     CatalogSetupIntent intent;
     intent.selections = {{"category-ai", std::nullopt}};
@@ -293,6 +325,56 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
     CHECK_NOTHROW(validate_config(plan.candidate));
     CHECK_NOTHROW(validate_recommended_list_setup(
         plan.candidate, "category_ai"));
+}
+
+TEST_CASE("KinoPub full variant remains URL backed") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:kinopub-variants"},
+        {"presets",
+         nlohmann::json::array(
+             {kinopub_full_preset(), kinopub_core_preset()})},
+    };
+
+    auto full_intent = outbound_intent();
+    full_intent.selections = {{"kinopub", std::nullopt}};
+    const auto full = plan_catalog_setup(
+        full_intent, catalog, base_config());
+    REQUIRE(full.candidate.lists.has_value());
+    REQUIRE(full.candidate.lists->size() == 1U);
+    REQUIRE(full.candidate.lists->count("kinopub") == 1U);
+    const auto& full_list = full.candidate.lists->at("kinopub");
+    CHECK(
+        full_list.url ==
+        "https://raw.githubusercontent.com/SagerNet/"
+        "sing-geosite/rule-set/geosite-kinopub.srs");
+    CHECK(full_list.domains.has_value());
+    REQUIRE(full.summary.lists.size() == 1U);
+    CHECK(full.summary.lists.front().url_backed);
+}
+
+TEST_CASE("KinoPub core variant remains inline only") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:kinopub-variants"},
+        {"presets",
+         nlohmann::json::array(
+             {kinopub_full_preset(), kinopub_core_preset()})},
+    };
+
+    auto core_intent = outbound_intent();
+    core_intent.selections = {{"kinopub-core", std::nullopt}};
+    const auto core = plan_catalog_setup(
+        core_intent, catalog, base_config());
+    REQUIRE(core.candidate.lists.has_value());
+    REQUIRE(core.candidate.lists->size() == 1U);
+    const auto& core_list = core.candidate.lists->at("kinopub_core");
+    CHECK_FALSE(core_list.url.has_value());
+    CHECK(
+        core_list.domains ==
+        std::optional<std::vector<std::string>>{
+            {"ahc.ovh", "kino.pub", "kino.watch"}});
+    REQUIRE(core.summary.lists.size() == 1U);
+    CHECK(core.summary.lists[0].technical_id == "kinopub_core");
+    CHECK_FALSE(core.summary.lists[0].url_backed);
 }
 
 TEST_CASE(
