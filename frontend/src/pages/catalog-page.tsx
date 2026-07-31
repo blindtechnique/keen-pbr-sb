@@ -29,6 +29,7 @@ import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { formatCatalogRefreshTimestamp } from "@/lib/catalog-refresh-timestamp"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 import {
@@ -163,7 +164,7 @@ function catalogWarningMessage(warning: CatalogWarning, t: TFunction): string {
 }
 
 export function CatalogPage() {
-  const { t } = useTranslation()
+  const { i18n, t } = useTranslation()
   const queryClient = useQueryClient()
 
   const configQuery = useGetConfig()
@@ -301,6 +302,10 @@ export function CatalogPage() {
   })
 
   const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
+  const catalogUpdatedAt = formatCatalogRefreshTimestamp(
+    catalogQuery.data?.updated_at,
+    { locale: i18n.resolvedLanguage }
+  )
   const displayPresets = useMemo(
     () => presets.filter((preset) => !preset.hidden),
     [presets]
@@ -495,15 +500,15 @@ export function CatalogPage() {
           >
             hoaxisr/awg-manager
           </a>
-          {catalogQuery.data?.updated_at
+          {catalogUpdatedAt
             ? ` · ${t("pages.catalog.updatedAt", {
-                date: new Date(
-                  catalogQuery.data.updated_at * 1000
-                ).toLocaleDateString(),
+                date: catalogUpdatedAt,
               })}`
             : null}
-          {presets.length > 0
-            ? ` · ${t("pages.catalog.count", { count: presets.length })}`
+          {displayPresets.length > 0
+            ? ` · ${t("pages.catalog.count", {
+                count: displayPresets.length,
+              })}`
             : null}
         </p>
 
