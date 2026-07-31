@@ -92,6 +92,7 @@ type SettingsDraft = {
   strictEnforcement: StrictEnforcementOption
   skipMarkedPackets: boolean
   clearDynamicSetsOnApply: boolean
+  reconnectUnmarkedFlowsOnRoutingChange: boolean
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
@@ -108,6 +109,7 @@ const fallbackDraft: SettingsDraft = {
   strictEnforcement: "automatic",
   skipMarkedPackets: true,
   clearDynamicSetsOnApply: true,
+  reconnectUnmarkedFlowsOnRoutingChange: true,
   ipv6Enabled: true,
   clientDnsEnforcement: false,
   inboundInterfaces: [],
@@ -122,6 +124,8 @@ const SETTINGS_FIELD_NAMES = {
   strictEnforcement: "strictEnforcement",
   skipMarkedPackets: "skipMarkedPackets",
   clearDynamicSetsOnApply: "clearDynamicSetsOnApply",
+  reconnectUnmarkedFlowsOnRoutingChange:
+    "reconnectUnmarkedFlowsOnRoutingChange",
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
@@ -1111,6 +1115,43 @@ function LoadedGeneralConfigPage({
           </CardHeader>
           <CardContent>
             <FieldGroup>
+              <form.Field
+                name={
+                  SETTINGS_FIELD_NAMES.reconnectUnmarkedFlowsOnRoutingChange
+                }
+              >
+                {(field) => (
+                  <Field>
+                    <FieldContent>
+                      <div className="flex items-center space-x-3">
+                        <Checkbox
+                          checked={field.state.value}
+                          id="reconnect-unmarked-flows-on-routing-change"
+                          onCheckedChange={(checked) =>
+                            field.handleChange(checked === true)
+                          }
+                        />
+                        <FieldLabel
+                          className="cursor-pointer flex-col items-start gap-0"
+                          htmlFor="reconnect-unmarked-flows-on-routing-change"
+                        >
+                          {t(
+                            "pages.settings.advanced.reconnectUnmarkedFlowsOnRoutingChangeLabel"
+                          )}
+                        </FieldLabel>
+                      </div>
+                      <FieldHint
+                        description={t(
+                          "pages.settings.advanced.reconnectUnmarkedFlowsOnRoutingChangeHint"
+                        )}
+                      />
+                    </FieldContent>
+                  </Field>
+                )}
+              </form.Field>
+
+              <FieldSeparator />
+
               <form.Field name={SETTINGS_FIELD_NAMES.fwmarkStart}>
                 {(field) => {
                   const error = getFirstFieldError(field.state.meta.errors)
@@ -1368,6 +1409,9 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     clearDynamicSetsOnApply:
       config.daemon?.clear_dynamic_sets_on_apply ??
       fallbackDraft.clearDynamicSetsOnApply,
+    reconnectUnmarkedFlowsOnRoutingChange:
+      config.daemon?.reconnect_unmarked_flows_on_routing_change ??
+      fallbackDraft.reconnectUnmarkedFlowsOnRoutingChange,
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
@@ -1409,6 +1453,8 @@ function buildUpdatedConfig(
           : draft.strictEnforcement === "enabled",
       skip_marked_packets: draft.skipMarkedPackets,
       clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
+      reconnect_unmarked_flows_on_routing_change:
+        draft.reconnectUnmarkedFlowsOnRoutingChange,
       ipv6_enabled: draft.ipv6Enabled,
     },
     route: {
@@ -1511,6 +1557,8 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.skipMarkedPackets
     case "daemon.clear_dynamic_sets_on_apply":
       return SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply
+    case "daemon.reconnect_unmarked_flows_on_routing_change":
+      return SETTINGS_FIELD_NAMES.reconnectUnmarkedFlowsOnRoutingChange
     case "daemon.ipv6_enabled":
       return SETTINGS_FIELD_NAMES.ipv6Enabled
     case "dns.client_dns_enforcement.enabled":

@@ -10,6 +10,7 @@
 
 #include <arpa/inet.h>
 
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <set>
@@ -128,7 +129,8 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::vector<InternalVpnRuntimeTarget>*
         effective_internal_vpn_targets,
     const std::vector<FirewallSourceEgressSnatSelector>*
-        native_vpn_direct_egress_snat_selectors) {
+        native_vpn_direct_egress_snat_selectors,
+    AppliedListContentState* applied_list_content_state) {
     ListStreamer list_streamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
@@ -157,6 +159,7 @@ std::vector<RuleState> apply_runtime_firewall(
     const auto& lists_map = config.lists ? *config.lists : empty_lists;
     const auto& route_rules = route_config.rules.value_or(std::vector<RouteRule>{});
     std::map<std::string, ListSetUsage> list_usage_cache;
+    AppliedListContentState candidate_list_content_state;
 
     for (size_t rule_idx = 0; rule_idx < route_rules.size(); ++rule_idx) {
         const auto& rule = route_rules[rule_idx];
@@ -204,6 +207,7 @@ std::vector<RuleState> apply_runtime_firewall(
                         analyze_list_set_usage(list_name, list_cfg, list_streamer)).first;
                 }
                 const auto& usage = usage_it->second;
+                ListSetUsage applied_usage = usage;
 
                 const std::string set4 = firewall.static_set_name(list_name, AF_INET);
                 const std::string set6 = firewall.static_set_name(list_name, AF_INET6);
@@ -211,6 +215,15 @@ std::vector<RuleState> apply_runtime_firewall(
                 const std::string set6d = firewall.dynamic_set_name(list_name, AF_INET6);
 
                 if (usage.has_static_entries) {
+                    // The list was inspected once to decide which kernel sets
+                    // are required. Track the content actually handed to the
+                    // set loaders during this second pass: a cache file may be
+                    // atomically replaced between the two reads, and cleanup
+                    // must never be based on the stale first observation.
+                    applied_usage.has_static_entries = false;
+                    applied_usage.has_domain_entries = false;
+                    applied_usage.static_destinations.clear();
+                    applied_usage.static_destinations_truncated = false;
                     firewall.create_ipset(set4, AF_INET, 0);
                     rule_state.set_names.push_back(set4);
                     if (ipv6_decision.enabled) {
@@ -224,7 +237,15 @@ std::vector<RuleState> apply_runtime_firewall(
                         : nullptr;
                     FunctionalVisitor splitter([&](EntryType type, std::string_view entry) {
                         if (type == EntryType::Domain) {
+                            applied_usage.has_domain_entries = true;
                             return;
+                        }
+                        applied_usage.has_static_entries = true;
+                        if (applied_usage.static_destinations.size() <
+                            ListSetUsage::kMaxTrackedStaticDestinations) {
+                            applied_usage.static_destinations.emplace_back(entry);
+                        } else {
+                            applied_usage.static_destinations_truncated = true;
                         }
                         const bool is_ipv6 = entry.find(':') != std::string_view::npos;
                         if (is_ipv6) {
@@ -240,6 +261,26 @@ std::vector<RuleState> apply_runtime_firewall(
                     if (loader6) {
                         loader6->finish();
                     }
+                }
+
+                std::sort(
+                    applied_usage.static_destinations.begin(),
+                    applied_usage.static_destinations.end());
+                applied_usage.static_destinations.erase(
+                    std::unique(
+                        applied_usage.static_destinations.begin(),
+                        applied_usage.static_destinations.end()),
+                    applied_usage.static_destinations.end());
+                candidate_list_content_state.static_destinations
+                    .insert_or_assign(
+                        list_name, applied_usage.static_destinations);
+                if (applied_usage.has_domain_entries) {
+                    candidate_list_content_state
+                        .domain_entry_lists.insert(list_name);
+                }
+                if (applied_usage.static_destinations_truncated) {
+                    candidate_list_content_state
+                        .truncated_static_destination_lists.insert(list_name);
                 }
 
                 if (usage.has_domain_entries) {
@@ -367,6 +408,10 @@ std::vector<RuleState> apply_runtime_firewall(
     }
 
     firewall.apply(mode);
+    if (applied_list_content_state != nullptr) {
+        *applied_list_content_state =
+            std::move(candidate_list_content_state);
+    }
     return rule_states;
 }
 

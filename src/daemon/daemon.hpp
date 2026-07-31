@@ -24,6 +24,7 @@
 #include "../health/url_tester.hpp"
 #include "../keenetic/internal_vpn_ingress_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
+#include "../lists/list_set_usage.hpp"
 #include "../routing/interface_monitor.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
@@ -691,6 +692,10 @@ private:
     RouteTable route_table_;
     PolicyRuleManager policy_rules_;
     FirewallState firewall_state_;
+    // Effective content analyzed immediately before the current firewall
+    // generation was populated. This follows normalized list entries rather
+    // than URL/file metadata and retains only a bounded static selector set.
+    AppliedListContentState applied_list_content_state_;
     ConntrackManager conntrack_manager_;
     bool conntrack_unavailable_warning_emitted_{false};
     URLTester url_tester_;

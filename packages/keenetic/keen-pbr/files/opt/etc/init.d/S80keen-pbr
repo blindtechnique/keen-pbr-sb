@@ -51,6 +51,9 @@ run_recovery_guard() {
 ENABLED=yes
 PROCS=$(basename "$KEEN_PBR")
 PIDFILE="/opt/var/run/keen-pbr.pid"
+FASTNAT_STATE_FILE="/opt/var/run/keen-pbr.fastnat-state"
+FASTNAT_UNSAFE_STOP_FILE="/opt/var/run/keen-pbr.fastnat-unsafe-stop"
+FASTNAT_PROC_ROOT="/proc/sys"
 ARGS="--config $CONFIG --pid-file $PIDFILE ${KEEN_PBR_ARGS:-} service"
 PREARGS=""
 POSTCMD=""
@@ -265,16 +268,113 @@ configure_raw_prerouting() {
     esac
 }
 
-enable_hwnat() {
-    log "Enabling HW NAT..."
-    sysctl -w net.ipv4.netfilter.ip_conntrack_fastnat=1 2>/dev/null || true
-    sysctl -w net.netfilter.nf_conntrack_fastnat=1 2>/dev/null || true
+read_fastnat_value() {
+    local path
+    local value
+
+    for path in \
+        "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat" \
+        "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"; do
+        [ -r "$path" ] || continue
+        read -r value < "$path" || continue
+        case "$value" in
+            0|1)
+                printf '%s\n' "$value"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+write_fastnat_value() {
+    local value="$1"
+    local written=1
+
+    sysctl -w "net.ipv4.netfilter.ip_conntrack_fastnat=$value" \
+        >/dev/null 2>&1 && written=0
+    sysctl -w "net.netfilter.nf_conntrack_fastnat=$value" \
+        >/dev/null 2>&1 && written=0
+    return "$written"
+}
+
+remember_fastnat_value() {
+    local old_umask
+    local temporary
+    local value
+
+    if [ -e "$FASTNAT_STATE_FILE" ]; then
+        read -r value < "$FASTNAT_STATE_FILE" || value=""
+        case "$value" in
+            0|1) return 0 ;;
+        esac
+        log_error "Saved FastNAT state is invalid: $FASTNAT_STATE_FILE"
+        return 1
+    fi
+
+    value="$(read_fastnat_value)" || {
+        # Older Keenetic kernels may not expose the FastNAT control at all.
+        # That is a supported capability difference, not a startup failure.
+        log "FastNAT control is unavailable; leaving kernel NAT settings unchanged"
+        return 2
+    }
+    temporary="${FASTNAT_STATE_FILE}.$$"
+    old_umask="$(umask)"
+    umask 077
+    if ! printf '%s\n' "$value" > "$temporary" ||
+       ! mv -f "$temporary" "$FASTNAT_STATE_FILE"; then
+        umask "$old_umask"
+        rm -f "$temporary"
+        log_error "Cannot save the current FastNAT state"
+        return 1
+    fi
+    umask "$old_umask"
 }
 
 disable_hwnat() {
-    log "Disabling HW NAT..."
-    sysctl -w net.ipv4.netfilter.ip_conntrack_fastnat=0 2>/dev/null || true
-    sysctl -w net.netfilter.nf_conntrack_fastnat=0 2>/dev/null || true
+    local status
+
+    if remember_fastnat_value; then
+        status=0
+    else
+        status=$?
+    fi
+    case "$status" in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
+    esac
+    log "Disabling FastNAT..."
+    if ! write_fastnat_value 0; then
+        log_error "Failed to disable FastNAT"
+        return 1
+    fi
+}
+
+restore_hwnat_if_safe() {
+    local value
+
+    [ -e "$FASTNAT_STATE_FILE" ] || return 0
+    if [ -e "$FASTNAT_UNSAFE_STOP_FILE" ]; then
+        log_error "FastNAT remains disabled after an unclean stop; start keen-pbr and stop it gracefully before restoring the saved state"
+        return 0
+    fi
+
+    read -r value < "$FASTNAT_STATE_FILE" || value=""
+    case "$value" in
+        0|1) ;;
+        *)
+            log_error "Saved FastNAT state is invalid: $FASTNAT_STATE_FILE"
+            return 1
+            ;;
+    esac
+
+    log "Restoring FastNAT to $value..."
+    if ! write_fastnat_value "$value"; then
+        log_error "Failed to restore FastNAT to $value"
+        return 1
+    fi
+    rm -f "$FASTNAT_STATE_FILE"
 }
 
 signal_service() {
@@ -361,19 +461,35 @@ stop_keen_pbr() {
     local pids
     local counter=0
     local limit=15
+    local forced=no
+    local term_failed=no
+
+    STOP_KEEN_PBR_SAFE=no
 
     printf ' Shutting down %s... ' "$DESC"
     pids="$(pidof "$PROCS" 2>/dev/null || true)"
     if [ -z "$pids" ]; then
+        if [ -e "$FASTNAT_STATE_FILE" ]; then
+            : > "$FASTNAT_UNSAFE_STOP_FILE"
+        fi
         rm -f "$PIDFILE"
         echo "             already stopped."
         return 0
     fi
 
     if [ "$mode" = "kill" ]; then
+        forced=yes
+        : > "$FASTNAT_UNSAFE_STOP_FILE"
         kill -KILL $pids 2>/dev/null || true
     else
-        kill -TERM $pids 2>/dev/null || true
+        if ! kill -TERM $pids 2>/dev/null; then
+            # Process disappearance after a failed multi-PID TERM can make the
+            # service look stopped without proving that the daemon completed
+            # its shutdown handlers. Keep FastNAT disabled in that case.
+            term_failed=yes
+            : > "$FASTNAT_UNSAFE_STOP_FILE"
+            log_error "Failed to send TERM to every keen-pbr process; treating the stop as unclean"
+        fi
     fi
 
     while [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ] &&
@@ -385,6 +501,8 @@ stop_keen_pbr() {
     pids="$(pidof "$PROCS" 2>/dev/null || true)"
     if [ -n "$pids" ] && [ "$mode" != "kill" ]; then
         log_error "Graceful shutdown timed out after ${limit}s; forcing keen-pbr to stop"
+        forced=yes
+        : > "$FASTNAT_UNSAFE_STOP_FILE"
         kill -KILL $pids 2>/dev/null || true
         sleep 1
     fi
@@ -404,6 +522,10 @@ stop_keen_pbr() {
         counter=$((counter + 1))
     done
 
+    if [ "$forced" = no ] && [ "$term_failed" = no ]; then
+        rm -f "$FASTNAT_UNSAFE_STOP_FILE"
+        STOP_KEEN_PBR_SAFE=yes
+    fi
     rm -f "$PIDFILE"
     echo "             done."
     return 0
@@ -412,14 +534,37 @@ stop_keen_pbr() {
 prepare_start() {
     check_runtime_dependencies
     configure_raw_prerouting || return 1
-    disable_hwnat
+    disable_hwnat || return 1
 }
 
 prepare_stop() {
-    enable_hwnat
     if [ -x "$DNSMASQ_HELPER" ]; then
         "$DNSMASQ_HELPER" deactivate || true
     fi
+}
+
+stop_service_for_action() {
+    local mode="$1"
+    local final_stop="$2"
+
+    prepare_stop
+    stop_keen_pbr "$mode" || return $?
+    if [ "$final_stop" = yes ] &&
+       [ "${STOP_KEEN_PBR_SAFE:-no}" = yes ]; then
+        restore_hwnat_if_safe || return 1
+    fi
+}
+
+restore_fastnat_after_failed_start() {
+    [ "${FASTNAT_RESTORE_ON_START_FAILURE:-no}" = yes ] || return 0
+    restore_hwnat_if_safe || true
+}
+
+exit_failed_start() {
+    local status="${1:-1}"
+
+    restore_fastnat_after_failed_start
+    exit "$status"
 }
 
 reapply_dnsmasq_config() {
@@ -449,24 +594,47 @@ case "$1" in
         exit $?
         ;;
     start)
-        run_recovery_guard start || exit 1
-        prepare_start || exit 1
-        reapply_dnsmasq_config || exit 1
+        # A state file left by an unclean process death is deliberately not
+        # restored if this start fails. Only state captured by this clean
+        # action is safe to roll back.
+        FASTNAT_RESTORE_ON_START_FAILURE=no
+        [ -e "$FASTNAT_STATE_FILE" ] ||
+            FASTNAT_RESTORE_ON_START_FAILURE=yes
+        run_recovery_guard start || exit_failed_start $?
+        prepare_start || exit_failed_start $?
+        reapply_dnsmasq_config || exit_failed_start $?
         ;;
     restart|restartall)
-        stop_keen_pbr stop || exit 1
+        # Keep FastNAT disabled for the complete replacement. Enabling it
+        # between TERM and the next start can cache the retiring route while
+        # the firmware and daemon are rebuilding netfilter state.
+        stop_service_for_action stop no || exit 1
         # Re-check only after the API writer is stopped. This closes the race
         # where a save WAL could appear between an early preflight and stop.
-        run_recovery_guard "$1" || exit 1
-        prepare_start || exit 1
-        reapply_dnsmasq_config || exit 1
+        FASTNAT_RESTORE_ON_START_FAILURE=yes
+        run_recovery_guard "$1" || exit_failed_start $?
+        prepare_start || exit_failed_start $?
+        reapply_dnsmasq_config || exit_failed_start $?
         set -- start "$2"
         ;;
-    stop|kill)
-        prepare_stop
-        stop_keen_pbr "$1"
+    stop)
+        stop_service_for_action stop yes
+        exit $?
+        ;;
+    kill)
+        stop_service_for_action kill yes
         exit $?
         ;;
 esac
 
 . /opt/etc/init.d/rc.func
+status=$?
+if [ "$status" -ne 0 ]; then
+    # Once rc.func has attempted to spawn the daemon, a non-zero status does
+    # not prove that no routing/firewall state reached the kernel (OOM and a
+    # forced death during startup are indistinguishable here). Leave FastNAT
+    # disabled until a later verified start followed by a graceful stop.
+    : > "$FASTNAT_UNSAFE_STOP_FILE"
+    log_error "keen-pbr startup did not complete; FastNAT remains disabled until a verified graceful stop"
+fi
+exit "$status"

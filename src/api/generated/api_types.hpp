@@ -243,6 +243,7 @@ namespace api {
         std::optional<bool> ipv6_enabled;
         std::optional<int64_t> max_file_size_bytes;
         std::optional<std::string> pid_file;
+        std::optional<bool> reconnect_unmarked_flows_on_routing_change;
         std::optional<bool> skip_marked_packets;
         std::optional<bool> strict_enforcement;
     };
@@ -1977,6 +1978,7 @@ namespace api {
         x.ipv6_enabled = get_stack_optional<bool>(j, "ipv6_enabled");
         x.max_file_size_bytes = get_stack_optional<int64_t>(j, "max_file_size_bytes");
         x.pid_file = get_stack_optional<std::string>(j, "pid_file");
+        x.reconnect_unmarked_flows_on_routing_change = get_stack_optional<bool>(j, "reconnect_unmarked_flows_on_routing_change");
         x.skip_marked_packets = get_stack_optional<bool>(j, "skip_marked_packets");
         x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
     }
@@ -1990,6 +1992,7 @@ namespace api {
         j["ipv6_enabled"] = x.ipv6_enabled;
         j["max_file_size_bytes"] = x.max_file_size_bytes;
         j["pid_file"] = x.pid_file;
+        j["reconnect_unmarked_flows_on_routing_change"] = x.reconnect_unmarked_flows_on_routing_change;
         j["skip_marked_packets"] = x.skip_marked_packets;
         j["strict_enforcement"] = x.strict_enforcement;
     }

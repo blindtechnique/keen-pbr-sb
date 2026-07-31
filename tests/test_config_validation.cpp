@@ -2451,6 +2451,38 @@ TEST_CASE("daemon.clear_dynamic_sets_on_apply: rejects non-boolean value") {
     CHECK(issues[0].path == "daemon.clear_dynamic_sets_on_apply");
 }
 
+TEST_CASE(
+    "daemon.reconnect_unmarked_flows_on_routing_change: accepts explicit policy") {
+    auto enabled = parse_test_config(
+        R"({"daemon":{"reconnect_unmarked_flows_on_routing_change":true}})");
+    auto disabled = parse_test_config(
+        R"({"daemon":{"reconnect_unmarked_flows_on_routing_change":false}})");
+    REQUIRE(
+        enabled.daemon->reconnect_unmarked_flows_on_routing_change.has_value());
+    REQUIRE(
+        disabled.daemon->reconnect_unmarked_flows_on_routing_change.has_value());
+    CHECK(*enabled.daemon->reconnect_unmarked_flows_on_routing_change);
+    CHECK_FALSE(*disabled.daemon->reconnect_unmarked_flows_on_routing_change);
+}
+
+TEST_CASE(
+    "daemon.reconnect_unmarked_flows_on_routing_change: null uses default behavior") {
+    auto cfg = parse_test_config(
+        R"({"daemon":{"reconnect_unmarked_flows_on_routing_change":null}})");
+    REQUIRE(cfg.daemon.has_value());
+    CHECK_FALSE(
+        cfg.daemon->reconnect_unmarked_flows_on_routing_change.has_value());
+}
+
+TEST_CASE(
+    "daemon.reconnect_unmarked_flows_on_routing_change: rejects non-boolean value") {
+    const auto issues = parse_issues(
+        R"({"daemon":{"reconnect_unmarked_flows_on_routing_change":"yes"}})");
+    REQUIRE(issues.size() == 1);
+    CHECK(issues[0].path ==
+          "daemon.reconnect_unmarked_flows_on_routing_change");
+}
+
 TEST_CASE("daemon.ipv6_enabled: defaults to true behavior when absent") {
     auto cfg = parse_test_config(R"({"daemon":{}})");
     REQUIRE(cfg.daemon.has_value());

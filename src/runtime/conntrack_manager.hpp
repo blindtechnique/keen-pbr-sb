@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -64,6 +65,42 @@ struct ConntrackSourceCleanupOptions {
         std::numeric_limits<std::size_t>::max()};
 };
 
+struct ConntrackForwardedFlowPair {
+    std::string source;
+    std::string destination;
+    bool ipv6{false};
+
+    bool operator==(const ConntrackForwardedFlowPair& other) const {
+        return source == other.source &&
+               destination == other.destination &&
+               ipv6 == other.ipv6;
+    }
+};
+
+struct ConntrackForwardedFlowCleanupSummary {
+    std::size_t matched{0};
+    std::size_t attempted{0};
+    std::size_t failed{0};
+    std::size_t skipped{0};
+    bool command_unavailable{false};
+    bool budget_exhausted{false};
+    bool invalid_owned_mask{false};
+    bool destination_input_truncated{false};
+    bool snapshot_unavailable{false};
+    bool snapshot_truncated{false};
+    bool local_address_scope_missing{false};
+    std::vector<ConntrackForwardedFlowPair> remaining_flows;
+};
+
+struct ConntrackForwardedFlowCleanupOptions {
+    bool ipv6_enabled{true};
+    std::chrono::milliseconds budget{std::chrono::seconds{2}};
+    std::size_t max_flows{256};
+    std::size_t max_destination_input_cidrs{1024};
+    std::size_t max_snapshot_bytes{2U * 1024U * 1024U};
+    std::size_t max_snapshot_lines{8192};
+};
+
 class ConntrackManager {
 public:
     struct CommandResult {
@@ -71,10 +108,18 @@ public:
         std::string output;
     };
 
+    struct Snapshot {
+        std::string content;
+        bool truncated{false};
+    };
+
     using CommandRunner =
         std::function<CommandResult(const std::vector<std::string>&)>;
+    using SnapshotReader =
+        std::function<std::optional<Snapshot>(std::size_t)>;
 
-    explicit ConntrackManager(CommandRunner runner = {});
+    explicit ConntrackManager(CommandRunner runner = {},
+                              SnapshotReader snapshot_reader = {});
 
     // Records the policy successfully handed to the firewall backend.
     // The backend owns the kernel representation; this class owns the
@@ -120,9 +165,24 @@ public:
         const std::vector<std::string>& source_cidrs,
         ConntrackSourceCleanupOptions options = {}) const;
 
+    // Reconnect only currently observed forwarded flows which are still fully
+    // unmarked after a successful broad destination-policy change. The
+    // snapshot parser keeps the original source/destination pair, rejects
+    // missing marks, excludes every live local address, and deletes exact host
+    // pairs with a full-width zero mark. It never expands a CIDR into a broad
+    // conntrack delete and never touches router-originated or foreign-marked
+    // flows. Empty/invalid local-address authority fails closed.
+    ConntrackForwardedFlowCleanupSummary
+    delete_unmarked_forwarded_destination_flows(
+        const std::vector<std::string>& destination_cidrs,
+        const std::vector<std::string>& local_interface_addresses,
+        uint32_t owned_mask,
+        ConntrackForwardedFlowCleanupOptions options = {}) const;
+
 private:
     ConntrackPolicy active_;
     CommandRunner runner_;
+    SnapshotReader snapshot_reader_;
 };
 
 } // namespace keen_pbr3

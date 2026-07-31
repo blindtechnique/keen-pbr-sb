@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -10,10 +11,197 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
-#include "../firewall/firewall.hpp"
+#include "../config/config.hpp"
+#include "../lists/list_set_usage.hpp"
+#include "../routing/firewall_state.hpp"
+#include "../routing/netlink.hpp"
 
 namespace keen_pbr3 {
+
+inline bool reconnect_unmarked_flows_on_routing_change_enabled(
+    const Config& config) noexcept {
+    return config.daemon.value_or(DaemonConfig{})
+        .reconnect_unmarked_flows_on_routing_change.value_or(true);
+}
+
+namespace runtime_recovery_detail {
+
+inline bool firewall_criteria_equal(
+    const FirewallRuleCriteria& left,
+    const FirewallRuleCriteria& right) noexcept {
+    return left.dst_set_name == right.dst_set_name &&
+           left.dscp == right.dscp &&
+           left.proto == right.proto &&
+           left.src_port == right.src_port &&
+           left.dst_port == right.dst_port &&
+           left.src_addr == right.src_addr &&
+           left.dst_addr == right.dst_addr &&
+           left.negate_src_port == right.negate_src_port &&
+           left.negate_dst_port == right.negate_dst_port &&
+           left.negate_src_addr == right.negate_src_addr &&
+           left.negate_dst_addr == right.negate_dst_addr;
+}
+
+inline bool firewall_rule_states_equal(const RuleState& left,
+                                       const RuleState& right) noexcept {
+    // rule_index is deliberately excluded. Inserting an unrelated rule above
+    // an existing one must not make every following rule look changed and
+    // trigger a broad reconnect storm.
+    return left.list_names == right.list_names &&
+           left.set_names == right.set_names &&
+           left.outbound_tag == right.outbound_tag &&
+           left.action_type == right.action_type &&
+           left.fwmark == right.fwmark &&
+           firewall_criteria_equal(left.criteria, right.criteria);
+}
+
+// Destination-based conntrack cleanup cannot preserve selectors that are not
+// expressible by `conntrack -D -d`.  Restrict it to broad, positive
+// destination rules so source-, protocol-, port-, and DSCP-scoped traffic is
+// never disconnected as collateral damage.
+inline bool destination_only_conntrack_cleanup_eligible(
+    const RuleState& rule) noexcept {
+    if (rule.action_type == RuleActionType::Skip ||
+        rule.action_type == RuleActionType::Pass) {
+        return false;
+    }
+
+    const auto& criteria = rule.criteria;
+    const bool has_positive_destination =
+        !rule.list_names.empty() ||
+        criteria.dst_set_name.has_value() ||
+        !criteria.dst_addr.empty();
+    // A list and dst_addr on the same rule are an intersection in the
+    // firewall. `conntrack -D` cannot express that intersection without
+    // expanding both sets, so treating the two selectors as a union would
+    // disconnect unrelated flows.
+    const bool has_mixed_destination_selectors =
+        (!rule.list_names.empty() || criteria.dst_set_name.has_value()) &&
+        !criteria.dst_addr.empty();
+    return has_positive_destination &&
+           !has_mixed_destination_selectors &&
+           !criteria.dscp.has_value() &&
+           criteria.proto == L4Proto::Any &&
+           criteria.src_port.empty() &&
+           criteria.dst_port.empty() &&
+           criteria.src_addr.empty() &&
+           !criteria.negate_src_port &&
+           !criteria.negate_dst_port &&
+           !criteria.negate_src_addr &&
+           !criteria.negate_dst_addr;
+}
+
+} // namespace runtime_recovery_detail
+
+struct ConntrackDestinationRetirementPlan {
+    std::set<std::string> current_list_names;
+    std::vector<std::string> current_destination_selectors;
+};
+
+struct ConntrackDestinationRetirementCoverage {
+    std::vector<std::string> destination_selectors;
+    // Dynamic DNS-derived members are not available through ListStreamer, and
+    // bounded static tracking deliberately retains only its first selectors.
+    // Callers expose this as quiet diagnostics; neither limitation justifies a
+    // global conntrack flush.
+    std::set<std::string> domain_backed_list_names;
+    std::set<std::string> truncated_static_list_names;
+
+    bool partial() const noexcept {
+        return !domain_backed_list_names.empty() ||
+               !truncated_static_list_names.empty();
+    }
+};
+
+inline ConntrackDestinationRetirementPlan
+plan_conntrack_destination_retirement(
+    const std::vector<RuleState>& previous_rules,
+    const std::vector<RuleState>& current_rules,
+    const std::set<std::string>& changed_list_names = {}) {
+    using namespace runtime_recovery_detail;
+    ConntrackDestinationRetirementPlan plan;
+
+    for (std::size_t index = 0; index < current_rules.size(); ++index) {
+        const auto& current = current_rules[index];
+        const bool existed_before = std::any_of(
+            previous_rules.begin(),
+            previous_rules.end(),
+            [&current](const RuleState& previous) {
+                return firewall_rule_states_equal(previous, current);
+            });
+        const bool referenced_list_changed = std::any_of(
+            current.list_names.begin(), current.list_names.end(),
+            [&changed_list_names](const std::string& list_name) {
+                return changed_list_names.count(list_name) != 0U;
+            });
+        if (existed_before && !referenced_list_changed) {
+            continue;
+        }
+        if (!destination_only_conntrack_cleanup_eligible(current)) {
+            continue;
+        }
+        // A preceding pass rule can deliberately keep a subset of the same
+        // destination direct. Destination-only conntrack deletion cannot
+        // reproduce its source/protocol/port predicates, so fail closed rather
+        // than interrupt an explicitly bypassed flow. Configurations without
+        // an earlier pass (the common catalog/list path) still converge
+        // immediately.
+        const bool has_earlier_pass = std::any_of(
+            current_rules.begin(),
+            current_rules.begin() +
+                static_cast<std::ptrdiff_t>(index),
+            [](const RuleState& candidate) {
+                return candidate.action_type == RuleActionType::Pass;
+            });
+        if (has_earlier_pass) {
+            continue;
+        }
+        plan.current_list_names.insert(
+            current.list_names.begin(), current.list_names.end());
+        plan.current_destination_selectors.insert(
+            plan.current_destination_selectors.end(),
+            current.criteria.dst_addr.begin(),
+            current.criteria.dst_addr.end());
+    }
+
+    return plan;
+}
+
+inline ConntrackDestinationRetirementCoverage
+collect_conntrack_destination_retirement_coverage(
+    const ConntrackDestinationRetirementPlan& plan,
+    const AppliedListContentState& content_state) {
+    ConntrackDestinationRetirementCoverage coverage;
+    coverage.destination_selectors = plan.current_destination_selectors;
+    for (const auto& list_name : plan.current_list_names) {
+        const auto static_destinations =
+            content_state.static_destinations.find(list_name);
+        if (static_destinations != content_state.static_destinations.end()) {
+            coverage.destination_selectors.insert(
+                coverage.destination_selectors.end(),
+                static_destinations->second.begin(),
+                static_destinations->second.end());
+        }
+        if (content_state.domain_entry_lists.count(list_name) != 0U) {
+            coverage.domain_backed_list_names.insert(list_name);
+        }
+        if (content_state.truncated_static_destination_lists.count(list_name) !=
+            0U) {
+            coverage.truncated_static_list_names.insert(list_name);
+        }
+    }
+    return coverage;
+}
+
+// Snapshot of the policy which was actually committed to the kernel.  It is
+// intentionally built from reconciler/controller state instead of comparing
+// raw JSON, so cosmetic aliases and API/UI settings never disconnect users.
+struct AppliedRoutingSignature {
+    std::uint32_t owned_mask{0};
+    std::vector<RuleState> firewall_rules;
+};
 
 inline constexpr std::array<std::chrono::milliseconds, 3>
     HOT_APPLY_FIREWALL_RETRY_DELAYS{

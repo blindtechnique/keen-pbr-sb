@@ -1506,6 +1506,18 @@ components:
             to `null`. Preserve-set reconciles never clear learned entries.
           default: true
           example: true
+        reconnect_unmarked_flows_on_routing_change:
+          type: boolean
+          nullable: true
+          description: >
+            After a successfully committed destination-routing change, terminate
+            only observed forwarded flows whose complete conntrack mark is zero and
+            whose destination is newly governed by the changed route. Applications
+            can then reconnect immediately through the new route. This never flushes
+            the conntrack table or removes foreign marks. Defaults to `true` when
+            omitted or set to `null`.
+          default: true
+          example: true
         ipv6_enabled:
           type: boolean
           nullable: true

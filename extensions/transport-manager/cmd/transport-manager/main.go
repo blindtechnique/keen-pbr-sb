@@ -35,7 +35,11 @@ func main() {
 	); err != nil {
 		log.Fatalf("clean up orphan sing-box processes: %v", err)
 	}
-	transport.CleanupForwardingRules(cfg.Transports)
+	if err := transport.CleanupForwardingRules(cfg.Transports); err != nil {
+		// A bounded runtime reconcile will retry after startup. Do not leave
+		// transports unavailable only because NDMS held the xtables lock here.
+		log.Printf("clean up stale forwarding rules: %v", err)
+	}
 	var sharedGroup *transport.SharedSingBoxGroup
 	if cfg.SingBoxProcessMode == config.SingBoxProcessModeShared {
 		sharedGroup, err = transport.NewSharedSingBoxGroup(

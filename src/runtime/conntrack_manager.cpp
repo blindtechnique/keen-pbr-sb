@@ -3,11 +3,14 @@
 #include "../util/safe_exec.hpp"
 
 #include <algorithm>
+#include <array>
 #include <arpa/inet.h>
 #include <charconv>
 #include <chrono>
+#include <fstream>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <utility>
 
@@ -34,7 +37,19 @@ std::string trim_ascii_whitespace(std::string_view value) {
     return std::string{value.substr(first, last - first + 1U)};
 }
 
-std::optional<std::string> normalize_targeted_ipv4_cidr(
+enum class TargetAddressFamily {
+    Ipv4,
+    Ipv6,
+};
+
+struct NormalizedTargetCidr {
+    TargetAddressFamily family{TargetAddressFamily::Ipv4};
+    std::string value;
+    std::array<unsigned char, 16> network{};
+    unsigned int prefix{0};
+};
+
+std::optional<NormalizedTargetCidr> normalize_targeted_cidr(
     std::string_view raw) {
     const std::string cidr = trim_ascii_whitespace(raw);
     if (cidr.empty()) {
@@ -48,7 +63,10 @@ std::optional<std::string> normalize_targeted_ipv4_cidr(
     }
     const std::string ip =
         slash == std::string::npos ? cidr : cidr.substr(0, slash);
-    int prefix = 32;
+    const bool ipv6 = ip.find(':') != std::string::npos;
+    const int address_family = ipv6 ? AF_INET6 : AF_INET;
+    const int max_prefix = ipv6 ? 128 : 32;
+    int prefix = max_prefix;
     if (slash != std::string::npos) {
         const std::string_view prefix_text{
             cidr.data() + slash + 1U,
@@ -65,34 +83,253 @@ std::optional<std::string> normalize_targeted_ipv4_cidr(
             return std::nullopt;
         }
     }
-    // /0 would select every IPv4 flow and is deliberately outside the
-    // contract of this targeted cleanup API.
-    if (prefix <= 0 || prefix > 32) {
+    // /0 would select every flow in the address family and is deliberately
+    // outside the contract of this targeted cleanup API.
+    if (prefix <= 0 || prefix > max_prefix) {
         return std::nullopt;
     }
 
-    in_addr address{};
-    if (::inet_pton(AF_INET, ip.c_str(), &address) != 1) {
+    if (!ipv6) {
+        in_addr address{};
+        if (::inet_pton(address_family, ip.c_str(), &address) != 1) {
+            return std::nullopt;
+        }
+        const std::uint32_t mask =
+            prefix == 32
+                ? std::numeric_limits<std::uint32_t>::max()
+                : std::numeric_limits<std::uint32_t>::max()
+                      << (32 - prefix);
+        address.s_addr = ::htonl(::ntohl(address.s_addr) & mask);
+
+        char normalized[INET_ADDRSTRLEN]{};
+        if (::inet_ntop(
+                address_family,
+                &address,
+                normalized,
+                sizeof(normalized)) == nullptr) {
+            return std::nullopt;
+        }
+        NormalizedTargetCidr result;
+        result.family = TargetAddressFamily::Ipv4;
+        result.value =
+            std::string{normalized} + "/" + std::to_string(prefix);
+        std::copy_n(
+            reinterpret_cast<const unsigned char*>(&address),
+            sizeof(address),
+            result.network.begin());
+        result.prefix = static_cast<unsigned int>(prefix);
+        return result;
+    }
+
+    in6_addr address{};
+    if (::inet_pton(address_family, ip.c_str(), &address) != 1) {
         return std::nullopt;
     }
-    const std::uint32_t mask =
-        prefix == 32
-            ? std::numeric_limits<std::uint32_t>::max()
-            : std::numeric_limits<std::uint32_t>::max() << (32 - prefix);
-    address.s_addr = ::htonl(::ntohl(address.s_addr) & mask);
+    const std::size_t complete_bytes =
+        static_cast<std::size_t>(prefix / 8);
+    const unsigned int remaining_bits =
+        static_cast<unsigned int>(prefix % 8);
+    std::size_t first_zero_byte = complete_bytes;
+    if (remaining_bits != 0U) {
+        const auto mask = static_cast<unsigned char>(
+            0xFFU << (8U - remaining_bits));
+        address.s6_addr[complete_bytes] &= mask;
+        first_zero_byte = complete_bytes + 1U;
+    }
+    std::fill(
+        address.s6_addr + first_zero_byte,
+        address.s6_addr + sizeof(address.s6_addr),
+        0U);
 
-    char normalized[INET_ADDRSTRLEN]{};
-    if (::inet_ntop(AF_INET, &address, normalized, sizeof(normalized)) ==
+    char normalized[INET6_ADDRSTRLEN]{};
+    if (::inet_ntop(
+            address_family,
+            &address,
+            normalized,
+            sizeof(normalized)) == nullptr) {
+        return std::nullopt;
+    }
+    NormalizedTargetCidr result;
+    result.family = TargetAddressFamily::Ipv6;
+    result.value =
+        std::string{normalized} + "/" + std::to_string(prefix);
+    std::copy_n(address.s6_addr, sizeof(address.s6_addr), result.network.begin());
+    result.prefix = static_cast<unsigned int>(prefix);
+    return result;
+}
+
+std::optional<std::string> normalize_targeted_ipv4_cidr(
+    std::string_view raw) {
+    const auto normalized = normalize_targeted_cidr(raw);
+    if (!normalized.has_value() ||
+        normalized->family != TargetAddressFamily::Ipv4) {
+        return std::nullopt;
+    }
+    return normalized->value;
+}
+
+struct NormalizedHostAddress {
+    TargetAddressFamily family{TargetAddressFamily::Ipv4};
+    std::string value;
+    std::array<unsigned char, 16> bytes{};
+};
+
+std::optional<NormalizedHostAddress> normalize_host_address(
+    std::string_view raw) {
+    std::string value = trim_ascii_whitespace(raw);
+    const auto slash = value.find('/');
+    if (slash != std::string::npos) {
+        value.resize(slash);
+    }
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    const bool ipv6 = value.find(':') != std::string::npos;
+    const int family = ipv6 ? AF_INET6 : AF_INET;
+    std::array<unsigned char, 16> bytes{};
+    if (::inet_pton(family, value.c_str(), bytes.data()) != 1) {
+        return std::nullopt;
+    }
+    char normalized[INET6_ADDRSTRLEN]{};
+    if (::inet_ntop(family, bytes.data(), normalized, sizeof(normalized)) ==
         nullptr) {
         return std::nullopt;
     }
-    return std::string{normalized} + "/" + std::to_string(prefix);
+    return NormalizedHostAddress{
+        ipv6 ? TargetAddressFamily::Ipv6 : TargetAddressFamily::Ipv4,
+        normalized,
+        bytes};
+}
+
+bool cidr_contains(const NormalizedTargetCidr& cidr,
+                   const NormalizedHostAddress& host) noexcept {
+    if (cidr.family != host.family) {
+        return false;
+    }
+    const std::size_t byte_count =
+        cidr.family == TargetAddressFamily::Ipv6 ? 16U : 4U;
+    const std::size_t complete_bytes = cidr.prefix / 8U;
+    const unsigned int remaining_bits = cidr.prefix % 8U;
+    if (!std::equal(cidr.network.begin(),
+                    cidr.network.begin() +
+                        static_cast<std::ptrdiff_t>(complete_bytes),
+                    host.bytes.begin())) {
+        return false;
+    }
+    if (remaining_bits == 0U || complete_bytes >= byte_count) {
+        return true;
+    }
+    const auto mask = static_cast<unsigned char>(
+        0xFFU << (8U - remaining_bits));
+    return (cidr.network[complete_bytes] & mask) ==
+           (host.bytes[complete_bytes] & mask);
+}
+
+std::optional<std::uint32_t> parse_explicit_conntrack_mark(
+    std::string_view value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    std::uint32_t mark = 0;
+    const int base = value.size() > 2U && value[0] == '0' &&
+            (value[1] == 'x' || value[1] == 'X')
+        ? 16
+        : 10;
+    if (base == 16) {
+        value.remove_prefix(2U);
+        if (value.empty()) {
+            return std::nullopt;
+        }
+    }
+    const auto [end, error] = std::from_chars(
+        value.data(), value.data() + value.size(), mark, base);
+    if (error != std::errc{} || end != value.data() + value.size()) {
+        return std::nullopt;
+    }
+    return mark;
+}
+
+struct ParsedConntrackOriginalPair {
+    NormalizedHostAddress source;
+    NormalizedHostAddress destination;
+    std::uint32_t mark{0};
+};
+
+std::optional<ParsedConntrackOriginalPair> parse_conntrack_original_pair(
+    std::string_view line) {
+    std::istringstream stream(std::string{line});
+    std::string token;
+    std::string family_token;
+    if (!(stream >> family_token) ||
+        (family_token != "ipv4" && family_token != "ipv6")) {
+        return std::nullopt;
+    }
+    std::optional<NormalizedHostAddress> source;
+    std::optional<NormalizedHostAddress> destination;
+    std::optional<std::uint32_t> mark;
+    while (stream >> token) {
+        if (token.rfind("src=", 0) == 0U && !destination.has_value()) {
+            if (source.has_value()) {
+                return std::nullopt;
+            }
+            const auto raw_source = std::string_view{token}.substr(4U);
+            if (raw_source.find('/') != std::string_view::npos) {
+                return std::nullopt;
+            }
+            source = normalize_host_address(
+                raw_source);
+            if (!source.has_value()) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (token.rfind("dst=", 0) == 0U && !destination.has_value()) {
+            if (!source.has_value()) {
+                return std::nullopt;
+            }
+            const auto raw_destination =
+                std::string_view{token}.substr(4U);
+            if (raw_destination.find('/') != std::string_view::npos) {
+                return std::nullopt;
+            }
+            destination = normalize_host_address(
+                raw_destination);
+            if (!destination.has_value()) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        if (token.rfind("mark=", 0) == 0U) {
+            if (mark.has_value()) {
+                return std::nullopt;
+            }
+            mark = parse_explicit_conntrack_mark(
+                std::string_view{token}.substr(5U));
+            if (!mark.has_value()) {
+                return std::nullopt;
+            }
+        }
+    }
+    if (!source.has_value() || !destination.has_value() ||
+        !mark.has_value() || source->family != destination->family) {
+        return std::nullopt;
+    }
+    const bool parsed_ipv6 =
+        source->family == TargetAddressFamily::Ipv6;
+    if ((family_token == "ipv6") != parsed_ipv6) {
+        return std::nullopt;
+    }
+    return ParsedConntrackOriginalPair{
+        *source, *destination, *mark};
 }
 
 } // namespace
 
-ConntrackManager::ConntrackManager(CommandRunner runner)
-    : runner_(std::move(runner)) {
+ConntrackManager::ConntrackManager(CommandRunner runner,
+                                   SnapshotReader snapshot_reader)
+    : runner_(std::move(runner)),
+      snapshot_reader_(std::move(snapshot_reader)) {
     if (!runner_) {
         runner_ = [](const std::vector<std::string>& args) {
             constexpr size_t kMaxDiagnosticBytes = 1024;
@@ -112,6 +349,34 @@ ConntrackManager::ConntrackManager(CommandRunner runner)
                 SafeExecFailureLog::DiagnosticOnly,
                 cleanup_timeouts);
             return CommandResult{result.exit_code, result.stdout_output};
+        };
+    }
+    if (!snapshot_reader_) {
+        snapshot_reader_ = [](std::size_t max_bytes)
+            -> std::optional<Snapshot> {
+            std::ifstream input("/proc/net/nf_conntrack");
+            if (!input) {
+                return std::nullopt;
+            }
+
+            Snapshot snapshot;
+            snapshot.content.reserve(
+                std::min<std::size_t>(max_bytes, 64U * 1024U));
+            std::string line;
+            while (std::getline(input, line)) {
+                const std::size_t required = line.size() + 1U;
+                if (required > max_bytes -
+                        std::min(max_bytes, snapshot.content.size())) {
+                    snapshot.truncated = true;
+                    break;
+                }
+                snapshot.content.append(line);
+                snapshot.content.push_back('\n');
+            }
+            if (input.bad()) {
+                return std::nullopt;
+            }
+            return snapshot;
         };
     }
 }
@@ -364,6 +629,184 @@ ConntrackSourceCleanupSummary ConntrackManager::delete_ipv4_source_cidrs(
         summary.remaining_source_cidrs.end(),
         failed_selectors.begin(),
         failed_selectors.end());
+    return summary;
+}
+
+ConntrackForwardedFlowCleanupSummary
+ConntrackManager::delete_unmarked_forwarded_destination_flows(
+    const std::vector<std::string>& destination_cidrs,
+    const std::vector<std::string>& local_interface_addresses,
+    uint32_t owned_mask,
+    ConntrackForwardedFlowCleanupOptions options) const {
+    ConntrackForwardedFlowCleanupSummary summary;
+    if (owned_mask == 0U) {
+        summary.invalid_owned_mask = true;
+        return summary;
+    }
+
+    std::vector<NormalizedTargetCidr> selectors;
+    std::set<std::string> seen_selectors;
+    const std::size_t input_limit =
+        std::min(
+            destination_cidrs.size(),
+            options.max_destination_input_cidrs);
+    selectors.reserve(input_limit);
+    if (input_limit < destination_cidrs.size()) {
+        summary.destination_input_truncated = true;
+        summary.skipped += destination_cidrs.size() - input_limit;
+    }
+    for (std::size_t input_index = 0;
+         input_index < input_limit;
+         ++input_index) {
+        const auto& raw = destination_cidrs[input_index];
+        const auto normalized = normalize_targeted_cidr(raw);
+        if (normalized.has_value() &&
+            normalized->family == TargetAddressFamily::Ipv6 &&
+            !options.ipv6_enabled) {
+            // IPv6 is intentionally outside the active runtime in this mode;
+            // omitting its selectors mirrors mark cleanup's family handling
+            // and does not create retry work which can never be attempted.
+            continue;
+        }
+
+        if (!normalized.has_value()) {
+            ++summary.failed;
+            continue;
+        }
+        const std::string key =
+            (normalized->family == TargetAddressFamily::Ipv6 ? "6:" : "4:") +
+            normalized->value;
+        if (seen_selectors.insert(key).second) {
+            selectors.push_back(*normalized);
+        }
+    }
+    if (selectors.empty()) {
+        return summary;
+    }
+
+    // The local-address inventory is the authority which separates forwarded
+    // client traffic from router-originated probes, DNS, downloads and control
+    // traffic. If it cannot be established completely, do nothing.
+    if (local_interface_addresses.empty()) {
+        summary.local_address_scope_missing = true;
+        return summary;
+    }
+    std::set<std::string> local_addresses;
+    for (const auto& raw : local_interface_addresses) {
+        const auto normalized = normalize_host_address(raw);
+        if (!normalized.has_value()) {
+            summary.local_address_scope_missing = true;
+            return summary;
+        }
+        local_addresses.insert(
+            (normalized->family == TargetAddressFamily::Ipv6 ? "6:" : "4:") +
+            normalized->value);
+    }
+    if (local_addresses.empty()) {
+        summary.local_address_scope_missing = true;
+        return summary;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::max(options.budget, std::chrono::milliseconds{0});
+    const auto deadline_reached = [&deadline]() {
+        return std::chrono::steady_clock::now() >= deadline;
+    };
+    const auto snapshot = snapshot_reader_(options.max_snapshot_bytes);
+    if (!snapshot.has_value()) {
+        summary.snapshot_unavailable = true;
+        return summary;
+    }
+    summary.snapshot_truncated = snapshot->truncated;
+
+    std::vector<ConntrackForwardedFlowPair> flows;
+    flows.reserve(std::min<std::size_t>(options.max_flows, 64U));
+    std::set<std::string> seen_flows;
+    std::istringstream snapshot_lines(snapshot->content);
+    std::string line;
+    std::size_t line_count = 0U;
+    while (std::getline(snapshot_lines, line)) {
+        if (line_count++ >= options.max_snapshot_lines) {
+            summary.snapshot_truncated = true;
+            break;
+        }
+        if (deadline_reached()) {
+            summary.budget_exhausted = true;
+            break;
+        }
+        const auto parsed = parse_conntrack_original_pair(line);
+        if (!parsed.has_value() || parsed->mark != 0U) {
+            continue;
+        }
+        const bool ipv6 =
+            parsed->source.family == TargetAddressFamily::Ipv6;
+        if (ipv6 && !options.ipv6_enabled) {
+            continue;
+        }
+        const std::string source_key =
+            (ipv6 ? "6:" : "4:") + parsed->source.value;
+        const std::string destination_key =
+            (ipv6 ? "6:" : "4:") + parsed->destination.value;
+        if (local_addresses.count(source_key) != 0U ||
+            local_addresses.count(destination_key) != 0U) {
+            continue;
+        }
+        const bool destination_matches = std::any_of(
+            selectors.begin(), selectors.end(),
+            [&parsed](const NormalizedTargetCidr& selector) {
+                return cidr_contains(selector, parsed->destination);
+            });
+        if (!destination_matches) {
+            continue;
+        }
+        const std::string flow_key = source_key + ">" +
+            parsed->destination.value;
+        if (!seen_flows.insert(flow_key).second) {
+            continue;
+        }
+        ++summary.matched;
+        if (flows.size() >= options.max_flows) {
+            ++summary.skipped;
+            continue;
+        }
+        flows.push_back(ConntrackForwardedFlowPair{
+            parsed->source.value,
+            parsed->destination.value,
+            ipv6});
+    }
+
+    const auto retain_from =
+        [&flows, &summary](std::size_t first) {
+            summary.remaining_flows.insert(
+                summary.remaining_flows.end(),
+                flows.begin() + static_cast<std::ptrdiff_t>(first),
+                flows.end());
+        };
+    for (std::size_t index = 0; index < flows.size(); ++index) {
+        if (deadline_reached()) {
+            summary.budget_exhausted = true;
+            summary.skipped += flows.size() - index;
+            retain_from(index);
+            break;
+        }
+        const auto& flow = flows[index];
+        const auto result = runner_({
+            "conntrack", "-D", "-f", flow.ipv6 ? "ipv6" : "ipv4",
+            "-s", flow.source, "-d", flow.destination,
+            "--mark", "0/4294967295"});
+        ++summary.attempted;
+        if (result.exit_code == 127) {
+            summary.command_unavailable = true;
+            summary.skipped += flows.size() - index;
+            retain_from(index);
+            break;
+        }
+        if (result.exit_code != 0 && !is_empty_delete_result(result)) {
+            ++summary.failed;
+            summary.remaining_flows.push_back(flow);
+        }
+    }
     return summary;
 }
 

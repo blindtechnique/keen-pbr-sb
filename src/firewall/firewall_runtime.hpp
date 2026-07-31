@@ -3,6 +3,7 @@
 #include "../cache/cache_manager.hpp"
 #include "../config/config.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
+#include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "firewall.hpp"
 
@@ -27,7 +28,8 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::vector<InternalVpnRuntimeTarget>*
         effective_internal_vpn_targets = nullptr,
     const std::vector<FirewallSourceEgressSnatSelector>*
-        native_vpn_direct_egress_snat_selectors = nullptr);
+        native_vpn_direct_egress_snat_selectors = nullptr,
+    AppliedListContentState* applied_list_content_state = nullptr);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
 // L2TP and IKEv1 servers. Their clients need this on the ordinary WAN path

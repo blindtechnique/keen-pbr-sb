@@ -430,32 +430,7 @@ func (s *SingBox) wait(cmd *exec.Cmd, logFile *os.File) {
 }
 
 func (s *SingBox) ensureForwardingRules() error {
-	for _, binary := range []string{"iptables", "ip6tables"} {
-		if _, err := exec.LookPath(binary); err != nil {
-			if binary == "iptables" {
-				return fmt.Errorf("%s is required to allow LAN forwarding into %s", binary, s.spec.Interface)
-			}
-			continue
-		}
-		args := forwardingRuleArgs(s.spec.Interface)
-		if exec.Command(binary, append([]string{"-C"}, args...)...).Run() == nil {
-			continue
-		}
-		output, err := exec.Command(binary, append([]string{"-A"}, args...)...).CombinedOutput()
-		if err == nil {
-			continue
-		}
-		// Some older Keenetic kernels do not expose xt_comment. Keep the
-		// compatibility rule append-only and reconcile it on every start.
-		legacy := []string{"FORWARD", "-o", s.spec.Interface, "-j", "ACCEPT"}
-		if exec.Command(binary, append([]string{"-C"}, legacy...)...).Run() == nil {
-			continue
-		}
-		if legacyOutput, legacyErr := exec.Command(binary, append([]string{"-A"}, legacy...)...).CombinedOutput(); legacyErr != nil {
-			return fmt.Errorf("allow forwarding into %s with %s: marked rule: %w: %s; compatibility rule: %v: %s", s.spec.Interface, binary, err, string(output), legacyErr, string(legacyOutput))
-		}
-	}
-	return nil
+	return systemForwardingRules.ensureInterfaces([]string{s.spec.Interface})
 }
 
 // EnsureRuntimeRules re-applies the firewall state this transport owns. Safe to
@@ -489,57 +464,24 @@ func (s *SingBox) removeForwardingRules() {
 	removeForwardingRules(s.spec.Interface, true)
 }
 
-func forwardingRuleArgs(interfaceName string) []string {
-	return []string{"FORWARD", "-o", interfaceName, "-m", "comment", "--comment", "keen-pbr-sb:" + interfaceName, "-j", "ACCEPT"}
-}
-
 func forwardingRulesPresent(interfaceName string) bool {
-	for _, binary := range []string{"iptables", "ip6tables"} {
-		if _, err := exec.LookPath(binary); err != nil {
-			if binary == "iptables" {
-				return false
-			}
-			continue
-		}
-		marked := forwardingRuleArgs(interfaceName)
-		if exec.Command(binary, append([]string{"-C"}, marked...)...).Run() == nil {
-			continue
-		}
-		legacy := []string{"FORWARD", "-o", interfaceName, "-j", "ACCEPT"}
-		if exec.Command(binary, append([]string{"-C"}, legacy...)...).Run() != nil {
-			return false
-		}
-	}
-	return true
+	return systemForwardingRules.rulesPresent(interfaceName)
 }
 
 func removeForwardingRules(interfaceName string, includeLegacy bool) {
-	for _, binary := range []string{"iptables", "ip6tables"} {
-		if _, err := exec.LookPath(binary); err != nil {
-			continue
-		}
-		rules := [][]string{forwardingRuleArgs(interfaceName)}
-		if includeLegacy {
-			rules = append(rules, []string{"FORWARD", "-o", interfaceName, "-j", "ACCEPT"})
-		}
-		for _, args := range rules {
-			for exec.Command(binary, append([]string{"-C"}, args...)...).Run() == nil {
-				if exec.Command(binary, append([]string{"-D"}, args...)...).Run() != nil {
-					break
-				}
-			}
-		}
-	}
+	_ = systemForwardingRules.cleanupInterfaces([]string{interfaceName}, includeLegacy)
 }
 
 // CleanupForwardingRules removes rules left behind by an unclean manager exit.
 // Only interfaces belonging to configured sing-box transports are touched.
-func CleanupForwardingRules(specs []TransportSpec) {
+func CleanupForwardingRules(specs []TransportSpec) error {
+	interfaces := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		if spec.Type == "sing-box" || spec.Type == "sing-box-vless-reality" {
-			removeForwardingRules(spec.Interface, true)
+			interfaces = append(interfaces, spec.Interface)
 		}
 	}
+	return systemForwardingRules.cleanupInterfaces(interfaces, true)
 }
 
 // CleanupOrphanProcesses terminates sing-box children that survived an

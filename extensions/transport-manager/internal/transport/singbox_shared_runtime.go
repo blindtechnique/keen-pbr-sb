@@ -724,31 +724,11 @@ func (g *SharedSingBoxGroup) ensureRulesFor(specs []TransportSpec) error {
 }
 
 func ensureForwardingRulesForSpecs(specs []TransportSpec) error {
+	interfaces := make([]string, 0, len(specs))
 	for _, spec := range specs {
-		for _, binary := range []string{"iptables", "ip6tables"} {
-			if _, err := exec.LookPath(binary); err != nil {
-				if binary == "iptables" {
-					return fmt.Errorf("%s is required to allow LAN forwarding into %s", binary, spec.Interface)
-				}
-				continue
-			}
-			args := forwardingRuleArgs(spec.Interface)
-			if exec.Command(binary, append([]string{"-C"}, args...)...).Run() == nil {
-				continue
-			}
-			if output, err := exec.Command(binary, append([]string{"-A"}, args...)...).CombinedOutput(); err != nil {
-				legacy := []string{"FORWARD", "-o", spec.Interface, "-j", "ACCEPT"}
-				if exec.Command(binary, append([]string{"-C"}, legacy...)...).Run() == nil {
-					continue
-				}
-				if legacyOutput, legacyErr := exec.Command(binary, append([]string{"-A"}, legacy...)...).CombinedOutput(); legacyErr != nil {
-					return fmt.Errorf("allow forwarding into %s with %s: %v: %s; compatibility: %v: %s",
-						spec.Interface, binary, err, string(output), legacyErr, string(legacyOutput))
-				}
-			}
-		}
+		interfaces = append(interfaces, spec.Interface)
 	}
-	return nil
+	return systemForwardingRules.ensureInterfaces(interfaces)
 }
 
 func (g *SharedSingBoxGroup) EnsureRuntimeRules() error {

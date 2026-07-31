@@ -350,6 +350,242 @@ TEST_CASE("ConntrackManager source cleanup honors an exhausted time budget") {
     CHECK(calls == 0);
 }
 
+TEST_CASE(
+    "ConntrackManager reconnects only observed unmarked forwarded flow pairs") {
+    std::vector<std::vector<std::string>> commands;
+    const std::string snapshot =
+        "ipv4 2 tcp 6 100 ESTABLISHED src=192.168.1.44 dst=31.13.64.51 "
+        "sport=50000 dport=443 src=31.13.64.51 dst=192.168.1.44 "
+        "sport=443 dport=50000 mark=0 use=1\n"
+        "ipv4 2 udp 17 20 src=192.168.1.44 dst=31.13.64.51 "
+        "sport=50001 dport=443 src=31.13.64.51 dst=192.168.1.44 "
+        "sport=443 dport=50001 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 ESTABLISHED src=192.168.1.1 dst=31.13.64.52 "
+        "sport=50002 dport=443 src=31.13.64.52 dst=192.168.1.1 "
+        "sport=443 dport=50002 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 ESTABLISHED src=192.168.1.45 dst=8.8.8.8 "
+        "sport=50003 dport=443 src=8.8.8.8 dst=192.168.1.45 "
+        "sport=443 dport=50003 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 ESTABLISHED src=192.168.1.46 dst=31.13.64.53 "
+        "sport=50004 dport=443 src=31.13.64.53 dst=192.168.1.46 "
+        "sport=443 dport=50004 mark=65536 use=1\n"
+        "ipv4 2 tcp 6 100 ESTABLISHED src=198.51.100.20 dst=192.168.1.1 "
+        "sport=50005 dport=443 src=192.168.1.1 dst=198.51.100.20 "
+        "sport=443 dport=50005 mark=0 use=1\n"
+        "ipv6 2 udp 17 20 src=fd00::44 dst=2001:db8:1::5 "
+        "sport=50006 dport=443 src=2001:db8:1::5 dst=fd00::44 "
+        "sport=443 dport=50006 mark=0 use=1\n"
+        "ipv6 2 tcp 6 100 ESTABLISHED src=2001:db8:ffff::20 dst=::1 "
+        "sport=50007 dport=443 src=::1 dst=2001:db8:ffff::20 "
+        "sport=443 dport=50007 mark=0 use=1\n";
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto summary =
+        manager.delete_unmarked_forwarded_destination_flows(
+            {"31.13.64.99/18", "192.168.1.0/24", "2001:db8:1::/64",
+             "::1/128"},
+            {"127.0.0.1/8", "192.168.1.1/24", "::1/128"},
+            0xFF0000U);
+
+    CHECK(summary.matched == 2);
+    CHECK(summary.attempted == 2);
+    CHECK(summary.failed == 0);
+    CHECK(summary.skipped == 0);
+    CHECK(summary.remaining_flows.empty());
+    CHECK(commands == std::vector<std::vector<std::string>>{
+                          {"conntrack", "-D", "-f", "ipv4", "-s",
+                           "192.168.1.44", "-d", "31.13.64.51", "--mark",
+                           "0/4294967295"},
+                          {"conntrack", "-D", "-f", "ipv6", "-s",
+                           "fd00::44", "-d", "2001:db8:1::5", "--mark",
+                           "0/4294967295"}});
+}
+
+TEST_CASE(
+    "ConntrackManager requires explicit family original tuple and full zero mark") {
+    std::vector<std::vector<std::string>> commands;
+    const std::string snapshot =
+        "ipv4 2 tcp 6 100 src=192.168.1.40 dst=31.13.64.40 "
+        "src=31.13.64.40 dst=192.168.1.40 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.41 dst=31.13.64.41 "
+        "src=31.13.64.41 dst=192.168.1.41 nmark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.42 dst=31.13.64.42 "
+        "src=31.13.64.42 dst=192.168.1.42 mark=oops use=1\n"
+        "ipv6 2 tcp 6 100 src=192.168.1.43 dst=31.13.64.43 "
+        "src=31.13.64.43 dst=192.168.1.43 mark=0 use=1\n"
+        "tcp 6 100 src=192.168.1.44 dst=31.13.64.44 "
+        "src=31.13.64.44 dst=192.168.1.44 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 dst=31.13.64.46 src=192.168.1.46 "
+        "src=31.13.64.46 dst=192.168.1.46 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.47/24 dst=31.13.64.47 "
+        "src=31.13.64.47 dst=192.168.1.47 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.48 dst=31.13.64.48 "
+        "src=31.13.64.48 dst=192.168.1.48 mark=1 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.45 dst=31.13.64.45 "
+        "src=31.13.64.45 dst=192.168.1.45 mark=0x0 use=1\n";
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto summary =
+        manager.delete_unmarked_forwarded_destination_flows(
+            {"31.13.64.0/18"}, {"192.168.1.1/24"}, 0xFF0000U);
+
+    CHECK(summary.matched == 1);
+    CHECK(summary.attempted == 1);
+    CHECK(commands.size() == 1);
+    CHECK(commands.front()[5] == "192.168.1.45");
+    CHECK(commands.front()[7] == "31.13.64.45");
+}
+
+TEST_CASE(
+    "ConntrackManager forwarded cleanup fails closed without local authority") {
+    std::size_t command_calls = 0;
+    std::size_t snapshot_calls = 0;
+    ConntrackManager manager(
+        [&command_calls](const std::vector<std::string>&) {
+            ++command_calls;
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot_calls](std::size_t) {
+            ++snapshot_calls;
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{}};
+        });
+
+    const auto empty = manager.delete_unmarked_forwarded_destination_flows(
+        {"31.13.64.0/18"}, {}, 0xFF0000U);
+    const auto invalid = manager.delete_unmarked_forwarded_destination_flows(
+        {"31.13.64.0/18"}, {"192.168.1.1/24", "not-an-address"},
+        0xFF0000U);
+    const auto zero_mask = manager.delete_unmarked_forwarded_destination_flows(
+        {"31.13.64.0/18"}, {"192.168.1.1/24"}, 0U);
+
+    CHECK(empty.local_address_scope_missing);
+    CHECK(invalid.local_address_scope_missing);
+    CHECK(zero_mask.invalid_owned_mask);
+    CHECK(snapshot_calls == 0);
+    CHECK(command_calls == 0);
+}
+
+TEST_CASE(
+    "ConntrackManager forwarded cleanup reports unavailable and bounded snapshots") {
+    const std::string snapshot =
+        "ipv4 2 tcp 6 100 src=192.168.1.40 dst=31.13.64.40 "
+        "src=31.13.64.40 dst=192.168.1.40 mark=0 use=1\n"
+        "ipv4 2 tcp 6 100 src=192.168.1.41 dst=31.13.64.41 "
+        "src=31.13.64.41 dst=192.168.1.41 mark=0 use=1\n";
+    std::vector<std::vector<std::string>> commands;
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{127, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, true}};
+        });
+
+    const auto summary =
+        manager.delete_unmarked_forwarded_destination_flows(
+            {"31.13.64.0/18", "198.51.100.0/24"},
+            {"192.168.1.1/24"},
+            0xFF0000U,
+            ConntrackForwardedFlowCleanupOptions{
+                /*ipv6_enabled=*/true,
+                std::chrono::seconds{2},
+                /*max_flows=*/1,
+                /*max_destination_input_cidrs=*/1,
+                /*max_snapshot_bytes=*/4096,
+                /*max_snapshot_lines=*/8192});
+
+    CHECK(summary.destination_input_truncated);
+    CHECK(summary.snapshot_truncated);
+    CHECK(summary.command_unavailable);
+    CHECK(summary.matched == 2);
+    CHECK(summary.attempted == 1);
+    CHECK(summary.skipped == 3);
+    CHECK(summary.remaining_flows ==
+          std::vector<ConntrackForwardedFlowPair>{
+              {"192.168.1.40", "31.13.64.40", false}});
+    CHECK(commands.size() == 1);
+}
+
+TEST_CASE(
+    "ConntrackManager treats empty exact deletion as success and can disable IPv6") {
+    std::vector<std::vector<std::string>> commands;
+    const std::string snapshot =
+        "ipv4 2 tcp 6 100 src=192.168.1.44 dst=31.13.64.51 "
+        "src=31.13.64.51 dst=192.168.1.44 mark=0 use=1\n"
+        "ipv6 2 udp 17 20 src=fd00::44 dst=2001:db8:1::5 "
+        "src=2001:db8:1::5 dst=fd00::44 mark=0 use=1\n";
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{
+                1,
+                "conntrack v1.4.8 (conntrack-tools): "
+                "0 flow entries have been deleted.\n"};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto summary =
+        manager.delete_unmarked_forwarded_destination_flows(
+            {"31.13.64.0/18", "2001:db8:1::/64"},
+            {"192.168.1.1/24", "::1/128"},
+            0xFF0000U,
+            ConntrackForwardedFlowCleanupOptions{
+                /*ipv6_enabled=*/false});
+
+    CHECK(summary.matched == 1);
+    CHECK(summary.attempted == 1);
+    CHECK(summary.failed == 0);
+    CHECK(summary.remaining_flows.empty());
+    CHECK(commands.size() == 1);
+    CHECK(commands.front()[3] == "ipv4");
+}
+
+TEST_CASE(
+    "ConntrackManager forwarded cleanup fails closed when snapshot is unavailable") {
+    std::size_t calls = 0;
+    ConntrackManager manager(
+        [&calls](const std::vector<std::string>&) {
+            ++calls;
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [](std::size_t) -> std::optional<ConntrackManager::Snapshot> {
+            return std::nullopt;
+        });
+
+    const auto summary =
+        manager.delete_unmarked_forwarded_destination_flows(
+            {"0.0.0.0/0", "31.13.64.0/18", "bad-selector"},
+            {"192.168.1.1/24"},
+            0xFF0000U);
+
+    CHECK(summary.snapshot_unavailable);
+    CHECK(summary.failed == 2);
+    CHECK(summary.attempted == 0);
+    CHECK(calls == 0);
+}
+
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {
     constexpr uint32_t owned = 0x00FF0000U;
     CHECK(ConntrackManager::restore_original_mark(

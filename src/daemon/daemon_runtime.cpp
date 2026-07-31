@@ -1119,7 +1119,8 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
     const auto native_vpn_direct_egress_snat_selectors =
         select_native_vpn_direct_egress_snat_selectors(
             runtime_targets);
-    firewall_state_.set_rules(apply_runtime_firewall(
+    AppliedListContentState candidate_list_content_state;
+    auto candidate_rules = apply_runtime_firewall(
         config_,
         outbound_marks_,
         firewall_state_.get_urltest_selections(),
@@ -1128,7 +1129,11 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         mode,
         &effective_interface_servers,
         &runtime_targets,
-        &native_vpn_direct_egress_snat_selectors));
+        &native_vpn_direct_egress_snat_selectors,
+        &candidate_list_content_state);
+    firewall_state_.set_rules(std::move(candidate_rules));
+    applied_list_content_state_ =
+        std::move(candidate_list_content_state);
     reconcile_native_vpn_direct_egress_conntrack(
         native_vpn_direct_egress_snat_selectors);
 
@@ -2595,6 +2600,40 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
                 false,
                 snapshot_internal_vpn_service_verified_includes_lkg());
     }
+
+    const auto has_restricted_forwarded_scope = [](
+        const Config& config,
+        const std::vector<InternalVpnServer>& internal_vpn_servers,
+        const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets) {
+        const auto route_config = config.route.value_or(RouteConfig{});
+        const bool has_explicit_inbound_scope =
+            route_config.inbound_interfaces.has_value() &&
+            !route_config.inbound_interfaces->empty();
+        const bool has_native_vpn_bypass = std::any_of(
+            internal_vpn_servers.begin(), internal_vpn_servers.end(),
+            [](const InternalVpnServer& server) {
+                return !server.process_clients;
+            }) || std::any_of(
+            internal_vpn_targets.begin(), internal_vpn_targets.end(),
+            [](const InternalVpnRuntimeTarget& target) {
+                return !target.process_clients;
+            });
+        return has_explicit_inbound_scope || has_native_vpn_bypass;
+    };
+    const bool previous_runtime_active = routing_runtime_active_;
+    const bool reconnect_unmarked_flows_on_routing_change =
+        reconnect_unmarked_flows_on_routing_change_enabled(prepared.config);
+    const bool previous_forwarded_scope_restricted =
+        has_restricted_forwarded_scope(
+            config_,
+            resolved_internal_vpn_servers_,
+            resolved_internal_vpn_service_targets_);
+    const AppliedRoutingSignature previous_routing_signature{
+        firewall_state_.get_fwmark_mask(),
+        firewall_state_.get_rules(),
+    };
+    const AppliedListContentState previous_list_content_state =
+        applied_list_content_state_;
     // Repair and retire any flows from a previously observed SNAT loss before
     // publishing `applying` or reassigning numerical marks. A transient
     // firmware race here must reject the save while the old runtime remains
@@ -2721,6 +2760,152 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
             std::nullopt,
             /*schedule_catalog_refresh=*/false,
             pending_owned_snat_recovery_);
+    }
+    // Conntrack retirement is irreversible. Keep it as the final, no-throw
+    // phase after the replacement has been persisted, published and fully
+    // reconciled. If an earlier phase throws, the caller can restore the
+    // previous generation without having already destroyed its live flows.
+    const AppliedRoutingSignature current_routing_signature{
+        firewall_state_.get_fwmark_mask(),
+        firewall_state_.get_rules(),
+    };
+    const bool current_forwarded_scope_restricted =
+        has_restricted_forwarded_scope(
+            config_,
+            resolved_internal_vpn_servers_,
+            resolved_internal_vpn_service_targets_);
+    ConntrackDestinationRetirementCoverage destination_coverage;
+    if (previous_runtime_active &&
+        reconnect_unmarked_flows_on_routing_change) {
+        std::set<std::string> changed_list_names;
+        for (const auto& [list_name, current_destinations] :
+             applied_list_content_state_.static_destinations) {
+            const auto previous =
+                previous_list_content_state.static_destinations.find(
+                    list_name);
+            if (previous ==
+                    previous_list_content_state.static_destinations.end() ||
+                previous->second != current_destinations) {
+                changed_list_names.insert(list_name);
+            }
+        }
+        for (const auto& list_name :
+             applied_list_content_state_.domain_entry_lists) {
+            if (previous_list_content_state.domain_entry_lists.count(
+                    list_name) == 0U) {
+                changed_list_names.insert(list_name);
+            }
+        }
+        for (const auto& list_name :
+             applied_list_content_state_.
+                 truncated_static_destination_lists) {
+            if (previous_list_content_state.
+                    truncated_static_destination_lists.count(list_name) ==
+                0U) {
+                changed_list_names.insert(list_name);
+            }
+        }
+        const std::vector<RuleState> no_previous_rules;
+        const auto& comparison_rules =
+            previous_forwarded_scope_restricted &&
+                !current_forwarded_scope_restricted
+            ? no_previous_rules
+            : previous_routing_signature.firewall_rules;
+        const auto destination_plan = plan_conntrack_destination_retirement(
+            comparison_rules,
+            current_routing_signature.firewall_rules,
+            changed_list_names);
+        destination_coverage =
+            collect_conntrack_destination_retirement_coverage(
+                destination_plan,
+                applied_list_content_state_);
+    }
+    if (previous_runtime_active &&
+        destination_coverage.partial()) {
+        Logger::instance().info(
+            "Targeted routing-policy conntrack retirement has partial "
+            "coverage for {} domain-backed and {} statically truncated "
+            "changed list(s); only observed flows for tracked static "
+            "destinations are eligible for immediate reconnection",
+            destination_coverage.domain_backed_list_names.size(),
+            destination_coverage.truncated_static_list_names.size());
+    }
+    if (previous_runtime_active &&
+        !destination_coverage.destination_selectors.empty()) {
+        try {
+            if (current_forwarded_scope_restricted) {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement was skipped "
+                    "because the active inbound/native-VPN policy cannot be "
+                    "represented by an exact forwarded-flow selector; existing "
+                    "flows will converge as they expire");
+            } else {
+                std::vector<std::string> local_interface_addresses;
+                for (const auto& interface : netlink_.dump_interfaces()) {
+                    local_interface_addresses.insert(
+                        local_interface_addresses.end(),
+                        interface.ipv4_addresses.begin(),
+                        interface.ipv4_addresses.end());
+                    local_interface_addresses.insert(
+                        local_interface_addresses.end(),
+                        interface.ipv6_addresses.begin(),
+                        interface.ipv6_addresses.end());
+                }
+
+                const auto cleanup =
+                    conntrack_manager_.
+                        delete_unmarked_forwarded_destination_flows(
+                            destination_coverage.destination_selectors,
+                            local_interface_addresses,
+                            current_routing_signature.owned_mask,
+                            ConntrackForwardedFlowCleanupOptions{
+                                resolve_ipv6_support(config_).enabled,
+                                std::chrono::seconds{2},
+                                /*max_flows=*/256U,
+                                /*max_destination_input_cidrs=*/1024U,
+                                /*max_snapshot_bytes=*/2U * 1024U * 1024U,
+                                /*max_snapshot_lines=*/8192U});
+                if (cleanup.command_unavailable) {
+                    warn_conntrack_unavailable_once();
+                } else if (cleanup.snapshot_unavailable ||
+                           cleanup.local_address_scope_missing ||
+                           cleanup.invalid_owned_mask) {
+                    Logger::instance().info(
+                        "Targeted routing-policy conntrack retirement failed "
+                        "closed because its live forwarded-flow scope was not "
+                        "authoritative; existing flows will converge as they "
+                        "expire");
+                } else if (cleanup.failed != 0U || cleanup.skipped != 0U ||
+                           cleanup.budget_exhausted ||
+                           cleanup.snapshot_truncated ||
+                           cleanup.destination_input_truncated) {
+                    Logger::instance().info(
+                        "Targeted routing-policy conntrack retirement matched "
+                        "{} exact forwarded flow(s), attempted {}, left {} "
+                        "failed and {} skipped; remaining flows will converge "
+                        "as they expire",
+                        cleanup.matched,
+                        cleanup.attempted,
+                        cleanup.failed,
+                        cleanup.skipped);
+                } else if (cleanup.attempted != 0U) {
+                    Logger::instance().info(
+                        "Targeted routing-policy conntrack retirement "
+                        "reconnected {} exact previously-direct forwarded "
+                        "flow(s)",
+                        cleanup.attempted);
+                }
+            }
+        } catch (const std::exception& error) {
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement was skipped: {}. "
+                "Existing flows will converge as they expire",
+                error.what());
+        } catch (...) {
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement was skipped by "
+                "an unknown error; existing flows will converge as they expire");
+        }
     }
     } catch (...) {
         routing_runtime_active_ = false;

@@ -1395,6 +1395,10 @@ export const enTranslation = {
         title: "Advanced routing settings",
         description:
           "Advanced settings - only change these if you know what you're doing.",
+        reconnectUnmarkedFlowsOnRoutingChangeLabel:
+          "Reconnect direct flows after routing changes",
+        reconnectUnmarkedFlowsOnRoutingChangeHint:
+          "After a successful apply, keen-pbr-sb terminates only previously direct flows that must now use the changed route, so applications reconnect immediately. When disabled, old flows wait for conntrack to expire naturally.",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
           "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",

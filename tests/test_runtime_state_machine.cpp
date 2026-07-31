@@ -42,6 +42,26 @@ TEST_CASE("new runtime refresh coalesces with a pending recovery chain") {
     CHECK_FALSE(runtime_recovery_request_should_coalesce(1, true));
 }
 
+TEST_CASE(
+    "routing change reconnect defaults on and respects explicit disable") {
+    Config absent;
+    CHECK(reconnect_unmarked_flows_on_routing_change_enabled(absent));
+
+    Config null_value;
+    null_value.daemon = DaemonConfig{};
+    null_value.daemon->reconnect_unmarked_flows_on_routing_change =
+        std::nullopt;
+    CHECK(reconnect_unmarked_flows_on_routing_change_enabled(null_value));
+
+    Config enabled = null_value;
+    enabled.daemon->reconnect_unmarked_flows_on_routing_change = true;
+    CHECK(reconnect_unmarked_flows_on_routing_change_enabled(enabled));
+
+    Config disabled = null_value;
+    disabled.daemon->reconnect_unmarked_flows_on_routing_change = false;
+    CHECK_FALSE(reconnect_unmarked_flows_on_routing_change_enabled(disabled));
+}
+
 TEST_CASE("SNAT recovery evicts only flows affected by a confirmed repair") {
     OwnedSnatRecovery recovery{
         /*requested=*/true,
@@ -509,4 +529,241 @@ TEST_CASE("runtime replacement does not stop the previous runtime on resolver fa
         std::runtime_error);
 
     CHECK(previous_runtime_active);
+}
+
+TEST_CASE("destination retirement plans only selectors newly governed by changed rules") {
+    RuleState direct;
+    direct.rule_index = 0U;
+    direct.action_type = RuleActionType::Pass;
+    direct.list_names = {"meta"};
+
+    RuleState tunneled = direct;
+    tunneled.action_type = RuleActionType::Mark;
+    tunneled.outbound_tag = "awg";
+    tunneled.fwmark = 0x00010000U;
+
+    const auto changed = plan_conntrack_destination_retirement(
+        {direct}, {tunneled});
+    CHECK(changed.current_list_names == std::set<std::string>{"meta"});
+    CHECK(changed.current_destination_selectors.empty());
+
+    RuleState direct_address;
+    direct_address.rule_index = 0U;
+    direct_address.action_type = RuleActionType::Pass;
+    direct_address.criteria.dst_addr = {"31.13.64.0/18"};
+    RuleState tunneled_address = direct_address;
+    tunneled_address.action_type = RuleActionType::Mark;
+    tunneled_address.outbound_tag = "awg";
+    tunneled_address.fwmark = 0x00010000U;
+    const auto address_changed = plan_conntrack_destination_retirement(
+        {direct_address}, {tunneled_address});
+    CHECK(address_changed.current_destination_selectors ==
+          std::vector<std::string>{"31.13.64.0/18"});
+
+    const auto unchanged = plan_conntrack_destination_retirement(
+        {tunneled}, {tunneled});
+    CHECK(unchanged.current_list_names.empty());
+    CHECK(unchanged.current_destination_selectors.empty());
+
+    const auto content_changed = plan_conntrack_destination_retirement(
+        {tunneled}, {tunneled}, {"meta"});
+    CHECK(content_changed.current_list_names ==
+          std::set<std::string>{"meta"});
+
+    const auto removed = plan_conntrack_destination_retirement(
+        {tunneled}, {});
+    CHECK(removed.current_list_names.empty());
+    CHECK(removed.current_destination_selectors.empty());
+}
+
+TEST_CASE("destination retirement does not treat shifted unchanged rules as new") {
+    RuleState existing;
+    existing.rule_index = 0U;
+    existing.action_type = RuleActionType::Mark;
+    existing.outbound_tag = "awg";
+    existing.fwmark = 0x00010000U;
+    existing.list_names = {"existing"};
+
+    RuleState inserted = existing;
+    inserted.rule_index = 0U;
+    inserted.list_names = {"meta"};
+
+    RuleState shifted = existing;
+    shifted.rule_index = 1U;
+
+    const auto plan = plan_conntrack_destination_retirement(
+        {existing},
+        {inserted, shifted});
+
+    CHECK(plan.current_list_names == std::set<std::string>{"meta"});
+}
+
+TEST_CASE("destination retirement ignores negated destinations") {
+    RuleState current;
+    current.rule_index = 0U;
+    current.action_type = RuleActionType::Mark;
+    current.fwmark = 0x00010000U;
+    current.criteria.dst_addr = {"31.13.64.0/18"};
+    current.criteria.negate_dst_addr = true;
+
+    const auto plan = plan_conntrack_destination_retirement({}, {current});
+    CHECK(plan.current_destination_selectors.empty());
+}
+
+TEST_CASE("destination retirement rejects list and address intersections") {
+    RuleState current;
+    current.rule_index = 0U;
+    current.action_type = RuleActionType::Mark;
+    current.fwmark = 0x00010000U;
+    current.list_names = {"meta"};
+    current.criteria.dst_addr = {"31.13.64.0/18"};
+
+    const auto plan = plan_conntrack_destination_retirement(
+        {}, {current});
+
+    CHECK(plan.current_list_names.empty());
+    CHECK(plan.current_destination_selectors.empty());
+}
+
+TEST_CASE("destination retirement fails closed behind an earlier pass rule") {
+    RuleState bypass;
+    bypass.rule_index = 0U;
+    bypass.action_type = RuleActionType::Pass;
+    bypass.criteria.dst_addr = {"203.0.113.7/32"};
+
+    RuleState current;
+    current.rule_index = 1U;
+    current.action_type = RuleActionType::Mark;
+    current.fwmark = 0x00010000U;
+    current.list_names = {"meta"};
+
+    const auto plan = plan_conntrack_destination_retirement(
+        {bypass}, {bypass, current});
+
+    CHECK(plan.current_list_names.empty());
+    CHECK(plan.current_destination_selectors.empty());
+}
+
+TEST_CASE("destination retirement rejects selectors conntrack cannot scope") {
+    RuleState broad;
+    broad.rule_index = 0U;
+    broad.action_type = RuleActionType::Mark;
+    broad.fwmark = 0x00010000U;
+    broad.list_names = {"meta"};
+    broad.criteria.dst_set_name = "kpbr_meta_v4";
+
+    const auto require_no_cleanup = [](const RuleState& scoped) {
+        const auto plan = plan_conntrack_destination_retirement(
+            {}, {scoped});
+        CHECK(plan.current_list_names.empty());
+        CHECK(plan.current_destination_selectors.empty());
+    };
+
+    auto source_address = broad;
+    source_address.criteria.src_addr = {"192.168.1.44/32"};
+    require_no_cleanup(source_address);
+
+    auto source_address_negated = broad;
+    source_address_negated.criteria.src_addr = {"192.168.1.44/32"};
+    source_address_negated.criteria.negate_src_addr = true;
+    require_no_cleanup(source_address_negated);
+
+    auto protocol = broad;
+    protocol.criteria.proto = L4Proto::Udp;
+    require_no_cleanup(protocol);
+
+    auto source_port = broad;
+    source_port.criteria.src_port = "443";
+    require_no_cleanup(source_port);
+
+    auto destination_port = broad;
+    destination_port.criteria.dst_port = "443";
+    require_no_cleanup(destination_port);
+
+    auto negated_port = broad;
+    negated_port.criteria.dst_port = "443";
+    negated_port.criteria.negate_dst_port = true;
+    require_no_cleanup(negated_port);
+
+    auto dscp = broad;
+    dscp.criteria.dscp = 46U;
+    require_no_cleanup(dscp);
+}
+
+TEST_CASE("destination retirement requires a positive destination selector") {
+    RuleState source_only;
+    source_only.rule_index = 0U;
+    source_only.action_type = RuleActionType::Mark;
+    source_only.fwmark = 0x00010000U;
+    source_only.criteria.src_addr = {"192.168.1.44/32"};
+
+    const auto plan = plan_conntrack_destination_retirement(
+        {}, {source_only});
+
+    CHECK(plan.current_list_names.empty());
+    CHECK(plan.current_destination_selectors.empty());
+}
+
+TEST_CASE("destination retirement does not reconnect explicit direct rules") {
+    RuleState direct;
+    direct.rule_index = 0;
+    direct.list_names = {"direct-list"};
+    direct.action_type = RuleActionType::Pass;
+    direct.criteria.dst_addr = {"203.0.113.9/32"};
+
+    const auto plan = plan_conntrack_destination_retirement(
+        {}, {direct});
+
+    CHECK(plan.current_list_names.empty());
+    CHECK(plan.current_destination_selectors.empty());
+}
+
+TEST_CASE("destination retirement coverage reports domain and static limits") {
+    ConntrackDestinationRetirementPlan plan;
+    plan.current_list_names = {
+        "domain-only", "mixed", "static", "truncated"};
+    plan.current_destination_selectors = {"203.0.113.7/32"};
+
+    AppliedListContentState content;
+    content.static_destinations = {
+        {"domain-only", {}},
+        {"mixed", {"31.13.64.0/18"}},
+        {"static", {"157.240.0.0/16"}},
+        {"truncated", {"169.44.0.0/16"}},
+    };
+    content.domain_entry_lists = {"domain-only", "mixed"};
+    content.truncated_static_destination_lists = {"truncated"};
+
+    const auto coverage =
+        collect_conntrack_destination_retirement_coverage(plan, content);
+
+    const std::vector<std::string> expected_selectors{
+        "203.0.113.7/32",
+        "31.13.64.0/18",
+        "157.240.0.0/16",
+        "169.44.0.0/16"};
+    const std::set<std::string> expected_domain_lists{
+        "domain-only", "mixed"};
+    const std::set<std::string> expected_truncated_lists{"truncated"};
+    CHECK(coverage.destination_selectors == expected_selectors);
+    CHECK(coverage.domain_backed_list_names == expected_domain_lists);
+    CHECK(coverage.truncated_static_list_names == expected_truncated_lists);
+    CHECK(coverage.partial());
+}
+
+TEST_CASE("destination retirement coverage is complete for bounded static lists") {
+    ConntrackDestinationRetirementPlan plan;
+    plan.current_list_names = {"static"};
+
+    AppliedListContentState content;
+    content.static_destinations = {
+        {"static", {"31.13.64.0/18"}},
+    };
+
+    const auto coverage =
+        collect_conntrack_destination_retirement_coverage(plan, content);
+
+    CHECK(coverage.destination_selectors ==
+          std::vector<std::string>{"31.13.64.0/18"});
+    CHECK_FALSE(coverage.partial());
 }
