@@ -424,10 +424,15 @@ TEST_CASE(
         {
             {"id", "kinopub"},
             {"name", "Kino.pub"},
-            {"notice", "Full service including CDN"},
+            {"notice", "Full service including video CDN"},
             {"covers", {"kinopub-core"}},
             {"domainSupplements",
-             {"ahc.ovh", "kino.pub", "kino.watch"}},
+             {"ahc.ovh",
+              "cdn-service.space",
+              "kino.pub",
+              "kino.watch",
+              "media.service-kp.com",
+              "pushbr.com"}},
             {"engines",
              {{"dns", {{"domains", {"kino.pub"}}}},
               {"singbox",
@@ -438,12 +443,17 @@ TEST_CASE(
         },
         {
             {"id", "kinopub-core"},
-            {"name", "KinoPub without CDN"},
-            {"notice", "GUI and API only"},
+            {"name", "Kino.pub (without CDN)"},
+            {"notice", "GUI, API and lightweight images"},
             {"engines",
              {{"dns",
                {{"domains",
-                 {"ahc.ovh", "kino.pub", "kino.watch"}}}}}},
+                 {"ahc.ovh",
+                  "cdn-service.space",
+                  "kino.pub",
+                  "kino.watch",
+                  "media.service-kp.com",
+                  "pushbr.com"}}}}}},
         },
         {
             {"id", "kartina-tv"},
@@ -548,7 +558,9 @@ TEST_CASE(
     CHECK(
         preset("kinopub").at("covers") ==
         nlohmann::json::array({"kinopub-core"}));
-    CHECK(preset("kinopub").at("notice") == "Full service including CDN");
+    CHECK(
+        preset("kinopub").at("notice") ==
+        "Full service including video CDN");
     CHECK_FALSE(preset("kinopub").contains("domainSupplements"));
     CHECK(
         preset("kinopub")
@@ -556,7 +568,13 @@ TEST_CASE(
             .at("dns")
             .at("domains") ==
         nlohmann::json::array(
-            {"kino.pub", "cdn2cdn.com", "ahc.ovh", "kino.watch"}));
+            {"kino.pub",
+             "cdn2cdn.com",
+             "ahc.ovh",
+             "cdn-service.space",
+             "kino.watch",
+             "media.service-kp.com",
+             "pushbr.com"}));
     CHECK(
         preset("kinopub")
             .at("engines")
@@ -572,7 +590,12 @@ TEST_CASE(
             .at("dns")
             .at("domains") ==
         nlohmann::json::array(
-            {"ahc.ovh", "kino.pub", "kino.watch"}));
+            {"ahc.ovh",
+             "cdn-service.space",
+             "kino.pub",
+             "kino.watch",
+             "media.service-kp.com",
+             "pushbr.com"}));
     CHECK_FALSE(
         preset("kinopub-core")
             .at("engines")
@@ -640,7 +663,12 @@ TEST_CASE(
     CHECK(
         bundled_kinopub->at("engines").at("dns").at("domains") ==
         nlohmann::json::array(
-            {"kino.pub", "ahc.ovh", "kino.watch"}));
+            {"kino.pub",
+             "ahc.ovh",
+             "cdn-service.space",
+             "kino.watch",
+             "media.service-kp.com",
+             "pushbr.com"}));
 
     auto snapshot = nlohmann::json{
         {"catalog_id", "test:catalog-identities"},

@@ -215,7 +215,7 @@
   {
     "id": "kino_pub",
     "name": "Kino.pub",
-    "description": "Полный список и вариант без CDN доступны в каталоге.",
+    "description": "Полный список и вариант без тяжёлых видео-CDN доступны в каталоге.",
     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-kinopub.srs",
     "category": "media",
     "catalogPresetId": "kinopub"

@@ -108,8 +108,8 @@ describe("catalog relationships", () => {
       },
       {
         id: "kinopub-core",
-        name: "KinoPub без CDN",
-        notice: "Сайт, API и управляющие зеркала",
+        name: "Kino.pub (без CDN)",
+        notice: "Сайт, API, постеры и служебные зависимости",
       },
       { id: "netflix", name: "Netflix" },
     ]

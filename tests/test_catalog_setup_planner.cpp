@@ -227,6 +227,41 @@ nlohmann::json telegram_preset() {
     };
 }
 
+const std::vector<std::string>& kinopub_core_domains() {
+    static const std::vector<std::string> domains{
+        "ahc.ovh",
+        "alador.space",
+        "api.ios-kp.store",
+        "api.service-kp.com",
+        "api.srvkp.com",
+        "cdn-service.space",
+        "firebaseremoteconfigrealtime.googleapis.com",
+        "gfw.ovh",
+        "gravatar.com",
+        "i0.wp.com",
+        "kino.pub",
+        "kino.watch",
+        "kinopub.online",
+        "kp-apps.xyz",
+        "kpapp.link",
+        "kpdl.cc",
+        "kpdl.link",
+        "m.boraboraboom.ru",
+        "media.service-kp.com",
+        "mos-gorsud.co",
+        "mos-gorsud.site",
+        "prod-lt-playstoregatewayadapter-pa.googleapis.com",
+        "proxykp.xyz",
+        "pushbr.com",
+        "smarttv.zeasn.tv",
+        "support-kp.com",
+        "themoviedb.org",
+        "tmdb.org",
+        "tsx.ovh",
+    };
+    return domains;
+}
+
 nlohmann::json kinopub_full_preset() {
     return {
         {"id", "kinopub"},
@@ -251,11 +286,10 @@ nlohmann::json kinopub_full_preset() {
 nlohmann::json kinopub_core_preset() {
     return {
         {"id", "kinopub-core"},
-        {"name", "KinoPub без CDN"},
+        {"name", "Kino.pub (без CDN)"},
         {"engines",
          {{"dns",
-           {{"domains",
-             {"ahc.ovh", "kino.pub", "kino.watch"}}}}}},
+           {{"domains", kinopub_core_domains()}}}}},
     };
 }
 
@@ -352,7 +386,7 @@ TEST_CASE("KinoPub full variant remains URL backed") {
     CHECK(full.summary.lists.front().url_backed);
 }
 
-TEST_CASE("KinoPub core variant remains inline only") {
+TEST_CASE("KinoPub no-CDN variant keeps lightweight dependencies inline") {
     const nlohmann::json catalog = {
         {"catalog_id", "test:kinopub-variants"},
         {"presets",
@@ -371,7 +405,7 @@ TEST_CASE("KinoPub core variant remains inline only") {
     CHECK(
         core_list.domains ==
         std::optional<std::vector<std::string>>{
-            {"ahc.ovh", "kino.pub", "kino.watch"}});
+            kinopub_core_domains()});
     REQUIRE(core.summary.lists.size() == 1U);
     CHECK(core.summary.lists[0].technical_id == "kinopub_core");
     CHECK_FALSE(core.summary.lists[0].url_backed);
