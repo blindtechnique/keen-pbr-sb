@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "addr_spec.hpp"
 #include "routing_state.hpp"
+#include "../dns/dns_server.hpp"
 #include "../util/display_name.hpp"
 #include "../util/system_info.hpp"
 
@@ -1864,8 +1865,23 @@ void validate_config(const Config& cfg) {
 
             const auto srv_type = srv.type.value_or(api::DnsServerType::STATIC);
             const std::string srv_addr = srv.address.value_or("");
-            const std::string srv_identity =
+            std::string srv_identity =
                 std::to_string(static_cast<int>(srv_type)) + "|" + srv_addr;
+            if (srv_type == api::DnsServerType::STATIC &&
+                !srv_addr.empty()) {
+                try {
+                    const auto parsed =
+                        parse_dns_address_str(srv_addr);
+                    srv_identity =
+                        std::to_string(static_cast<int>(srv_type)) + "|" +
+                        parsed.ip + "|" + std::to_string(parsed.port);
+                } catch (const DnsError& error) {
+                    add_issue(
+                        issues,
+                        "dns.servers." + srv.tag + ".address",
+                        error.what());
+                }
+            }
             if (!dns_server_identities.insert(srv_identity).second) {
                 add_issue(issues, "dns.servers." + srv.tag,
                           "DNS server \"" + srv.tag +

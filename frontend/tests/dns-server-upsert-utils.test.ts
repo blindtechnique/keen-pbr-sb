@@ -4,13 +4,108 @@ import { DnsServerType } from "../src/api/generated/model/dnsServerType"
 import {
   buildUpdatedConfigForDnsServerUpsert,
   getDnsServerDraft,
+  getDnsServerPresetTransition,
   MAX_PLAIN_DNS_TEMPLATES,
   normalizeDnsAddress,
+  normalizeDnsServerDraftForComparison,
   normalizePlainDnsTemplateAddress,
   withSavedPlainDnsTemplate,
 } from "../src/pages/dns-server-upsert-utils"
+import { semanticJsonEqual } from "../src/lib/semantic-json"
 
 describe("DNS server upsert helpers", () => {
+  test("returning from a preset to custom restores the clean create draft", () => {
+    const baseline = getDnsServerDraft()
+    const preset = getDnsServerPresetTransition(
+      "cloudflare",
+      baseline,
+      [],
+      []
+    )
+    expect(preset).not.toBeNull()
+
+    const presetDraft = {
+      ...baseline,
+      ...preset!.fields,
+    }
+    const custom = getDnsServerPresetTransition(
+      "custom",
+      baseline,
+      [],
+      []
+    )
+    expect(custom).not.toBeNull()
+
+    const restoredDraft = {
+      ...presetDraft,
+      ...custom!.fields,
+    }
+    expect(
+      semanticJsonEqual(
+        normalizeDnsServerDraftForComparison(restoredDraft),
+        normalizeDnsServerDraftForComparison(baseline)
+      )
+    ).toBeTrue()
+    expect(restoredDraft.tag).toBe("")
+  })
+
+  test("returning from a preset preserves the user's custom DNS draft", () => {
+    const customDraft = {
+      ...getDnsServerDraft(),
+      displayName: "Домашний DNS",
+      tag: "dns_home",
+      address: "192.0.2.53",
+      detour: "vpn",
+    }
+    const preset = getDnsServerPresetTransition(
+      "cloudflare",
+      customDraft,
+      [],
+      []
+    )
+    expect(preset).not.toBeNull()
+
+    const restored = getDnsServerPresetTransition(
+      "custom",
+      customDraft,
+      [],
+      []
+    )
+    expect(restored?.fields).toEqual({
+      displayName: "Домашний DNS",
+      tag: "dns_home",
+      type: DnsServerType.static,
+      address: "192.0.2.53",
+      detour: "vpn",
+    })
+  })
+
+  test("returning to custom restores its detour after editing a preset", () => {
+    const customDraft = {
+      ...getDnsServerDraft(),
+      displayName: "Домашний DNS",
+      tag: "dns_home",
+      address: "192.0.2.53",
+      detour: "vpn_primary",
+    }
+    const presetDraft = {
+      ...customDraft,
+      ...getDnsServerPresetTransition("cloudflare", customDraft, [], [])!
+        .fields,
+      detour: "vpn_backup",
+    }
+
+    const restored = getDnsServerPresetTransition(
+      "custom",
+      customDraft,
+      [],
+      []
+    )
+
+    expect(presetDraft.detour).toBe("vpn_backup")
+    expect(restored?.fields.detour).toBe("vpn_primary")
+  })
+
   test("normalizes valid IPv4 and IPv6 addresses", () => {
     expect(normalizeDnsAddress(" 1.1.1.1:53 ")).toBe("1.1.1.1:53")
     expect(normalizeDnsAddress("2606:4700:4700::1111")).toBe(

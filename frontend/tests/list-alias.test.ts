@@ -91,6 +91,90 @@ describe("list aliases", () => {
     expect(result?.config.dns?.servers).toHaveLength(1)
   })
 
+  test("uses the preset backup address when the primary endpoint is occupied", () => {
+    const result = addRecommendedDnsServer(
+      {
+        dns: {
+          servers: [
+            {
+              tag: "direct_cloudflare",
+              type: "static",
+              address: "1.1.1.1:53",
+            },
+          ],
+        },
+      },
+      {
+        name: "Cloudflare",
+        primaryAddress: "1.1.1.1",
+        secondaryAddress: "1.0.0.1",
+        technicalSeed: "cloudflare",
+      },
+      "vpn",
+      "VPN"
+    )
+
+    expect(result?.config.dns?.servers?.[1]?.address).toBe("1.0.0.1")
+    expect(result?.config.dns?.servers?.[1]?.detour).toBe("vpn")
+  })
+
+  test("treats an explicit default port as the same occupied endpoint", () => {
+    const result = addRecommendedDnsServer(
+      {
+        dns: {
+          servers: [
+            {
+              tag: "direct_cloudflare",
+              type: "static",
+              address: "1.1.1.1:053",
+            },
+          ],
+        },
+      },
+      {
+        name: "Cloudflare",
+        primaryAddress: "1.1.1.1",
+        secondaryAddress: "1.0.0.1",
+        technicalSeed: "cloudflare",
+      },
+      "vpn",
+      "VPN"
+    )
+
+    expect(result?.config.dns?.servers?.[1]?.address).toBe("1.0.0.1")
+  })
+
+  test("does not create a conflicting DNS endpoint on another detour", () => {
+    const result = addRecommendedDnsServer(
+      {
+        dns: {
+          servers: [
+            {
+              tag: "primary",
+              type: "static",
+              address: "1.1.1.1",
+            },
+            {
+              tag: "secondary",
+              type: "static",
+              address: "1.0.0.1",
+            },
+          ],
+        },
+      },
+      {
+        name: "Cloudflare",
+        primaryAddress: "1.1.1.1",
+        secondaryAddress: "1.0.0.1",
+        technicalSeed: "cloudflare",
+      },
+      "vpn",
+      "VPN"
+    )
+
+    expect(result).toBeNull()
+  })
+
   test("builds one dedicated route and DNS rule while reusing compatible DNS", () => {
     const baseline: ConfigObject = {
       dns: {

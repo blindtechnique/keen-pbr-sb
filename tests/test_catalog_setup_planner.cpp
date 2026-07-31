@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -282,6 +283,11 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
     CHECK(plan.summary.route_rule->display_name == "Нейросети");
     REQUIRE(plan.summary.dns_rule.has_value());
     CHECK(plan.summary.dns_rule->server == "proxy_dns");
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK(plan.summary.dns_server->technical_id == "proxy_dns");
+    CHECK(plan.summary.dns_server->address == "1.1.1.1");
+    CHECK(plan.summary.dns_server->detour == "proxy");
+    CHECK_FALSE(plan.summary.dns_server->created);
     CHECK(plan.warnings.empty());
     CHECK(plan.candidate_revision.size() == 64U);
     CHECK_NOTHROW(validate_config(plan.candidate));
@@ -943,9 +949,33 @@ TEST_CASE("catalog planner accepts authoritative subnet-only Cloudflare preset")
     CHECK_FALSE(summary.url_backed);
     CHECK_FALSE(summary.has_inline_domains);
     CHECK(summary.has_inline_cidrs);
+    CHECK_FALSE(plan.summary.dns_server.has_value());
+    CHECK_FALSE(plan.summary.dns_rule.has_value());
     CHECK(
         plan.candidate.lists->at("cloudflare_ips").ip_cidrs ==
         cloudflare_subnets);
+    CHECK_NOTHROW(validate_config(plan.candidate));
+}
+
+TEST_CASE("pure IP catalogue selection ignores explicit DNS input") {
+    const nlohmann::json ip_only = {
+        {"id", "service-ips"},
+        {"name", "Service IPs"},
+        {"engines",
+         {{"dns", {{"subnets", {"203.0.113.0/24"}}}}}},
+    };
+    auto intent = outbound_intent();
+    intent.selections = {{"service-ips", std::nullopt}};
+    intent.dns_mode = CatalogDnsMode::explicit_server;
+    intent.dns_server_tag = "missing_dns";
+    intent.source_detour_tag.reset();
+
+    const auto plan = plan_catalog_setup(
+        intent, nlohmann::json::array({ip_only}), base_config());
+
+    CHECK_FALSE(plan.summary.dns_server.has_value());
+    CHECK_FALSE(plan.summary.dns_rule.has_value());
+    REQUIRE(plan.summary.route_rule.has_value());
     CHECK_NOTHROW(validate_config(plan.candidate));
 }
 
@@ -1244,26 +1274,267 @@ TEST_CASE("explicit DNS server mismatch is rejected") {
     }
 }
 
-TEST_CASE("automatic DNS fails closed when no server follows route") {
+TEST_CASE("automatic DNS creates a separate detoured resolver when needed") {
     auto config = base_config();
+    config.outbounds->front().display_name = "Amsterdam";
     config.dns->servers->front().detour = "backup";
     validate_config(config);
-    try {
-        static_cast<void>(plan_catalog_setup(
+    const auto catalog = nlohmann::json::array({routing_preset()});
+    const auto plan =
+        plan_catalog_setup(outbound_intent(), catalog, config);
+
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK(plan.summary.dns_server->technical_id == "cloudflare_proxy");
+    CHECK(
+        plan.summary.dns_server->display_name ==
+        "Cloudflare · Amsterdam");
+    CHECK(plan.summary.dns_server->address == "1.0.0.1");
+    CHECK(plan.summary.dns_server->detour == "proxy");
+    CHECK(plan.summary.dns_server->created);
+    REQUIRE(plan.candidate.dns.has_value());
+    REQUIRE(plan.candidate.dns->servers.has_value());
+    CHECK(plan.candidate.dns->servers->size() == 3U);
+    const auto created = std::find_if(
+        plan.candidate.dns->servers->begin(),
+        plan.candidate.dns->servers->end(),
+        [](const DnsServer& server) {
+            return server.tag == "cloudflare_proxy";
+        });
+    REQUIRE(created != plan.candidate.dns->servers->end());
+    CHECK(created->address == "1.0.0.1");
+    CHECK(created->detour == "proxy");
+    CHECK(created->type == api::DnsServerType::STATIC);
+    REQUIRE(plan.summary.dns_rule.has_value());
+    CHECK(plan.summary.dns_rule->server == "cloudflare_proxy");
+    CHECK_NOTHROW(validate_recommended_list_setup(
+        plan.candidate, "category_ai"));
+
+    const auto repeated = plan_catalog_setup(
+        outbound_intent(), catalog, plan.candidate);
+    REQUIRE(repeated.summary.dns_server.has_value());
+    CHECK(
+        repeated.summary.dns_server->technical_id ==
+        "cloudflare_proxy");
+    CHECK_FALSE(repeated.summary.dns_server->created);
+    CHECK_FALSE(repeated.summary.route_rule.has_value());
+    CHECK_FALSE(repeated.summary.dns_rule.has_value());
+    CHECK(
+        nlohmann::json(repeated.candidate) ==
+        nlohmann::json(plan.candidate));
+}
+
+TEST_CASE("automatic DNS creates a complete DNS config on first setup") {
+    auto config = base_config();
+    config.dns->servers.reset();
+    config.dns->fallback.reset();
+    config.dns->rules.reset();
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(
+        outbound_intent(),
+        nlohmann::json::array({routing_preset()}),
+        config);
+
+    REQUIRE(plan.candidate.dns.has_value());
+    REQUIRE(plan.candidate.dns->system_resolver.has_value());
+    CHECK(plan.candidate.dns->system_resolver->address == "127.0.0.1");
+    REQUIRE(plan.candidate.dns->servers.has_value());
+    CHECK(plan.candidate.dns->servers->size() == 1U);
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK(plan.summary.dns_server->created);
+    CHECK_NOTHROW(validate_config(plan.candidate));
+}
+
+TEST_CASE("automatic DNS reuses the lowest exact-detour tag") {
+    auto config = base_config();
+    DnsServer preferred;
+    preferred.tag = "a_proxy_dns";
+    preferred.display_name = "Preferred DNS";
+    preferred.address = "8.8.8.8";
+    preferred.detour = "proxy";
+    config.dns->servers->push_back(preferred);
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(
+        outbound_intent(),
+        nlohmann::json::array({routing_preset()}),
+        config);
+
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK(plan.summary.dns_server->technical_id == "a_proxy_dns");
+    CHECK(plan.summary.dns_server->display_name == "Preferred DNS");
+    CHECK_FALSE(plan.summary.dns_server->created);
+    REQUIRE(plan.summary.dns_rule.has_value());
+    CHECK(plan.summary.dns_rule->server == "a_proxy_dns");
+}
+
+TEST_CASE(
+    "automatic DNS prefers an exact-detour server covering the selected list") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:dns-coverage-preference"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    auto list_only_intent = outbound_intent();
+    list_only_intent.mode = CatalogSetupMode::none;
+    list_only_intent.outbound_tag.reset();
+    list_only_intent.dns_mode = CatalogDnsMode::none;
+    list_only_intent.source_detour_tag.reset();
+    auto config =
+        plan_catalog_setup(list_only_intent, catalog, base_config())
+            .candidate;
+
+    DnsServer a_dns;
+    a_dns.tag = "a_dns";
+    a_dns.address = "8.8.4.4";
+    a_dns.detour = "proxy";
+    DnsServer z_dns;
+    z_dns.tag = "z_dns";
+    z_dns.address = "8.8.8.8";
+    z_dns.detour = "proxy";
+    config.dns->servers = std::vector<DnsServer>{a_dns, z_dns};
+    config.dns->fallback = std::vector<std::string>{"z_dns"};
+
+    RouteRule route_rule;
+    route_rule.enabled = true;
+    route_rule.list = std::vector<std::string>{"category_ai"};
+    route_rule.outbound = "proxy";
+    config.route->rules = std::vector<RouteRule>{route_rule};
+
+    DnsRule dns_rule;
+    dns_rule.enabled = true;
+    dns_rule.list = std::vector<std::string>{"category_ai"};
+    dns_rule.server = "z_dns";
+    config.dns->rules = std::vector<DnsRule>{dns_rule};
+    validate_config(config);
+
+    const auto plan =
+        plan_catalog_setup(outbound_intent(), catalog, config);
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK(plan.summary.dns_server->technical_id == "z_dns");
+    CHECK_FALSE(plan.summary.dns_server->created);
+    CHECK_FALSE(plan.summary.route_rule.has_value());
+    CHECK_FALSE(plan.summary.dns_rule.has_value());
+    CHECK(nlohmann::json(plan.candidate) == nlohmann::json(config));
+}
+
+TEST_CASE(
+    "automatic DNS accepts split same-detour coverage without duplicate rules") {
+    const auto second_preset =
+        routing_preset(
+            "category-search",
+            "Поиск",
+            "https://repo.hoaxisr.ru/rulesets/srs/search.srs");
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:dns-split-coverage"},
+        {"presets",
+         nlohmann::json::array({routing_preset(), second_preset})},
+    };
+    auto intent = outbound_intent();
+    intent.selections = {
+        {"category-ai", std::nullopt},
+        {"category-search", std::nullopt},
+    };
+
+    auto config =
+        plan_catalog_setup(intent, catalog, base_config()).candidate;
+    DnsServer alternate;
+    alternate.tag = "alternate_dns";
+    alternate.address = "8.8.8.8";
+    alternate.detour = "proxy";
+    config.dns->servers->push_back(alternate);
+    REQUIRE(config.dns->rules.has_value());
+    REQUIRE(config.dns->rules->size() == 2U);
+    config.dns->rules->at(0).server = "proxy_dns";
+    config.dns->rules->at(1).server = "alternate_dns";
+    validate_config(config);
+
+    const auto plan = plan_catalog_setup(intent, catalog, config);
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK_FALSE(plan.summary.dns_server->created);
+    CHECK(plan.summary.dns_rules.empty());
+    CHECK_FALSE(plan.summary.dns_rule.has_value());
+    CHECK(nlohmann::json(plan.candidate) == nlohmann::json(config));
+}
+
+TEST_CASE(
+    "explicit DNS does not reuse coverage from another same-detour server") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:dns-explicit-server"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    auto config =
+        plan_catalog_setup(
+            outbound_intent(), catalog, base_config())
+            .candidate;
+
+    DnsServer alternate;
+    alternate.tag = "alternate_dns";
+    alternate.address = "8.8.8.8";
+    alternate.detour = "proxy";
+    config.dns->servers->push_back(alternate);
+    REQUIRE(config.dns->rules.has_value());
+    REQUIRE(config.dns->rules->size() == 1U);
+    config.dns->rules->front().server = "alternate_dns";
+    validate_config(config);
+
+    auto explicit_intent = outbound_intent();
+    explicit_intent.dns_mode = CatalogDnsMode::explicit_server;
+    explicit_intent.dns_server_tag = "proxy_dns";
+    const auto plan =
+        plan_catalog_setup(explicit_intent, catalog, config);
+    REQUIRE(plan.summary.dns_server.has_value());
+    CHECK(plan.summary.dns_server->technical_id == "proxy_dns");
+    REQUIRE(plan.summary.dns_rules.size() == 1U);
+    CHECK(plan.summary.dns_rules.front().server == "proxy_dns");
+    REQUIRE(plan.candidate.dns->rules.has_value());
+    CHECK(plan.candidate.dns->rules->size() == 2U);
+    CHECK(plan.candidate.dns->rules->back().server == "proxy_dns");
+}
+
+TEST_CASE("automatic DNS fails when every built-in endpoint is occupied") {
+    auto config = base_config();
+    config.dns->servers->front().detour = "backup";
+    DnsServer google;
+    google.tag = "google";
+    google.address = "8.8.8.8:53";
+    DnsServer cloudflare_secondary;
+    cloudflare_secondary.tag = "cloudflare_secondary";
+    cloudflare_secondary.address = "1.0.0.1";
+    DnsServer google_secondary;
+    google_secondary.tag = "google_secondary";
+    google_secondary.address = "8.8.4.4";
+    DnsServer quad9_secondary;
+    quad9_secondary.tag = "quad9_secondary";
+    quad9_secondary.address = "149.112.112.112";
+    DnsServer opendns;
+    opendns.tag = "opendns";
+    opendns.address = "208.67.222.222";
+    DnsServer opendns_secondary;
+    opendns_secondary.tag = "opendns_secondary";
+    opendns_secondary.address = "208.67.220.220";
+    DnsServer yandex;
+    yandex.tag = "yandex";
+    yandex.address = "77.88.8.8";
+    DnsServer yandex_secondary;
+    yandex_secondary.tag = "yandex_secondary";
+    yandex_secondary.address = "77.88.8.1";
+    config.dns->servers->push_back(cloudflare_secondary);
+    config.dns->servers->push_back(google);
+    config.dns->servers->push_back(google_secondary);
+    config.dns->servers->push_back(quad9_secondary);
+    config.dns->servers->push_back(opendns);
+    config.dns->servers->push_back(opendns_secondary);
+    config.dns->servers->push_back(yandex);
+    config.dns->servers->push_back(yandex_secondary);
+    validate_config(config);
+
+    CHECK_THROWS_WITH_AS(
+        plan_catalog_setup(
             outbound_intent(),
             nlohmann::json::array({routing_preset()}),
-            config));
-        FAIL("automatic DNS unexpectedly produced a partial plan");
-    } catch (const CatalogSetupPlanError& error) {
-        CHECK(
-            error.code() ==
-            CatalogSetupErrorCode::dns_automatic_unavailable);
-        CHECK(error.path() == "intent.dns_mode");
-        CHECK(
-            std::string(error.what()) ==
-            "No DNS server is detoured through outbound 'proxy'; "
-            "create or select a compatible DNS server first");
-    }
+            config),
+        "No unused built-in DNS endpoint is available for outbound 'proxy'",
+        CatalogSetupPlanError);
 }
 
 TEST_CASE("none mode adds only lists and supports API catalog response snapshot") {

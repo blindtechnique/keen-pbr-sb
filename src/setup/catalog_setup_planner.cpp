@@ -1,12 +1,15 @@
 #include "catalog_setup_planner.hpp"
 
 #include "../crypto/sha256.hpp"
+#include "../dns/dns_server.hpp"
 #include "../util/display_name.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -19,6 +22,26 @@ namespace keen_pbr3::setup {
 namespace {
 
 constexpr std::size_t kMaxTechnicalIdLength = 24U;
+
+struct AutomaticDnsEndpoint {
+    const char* technical_name;
+    const char* display_name;
+    const char* address;
+};
+
+constexpr std::array<AutomaticDnsEndpoint, 10U>
+    kAutomaticDnsEndpoints{{
+        {"cloudflare", "Cloudflare", "1.1.1.1"},
+        {"cloudflare", "Cloudflare", "1.0.0.1"},
+        {"google", "Google", "8.8.8.8"},
+        {"google", "Google", "8.8.4.4"},
+        {"quad9", "Quad9", "9.9.9.9"},
+        {"quad9", "Quad9", "149.112.112.112"},
+        {"opendns", "OpenDNS", "208.67.222.222"},
+        {"opendns", "OpenDNS", "208.67.220.220"},
+        {"yandex", "Yandex", "77.88.8.8"},
+        {"yandex", "Yandex", "77.88.8.1"},
+    }};
 
 struct ParsedPreset {
     std::string id;
@@ -725,6 +748,12 @@ ParsedPreset parse_preset(const nlohmann::json& preset,
     result.url = parse_url(preset, path);
     result.domains = parse_domains(preset, path);
     result.ip_cidrs = parse_subnets(preset, path);
+    // Pure IP lists are matched by the routing firewall and do not need a
+    // parallel DNS rule. URL-backed rule sets remain DNS-eligible because
+    // their decoded contents can include domains even when the catalogue
+    // snapshot has no inline domain preview.
+    result.dns_eligible =
+        !result.domains.empty() || result.url.has_value();
     result.rejects = parse_reject_action(preset, path);
     result.broad_traffic_scope_warning =
         parse_broad_traffic_scope_warning(preset, path);
@@ -1280,6 +1309,26 @@ bool dns_policy_covers_list(const Config& config,
         });
 }
 
+bool dns_policy_covers_list_on_detour(
+    const Config& config,
+    const std::string& list_id,
+    const std::string& detour) {
+    const auto rules =
+        config.dns.value_or(DnsConfig{}).rules.value_or(
+            std::vector<DnsRule>{});
+    return std::any_of(
+        rules.begin(), rules.end(),
+        [&](const DnsRule& rule) {
+            if (!dns_rule_enabled(rule) ||
+                rule.list != std::vector<std::string>{list_id}) {
+                return false;
+            }
+            const auto* server = find_dns_server(config, rule.server);
+            return server != nullptr && server->detour.has_value() &&
+                   *server->detour == detour;
+        });
+}
+
 std::optional<std::string> usable_source_detour(
     const CatalogSetupIntent& intent,
     const Config& config,
@@ -1323,10 +1372,13 @@ std::optional<std::string> usable_source_detour(
 
 std::optional<std::string> select_dns_server(
     const CatalogSetupIntent& intent,
-    const Config& config,
+    Config& config,
     const std::optional<std::string>& route_outbound,
+    const std::vector<std::string>& dns_eligible_list_ids,
+    CatalogSetupSummary& summary,
     std::vector<CatalogSetupWarning>& warnings) {
     if (intent.dns_mode == CatalogDnsMode::none) return std::nullopt;
+    if (dns_eligible_list_ids.empty()) return std::nullopt;
     if (intent.mode == CatalogSetupMode::block) {
         warnings.push_back({
             CatalogSetupWarningCode::dns_ignored_for_block,
@@ -1344,17 +1396,122 @@ std::optional<std::string> select_dns_server(
                 "Automatic DNS requires an outbound route; choose an "
                 "outbound or disable automatic DNS");
         }
-        for (const auto& server :
-             config.dns.value_or(DnsConfig{}).servers.value_or(
-                 std::vector<DnsServer>{})) {
-            if (server.detour == route_outbound) return server.tag;
+
+        // Server vector order is editable in the advanced UI. Select by tag
+        // so the same valid config always produces the same quick-setup plan.
+        const auto existing_servers =
+            config.dns.value_or(DnsConfig{}).servers.value_or(
+                std::vector<DnsServer>{});
+        const DnsServer* selected = nullptr;
+        std::size_t selected_coverage = 0U;
+        for (const auto& server : existing_servers) {
+            if (server.detour != route_outbound) continue;
+            const auto coverage = static_cast<std::size_t>(std::count_if(
+                dns_eligible_list_ids.begin(),
+                dns_eligible_list_ids.end(),
+                [&](const std::string& list_id) {
+                    return dns_policy_covers_list(
+                        config, list_id, server.tag);
+                }));
+            if (selected == nullptr ||
+                coverage > selected_coverage ||
+                (coverage == selected_coverage &&
+                 server.tag < selected->tag)) {
+                selected = &server;
+                selected_coverage = coverage;
+            }
         }
-        fail(
-            CatalogSetupErrorCode::dns_automatic_unavailable,
-            "intent.dns_mode",
-            "No DNS server is detoured through outbound '" +
-                *route_outbound +
-                "'; create or select a compatible DNS server first");
+        if (selected != nullptr) {
+            summary.dns_server = CatalogDnsServerPlanSummary{
+                selected->tag,
+                selected->display_name.value_or(selected->tag),
+                selected->address.value_or(""),
+                *route_outbound,
+                false,
+            };
+            return selected->tag;
+        }
+
+        auto dns = config.dns.value_or(DnsConfig{});
+        if (!dns.system_resolver.has_value()) {
+            api::SystemResolver resolver;
+            resolver.address = "127.0.0.1";
+            dns.system_resolver = std::move(resolver);
+        }
+        auto servers =
+            dns.servers.value_or(std::vector<DnsServer>{});
+        std::set<std::pair<std::string, std::uint16_t>>
+            occupied_endpoints;
+        std::set<std::string> occupied;
+        for (const auto& server : servers) {
+            occupied.insert(server.tag);
+            if (server.type.value_or(api::DnsServerType::STATIC) !=
+                    api::DnsServerType::STATIC ||
+                !server.address.has_value()) {
+                continue;
+            }
+            try {
+                const auto parsed =
+                    parse_dns_address_str(*server.address);
+                occupied_endpoints.emplace(parsed.ip, parsed.port);
+            } catch (const DnsError&) {
+                // The authoritative validator/runtime owns malformed-address
+                // reporting. An invalid endpoint cannot reserve a valid
+                // automatic endpoint.
+            }
+        }
+
+        const AutomaticDnsEndpoint* endpoint = nullptr;
+        for (const auto& candidate : kAutomaticDnsEndpoints) {
+            const auto parsed =
+                parse_dns_address_str(candidate.address);
+            if (occupied_endpoints.count(
+                    {parsed.ip, parsed.port}) == 0U) {
+                endpoint = &candidate;
+                break;
+            }
+        }
+        if (endpoint == nullptr) {
+            fail(
+                CatalogSetupErrorCode::dns_automatic_unavailable,
+                "intent.dns_mode",
+                "No unused built-in DNS endpoint is available for outbound '" +
+                    *route_outbound + "'");
+        }
+
+        DnsServer created;
+        created.tag = unique_technical_id(
+            std::string(endpoint->technical_name) + "_" +
+                *route_outbound,
+            "dns",
+            occupied);
+        const auto* outbound = find_outbound(config, *route_outbound);
+        const auto outbound_name =
+            outbound == nullptr
+                ? *route_outbound
+                : outbound->display_name.value_or(*route_outbound);
+        auto generated_name =
+            std::string(endpoint->display_name) + " · " + outbound_name;
+        if (!display_name::is_valid(generated_name)) {
+            generated_name =
+                std::string(endpoint->display_name) + " · " +
+                *route_outbound;
+        }
+        created.display_name = std::move(generated_name);
+        created.address = endpoint->address;
+        created.detour = *route_outbound;
+        created.type = api::DnsServerType::STATIC;
+        servers.push_back(created);
+        dns.servers = std::move(servers);
+        config.dns = std::move(dns);
+        summary.dns_server = CatalogDnsServerPlanSummary{
+            created.tag,
+            *created.display_name,
+            *created.address,
+            *created.detour,
+            true,
+        };
+        return created.tag;
     }
 
     const auto& tag = *intent.dns_server_tag;
@@ -1365,6 +1522,13 @@ std::optional<std::string> select_dns_server(
             "intent.dns_server_tag",
             "DNS server '" + tag + "' does not exist");
     }
+    summary.dns_server = CatalogDnsServerPlanSummary{
+        server->tag,
+        server->display_name.value_or(server->tag),
+        server->address.value_or(""),
+        server->detour.value_or(""),
+        false,
+    };
     if (route_outbound.has_value()) {
         if (!server->detour.has_value()) {
             fail(
@@ -1613,8 +1777,22 @@ CatalogSetupPlan plan_catalog_setup(
         return result;
     }();
 
+    std::vector<std::string> dns_eligible_list_ids;
+    {
+        std::set<std::string> seen;
+        for (const auto& [list_id, preset] : selected_lists) {
+            if (preset.dns_eligible && seen.insert(list_id).second) {
+                dns_eligible_list_ids.push_back(list_id);
+            }
+        }
+    }
     const auto dns_server = select_dns_server(
-        intent, active_config, route_outbound, plan.warnings);
+        intent,
+        candidate,
+        route_outbound,
+        dns_eligible_list_ids,
+        plan.summary,
+        plan.warnings);
     const auto missing_dns_list_ids = [&]() {
         std::vector<std::string> result;
         if (!dns_server.has_value()) return result;
@@ -1624,8 +1802,14 @@ CatalogSetupPlan plan_catalog_setup(
                 !seen.insert(list_id).second) {
                 continue;
             }
-            if (!dns_policy_covers_list(
-                    active_config, list_id, *dns_server)) {
+            const bool covered =
+                intent.dns_mode == CatalogDnsMode::automatic &&
+                        route_outbound.has_value()
+                    ? dns_policy_covers_list_on_detour(
+                          active_config, list_id, *route_outbound)
+                    : dns_policy_covers_list(
+                          active_config, list_id, *dns_server);
+            if (!covered) {
                 result.push_back(list_id);
             }
         }

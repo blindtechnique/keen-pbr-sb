@@ -1452,6 +1452,75 @@ TEST_CASE("dns servers: duplicate server definition is rejected") {
     CHECK_THROWS_AS(parse_test_config(json), ConfigError);
 }
 
+TEST_CASE(
+    "dns servers: canonical static endpoint on different detours is rejected") {
+    std::string json = R"({
+        "outbounds":[
+            {"tag":"proxy_a","type":"interface","interface":"tun0"},
+            {"tag":"proxy_b","type":"interface","interface":"tun1"}
+        ],
+        "dns":{
+            "servers":[
+                {"tag":"dns_a","address":"8.8.8.8","detour":"proxy_a"},
+                {"tag":"dns_b","address":"8.8.8.8:53","detour":"proxy_b"}
+            ],
+            "fallback":["dns_a"]
+        }
+    })";
+    CHECK_THROWS_AS(parse_test_config(json), ConfigError);
+}
+
+TEST_CASE("dns servers: ambiguous leading-zero IPv4 endpoint is rejected") {
+    CHECK_THROWS_AS(
+        parse_test_config(R"({
+            "dns":{
+                "servers":[
+                    {"tag":"dns_a","address":"008.008.008.008"}
+                ],
+                "fallback":["dns_a"]
+            }
+        })"),
+        ConfigError);
+}
+
+TEST_CASE(
+    "dns servers: equivalent IPv6 spellings on different detours are rejected") {
+    std::string json = R"({
+        "outbounds":[
+            {"tag":"proxy_a","type":"interface","interface":"tun0"},
+            {"tag":"proxy_b","type":"interface","interface":"tun1"}
+        ],
+        "dns":{
+            "servers":[
+                {
+                    "tag":"dns_a",
+                    "address":"[2001:0DB8:0000:0000:0000:0000:0000:0001]:53",
+                    "detour":"proxy_a"
+                },
+                {
+                    "tag":"dns_b",
+                    "address":"2001:db8::1",
+                    "detour":"proxy_b"
+                }
+            ],
+            "fallback":["dns_a"]
+        }
+    })";
+    CHECK_THROWS_AS(parse_test_config(json), ConfigError);
+}
+
+TEST_CASE("dns servers: same IPv6 address on distinct ports is accepted") {
+    CHECK_NOTHROW(parse_test_config(R"({
+        "dns":{
+            "servers":[
+                {"tag":"dns_a","address":"[2001:db8::1]:53"},
+                {"tag":"dns_b","address":"[2001:0DB8:0:0:0:0:0:1]:5353"}
+            ],
+            "fallback":["dns_a"]
+        }
+    })"));
+}
+
 TEST_CASE("outbound tag: uppercase is rejected") {
     std::string json = R"({"outbounds":[{"tag":"Vpn","type":"interface","interface":"wg0"}]})";
     CHECK_THROWS_AS(parse_test_config(json), ConfigError);

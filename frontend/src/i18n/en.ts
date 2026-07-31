@@ -1042,7 +1042,7 @@ export const enTranslation = {
         noRoute: "not created",
         noDnsRule: "rule not created",
         automaticDnsHint:
-          "A matching DNS server is selected automatically from the chosen route. If none exists, preview warns you instead of silently changing the plan.",
+          "A matching DNS server is selected automatically for the route. If none exists, the wizard creates a separate available plain DNS through that route without changing primary DNS servers.",
         warningTitle: "Review required",
         acceptWarnings:
           "I have reviewed the warnings and agree to apply this exact checked plan.",
@@ -1054,7 +1054,7 @@ export const enTranslation = {
           sourceDetourNotApplicable:
             "The selected list has no remote file, so it does not need a download route.",
           dnsAutomaticUnavailable:
-            "No matching DNS server was found for this route. The list and route will be added without a DNS rule.",
+            "No free built-in DNS server is available for this route. Select a compatible DNS server manually in the advanced editor.",
           dnsIgnoredForBlock: "A DNS rule is not created for a blocking list.",
           dnsDetourMissing:
             "The selected DNS server is not attached to the route. Check that it can resolve domains through the intended output.",

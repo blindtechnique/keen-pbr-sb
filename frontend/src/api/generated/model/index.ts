@@ -14,6 +14,7 @@ export * from './catalogSetupApplyResponse';
 export * from './catalogSetupBlackholeSummary';
 export * from './catalogSetupDnsMode';
 export * from './catalogSetupDnsRuleSummary';
+export * from './catalogSetupDnsServerSummary';
 export * from './catalogSetupIntent';
 export * from './catalogSetupListSummary';
 export * from './catalogSetupMode';

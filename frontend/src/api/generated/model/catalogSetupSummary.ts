@@ -7,6 +7,7 @@
  */
 import type { CatalogSetupBlackholeSummary } from './catalogSetupBlackholeSummary';
 import type { CatalogSetupDnsRuleSummary } from './catalogSetupDnsRuleSummary';
+import type { CatalogSetupDnsServerSummary } from './catalogSetupDnsServerSummary';
 import type { CatalogSetupListSummary } from './catalogSetupListSummary';
 import type { CatalogSetupMode } from './catalogSetupMode';
 import type { CatalogSetupRouteRuleSummary } from './catalogSetupRouteRuleSummary';
@@ -26,5 +27,8 @@ export interface CatalogSetupSummary {
   /** Independently editable DNS rules created by the plan. A beginner setup creates at most one DNS rule for each selected list.
    */
   dns_rules?: CatalogSetupDnsRuleSummary[];
+  /** DNS server reused or created atomically by automatic catalogue setup. Existing unrelated and fallback DNS servers are not modified.
+   */
+  dns_server?: CatalogSetupDnsServerSummary;
   blackhole?: CatalogSetupBlackholeSummary;
 }

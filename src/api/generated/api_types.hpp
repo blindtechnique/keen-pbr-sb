@@ -160,6 +160,14 @@ namespace api {
         std::string technical_id;
     };
 
+    struct CatalogSetupDnsServerSummary {
+        std::string address;
+        bool created;
+        std::string detour;
+        std::string display_name;
+        std::string technical_id;
+    };
+
     struct CatalogSetupListSummary {
         bool already_installed;
         std::string display_name;
@@ -187,6 +195,7 @@ namespace api {
         std::optional<CatalogSetupBlackholeSummary> blackhole;
         std::optional<CatalogSetupDnsRuleSummary> dns_rule;
         std::optional<std::vector<CatalogSetupDnsRuleSummary>> dns_rules;
+        std::optional<CatalogSetupDnsServerSummary> dns_server;
         std::vector<CatalogSetupListSummary> lists;
         CatalogSetupModeEnum mode;
         std::optional<RouteRule> route_rule;
@@ -1050,6 +1059,7 @@ namespace api {
         std::optional<CatalogSetupBlackholeSummary> catalog_setup_blackhole_summary;
         std::optional<DnsMode> catalog_setup_dns_mode;
         std::optional<CatalogSetupDnsRuleSummary> catalog_setup_dns_rule_summary;
+        std::optional<CatalogSetupDnsServerSummary> catalog_setup_dns_server_summary;
         std::optional<Intent> catalog_setup_intent;
         std::optional<CatalogSetupListSummary> catalog_setup_list_summary;
         std::optional<CatalogSetupModeEnum> catalog_setup_mode;
@@ -1197,6 +1207,9 @@ namespace api {
 
     void from_json(const json & j, CatalogSetupDnsRuleSummary & x);
     void to_json(json & j, const CatalogSetupDnsRuleSummary & x);
+
+    void from_json(const json & j, CatalogSetupDnsServerSummary & x);
+    void to_json(json & j, const CatalogSetupDnsServerSummary & x);
 
     void from_json(const json & j, CatalogSetupListSummary & x);
     void to_json(json & j, const CatalogSetupListSummary & x);
@@ -1809,6 +1822,23 @@ namespace api {
         j["technical_id"] = x.technical_id;
     }
 
+    inline void from_json(const json & j, CatalogSetupDnsServerSummary& x) {
+        x.address = j.at("address").get<std::string>();
+        x.created = j.at("created").get<bool>();
+        x.detour = j.at("detour").get<std::string>();
+        x.display_name = j.at("display_name").get<std::string>();
+        x.technical_id = j.at("technical_id").get<std::string>();
+    }
+
+    inline void to_json(json & j, const CatalogSetupDnsServerSummary & x) {
+        j = json::object();
+        j["address"] = x.address;
+        j["created"] = x.created;
+        j["detour"] = x.detour;
+        j["display_name"] = x.display_name;
+        j["technical_id"] = x.technical_id;
+    }
+
     inline void from_json(const json & j, CatalogSetupListSummary& x) {
         x.already_installed = j.at("already_installed").get<bool>();
         x.display_name = j.at("display_name").get<std::string>();
@@ -1862,6 +1892,7 @@ namespace api {
         x.blackhole = get_stack_optional<CatalogSetupBlackholeSummary>(j, "blackhole");
         x.dns_rule = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "dns_rule");
         x.dns_rules = get_stack_optional<std::vector<CatalogSetupDnsRuleSummary>>(j, "dns_rules");
+        x.dns_server = get_stack_optional<CatalogSetupDnsServerSummary>(j, "dns_server");
         x.lists = j.at("lists").get<std::vector<CatalogSetupListSummary>>();
         x.mode = j.at("mode").get<CatalogSetupModeEnum>();
         x.route_rule = get_stack_optional<RouteRule>(j, "route_rule");
@@ -1873,6 +1904,7 @@ namespace api {
         j["blackhole"] = x.blackhole;
         j["dns_rule"] = x.dns_rule;
         j["dns_rules"] = x.dns_rules;
+        j["dns_server"] = x.dns_server;
         j["lists"] = x.lists;
         j["mode"] = x.mode;
         j["route_rule"] = x.route_rule;
@@ -3454,6 +3486,7 @@ namespace api {
         x.catalog_setup_blackhole_summary = get_stack_optional<CatalogSetupBlackholeSummary>(j, "CatalogSetupBlackholeSummary");
         x.catalog_setup_dns_mode = get_stack_optional<DnsMode>(j, "CatalogSetupDnsMode");
         x.catalog_setup_dns_rule_summary = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "CatalogSetupDnsRuleSummary");
+        x.catalog_setup_dns_server_summary = get_stack_optional<CatalogSetupDnsServerSummary>(j, "CatalogSetupDnsServerSummary");
         x.catalog_setup_intent = get_stack_optional<Intent>(j, "CatalogSetupIntent");
         x.catalog_setup_list_summary = get_stack_optional<CatalogSetupListSummary>(j, "CatalogSetupListSummary");
         x.catalog_setup_mode = get_stack_optional<CatalogSetupModeEnum>(j, "CatalogSetupMode");
@@ -3584,6 +3617,7 @@ namespace api {
         j["CatalogSetupBlackholeSummary"] = x.catalog_setup_blackhole_summary;
         j["CatalogSetupDnsMode"] = x.catalog_setup_dns_mode;
         j["CatalogSetupDnsRuleSummary"] = x.catalog_setup_dns_rule_summary;
+        j["CatalogSetupDnsServerSummary"] = x.catalog_setup_dns_server_summary;
         j["CatalogSetupIntent"] = x.catalog_setup_intent;
         j["CatalogSetupListSummary"] = x.catalog_setup_list_summary;
         j["CatalogSetupMode"] = x.catalog_setup_mode;

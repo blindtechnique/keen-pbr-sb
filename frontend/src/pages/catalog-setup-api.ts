@@ -29,6 +29,7 @@ export function getCatalogSetupInstallState(
     (preview.summary.dns_rules?.length ?? 0) > 0 ||
     Boolean(preview.summary.route_rule) ||
     Boolean(preview.summary.dns_rule) ||
+    Boolean(preview.summary.dns_server?.created) ||
     Boolean(preview.summary.blackhole?.created)
   return {
     installed,

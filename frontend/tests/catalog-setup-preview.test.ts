@@ -65,4 +65,19 @@ describe("catalog setup preview install state", () => {
     expect(empty.allInstalled).toBe(false)
     expect(empty.noChanges).toBe(false)
   })
+
+  test("counts an automatically created DNS server as a policy change", () => {
+    const result = preview([true, true])
+    result.summary.dns_server = {
+      technical_id: "dns_cloudflare_proxy",
+      display_name: "Cloudflare через Proxy",
+      address: "1.1.1.1",
+      detour: "proxy",
+      created: true,
+    }
+
+    const state = getCatalogSetupInstallState(result)
+    expect(state.allInstalled).toBe(true)
+    expect(state.noChanges).toBe(false)
+  })
 })

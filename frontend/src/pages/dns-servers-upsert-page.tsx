@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
@@ -45,6 +45,7 @@ import { makeTechnicalId } from "@/lib/technical-id"
 import {
   buildUpdatedConfigForDnsServerUpsert,
   getDnsServerDraft,
+  getDnsServerPresetTransition,
   normalizeDnsAddress,
   normalizePlainDnsTemplateAddress,
   normalizeDnsServerDraftForComparison,
@@ -175,6 +176,12 @@ function DnsServerForm({
   )
   const [customSecondaryAddress, setCustomSecondaryAddress] = useState("")
   const [saveCustomTemplate, setSaveCustomTemplate] = useState(false)
+  const customPresetStateRef = useRef({
+    draft: baselineDraft,
+    includeBackup: false,
+    secondaryAddress: "",
+    saveCustomTemplate: false,
+  })
   const configServers = config?.dns?.servers ?? []
   const savedTemplates = config?.ui_preferences?.plain_dns_templates ?? []
   const normalizedCustomSecondaryAddress = normalizePlainDnsTemplateAddress(
@@ -301,44 +308,54 @@ function DnsServerForm({
   }, [isDirty, onDirtyChange])
 
   const selectPreset = (selection: DnsPresetSelection) => {
-    setPresetSelection(selection)
-    form.setFieldValue(DNS_SERVER_FIELD_NAMES.type, DnsServerType.static)
-
-    if (selection === "custom") {
-      setIncludeBackup(false)
-      setCustomSecondaryAddress("")
-      setSaveCustomTemplate(false)
-      form.setFieldValue(DNS_SERVER_FIELD_NAMES.displayName, "")
-      form.setFieldValue(DNS_SERVER_FIELD_NAMES.address, "")
-      form.setFieldValue(
-        DNS_SERVER_FIELD_NAMES.tag,
-        makeTechnicalId(
-          "dns",
-          configServers.map((server) => server.tag),
-          { prefix: "dns" }
-        )
-      )
-      return
+    if (presetSelection === "custom" && selection !== "custom") {
+      customPresetStateRef.current = {
+        draft: { ...form.state.values },
+        includeBackup,
+        secondaryAddress: customSecondaryAddress,
+        saveCustomTemplate,
+      }
     }
 
-    const preset = resolveDnsTemplateSelection(selection, savedTemplates)
-    if (!preset) {
-      return
-    }
-
-    setIncludeBackup(Boolean(preset.secondaryAddress))
-    setCustomSecondaryAddress("")
-    setSaveCustomTemplate(false)
-    form.setFieldValue(DNS_SERVER_FIELD_NAMES.displayName, preset.name)
-    form.setFieldValue(DNS_SERVER_FIELD_NAMES.address, preset.primaryAddress)
-    form.setFieldValue(
-      DNS_SERVER_FIELD_NAMES.tag,
-      makeTechnicalId(
-        preset.technicalSeed,
-        configServers.map((server) => server.tag),
-        { prefix: "dns" }
-      )
+    const transition = getDnsServerPresetTransition(
+      selection,
+      selection === "custom"
+        ? customPresetStateRef.current.draft
+        : form.state.values,
+      savedTemplates,
+      configServers.map((server) => server.tag)
     )
+    if (!transition) {
+      return
+    }
+
+    setPresetSelection(selection)
+    setIncludeBackup(
+      selection === "custom"
+        ? customPresetStateRef.current.includeBackup
+        : transition.includeBackup
+    )
+    setCustomSecondaryAddress(
+      selection === "custom"
+        ? customPresetStateRef.current.secondaryAddress
+        : transition.secondaryAddress
+    )
+    setSaveCustomTemplate(
+      selection === "custom"
+        ? customPresetStateRef.current.saveCustomTemplate
+        : false
+    )
+    form.setFieldValue(
+      DNS_SERVER_FIELD_NAMES.displayName,
+      transition.fields.displayName
+    )
+    form.setFieldValue(DNS_SERVER_FIELD_NAMES.tag, transition.fields.tag)
+    form.setFieldValue(DNS_SERVER_FIELD_NAMES.type, transition.fields.type)
+    form.setFieldValue(
+      DNS_SERVER_FIELD_NAMES.address,
+      transition.fields.address
+    )
+    form.setFieldValue(DNS_SERVER_FIELD_NAMES.detour, transition.fields.detour)
   }
 
   return (

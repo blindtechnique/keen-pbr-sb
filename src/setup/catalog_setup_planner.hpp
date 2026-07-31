@@ -114,6 +114,14 @@ struct CatalogDnsRulePlanSummary {
     std::size_t insertion_index{0};
 };
 
+struct CatalogDnsServerPlanSummary {
+    std::string technical_id;
+    std::string display_name;
+    std::string address;
+    std::string detour;
+    bool created{false};
+};
+
 struct CatalogBlackholePlanSummary {
     std::string tag;
     bool created{false};
@@ -129,6 +137,7 @@ struct CatalogSetupSummary {
     std::vector<CatalogDnsRulePlanSummary> dns_rules;
     std::optional<CatalogRouteRulePlanSummary> route_rule;
     std::optional<CatalogDnsRulePlanSummary> dns_rule;
+    std::optional<CatalogDnsServerPlanSummary> dns_server;
     std::optional<CatalogBlackholePlanSummary> blackhole;
 };
 

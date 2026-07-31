@@ -614,6 +614,16 @@ TEST_CASE(
                 .at("lists")
                 .at(0)
                 .at("has_inline_cidrs") == true);
+    REQUIRE(preview.at("summary").contains("dns_server"));
+    CHECK(
+        preview.at("summary").at("dns_server").at("technical_id") ==
+        "proxy_dns");
+    CHECK(
+        preview.at("summary").at("dns_server").at("detour") ==
+        "proxy");
+    CHECK(
+        preview.at("summary").at("dns_server").at("created") ==
+        false);
 
     const auto apply_response = client.Post(
         "/api/setup/catalog/apply",

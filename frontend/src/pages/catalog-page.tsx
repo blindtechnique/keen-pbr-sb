@@ -869,7 +869,8 @@ export function CatalogPage() {
                             ) ?? setupPreview.summary.route_rule.outbound)
                           : t("pages.catalog.setup.noRoute"),
                         dns: setupPreview.summary.dns_rule?.server
-                          ? (config?.dns?.servers?.find(
+                          ? (setupPreview.summary.dns_server?.display_name ??
+                            config?.dns?.servers?.find(
                               (server) =>
                                 server.tag ===
                                 setupPreview.summary.dns_rule?.server

@@ -958,6 +958,31 @@ components:
           type: integer
           minimum: 0
 
+    CatalogSetupDnsServerSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - technical_id
+        - display_name
+        - address
+        - detour
+        - created
+      properties:
+        technical_id:
+          type: string
+        display_name:
+          type: string
+        address:
+          type: string
+        detour:
+          type: string
+        created:
+          type: boolean
+          description: >
+            True when automatic catalogue setup will create this DNS server.
+            False means an existing server with the exact route detour is
+            reused without changing its definition.
+
     CatalogSetupBlackholeSummary:
       type: object
       additionalProperties: false
@@ -1001,6 +1026,12 @@ components:
             setup creates at most one DNS rule for each selected list.
           items:
             $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
+        dns_server:
+          $ref: "#/components/schemas/CatalogSetupDnsServerSummary"
+          description: >
+            DNS server reused or created atomically by automatic catalogue
+            setup. Existing unrelated and fallback DNS servers are not
+            modified.
         blackhole:
           $ref: "#/components/schemas/CatalogSetupBlackholeSummary"
 

@@ -360,6 +360,16 @@ nlohmann::json summary_json(const CatalogSetupPlan& plan) {
             {"insertion_index", dns.insertion_index},
         };
     }
+    if (plan.summary.dns_server.has_value()) {
+        const auto& dns = *plan.summary.dns_server;
+        summary["dns_server"] = {
+            {"technical_id", dns.technical_id},
+            {"display_name", dns.display_name},
+            {"address", dns.address},
+            {"detour", dns.detour},
+            {"created", dns.created},
+        };
+    }
     if (plan.summary.blackhole.has_value()) {
         summary["blackhole"] = {
             {"tag", plan.summary.blackhole->tag},
@@ -392,6 +402,8 @@ bool catalog_plan_has_changes(const CatalogSetupPlan& plan) {
            plan.summary.dns_rule.has_value() ||
            !plan.summary.route_rules.empty() ||
            !plan.summary.dns_rules.empty() ||
+           (plan.summary.dns_server.has_value() &&
+            plan.summary.dns_server->created) ||
            (plan.summary.blackhole.has_value() &&
             plan.summary.blackhole->created);
 }

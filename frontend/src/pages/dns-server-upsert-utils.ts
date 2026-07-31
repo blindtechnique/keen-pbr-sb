@@ -2,6 +2,11 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsServer } from "@/api/generated/model/dnsServer"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
 import type { PlainDnsTemplate } from "@/api/generated/model/plainDnsTemplate"
+import {
+  resolveDnsTemplateSelection,
+  type DnsPresetSelection,
+} from "@/components/dns/dns-preset-selection"
+import { makeTechnicalId } from "@/lib/technical-id"
 
 export type DnsServerDraft = {
   displayName: string
@@ -15,6 +20,15 @@ export type DnsServerBackupDraft = {
   displayName?: string
   tag: string
   address: string
+}
+
+export type DnsServerPresetTransition = {
+  fields: Pick<
+    DnsServerDraft,
+    "displayName" | "tag" | "type" | "address" | "detour"
+  >
+  includeBackup: boolean
+  secondaryAddress: string
 }
 
 export const MAX_PLAIN_DNS_TEMPLATES = 32
@@ -38,6 +52,46 @@ export function getDnsServerDraft(server?: DnsServer): DnsServerDraft {
     type: server.type ?? DnsServerType.static,
     address: server.address ?? "",
     detour: server.detour ?? "",
+  }
+}
+
+export function getDnsServerPresetTransition(
+  selection: DnsPresetSelection,
+  customDraft: DnsServerDraft,
+  savedTemplates: readonly PlainDnsTemplate[],
+  reservedTags: readonly string[]
+): DnsServerPresetTransition | null {
+  if (selection === "custom") {
+    return {
+      fields: {
+        displayName: customDraft.displayName,
+        tag: customDraft.tag,
+        type: DnsServerType.static,
+        address: customDraft.address,
+        detour: customDraft.detour,
+      },
+      includeBackup: false,
+      secondaryAddress: "",
+    }
+  }
+
+  const preset = resolveDnsTemplateSelection(selection, savedTemplates)
+  if (!preset) {
+    return null
+  }
+
+  return {
+    fields: {
+      displayName: preset.name,
+      tag: makeTechnicalId(preset.technicalSeed, reservedTags, {
+        prefix: "dns",
+      }),
+      type: DnsServerType.static,
+      address: preset.primaryAddress,
+      detour: customDraft.detour,
+    },
+    includeBackup: Boolean(preset.secondaryAddress),
+    secondaryAddress: "",
   }
 }
 

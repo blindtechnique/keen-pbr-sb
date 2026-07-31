@@ -6,7 +6,10 @@ import type { ListConfig } from "@/api/generated/model/listConfig"
 import { getDnsServerDisplayName } from "@/lib/dns-display"
 import { withListDisplayName } from "@/lib/list-display"
 import { makeTechnicalId } from "@/lib/technical-id"
-import { buildUpdatedConfigForDnsServerUpsert } from "@/pages/dns-server-upsert-utils"
+import {
+  buildUpdatedConfigForDnsServerUpsert,
+  normalizeDnsAddress,
+} from "@/pages/dns-server-upsert-utils"
 
 export type ListDraft = {
   displayName: string
@@ -30,6 +33,7 @@ export type QuickSetup = {
 export type RecommendedDnsTemplate = {
   name: string
   primaryAddress: string
+  secondaryAddress?: string
   technicalSeed: string
 }
 
@@ -83,13 +87,55 @@ export function addRecommendedDnsServer(
     return null
   }
 
+  const candidates = [
+    template.primaryAddress,
+    ...(template.secondaryAddress ? [template.secondaryAddress] : []),
+  ]
+  const candidateIdentity = (address: string) => {
+    const normalized =
+      normalizeDnsAddress(address) ?? address.trim().toLowerCase()
+    const ipv4WithPort =
+      /^(\d+\.\d+\.\d+\.\d+)(?::(\d+))?$/.exec(normalized)
+    if (ipv4WithPort) {
+      const host = ipv4WithPort[1]
+        .split(".")
+        .map((octet) => Number(octet))
+        .join(".")
+      return `${host}|${Number(ipv4WithPort[2] ?? "53")}`
+    }
+    const bracketedIpv6WithPort = /^\[([^\]]+)\]:(\d+)$/.exec(normalized)
+    if (bracketedIpv6WithPort) {
+      return `${bracketedIpv6WithPort[1]}|${Number(
+        bracketedIpv6WithPort[2]
+      )}`
+    }
+    return `${normalized}|53`
+  }
+  const candidateIdentities = new Set(candidates.map(candidateIdentity))
   const existing = (config.dns?.servers ?? []).find(
     (server) =>
       server.detour === normalizedOutboundTag &&
-      server.address === template.primaryAddress
+      Boolean(
+        server.address &&
+          candidateIdentities.has(candidateIdentity(server.address))
+      )
   )
   if (existing) {
     return { config, serverTag: existing.tag }
+  }
+
+  const occupiedIdentities = new Set(
+    (config.dns?.servers ?? [])
+      .filter((server) => server.type !== DnsServerType.keenetic)
+      .flatMap((server) =>
+        server.address ? [candidateIdentity(server.address)] : []
+      )
+  )
+  const address = candidates.find(
+    (candidate) => !occupiedIdentities.has(candidateIdentity(candidate))
+  )
+  if (!address) {
+    return null
   }
 
   const existingTags = (config.dns?.servers ?? []).map((server) => server.tag)
@@ -106,7 +152,7 @@ export function addRecommendedDnsServer(
     displayName: displayName || template.name,
     tag: serverTag,
     type: DnsServerType.static,
-    address: template.primaryAddress,
+    address,
     detour: normalizedOutboundTag,
   })
 

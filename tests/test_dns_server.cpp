@@ -40,6 +40,13 @@ TEST_CASE("parse: IPv4 port 65536 -> DnsError") {
     CHECK_THROWS_AS(parse_dns_address_str("1.2.3.4:65536"), DnsError);
 }
 
+TEST_CASE("parse: IPv4 octets with leading zeroes are rejected") {
+    CHECK_THROWS_AS(
+        parse_dns_address_str("008.008.008.008"),
+        DnsError);
+    CHECK_NOTHROW(parse_dns_address_str("0.0.0.0"));
+}
+
 // ---------------------------------------------------------------------------
 // IPv6 bare
 // ---------------------------------------------------------------------------
@@ -59,6 +66,13 @@ TEST_CASE("parse: [IPv6]:port -> parsed port") {
 TEST_CASE("parse: bracketed IPv6 without port -> port 53") {
     auto r = parse_dns_address_str("[::1]");
     CHECK(r.ip   == "::1");
+    CHECK(r.port == 53);
+}
+
+TEST_CASE("parse: IPv6 is returned in binary-canonical spelling") {
+    auto r = parse_dns_address_str(
+        "[2001:0DB8:0000:0000:0000:0000:0000:0001]:53");
+    CHECK(r.ip == "2001:db8::1");
     CHECK(r.port == 53);
 }
 
