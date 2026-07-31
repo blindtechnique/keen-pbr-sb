@@ -75,8 +75,15 @@ export function RouterInfoPanel() {
             <div className="text-[16px] leading-6 font-medium">
               {[info.vendor, info.model].filter(Boolean).join(" ")}
             </div>
-            <div className="text-xs text-muted-foreground">
-              {[info.hw_id, info.region, info.arch].filter(Boolean).join(" · ")}
+            <div className="min-w-0 text-xs text-muted-foreground sm:text-right">
+              <div>
+                {[info.hw_id, info.region, info.arch]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+              {info.cpu_model ? (
+                <div className="truncate">{info.cpu_model}</div>
+              ) : null}
             </div>
           </div>
 
@@ -124,11 +131,6 @@ export function RouterInfoPanel() {
               </Metric>
             ) : null}
           </dl>
-          {info.cpu_model ? (
-            <p className="truncate text-xs text-muted-foreground">
-              {info.cpu_model}
-            </p>
-          ) : null}
         </div>
       ) : null}
     </div>

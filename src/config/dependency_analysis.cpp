@@ -11,12 +11,6 @@ namespace {
 
 using TargetKey = std::pair<DependencyEntityKind, std::string>;
 
-bool has_non_list_route_condition(const RouteRule& rule) {
-    return rule.proto.has_value() || rule.dscp.has_value() ||
-           rule.src_port.has_value() || rule.dest_port.has_value() ||
-           rule.src_addr.has_value() || rule.dest_addr.has_value();
-}
-
 bool target_exists(const Config& config, const DependencyTarget& target) {
     switch (target.kind) {
     case DependencyEntityKind::List:
@@ -175,7 +169,7 @@ DependencyAnalysis analyze_dependencies(
         }
         if (removed_list_count > 0 &&
             removed_list_count == route_rule_lists(rule).size() &&
-            !has_non_list_route_condition(rule)) {
+            !route_rule_has_non_list_match_condition(rule)) {
             for (auto& reference : analysis.references) {
                 if (reference.dependent_kind ==
                         DependencyDependentKind::RoutingRule &&

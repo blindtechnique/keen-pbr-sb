@@ -19,6 +19,7 @@ export type DeleteImpactItem = {
 }
 
 type DeleteImpactDialogProps = {
+  children?: ReactNode
   confirmLabel: string
   description: string
   impactItems: DeleteImpactItem[]
@@ -30,6 +31,7 @@ type DeleteImpactDialogProps = {
 }
 
 export function DeleteImpactDialog({
+  children,
   confirmLabel,
   description,
   impactItems,
@@ -51,6 +53,8 @@ export function DeleteImpactDialog({
           </DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+
+        {children}
 
         {impactItems.length > 0 ? (
           <div className="max-h-72 overflow-y-auto rounded-lg border bg-muted/30 p-3">

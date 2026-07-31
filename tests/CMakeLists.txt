@@ -36,6 +36,7 @@ add_executable(keen-pbr-tests
   test_catalog_setup_planner.cpp
   test_config_writer.cpp
   test_dependency_analysis.cpp
+  test_list_delete_planner.cpp
   test_routing_state.cpp
   test_runtime_interface_inventory.cpp
   test_api_ndms_names.cpp
@@ -95,6 +96,7 @@ add_executable(keen-pbr-tests
   ../src/cmd/recover_persistent_state.cpp
   ../src/update/maintenance_lock.cpp
   ../src/config/dependency_analysis.cpp
+  ../src/config/list_delete_planner.cpp
   ../src/crash/crash_diagnostics.cpp
   ../src/config/routing_state.cpp
   ../src/firewall/iptables_verifier.cpp

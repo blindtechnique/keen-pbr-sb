@@ -75,6 +75,17 @@ inline bool route_rule_enabled(const RouteRule& rule) {
     return rule.enabled.value_or(true);
 }
 
+// Keep this predicate aligned with validate_route_rule_specs(). Protocol is a
+// modifier for a real match condition, not a standalone condition by itself.
+inline bool route_rule_has_non_list_match_condition(
+    const RouteRule& rule) {
+    return rule.dscp.has_value() ||
+           rule.src_port.has_value() ||
+           rule.dest_port.has_value() ||
+           rule.src_addr.has_value() ||
+           rule.dest_addr.has_value();
+}
+
 inline bool dns_rule_enabled(const DnsRule& rule) {
     return rule.enabled.value_or(true);
 }

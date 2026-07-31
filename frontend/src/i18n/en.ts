@@ -988,6 +988,20 @@ export const enTranslation = {
       add: "Add",
       added: "Lists added: {{count}}",
       installed: "Already added",
+      partial: "Partially added",
+      coveredByInstalled: "Included in “{{name}}”",
+      coveredBySelection: "Selected through “{{name}}”",
+      ipCompanionBadge: "+ IP",
+      ipCompanionHint:
+        "A separate IP set will be added together with the primary list ({{count}}).",
+      risks: {
+        title: "Please note",
+        broadTrafficScope:
+          "This list covers a very large part of the internet. All matching traffic will use the selected route.",
+        requiresAcceptance:
+          "A separate confirmation will be required before applying.",
+        unknown: "The catalogue reported a risk: {{code}}.",
+      },
       refreshState: {
         success: "Succeeded: {{date}}",
         attempt: "Last attempt: {{date}}",
@@ -2032,6 +2046,16 @@ export const enTranslation = {
         description:
           "Confirming this operation will make the following changes:",
         confirm: "Delete",
+        staged:
+          "Safe deletion was staged as a draft. Review the changes, then apply them.",
+        revisionChanged:
+          "The configuration changed in the meantime. The impact was recalculated from fresh data — review it again.",
+        referencesLabel: "What to do with dependencies",
+        referencesRemoveOption: "Remove references and orphaned rules",
+        referencesRemoveHint:
+          "References to the deleted lists will be removed. Rules with no other match condition will be deleted so the draft remains valid.",
+        referencesReplaceHint:
+          "Every reference will be safely rebound to “{{name}}”. Duplicate references will be merged automatically.",
         items: {
           listPrefix: "List",
           listSuffix: "will be deleted.",

@@ -116,6 +116,24 @@ TEST_CASE("list dependency analysis distinguishes modified and deleted rules") {
         DependencyConsequence::Delete));
 }
 
+TEST_CASE(
+    "protocol alone does not preserve a route rule after its list is deleted") {
+    auto config = dependency_fixture();
+    REQUIRE(config.route.has_value());
+    REQUIRE(config.route->rules.has_value());
+    config.route->rules->at(0).proto = "udp";
+
+    const auto analysis = analyze_dependencies(
+        config,
+        {{DependencyEntityKind::List, "ai", false}});
+
+    CHECK(has_reference(
+        analysis,
+        DependencyDependentKind::RoutingRule,
+        "0",
+        DependencyConsequence::Delete));
+}
+
 TEST_CASE("outbound dependency analysis includes urltest cascade and detours") {
     const auto analysis = analyze_dependencies(
         dependency_fixture(),

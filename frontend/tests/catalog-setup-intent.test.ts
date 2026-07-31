@@ -152,6 +152,8 @@ describe("catalog setup intent", () => {
       urlBacked: false,
       domainCount: 0,
       cidrCount: 2,
+      companionCount: 0,
+      hasIpCompanion: false,
     })
   })
 

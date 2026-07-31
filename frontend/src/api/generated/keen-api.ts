@@ -38,6 +38,8 @@ import type {
   DependencyAnalysisResponse,
   ErrorResponse,
   HealthResponse,
+  ListDeleteStageRequest,
+  ListDeleteStageResponse,
   ListRefreshRequest,
   ListRefreshResponse,
   NdmsInterfaceInventoryResponse,
@@ -847,6 +849,103 @@ export const usePostRecommendedListSetup = <TError = ErrorResponse,
         TContext
       > => {
       return useMutation(getPostRecommendedListSetupMutationOptions(options), queryClient);
+    }
+
+/**
+ * Builds the mutation from the server's visible configuration, rewrites route and DNS dependencies, validates the complete candidate, and stages it in memory only when base_revision still matches. A target without replacement_list_id is removed from dependent rules; route or DNS rules left without a valid match condition are deleted. This endpoint never saves, applies, or restarts the routing runtime.
+
+ * @summary Safely stage list deletion or replacement
+ */
+export type postListDeleteStageResponse200 = {
+  data: ListDeleteStageResponse
+  status: 200
+}
+
+export type postListDeleteStageResponse400 = {
+  data: ErrorResponse
+  status: 400
+}
+
+export type postListDeleteStageResponse409 = {
+  data: ErrorResponse
+  status: 409
+}
+
+export type postListDeleteStageResponseSuccess = (postListDeleteStageResponse200) & {
+  headers: Headers;
+};
+export type postListDeleteStageResponseError = (postListDeleteStageResponse400 | postListDeleteStageResponse409) & {
+  headers: Headers;
+};
+
+export type postListDeleteStageResponse = (postListDeleteStageResponseSuccess | postListDeleteStageResponseError)
+
+export const getPostListDeleteStageUrl = () => {
+
+
+
+
+  return `/api/setup/lists/delete/stage`
+}
+
+export const postListDeleteStage = async (listDeleteStageRequest: ListDeleteStageRequest, options?: RequestInit): Promise<postListDeleteStageResponse> => {
+
+  return apiFetch<postListDeleteStageResponse>(getPostListDeleteStageUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      listDeleteStageRequest,)
+  }
+);}
+
+
+
+
+export const getPostListDeleteStageMutationOptions = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListDeleteStage>>, TError,{data: ListDeleteStageRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof postListDeleteStage>>, TError,{data: ListDeleteStageRequest}, TContext> => {
+
+const mutationKey = ['postListDeleteStage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof postListDeleteStage>>, {data: ListDeleteStageRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  postListDeleteStage(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PostListDeleteStageMutationResult = NonNullable<Awaited<ReturnType<typeof postListDeleteStage>>>
+    export type PostListDeleteStageMutationBody = ListDeleteStageRequest
+    export type PostListDeleteStageMutationError = ErrorResponse
+
+    /**
+ * @summary Safely stage list deletion or replacement
+ */
+export const usePostListDeleteStage = <TError = ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof postListDeleteStage>>, TError,{data: ListDeleteStageRequest}, TContext>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof postListDeleteStage>>,
+        TError,
+        {data: ListDeleteStageRequest},
+        TContext
+      > => {
+      return useMutation(getPostListDeleteStageMutationOptions(options), queryClient);
     }
 
 /**

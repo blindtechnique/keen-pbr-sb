@@ -183,7 +183,7 @@ namespace api {
         std::string technical_id;
     };
 
-    struct Summary {
+    struct CatalogSetupSummaryClass {
         std::optional<CatalogSetupBlackholeSummary> blackhole;
         std::optional<CatalogSetupDnsRuleSummary> dns_rule;
         std::optional<std::vector<CatalogSetupDnsRuleSummary>> dns_rules;
@@ -193,7 +193,7 @@ namespace api {
         std::optional<std::vector<RouteRule>> route_rules;
     };
 
-    enum class Code : int { DNS_AUTOMATIC_UNAVAILABLE, DNS_DETOUR_MISMATCH, DNS_DETOUR_MISSING, DNS_IGNORED_FOR_BLOCK, SOURCE_DETOUR_NOT_APPLICABLE, SOURCE_DETOUR_NOT_FOUND, SOURCE_DETOUR_NOT_ROUTABLE };
+    enum class Code : int { BROAD_TRAFFIC_SCOPE, DNS_AUTOMATIC_UNAVAILABLE, DNS_DETOUR_MISMATCH, DNS_DETOUR_MISSING, DNS_IGNORED_FOR_BLOCK, SOURCE_DETOUR_NOT_APPLICABLE, SOURCE_DETOUR_NOT_FOUND, SOURCE_DETOUR_NOT_ROUTABLE };
 
     struct CatalogSetupWarningElement {
         Code code;
@@ -206,7 +206,7 @@ namespace api {
         std::string candidate_revision;
         std::string preview_token;
         bool requires_warning_acceptance;
-        Summary summary;
+        CatalogSetupSummaryClass summary;
         std::vector<CatalogSetupWarningElement> warnings;
     };
 
@@ -578,6 +578,31 @@ namespace api {
         std::string runtime_state_reason;
         HealthResponseStatus status;
         std::string version;
+    };
+
+    struct ListDeleteTargetElement {
+        std::string list_id;
+        std::optional<std::string> replacement_list_id;
+    };
+
+    struct ListDeleteStageRequest {
+        std::string base_revision;
+        std::vector<ListDeleteTargetElement> targets;
+    };
+
+    struct ListDeleteStageSummaryClass {
+        std::vector<std::string> deleted_lists;
+        int64_t rebound_references;
+        int64_t removed_dns_rules;
+        int64_t removed_route_rules;
+        int64_t updated_dns_rules;
+        int64_t updated_route_rules;
+    };
+
+    struct ListDeleteStageResponse {
+        std::string message;
+        bool staged;
+        ListDeleteStageSummaryClass summary;
     };
 
     struct ListRefreshRequest {
@@ -1031,7 +1056,7 @@ namespace api {
         std::optional<CatalogSetupPreviewRequest> catalog_setup_preview_request;
         std::optional<CatalogSetupPreviewResponse> catalog_setup_preview_response;
         std::optional<RouteRule> catalog_setup_route_rule_summary;
-        std::optional<Summary> catalog_setup_summary;
+        std::optional<CatalogSetupSummaryClass> catalog_setup_summary;
         std::optional<CatalogSetupWarningElement> catalog_setup_warning;
         std::optional<CheckStatus> check_status;
         std::optional<CircuitBreakerConfig> circuit_breaker_config;
@@ -1071,6 +1096,10 @@ namespace api {
         std::optional<LifecycleOperation> lifecycle_operation;
         std::optional<LifecycleOperationStageElement> lifecycle_operation_stage;
         std::optional<ListConfigValue> list_config;
+        std::optional<ListDeleteStageRequest> list_delete_stage_request;
+        std::optional<ListDeleteStageResponse> list_delete_stage_response;
+        std::optional<ListDeleteStageSummaryClass> list_delete_stage_summary;
+        std::optional<ListDeleteTargetElement> list_delete_target;
         std::optional<ListRefreshRequest> list_refresh_request;
         std::optional<ListRefreshResponse> list_refresh_response;
         std::optional<ListRefreshStateValue> list_refresh_state;
@@ -1178,8 +1207,8 @@ namespace api {
     void from_json(const json & j, RouteRule & x);
     void to_json(json & j, const RouteRule & x);
 
-    void from_json(const json & j, Summary & x);
-    void to_json(json & j, const Summary & x);
+    void from_json(const json & j, CatalogSetupSummaryClass & x);
+    void to_json(json & j, const CatalogSetupSummaryClass & x);
 
     void from_json(const json & j, CatalogSetupWarningElement & x);
     void to_json(json & j, const CatalogSetupWarningElement & x);
@@ -1309,6 +1338,18 @@ namespace api {
 
     void from_json(const json & j, HealthResponse & x);
     void to_json(json & j, const HealthResponse & x);
+
+    void from_json(const json & j, ListDeleteTargetElement & x);
+    void to_json(json & j, const ListDeleteTargetElement & x);
+
+    void from_json(const json & j, ListDeleteStageRequest & x);
+    void to_json(json & j, const ListDeleteStageRequest & x);
+
+    void from_json(const json & j, ListDeleteStageSummaryClass & x);
+    void to_json(json & j, const ListDeleteStageSummaryClass & x);
+
+    void from_json(const json & j, ListDeleteStageResponse & x);
+    void to_json(json & j, const ListDeleteStageResponse & x);
 
     void from_json(const json & j, ListRefreshRequest & x);
     void to_json(json & j, const ListRefreshRequest & x);
@@ -1817,7 +1858,7 @@ namespace api {
         j["technical_id"] = x.technical_id;
     }
 
-    inline void from_json(const json & j, Summary& x) {
+    inline void from_json(const json & j, CatalogSetupSummaryClass& x) {
         x.blackhole = get_stack_optional<CatalogSetupBlackholeSummary>(j, "blackhole");
         x.dns_rule = get_stack_optional<CatalogSetupDnsRuleSummary>(j, "dns_rule");
         x.dns_rules = get_stack_optional<std::vector<CatalogSetupDnsRuleSummary>>(j, "dns_rules");
@@ -1827,7 +1868,7 @@ namespace api {
         x.route_rules = get_stack_optional<std::vector<RouteRule>>(j, "route_rules");
     }
 
-    inline void to_json(json & j, const Summary & x) {
+    inline void to_json(json & j, const CatalogSetupSummaryClass & x) {
         j = json::object();
         j["blackhole"] = x.blackhole;
         j["dns_rule"] = x.dns_rule;
@@ -1856,7 +1897,7 @@ namespace api {
         x.candidate_revision = j.at("candidate_revision").get<std::string>();
         x.preview_token = j.at("preview_token").get<std::string>();
         x.requires_warning_acceptance = j.at("requires_warning_acceptance").get<bool>();
-        x.summary = j.at("summary").get<Summary>();
+        x.summary = j.at("summary").get<CatalogSetupSummaryClass>();
         x.warnings = j.at("warnings").get<std::vector<CatalogSetupWarningElement>>();
     }
 
@@ -2565,6 +2606,60 @@ namespace api {
         j["runtime_state_reason"] = x.runtime_state_reason;
         j["status"] = x.status;
         j["version"] = x.version;
+    }
+
+    inline void from_json(const json & j, ListDeleteTargetElement& x) {
+        x.list_id = j.at("list_id").get<std::string>();
+        x.replacement_list_id = get_stack_optional<std::string>(j, "replacement_list_id");
+    }
+
+    inline void to_json(json & j, const ListDeleteTargetElement & x) {
+        j = json::object();
+        j["list_id"] = x.list_id;
+        j["replacement_list_id"] = x.replacement_list_id;
+    }
+
+    inline void from_json(const json & j, ListDeleteStageRequest& x) {
+        x.base_revision = j.at("base_revision").get<std::string>();
+        x.targets = j.at("targets").get<std::vector<ListDeleteTargetElement>>();
+    }
+
+    inline void to_json(json & j, const ListDeleteStageRequest & x) {
+        j = json::object();
+        j["base_revision"] = x.base_revision;
+        j["targets"] = x.targets;
+    }
+
+    inline void from_json(const json & j, ListDeleteStageSummaryClass& x) {
+        x.deleted_lists = j.at("deleted_lists").get<std::vector<std::string>>();
+        x.rebound_references = j.at("rebound_references").get<int64_t>();
+        x.removed_dns_rules = j.at("removed_dns_rules").get<int64_t>();
+        x.removed_route_rules = j.at("removed_route_rules").get<int64_t>();
+        x.updated_dns_rules = j.at("updated_dns_rules").get<int64_t>();
+        x.updated_route_rules = j.at("updated_route_rules").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const ListDeleteStageSummaryClass & x) {
+        j = json::object();
+        j["deleted_lists"] = x.deleted_lists;
+        j["rebound_references"] = x.rebound_references;
+        j["removed_dns_rules"] = x.removed_dns_rules;
+        j["removed_route_rules"] = x.removed_route_rules;
+        j["updated_dns_rules"] = x.updated_dns_rules;
+        j["updated_route_rules"] = x.updated_route_rules;
+    }
+
+    inline void from_json(const json & j, ListDeleteStageResponse& x) {
+        x.message = j.at("message").get<std::string>();
+        x.staged = j.at("staged").get<bool>();
+        x.summary = j.at("summary").get<ListDeleteStageSummaryClass>();
+    }
+
+    inline void to_json(json & j, const ListDeleteStageResponse & x) {
+        j = json::object();
+        j["message"] = x.message;
+        j["staged"] = x.staged;
+        j["summary"] = x.summary;
     }
 
     inline void from_json(const json & j, ListRefreshRequest& x) {
@@ -3365,7 +3460,7 @@ namespace api {
         x.catalog_setup_preview_request = get_stack_optional<CatalogSetupPreviewRequest>(j, "CatalogSetupPreviewRequest");
         x.catalog_setup_preview_response = get_stack_optional<CatalogSetupPreviewResponse>(j, "CatalogSetupPreviewResponse");
         x.catalog_setup_route_rule_summary = get_stack_optional<RouteRule>(j, "CatalogSetupRouteRuleSummary");
-        x.catalog_setup_summary = get_stack_optional<Summary>(j, "CatalogSetupSummary");
+        x.catalog_setup_summary = get_stack_optional<CatalogSetupSummaryClass>(j, "CatalogSetupSummary");
         x.catalog_setup_warning = get_stack_optional<CatalogSetupWarningElement>(j, "CatalogSetupWarning");
         x.check_status = get_stack_optional<CheckStatus>(j, "CheckStatus");
         x.circuit_breaker_config = get_stack_optional<CircuitBreakerConfig>(j, "CircuitBreakerConfig");
@@ -3405,6 +3500,10 @@ namespace api {
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "LifecycleOperation");
         x.lifecycle_operation_stage = get_stack_optional<LifecycleOperationStageElement>(j, "LifecycleOperationStage");
         x.list_config = get_stack_optional<ListConfigValue>(j, "ListConfig");
+        x.list_delete_stage_request = get_stack_optional<ListDeleteStageRequest>(j, "ListDeleteStageRequest");
+        x.list_delete_stage_response = get_stack_optional<ListDeleteStageResponse>(j, "ListDeleteStageResponse");
+        x.list_delete_stage_summary = get_stack_optional<ListDeleteStageSummaryClass>(j, "ListDeleteStageSummary");
+        x.list_delete_target = get_stack_optional<ListDeleteTargetElement>(j, "ListDeleteTarget");
         x.list_refresh_request = get_stack_optional<ListRefreshRequest>(j, "ListRefreshRequest");
         x.list_refresh_response = get_stack_optional<ListRefreshResponse>(j, "ListRefreshResponse");
         x.list_refresh_state = get_stack_optional<ListRefreshStateValue>(j, "ListRefreshState");
@@ -3531,6 +3630,10 @@ namespace api {
         j["LifecycleOperation"] = x.lifecycle_operation;
         j["LifecycleOperationStage"] = x.lifecycle_operation_stage;
         j["ListConfig"] = x.list_config;
+        j["ListDeleteStageRequest"] = x.list_delete_stage_request;
+        j["ListDeleteStageResponse"] = x.list_delete_stage_response;
+        j["ListDeleteStageSummary"] = x.list_delete_stage_summary;
+        j["ListDeleteTarget"] = x.list_delete_target;
         j["ListRefreshRequest"] = x.list_refresh_request;
         j["ListRefreshResponse"] = x.list_refresh_response;
         j["ListRefreshState"] = x.list_refresh_state;
@@ -3634,7 +3737,8 @@ namespace api {
     }
 
     inline void from_json(const json & j, Code & x) {
-        if (j == "dns_automatic_unavailable") x = Code::DNS_AUTOMATIC_UNAVAILABLE;
+        if (j == "broad_traffic_scope") x = Code::BROAD_TRAFFIC_SCOPE;
+        else if (j == "dns_automatic_unavailable") x = Code::DNS_AUTOMATIC_UNAVAILABLE;
         else if (j == "dns_detour_mismatch") x = Code::DNS_DETOUR_MISMATCH;
         else if (j == "dns_detour_missing") x = Code::DNS_DETOUR_MISSING;
         else if (j == "dns_ignored_for_block") x = Code::DNS_IGNORED_FOR_BLOCK;
@@ -3646,6 +3750,7 @@ namespace api {
 
     inline void to_json(json & j, const Code & x) {
         switch (x) {
+            case Code::BROAD_TRAFFIC_SCOPE: j = "broad_traffic_scope"; break;
             case Code::DNS_AUTOMATIC_UNAVAILABLE: j = "dns_automatic_unavailable"; break;
             case Code::DNS_DETOUR_MISMATCH: j = "dns_detour_mismatch"; break;
             case Code::DNS_DETOUR_MISSING: j = "dns_detour_missing"; break;

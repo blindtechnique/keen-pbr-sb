@@ -151,6 +151,22 @@ Config make_recommended_list_config(
     return config;
 }
 
+Config make_list_delete_config(
+    const std::string& listen) {
+    Config config = make_recommended_list_config(
+        listen, "legacy");
+
+    ListConfig replacement;
+    replacement.display_name = "Replacement list";
+    replacement.domains =
+        std::vector<std::string>{"replacement.test"};
+    REQUIRE(config.lists.has_value());
+    config.lists->emplace(
+        "replacement", std::move(replacement));
+    validate_config(config);
+    return config;
+}
+
 struct FakeMaintenanceState {
     std::vector<std::string> events;
     std::optional<MaintenanceLockErrorKind> acquire_error;
@@ -480,6 +496,167 @@ TEST_CASE(
     CHECK(apply_calls == 0U);
     CHECK_FALSE(store.staged_cas_snapshot().has_value());
     CHECK(nlohmann::json(store.active_config()) == replacement_json);
+}
+
+TEST_CASE(
+    "list delete endpoint atomically stages backend-planned rebinds") {
+    constexpr int api_port = 18263;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config active =
+        make_list_delete_config("127.0.0.1:12121");
+    ConfigStore store(active);
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        active,
+        nlohmann::json(active).dump(),
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string&, const std::string&) {});
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto initial_response = client.Get("/api/config");
+    REQUIRE(initial_response != nullptr);
+    REQUIRE(initial_response->status == 200);
+    const std::string base_revision =
+        nlohmann::json::parse(initial_response->body)
+            .at("revision")
+            .get<std::string>();
+
+    const auto stage_response = client.Post(
+        "/api/setup/lists/delete/stage",
+        nlohmann::json{
+            {"base_revision", base_revision},
+            {"targets",
+             nlohmann::json::array(
+                 {{{"list_id", "legacy"},
+                   {"replacement_list_id",
+                    "replacement"}}})},
+        }
+            .dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(stage_response != nullptr);
+    CHECK(stage_response->status == 200);
+    const nlohmann::json response =
+        nlohmann::json::parse(stage_response->body);
+    CHECK(response.at("staged") == true);
+    CHECK(
+        response.at("summary")
+            .at("rebound_references") == 2);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(apply_calls == 0U);
+    CHECK(store.active_config().lists->count("legacy") == 1U);
+
+    const auto staged = store.staged_cas_snapshot();
+    REQUIRE(staged.has_value());
+    REQUIRE(staged->config.lists.has_value());
+    CHECK(staged->config.lists->count("legacy") == 0U);
+    CHECK(
+        staged->config.lists->count("replacement") == 1U);
+    REQUIRE(staged->config.route.has_value());
+    REQUIRE(staged->config.route->rules.has_value());
+    CHECK(
+        route_rule_lists(
+            staged->config.route->rules->front()) ==
+        std::vector<std::string>{"replacement"});
+    REQUIRE(staged->config.dns.has_value());
+    REQUIRE(staged->config.dns->rules.has_value());
+    CHECK(
+        staged->config.dns->rules->front().list ==
+        std::vector<std::string>{"replacement"});
+}
+
+TEST_CASE(
+    "list delete endpoint preserves a newer visible draft on CAS conflict") {
+    constexpr int api_port = 18264;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config active =
+        make_list_delete_config("127.0.0.1:12121");
+    ConfigStore store(active);
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        active,
+        nlohmann::json(active).dump(),
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+
+    const std::string stale_revision =
+        store.visible_snapshot().revision;
+    Config newer = active;
+    newer.api->listen = "127.0.0.1:12122";
+    store.stage_config(
+        newer, nlohmann::json(newer).dump());
+    const std::string newer_revision =
+        store.visible_snapshot().revision;
+    REQUIRE(newer_revision != stale_revision);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [](const std::string&, const std::string&) {});
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response = client.Post(
+        "/api/setup/lists/delete/stage",
+        nlohmann::json{
+            {"base_revision", stale_revision},
+            {"targets",
+             nlohmann::json::array(
+                 {{{"list_id", "legacy"}}})},
+        }
+            .dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 409);
+    const nlohmann::json error =
+        nlohmann::json::parse(response->body);
+    CHECK(error.at("reason") == "base_revision_mismatch");
+    CHECK(error.at("current_base_revision") == newer_revision);
+    CHECK(error.at("draft_preserved") == true);
+    CHECK(error.at("staged") == false);
+    CHECK(begin_calls == 0U);
+    CHECK(finish_calls == 0U);
+    CHECK(apply_calls == 0U);
+    CHECK(
+        store.visible_snapshot().revision ==
+        newer_revision);
+    CHECK(store.visible_snapshot().is_draft);
 }
 
 TEST_CASE(

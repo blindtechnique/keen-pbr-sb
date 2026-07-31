@@ -201,6 +201,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/setup/lists/delete/stage:
+    post:
+      summary: Safely stage list deletion or replacement
+      description: >
+        Builds the mutation from the server's visible configuration, rewrites
+        route and DNS dependencies, validates the complete candidate, and
+        stages it in memory only when base_revision still matches. A target
+        without replacement_list_id is removed from dependent rules; route or
+        DNS rules left without a valid match condition are deleted. This
+        endpoint never saves, applies, or restarts the routing runtime.
+      operationId: postListDeleteStage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListDeleteStageRequest"
+      responses:
+        "200":
+          description: Backend-planned deletion staged successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListDeleteStageResponse"
+        "400":
+          description: Invalid target, replacement, or resulting configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The visible configuration changed after the dialog was opened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/config/dependencies:
     post:
       summary: Analyze configuration dependencies before a mutation
@@ -840,6 +877,7 @@ components:
             - dns_ignored_for_block
             - dns_detour_missing
             - dns_detour_mismatch
+            - broad_traffic_scope
         path:
           type: string
         message:
@@ -3385,6 +3423,88 @@ components:
           description: >
             Revision returned by GET /api/config for the exact visible
             configuration on which this candidate is based.
+
+    ListDeleteTarget:
+      type: object
+      additionalProperties: false
+      required: [list_id]
+      properties:
+        list_id:
+          type: string
+          minLength: 1
+          description: Technical ID of the list to delete.
+        replacement_list_id:
+          type: string
+          minLength: 1
+          description: >
+            Optional existing list technical ID that replaces every route and
+            DNS reference to list_id before list_id is deleted.
+
+    ListDeleteStageRequest:
+      type: object
+      additionalProperties: false
+      required: [base_revision, targets]
+      properties:
+        base_revision:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: >
+            Revision returned by GET /api/config for the visible configuration
+            on which the delete confirmation was based.
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/ListDeleteTarget"
+
+    ListDeleteStageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - deleted_lists
+        - rebound_references
+        - removed_route_rules
+        - updated_route_rules
+        - removed_dns_rules
+        - updated_dns_rules
+      properties:
+        deleted_lists:
+          type: array
+          items:
+            type: string
+        rebound_references:
+          type: integer
+          format: int64
+          minimum: 0
+        removed_route_rules:
+          type: integer
+          format: int64
+          minimum: 0
+        updated_route_rules:
+          type: integer
+          format: int64
+          minimum: 0
+        removed_dns_rules:
+          type: integer
+          format: int64
+          minimum: 0
+        updated_dns_rules:
+          type: integer
+          format: int64
+          minimum: 0
+
+    ListDeleteStageResponse:
+      type: object
+      additionalProperties: false
+      required: [message, staged, summary]
+      properties:
+        message:
+          type: string
+        staged:
+          type: boolean
+        summary:
+          $ref: "#/components/schemas/ListDeleteStageSummary"
 
     DependencyEntityKind:
       title: DependencyEntityKind

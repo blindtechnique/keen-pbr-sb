@@ -139,12 +139,19 @@ nlohmann::json whatsapp_preset() {
     return {
         {"id", "whatsapp"},
         {"name", "WhatsApp"},
+        {"routingCompanions",
+         {{{"id", "whatsapp_ip"},
+           {"name", "WhatsApp IP"},
+           {"sourcePresetId", "whatsapp-ip-source"},
+           {"include", "ip_cidrs"},
+           {"catalogIdentityId",
+            "meta#routing-companion:meta_whatsapp_ip"},
+           {"suppressDirectSelection", true}}}},
         {"engines",
          {
              {"dns",
               {
                   {"domains", whatsapp_domains()},
-                  {"subnets", whatsapp_ipv4_cidrs()},
               }},
              {"singbox",
               {
@@ -158,6 +165,16 @@ nlohmann::json whatsapp_preset() {
     };
 }
 
+nlohmann::json whatsapp_ip_source_preset() {
+    return {
+        {"id", "whatsapp-ip-source"},
+        {"name", "WhatsApp IP source"},
+        {"hidden", true},
+        {"engines",
+         {{"dns", {{"subnets", whatsapp_ipv4_cidrs()}}}}},
+    };
+}
+
 nlohmann::json meta_preset() {
     return {
         {"id", "meta"},
@@ -166,7 +183,7 @@ nlohmann::json meta_preset() {
         {"routingCompanions",
          {{{"id", "meta_whatsapp_ip"},
            {"name", "Meta / WhatsApp IP"},
-           {"sourcePresetId", "whatsapp"},
+           {"sourcePresetId", "whatsapp-ip-source"},
            {"include", "ip_cidrs"},
            {"suppressDirectSelection", true}}}},
         {"engines",
@@ -277,7 +294,10 @@ TEST_CASE(
     const nlohmann::json catalog = {
         {"catalog_id", "test:meta-companion"},
         {"presets",
-         nlohmann::json::array({meta_preset(), whatsapp_preset()})},
+         nlohmann::json::array(
+             {meta_preset(),
+              whatsapp_preset(),
+              whatsapp_ip_source_preset()})},
     };
     const auto plan = plan_catalog_setup(
         meta_outbound_intent(),
@@ -380,7 +400,10 @@ TEST_CASE(
     const nlohmann::json catalog = {
         {"catalog_id", "test:meta-companion-upgrade"},
         {"presets",
-         nlohmann::json::array({meta_preset(), whatsapp_preset()})},
+         nlohmann::json::array(
+             {meta_preset(),
+              whatsapp_preset(),
+              whatsapp_ip_source_preset()})},
     };
     const auto initial = plan_catalog_setup(
         meta_outbound_intent(), catalog, base_config());
@@ -486,7 +509,10 @@ TEST_CASE(
     const nlohmann::json catalog = {
         {"catalog_id", "test:meta-covered-selection"},
         {"presets",
-         nlohmann::json::array({meta_preset(), whatsapp_preset()})},
+         nlohmann::json::array(
+             {meta_preset(),
+              whatsapp_preset(),
+              whatsapp_ip_source_preset()})},
     };
 
     const auto plan =
@@ -507,6 +533,197 @@ TEST_CASE(
         std::vector<std::string>{"meta"});
 }
 
+TEST_CASE(
+    "WhatsApp installs the shared IP companion and Meta reuses it") {
+    auto whatsapp_intent = outbound_intent();
+    whatsapp_intent.selections = {{"whatsapp", std::nullopt}};
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:shared-whatsapp-ip"},
+        {"presets",
+         nlohmann::json::array(
+             {meta_preset(),
+              whatsapp_preset(),
+              whatsapp_ip_source_preset()})},
+    };
+
+    const auto whatsapp = plan_catalog_setup(
+        whatsapp_intent, catalog, base_config());
+    REQUIRE(whatsapp.candidate.lists.has_value());
+    REQUIRE(whatsapp.candidate.lists->size() == 2U);
+    CHECK(whatsapp.candidate.lists->count("whatsapp") == 1U);
+    CHECK(whatsapp.candidate.lists->count("whatsapp_ip") == 1U);
+    CHECK_FALSE(
+        whatsapp.candidate.lists->at("whatsapp").ip_cidrs.has_value());
+    CHECK(
+        whatsapp.candidate.lists->at("whatsapp_ip").ip_cidrs ==
+        std::optional<std::vector<std::string>>{
+            whatsapp_ipv4_cidrs()});
+    CHECK(
+        whatsapp.candidate.lists->at("whatsapp_ip").catalog_identity ==
+        catalog_preset_identity(
+            catalog,
+            "meta#routing-companion:meta_whatsapp_ip"));
+
+    const auto meta = plan_catalog_setup(
+        meta_outbound_intent(), catalog, whatsapp.candidate);
+    REQUIRE(meta.candidate.lists.has_value());
+    CHECK(meta.candidate.lists->size() == 3U);
+    CHECK(meta.candidate.lists->count("meta") == 1U);
+    CHECK(meta.candidate.lists->count("whatsapp_ip") == 1U);
+    CHECK(meta.candidate.lists->count("meta_whatsapp_ip") == 0U);
+    REQUIRE(meta.summary.lists.size() == 2U);
+    CHECK_FALSE(meta.summary.lists[0].already_installed);
+    CHECK(meta.summary.lists[1].already_installed);
+    CHECK(meta.summary.lists[1].technical_id == "whatsapp_ip");
+    REQUIRE(meta.summary.route_rules.size() == 1U);
+    CHECK(
+        meta.candidate.route->rules
+            ->at(meta.summary.route_rules.front().insertion_index)
+            .list ==
+        std::vector<std::string>{"meta"});
+}
+
+TEST_CASE(
+    "existing combined WhatsApp list migrates to the shared IP companion") {
+    auto intent = outbound_intent();
+    intent.selections = {{"whatsapp", std::nullopt}};
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:whatsapp-split-migration"},
+        {"presets",
+         nlohmann::json::array(
+             {whatsapp_preset(), whatsapp_ip_source_preset()})},
+    };
+    auto active = base_config();
+    ListConfig combined;
+    combined.display_name = "WhatsApp";
+    combined.catalog_identity =
+        catalog_preset_identity(catalog, "whatsapp");
+    combined.url =
+        "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs";
+    combined.domains = whatsapp_domains();
+    combined.ip_cidrs = whatsapp_ipv4_cidrs();
+    active.lists =
+        std::map<std::string, ListConfig>{{"whatsapp", combined}};
+    validate_config(active);
+
+    const auto migrated =
+        plan_catalog_setup(intent, catalog, active);
+    REQUIRE(migrated.candidate.lists.has_value());
+    CHECK(migrated.candidate.lists->size() == 2U);
+    CHECK_FALSE(
+        migrated.candidate.lists->at("whatsapp").ip_cidrs.has_value());
+    CHECK(
+        migrated.candidate.lists->at("whatsapp_ip").ip_cidrs ==
+        std::optional<std::vector<std::string>>{
+            whatsapp_ipv4_cidrs()});
+    REQUIRE(migrated.summary.lists.size() == 2U);
+    CHECK(migrated.summary.lists[0].already_installed);
+    CHECK_FALSE(migrated.summary.lists[1].already_installed);
+}
+
+TEST_CASE(
+    "catalog covers suppress selected descendants transitively") {
+    auto aggregate = routing_preset("all", "All services");
+    aggregate["covers"] = {"middle"};
+    auto middle = routing_preset("middle", "Middle");
+    middle["covers"] = {"leaf"};
+    auto leaf = routing_preset("leaf", "Leaf");
+    auto intent = outbound_intent();
+    intent.selections = {
+        {"leaf", std::nullopt},
+        {"all", std::nullopt},
+        {"middle", std::nullopt},
+    };
+
+    const auto plan = plan_catalog_setup(
+        intent,
+        nlohmann::json::array({aggregate, middle, leaf}),
+        base_config());
+    REQUIRE(plan.summary.lists.size() == 1U);
+    CHECK(plan.summary.lists.front().preset_id == "all");
+    CHECK(plan.candidate.lists->size() == 1U);
+}
+
+TEST_CASE("catalog covers metadata is a validated DAG") {
+    SUBCASE("unknown child") {
+        auto parent = routing_preset("parent", "Parent");
+        parent["covers"] = {"missing"};
+        auto intent = outbound_intent();
+        intent.selections = {{"parent", std::nullopt}};
+        CHECK_THROWS_WITH_AS(
+            plan_catalog_setup(
+                intent,
+                nlohmann::json::array({parent}),
+                base_config()),
+            "Catalogue preset 'parent' covers unknown preset 'missing'",
+            CatalogSetupPlanError);
+    }
+
+    SUBCASE("self cover") {
+        auto parent = routing_preset("parent", "Parent");
+        parent["covers"] = {"parent"};
+        auto intent = outbound_intent();
+        intent.selections = {{"parent", std::nullopt}};
+        CHECK_THROWS_WITH_AS(
+            plan_catalog_setup(
+                intent,
+                nlohmann::json::array({parent}),
+                base_config()),
+            "Catalogue preset 'parent' must not cover itself",
+            CatalogSetupPlanError);
+    }
+
+    SUBCASE("cycle") {
+        auto first = routing_preset("first", "First");
+        first["covers"] = {"second"};
+        auto second = routing_preset("second", "Second");
+        second["covers"] = {"first"};
+        auto intent = outbound_intent();
+        intent.selections = {{"first", std::nullopt}};
+        CHECK_THROWS_AS(
+            plan_catalog_setup(
+                intent,
+                nlohmann::json::array({first, second}),
+                base_config()),
+            CatalogSetupPlanError);
+    }
+
+    SUBCASE("duplicate edge") {
+        auto parent = routing_preset("parent", "Parent");
+        parent["covers"] = {"child", "child"};
+        auto child = routing_preset("child", "Child");
+        auto intent = outbound_intent();
+        intent.selections = {{"parent", std::nullopt}};
+        CHECK_THROWS_WITH_AS(
+            plan_catalog_setup(
+                intent,
+                nlohmann::json::array({parent, child}),
+                base_config()),
+            "Catalogue preset 'parent' covers 'child' more than once",
+            CatalogSetupPlanError);
+    }
+}
+
+TEST_CASE(
+    "broad traffic catalog warning requires the existing acceptance flow") {
+    auto cloudflare = routing_preset("cloudflare", "Cloudflare");
+    cloudflare["warnings"] = nlohmann::json::array(
+        {{{"code", "broad_traffic_scope"},
+          {"requiresAcceptance", true}}});
+    auto intent = outbound_intent();
+    intent.selections = {{"cloudflare", std::nullopt}};
+
+    const auto plan = plan_catalog_setup(
+        intent,
+        nlohmann::json::array({cloudflare}),
+        base_config());
+    REQUIRE(plan.warnings.size() == 1U);
+    CHECK(
+        plan.warnings.front().code ==
+        CatalogSetupWarningCode::broad_traffic_scope);
+    CHECK(plan.warnings.front().path == "catalog.presets.cloudflare");
+}
+
 TEST_CASE("routing companion metadata rejects unsafe or missing sources") {
     SUBCASE("unknown inline source") {
         auto meta = meta_preset();
@@ -514,7 +731,8 @@ TEST_CASE("routing companion metadata rejects unsafe or missing sources") {
         CHECK_THROWS_WITH_AS(
             plan_catalog_setup(
                 meta_outbound_intent(),
-                nlohmann::json::array({std::move(meta)}),
+                nlohmann::json::array(
+                    {std::move(meta), whatsapp_preset()}),
                 base_config()),
             "Catalogue routing companion references unknown preset 'missing'",
             CatalogSetupPlanError);
@@ -528,7 +746,9 @@ TEST_CASE("routing companion metadata rejects unsafe or missing sources") {
             plan_catalog_setup(
                 meta_outbound_intent(),
                 nlohmann::json::array(
-                    {std::move(meta), whatsapp_preset()}),
+                    {std::move(meta),
+                     whatsapp_preset(),
+                     whatsapp_ip_source_preset()}),
                 base_config()),
             "Catalogue routing companion must define exactly one of url or "
             "sourcePresetId",

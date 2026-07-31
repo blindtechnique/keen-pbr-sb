@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import type { TFunction } from "i18next"
 import { useMemo, useRef, useState } from "react"
 import { AlertTriangleIcon, RefreshCw, ShieldCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
@@ -31,11 +32,15 @@ import { getApiErrorMessage } from "@/lib/api-errors"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { cn } from "@/lib/utils"
 import {
-  findCatalogPresetInstalledListId,
+  applyCatalogSelectionToggle,
+  canSelectCatalogPreset,
   getCatalogPresetSourceSummary,
   getCatalogSelectionMode,
   isCatalogRoutableOutboundType,
+  resolveCatalogAncestorMap,
+  resolveCatalogInstallStates,
   type CatalogPreset,
+  type CatalogWarning,
 } from "@/pages/catalog-model"
 import {
   applyCatalogSetup,
@@ -142,12 +147,25 @@ function formatRefreshTimestamp(value: string | undefined, fallback: string) {
   }).format(parsed)
 }
 
+function catalogWarningMessage(warning: CatalogWarning, t: TFunction): string {
+  switch (warning.code) {
+    case "broad_traffic_scope":
+      return t("pages.catalog.risks.broadTrafficScope")
+    default:
+      return (
+        warning.message ??
+        t("pages.catalog.risks.unknown", { code: warning.code })
+      )
+  }
+}
+
 export function CatalogPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
   const configQuery = useGetConfig()
   const config = selectConfig(configQuery.data)
+  const configuredLists = config?.lists
   const listRefreshState = selectListRefreshState(configQuery.data)
   const configMutationPending = useConfigMutationPending()
 
@@ -278,22 +296,43 @@ export function CatalogPage() {
   })
 
   const presets = catalogQuery.data?.presets ?? EMPTY_PRESETS
+  const displayPresets = useMemo(
+    () => presets.filter((preset) => !preset.hidden),
+    [presets]
+  )
   const selectedMode = getCatalogSelectionMode(presets, selected)
-  const installedListIdByPresetId = new Map(
-    presets.flatMap((preset) => {
-      const listId = findCatalogPresetInstalledListId(preset, config?.lists)
-      return listId ? [[preset.id, listId] as const] : []
-    })
+  const installStateByPresetId = resolveCatalogInstallStates(
+    presets,
+    configuredLists
+  )
+  const selectedAncestorByPresetId = resolveCatalogAncestorMap(
+    presets,
+    selected
+  )
+  const selectedCatalogWarnings = useMemo(
+    () =>
+      presets.flatMap((preset) => {
+        if (!selected.has(preset.id)) {
+          return []
+        }
+        return (preset.warnings ?? []).map((warning) => ({
+          key: `${preset.id}:${warning.code}`,
+          presetName: preset.name,
+          message: catalogWarningMessage(warning, t),
+          requiresAcceptance: warning.requiresAcceptance ?? false,
+        }))
+      }),
+    [presets, selected, t]
   )
 
   const categories = useMemo(() => {
-    const present = new Set(presets.map((preset) => preset.category))
+    const present = new Set(displayPresets.map((preset) => preset.category))
     return CATEGORY_ORDER.filter((key) => present.has(key))
-  }, [presets])
+  }, [displayPresets])
 
   const categoryTabs = useMemo<SectionTab<string>[]>(() => {
     const counts = new Map<string, number>()
-    for (const preset of presets) {
+    for (const preset of displayPresets) {
       if (preset.category) {
         counts.set(preset.category, (counts.get(preset.category) ?? 0) + 1)
       }
@@ -303,7 +342,7 @@ export function CatalogPage() {
       {
         value: "all",
         label: t("pages.catalog.categories.all"),
-        count: presets.length,
+        count: displayPresets.length,
       },
       ...categories.map((key) => ({
         value: key,
@@ -311,7 +350,7 @@ export function CatalogPage() {
         count: counts.get(key) ?? 0,
       })),
     ]
-  }, [categories, presets, t])
+  }, [categories, displayPresets, t])
   const [category, setCategory] = useSectionTab(
     categoryTabs.map((tab) => tab.value),
     "all"
@@ -319,23 +358,17 @@ export function CatalogPage() {
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase()
-    return presets.filter(
+    return displayPresets.filter(
       (preset) =>
         (category === "all" || preset.category === category) &&
         (needle === "" || preset.name.toLowerCase().includes(needle))
     )
-  }, [presets, category, search])
+  }, [displayPresets, category, search])
 
   const toggle = (id: string) => {
-    setSelected((previous) => {
-      const next = new Set(previous)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
-      return next
-    })
+    setSelected((previous) =>
+      applyCatalogSelectionToggle(presets, previous, id)
+    )
   }
 
   const openAddDialog = () => {
@@ -399,6 +432,9 @@ export function CatalogPage() {
   }
 
   const setupWarningMessage = (warning: CatalogSetupWarning) => {
+    if ((warning.code as string) === "broad_traffic_scope") {
+      return t("pages.catalog.risks.broadTrafficScope")
+    }
     switch (warning.code) {
       case "source_detour_not_found":
         return t("pages.catalog.setup.warnings.sourceDetourNotFound")
@@ -518,11 +554,20 @@ export function CatalogPage() {
         {visible.map((preset) => {
           const sourceSummary = getCatalogPresetSourceSummary(preset)
           const blocks = preset.engines?.singbox?.action === "reject"
-          const installedListId = installedListIdByPresetId.get(preset.id)
+          const installState = installStateByPresetId.get(preset.id)
+          const installedListId = installState?.primaryListId
           const installedList = installedListId
             ? config?.lists?.[installedListId]
             : undefined
-          const installed = Boolean(installedListId)
+          const selectedAncestor = selectedAncestorByPresetId.get(preset.id)
+          const exactlyInstalled = installState?.kind === "installed"
+          const selectionUnavailable = !canSelectCatalogPreset(
+            installState,
+            selectedAncestor
+          )
+          const warningMessages = (preset.warnings ?? []).map((warning) =>
+            catalogWarningMessage(warning, t)
+          )
           const refreshState = installedListId
             ? listRefreshState[installedListId]
             : undefined
@@ -533,24 +578,58 @@ export function CatalogPage() {
 
           return (
             <label
-              className="flex cursor-pointer items-center gap-3 px-3 py-2.5 text-sm hover:bg-secondary"
+              className={cn(
+                "flex items-center gap-3 px-3 py-2.5 text-sm",
+                selectionUnavailable
+                  ? "cursor-not-allowed"
+                  : "cursor-pointer hover:bg-secondary"
+              )}
               key={preset.id}
             >
               <input
                 checked={selected.has(preset.id)}
                 className="size-4 accent-[var(--primary)]"
+                disabled={selectionUnavailable}
                 onChange={() => toggle(preset.id)}
                 type="checkbox"
               />
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 items-center gap-2">
                   <span className="truncate">{preset.name}</span>
-                  {installed ? (
+                  {exactlyInstalled ? (
                     <span className="shrink-0 text-xs font-medium text-success">
                       {t("pages.catalog.installed")}
                     </span>
+                  ) : installState?.kind === "partial" ? (
+                    <span className="shrink-0 text-xs font-medium text-warning-foreground">
+                      {t("pages.catalog.partial")}
+                    </span>
+                  ) : installState?.kind === "covered" &&
+                    installState.coveredBy ? (
+                    <span className="shrink-0 text-xs font-medium text-primary">
+                      {t("pages.catalog.coveredByInstalled", {
+                        name: installState.coveredBy.name,
+                      })}
+                    </span>
+                  ) : selectedAncestor ? (
+                    <span className="shrink-0 text-xs font-medium text-primary">
+                      {t("pages.catalog.coveredBySelection", {
+                        name: selectedAncestor.name,
+                      })}
+                    </span>
                   ) : null}
                 </span>
+                {preset.notice ? (
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    {preset.notice}
+                  </span>
+                ) : null}
+                {warningMessages.length > 0 ? (
+                  <span className="mt-1 flex items-start gap-1.5 text-xs text-warning-foreground">
+                    <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                    <span>{warningMessages.join(" ")}</span>
+                  </span>
+                ) : null}
                 {installedList?.url ? (
                   <CatalogListRefreshSummary
                     detour={refreshDetour}
@@ -558,21 +637,34 @@ export function CatalogPage() {
                   />
                 ) : null}
               </span>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {sourceSummary.urlBacked
-                  ? t("pages.catalog.ruleSet")
-                  : sourceSummary.domainCount > 0 && sourceSummary.cidrCount > 0
-                    ? t("pages.catalog.domainsAndCidrs", {
-                        domains: sourceSummary.domainCount,
-                        cidrs: sourceSummary.cidrCount,
-                      })
-                    : sourceSummary.cidrCount > 0
-                      ? t("pages.catalog.cidrs", {
-                          count: sourceSummary.cidrCount,
+              <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <span>
+                  {sourceSummary.urlBacked
+                    ? t("pages.catalog.ruleSet")
+                    : sourceSummary.domainCount > 0 &&
+                        sourceSummary.cidrCount > 0
+                      ? t("pages.catalog.domainsAndCidrs", {
+                          domains: sourceSummary.domainCount,
+                          cidrs: sourceSummary.cidrCount,
                         })
-                      : t("pages.catalog.domains", {
-                          count: sourceSummary.domainCount,
-                        })}
+                      : sourceSummary.cidrCount > 0
+                        ? t("pages.catalog.cidrs", {
+                            count: sourceSummary.cidrCount,
+                          })
+                        : t("pages.catalog.domains", {
+                            count: sourceSummary.domainCount,
+                          })}
+                </span>
+                {sourceSummary.hasIpCompanion ? (
+                  <span
+                    className="rounded-sm bg-primary/10 px-1.5 py-0.5 font-medium text-primary"
+                    title={t("pages.catalog.ipCompanionHint", {
+                      count: sourceSummary.companionCount,
+                    })}
+                  >
+                    {t("pages.catalog.ipCompanionBadge")}
+                  </span>
+                ) : null}
               </span>
               <span
                 className={cn(
@@ -590,6 +682,26 @@ export function CatalogPage() {
           )
         })}
       </div>
+
+      {selectedCatalogWarnings.length > 0 ? (
+        <Alert variant="warning">
+          <AlertTriangleIcon className="size-4" />
+          <AlertTitle>{t("pages.catalog.risks.title")}</AlertTitle>
+          <AlertDescription>
+            <ul className="mt-1 space-y-1">
+              {selectedCatalogWarnings.map((notice) => (
+                <li key={notice.key}>
+                  <span className="font-medium">{notice.presetName}:</span>{" "}
+                  {notice.message}
+                  {notice.requiresAcceptance
+                    ? ` ${t("pages.catalog.risks.requiresAcceptance")}`
+                    : null}
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <BottomActionBar contentClassName="justify-between">
         <span className="text-[13px] text-muted-foreground">

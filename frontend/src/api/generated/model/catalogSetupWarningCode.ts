@@ -17,4 +17,5 @@ export const CatalogSetupWarningCode = {
   dns_ignored_for_block: 'dns_ignored_for_block',
   dns_detour_missing: 'dns_detour_missing',
   dns_detour_mismatch: 'dns_detour_mismatch',
+  broad_traffic_scope: 'broad_traffic_scope',
 } as const;

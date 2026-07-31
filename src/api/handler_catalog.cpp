@@ -13,6 +13,7 @@
 #include <fstream>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
 #include <sys/stat.h>
 
@@ -110,6 +111,41 @@ const nlohmann::json* find_preset(
         }
     }
     return nullptr;
+}
+
+void append_missing_covered_presets(
+    nlohmann::json& upstream_presets,
+    const nlohmann::json& bundled_presets) {
+    // The downloaded AWG Manager catalogue is allowed to evolve independently
+    // from our relationship overlay. Keep every bundled child used by `covers`
+    // available even when upstream renames or temporarily removes that preset;
+    // otherwise one unrelated remote change would invalidate the whole graph.
+    while (true) {
+        std::set<std::string> missing_ids;
+        for (const auto& preset : upstream_presets) {
+            if (!preset.is_object()) continue;
+            const auto covers = preset.find("covers");
+            if (covers == preset.end() || !covers->is_array()) continue;
+            for (const auto& child : *covers) {
+                if (!child.is_string()) continue;
+                const auto& child_id =
+                    child.get_ref<const std::string&>();
+                if (find_preset(upstream_presets, child_id) == nullptr) {
+                    missing_ids.insert(child_id);
+                }
+            }
+        }
+
+        bool appended = false;
+        for (const auto& child_id : missing_ids) {
+            const auto* bundled_child =
+                find_preset(bundled_presets, child_id);
+            if (bundled_child == nullptr) continue;
+            upstream_presets.push_back(*bundled_child);
+            appended = true;
+        }
+        if (!appended) return;
+    }
 }
 
 const nlohmann::json* dns_subnets(
@@ -210,19 +246,7 @@ nlohmann::json load_catalog_snapshot_locked() {
         response["presets"] =
             enrich_catalog_with_routing_companions(
                 std::move(presets), bundled);
-        if (response["presets"].is_array()) {
-            for (auto& preset : response["presets"]) {
-                if (!preset.is_object()) continue;
-                const auto id = preset.find("id");
-                if (id == preset.end() || !id->is_string() ||
-                    id->get_ref<const std::string&>().empty()) {
-                    continue;
-                }
-                preset["catalog_identity"] =
-                    setup::catalog_preset_identity(
-                        response, id->get_ref<const std::string&>());
-            }
-        }
+        add_catalog_identities(response);
     } catch (const std::exception&) {
         response["presets"] = nlohmann::json::array();
         response["error"] = "catalogue is unavailable";
@@ -234,6 +258,55 @@ nlohmann::json load_catalog_snapshot_locked() {
 
 } // namespace
 
+void add_catalog_identities(nlohmann::json& snapshot) {
+    if (!snapshot.is_object()) return;
+    const auto presets = snapshot.find("presets");
+    if (presets == snapshot.end() || !presets->is_array()) return;
+    for (auto& preset : *presets) {
+        if (!preset.is_object()) continue;
+        const auto id = preset.find("id");
+        if (id == preset.end() || !id->is_string() ||
+            id->get_ref<const std::string&>().empty()) {
+            continue;
+        }
+        const auto& parent_id =
+            id->get_ref<const std::string&>();
+        preset["catalog_identity"] =
+            setup::catalog_preset_identity(snapshot, parent_id);
+        const auto companions =
+            preset.find("routingCompanions");
+        if (companions == preset.end() ||
+            !companions->is_array()) {
+            continue;
+        }
+        for (auto& companion : *companions) {
+            if (!companion.is_object()) continue;
+            const auto companion_id = companion.find("id");
+            if (companion_id == companion.end() ||
+                !companion_id->is_string() ||
+                companion_id->get_ref<const std::string&>().empty()) {
+                continue;
+            }
+            std::string identity_id =
+                parent_id + "#routing-companion:" +
+                companion_id->get_ref<const std::string&>();
+            const auto explicit_identity =
+                companion.find("catalogIdentityId");
+            if (explicit_identity != companion.end() &&
+                explicit_identity->is_string() &&
+                !explicit_identity
+                     ->get_ref<const std::string&>()
+                     .empty()) {
+                identity_id =
+                    explicit_identity->get_ref<const std::string&>();
+            }
+            companion["catalog_identity"] =
+                setup::catalog_preset_identity(
+                    snapshot, identity_id);
+        }
+    }
+}
+
 nlohmann::json enrich_catalog_with_routing_companions(
     nlohmann::json upstream_presets,
     const nlohmann::json& bundled_presets) {
@@ -244,13 +317,20 @@ nlohmann::json enrich_catalog_with_routing_companions(
 
     for (const auto& bundled_parent : bundled_presets) {
         if (!bundled_parent.is_object()) continue;
-        const auto companions =
-            bundled_parent.find("routingCompanions");
-        if (companions == bundled_parent.end() ||
-            !companions->is_array() ||
-            companions->empty()) {
+        const bool owns_companions =
+            bundled_parent.contains("routingCompanions");
+        const bool owns_covers =
+            bundled_parent.contains("covers");
+        const bool owns_warnings =
+            bundled_parent.contains("warnings");
+        const bool owns_hidden =
+            bundled_parent.contains("hidden");
+        if (!owns_companions && !owns_covers &&
+            !owns_warnings && !owns_hidden) {
             continue;
         }
+        const auto companions =
+            bundled_parent.find("routingCompanions");
         const auto parent_id_value =
             bundled_parent.find("id");
         if (parent_id_value == bundled_parent.end() ||
@@ -267,13 +347,34 @@ nlohmann::json enrich_catalog_with_routing_companions(
             upstream_presets.push_back(bundled_parent);
             upstream_parent = &upstream_presets.back();
         } else {
-            (*upstream_parent)["routingCompanions"] =
-                *companions;
-            // Once IP matching is delegated to a companion, the primary must
-            // not retain stale upstream subnets and route them twice.
-            align_dns_subnets(*upstream_parent, bundled_parent);
+            if (owns_companions) {
+                (*upstream_parent)["routingCompanions"] =
+                    *companions;
+                // Once IP matching is delegated to a companion, the primary
+                // must not retain stale upstream subnets and route them twice.
+                align_dns_subnets(*upstream_parent, bundled_parent);
+            }
+            if (owns_covers) {
+                (*upstream_parent)["covers"] =
+                    bundled_parent.at("covers");
+            }
+            if (owns_warnings) {
+                (*upstream_parent)["warnings"] =
+                    bundled_parent.at("warnings");
+                if (bundled_parent.contains("notice")) {
+                    (*upstream_parent)["notice"] =
+                        bundled_parent.at("notice");
+                }
+            }
+            if (owns_hidden) {
+                (*upstream_parent)["hidden"] =
+                    bundled_parent.at("hidden");
+            }
         }
 
+        if (!owns_companions || !companions->is_array()) {
+            continue;
+        }
         for (const auto& companion : *companions) {
             if (!companion.is_object()) continue;
             const auto source_id_value =
@@ -303,6 +404,8 @@ nlohmann::json enrich_catalog_with_routing_companions(
             }
         }
     }
+    append_missing_covered_presets(
+        upstream_presets, bundled_presets);
     return upstream_presets;
 }
 

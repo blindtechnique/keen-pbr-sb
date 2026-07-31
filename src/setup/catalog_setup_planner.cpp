@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -30,6 +31,7 @@ struct ParsedPreset {
     bool dns_eligible{true};
     bool allow_legacy_adoption{true};
     bool reconcile_managed_sources{false};
+    bool broad_traffic_scope_warning{false};
 };
 
 struct ResolvedPreset {
@@ -45,6 +47,8 @@ struct CatalogPresetEntry {
 
 using CatalogPresetIndex =
     std::map<std::string, std::vector<CatalogPresetEntry>>;
+using CatalogCoverGraph =
+    std::map<std::string, std::vector<std::string>>;
 
 [[noreturn]] void fail(CatalogSetupErrorCode code,
                        std::string path,
@@ -197,6 +201,151 @@ const nlohmann::json& preset_array(const nlohmann::json& snapshot) {
         CatalogSetupErrorCode::invalid_catalog_snapshot,
         "catalog",
         "Catalogue snapshot must be an array or contain a presets array");
+}
+
+CatalogPresetIndex index_catalog_presets(
+    const nlohmann::json& presets) {
+    CatalogPresetIndex result;
+    for (std::size_t index = 0; index < presets.size(); ++index) {
+        const auto& entry = presets.at(index);
+        if (!entry.is_object()) continue;
+        const auto id = entry.find("id");
+        if (id == entry.end() || !id->is_string()) {
+            if (entry.contains("covers") ||
+                entry.contains("routingCompanions") ||
+                entry.contains("warnings") ||
+                entry.contains("hidden")) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    "catalog.presets[" + std::to_string(index) + "].id",
+                    "Catalogue metadata owner must contain a string id");
+            }
+            continue;
+        }
+        const auto value = trim_ascii(id->get<std::string>());
+        if (value.empty()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                "catalog.presets[" + std::to_string(index) + "].id",
+                "Catalogue preset id must not be empty");
+        }
+        auto& entries = result[value];
+        entries.push_back({&entry, index});
+        if (entries.size() > 1U) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                "catalog.presets[" + std::to_string(index) + "].id",
+                "Authoritative catalogue contains duplicate id '" +
+                    value + "'");
+        }
+    }
+    return result;
+}
+
+CatalogCoverGraph parse_cover_graph(
+    const CatalogPresetIndex& catalog) {
+    CatalogCoverGraph graph;
+    for (const auto& [id, entries] : catalog) {
+        const auto& entry = entries.front();
+        const auto path =
+            "catalog.presets[" + std::to_string(entry.index) + "].covers";
+        const auto covers = entry.preset->find("covers");
+        if (covers == entry.preset->end() || covers->is_null()) {
+            graph.emplace(id, std::vector<std::string>{});
+            continue;
+        }
+        if (!covers->is_array()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                path,
+                "Catalogue covers must be an array");
+        }
+
+        std::vector<std::string> children;
+        children.reserve(covers->size());
+        std::set<std::string> unique;
+        for (std::size_t index = 0; index < covers->size(); ++index) {
+            const auto& child = covers->at(index);
+            if (!child.is_string() ||
+                trim_ascii(child.get<std::string>()).empty()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + "[" + std::to_string(index) + "]",
+                    "Catalogue cover id must be a non-empty string");
+            }
+            const auto child_id =
+                trim_ascii(child.get<std::string>());
+            if (child_id == id) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + "[" + std::to_string(index) + "]",
+                    "Catalogue preset '" + id +
+                        "' must not cover itself");
+            }
+            if (catalog.count(child_id) == 0U) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + "[" + std::to_string(index) + "]",
+                    "Catalogue preset '" + id +
+                        "' covers unknown preset '" + child_id + "'");
+            }
+            if (!unique.insert(child_id).second) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + "[" + std::to_string(index) + "]",
+                    "Catalogue preset '" + id +
+                        "' covers '" + child_id + "' more than once");
+            }
+            children.push_back(std::move(child_id));
+        }
+        graph.emplace(id, std::move(children));
+    }
+
+    enum class VisitState {
+        unseen,
+        visiting,
+        done,
+    };
+    std::map<std::string, VisitState> states;
+    std::function<void(const std::string&)> visit =
+        [&](const std::string& id) {
+            const auto state = states[id];
+            if (state == VisitState::done) return;
+            if (state == VisitState::visiting) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    "catalog.presets",
+                    "Catalogue covers contain a cycle at preset '" +
+                        id + "'");
+            }
+            states[id] = VisitState::visiting;
+            for (const auto& child : graph.at(id)) {
+                visit(child);
+            }
+            states[id] = VisitState::done;
+        };
+    for (const auto& [id, _] : graph) visit(id);
+    return graph;
+}
+
+bool catalog_transitively_covers(
+    const CatalogCoverGraph& graph,
+    const std::string& parent,
+    const std::string& candidate) {
+    std::vector<std::string> pending{parent};
+    std::set<std::string> visited;
+    while (!pending.empty()) {
+        auto current = std::move(pending.back());
+        pending.pop_back();
+        if (!visited.insert(current).second) continue;
+        const auto found = graph.find(current);
+        if (found == graph.end()) continue;
+        for (const auto& child : found->second) {
+            if (child == candidate) return true;
+            pending.push_back(child);
+        }
+    }
+    return false;
 }
 
 std::string catalog_source_identity(const nlohmann::json& snapshot) {
@@ -478,6 +627,67 @@ bool parse_reject_action(const nlohmann::json& preset,
         "Unsupported catalogue action '" + value + "'");
 }
 
+bool parse_broad_traffic_scope_warning(
+    const nlohmann::json& preset,
+    const std::string& path) {
+    const auto warnings = preset.find("warnings");
+    if (warnings == preset.end() || warnings->is_null()) return false;
+    if (!warnings->is_array()) {
+        fail(
+            CatalogSetupErrorCode::malformed_preset,
+            path + ".warnings",
+            "Catalogue warnings must be an array");
+    }
+
+    bool broad_scope = false;
+    for (std::size_t index = 0; index < warnings->size(); ++index) {
+        const auto warning_path =
+            path + ".warnings[" + std::to_string(index) + "]";
+        const auto& warning = warnings->at(index);
+        if (!warning.is_object()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                warning_path,
+                "Catalogue warning must be an object");
+        }
+        const auto code = warning.find("code");
+        if (code == warning.end() || !code->is_string() ||
+            trim_ascii(code->get<std::string>()).empty()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                warning_path + ".code",
+                "Catalogue warning code must be a non-empty string");
+        }
+        if (code->get_ref<const std::string&>() !=
+            "broad_traffic_scope") {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                warning_path + ".code",
+                "Unsupported catalogue warning code '" +
+                    code->get<std::string>() + "'");
+        }
+        const auto requires_acceptance =
+            warning.find("requiresAcceptance");
+        if (requires_acceptance == warning.end() ||
+            !requires_acceptance->is_boolean() ||
+            !requires_acceptance->get<bool>()) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                warning_path + ".requiresAcceptance",
+                "Broad traffic scope warning must require explicit "
+                "acceptance");
+        }
+        if (broad_scope) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                warning_path + ".code",
+                "Broad traffic scope warning is duplicated");
+        }
+        broad_scope = true;
+    }
+    return broad_scope;
+}
+
 ParsedPreset parse_preset(const nlohmann::json& preset,
                           const std::string& expected_id,
                           std::size_t index) {
@@ -516,6 +726,8 @@ ParsedPreset parse_preset(const nlohmann::json& preset,
     result.domains = parse_domains(preset, path);
     result.ip_cidrs = parse_subnets(preset, path);
     result.rejects = parse_reject_action(preset, path);
+    result.broad_traffic_scope_warning =
+        parse_broad_traffic_scope_warning(preset, path);
     return result;
 }
 
@@ -585,6 +797,30 @@ std::vector<ParsedPreset> parse_routing_companions(
 
         companion.catalog_identity_id =
             parsed_parent.id + "#routing-companion:" + companion.id;
+        const auto explicit_identity =
+            definition.find("catalogIdentityId");
+        if (explicit_identity != definition.end()) {
+            if (!explicit_identity->is_string() ||
+                trim_ascii(
+                    explicit_identity->get<std::string>()).empty()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".catalogIdentityId",
+                    "Catalogue routing companion catalogIdentityId must be "
+                    "a non-empty string");
+            }
+            const auto identity_id =
+                trim_ascii(explicit_identity->get<std::string>());
+            if (identity_id.find("#routing-companion:") ==
+                std::string::npos) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    path + ".catalogIdentityId",
+                    "Catalogue routing companion catalogIdentityId must "
+                    "identify a routing companion");
+            }
+            companion.catalog_identity_id = identity_id;
+        }
         companion.rejects = parsed_parent.rejects;
         companion.dns_eligible = false;
         companion.reconcile_managed_sources = true;
@@ -722,27 +958,22 @@ std::vector<ParsedPreset> select_presets(
     }
 
     const auto& presets = preset_array(snapshot);
-    CatalogPresetIndex catalog_entries;
-    for (std::size_t index = 0; index < presets.size(); ++index) {
-        const auto& entry = presets.at(index);
-        if (!entry.is_object()) continue;
-        const auto id = entry.find("id");
-        if (id == entry.end() || !id->is_string()) continue;
-        const auto& value = id->get_ref<const std::string&>();
-        auto& entries = catalog_entries[value];
-        entries.push_back({&entry, index});
-        if (requested.find(value) != requested.end() &&
-            entries.size() > 1U) {
-            fail(
-                CatalogSetupErrorCode::malformed_preset,
-                "catalog.presets[" + std::to_string(index) + "].id",
-                "Authoritative catalogue contains duplicate selected id '" +
-                    value + "'");
-        }
-    }
+    const auto catalog_entries =
+        index_catalog_presets(presets);
+    const auto cover_graph =
+        parse_cover_graph(catalog_entries);
 
     std::set<std::string> suppressed_selections;
     for (const auto& selection : intent.selections) {
+        for (const auto& candidate : intent.selections) {
+            if (selection.preset_id != candidate.preset_id &&
+                catalog_transitively_covers(
+                    cover_graph,
+                    selection.preset_id,
+                    candidate.preset_id)) {
+                suppressed_selections.insert(candidate.preset_id);
+            }
+        }
         const auto parent = catalog_entries.find(selection.preset_id);
         if (parent == catalog_entries.end() ||
             parent->second.empty()) {
@@ -788,6 +1019,23 @@ std::vector<ParsedPreset> select_presets(
                     "' is absent from the authoritative snapshot");
         }
         const auto& entry = found->second.front();
+        const auto hidden = entry.preset->find("hidden");
+        if (hidden != entry.preset->end()) {
+            if (!hidden->is_boolean()) {
+                fail(
+                    CatalogSetupErrorCode::malformed_preset,
+                    "catalog.presets[" + std::to_string(entry.index) +
+                        "].hidden",
+                    "Catalogue preset hidden must be a boolean");
+            }
+            if (hidden->get<bool>()) {
+                fail(
+                    CatalogSetupErrorCode::preset_not_found,
+                    "intent.selections",
+                    "Catalogue preset '" + id +
+                        "' is an internal source and cannot be selected");
+            }
+        }
         auto parsed =
             parse_preset(*entry.preset, id, entry.index);
         if (!parsed.url && parsed.domains.empty() &&
@@ -811,7 +1059,40 @@ std::vector<ParsedPreset> select_presets(
             std::make_move_iterator(companions.begin()),
             std::make_move_iterator(companions.end()));
     }
-    return result;
+
+    // Multiple visible presets may intentionally share one package-managed
+    // routing companion. Resolve it once, but reject identity collisions that
+    // would otherwise alias different source content to one list.
+    std::vector<ParsedPreset> unique_result;
+    unique_result.reserve(result.size());
+    std::map<std::string, std::size_t> identity_positions;
+    for (auto& preset : result) {
+        const auto existing =
+            identity_positions.find(preset.catalog_identity_id);
+        if (existing == identity_positions.end()) {
+            identity_positions.emplace(
+                preset.catalog_identity_id,
+                unique_result.size());
+            unique_result.push_back(std::move(preset));
+            continue;
+        }
+        const auto& previous = unique_result[existing->second];
+        if (previous.url != preset.url ||
+            normalized_values(previous.domains) !=
+                normalized_values(preset.domains) ||
+            normalized_values(previous.ip_cidrs) !=
+                normalized_values(preset.ip_cidrs) ||
+            previous.rejects != preset.rejects ||
+            previous.dns_eligible != preset.dns_eligible) {
+            fail(
+                CatalogSetupErrorCode::malformed_preset,
+                "catalog.presets",
+                "Catalogue routing companion identity '" +
+                    preset.catalog_identity_id +
+                    "' resolves to conflicting content");
+        }
+    }
+    return unique_result;
 }
 
 std::string sanitize_technical_id(const std::string& value,
@@ -1153,6 +1434,19 @@ CatalogSetupPlan plan_catalog_setup(
     Config candidate = active_config;
     CatalogSetupPlan plan;
     plan.summary.mode = intent.mode;
+    std::set<std::string> emitted_catalog_warnings;
+    for (const auto& preset : presets) {
+        if (preset.broad_traffic_scope_warning &&
+            emitted_catalog_warnings.insert(preset.id).second) {
+            plan.warnings.push_back({
+                CatalogSetupWarningCode::broad_traffic_scope,
+                "catalog.presets." + preset.id,
+                "Catalogue preset '" + preset.name +
+                    "' covers a very large share of Internet traffic; all "
+                    "matching traffic will use the selected route",
+            });
+        }
+    }
 
     const auto active_lists =
         active_config.lists.value_or(
@@ -1237,10 +1531,16 @@ CatalogSetupPlan plan_catalog_setup(
             const auto& active_list =
                 active_lists.at(*item.existing_technical_id);
             if (preset.reconcile_managed_sources &&
-                active_list.catalog_identity ==
-                    item.catalog_identity) {
+                (!active_list.catalog_identity.has_value() ||
+                 active_list.catalog_identity ==
+                     item.catalog_identity)) {
                 auto& managed =
                     lists.at(*item.existing_technical_id);
+                // Exact legacy source adoption remains supported, but once a
+                // parent gains package-owned companions it must be upgraded
+                // atomically. Otherwise old inline CIDRs would be routed both
+                // by the parent and by its new shared IP companion.
+                managed.catalog_identity = item.catalog_identity;
                 managed.url = preset.url;
                 managed.domains =
                     preset.domains.empty()

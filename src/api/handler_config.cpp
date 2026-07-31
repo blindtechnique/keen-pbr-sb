@@ -9,6 +9,7 @@
 #include "../backup/restore_transaction.hpp"
 #include "../config/config.hpp"
 #include "../config/config_writer.hpp"
+#include "../config/list_delete_planner.hpp"
 #include "../crypto/sha256.hpp"
 #include "../log/logger.hpp"
 #include "../setup/catalog_setup_planner.hpp"
@@ -1169,6 +1170,163 @@ static void register_config_handler_impl(
             response.status = api::ConfigUpdateResponseStatus::OK;
             response.message =
                 "Recommended list setup staged in memory";
+            return nlohmann::json(response).dump();
+        });
+
+    // List deletion is planned from the current visible snapshot on the
+    // backend. The client only chooses delete/rebind intent; it never rebuilds
+    // route or DNS rules locally.
+    server.post(
+        "/api/setup/lists/delete/stage",
+        [&ctx](const std::string& body) -> std::string {
+            api::ListDeleteStageRequest request;
+            try {
+                request =
+                    nlohmann::json::parse(body)
+                        .get<api::ListDeleteStageRequest>();
+            } catch (const nlohmann::json::exception& error) {
+                const std::string message =
+                    std::string("Invalid list delete request: ") +
+                    error.what();
+                throw ApiError(
+                    message,
+                    400,
+                    nlohmann::json{
+                        {"error", message},
+                        {"reason", "list_delete_invalid"},
+                    }
+                        .dump());
+            } catch (const std::exception& error) {
+                const std::string message =
+                    std::string("Invalid list delete request: ") +
+                    error.what();
+                throw ApiError(
+                    message,
+                    400,
+                    nlohmann::json{
+                        {"error", message},
+                        {"reason", "list_delete_invalid"},
+                    }
+                        .dump());
+            }
+
+            if (!is_lowercase_sha256_digest(
+                    request.base_revision)) {
+                const std::string message =
+                    "List deletion requires a lowercase SHA-256 "
+                    "base_revision";
+                throw ApiError(
+                    message,
+                    400,
+                    nlohmann::json{
+                        {"error", message},
+                        {"reason", "list_delete_invalid"},
+                    }
+                        .dump());
+            }
+
+            std::vector<ListDeleteTarget> targets;
+            targets.reserve(request.targets.size());
+            for (const auto& target : request.targets) {
+                targets.push_back(
+                    {
+                        target.list_id,
+                        target.replacement_list_id,
+                    });
+            }
+
+            ListDeletePlan plan;
+            try {
+                const VisibleConfigSnapshot visible =
+                    ctx.get_visible_config_snapshot();
+                if (visible.revision != request.base_revision) {
+                    const std::string message =
+                        "The visible configuration changed after this "
+                        "list deletion was opened";
+                    throw ApiError(
+                        message,
+                        409,
+                        nlohmann::json{
+                            {"error", message},
+                            {"reason", "base_revision_mismatch"},
+                            {"base_revision", request.base_revision},
+                            {"current_base_revision", visible.revision},
+                            {"draft_preserved", visible.is_draft},
+                            {"staged", false},
+                        }
+                            .dump());
+                }
+                plan = plan_list_delete(
+                    visible.config, targets);
+                validate_config(plan.config);
+                ctx.validate_candidate_config(plan.config);
+            } catch (const ApiError&) {
+                throw;
+            } catch (const ConfigValidationError& error) {
+                auto payload =
+                    make_validation_error_json(error);
+                payload["reason"] = "list_delete_invalid";
+                payload["staged"] = false;
+                throw ApiError(
+                    error.what(), 400, payload.dump());
+            } catch (const std::invalid_argument& error) {
+                throw ApiError(
+                    error.what(),
+                    400,
+                    nlohmann::json{
+                        {"error", error.what()},
+                        {"reason", "list_delete_invalid"},
+                        {"staged", false},
+                    }
+                        .dump());
+            }
+
+            std::string formatted_config =
+                serialize_config_pretty(plan.config);
+            ConfigOperationGuard config_operation(ctx);
+            if (!ctx.stage_config_if_visible_revision(
+                    request.base_revision,
+                    std::move(plan.config),
+                    std::move(formatted_config))) {
+                const VisibleConfigSnapshot current =
+                    ctx.get_visible_config_snapshot();
+                const std::string message =
+                    "The visible configuration changed while this list "
+                    "deletion was being prepared";
+                throw ApiError(
+                    message,
+                    409,
+                    nlohmann::json{
+                        {"error", message},
+                        {"reason", "base_revision_mismatch"},
+                        {"base_revision", request.base_revision},
+                        {"current_base_revision", current.revision},
+                        {"draft_preserved", current.is_draft},
+                        {"staged", false},
+                    }
+                        .dump());
+            }
+            config_operation.finish();
+
+            api::ListDeleteStageSummaryClass summary;
+            summary.deleted_lists =
+                std::move(plan.summary.deleted_lists);
+            summary.rebound_references = static_cast<int64_t>(
+                plan.summary.rebound_references);
+            summary.removed_route_rules = static_cast<int64_t>(
+                plan.summary.removed_route_rules);
+            summary.updated_route_rules = static_cast<int64_t>(
+                plan.summary.updated_route_rules);
+            summary.removed_dns_rules = static_cast<int64_t>(
+                plan.summary.removed_dns_rules);
+            summary.updated_dns_rules = static_cast<int64_t>(
+                plan.summary.updated_dns_rules);
+
+            api::ListDeleteStageResponse response;
+            response.message =
+                "List deletion staged in memory";
+            response.staged = true;
+            response.summary = std::move(summary);
             return nlohmann::json(response).dump();
         });
 

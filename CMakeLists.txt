@@ -261,6 +261,7 @@ set(SOURCES
   src/config/config.cpp
   src/config/config_writer.cpp
   src/config/dependency_analysis.cpp
+  src/config/list_delete_planner.cpp
   src/config/routing_state.cpp
   src/config/list_parser.cpp
   src/setup/catalog_setup_planner.cpp

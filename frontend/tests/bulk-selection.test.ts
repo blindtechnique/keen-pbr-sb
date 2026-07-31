@@ -12,7 +12,9 @@ import {
   getDnsServerDeleteReferenceInfo,
 } from "../src/pages/dns-servers-utils"
 import {
+  buildListDeleteTargets,
   buildUpdatedConfigForListsDelete,
+  getListDeleteImpact,
   listDeletesAltersRoutingOrDnsRefs,
 } from "../src/pages/lists-utils"
 import {
@@ -50,6 +52,7 @@ describe("config mutation pending helper", () => {
   test("is true with draft or apply mutations in flight", () => {
     expect(isConfigMutationPending(1, 0)).toBe(true)
     expect(isConfigMutationPending(0, 1)).toBe(true)
+    expect(isConfigMutationPending(0, 0, 1)).toBe(true)
   })
 })
 
@@ -151,6 +154,58 @@ describe("bulk list delete helpers", () => {
         outbound: "vpn",
       },
     ])
+  })
+
+  test("does not treat protocol alone as a valid condition after list removal", () => {
+    const config: ConfigObject = {
+      lists: { meta: { domains: ["whatsapp.com"] } },
+      route: {
+        rules: [{ list: ["meta"], proto: "udp", outbound: "vpn" }],
+      },
+    }
+
+    expect(getListDeleteImpact(config, ["meta"])).toMatchObject({
+      routeRuleIndexes: [0],
+      removedRouteRuleIndexes: [0],
+    })
+  })
+
+  test("builds narrow delete or rebind intents for the backend planner", () => {
+    expect(buildListDeleteTargets(["meta", "meta"], undefined)).toEqual([
+      { list_id: "meta", replacement_list_id: undefined },
+    ])
+    expect(buildListDeleteTargets(["meta", "instagram"], "social")).toEqual([
+      { list_id: "meta", replacement_list_id: "social" },
+      { list_id: "instagram", replacement_list_id: "social" },
+    ])
+  })
+
+  test("rebind preview keeps dependent rules and deduplicates the replacement", () => {
+    const config: ConfigObject = {
+      lists: {
+        meta: { domains: ["whatsapp.com"] },
+        social: { domains: ["example.com"] },
+      },
+      route: {
+        rules: [
+          {
+            list: ["meta", "social"],
+            proto: "udp",
+            outbound: "vpn",
+          },
+        ],
+      },
+      dns: {
+        rules: [{ list: ["meta"], server: "vpn_dns" }],
+      },
+    }
+
+    expect(getListDeleteImpact(config, ["meta"], "social")).toEqual({
+      dnsRuleIndexes: [0],
+      routeRuleIndexes: [0],
+      removedDnsRuleIndexes: [],
+      removedRouteRuleIndexes: [],
+    })
   })
 })
 

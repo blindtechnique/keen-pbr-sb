@@ -254,6 +254,8 @@ const char* warning_code_name(CatalogSetupWarningCode code) {
         return "dns_detour_missing";
     case CatalogSetupWarningCode::dns_detour_mismatch:
         return "dns_detour_mismatch";
+    case CatalogSetupWarningCode::broad_traffic_scope:
+        return "broad_traffic_scope";
     }
     return "unknown";
 }

@@ -815,6 +815,12 @@
     "iconSlug": "cloudflare",
     "category": "cloud",
     "notice": "Список покрывает сайты и сервисы на инфраструктуре Cloudflare (CDN, reverse proxy, Workers). Выбирая его, вы буквально заворачиваете в правило огромную часть интернета — используйте осознанно.",
+    "warnings": [
+      {
+        "code": "broad_traffic_scope",
+        "requiresAcceptance": true
+      }
+    ],
     "origin": "",
     "engines": {
       "dns": {
@@ -911,6 +917,12 @@
     "name": "Cloudflare IPs",
     "iconSlug": "cloudflare",
     "category": "cloud",
+    "warnings": [
+      {
+        "code": "broad_traffic_scope",
+        "requiresAcceptance": true
+      }
+    ],
     "origin": "builtin",
     "engines": {
       "dns": {
@@ -4429,7 +4441,7 @@
       {
         "id": "meta_whatsapp_ip",
         "name": "Meta / WhatsApp IP",
-        "sourcePresetId": "whatsapp",
+        "sourcePresetId": "whatsapp-ip-source",
         "include": "ip_cidrs",
         "suppressDirectSelection": true
       }
@@ -4712,7 +4724,38 @@
         "domains": [
           "whatsapp.com",
           "whatsapp.net"
+        ]
+      },
+      "singbox": {
+        "ruleSets": [
+          {
+            "tag": "geosite-whatsapp",
+            "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"
+          }
         ],
+        "action": "tunnel"
+      }
+    },
+    "routingCompanions": [
+      {
+        "id": "whatsapp_ip",
+        "name": "WhatsApp IP",
+        "sourcePresetId": "whatsapp-ip-source",
+        "include": "ip_cidrs",
+        "catalogIdentityId": "meta#routing-companion:meta_whatsapp_ip",
+        "suppressDirectSelection": true
+      }
+    ]
+  },
+  {
+    "id": "whatsapp-ip-source",
+    "name": "WhatsApp IP (служебный источник)",
+    "iconSlug": "whatsapp",
+    "category": "social",
+    "hidden": true,
+    "origin": "keen-pbr-sb",
+    "engines": {
+      "dns": {
         "subnets": [
           "31.13.24.0/21",
           "31.13.64.0/18",
@@ -4745,15 +4788,6 @@
           "189.247.71.0/24",
           "204.15.20.0/22"
         ]
-      },
-      "singbox": {
-        "ruleSets": [
-          {
-            "tag": "geosite-whatsapp",
-            "url": "https://repo.hoaxisr.ru/rulesets/srs/whatsapp.srs"
-          }
-        ],
-        "action": "tunnel"
       }
     }
   },

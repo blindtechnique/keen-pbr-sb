@@ -330,6 +330,19 @@ TEST_CASE(
                     "telegram.srs"}}}}}}}},
         },
         {
+            {"id", "category-ai"},
+            {"name", "All AI upstream"},
+            {"engines",
+             {{"dns", {{"domains", {"upstream-ai.example"}}}}}},
+        },
+        {
+            {"id", "cloudflare"},
+            {"name", "Cloudflare upstream"},
+            {"notice", "Upstream notice"},
+            {"engines",
+             {{"dns", {{"domains", {"upstream-cloudflare.example"}}}}}},
+        },
+        {
             {"id", "unrelated"},
             {"name", "Unrelated"},
             {"engines",
@@ -340,10 +353,11 @@ TEST_CASE(
         {
             {"id", "meta"},
             {"name", "Meta"},
+            {"covers", {"whatsapp"}},
             {"routingCompanions",
              {{{"id", "meta_whatsapp_ip"},
                {"name", "Meta / WhatsApp IP"},
-               {"sourcePresetId", "whatsapp"},
+               {"sourcePresetId", "whatsapp-ip-source"},
                {"include", "ip_cidrs"},
                {"suppressDirectSelection", true}}}},
             {"engines",
@@ -356,11 +370,43 @@ TEST_CASE(
         {
             {"id", "whatsapp"},
             {"name", "WhatsApp"},
+            {"routingCompanions",
+             {{{"id", "whatsapp_ip"},
+               {"name", "WhatsApp IP"},
+               {"sourcePresetId", "whatsapp-ip-source"},
+               {"include", "ip_cidrs"},
+               {"catalogIdentityId",
+                "meta#routing-companion:meta_whatsapp_ip"},
+               {"suppressDirectSelection", true}}}},
             {"engines",
              {{"dns",
-               {{"domains", {"whatsapp.com", "whatsapp.net"}},
-                {"subnets",
+               {{"domains", {"whatsapp.com", "whatsapp.net"}}}}}},
+        },
+        {
+            {"id", "whatsapp-ip-source"},
+            {"name", "WhatsApp IP source"},
+            {"hidden", true},
+            {"engines",
+             {{"dns",
+               {{"subnets",
                  {"31.13.24.0/21", "57.141.24.0/24"}}}}}},
+        },
+        {
+            {"id", "category-ai"},
+            {"name", "All AI"},
+            {"covers", {"openai"}},
+            {"engines",
+             {{"dns", {{"domains", {"ai.example"}}}}}},
+        },
+        {
+            {"id", "cloudflare"},
+            {"name", "Cloudflare"},
+            {"notice", "Broad infrastructure"},
+            {"warnings",
+             {{{"code", "broad_traffic_scope"},
+               {"requiresAcceptance", true}}}},
+            {"engines",
+             {{"dns", {{"domains", {"cloudflare.com"}}}}}},
         },
         {
             {"id", "telegram"},
@@ -400,12 +446,43 @@ TEST_CASE(
 
     CHECK(preset("meta").at("routingCompanions").size() == 1U);
     CHECK(
+        preset("meta").at("covers") ==
+        nlohmann::json::array({"whatsapp"}));
+    CHECK_FALSE(
         preset("whatsapp")
+            .at("engines")
+            .at("dns")
+            .contains("subnets"));
+    CHECK(
+        preset("whatsapp")
+            .at("routingCompanions")
+            .at(0)
+            .at("catalogIdentityId") ==
+        "meta#routing-companion:meta_whatsapp_ip");
+    CHECK(preset("whatsapp-ip-source").at("hidden"));
+    CHECK(
+        preset("whatsapp-ip-source")
             .at("engines")
             .at("dns")
             .at("subnets") ==
         nlohmann::json::array(
             {"31.13.24.0/21", "57.141.24.0/24"}));
+    CHECK(
+        preset("category-ai").at("covers") ==
+        nlohmann::json::array({"openai"}));
+    CHECK(preset("category-ai").at("name") == "All AI upstream");
+    CHECK(
+        preset("cloudflare")
+            .at("warnings")
+            .at(0)
+            .at("code") == "broad_traffic_scope");
+    CHECK(preset("cloudflare").at("notice") == "Broad infrastructure");
+    CHECK(
+        preset("cloudflare")
+            .at("engines")
+            .at("dns")
+            .at("domains")
+            .at(0) == "upstream-cloudflare.example");
     CHECK_FALSE(
         preset("telegram")
             .at("engines")
@@ -423,10 +500,61 @@ TEST_CASE(
             .at("domains")
             .at(0) == "example.test");
 
+    auto upstream_without_whatsapp = nlohmann::json::array();
+    for (const auto& candidate : upstream) {
+        if (candidate.value("id", std::string{}) != "whatsapp") {
+            upstream_without_whatsapp.push_back(candidate);
+        }
+    }
+    const auto restored_coverage =
+        enrich_catalog_with_routing_companions(
+            std::move(upstream_without_whatsapp), bundled);
+    CHECK(
+        std::any_of(
+            restored_coverage.begin(),
+            restored_coverage.end(),
+            [](const nlohmann::json& candidate) {
+                return candidate.value(
+                           "id", std::string{}) == "whatsapp";
+            }));
+
     const auto bundled_fallback =
         enrich_catalog_with_routing_companions(
             bundled, bundled);
     CHECK(bundled_fallback == bundled);
+
+    auto snapshot = nlohmann::json{
+        {"catalog_id", "test:catalog-identities"},
+        {"presets", enriched},
+    };
+    add_catalog_identities(snapshot);
+    const auto& identified = snapshot.at("presets");
+    const auto identified_preset =
+        [&](const std::string& id) -> const nlohmann::json& {
+            const auto found = std::find_if(
+                identified.begin(),
+                identified.end(),
+                [&](const nlohmann::json& candidate) {
+                    return candidate.value(
+                               "id", std::string{}) == id;
+                });
+            REQUIRE(found != identified.end());
+            return *found;
+        };
+    const auto& meta_companion =
+        identified_preset("meta")
+            .at("routingCompanions")
+            .at(0);
+    const auto& whatsapp_companion =
+        identified_preset("whatsapp")
+            .at("routingCompanions")
+            .at(0);
+    CHECK(
+        meta_companion.at("catalog_identity") ==
+        whatsapp_companion.at("catalog_identity"));
+    CHECK(
+        identified_preset("meta").at("catalog_identity") !=
+        meta_companion.at("catalog_identity"));
 }
 
 TEST_CASE(
