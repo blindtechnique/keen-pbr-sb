@@ -32,6 +32,7 @@
 #include "../routing/route_table.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/conntrack_manager.hpp"
+#include "../runtime/idle_stall_detector.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../firewall/firewall.hpp"
@@ -364,7 +365,11 @@ public:
     // task only runs after the current event-loop iteration completes and all
     // caller locks have been released. Use this for callbacks that must not
     // run re-entrantly inside the current controller action.
-    void post_control_task(std::function<void()> task,
+    // Returns false only when deferred control commits are already disabled
+    // (startup rollback/shutdown) or the callback is empty. Callers which own
+    // single-flight state can therefore release it without relying on a
+    // completion callback that was never queued.
+    bool post_control_task(std::function<void()> task,
                            const std::string& label = "");
 
     // Run the daemon lifecycle: startup, event loop, shutdown.
@@ -438,6 +443,29 @@ private:
                                       TraceId trace_id);
     void apply_config(Config config, bool refresh_remote_lists = true);
     void apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared);
+    void execute_committed_stale_flow_reconnect(
+        std::uint64_t committed_runtime_generation,
+        bool previous_runtime_active,
+        bool exact_forwarded_scope,
+        std::uint32_t owned_mask,
+        const ConntrackDestinationRetirementCoverage& normal_coverage,
+        const ConntrackDestinationRetirementCoverage& aggressive_coverage)
+        noexcept;
+    void reset_idle_stall_observer(bool schedule_if_eligible) noexcept;
+    void cancel_idle_stall_observer() noexcept;
+    void schedule_idle_stall_observer_after(
+        std::chrono::seconds delay) noexcept;
+    void run_idle_stall_observer() noexcept;
+    void commit_idle_stall_observation(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t expected_coverage_generation,
+        std::uint32_t owned_mask,
+        ConntrackFlowObservation observation,
+        std::vector<std::string> observed_local_interface_addresses,
+        std::vector<std::string> destination_selectors,
+        bool ipv6_enabled,
+        bool coverage_complete,
+        std::string failure_detail);
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
                                                   RemoteListPreparationMode list_mode =
                                                       RemoteListPreparationMode::RefreshAll);
@@ -636,6 +664,16 @@ private:
     int resolver_reload_retry_task_id_{-1};
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
+    // Bounded one-shot observer for a client reusing a long-idle forwarded
+    // flow which no longer receives replies. It is armed only for explicitly
+    // selected strong-reconnect lists and never performs a broad conntrack
+    // flush. All detector state belongs to the control/event-loop thread.
+    int idle_stall_observer_task_id_{-1};
+    IdleStallDetector idle_stall_detector_;
+    std::vector<std::string> idle_stall_destination_selectors_;
+    std::atomic<bool> idle_stall_observer_enabled_{false};
+    std::atomic<bool> idle_stall_observer_inflight_{false};
+    std::atomic<std::uint64_t> idle_stall_coverage_generation_{1};
 
     // Epoll state
     int epoll_fd_{-1};

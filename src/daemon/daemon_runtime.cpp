@@ -64,6 +64,100 @@ constexpr std::array<std::chrono::seconds, 5>
 constexpr std::size_t OWNED_CONNTRACK_CLEANUP_RETRY_BATCH_SIZE = 4U;
 constexpr auto OWNED_CONNTRACK_CLEANUP_RETRY_BUDGET =
     std::chrono::milliseconds{750};
+constexpr auto IDLE_STALL_ACTIVE_SCAN_INTERVAL =
+    std::chrono::seconds{5};
+constexpr auto IDLE_STALL_QUIET_SCAN_INTERVAL =
+    std::chrono::seconds{30};
+constexpr std::size_t IDLE_STALL_MAX_FLOWS = 256U;
+constexpr std::size_t IDLE_STALL_MAX_DESTINATION_CIDRS = 1024U;
+constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_BYTES =
+    2U * 1024U * 1024U;
+constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_LINES = 8192U;
+constexpr std::uint64_t IDLE_STALL_APPLICATION_REPLY_BYTES = 256U;
+
+std::vector<std::string> local_interface_addresses_from(
+    const std::vector<DumpedInterface>& interfaces) {
+    std::vector<std::string> addresses;
+    for (const auto& interface : interfaces) {
+        addresses.insert(addresses.end(),
+                         interface.ipv4_addresses.begin(),
+                         interface.ipv4_addresses.end());
+        addresses.insert(addresses.end(),
+                         interface.ipv6_addresses.begin(),
+                         interface.ipv6_addresses.end());
+    }
+    std::sort(addresses.begin(), addresses.end());
+    addresses.erase(
+        std::unique(addresses.begin(), addresses.end()),
+        addresses.end());
+    return addresses;
+}
+
+IdleStallFlowKey idle_stall_key_from(
+    const ConntrackExactForwardedFlow& flow) {
+    return IdleStallFlowKey{
+        flow.family == ConntrackFlowFamily::Ipv6
+            ? IdleStallAddressFamily::ipv6
+            : IdleStallAddressFamily::ipv4,
+        flow.protocol == ConntrackFlowProtocol::Udp
+            ? IdleStallProtocol::udp
+            : IdleStallProtocol::tcp,
+        flow.source,
+        flow.destination,
+        flow.source_port,
+        flow.destination_port,
+        flow.mark};
+}
+
+IdleStallFlowSample idle_stall_sample_from(
+    const ConntrackExactForwardedFlow& flow) {
+    IdleStallFlowReadiness readiness =
+        IdleStallFlowReadiness::ineligible;
+    if (flow.protocol == ConntrackFlowProtocol::Tcp &&
+        flow.tcp_state == ConntrackTcpState::Established) {
+        readiness = IdleStallFlowReadiness::tcp_established;
+    } else if (flow.protocol == ConntrackFlowProtocol::Udp &&
+               flow.assured) {
+        readiness = IdleStallFlowReadiness::udp_assured;
+    }
+    return IdleStallFlowSample{
+        idle_stall_key_from(flow),
+        IdleStallFlowCounters{
+            flow.original.packets,
+            flow.original.bytes,
+            flow.reply.packets,
+            flow.reply.bytes},
+        readiness,
+        flow.fastnat};
+}
+
+struct IdleStallPendingDelete {
+    IdleStallDeleteDecision decision;
+    ConntrackExactForwardedFlow flow;
+};
+
+class AtomicFlagResetGuard {
+public:
+    explicit AtomicFlagResetGuard(std::atomic<bool>& flag) noexcept
+        : flag_(flag) {}
+
+    ~AtomicFlagResetGuard() {
+        if (armed_) {
+            flag_.store(false, std::memory_order_release);
+        }
+    }
+
+    AtomicFlagResetGuard(const AtomicFlagResetGuard&) = delete;
+    AtomicFlagResetGuard& operator=(const AtomicFlagResetGuard&) = delete;
+
+    void release() noexcept {
+        armed_ = false;
+    }
+
+private:
+    std::atomic<bool>& flag_;
+    bool armed_{true};
+};
 
 class ResolverIpcGate {
 public:
@@ -704,6 +798,7 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
 
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
+    cancel_idle_stall_observer();
     cancel_owned_snat_health_check();
     cancel_owned_conntrack_cleanup_retry();
     cancel_runtime_firewall_retry();
@@ -755,9 +850,11 @@ void Daemon::start_routing_runtime() {
     auto& log = Logger::instance();
     if (routing_runtime_active_) {
         schedule_owned_snat_health_check();
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         return;
     }
 
+    cancel_idle_stall_observer();
     transition_runtime_or_throw(RuntimeState::starting, "runtime start requested");
     publish_runtime_state();
 
@@ -822,6 +919,7 @@ void Daemon::start_routing_runtime() {
         update_internal_vpn_service_verified_includes_lkg(
             internal_vpn_service_resolution);
         routing_runtime_active_ = true;
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         schedule_owned_snat_health_check();
         schedule_internal_vpn_catalog_refresh_if_needed(
             internal_vpn_resolution.state,
@@ -870,6 +968,7 @@ void Daemon::start_routing_runtime() {
             log.warn("System resolver fallback recovery failed");
         }
         routing_runtime_active_ = false;
+        cancel_idle_stall_observer();
         cancel_owned_snat_health_check();
         cancel_owned_conntrack_cleanup_retry();
         refresh_resolver_config_hash_actual_async();
@@ -889,6 +988,7 @@ void Daemon::restart_routing_runtime() {
     }
 
     auto& log = Logger::instance();
+    cancel_idle_stall_observer();
     const auto previous_apply_started =
         apply_started_ts_.load(std::memory_order_acquire);
     const ResolverSyncCheckpoint previous_resolver_sync =
@@ -985,6 +1085,7 @@ void Daemon::restart_routing_runtime() {
             });
 
         routing_runtime_active_ = true;
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         schedule_internal_vpn_catalog_refresh_if_needed(
             internal_vpn_resolution.state,
             internal_vpn_service_resolution.state);
@@ -1017,6 +1118,7 @@ void Daemon::restart_routing_runtime() {
             resolver_sync_.restore(previous_resolver_sync);
         }
         routing_runtime_active_ = true;
+        reset_idle_stall_observer(/*schedule_if_eligible=*/true);
         if (!kernel_generation_committed &&
             config_has_native_vpn_catalog_policy(config_)) {
             // Keep a bounded retry pending so either a pre-COMMIT failure or a
@@ -2577,6 +2679,956 @@ void Daemon::schedule_resolver_reload_retry(
         delay.count());
 }
 
+void Daemon::cancel_idle_stall_observer() noexcept {
+    idle_stall_observer_enabled_.store(false, std::memory_order_release);
+    try {
+        if (scheduler_ && idle_stall_observer_task_id_ >= 0) {
+            scheduler_->cancel(idle_stall_observer_task_id_);
+        }
+    } catch (...) {
+    }
+    idle_stall_observer_task_id_ = -1;
+    idle_stall_detector_.reset();
+    idle_stall_destination_selectors_.clear();
+    idle_stall_coverage_generation_.fetch_add(
+        1U, std::memory_order_acq_rel);
+}
+
+void Daemon::schedule_idle_stall_observer_after(
+    std::chrono::seconds delay) noexcept {
+    try {
+        if (!scheduler_ ||
+            !idle_stall_observer_enabled_.load(
+                std::memory_order_acquire) ||
+            !routing_runtime_active_) {
+            return;
+        }
+        if (idle_stall_observer_task_id_ >= 0) {
+            scheduler_->cancel(idle_stall_observer_task_id_);
+            idle_stall_observer_task_id_ = -1;
+        }
+        idle_stall_observer_task_id_ = scheduler_->schedule_oneshot(
+            std::chrono::duration_cast<std::chrono::milliseconds>(delay),
+            [this]() {
+                idle_stall_observer_task_id_ = -1;
+                run_idle_stall_observer();
+            },
+            "idle-stall-observer");
+    } catch (const std::exception& error) {
+        idle_stall_observer_task_id_ = -1;
+        idle_stall_observer_enabled_.store(
+            false, std::memory_order_release);
+        idle_stall_detector_.reset();
+        idle_stall_destination_selectors_.clear();
+        idle_stall_coverage_generation_.fetch_add(
+            1U, std::memory_order_acq_rel);
+        try {
+            Logger::instance().info(
+                "Idle forwarded-flow observer was not scheduled: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        idle_stall_observer_task_id_ = -1;
+        idle_stall_observer_enabled_.store(
+            false, std::memory_order_release);
+        idle_stall_detector_.reset();
+        idle_stall_destination_selectors_.clear();
+        idle_stall_coverage_generation_.fetch_add(
+            1U, std::memory_order_acq_rel);
+    }
+}
+
+void Daemon::reset_idle_stall_observer(
+    bool schedule_if_eligible) noexcept {
+    cancel_idle_stall_observer();
+    if (!schedule_if_eligible || !routing_runtime_active_ ||
+        !reconnect_unmarked_flows_on_routing_change_enabled(config_) ||
+        reconnect_owned_flows_on_routing_change_list_names(config_).empty()) {
+        return;
+    }
+    idle_stall_observer_enabled_.store(true, std::memory_order_release);
+    // The first short observation only establishes whether relevant flows
+    // exist. Subsequent empty scans back off to the 30-second quiet interval.
+    schedule_idle_stall_observer_after(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+}
+
+void Daemon::run_idle_stall_observer() noexcept {
+    try {
+        if (!routing_runtime_active_ ||
+            !idle_stall_observer_enabled_.load(
+                std::memory_order_acquire) ||
+            !reconnect_unmarked_flows_on_routing_change_enabled(config_)) {
+            cancel_idle_stall_observer();
+            return;
+        }
+
+        const auto configured_list_names =
+            reconnect_owned_flows_on_routing_change_list_names(config_);
+        const auto selected_list_names =
+            active_destination_only_reconnect_list_names(
+                configured_list_names,
+                firewall_state_.get_rules());
+        if (selected_list_names.empty()) {
+            cancel_idle_stall_observer();
+            return;
+        }
+
+        const auto coverage =
+            collect_conntrack_destination_retirement_coverage(
+                destination_retirement_plan_for_lists(
+                    selected_list_names),
+                applied_list_content_state_);
+        std::vector<std::string> destination_selectors =
+            coverage.destination_selectors;
+        std::sort(destination_selectors.begin(),
+                  destination_selectors.end());
+        destination_selectors.erase(
+            std::unique(destination_selectors.begin(),
+                        destination_selectors.end()),
+            destination_selectors.end());
+
+        const bool coverage_complete =
+            !coverage.partial() && !destination_selectors.empty() &&
+            !runtime_recovery_detail::contains_global_destination_selector(
+                coverage);
+        if (!coverage_complete) {
+            idle_stall_detector_.reset();
+            idle_stall_destination_selectors_.clear();
+            idle_stall_coverage_generation_.fetch_add(
+                1U, std::memory_order_acq_rel);
+            schedule_idle_stall_observer_after(
+                IDLE_STALL_QUIET_SCAN_INTERVAL);
+            return;
+        }
+
+        if (destination_selectors !=
+            idle_stall_destination_selectors_) {
+            idle_stall_detector_.reset();
+            idle_stall_destination_selectors_ = destination_selectors;
+            idle_stall_coverage_generation_.fetch_add(
+                1U, std::memory_order_acq_rel);
+        }
+
+        const auto runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const auto coverage_generation =
+            idle_stall_coverage_generation_.load(
+                std::memory_order_acquire);
+        const auto owned_mask = firewall_state_.get_fwmark_mask();
+        const bool ipv6_enabled = resolve_ipv6_support(config_).enabled;
+        if (runtime_generation == 0U || coverage_generation == 0U ||
+            owned_mask == 0U) {
+            idle_stall_detector_.reset();
+            schedule_idle_stall_observer_after(
+                IDLE_STALL_QUIET_SCAN_INTERVAL);
+            return;
+        }
+
+        bool expected = false;
+        if (!idle_stall_observer_inflight_.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            schedule_idle_stall_observer_after(
+                IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+            return;
+        }
+
+        const TraceId trace_id = ensure_trace_id();
+        const bool enqueued = blocking_executor_.try_post(
+            "idle-stall-conntrack-scan",
+            [this,
+             runtime_generation,
+             coverage_generation,
+             owned_mask,
+             ipv6_enabled,
+             coverage_complete,
+             destination_selectors =
+                 std::move(destination_selectors)]() mutable {
+                AtomicFlagResetGuard inflight_guard(
+                    idle_stall_observer_inflight_);
+                ConntrackFlowObservation observation;
+                std::vector<std::string> local_interface_addresses;
+                std::string failure_detail;
+
+                const auto generation_is_current = [this,
+                                                     runtime_generation,
+                                                     coverage_generation]() {
+                    return idle_stall_observer_enabled_.load(
+                               std::memory_order_acquire) &&
+                           runtime_generation_.load(
+                               std::memory_order_acquire) ==
+                               runtime_generation &&
+                           idle_stall_coverage_generation_.load(
+                               std::memory_order_acquire) ==
+                               coverage_generation;
+                };
+
+                try {
+                    if (generation_is_current()) {
+                        local_interface_addresses =
+                            local_interface_addresses_from(
+                                netlink_.dump_interfaces());
+                    }
+                    // This is the last fence before the bounded /proc scan.
+                    if (generation_is_current()) {
+                        observation = conntrack_manager_.
+                            observe_forwarded_destination_flows(
+                                destination_selectors,
+                                local_interface_addresses,
+                                owned_mask,
+                                ConntrackFlowObservationOptions{
+                                    ipv6_enabled,
+                                    IDLE_STALL_MAX_FLOWS,
+                                    IDLE_STALL_MAX_DESTINATION_CIDRS,
+                                    IDLE_STALL_MAX_SNAPSHOT_BYTES,
+                                    IDLE_STALL_MAX_SNAPSHOT_LINES});
+                    }
+                } catch (const std::exception& error) {
+                    failure_detail = error.what();
+                    observation.snapshot_unavailable = true;
+                } catch (...) {
+                    failure_detail = "unknown observation error";
+                    observation.snapshot_unavailable = true;
+                }
+
+                const bool commit_posted = post_control_task(
+                    [this,
+                     runtime_generation,
+                     coverage_generation,
+                     owned_mask,
+                     observation = std::move(observation),
+                     local_interface_addresses =
+                         std::move(local_interface_addresses),
+                     destination_selectors =
+                         std::move(destination_selectors),
+                     ipv6_enabled,
+                     coverage_complete,
+                     failure_detail =
+                         std::move(failure_detail)]() mutable {
+                        try {
+                            commit_idle_stall_observation(
+                                runtime_generation,
+                                coverage_generation,
+                                owned_mask,
+                                std::move(observation),
+                                std::move(local_interface_addresses),
+                                std::move(destination_selectors),
+                                ipv6_enabled,
+                                coverage_complete,
+                                std::move(failure_detail));
+                        } catch (const std::exception& error) {
+                            idle_stall_observer_inflight_.store(
+                                false, std::memory_order_release);
+                            idle_stall_detector_.reset();
+                            Logger::instance().info(
+                                "Idle forwarded-flow observation commit "
+                                "failed closed: {}",
+                                error.what());
+                            schedule_idle_stall_observer_after(
+                                IDLE_STALL_QUIET_SCAN_INTERVAL);
+                        } catch (...) {
+                            idle_stall_observer_inflight_.store(
+                                false, std::memory_order_release);
+                            idle_stall_detector_.reset();
+                            schedule_idle_stall_observer_after(
+                                IDLE_STALL_QUIET_SCAN_INTERVAL);
+                        }
+                    },
+                    "idle-stall-observation-commit");
+                if (commit_posted) {
+                    // The control-loop commit now owns single-flight release.
+                    inflight_guard.release();
+                }
+            },
+            trace_id);
+
+        if (!enqueued) {
+            idle_stall_observer_inflight_.store(
+                false, std::memory_order_release);
+            schedule_idle_stall_observer_after(
+                IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+        }
+    } catch (const std::exception& error) {
+        idle_stall_observer_inflight_.store(
+            false, std::memory_order_release);
+        idle_stall_detector_.reset();
+        Logger::instance().info(
+            "Idle forwarded-flow observation failed closed: {}",
+            error.what());
+        schedule_idle_stall_observer_after(
+            IDLE_STALL_QUIET_SCAN_INTERVAL);
+    } catch (...) {
+        idle_stall_observer_inflight_.store(
+            false, std::memory_order_release);
+        idle_stall_detector_.reset();
+        schedule_idle_stall_observer_after(
+            IDLE_STALL_QUIET_SCAN_INTERVAL);
+    }
+}
+
+void Daemon::commit_idle_stall_observation(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t expected_coverage_generation,
+    std::uint32_t owned_mask,
+    ConntrackFlowObservation observation,
+    std::vector<std::string> observed_local_interface_addresses,
+    std::vector<std::string> destination_selectors,
+    bool ipv6_enabled,
+    bool coverage_complete,
+    std::string failure_detail) {
+    const auto generation_is_current = [this,
+                                        expected_runtime_generation,
+                                        expected_coverage_generation]() {
+        return routing_runtime_active_ &&
+               idle_stall_observer_enabled_.load(
+                   std::memory_order_acquire) &&
+               runtime_generation_.load(std::memory_order_acquire) ==
+                   expected_runtime_generation &&
+               idle_stall_coverage_generation_.load(
+                   std::memory_order_acquire) ==
+                   expected_coverage_generation;
+    };
+    if (!generation_is_current()) {
+        idle_stall_observer_inflight_.store(
+            false, std::memory_order_release);
+        return;
+    }
+
+    if (!failure_detail.empty()) {
+        Logger::instance().trace(
+            "idle_stall_observation_skip",
+            "generation={} reason={}",
+            expected_runtime_generation,
+            failure_detail);
+    }
+
+    IdleStallScan scan;
+    scan.epoch = IdleStallEpoch{
+        expected_runtime_generation,
+        expected_coverage_generation};
+    scan.owned_mark_mask = owned_mask;
+    scan.status.snapshot_complete =
+        !observation.snapshot_unavailable &&
+        !observation.snapshot_truncated &&
+        !observation.line_limit_reached &&
+        !observation.flow_limit_reached;
+    scan.status.counters_available = true;
+    scan.status.local_scope_complete =
+        !observation.local_address_scope_missing &&
+        !observed_local_interface_addresses.empty();
+    scan.status.coverage_complete =
+        coverage_complete &&
+        !observation.destination_input_truncated &&
+        observation.invalid_destination_selectors == 0U &&
+        !observation.invalid_owned_mask;
+    scan.flows.reserve(observation.flows.size());
+    for (const auto& flow : observation.flows) {
+        scan.flows.push_back(idle_stall_sample_from(flow));
+    }
+
+    std::vector<IdleStallDeleteDecision> decisions;
+    try {
+        decisions = idle_stall_detector_.observe(
+            scan, IdleStallDetector::Clock::now());
+    } catch (const std::exception& error) {
+        idle_stall_detector_.reset();
+        Logger::instance().info(
+            "Idle forwarded-flow detector failed closed: {}",
+            error.what());
+    } catch (...) {
+        idle_stall_detector_.reset();
+    }
+
+    const bool relevant_flows_observed = !observation.flows.empty();
+    if (decisions.empty()) {
+        idle_stall_observer_inflight_.store(
+            false, std::memory_order_release);
+        schedule_idle_stall_observer_after(
+            relevant_flows_observed ||
+                    idle_stall_detector_.tracked_flow_count() != 0U
+                ? IDLE_STALL_ACTIVE_SCAN_INTERVAL
+                : IDLE_STALL_QUIET_SCAN_INTERVAL);
+        return;
+    }
+
+    std::vector<IdleStallPendingDelete> pending_deletes;
+    std::vector<ConntrackExactForwardedFlow> media_baselines;
+    pending_deletes.reserve(decisions.size());
+    for (const auto& flow : observation.flows) {
+        if (flow.protocol == ConntrackFlowProtocol::Udp && flow.assured) {
+            media_baselines.push_back(flow);
+        }
+    }
+    for (const auto& decision : decisions) {
+        const auto flow = std::find_if(
+            observation.flows.begin(),
+            observation.flows.end(),
+            [&decision](const ConntrackExactForwardedFlow& candidate) {
+                return idle_stall_key_from(candidate) == decision.flow;
+            });
+        if (flow != observation.flows.end()) {
+            pending_deletes.push_back(
+                IdleStallPendingDelete{decision, *flow});
+        }
+    }
+    const auto release_pending_decisions = [this, &decisions]() {
+        const auto now = IdleStallDetector::Clock::now();
+        for (const auto& decision : decisions) {
+            idle_stall_detector_.acknowledge_delete_result(
+                decision, false, now);
+        }
+    };
+    if (pending_deletes.empty() || !generation_is_current()) {
+        release_pending_decisions();
+        idle_stall_observer_inflight_.store(
+            false, std::memory_order_release);
+        schedule_idle_stall_observer_after(
+            IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+        return;
+    }
+    std::vector<std::string> media_guard_sources;
+    media_guard_sources.reserve(pending_deletes.size());
+    for (const auto& pending : pending_deletes) {
+        media_guard_sources.push_back(pending.flow.source);
+    }
+    std::sort(media_guard_sources.begin(), media_guard_sources.end());
+    media_guard_sources.erase(
+        std::unique(media_guard_sources.begin(), media_guard_sources.end()),
+        media_guard_sources.end());
+
+    const TraceId trace_id = ensure_trace_id();
+    const bool enqueued = blocking_executor_.try_post(
+        "idle-stall-exact-delete",
+        [this,
+         expected_runtime_generation,
+         expected_coverage_generation,
+         owned_mask,
+         pending_deletes = std::move(pending_deletes),
+         media_baselines = std::move(media_baselines),
+         media_guard_sources = std::move(media_guard_sources),
+         destination_selectors = std::move(destination_selectors),
+         ipv6_enabled,
+         observed_local_interface_addresses =
+             std::move(observed_local_interface_addresses)]() mutable {
+            AtomicFlagResetGuard inflight_guard(
+                idle_stall_observer_inflight_);
+            std::size_t media_protected = 0U;
+            std::size_t recovered_or_replaced = 0U;
+            bool live_scope_changed = false;
+            std::vector<IdleStallDeleteDecision> all_decisions;
+            all_decisions.reserve(pending_deletes.size());
+            for (const auto& pending : pending_deletes) {
+                all_decisions.push_back(pending.decision);
+            }
+
+            const auto generation_is_current = [this,
+                                                 expected_runtime_generation,
+                                                 expected_coverage_generation]() {
+                return idle_stall_observer_enabled_.load(
+                           std::memory_order_acquire) &&
+                       runtime_generation_.load(
+                           std::memory_order_acquire) ==
+                           expected_runtime_generation &&
+                       idle_stall_coverage_generation_.load(
+                           std::memory_order_acquire) ==
+                           expected_coverage_generation;
+            };
+
+            try {
+                if (!generation_is_current()) {
+                    live_scope_changed = true;
+                } else {
+                    const auto current_local_interface_addresses =
+                        local_interface_addresses_from(
+                            netlink_.dump_interfaces());
+                    live_scope_changed =
+                        current_local_interface_addresses.empty() ||
+                        current_local_interface_addresses !=
+                            observed_local_interface_addresses;
+                    if (!live_scope_changed && generation_is_current()) {
+                        const auto current_observation = conntrack_manager_.
+                            observe_forwarded_destination_flows(
+                                destination_selectors,
+                                current_local_interface_addresses,
+                                owned_mask,
+                                ConntrackFlowObservationOptions{
+                                    ipv6_enabled,
+                                    IDLE_STALL_MAX_FLOWS,
+                                    IDLE_STALL_MAX_DESTINATION_CIDRS,
+                                    IDLE_STALL_MAX_SNAPSHOT_BYTES,
+                                IDLE_STALL_MAX_SNAPSHOT_LINES},
+                                media_guard_sources);
+                        live_scope_changed =
+                            current_observation.snapshot_unavailable ||
+                            current_observation.snapshot_truncated ||
+                            current_observation.line_limit_reached ||
+                            current_observation.flow_limit_reached ||
+                            current_observation.local_address_scope_missing ||
+                            current_observation.destination_input_truncated ||
+                            current_observation.invalid_owned_mask ||
+                            current_observation.
+                                    invalid_media_guard_sources != 0U ||
+                            current_observation.
+                                    invalid_destination_selectors != 0U;
+
+                        std::set<std::pair<ConntrackFlowFamily, std::string>>
+                            protected_sources;
+                        if (!live_scope_changed) {
+                            for (const auto& current :
+                                 current_observation.
+                                     source_wide_udp_flows) {
+                                if (current.protocol !=
+                                        ConntrackFlowProtocol::Udp ||
+                                    !current.assured) {
+                                    continue;
+                                }
+                                const auto baseline = std::find_if(
+                                    media_baselines.begin(),
+                                    media_baselines.end(),
+                                    [&current](const auto& candidate) {
+                                        return idle_stall_key_from(candidate) ==
+                                               idle_stall_key_from(current);
+                                    });
+                                const bool new_bidirectional_media =
+                                    baseline == media_baselines.end() &&
+                                    current.original.packets != 0U &&
+                                    current.reply.packets != 0U;
+                                const bool existing_media_progressed =
+                                    baseline != media_baselines.end() &&
+                                    (current.original.packets >
+                                         baseline->original.packets ||
+                                     current.original.bytes >
+                                         baseline->original.bytes) &&
+                                    (current.reply.packets >
+                                         baseline->reply.packets ||
+                                     current.reply.bytes >
+                                         baseline->reply.bytes);
+                                if (new_bidirectional_media ||
+                                    existing_media_progressed) {
+                                    protected_sources.emplace(
+                                        current.family, current.source);
+                                }
+                            }
+                        }
+
+                        if (!live_scope_changed) {
+                            pending_deletes.erase(
+                                std::remove_if(
+                                    pending_deletes.begin(),
+                                    pending_deletes.end(),
+                                    [&protected_sources,
+                                     &media_protected](const auto& pending) {
+                                        if (protected_sources.count(
+                                                {pending.flow.family,
+                                                 pending.flow.source}) == 0U) {
+                                            return false;
+                                        }
+                                        ++media_protected;
+                                        return true;
+                                    }),
+                                pending_deletes.end());
+
+                            std::vector<IdleStallPendingDelete>
+                                still_stalled;
+                            still_stalled.reserve(pending_deletes.size());
+                            for (auto& pending : pending_deletes) {
+                                const auto current = std::find_if(
+                                    current_observation.flows.begin(),
+                                    current_observation.flows.end(),
+                                    [&pending](const auto& observed) {
+                                        return idle_stall_key_from(observed) ==
+                                               idle_stall_key_from(
+                                                   pending.flow);
+                                    });
+                                const bool current_state_eligible =
+                                    current !=
+                                        current_observation.flows.end() &&
+                                    ((current->protocol ==
+                                          ConntrackFlowProtocol::Tcp &&
+                                      current->tcp_state ==
+                                          ConntrackTcpState::Established) ||
+                                     (current->protocol ==
+                                          ConntrackFlowProtocol::Udp &&
+                                      current->assured));
+                                if (!current_state_eligible ||
+                                    current->original.packets <
+                                        pending.flow.original.packets ||
+                                    current->original.bytes <
+                                        pending.flow.original.bytes ||
+                                    current->reply.packets <
+                                        pending.flow.reply.packets ||
+                                    current->reply.bytes <
+                                        pending.flow.reply.bytes ||
+                                    current->reply.bytes -
+                                            pending.flow.reply.bytes >
+                                        IDLE_STALL_APPLICATION_REPLY_BYTES) {
+                                    ++recovered_or_replaced;
+                                    continue;
+                                }
+                                // Delete the freshly revalidated object, not
+                                // the older scan copy. This preserves its
+                                // current TCP state and exact full mark.
+                                pending.flow = *current;
+                                still_stalled.push_back(std::move(pending));
+                            }
+                            pending_deletes = std::move(still_stalled);
+                        }
+                    }
+                }
+            } catch (...) {
+                live_scope_changed = true;
+            }
+
+            const bool completion_posted = post_control_task(
+                [this,
+                 expected_runtime_generation,
+                 expected_coverage_generation,
+                 owned_mask,
+                 pending_deletes = std::move(pending_deletes),
+                 all_decisions = std::move(all_decisions),
+                 media_protected,
+                 recovered_or_replaced,
+                 live_scope_changed]() mutable {
+                    idle_stall_observer_inflight_.store(
+                        false, std::memory_order_release);
+                    const auto generation_is_current = [this,
+                                                        expected_runtime_generation,
+                                                        expected_coverage_generation]() {
+                        return running_.load(std::memory_order_acquire) &&
+                               routing_runtime_active_ &&
+                               idle_stall_observer_enabled_.load(
+                                   std::memory_order_acquire) &&
+                               runtime_generation_.load(
+                                   std::memory_order_acquire) ==
+                                   expected_runtime_generation &&
+                               idle_stall_coverage_generation_.load(
+                                   std::memory_order_acquire) ==
+                                   expected_coverage_generation;
+                    };
+                    if (!generation_is_current()) {
+                        return;
+                    }
+
+                    std::size_t succeeded = 0U;
+                    std::size_t failed = 0U;
+                    bool command_unavailable = false;
+                    std::set<std::uint64_t> acknowledged_attempts;
+                    const auto acknowledge =
+                        [this, &acknowledged_attempts](
+                            const IdleStallDeleteDecision& decision,
+                            bool delete_succeeded) {
+                            idle_stall_detector_.acknowledge_delete_result(
+                                decision,
+                                delete_succeeded,
+                                IdleStallDetector::Clock::now());
+                            acknowledged_attempts.insert(decision.attempt_id);
+                        };
+
+                    if (!live_scope_changed) {
+                        // Exact deletion is deliberately serialized on the
+                        // control loop. Apply/stop tasks cannot change the
+                        // committed runtime generation between this final
+                        // fence and the irreversible 5-tuple operation.
+                        for (const auto& pending : pending_deletes) {
+                            if (!generation_is_current()) {
+                                live_scope_changed = true;
+                                break;
+                            }
+                            ConntrackCleanupResult result =
+                                ConntrackCleanupResult::Failed;
+                            try {
+                                result = conntrack_manager_.
+                                    delete_exact_forwarded_flow(
+                                        pending.flow, owned_mask);
+                            } catch (...) {
+                                ++failed;
+                                acknowledge(pending.decision, false);
+                                continue;
+                            }
+                            if (result ==
+                                ConntrackCleanupResult::Succeeded) {
+                                ++succeeded;
+                                acknowledge(pending.decision, true);
+                            } else if (result ==
+                                       ConntrackCleanupResult::
+                                           CommandUnavailable) {
+                                command_unavailable = true;
+                                acknowledge(pending.decision, false);
+                                break;
+                            } else {
+                                ++failed;
+                                acknowledge(pending.decision, false);
+                            }
+                        }
+                    }
+
+                    // Media protection, a recovered/replaced tuple, command
+                    // failure, or a changed scope must release the detector's
+                    // reservation without consuming cooldown/rate tokens.
+                    for (const auto& decision : all_decisions) {
+                        if (acknowledged_attempts.count(
+                                decision.attempt_id) == 0U) {
+                            acknowledge(decision, false);
+                        }
+                    }
+
+                    if (!running_.load(std::memory_order_acquire) ||
+                        !routing_runtime_active_ ||
+                        !idle_stall_observer_enabled_.load(
+                            std::memory_order_acquire) ||
+                        runtime_generation_.load(
+                            std::memory_order_acquire) !=
+                            expected_runtime_generation ||
+                        idle_stall_coverage_generation_.load(
+                            std::memory_order_acquire) !=
+                            expected_coverage_generation) {
+                        return;
+                    }
+                    if (succeeded != 0U) {
+                        Logger::instance().info(
+                            "Recovered {} exact idle forwarded flow(s) after "
+                            "their reply path stopped progressing",
+                            succeeded);
+                    } else if (command_unavailable) {
+                        Logger::instance().info(
+                            "Idle forwarded-flow recovery is unavailable "
+                            "because the conntrack utility could not be run");
+                    } else if (failed != 0U) {
+                        Logger::instance().info(
+                            "Idle forwarded-flow recovery left {} exact "
+                            "flow deletion(s) incomplete; no broad cleanup "
+                            "was attempted",
+                            failed);
+                    } else if (media_protected != 0U) {
+                        Logger::instance().trace(
+                            "idle_stall_delete_skip",
+                            "generation={} reason=active_udp_media "
+                            "protected={}",
+                            expected_runtime_generation,
+                            media_protected);
+                    } else if (recovered_or_replaced != 0U) {
+                        Logger::instance().trace(
+                            "idle_stall_delete_skip",
+                            "generation={} reason=flow_recovered_or_replaced "
+                            "count={}",
+                            expected_runtime_generation,
+                            recovered_or_replaced);
+                    } else if (live_scope_changed) {
+                        Logger::instance().trace(
+                            "idle_stall_delete_skip",
+                            "generation={} reason=live_scope_changed",
+                            expected_runtime_generation);
+                    }
+                    schedule_idle_stall_observer_after(
+                        IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+                },
+                "idle-stall-delete-commit");
+            if (completion_posted) {
+                inflight_guard.release();
+            }
+        },
+        trace_id);
+
+    if (!enqueued) {
+        release_pending_decisions();
+        idle_stall_observer_inflight_.store(
+            false, std::memory_order_release);
+        schedule_idle_stall_observer_after(
+            IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+    }
+}
+
+void Daemon::execute_committed_stale_flow_reconnect(
+    std::uint64_t committed_runtime_generation,
+    bool previous_runtime_active,
+    bool exact_forwarded_scope,
+    std::uint32_t owned_mask,
+    const ConntrackDestinationRetirementCoverage& normal_coverage,
+    const ConntrackDestinationRetirementCoverage& aggressive_coverage)
+    noexcept {
+    try {
+        if (!previous_runtime_active) {
+            return;
+        }
+
+        if (normal_coverage.partial() || aggressive_coverage.partial()) {
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement has partial "
+                "coverage: normal={}/{} and stronger={}/{} domain-backed/"
+                "statically-truncated changed list(s); only observed flows "
+                "for tracked static destinations are eligible for immediate "
+                "reconnection",
+                normal_coverage.domain_backed_list_names.size(),
+                normal_coverage.truncated_static_list_names.size(),
+                aggressive_coverage.domain_backed_list_names.size(),
+                aggressive_coverage.truncated_static_list_names.size());
+        }
+
+        StaleFlowReconnectRequest request;
+        request.expected_runtime_generation = committed_runtime_generation;
+        request.normal = normal_coverage;
+        request.aggressive = aggressive_coverage;
+        request.exact_forwarded_scope = exact_forwarded_scope;
+
+        std::optional<ConntrackForwardedFlowCleanupSummary> cleanup_summary;
+        std::string failure_detail;
+        const auto execution = run_stale_flow_reconnect_if_committed(
+            RuntimeReconnectCommitState::committed,
+            request,
+            [this]() noexcept {
+                return routing_runtime_active_;
+            },
+            [this]() noexcept {
+                return runtime_generation_.load(std::memory_order_acquire);
+            },
+            [this, &failure_detail]() {
+                try {
+                    std::vector<std::string> local_interface_addresses;
+                    for (const auto& interface : netlink_.dump_interfaces()) {
+                        local_interface_addresses.insert(
+                            local_interface_addresses.end(),
+                            interface.ipv4_addresses.begin(),
+                            interface.ipv4_addresses.end());
+                        local_interface_addresses.insert(
+                            local_interface_addresses.end(),
+                            interface.ipv6_addresses.begin(),
+                            interface.ipv6_addresses.end());
+                    }
+                    return local_interface_addresses;
+                } catch (const std::exception& error) {
+                    failure_detail = error.what();
+                    throw;
+                } catch (...) {
+                    failure_detail = "unknown live-scope preparation error";
+                    throw;
+                }
+            },
+            [this, owned_mask, &cleanup_summary, &failure_detail](
+                const std::vector<std::string>& local_interface_addresses,
+                const StaleFlowReconnectRequest& reconnect_request) {
+                try {
+                    cleanup_summary =
+                        conntrack_manager_.delete_forwarded_destination_flows(
+                            reconnect_request.normal.destination_selectors,
+                            reconnect_request.aggressive.
+                                destination_selectors,
+                            local_interface_addresses,
+                            owned_mask,
+                            ConntrackForwardedFlowCleanupOptions{
+                                resolve_ipv6_support(config_).enabled,
+                                std::chrono::seconds{2},
+                                /*max_flows=*/256U,
+                                /*max_destination_input_cidrs=*/1024U,
+                                /*max_snapshot_bytes=*/2U * 1024U * 1024U,
+                                /*max_snapshot_lines=*/8192U});
+                } catch (const std::exception& error) {
+                    failure_detail = error.what();
+                    throw;
+                } catch (...) {
+                    failure_detail = "unknown targeted conntrack cleanup error";
+                    throw;
+                }
+            });
+
+        switch (execution) {
+        case StaleFlowReconnectExecution::completed: {
+            if (!cleanup_summary.has_value()) {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement failed "
+                    "closed because no cleanup result was produced; existing "
+                    "flows will converge as they expire");
+                return;
+            }
+            const auto& cleanup = *cleanup_summary;
+            if (cleanup.command_unavailable) {
+                warn_conntrack_unavailable_once();
+            } else if (cleanup.snapshot_unavailable ||
+                       cleanup.local_address_scope_missing ||
+                       cleanup.invalid_owned_mask) {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement failed "
+                    "closed because its live forwarded-flow scope was not "
+                    "authoritative; existing flows will converge as they "
+                    "expire");
+            } else if (cleanup.failed != 0U || cleanup.skipped != 0U ||
+                       cleanup.budget_exhausted ||
+                       cleanup.snapshot_truncated ||
+                       cleanup.destination_input_truncated) {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement matched "
+                    "{} exact forwarded flow(s), attempted {}, left {} "
+                    "failed and {} skipped; remaining flows will converge "
+                    "as they expire",
+                    cleanup.matched,
+                    cleanup.attempted,
+                    cleanup.failed,
+                    cleanup.skipped);
+            } else if (cleanup.attempted != 0U) {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement "
+                    "reconnected {} exact forwarded flow(s) after a "
+                    "committed policy change",
+                    cleanup.attempted);
+            }
+            return;
+        }
+        case StaleFlowReconnectExecution::skipped_inexact_forwarded_scope:
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement was skipped "
+                "because the active inbound/native-VPN policy cannot be "
+                "represented by an exact forwarded-flow selector; existing "
+                "flows will converge as they expire");
+            return;
+        case StaleFlowReconnectExecution::skipped_inactive_runtime:
+        case StaleFlowReconnectExecution::skipped_stale_generation:
+        case StaleFlowReconnectExecution::skipped_generation_changed:
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement was skipped "
+                "because the committed runtime generation is no longer "
+                "current; existing flows will converge as they expire");
+            return;
+        case StaleFlowReconnectExecution::skipped_invalid_generation:
+        case StaleFlowReconnectExecution::skipped_global_destination_scope:
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement failed closed "
+                "because its destination scope was not safely bounded; "
+                "existing flows will converge as they expire");
+            return;
+        case StaleFlowReconnectExecution::failed:
+            if (!failure_detail.empty()) {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement was "
+                    "skipped: {}. Existing flows will converge as they expire",
+                    failure_detail);
+            } else {
+                Logger::instance().info(
+                    "Targeted routing-policy conntrack retirement was "
+                    "skipped by an unknown error; existing flows will "
+                    "converge as they expire");
+            }
+            return;
+        case StaleFlowReconnectExecution::skipped_not_committed:
+        case StaleFlowReconnectExecution::skipped_empty_plan:
+            return;
+        }
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement was skipped: "
+                "{}. Existing flows will converge as they expire",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            Logger::instance().info(
+                "Targeted routing-policy conntrack retirement was skipped by "
+                "an unknown error; existing flows will converge as they expire");
+        } catch (...) {
+        }
+    }
+}
+
 void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     if (event_loop_active_.load(std::memory_order_acquire) && !is_event_loop_thread()) {
         throw DaemonError("apply_prepared_runtime_inputs must run on the control/event-loop thread");
@@ -2658,8 +3710,10 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     publish_runtime_state();
 
     try {
+    cancel_idle_stall_observer();
     cancel_owned_conntrack_cleanup_retry();
-    runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
+    const auto applying_runtime_generation =
+        runtime_generation_.fetch_add(1, std::memory_order_acq_rel) + 1U;
     cancel_runtime_firewall_retry();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
@@ -2859,103 +3913,17 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
                         previous_list_content_state));
         }
     }
-    if (previous_runtime_active &&
-        (destination_coverage.partial() ||
-         owned_destination_coverage.partial())) {
-        Logger::instance().info(
-            "Targeted routing-policy conntrack retirement has partial "
-            "coverage: normal={}/{} and stronger={}/{} domain-backed/"
-            "statically-truncated changed list(s); only observed flows for "
-            "tracked static destinations are eligible for immediate "
-            "reconnection",
-            destination_coverage.domain_backed_list_names.size(),
-            destination_coverage.truncated_static_list_names.size(),
-            owned_destination_coverage.domain_backed_list_names.size(),
-            owned_destination_coverage.
-                truncated_static_list_names.size());
-    }
-    if (previous_runtime_active &&
-        (!destination_coverage.destination_selectors.empty() ||
-         !owned_destination_coverage.destination_selectors.empty())) {
-        try {
-            if (current_forwarded_scope_restricted) {
-                Logger::instance().info(
-                    "Targeted routing-policy conntrack retirement was skipped "
-                    "because the active inbound/native-VPN policy cannot be "
-                    "represented by an exact forwarded-flow selector; existing "
-                    "flows will converge as they expire");
-            } else {
-                std::vector<std::string> local_interface_addresses;
-                for (const auto& interface : netlink_.dump_interfaces()) {
-                    local_interface_addresses.insert(
-                        local_interface_addresses.end(),
-                        interface.ipv4_addresses.begin(),
-                        interface.ipv4_addresses.end());
-                    local_interface_addresses.insert(
-                        local_interface_addresses.end(),
-                        interface.ipv6_addresses.begin(),
-                        interface.ipv6_addresses.end());
-                }
-
-                const auto cleanup =
-                    conntrack_manager_.
-                        delete_forwarded_destination_flows(
-                            destination_coverage.destination_selectors,
-                            owned_destination_coverage.
-                                destination_selectors,
-                            local_interface_addresses,
-                            current_routing_signature.owned_mask,
-                            ConntrackForwardedFlowCleanupOptions{
-                                resolve_ipv6_support(config_).enabled,
-                                std::chrono::seconds{2},
-                                /*max_flows=*/256U,
-                                /*max_destination_input_cidrs=*/1024U,
-                                /*max_snapshot_bytes=*/2U * 1024U * 1024U,
-                                /*max_snapshot_lines=*/8192U});
-                if (cleanup.command_unavailable) {
-                    warn_conntrack_unavailable_once();
-                } else if (cleanup.snapshot_unavailable ||
-                           cleanup.local_address_scope_missing ||
-                           cleanup.invalid_owned_mask) {
-                    Logger::instance().info(
-                        "Targeted routing-policy conntrack retirement failed "
-                        "closed because its live forwarded-flow scope was not "
-                        "authoritative; existing flows will converge as they "
-                        "expire");
-                } else if (cleanup.failed != 0U || cleanup.skipped != 0U ||
-                           cleanup.budget_exhausted ||
-                           cleanup.snapshot_truncated ||
-                           cleanup.destination_input_truncated) {
-                    Logger::instance().info(
-                        "Targeted routing-policy conntrack retirement matched "
-                        "{} exact forwarded flow(s), attempted {}, left {} "
-                        "failed and {} skipped; remaining flows will converge "
-                        "as they expire",
-                        cleanup.matched,
-                        cleanup.attempted,
-                        cleanup.failed,
-                        cleanup.skipped);
-                } else if (cleanup.attempted != 0U) {
-                    Logger::instance().info(
-                        "Targeted routing-policy conntrack retirement "
-                        "reconnected {} exact forwarded flow(s) after a "
-                        "committed policy change",
-                        cleanup.attempted);
-                }
-            }
-        } catch (const std::exception& error) {
-            Logger::instance().info(
-                "Targeted routing-policy conntrack retirement was skipped: {}. "
-                "Existing flows will converge as they expire",
-                error.what());
-        } catch (...) {
-            Logger::instance().info(
-                "Targeted routing-policy conntrack retirement was skipped by "
-                "an unknown error; existing flows will converge as they expire");
-        }
-    }
+    execute_committed_stale_flow_reconnect(
+        applying_runtime_generation,
+        previous_runtime_active,
+        !current_forwarded_scope_restricted,
+        current_routing_signature.owned_mask,
+        destination_coverage,
+        owned_destination_coverage);
+    reset_idle_stall_observer(/*schedule_if_eligible=*/true);
     } catch (...) {
         routing_runtime_active_ = false;
+        cancel_idle_stall_observer();
         try {
             transition_runtime_or_throw(RuntimeState::broken, "configuration apply failed");
             publish_runtime_state();

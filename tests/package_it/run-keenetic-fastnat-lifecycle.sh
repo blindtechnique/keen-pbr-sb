@@ -14,7 +14,7 @@ trap 'rm -rf "$work"' 0 HUP INT TERM
 # Source only the production functions under test. The Keenetic rc.func
 # dispatcher is deliberately not emulated here.
 {
-    sed -n '/^read_fastnat_value()/,/^signal_service()/p' "$init_script" |
+    sed -n '/^read_fastnat_value()/,/^# Verify that a PID still belongs/p' "$init_script" |
         sed '$d'
     sed -n '/^stop_keen_pbr()/,/^prepare_start()/p' "$init_script" |
         sed '$d'
@@ -27,12 +27,20 @@ mkdir -p "$work/bin" "$work/proc/net/netfilter" "$work/state"
 cat > "$work/bin/sysctl" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FASTNAT_TEST_CALLS"
-case "$*" in
-    *net.ipv4.netfilter.ip_conntrack_fastnat=*)
-        [ "${FASTNAT_TEST_IPV4_ALIAS:-yes}" = yes ]
+assignment=${2:-}
+value=${assignment#*=}
+case "$assignment" in
+    net.ipv4.netfilter.ip_conntrack_fastnat=*)
+        [ "${FASTNAT_TEST_IPV4_ALIAS:-yes}" = yes ] || exit 1
+        mkdir -p "$FASTNAT_PROC_ROOT/net/ipv4/netfilter"
+        printf '%s\n' "$value" > \
+            "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"
         ;;
-    *net.netfilter.nf_conntrack_fastnat=*)
-        [ "${FASTNAT_TEST_NET_ALIAS:-yes}" = yes ]
+    net.netfilter.nf_conntrack_fastnat=*)
+        [ "${FASTNAT_TEST_NET_ALIAS:-yes}" = yes ] || exit 1
+        mkdir -p "$FASTNAT_PROC_ROOT/net/netfilter"
+        printf '%s\n' "$value" > \
+            "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
         ;;
     *) exit 1 ;;
 esac
@@ -60,6 +68,14 @@ assert_calls_contain() {
     }
 }
 
+assert_no_calls() {
+    [ ! -s "$calls" ] || {
+        echo "unexpected sysctl calls:" >&2
+        cat "$calls" >&2
+        exit 1
+    }
+}
+
 printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
 : > "$calls"
 original_umask=$(umask)
@@ -74,6 +90,71 @@ restore_hwnat_if_safe
 assert_calls_contain 'net.ipv4.netfilter.ip_conntrack_fastnat=1'
 assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=1'
 [ ! -e "$FASTNAT_STATE_FILE" ]
+
+# A firmware netfilter rebuild may re-enable FastNAT while the daemon stays
+# alive. The runtime guard must disable it without replacing the original
+# snapshot that a graceful final stop will restore.
+printf '%s\n' 1 > "$FASTNAT_STATE_FILE"
+printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+: > "$calls"
+ensure_fastnat_disabled
+[ "$(cat "$FASTNAT_STATE_FILE")" = 1 ]
+assert_calls_contain 'net.ipv4.netfilter.ip_conntrack_fastnat=0'
+assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=0'
+
+# Healthy steady state is a true no-op: no repeated sysctl writes or logs.
+printf '%s\n' 0 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+: > "$calls"
+ensure_fastnat_disabled
+assert_no_calls
+
+# A missing runtime snapshot cannot be reconstructed from firmware-created
+# drift. Record the fail-closed disabled value rather than later enabling a
+# setting which may have been disabled before keen-pbr started.
+rm -f "$FASTNAT_STATE_FILE"
+printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+: > "$calls"
+ensure_fastnat_disabled
+[ "$(cat "$FASTNAT_STATE_FILE")" = 0 ]
+assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=0'
+: > "$calls"
+restore_hwnat_if_safe
+assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=0'
+[ ! -e "$FASTNAT_STATE_FILE" ]
+
+# If Keenetic exposes both aliases inconsistently, an enabled alias wins: the
+# routing runtime cannot safely assume acceleration is disabled.
+mkdir -p "$FASTNAT_PROC_ROOT/net/ipv4/netfilter"
+printf '%s\n' 0 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"
+rm -f "$FASTNAT_STATE_FILE"
+: > "$calls"
+ensure_fastnat_disabled
+[ "$(cat "$FASTNAT_STATE_FILE")" = 0 ]
+assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=0'
+rm -f "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"
+restore_hwnat_if_safe
+
+# A successful write to one alias must not hide a second readable alias that
+# remains enabled. The aggregate postcondition is authoritative.
+printf '%s\n' 1 > "$FASTNAT_STATE_FILE"
+printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+mkdir -p "$FASTNAT_PROC_ROOT/net/ipv4/netfilter"
+printf '%s\n' 1 > \
+    "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"
+FASTNAT_TEST_IPV4_ALIAS=yes
+FASTNAT_TEST_NET_ALIAS=no
+export FASTNAT_TEST_IPV4_ALIAS FASTNAT_TEST_NET_ALIAS
+: > "$calls"
+if ensure_fastnat_disabled; then
+    echo "runtime guard accepted a partial FastNAT write" >&2
+    exit 1
+fi
+[ "$(cat "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat")" = 1 ]
+[ "$(cat "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat")" = 0 ]
+rm -f "$FASTNAT_STATE_FILE"
+FASTNAT_TEST_NET_ALIAS=yes
+export FASTNAT_TEST_NET_ALIAS
 
 # An originally disabled system must stay disabled after a clean stop.
 printf '%s\n' 0 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
@@ -103,6 +184,7 @@ fi
 rm -f "$FASTNAT_STATE_FILE"
 
 # One available Keenetic sysctl alias is sufficient.
+rm -f "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"
 printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
 FASTNAT_TEST_IPV4_ALIAS=no
 FASTNAT_TEST_NET_ALIAS=yes
@@ -114,11 +196,77 @@ assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=1'
 
 # Kernels without either FastNAT control remain supported.
 rm -f "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+rm -f "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"
 rm -f "$FASTNAT_STATE_FILE"
 : > "$calls"
-disable_hwnat
+ensure_fastnat_disabled
 [ ! -e "$FASTNAT_STATE_FILE" ]
-[ ! -s "$calls" ]
+assert_no_calls
+
+# A damaged snapshot fails closed and is never passed to sysctl by the
+# runtime guard either.
+printf '%s\n' unexpected > "$FASTNAT_STATE_FILE"
+: > "$calls"
+if ensure_fastnat_disabled; then
+    echo "runtime guard accepted an invalid FastNAT snapshot" >&2
+    exit 1
+fi
+assert_no_calls
+rm -f "$FASTNAT_STATE_FILE"
+
+# Reapply proves that a daemon is live, restores the invariant, and only then
+# delivers the signal. A failed guard must never schedule a daemon refresh.
+reapply_order="$work/reapply-order"
+validate_service_pid() {
+    printf '%s\n' "validate:$1" >> "$reapply_order"
+    [ "${FASTNAT_TEST_VALIDATE_OK:-yes}" = yes ]
+}
+ensure_fastnat_disabled() {
+    printf '%s\n' guard >> "$reapply_order"
+    [ "${FASTNAT_TEST_GUARD_OK:-yes}" = yes ]
+}
+signal_service() {
+    printf '%s\n' "signal:$1" >> "$reapply_order"
+    [ "${FASTNAT_TEST_SIGNAL_OK:-yes}" = yes ]
+}
+
+: > "$reapply_order"
+FASTNAT_TEST_VALIDATE_OK=yes
+FASTNAT_TEST_SIGNAL_OK=yes
+FASTNAT_TEST_GUARD_OK=yes
+reapply_netfilter_runtime SIGUSR1
+[ "$(cat "$reapply_order")" = "validate:SIGUSR1
+guard
+signal:SIGUSR1" ]
+
+: > "$reapply_order"
+FASTNAT_TEST_VALIDATE_OK=no
+if reapply_netfilter_runtime SIGUSR2; then
+    echo "reapply accepted a failed daemon validation" >&2
+    exit 1
+fi
+[ "$(cat "$reapply_order")" = "validate:SIGUSR2" ]
+
+: > "$reapply_order"
+FASTNAT_TEST_VALIDATE_OK=yes
+FASTNAT_TEST_GUARD_OK=no
+if reapply_netfilter_runtime SIGUSR1; then
+    echo "reapply ignored a failed FastNAT guard" >&2
+    exit 1
+fi
+[ "$(cat "$reapply_order")" = "validate:SIGUSR1
+guard" ]
+
+: > "$reapply_order"
+FASTNAT_TEST_GUARD_OK=yes
+FASTNAT_TEST_SIGNAL_OK=no
+if reapply_netfilter_runtime SIGUSR2; then
+    echo "reapply accepted a failed daemon signal" >&2
+    exit 1
+fi
+[ "$(cat "$reapply_order")" = "validate:SIGUSR2
+guard
+signal:SIGUSR2" ]
 
 # Verify the control-flow contract separately from sysctl behavior.
 order="$work/order"
@@ -193,5 +341,8 @@ if printf '%s\n' "$dispatcher_tail" |
     echo "post-dispatch startup failure restores FastNAT unsafely" >&2
     exit 1
 fi
+
+grep -Fq 'reapply_netfilter_runtime SIGUSR1' "$init_script"
+grep -Fq 'reapply_netfilter_runtime SIGUSR2' "$init_script"
 
 /bin/sh -n "$init_script"

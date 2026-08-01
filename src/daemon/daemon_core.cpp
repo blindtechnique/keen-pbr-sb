@@ -292,7 +292,11 @@ Daemon::Daemon(Config config,
 
 Daemon::~Daemon() {
     try {
-        accept_posted_control_tasks_.store(false, std::memory_order_release);
+        {
+            KPBR_LOCK_GUARD(control_tasks_mutex_);
+            accept_posted_control_tasks_.store(
+                false, std::memory_order_release);
+        }
         resolver_hook_executor_.shutdown();
         resolver_stream_executor_.shutdown();
         resolver_io_executor_.shutdown();
@@ -984,13 +988,13 @@ void Daemon::enqueue_control_task(std::function<void()> task,
     wake_control_loop();
 }
 
-void Daemon::post_control_task(std::function<void()> task, const std::string& label) {
-    if (!task) return;
+bool Daemon::post_control_task(std::function<void()> task, const std::string& label) {
+    if (!task) return false;
     if (!accept_posted_control_tasks_.load(std::memory_order_acquire)) {
         Logger::instance().trace("control_task_skip",
                                  "label={} reason=posted_tasks_disabled",
                                  label.empty() ? "post-control-task" : label);
-        return;
+        return false;
     }
 
     const auto effective_label = label.empty() ? std::string("post-control-task") : label;
@@ -1023,6 +1027,13 @@ void Daemon::post_control_task(std::function<void()> task, const std::string& la
 
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
+        // Serialize admission with shutdown. The optimistic check above keeps
+        // the normal rejection path cheap; this second check prevents a task
+        // from being queued after shutdown disabled deferred commits.
+        if (!accept_posted_control_tasks_.load(
+                std::memory_order_acquire)) {
+            return false;
+        }
         control_tasks_.push_back(ControlTask{
             .callback = std::move(traced_task),
             .label = effective_label,
@@ -1033,6 +1044,7 @@ void Daemon::post_control_task(std::function<void()> task, const std::string& la
                              "label={} wait=false mode=post",
                              effective_label);
     wake_control_loop();
+    return true;
 }
 
 void Daemon::enqueue_control_command(std::function<void()> command,
@@ -2080,6 +2092,7 @@ void Daemon::run() {
         internal_vpn_service_generation.reset();
     }
     routing_runtime_active_ = true;
+    reset_idle_stall_observer(/*schedule_if_eligible=*/true);
     schedule_owned_snat_health_check();
     transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
@@ -2119,7 +2132,12 @@ void Daemon::run() {
         // event loop starts must therefore unwind every owned subsystem; the
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
-        accept_posted_control_tasks_.store(false, std::memory_order_release);
+        {
+            KPBR_LOCK_GUARD(control_tasks_mutex_);
+            accept_posted_control_tasks_.store(
+                false, std::memory_order_release);
+        }
+        cancel_idle_stall_observer();
         cancel_owned_conntrack_cleanup_retry();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
         scheduler_->cancel_all();
@@ -2217,7 +2235,16 @@ void Daemon::run() {
 
     event_loop_active_.store(false, std::memory_order_release);
     event_loop_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
-    accept_posted_control_tasks_.store(false, std::memory_order_release);
+    // Stop the continuous forwarded-flow observer before closing admission to
+    // the control loop or tearing down API/conntrack state.  An in-flight
+    // observation is generation-fenced, but disabling it here also prevents a
+    // late exact delete from racing normal shutdown.
+    cancel_idle_stall_observer();
+    {
+        KPBR_LOCK_GUARD(control_tasks_mutex_);
+        accept_posted_control_tasks_.store(
+            false, std::memory_order_release);
+    }
 
     log.info("Shutting down...");
     transition_runtime_or_throw(RuntimeState::shutting_down, "daemon shutdown requested");

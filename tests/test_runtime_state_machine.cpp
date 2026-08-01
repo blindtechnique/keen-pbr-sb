@@ -62,6 +62,84 @@ TEST_CASE(
     CHECK_FALSE(reconnect_unmarked_flows_on_routing_change_enabled(disabled));
 }
 
+TEST_CASE(
+    "continuous reconnect observes only active destination-only mark lists") {
+    RuleState active_mark;
+    active_mark.rule_index = 0U;
+    active_mark.action_type = RuleActionType::Mark;
+    active_mark.fwmark = 0x00010000U;
+    active_mark.list_names = {"whatsapp", "shared"};
+    active_mark.criteria.dst_set_name = "kpbr4_whatsapp";
+
+    RuleState unused_mark = active_mark;
+    unused_mark.rule_index = 1U;
+    unused_mark.list_names = {"configured-but-not-selected"};
+
+    const auto active = active_destination_only_reconnect_list_names(
+        {"whatsapp", "selected-but-unused"},
+        {active_mark, unused_mark});
+
+    CHECK(active == std::set<std::string>{"whatsapp"});
+}
+
+TEST_CASE(
+    "continuous reconnect excludes non-mark and scoped routing rules") {
+    RuleState eligible;
+    eligible.rule_index = 0U;
+    eligible.action_type = RuleActionType::Mark;
+    eligible.fwmark = 0x00010000U;
+    eligible.list_names = {"eligible"};
+    eligible.criteria.dst_set_name = "kpbr4_eligible";
+
+    RuleState pass = eligible;
+    pass.rule_index = 1U;
+    pass.action_type = RuleActionType::Pass;
+    pass.list_names = {"pass"};
+
+    RuleState skip = eligible;
+    skip.rule_index = 2U;
+    skip.action_type = RuleActionType::Skip;
+    skip.list_names = {"skip"};
+
+    RuleState drop = eligible;
+    drop.rule_index = 3U;
+    drop.action_type = RuleActionType::Drop;
+    drop.list_names = {"drop"};
+
+    RuleState source_scoped = eligible;
+    source_scoped.rule_index = 4U;
+    source_scoped.list_names = {"source-scoped"};
+    source_scoped.criteria.src_addr = {"192.168.1.44/32"};
+
+    RuleState protocol_scoped = eligible;
+    protocol_scoped.rule_index = 5U;
+    protocol_scoped.list_names = {"protocol-scoped"};
+    protocol_scoped.criteria.proto = L4Proto::Tcp;
+
+    RuleState unrealized_mark = eligible;
+    unrealized_mark.rule_index = 6U;
+    unrealized_mark.list_names = {"zero-mark"};
+    unrealized_mark.fwmark = 0U;
+
+    const auto active = active_destination_only_reconnect_list_names(
+        {"eligible",
+         "pass",
+         "skip",
+         "drop",
+         "source-scoped",
+         "protocol-scoped",
+         "zero-mark"},
+        {eligible,
+         pass,
+         skip,
+         drop,
+         source_scoped,
+         protocol_scoped,
+         unrealized_mark});
+
+    CHECK(active == std::set<std::string>{"eligible"});
+}
+
 TEST_CASE("SNAT recovery evicts only flows affected by a confirmed repair") {
     OwnedSnatRecovery recovery{
         /*requested=*/true,
@@ -677,6 +755,248 @@ TEST_CASE("strong reconnect coverage merges old and new list addresses") {
     CHECK(
         merged.destination_selectors ==
         std::vector<std::string>{"57.144.0.0/14", "31.13.64.0/18"});
+}
+
+TEST_CASE("stale-flow reconnect runs only for the committed current runtime") {
+    StaleFlowReconnectRequest request;
+    request.expected_runtime_generation = 17U;
+    request.exact_forwarded_scope = true;
+    request.normal.destination_selectors = {"31.13.64.0/18"};
+    request.aggressive.destination_selectors = {"157.240.0.0/16"};
+
+    std::vector<std::string> events;
+    const auto result = run_stale_flow_reconnect_if_committed(
+        RuntimeReconnectCommitState::committed,
+        request,
+        [&]() {
+            events.push_back("active");
+            return true;
+        },
+        [&]() {
+            events.push_back("generation");
+            return std::uint64_t{17U};
+        },
+        [&]() {
+            events.push_back("prepare");
+            return std::vector<std::string>{"192.168.1.1"};
+        },
+        [&](const std::vector<std::string>& local_addresses,
+            const StaleFlowReconnectRequest& observed) {
+            events.push_back("cleanup");
+            CHECK(local_addresses ==
+                  std::vector<std::string>{"192.168.1.1"});
+            CHECK(observed.normal.destination_selectors ==
+                  std::vector<std::string>{"31.13.64.0/18"});
+            CHECK(observed.aggressive.destination_selectors ==
+                  std::vector<std::string>{"157.240.0.0/16"});
+        });
+
+    CHECK(result == StaleFlowReconnectExecution::completed);
+    const std::vector<std::string> expected{
+        "active",
+        "generation",
+        "prepare",
+        "active",
+        "generation",
+        "cleanup",
+    };
+    CHECK(events == expected);
+}
+
+TEST_CASE("failed and rolled-back applies never reconnect stale flows") {
+    StaleFlowReconnectRequest request;
+    request.expected_runtime_generation = 17U;
+    request.exact_forwarded_scope = true;
+    request.normal.destination_selectors = {"31.13.64.0/18"};
+
+    for (const auto state : {
+             RuntimeReconnectCommitState::failed,
+             RuntimeReconnectCommitState::rolled_back}) {
+        std::size_t callback_calls = 0U;
+        const auto result = run_stale_flow_reconnect_if_committed(
+            state,
+            request,
+            [&]() {
+                ++callback_calls;
+                return true;
+            },
+            [&]() {
+                ++callback_calls;
+                return std::uint64_t{17U};
+            },
+            [&]() {
+                ++callback_calls;
+                return 1;
+            },
+            [&](int, const StaleFlowReconnectRequest&) {
+                ++callback_calls;
+            });
+
+        CHECK(result ==
+              StaleFlowReconnectExecution::skipped_not_committed);
+        CHECK(callback_calls == 0U);
+    }
+}
+
+TEST_CASE("stale-flow reconnect rejects inactive and stale runtimes") {
+    StaleFlowReconnectRequest request;
+    request.expected_runtime_generation = 17U;
+    request.exact_forwarded_scope = true;
+    request.normal.destination_selectors = {"31.13.64.0/18"};
+
+    std::size_t prepare_calls = 0U;
+    std::size_t cleanup_calls = 0U;
+    const auto inactive = run_stale_flow_reconnect_if_committed(
+        RuntimeReconnectCommitState::committed,
+        request,
+        []() { return false; },
+        []() { return std::uint64_t{17U}; },
+        [&]() {
+            ++prepare_calls;
+            return 1;
+        },
+        [&](int, const StaleFlowReconnectRequest&) {
+            ++cleanup_calls;
+        });
+    CHECK(inactive ==
+          StaleFlowReconnectExecution::skipped_inactive_runtime);
+
+    const auto stale = run_stale_flow_reconnect_if_committed(
+        RuntimeReconnectCommitState::committed,
+        request,
+        []() { return true; },
+        []() { return std::uint64_t{18U}; },
+        [&]() {
+            ++prepare_calls;
+            return 1;
+        },
+        [&](int, const StaleFlowReconnectRequest&) {
+            ++cleanup_calls;
+        });
+    CHECK(stale == StaleFlowReconnectExecution::skipped_stale_generation);
+    CHECK(prepare_calls == 0U);
+    CHECK(cleanup_calls == 0U);
+}
+
+TEST_CASE("stale-flow reconnect rechecks generation after scope preparation") {
+    StaleFlowReconnectRequest request;
+    request.expected_runtime_generation = 17U;
+    request.exact_forwarded_scope = true;
+    request.normal.destination_selectors = {"31.13.64.0/18"};
+
+    std::size_t generation_checks = 0U;
+    std::size_t prepare_calls = 0U;
+    std::size_t cleanup_calls = 0U;
+    const auto result = run_stale_flow_reconnect_if_committed(
+        RuntimeReconnectCommitState::committed,
+        request,
+        []() { return true; },
+        [&]() {
+            ++generation_checks;
+            return generation_checks == 1U
+                ? std::uint64_t{17U}
+                : std::uint64_t{18U};
+        },
+        [&]() {
+            ++prepare_calls;
+            return 1;
+        },
+        [&](int, const StaleFlowReconnectRequest&) {
+            ++cleanup_calls;
+        });
+
+    CHECK(result ==
+          StaleFlowReconnectExecution::skipped_generation_changed);
+    CHECK(generation_checks == 2U);
+    CHECK(prepare_calls == 1U);
+    CHECK(cleanup_calls == 0U);
+}
+
+TEST_CASE("stale-flow reconnect fails closed for unsafe plans") {
+    const auto execute = [](const StaleFlowReconnectRequest& request) {
+        std::size_t callback_calls = 0U;
+        const auto result = run_stale_flow_reconnect_if_committed(
+            RuntimeReconnectCommitState::committed,
+            request,
+            [&]() {
+                ++callback_calls;
+                return true;
+            },
+            [&]() {
+                ++callback_calls;
+                return request.expected_runtime_generation;
+            },
+            [&]() {
+                ++callback_calls;
+                return 1;
+            },
+            [&](int, const StaleFlowReconnectRequest&) {
+                ++callback_calls;
+            });
+        return std::pair{result, callback_calls};
+    };
+
+    StaleFlowReconnectRequest empty;
+    empty.expected_runtime_generation = 17U;
+    empty.exact_forwarded_scope = true;
+    const auto empty_result = execute(empty);
+    CHECK(empty_result.first ==
+          StaleFlowReconnectExecution::skipped_empty_plan);
+    CHECK(empty_result.second == 0U);
+
+    auto inexact = empty;
+    inexact.exact_forwarded_scope = false;
+    inexact.normal.destination_selectors = {"31.13.64.0/18"};
+    const auto inexact_result = execute(inexact);
+    CHECK(inexact_result.first ==
+          StaleFlowReconnectExecution::skipped_inexact_forwarded_scope);
+    CHECK(inexact_result.second == 0U);
+
+    auto global = empty;
+    global.normal.destination_selectors = {" 192.0.2.1 / 0 "};
+    const auto global_result = execute(global);
+    CHECK(global_result.first ==
+          StaleFlowReconnectExecution::skipped_global_destination_scope);
+    CHECK(global_result.second == 0U);
+
+    auto invalid_generation = empty;
+    invalid_generation.expected_runtime_generation = 0U;
+    invalid_generation.normal.destination_selectors = {"31.13.64.0/18"};
+    const auto invalid_generation_result = execute(invalid_generation);
+    CHECK(invalid_generation_result.first ==
+          StaleFlowReconnectExecution::skipped_invalid_generation);
+    CHECK(invalid_generation_result.second == 0U);
+}
+
+TEST_CASE("stale-flow reconnect contains preparation and cleanup failures") {
+    StaleFlowReconnectRequest request;
+    request.expected_runtime_generation = 17U;
+    request.exact_forwarded_scope = true;
+    request.normal.destination_selectors = {"31.13.64.0/18"};
+
+    std::size_t cleanup_calls = 0U;
+    const auto prepare_failed = run_stale_flow_reconnect_if_committed(
+        RuntimeReconnectCommitState::committed,
+        request,
+        []() { return true; },
+        []() { return std::uint64_t{17U}; },
+        []() -> int { throw std::runtime_error("scope unavailable"); },
+        [&](int, const StaleFlowReconnectRequest&) {
+            ++cleanup_calls;
+        });
+    CHECK(prepare_failed == StaleFlowReconnectExecution::failed);
+    CHECK(cleanup_calls == 0U);
+
+    const auto cleanup_failed = run_stale_flow_reconnect_if_committed(
+        RuntimeReconnectCommitState::committed,
+        request,
+        []() { return true; },
+        []() { return std::uint64_t{17U}; },
+        []() { return 1; },
+        [](int, const StaleFlowReconnectRequest&) {
+            throw std::runtime_error("cleanup unavailable");
+        });
+    CHECK(cleanup_failed == StaleFlowReconnectExecution::failed);
 }
 
 TEST_CASE("destination retirement does not treat shifted unchanged rules as new") {

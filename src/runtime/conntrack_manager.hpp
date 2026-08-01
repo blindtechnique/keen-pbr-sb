@@ -103,6 +103,104 @@ struct ConntrackForwardedFlowCleanupOptions {
     std::size_t max_snapshot_lines{8192};
 };
 
+enum class ConntrackFlowFamily {
+    Ipv4,
+    Ipv6,
+};
+
+enum class ConntrackFlowProtocol {
+    Tcp,
+    Udp,
+};
+
+enum class ConntrackTcpState {
+    None,
+    SynSent,
+    SynRecv,
+    Established,
+    FinWait,
+    CloseWait,
+    LastAck,
+    TimeWait,
+    Close,
+    Listen,
+    SynSent2,
+    Retrans,
+    Unack,
+};
+
+struct ConntrackFlowCounters {
+    std::uint64_t packets{0};
+    std::uint64_t bytes{0};
+
+    bool operator==(const ConntrackFlowCounters& other) const {
+        return packets == other.packets && bytes == other.bytes;
+    }
+};
+
+// One exact original-direction forwarded flow. The tuple is normalized and
+// complete; counters are kept separately for the original and reply
+// directions so a higher-level observer can detect one-way progress without
+// rereading or reparsing conntrack text.
+struct ConntrackExactForwardedFlow {
+    ConntrackFlowFamily family{ConntrackFlowFamily::Ipv4};
+    ConntrackFlowProtocol protocol{ConntrackFlowProtocol::Tcp};
+    std::string source;
+    std::string destination;
+    std::uint16_t source_port{0};
+    std::uint16_t destination_port{0};
+    std::uint32_t mark{0};
+    ConntrackFlowCounters original;
+    ConntrackFlowCounters reply;
+    std::optional<ConntrackTcpState> tcp_state;
+    bool assured{false};
+    bool seen_reply{false};
+    bool fastnat{false};
+
+    bool operator==(const ConntrackExactForwardedFlow& other) const {
+        return family == other.family &&
+               protocol == other.protocol &&
+               source == other.source &&
+               destination == other.destination &&
+               source_port == other.source_port &&
+               destination_port == other.destination_port &&
+               mark == other.mark &&
+               original == other.original &&
+               reply == other.reply &&
+               tcp_state == other.tcp_state &&
+               assured == other.assured &&
+               seen_reply == other.seen_reply &&
+               fastnat == other.fastnat;
+    }
+};
+
+struct ConntrackFlowObservationOptions {
+    bool ipv6_enabled{true};
+    std::size_t max_flows{256};
+    std::size_t max_destination_input_cidrs{1024};
+    std::size_t max_snapshot_bytes{2U * 1024U * 1024U};
+    std::size_t max_snapshot_lines{8192};
+};
+
+struct ConntrackFlowObservation {
+    std::vector<ConntrackExactForwardedFlow> flows;
+    // Read-only, source-scoped UDP media guard. These flows may target an
+    // arbitrary peer outside destination_cidrs and are never deletion
+    // candidates; callers use them only to protect a same-source signalling
+    // flow while a P2P call is active.
+    std::vector<ConntrackExactForwardedFlow> source_wide_udp_flows;
+    std::size_t invalid_destination_selectors{0};
+    std::size_t invalid_media_guard_sources{0};
+    std::size_t skipped_destination_selectors{0};
+    bool invalid_owned_mask{false};
+    bool destination_input_truncated{false};
+    bool snapshot_unavailable{false};
+    bool snapshot_truncated{false};
+    bool line_limit_reached{false};
+    bool flow_limit_reached{false};
+    bool local_address_scope_missing{false};
+};
+
 class ConntrackManager {
 public:
     struct CommandResult {
@@ -169,9 +267,9 @@ public:
 
     // Reconnect currently observed forwarded flows after a successfully
     // committed destination-policy change. Fully unmarked flows are eligible
-    // only for normal_destination_cidrs. Flows carrying at least one
-    // keen-pbr-owned mark bit are additionally eligible for
-    // aggressive_destination_cidrs; foreign-only marks are never selected.
+    // for normal_destination_cidrs and aggressive_destination_cidrs. Flows
+    // carrying at least one keen-pbr-owned mark bit are additionally eligible
+    // for aggressive_destination_cidrs; foreign-only marks are never selected.
     // The snapshot is read once and all matches share the same time/flow
     // budget. Every deletion uses the exact original host pair and the full
     // observed mark, so this API cannot become a global or masked-mark flush.
@@ -197,6 +295,26 @@ public:
         const std::vector<std::string>& local_interface_addresses,
         uint32_t owned_mask,
         ConntrackForwardedFlowCleanupOptions options = {}) const;
+
+    // Observe only exact forwarded TCP/UDP flows whose destination belongs to
+    // one of the validated, non-/0 selectors. Eligible marks are either zero
+    // or entirely inside owned_mask; foreign-only and mixed foreign/owned
+    // marks are excluded. Local-address inventory is authoritative and any
+    // missing/invalid entry fails closed before reading conntrack.
+    ConntrackFlowObservation observe_forwarded_destination_flows(
+        const std::vector<std::string>& destination_cidrs,
+        const std::vector<std::string>& local_interface_addresses,
+        uint32_t owned_mask,
+        ConntrackFlowObservationOptions options = {},
+        const std::vector<std::string>& media_guard_source_addresses = {})
+        const;
+
+    // Delete one previously observed flow by its full original 5-tuple and
+    // full-width mark. The tuple is revalidated and marks with foreign bits
+    // are rejected; this method never issues a CIDR selector or global flush.
+    ConntrackCleanupResult delete_exact_forwarded_flow(
+        const ConntrackExactForwardedFlow& flow,
+        uint32_t owned_mask) const;
 
 private:
     ConntrackPolicy active_;

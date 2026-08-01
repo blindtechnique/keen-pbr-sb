@@ -271,6 +271,8 @@ configure_raw_prerouting() {
 read_fastnat_value() {
     local path
     local value
+    local found=no
+    local enabled=no
 
     for path in \
         "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat" \
@@ -278,29 +280,61 @@ read_fastnat_value() {
         [ -r "$path" ] || continue
         read -r value < "$path" || continue
         case "$value" in
-            0|1)
-                printf '%s\n' "$value"
-                return 0
-                ;;
+            0) found=yes ;;
+            1) found=yes; enabled=yes ;;
         esac
     done
-    return 1
+    [ "$found" = yes ] || return 1
+    if [ "$enabled" = yes ]; then
+        printf '%s\n' 1
+    else
+        printf '%s\n' 0
+    fi
 }
 
 write_fastnat_value() {
     local value="$1"
+    local observed
     local written=1
 
     sysctl -w "net.ipv4.netfilter.ip_conntrack_fastnat=$value" \
         >/dev/null 2>&1 && written=0
     sysctl -w "net.netfilter.nf_conntrack_fastnat=$value" \
         >/dev/null 2>&1 && written=0
-    return "$written"
+    [ "$written" -eq 0 ] || return 1
+
+    # One alias may accept the write while another readable alias remains
+    # enabled. Verify the aggregate kernel state instead of treating a single
+    # successful sysctl invocation as proof that the invariant was restored.
+    observed="$(read_fastnat_value)" || return 1
+    [ "$observed" = "$value" ]
+}
+
+save_fastnat_snapshot() {
+    local value="$1"
+    local old_umask
+    local temporary
+
+    case "$value" in
+        0|1) ;;
+        *) return 1 ;;
+    esac
+
+    temporary="${FASTNAT_STATE_FILE}.$$"
+    old_umask="$(umask)"
+    umask 077
+    if ! printf '%s\n' "$value" > "$temporary" ||
+       ! mv -f "$temporary" "$FASTNAT_STATE_FILE"; then
+        umask "$old_umask"
+        rm -f "$temporary"
+        log_error "Cannot save the current FastNAT state"
+        return 1
+    fi
+    umask "$old_umask"
 }
 
 remember_fastnat_value() {
-    local old_umask
-    local temporary
+    local quiet="${1:-no}"
     local value
 
     if [ -e "$FASTNAT_STATE_FILE" ]; then
@@ -315,20 +349,34 @@ remember_fastnat_value() {
     value="$(read_fastnat_value)" || {
         # Older Keenetic kernels may not expose the FastNAT control at all.
         # That is a supported capability difference, not a startup failure.
-        log "FastNAT control is unavailable; leaving kernel NAT settings unchanged"
+        if [ "$quiet" != yes ]; then
+            log "FastNAT control is unavailable; leaving kernel NAT settings unchanged"
+        fi
         return 2
     }
-    temporary="${FASTNAT_STATE_FILE}.$$"
-    old_umask="$(umask)"
-    umask 077
-    if ! printf '%s\n' "$value" > "$temporary" ||
-       ! mv -f "$temporary" "$FASTNAT_STATE_FILE"; then
-        umask "$old_umask"
-        rm -f "$temporary"
-        log_error "Cannot save the current FastNAT state"
+    save_fastnat_snapshot "$value"
+}
+
+ensure_fastnat_disabled() {
+    local value
+
+    # A firmware netfilter rebuild may turn FastNAT back on while keen-pbr is
+    # already running. If the startup snapshot is unexpectedly absent, the
+    # pre-service value is no longer knowable: remember disabled as the only
+    # fail-closed value instead of later restoring firmware-created drift.
+    if [ -e "$FASTNAT_STATE_FILE" ]; then
+        remember_fastnat_value yes || return 1
+        value="$(read_fastnat_value)" || return 0
+    else
+        value="$(read_fastnat_value)" || return 0
+        save_fastnat_snapshot 0 || return 1
+    fi
+    [ "$value" = 1 ] || return 0
+
+    if ! write_fastnat_value 0; then
+        log_error "Failed to keep FastNAT disabled after a netfilter rebuild"
         return 1
     fi
-    umask "$old_umask"
 }
 
 disable_hwnat() {
@@ -377,9 +425,11 @@ restore_hwnat_if_safe() {
     rm -f "$FASTNAT_STATE_FILE"
 }
 
-signal_service() {
+validate_service_pid() {
     local signal="$1"
     local pid
+
+    VALIDATED_SERVICE_PID=""
 
     if [ ! -s "$PIDFILE" ]; then
         log_error "Cannot send $signal to keen-pbr: PID file $PIDFILE is missing or empty"
@@ -396,6 +446,16 @@ signal_service() {
         return 1
     fi
 
+    VALIDATED_SERVICE_PID="$pid"
+}
+
+signal_service() {
+    local signal="$1"
+    local pid
+
+    validate_service_pid "$signal" || return 1
+    pid="$VALIDATED_SERVICE_PID"
+
     if ! kill "-$signal" "$pid"; then
         log_error "Failed to send $signal to keen-pbr PID $pid from $PIDFILE"
         return 1
@@ -404,6 +464,20 @@ signal_service() {
     log "Sent $signal to keen-pbr PID $pid"
 
     return 0
+}
+
+reapply_netfilter_runtime() {
+    local signal="$1"
+
+    # Do not change a global kernel setting for a stopped or stale service.
+    # Validate first, then restore the invariant, and only then schedule the
+    # daemon refresh. A failed guard must never leave a refresh queued.
+    validate_service_pid "$signal" || return 1
+    ensure_fastnat_disabled || return 1
+
+    # signal_service validates again immediately before kill, closing the
+    # process-exit/PID-reuse window introduced by the kernel-state update.
+    signal_service "$signal"
 }
 
 # Verify that a PID still belongs to keen-pbr. A live but reused stale PID must
@@ -581,11 +655,11 @@ case "$1" in
         exit $?
         ;;
     reapply-firewall)
-        signal_service SIGUSR1
+        reapply_netfilter_runtime SIGUSR1
         exit $?
         ;;
     reapply-nat)
-        signal_service SIGUSR2
+        reapply_netfilter_runtime SIGUSR2
         exit $?
         ;;
     reapply-dnsmasq-config)

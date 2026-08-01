@@ -46,6 +46,7 @@ add_executable(keen-pbr-tests
   test_connection_query.cpp
   test_conntrack_event_monitor.cpp
   test_conntrack_manager.cpp
+  test_idle_stall_detector.cpp
   test_interface_traffic_sampler.cpp
   test_api_status_events.cpp
   test_api_logs.cpp

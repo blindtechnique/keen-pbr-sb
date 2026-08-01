@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -121,6 +122,38 @@ inline bool destination_only_conntrack_cleanup_eligible(
 
 } // namespace runtime_recovery_detail
 
+// Limit continuous reconnect observation to selected lists that are actually
+// referenced by a committed, realized mark rule.  A configured list alone is
+// not evidence that any live traffic can reach the corresponding outbound:
+// it may be unused, disabled (Skip), pass-through, blackholed, or combined
+// with selectors that destination-only conntrack cleanup cannot reproduce.
+inline std::set<std::string>
+active_destination_only_reconnect_list_names(
+    const std::set<std::string>& selected_list_names,
+    const std::vector<RuleState>& committed_rules) {
+    std::set<std::string> active;
+    if (selected_list_names.empty()) {
+        return active;
+    }
+
+    for (const auto& rule : committed_rules) {
+        if (rule.action_type != RuleActionType::Mark ||
+            rule.fwmark == 0U ||
+            !runtime_recovery_detail::
+                destination_only_conntrack_cleanup_eligible(rule)) {
+            continue;
+        }
+
+        for (const auto& list_name : rule.list_names) {
+            if (selected_list_names.find(list_name) !=
+                selected_list_names.end()) {
+                active.insert(list_name);
+            }
+        }
+    }
+    return active;
+}
+
 struct ConntrackDestinationRetirementPlan {
     std::set<std::string> current_list_names;
     std::vector<std::string> current_destination_selectors;
@@ -140,6 +173,136 @@ struct ConntrackDestinationRetirementCoverage {
                !truncated_static_list_names.empty();
     }
 };
+
+enum class RuntimeReconnectCommitState : std::uint8_t {
+    committed,
+    failed,
+    rolled_back,
+};
+
+enum class StaleFlowReconnectExecution : std::uint8_t {
+    completed,
+    skipped_not_committed,
+    skipped_inactive_runtime,
+    skipped_invalid_generation,
+    skipped_stale_generation,
+    skipped_empty_plan,
+    skipped_inexact_forwarded_scope,
+    skipped_global_destination_scope,
+    skipped_generation_changed,
+    failed,
+};
+
+struct StaleFlowReconnectRequest {
+    std::uint64_t expected_runtime_generation{0};
+    ConntrackDestinationRetirementCoverage normal;
+    ConntrackDestinationRetirementCoverage aggressive;
+    // Destination selectors alone cannot preserve source-, protocol-, or
+    // port-scoped inbound policies. Callers must opt in only after proving
+    // that the live forwarded-flow scope is representable exactly.
+    bool exact_forwarded_scope{false};
+
+    bool empty() const noexcept {
+        return normal.destination_selectors.empty() &&
+               aggressive.destination_selectors.empty();
+    }
+};
+
+namespace runtime_recovery_detail {
+
+inline std::string_view trim_ascii_whitespace(
+    std::string_view value) noexcept {
+    constexpr std::string_view whitespace{" \t\r\n"};
+    const auto first = value.find_first_not_of(whitespace);
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    const auto last = value.find_last_not_of(whitespace);
+    return value.substr(first, last - first + 1U);
+}
+
+inline bool is_global_destination_selector(
+    std::string_view selector) noexcept {
+    selector = trim_ascii_whitespace(selector);
+    const auto slash = selector.rfind('/');
+    if (slash == std::string_view::npos) {
+        return false;
+    }
+    return trim_ascii_whitespace(selector.substr(slash + 1U)) == "0";
+}
+
+inline bool contains_global_destination_selector(
+    const ConntrackDestinationRetirementCoverage& coverage) noexcept {
+    return std::any_of(
+        coverage.destination_selectors.begin(),
+        coverage.destination_selectors.end(),
+        [](const std::string& selector) {
+            return is_global_destination_selector(selector);
+        });
+}
+
+} // namespace runtime_recovery_detail
+
+// Execute targeted stale-flow retirement only for the runtime generation that
+// was successfully committed. Scope preparation may inspect live interfaces or
+// conntrack state and therefore race with a newer apply; fence the generation
+// both before and after preparation, before invoking the irreversible cleanup.
+// The cleanup callback receives destination coverage only. There is no global
+// flush mode, and /0 selectors are rejected explicitly.
+template <typename IsRuntimeActive,
+          typename CurrentGeneration,
+          typename PrepareScope,
+          typename Cleanup>
+StaleFlowReconnectExecution run_stale_flow_reconnect_if_committed(
+    RuntimeReconnectCommitState commit_state,
+    const StaleFlowReconnectRequest& request,
+    IsRuntimeActive&& is_runtime_active,
+    CurrentGeneration&& current_generation,
+    PrepareScope&& prepare_scope,
+    Cleanup&& cleanup) noexcept {
+    if (commit_state != RuntimeReconnectCommitState::committed) {
+        return StaleFlowReconnectExecution::skipped_not_committed;
+    }
+    if (!request.exact_forwarded_scope) {
+        return StaleFlowReconnectExecution::skipped_inexact_forwarded_scope;
+    }
+    if (request.empty()) {
+        return StaleFlowReconnectExecution::skipped_empty_plan;
+    }
+    if (runtime_recovery_detail::contains_global_destination_selector(
+            request.normal) ||
+        runtime_recovery_detail::contains_global_destination_selector(
+            request.aggressive)) {
+        return StaleFlowReconnectExecution::
+            skipped_global_destination_scope;
+    }
+    if (request.expected_runtime_generation == 0U) {
+        return StaleFlowReconnectExecution::skipped_invalid_generation;
+    }
+
+    try {
+        if (!is_runtime_active()) {
+            return StaleFlowReconnectExecution::skipped_inactive_runtime;
+        }
+        if (current_generation() != request.expected_runtime_generation) {
+            return StaleFlowReconnectExecution::skipped_stale_generation;
+        }
+
+        auto prepared_scope = prepare_scope();
+
+        if (!is_runtime_active()) {
+            return StaleFlowReconnectExecution::skipped_inactive_runtime;
+        }
+        if (current_generation() != request.expected_runtime_generation) {
+            return StaleFlowReconnectExecution::skipped_generation_changed;
+        }
+
+        cleanup(prepared_scope, request);
+        return StaleFlowReconnectExecution::completed;
+    } catch (...) {
+        return StaleFlowReconnectExecution::failed;
+    }
+}
 
 inline std::set<std::string>
 plan_conntrack_owned_destination_reconnect(
