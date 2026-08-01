@@ -18,13 +18,13 @@ export interface CatalogSetupSummary {
   /** Compatibility projection of the first created route rule.
    */
   route_rule?: CatalogSetupRouteRuleSummary;
-  /** Independently editable route rules created by the plan. A beginner setup creates at most one route rule for each selected list.
+  /** Independently editable route rules created by the plan. A catalogue setup session creates at most one route rule containing every selected list that still needs the requested route.
    */
   route_rules?: CatalogSetupRouteRuleSummary[];
   /** Compatibility projection of the first created DNS rule.
    */
   dns_rule?: CatalogSetupDnsRuleSummary;
-  /** Independently editable DNS rules created by the plan. A beginner setup creates at most one DNS rule for each selected list.
+  /** Independently editable DNS rules created by the plan. A catalogue setup session creates at most one DNS rule containing every DNS-eligible selected list that still needs the requested server.
    */
   dns_rules?: CatalogSetupDnsRuleSummary[];
   /** DNS server reused or created atomically by automatic catalogue setup. Existing unrelated and fallback DNS servers are not modified.
