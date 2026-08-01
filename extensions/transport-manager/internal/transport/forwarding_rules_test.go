@@ -28,6 +28,7 @@ type fakeFirewallRunner struct {
 	commentSupported   bool
 	rules              map[string]map[string]int
 	scripted           map[string][]firewallCommandResult
+	hooks              map[string][]func(*fakeFirewallRunner)
 	calls              []fakeFirewallCall
 }
 
@@ -38,6 +39,7 @@ func newFakeFirewallRunner() *fakeFirewallRunner {
 		commentSupported:   true,
 		rules:              map[string]map[string]int{"iptables": {}},
 		scripted:           make(map[string][]firewallCommandResult),
+		hooks:              make(map[string][]func(*fakeFirewallRunner)),
 	}
 }
 
@@ -78,6 +80,11 @@ func (f *fakeFirewallRunner) Run(_ context.Context, binary string, args []string
 	f.calls = append(f.calls, fakeFirewallCall{binary: binary, op: op, rule: rule, wait: wait, waitValue: waitValue})
 
 	scriptKey := fakeCommandKey(binary, op, rule)
+	if hooks := f.hooks[scriptKey]; len(hooks) > 0 {
+		hook := hooks[0]
+		f.hooks[scriptKey] = hooks[1:]
+		hook(f)
+	}
 	if queue := f.scripted[scriptKey]; len(queue) > 0 {
 		result := queue[0]
 		f.scripted[scriptKey] = queue[1:]
@@ -139,11 +146,30 @@ func (f *fakeFirewallRunner) operationCount(op string) int {
 	return count
 }
 
+func (f *fakeFirewallRunner) commandCount(binary, op string, rule []string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, call := range f.calls {
+		if call.binary == binary && call.op == op && slices.Equal(call.rule, rule) {
+			count++
+		}
+	}
+	return count
+}
+
 func (f *fakeFirewallRunner) queue(binary, op string, rule []string, results ...firewallCommandResult) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := fakeCommandKey(binary, op, rule)
 	f.scripted[key] = append(f.scripted[key], results...)
+}
+
+func (f *fakeFirewallRunner) queueHook(binary, op string, rule []string, hooks ...func(*fakeFirewallRunner)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeCommandKey(binary, op, rule)
+	f.hooks[key] = append(f.hooks[key], hooks...)
 }
 
 func (f *fakeFirewallRunner) setRuleCountLocked(binary string, rule []string, count int) {
@@ -199,6 +225,14 @@ func fakeLockResult() firewallCommandResult {
 	}
 }
 
+func fakeForwardingScaffoldMissingResult() firewallCommandResult {
+	return firewallCommandResult{
+		exitCode: 1,
+		output:   "iptables: No chain/target/match by that name.",
+		err:      errors.New("exit status 1"),
+	}
+}
+
 func testForwardingRuleManager(runner firewallCommandRunner) *forwardingRuleManager {
 	manager := newForwardingRuleManager(runner)
 	manager.sleep = func(time.Duration) {}
@@ -221,6 +255,139 @@ func TestForwardingRuleEnsureRetriesLockWithoutAppending(t *testing.T) {
 	}
 	if additions := runner.operationCount("-A"); additions != 0 {
 		t.Fatalf("unexpected append after transient inspection: %d", additions)
+	}
+}
+
+func TestForwardingRuleEnsureWaitsForNDMSForwardingScaffold(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	manager.scaffoldRetryDelays = []time.Duration{100 * time.Millisecond, 250 * time.Millisecond}
+	var sleeps []time.Duration
+	manager.sleep = func(delay time.Duration) { sleeps = append(sleeps, delay) }
+	marked := forwardingRuleArgs("vless1")
+	runner.queue(
+		"iptables",
+		"-C",
+		marked,
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+	runner.queue(
+		"iptables",
+		"-S",
+		[]string{"FORWARD"},
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	wantSleeps := append(append([]time.Duration(nil), manager.scaffoldRetryDelays...), manager.scaffoldStableDelay)
+	if !slices.Equal(sleeps, wantSleeps) {
+		t.Fatalf("scaffold retry sleeps = %v, want %v", sleeps, wantSleeps)
+	}
+	if got := manager.waitSupport["iptables"]; got != xtablesWaitWithTimeout {
+		t.Fatalf("wait mode = %d, want numeric timeout mode %d", got, xtablesWaitWithTimeout)
+	}
+	if count := runner.ruleCount("iptables", marked); count != 1 {
+		t.Fatalf("marked rule count = %d, want 1", count)
+	}
+}
+
+func TestForwardingRuleEnsureRetriesWhenScaffoldVanishesBeforeAppend(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	manager.scaffoldRetryDelays = []time.Duration{100 * time.Millisecond}
+	var sleeps []time.Duration
+	manager.sleep = func(delay time.Duration) { sleeps = append(sleeps, delay) }
+	marked := forwardingRuleArgs("vless1")
+	runner.queue("iptables", "-S", []string{"FORWARD"}, fakeForwardingScaffoldMissingResult())
+	runner.queue("iptables", "-A", marked, fakeForwardingScaffoldMissingResult())
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	wantSleeps := append(append([]time.Duration(nil), manager.scaffoldRetryDelays...), manager.scaffoldStableDelay)
+	if !slices.Equal(sleeps, wantSleeps) {
+		t.Fatalf("scaffold retry sleeps = %v, want %v", sleeps, wantSleeps)
+	}
+	if count := runner.ruleCount("iptables", marked); count != 1 {
+		t.Fatalf("marked rule count = %d, want 1", count)
+	}
+	if count := runner.ruleCount("iptables", legacyForwardingRuleArgs("vless1")); count != 0 {
+		t.Fatalf("unsafe compatibility fallback appended %d rule(s)", count)
+	}
+}
+
+func TestForwardingRuleEnsureRebuildsFullPassAfterNDMSWipesEarlierFamily(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	runner.rules["ip6tables"] = make(map[string]int)
+	manager := testForwardingRuleManager(runner)
+	manager.scaffoldRetryDelays = []time.Duration{100 * time.Millisecond, 250 * time.Millisecond}
+	manager.scaffoldStableDelay = 250 * time.Millisecond
+	marked := forwardingRuleArgs("vless1")
+	runner.queue("ip6tables", "-C", marked, fakeForwardingScaffoldMissingResult())
+	runner.queue("ip6tables", "-S", []string{"FORWARD"}, fakeForwardingScaffoldMissingResult())
+	runner.queueHook("ip6tables", "-A", marked, func(runner *fakeFirewallRunner) {
+		runner.setRuleCountLocked("iptables", marked, 0)
+	})
+
+	var sleeps []time.Duration
+	manager.sleep = func(delay time.Duration) { sleeps = append(sleeps, delay) }
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	wantSleeps := []time.Duration{
+		manager.scaffoldRetryDelays[0],
+		manager.scaffoldStableDelay,
+		manager.scaffoldRetryDelays[1],
+		manager.scaffoldStableDelay,
+	}
+	if !slices.Equal(sleeps, wantSleeps) {
+		t.Fatalf("scaffold retry sleeps = %v, want %v", sleeps, wantSleeps)
+	}
+	for _, binary := range []string{"iptables", "ip6tables"} {
+		if count := runner.ruleCount(binary, marked); count != 1 {
+			t.Fatalf("%s marked rule count = %d, want 1", binary, count)
+		}
+	}
+}
+
+func TestForwardingRuleEnsureBoundsMissingScaffoldRetries(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	manager.scaffoldRetryDelays = []time.Duration{100 * time.Millisecond, 250 * time.Millisecond}
+	var sleeps []time.Duration
+	manager.sleep = func(delay time.Duration) { sleeps = append(sleeps, delay) }
+	marked := forwardingRuleArgs("vless1")
+	runner.queue(
+		"iptables",
+		"-C",
+		marked,
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+	runner.queue(
+		"iptables",
+		"-S",
+		[]string{"FORWARD"},
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+
+	err := manager.ensureInterfaces([]string{"vless1"})
+	if !errors.Is(err, errForwardingScaffoldUnavailable) {
+		t.Fatalf("ensure error = %v, want missing forwarding scaffold", err)
+	}
+	if !slices.Equal(sleeps, manager.scaffoldRetryDelays) {
+		t.Fatalf("scaffold retry sleeps = %v, want %v", sleeps, manager.scaffoldRetryDelays)
+	}
+	if additions := runner.operationCount("-A"); additions != 0 {
+		t.Fatalf("missing scaffold appended %d rule(s)", additions)
 	}
 }
 
@@ -321,6 +488,31 @@ func TestForwardingRuleCleanupRemovesEveryConfiguredLegacyDuplicate(t *testing.T
 	}
 	if checks := runner.operationCount("-C"); checks != 0 {
 		t.Fatalf("startup cleanup performed %d fragile check(s)", checks)
+	}
+}
+
+func TestForwardingRuleCleanupIgnoresUnrepresentableMarkedRuleAndRemovesLegacy(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	marked := forwardingRuleArgs("vless1")
+	legacy := legacyForwardingRuleArgs("vless1")
+	runner.setRuleCount("iptables", legacy, 1)
+	runner.queue(
+		"iptables",
+		"-D",
+		marked,
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+
+	if err := manager.cleanupInterfaces([]string{"vless1"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if count := runner.ruleCount("iptables", legacy); count != 0 {
+		t.Fatalf("compatibility rule count after cleanup = %d, want 0", count)
+	}
+	if manager.commentSupport["iptables"] != commentMatchUnavailable {
+		t.Fatal("cleanup did not cache unavailable comment matcher")
 	}
 }
 
@@ -438,21 +630,149 @@ func TestCountExactForwardingRulesDoesNotMatchSimilarInterfaceOrExtraPredicates(
 	}
 }
 
-func TestForwardingRuleEnsureDoesNotFallbackOnUnrelatedCommentFailure(t *testing.T) {
+func TestForwardingRuleEnsureUsesCompatibilityRuleForAmbiguousKeeneticCommentFailure(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	var sleeps int
+	manager.sleep = func(time.Duration) { sleeps++ }
+	marked := forwardingRuleArgs("vless1")
+	ambiguousFailure := firewallCommandResult{
+		exitCode: 2,
+		output:   "iptables: No chain/target/match by that name",
+		err:      errors.New("exit status 2"),
+	}
+	runner.queue("iptables", "-A", marked, ambiguousFailure, ambiguousFailure)
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	if count := runner.ruleCount("iptables", marked); count != 0 {
+		t.Fatalf("unsupported marked rule count = %d, want 0", count)
+	}
+	if count := runner.ruleCount("iptables", legacyForwardingRuleArgs("vless1")); count != 1 {
+		t.Fatalf("compatibility rule count = %d, want 1", count)
+	}
+	markedChecks := runner.commandCount("iptables", "-C", marked)
+	sleepsAfterDetection := sleeps
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.commandCount("iptables", "-C", marked); got != markedChecks {
+		t.Fatalf("cached unavailable comment matcher performed %d extra marked check(s)", got-markedChecks)
+	}
+	if sleeps != sleepsAfterDetection {
+		t.Fatalf("cached unavailable comment matcher added %d sleep(s)", sleeps-sleepsAfterDetection)
+	}
+}
+
+func TestForwardingRuleEnsureRecognizesAmbiguousManagedInspectionAsUnavailableComment(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	marked := forwardingRuleArgs("vless1")
+	runner.queue(
+		"iptables",
+		"-C",
+		marked,
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	if additions := runner.commandCount("iptables", "-A", marked); additions != 0 {
+		t.Fatalf("unsupported marked rule appended %d time(s)", additions)
+	}
+	if count := runner.ruleCount("iptables", legacyForwardingRuleArgs("vless1")); count != 1 {
+		t.Fatalf("compatibility rule count = %d, want 1", count)
+	}
+}
+
+func TestForwardingRuleInspectionKeepsUnrelatedAmbiguousFailureFatal(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	rule := []string{"FORWARD", "-p", "tcp", "-m", "comment", "--comment", "unrelated", "-j", "ACCEPT"}
+	runner.queue(
+		"iptables",
+		"-C",
+		rule,
+		fakeForwardingScaffoldMissingResult(),
+		fakeForwardingScaffoldMissingResult(),
+	)
+
+	_, err := manager.rulePresentLocked("iptables", rule)
+	if err == nil {
+		t.Fatal("expected unrelated inspection failure")
+	}
+	if errors.Is(err, errCommentMatchUnavailable) || errors.Is(err, errForwardingScaffoldUnavailable) {
+		t.Fatalf("unrelated inspection error was misclassified: %v", err)
+	}
+}
+
+func TestForwardingRuleAppendKeepsUnrelatedAmbiguousCommentFailureFatal(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	rule := []string{"FORWARD", "-p", "tcp", "-m", "comment", "--comment", "unrelated", "-j", "ACCEPT"}
+	ambiguousFailure := firewallCommandResult{
+		exitCode: 2,
+		output:   "iptables: No chain/target/match by that name",
+		err:      errors.New("exit status 2"),
+	}
+	runner.queue("iptables", "-A", rule, ambiguousFailure, ambiguousFailure)
+
+	err := manager.appendRuleLocked("iptables", rule)
+	if err == nil {
+		t.Fatal("expected unrelated append failure")
+	}
+	if errors.Is(err, errCommentMatchUnavailable) || errors.Is(err, errForwardingScaffoldUnavailable) {
+		t.Fatalf("unrelated append error was misclassified: %v", err)
+	}
+}
+
+func TestForwardingRuleAppendKeepsLegacyAmbiguousFailureFatal(t *testing.T) {
+	runner := newFakeFirewallRunner()
+	manager := testForwardingRuleManager(runner)
+	legacy := legacyForwardingRuleArgs("vless1")
+	ambiguousFailure := firewallCommandResult{
+		exitCode: 1,
+		output:   "iptables: No chain/target/match by that name",
+		err:      errors.New("exit status 1"),
+	}
+	runner.queue("iptables", "-A", legacy, ambiguousFailure, ambiguousFailure)
+
+	err := manager.appendRuleLocked("iptables", legacy)
+	if err == nil {
+		t.Fatal("expected compatibility append failure")
+	}
+	if errors.Is(err, errCommentMatchUnavailable) || errors.Is(err, errForwardingScaffoldUnavailable) {
+		t.Fatalf("compatibility append error was misclassified: %v", err)
+	}
+	if attempts := runner.commandCount("iptables", "-A", legacy); attempts != 2 {
+		t.Fatalf("compatibility append attempts = %d, want 2", attempts)
+	}
+}
+
+func TestForwardingRuleEnsureRetriesAmbiguousAppendAfterScaffoldReturns(t *testing.T) {
 	runner := newFakeFirewallRunner()
 	manager := testForwardingRuleManager(runner)
 	marked := forwardingRuleArgs("vless1")
 	runner.queue("iptables", "-A", marked, firewallCommandResult{
-		exitCode: 2,
+		exitCode: 1,
 		output:   "iptables: No chain/target/match by that name",
-		err:      errors.New("exit status 2"),
+		err:      errors.New("exit status 1"),
 	})
 
-	if err := manager.ensureInterfaces([]string{"vless1"}); err == nil {
-		t.Fatal("expected unrelated append failure")
+	if err := manager.ensureInterfaces([]string{"vless1"}); err != nil {
+		t.Fatal(err)
+	}
+	if additions := runner.operationCount("-A"); additions != 2 {
+		t.Fatalf("append attempts = %d, want exactly 2", additions)
+	}
+	if count := runner.ruleCount("iptables", marked); count != 1 {
+		t.Fatalf("marked rule count = %d, want 1", count)
 	}
 	if count := runner.ruleCount("iptables", legacyForwardingRuleArgs("vless1")); count != 0 {
-		t.Fatalf("unsafe fallback appended %d compatibility rule(s)", count)
+		t.Fatalf("unsafe compatibility fallback appended %d rule(s)", count)
 	}
 }
 
