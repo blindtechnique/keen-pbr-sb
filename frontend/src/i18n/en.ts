@@ -151,6 +151,7 @@ export const enTranslation = {
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
   },
   common: {
+    retry: "Try again",
     updateStatus: {
       available: "Update available",
       current: "No updates",
@@ -166,7 +167,25 @@ export const enTranslation = {
         dnsServer: "DNS servers:",
         failoverGroup: "Failover:",
         list: "Lists:",
+        listRefresh: "URL list refresh:",
       },
+    },
+    listRefreshRoute: {
+      primary: "Primary download route",
+      primaryEmpty: "System route",
+      primaryPlaceholder: "Select a primary route",
+      primaryHint:
+        "If the primary route is unavailable, fallback routes are tried strictly in order.",
+      fallbacks: "Fallback download routes",
+      addFallback: "Add a fallback route",
+      noFallbacks: "No fallback routes are available",
+      fallbackLimit: "Up to three fallback routes can be selected",
+      fallbackPlaceholder: "No fallback routes selected",
+      fallbackPlaceholderDescription:
+        "They are tried in order if the download fails.",
+      fallbackHint:
+        "Used only after a network or HTTP failure on the primary route. A direct connection is not added after the configured chain.",
+      systemDirect: "system route",
     },
     language: "Language",
     theme: "Theme",
@@ -490,6 +509,13 @@ export const enTranslation = {
       outboundExists: "A route tagged {{tag}} already exists",
       createTitle: "Add tunnel or proxy",
       editTitle: "Edit tunnel or proxy",
+      missingTitle: "Tunnel or proxy not found",
+      missingDescription:
+        "Return to the tunnels and proxies list and choose an existing entry.",
+      back: "Back to tunnels and proxies",
+      loadErrorTitle: "Transport data could not be loaded",
+      loadErrorDescription:
+        "Check that the service is available and try again. Saving is disabled to avoid overwriting the current configuration.",
       description:
         "Expose a native interface or a scoped proxy TUN to keen-pbr.",
       tag: "Tag",
@@ -1037,6 +1063,13 @@ export const enTranslation = {
         previewReady: "Setup checked",
         previewSummary:
           "New lists: {{lists}}. Routing rules: {{routes}}. Route: {{route}}. DNS rules: {{dnsRules}}; server: {{dns}}.",
+        batchPolicyTitle: "One shared setup without redundant rules",
+        batchPolicyOutbound:
+          "This session creates at most one shared routing rule for the selected lists and related IP sets. One shared DNS rule is created for all domain lists; IP sets are not added to it. Lists already covered by the selected route are not duplicated; after adding, you can split or fine-tune the rules in the editor.",
+        batchPolicyBlock:
+          "This session creates at most one shared rule for the selected blocking lists. Lists already covered by blocking are not duplicated, and no DNS rule is created for blocking.",
+        batchPolicyDirect:
+          "The selected lists will be added without a routing rule or DNS rule because the direct route is selected.",
         planTitle: "Lists in the checked plan",
         ipListCidrs: "IP list · {{count}} subnets",
         ipListRemote: "IP list · updated from URL",
@@ -1351,8 +1384,9 @@ export const enTranslation = {
             saturday: "On Saturdays",
           },
         },
-        title: "Lists autoupdate",
-        description: "Keep your remote lists up to date automatically.",
+        title: "URL list refresh",
+        description:
+          "Schedule and global download route chain for remote lists.",
         enabledLabel: "Enable lists autoupdate",
         enabledHint:
           "Automatically download the latest version of your remote lists and update routing when they change.",
@@ -1360,6 +1394,11 @@ export const enTranslation = {
         cronHintPrefix: "How often to check for updates. Uses cron format. Use",
         cronHintSuffix: "for help.",
         openInGuru: "Open in Crontab Guru",
+        routeTitle: "Global download route",
+        routeDescription:
+          "Used by URL lists by default. An individual list can override this chain.",
+        inheritedListsCount:
+          "URL lists currently inheriting this chain: {{count}}.",
       },
       softwareUpdate: {
         title: "keen-pbr-sb update",
@@ -1752,6 +1791,8 @@ export const enTranslation = {
           dnsDetour: 'DNS server "{{server}}" will be changed.',
           listDownloadRoutes:
             'List "{{list}}" download routes will be changed.',
+          globalListRefreshRoutes:
+            "The global URL list refresh routes will be changed.",
           downloadRoutes: "Download routes",
           urltestGroupChanged:
             'Group #{{group}} in failover target "{{outbound}}" will be changed.',
@@ -2237,6 +2278,21 @@ export const enTranslation = {
           "Domains from this list resolve through the selected server. Without one the list uses the primary servers.",
         none: "Not set",
       },
+      refreshRoute: {
+        modeLabel: "Refresh route",
+        modes: {
+          inherit: "Use the global chain",
+          override: "Set for this list",
+        },
+        inheritHint:
+          "This list uses the global primary and fallback routes from settings.",
+        overrideHint:
+          "This list uses its own route chain instead of the global one.",
+        inheritSummary:
+          "Download route: {{chain}}. Change it in the global URL list refresh settings.",
+        overrideSummary:
+          "Individual download route: {{chain}}. Change it in the advanced editor.",
+      },
       quickSetup: {
         title: "Quick rule setup",
         description:
@@ -2320,6 +2376,8 @@ export const enTranslation = {
         nameRequired: "Technical ID is required.",
         duplicateName: "A list with this technical ID already exists.",
         invalidTtl: "TTL must be a non-negative integer.",
+        refreshDetourRequired:
+          "Select a primary route for the individual refresh chain.",
       },
     },
   },

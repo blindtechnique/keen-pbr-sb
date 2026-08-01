@@ -76,6 +76,8 @@ export * from './listDeleteStageRequest';
 export * from './listDeleteStageResponse';
 export * from './listDeleteStageSummary';
 export * from './listDeleteTarget';
+export * from './listRefreshConfig';
+export * from './listRefreshDetourMode';
 export * from './listRefreshRequest';
 export * from './listRefreshResponse';
 export * from './listRefreshResponseStatus';

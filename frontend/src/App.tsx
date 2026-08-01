@@ -84,6 +84,11 @@ const RoutingRulesPage = lazy(() =>
 const TransportsPage = lazy(() =>
   import("@/pages/transports-page").then((m) => ({ default: m.TransportsPage }))
 )
+const TransportUpsertPage = lazy(() =>
+  import("@/pages/transport-upsert-page").then((m) => ({
+    default: m.TransportUpsertPage,
+  }))
+)
 
 /** Shown while a page chunk arrives; on a LAN this is a single frame. */
 function PageFallback() {
@@ -164,11 +169,7 @@ function RoutingRuleEditorRoute({
 
   if (presentation === "page") {
     return (
-      <RoutingRuleUpsertPage
-        mode={mode}
-        presentation="page"
-        ruleId={ruleId}
-      />
+      <RoutingRuleUpsertPage mode={mode} presentation="page" ruleId={ruleId} />
     )
   }
 
@@ -194,23 +195,13 @@ function DnsRuleEditorRoute({
   const presentation = useEditorPresentation()
 
   if (presentation === "page") {
-    return (
-      <DnsRuleUpsertPage
-        mode={mode}
-        presentation="page"
-        ruleId={ruleId}
-      />
-    )
+    return <DnsRuleUpsertPage mode={mode} presentation="page" ruleId={ruleId} />
   }
 
   return (
     <>
       <DnsRulesPage />
-      <DnsRuleUpsertPage
-        mode={mode}
-        presentation="dialog"
-        ruleId={ruleId}
-      />
+      <DnsRuleUpsertPage mode={mode} presentation="dialog" ruleId={ruleId} />
     </>
   )
 }
@@ -241,6 +232,37 @@ function OutboundEditorRoute({
         mode={mode}
         outboundId={outboundId}
         presentation="dialog"
+      />
+    </>
+  )
+}
+
+function TransportEditorRoute({
+  mode,
+  transportTag,
+}: {
+  mode: "create" | "edit"
+  transportTag?: string
+}) {
+  const presentation = useEditorPresentation()
+
+  if (presentation === "page") {
+    return (
+      <TransportUpsertPage
+        mode={mode}
+        presentation="page"
+        transportTag={transportTag}
+      />
+    )
+  }
+
+  return (
+    <>
+      <TransportsPage />
+      <TransportUpsertPage
+        mode={mode}
+        presentation="dialog"
+        transportTag={transportTag}
       />
     </>
   )
@@ -279,6 +301,17 @@ function App() {
               )}
             </Route>
             <Route component={OutboundsPage} path="/outbounds" />
+            <Route path="/transports/create">
+              <TransportEditorRoute mode="create" />
+            </Route>
+            <Route path="/transports/:transportTag/edit">
+              {(params) => (
+                <TransportEditorRoute
+                  mode="edit"
+                  transportTag={decodeURIComponent(params.transportTag)}
+                />
+              )}
+            </Route>
             <Route component={TransportsPage} path="/transports" />
             <Route component={ConnectionsPage} path="/connections" />
             <Route component={NfqwsPage} path="/nfqws" />

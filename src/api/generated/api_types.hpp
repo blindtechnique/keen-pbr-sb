@@ -295,6 +295,13 @@ namespace api {
         std::optional<int64_t> table_start;
     };
 
+    struct ListRefresh {
+        std::optional<std::string> detour;
+        std::optional<std::vector<std::string>> fallback_detours;
+    };
+
+    enum class RefreshDetourMode : int { INHERIT, OVERRIDE };
+
     struct ListConfigValue {
         std::optional<std::string> catalog_identity;
         std::optional<std::string> detour;
@@ -303,6 +310,7 @@ namespace api {
         std::optional<std::vector<std::string>> fallback_detours;
         std::optional<std::string> file;
         std::optional<std::vector<std::string>> ip_cidrs;
+        std::optional<RefreshDetourMode> refresh_detour_mode;
         std::optional<int64_t> ttl_ms;
         std::optional<std::string> url;
     };
@@ -397,6 +405,7 @@ namespace api {
         std::optional<Dns> dns;
         std::optional<Fwmark> fwmark;
         std::optional<Iproute> iproute;
+        std::optional<ListRefresh> list_refresh;
         std::optional<std::map<std::string, ListConfigValue>> lists;
         std::optional<ListsAutoupdate> lists_autoupdate;
         std::optional<std::vector<OutboundElement>> outbounds;
@@ -486,7 +495,7 @@ namespace api {
 
     enum class DependencyConsequence : int { DELETE, DISCONNECT, MODIFY };
 
-    enum class DependencyDependentKind : int { DNS_FALLBACK, DNS_RULE, DNS_SERVER, LIST, OUTBOUND_GROUP, ROUTING_RULE };
+    enum class DependencyDependentKind : int { DNS_FALLBACK, DNS_RULE, DNS_SERVER, LIST, LIST_REFRESH, OUTBOUND_GROUP, ROUTING_RULE };
 
     enum class DependencyRelation : int { CONTAINS_MEMBER, DETOURS_VIA, FALLBACK_TO, ROUTES_TO, USES_DNS_SERVER, USES_LIST };
 
@@ -1112,6 +1121,8 @@ namespace api {
         std::optional<ListDeleteStageResponse> list_delete_stage_response;
         std::optional<ListDeleteStageSummaryClass> list_delete_stage_summary;
         std::optional<ListDeleteTargetElement> list_delete_target;
+        std::optional<ListRefresh> list_refresh_config;
+        std::optional<RefreshDetourMode> list_refresh_detour_mode;
         std::optional<ListRefreshRequest> list_refresh_request;
         std::optional<ListRefreshResponse> list_refresh_response;
         std::optional<ListRefreshStateValue> list_refresh_state;
@@ -1260,6 +1271,9 @@ namespace api {
 
     void from_json(const json & j, Iproute & x);
     void to_json(json & j, const Iproute & x);
+
+    void from_json(const json & j, ListRefresh & x);
+    void to_json(json & j, const ListRefresh & x);
 
     void from_json(const json & j, ListConfigValue & x);
     void to_json(json & j, const ListConfigValue & x);
@@ -1527,6 +1541,9 @@ namespace api {
 
     void from_json(const json & j, DnsServerType & x);
     void to_json(json & j, const DnsServerType & x);
+
+    void from_json(const json & j, RefreshDetourMode & x);
+    void to_json(json & j, const RefreshDetourMode & x);
 
     void from_json(const json & j, ConntrackOnSwitch & x);
     void to_json(json & j, const ConntrackOnSwitch & x);
@@ -2095,6 +2112,17 @@ namespace api {
         j["table_start"] = x.table_start;
     }
 
+    inline void from_json(const json & j, ListRefresh& x) {
+        x.detour = get_stack_optional<std::string>(j, "detour");
+        x.fallback_detours = get_stack_optional<std::vector<std::string>>(j, "fallback_detours");
+    }
+
+    inline void to_json(json & j, const ListRefresh & x) {
+        j = json::object();
+        j["detour"] = x.detour;
+        j["fallback_detours"] = x.fallback_detours;
+    }
+
     inline void from_json(const json & j, ListConfigValue& x) {
         x.catalog_identity = get_stack_optional<std::string>(j, "catalog_identity");
         x.detour = get_stack_optional<std::string>(j, "detour");
@@ -2103,6 +2131,7 @@ namespace api {
         x.fallback_detours = get_stack_optional<std::vector<std::string>>(j, "fallback_detours");
         x.file = get_stack_optional<std::string>(j, "file");
         x.ip_cidrs = get_stack_optional<std::vector<std::string>>(j, "ip_cidrs");
+        x.refresh_detour_mode = get_stack_optional<RefreshDetourMode>(j, "refresh_detour_mode");
         x.ttl_ms = get_stack_optional<int64_t>(j, "ttl_ms");
         x.url = get_stack_optional<std::string>(j, "url");
     }
@@ -2116,6 +2145,7 @@ namespace api {
         j["fallback_detours"] = x.fallback_detours;
         j["file"] = x.file;
         j["ip_cidrs"] = x.ip_cidrs;
+        j["refresh_detour_mode"] = x.refresh_detour_mode;
         j["ttl_ms"] = x.ttl_ms;
         j["url"] = x.url;
     }
@@ -2292,6 +2322,7 @@ namespace api {
         x.dns = get_stack_optional<Dns>(j, "dns");
         x.fwmark = get_stack_optional<Fwmark>(j, "fwmark");
         x.iproute = get_stack_optional<Iproute>(j, "iproute");
+        x.list_refresh = get_stack_optional<ListRefresh>(j, "list_refresh");
         x.lists = get_stack_optional<std::map<std::string, ListConfigValue>>(j, "lists");
         x.lists_autoupdate = get_stack_optional<ListsAutoupdate>(j, "lists_autoupdate");
         x.outbounds = get_stack_optional<std::vector<OutboundElement>>(j, "outbounds");
@@ -2306,6 +2337,7 @@ namespace api {
         j["dns"] = x.dns;
         j["fwmark"] = x.fwmark;
         j["iproute"] = x.iproute;
+        j["list_refresh"] = x.list_refresh;
         j["lists"] = x.lists;
         j["lists_autoupdate"] = x.lists_autoupdate;
         j["outbounds"] = x.outbounds;
@@ -3543,6 +3575,8 @@ namespace api {
         x.list_delete_stage_response = get_stack_optional<ListDeleteStageResponse>(j, "ListDeleteStageResponse");
         x.list_delete_stage_summary = get_stack_optional<ListDeleteStageSummaryClass>(j, "ListDeleteStageSummary");
         x.list_delete_target = get_stack_optional<ListDeleteTargetElement>(j, "ListDeleteTarget");
+        x.list_refresh_config = get_stack_optional<ListRefresh>(j, "ListRefreshConfig");
+        x.list_refresh_detour_mode = get_stack_optional<RefreshDetourMode>(j, "ListRefreshDetourMode");
         x.list_refresh_request = get_stack_optional<ListRefreshRequest>(j, "ListRefreshRequest");
         x.list_refresh_response = get_stack_optional<ListRefreshResponse>(j, "ListRefreshResponse");
         x.list_refresh_state = get_stack_optional<ListRefreshStateValue>(j, "ListRefreshState");
@@ -3674,6 +3708,8 @@ namespace api {
         j["ListDeleteStageResponse"] = x.list_delete_stage_response;
         j["ListDeleteStageSummary"] = x.list_delete_stage_summary;
         j["ListDeleteTarget"] = x.list_delete_target;
+        j["ListRefreshConfig"] = x.list_refresh_config;
+        j["ListRefreshDetourMode"] = x.list_refresh_detour_mode;
         j["ListRefreshRequest"] = x.list_refresh_request;
         j["ListRefreshResponse"] = x.list_refresh_response;
         j["ListRefreshState"] = x.list_refresh_state;
@@ -3848,6 +3884,20 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, RefreshDetourMode & x) {
+        if (j == "inherit") x = RefreshDetourMode::INHERIT;
+        else if (j == "override") x = RefreshDetourMode::OVERRIDE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RefreshDetourMode\""); }
+    }
+
+    inline void to_json(json & j, const RefreshDetourMode & x) {
+        switch (x) {
+            case RefreshDetourMode::INHERIT: j = "inherit"; break;
+            case RefreshDetourMode::OVERRIDE: j = "override"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RefreshDetourMode\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, ConntrackOnSwitch & x) {
         if (j == "delete") x = ConntrackOnSwitch::DELETE;
         else if (j == "delete_on_failure") x = ConntrackOnSwitch::DELETE_ON_FAILURE;
@@ -3979,6 +4029,7 @@ namespace api {
         else if (j == "dns_rule") x = DependencyDependentKind::DNS_RULE;
         else if (j == "dns_server") x = DependencyDependentKind::DNS_SERVER;
         else if (j == "list") x = DependencyDependentKind::LIST;
+        else if (j == "list_refresh") x = DependencyDependentKind::LIST_REFRESH;
         else if (j == "outbound_group") x = DependencyDependentKind::OUTBOUND_GROUP;
         else if (j == "routing_rule") x = DependencyDependentKind::ROUTING_RULE;
         else { throw std::runtime_error("Cannot deserialize to enumeration \"DependencyDependentKind\""); }
@@ -3990,6 +4041,7 @@ namespace api {
             case DependencyDependentKind::DNS_RULE: j = "dns_rule"; break;
             case DependencyDependentKind::DNS_SERVER: j = "dns_server"; break;
             case DependencyDependentKind::LIST: j = "list"; break;
+            case DependencyDependentKind::LIST_REFRESH: j = "list_refresh"; break;
             case DependencyDependentKind::OUTBOUND_GROUP: j = "outbound_group"; break;
             case DependencyDependentKind::ROUTING_RULE: j = "routing_rule"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"DependencyDependentKind\": " + std::to_string(static_cast<int>(x)));

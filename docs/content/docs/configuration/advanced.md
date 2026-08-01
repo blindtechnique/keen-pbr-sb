@@ -5,7 +5,7 @@ weight: 5
 
 Most users can skip this page.
 
-These settings are for advanced setups and service-level tuning: `daemon`, `api`, `fwmark`, `iproute`, and `lists_autoupdate`.
+These settings are for advanced setups and service-level tuning: `daemon`, `api`, `fwmark`, `iproute`, `lists_autoupdate`, and `list_refresh`.
 
 ## daemon
 
@@ -124,6 +124,27 @@ If the `lists_autoupdate` section is omitted, automatic refresh is disabled.
 The `cron` field uses the standard 5-field format: `minute hour day-of-month month day-of-week`. The example above runs weekly at 04:00 on Sunday.
 
 The `cron` field is validated even when `enabled` is `false`.
+
+## list_refresh
+
+Defines the ordered outbound chain used to download URL-backed lists. The same
+chain is used by scheduled refresh, the manual refresh action, and refreshes
+triggered after applying configuration.
+
+```json { filename="config.json" }
+{
+  "list_refresh": {
+    "detour": "primary_vpn",
+    "fallback_detours": ["backup_vpn", "wan"]
+  }
+}
+```
+
+Lists inherit this chain by default. A list with
+`"refresh_detour_mode": "override"` uses its own `detour` and
+`fallback_detours` instead. Legacy lists that already contain `detour` keep
+their old per-list behavior without a migration. If an explicit chain fails,
+keen-pbr does not silently retry through the system default route.
 
 You can also trigger a manual refresh at any time:
 - Send `SIGHUP` to the daemon process: `kill -HUP $(cat /var/run/keen-pbr.pid)`

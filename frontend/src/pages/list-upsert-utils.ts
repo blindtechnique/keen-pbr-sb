@@ -3,6 +3,7 @@ import type { DnsRule } from "@/api/generated/model/dnsRule"
 import type { DnsServer } from "@/api/generated/model/dnsServer"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
 import type { ListConfig } from "@/api/generated/model/listConfig"
+import type { ListRefreshDetourMode } from "@/api/generated/model/listRefreshDetourMode"
 import { getDnsServerDisplayName } from "@/lib/dns-display"
 import { withListDisplayName } from "@/lib/list-display"
 import { makeTechnicalId } from "@/lib/technical-id"
@@ -15,6 +16,7 @@ export type ListDraft = {
   displayName: string
   name: string
   ttlMs: string
+  refreshDetourMode: ListRefreshDetourMode
   detour: string
   fallbackDetours: string[]
   domains: string
@@ -67,6 +69,7 @@ export function createListDraft(
       ? makeTechnicalId(displayName, existingNames, { prefix: "list" })
       : "",
     ttlMs: "7200000",
+    refreshDetourMode: "inherit",
     detour: "",
     fallbackDetours: [],
     domains: "",
@@ -94,8 +97,7 @@ export function addRecommendedDnsServer(
   const candidateIdentity = (address: string) => {
     const normalized =
       normalizeDnsAddress(address) ?? address.trim().toLowerCase()
-    const ipv4WithPort =
-      /^(\d+\.\d+\.\d+\.\d+)(?::(\d+))?$/.exec(normalized)
+    const ipv4WithPort = /^(\d+\.\d+\.\d+\.\d+)(?::(\d+))?$/.exec(normalized)
     if (ipv4WithPort) {
       const host = ipv4WithPort[1]
         .split(".")
@@ -105,9 +107,7 @@ export function addRecommendedDnsServer(
     }
     const bracketedIpv6WithPort = /^\[([^\]]+)\]:(\d+)$/.exec(normalized)
     if (bracketedIpv6WithPort) {
-      return `${bracketedIpv6WithPort[1]}|${Number(
-        bracketedIpv6WithPort[2]
-      )}`
+      return `${bracketedIpv6WithPort[1]}|${Number(bracketedIpv6WithPort[2])}`
     }
     return `${normalized}|53`
   }
@@ -117,7 +117,7 @@ export function addRecommendedDnsServer(
       server.detour === normalizedOutboundTag &&
       Boolean(
         server.address &&
-          candidateIdentities.has(candidateIdentity(server.address))
+        candidateIdentities.has(candidateIdentity(server.address))
       )
   )
   if (existing) {
@@ -171,6 +171,11 @@ export function getDraftFromMapEntry(
     displayName: listConfig.display_name ?? "",
     name,
     ttlMs: String(listConfig.ttl_ms ?? 0),
+    refreshDetourMode:
+      listConfig.refresh_detour_mode ??
+      (listConfig.detour || (listConfig.fallback_detours?.length ?? 0) > 0
+        ? "override"
+        : "inherit"),
     detour: listConfig.detour ?? "",
     fallbackDetours: listConfig.fallback_detours ?? [],
     domains: (listConfig.domains ?? []).join("\n"),
@@ -309,6 +314,8 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
   const trimmedUrl = draft.url.trim()
   const trimmedFile = draft.file.trim()
   const trimmedDetour = draft.detour.trim()
+  const refreshDetourMode =
+    draft.refreshDetourMode ?? (trimmedDetour ? "override" : "inherit")
   const ttlMs = Number.parseInt(draft.ttlMs.trim(), 10)
 
   const listConfig: ListConfig = {}
@@ -316,6 +323,7 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
 
   if (trimmedUrl) {
     listConfig.url = trimmedUrl
+    listConfig.refresh_detour_mode = refreshDetourMode
   }
 
   if (trimmedFile) {
@@ -330,7 +338,7 @@ export function getListConfigFromDraft(draft: ListDraft): ListConfig {
     listConfig.ip_cidrs = ipCidrs
   }
 
-  if (trimmedDetour) {
+  if (trimmedUrl && refreshDetourMode === "override" && trimmedDetour) {
     listConfig.detour = trimmedDetour
     const fallbackDetours = draft.fallbackDetours
       .map((detour) => detour.trim())

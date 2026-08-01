@@ -361,6 +361,32 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
         plan.candidate, "category_ai"));
 }
 
+TEST_CASE(
+    "catalog planner persists an explicit refresh override for a chosen source detour") {
+    const auto plan = plan_catalog_setup(
+        outbound_intent(),
+        nlohmann::json::array({routing_preset()}),
+        base_config());
+
+    REQUIRE(plan.candidate.lists.has_value());
+    const auto& list = plan.candidate.lists->at("category_ai");
+    REQUIRE(list.refresh_detour_mode.has_value());
+    CHECK(
+        *list.refresh_detour_mode ==
+        ListRefreshDetourMode::OVERRIDE);
+    CHECK(list.detour == "proxy");
+
+    const auto persisted =
+        nlohmann::json(plan.candidate).get<Config>();
+    REQUIRE(persisted.lists.has_value());
+    const auto& persisted_list = persisted.lists->at("category_ai");
+    REQUIRE(persisted_list.refresh_detour_mode.has_value());
+    CHECK(
+        *persisted_list.refresh_detour_mode ==
+        ListRefreshDetourMode::OVERRIDE);
+    CHECK(persisted_list.detour == "proxy");
+}
+
 TEST_CASE("KinoPub full variant remains URL backed") {
     const nlohmann::json catalog = {
         {"catalog_id", "test:kinopub-variants"},
@@ -460,14 +486,15 @@ TEST_CASE(
     CHECK_FALSE(plan.summary.lists[1].has_inline_domains);
     CHECK(plan.summary.lists[1].has_inline_cidrs);
 
-    REQUIRE(plan.summary.route_rules.size() == 2U);
-    for (const auto& summary : plan.summary.route_rules) {
-        const auto& rule =
-            plan.candidate.route->rules->at(summary.insertion_index);
-        CHECK(rule.outbound == "proxy");
-        REQUIRE(rule.list.has_value());
-        CHECK(rule.list->size() == 1U);
-    }
+    REQUIRE(plan.summary.route_rules.size() == 1U);
+    const auto& route_rule =
+        plan.candidate.route->rules->at(
+            plan.summary.route_rules.front().insertion_index);
+    CHECK(route_rule.outbound == "proxy");
+    CHECK(
+        route_rule.list ==
+        std::optional<std::vector<std::string>>{
+            {"meta", "meta_whatsapp_ip"}});
     REQUIRE(plan.summary.dns_rules.size() == 1U);
     const auto& dns_rule =
         plan.candidate.dns->rules->at(
@@ -596,7 +623,13 @@ TEST_CASE(
     CHECK(primary.detour == "proxy");
     CHECK(companion.detour == "proxy");
 
-    REQUIRE(plan.summary.route_rules.size() == 2U);
+    REQUIRE(plan.summary.route_rules.size() == 1U);
+    CHECK(
+        plan.candidate.route->rules
+            ->at(plan.summary.route_rules.front().insertion_index)
+            .list ==
+        std::optional<std::vector<std::string>>{
+            {"telegram", "telegram_ip"}});
     REQUIRE(plan.summary.dns_rules.size() == 1U);
     const auto& dns_rule =
         plan.candidate.dns->rules->at(
@@ -622,16 +655,8 @@ TEST_CASE(
     REQUIRE(old_install.route.has_value());
     REQUIRE(old_install.route->rules.has_value());
     auto& route_rules = *old_install.route->rules;
-    route_rules.erase(
-        std::remove_if(
-            route_rules.begin(),
-            route_rules.end(),
-            [](const RouteRule& rule) {
-                return rule.list ==
-                    std::optional<std::vector<std::string>>{
-                        {"meta_whatsapp_ip"}};
-            }),
-        route_rules.end());
+    REQUIRE(route_rules.size() == 1U);
+    route_rules.front().list = std::vector<std::string>{"meta"};
     validate_config(old_install);
 
     const auto upgraded = plan_catalog_setup(
@@ -733,7 +758,13 @@ TEST_CASE(
         plan.candidate.lists->count("meta_whatsapp_ip") ==
         1U);
     CHECK(plan.candidate.lists->count("whatsapp") == 0U);
-    REQUIRE(plan.summary.route_rules.size() == 2U);
+    REQUIRE(plan.summary.route_rules.size() == 1U);
+    CHECK(
+        plan.candidate.route->rules
+            ->at(plan.summary.route_rules.front().insertion_index)
+            .list ==
+        std::optional<std::vector<std::string>>{
+            {"meta", "meta_whatsapp_ip"}});
     REQUIRE(plan.summary.dns_rules.size() == 1U);
     CHECK(
         plan.candidate.dns->rules
@@ -772,6 +803,19 @@ TEST_CASE(
         catalog_preset_identity(
             catalog,
             "meta#routing-companion:meta_whatsapp_ip"));
+    REQUIRE(whatsapp.summary.route_rules.size() == 1U);
+    CHECK(
+        whatsapp.candidate.route->rules
+            ->at(whatsapp.summary.route_rules.front().insertion_index)
+            .list ==
+        std::optional<std::vector<std::string>>{
+            {"whatsapp", "whatsapp_ip"}});
+    REQUIRE(whatsapp.summary.dns_rules.size() == 1U);
+    CHECK(
+        whatsapp.candidate.dns->rules
+            ->at(whatsapp.summary.dns_rules.front().insertion_index)
+            .list ==
+        std::vector<std::string>{"whatsapp"});
 
     const auto meta = plan_catalog_setup(
         meta_outbound_intent(), catalog, whatsapp.candidate);
@@ -1421,20 +1465,18 @@ TEST_CASE("source detour applies only to URL-backed lists") {
     CHECK(plan.summary.lists[0].display_name == "Каталог AI");
     CHECK(plan.summary.lists[1].display_name == "Встроенные домены");
     REQUIRE(plan.summary.route_rule.has_value());
-    REQUIRE(plan.summary.route_rules.size() == 2U);
-    CHECK(plan.summary.route_rules[0].display_name == "Каталог AI");
-    CHECK(plan.summary.route_rules[1].display_name == "Встроенные домены");
+    REQUIRE(plan.summary.route_rules.size() == 1U);
+    CHECK(plan.summary.route_rules[0].display_name == "Маршрут AI");
     REQUIRE(plan.summary.dns_rule.has_value());
-    REQUIRE(plan.summary.dns_rules.size() == 2U);
-    CHECK(plan.summary.dns_rules[0].display_name == "Каталог AI");
-    CHECK(plan.summary.dns_rules[1].display_name == "Встроенные домены");
-    for (const auto& rule : *plan.candidate.route->rules) {
-        REQUIRE(rule.list.has_value());
-        CHECK(rule.list->size() == 1U);
-    }
-    for (const auto& rule : *plan.candidate.dns->rules) {
-        CHECK(rule.list.size() == 1U);
-    }
+    REQUIRE(plan.summary.dns_rules.size() == 1U);
+    CHECK(plan.summary.dns_rules[0].display_name == "DNS для AI");
+    REQUIRE(plan.candidate.route->rules->front().list.has_value());
+    CHECK(
+        *plan.candidate.route->rules->front().list ==
+        std::vector<std::string>{"category_ai", "inline"});
+    CHECK(
+        plan.candidate.dns->rules->front().list ==
+        std::vector<std::string>{"category_ai", "inline"});
 }
 
 TEST_CASE("unusable source detour is omitted with an exact warning") {
@@ -1646,9 +1688,19 @@ TEST_CASE(
     alternate.detour = "proxy";
     config.dns->servers->push_back(alternate);
     REQUIRE(config.dns->rules.has_value());
-    REQUIRE(config.dns->rules->size() == 2U);
-    config.dns->rules->at(0).server = "proxy_dns";
-    config.dns->rules->at(1).server = "alternate_dns";
+    REQUIRE(config.dns->rules->size() == 1U);
+    const auto shared_rule = config.dns->rules->front();
+    REQUIRE(shared_rule.list.size() == 2U);
+    auto first_rule = shared_rule;
+    first_rule.id = "dns_ai";
+    first_rule.list = {shared_rule.list.at(0)};
+    first_rule.server = "proxy_dns";
+    auto second_rule = shared_rule;
+    second_rule.id = "dns_search";
+    second_rule.list = {shared_rule.list.at(1)};
+    second_rule.server = "alternate_dns";
+    config.dns->rules =
+        std::vector<DnsRule>{first_rule, second_rule};
     validate_config(config);
 
     const auto plan = plan_catalog_setup(intent, catalog, config);
@@ -1938,7 +1990,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "multi-list rules do not count as dedicated catalogue coverage") {
+    "multi-list rules satisfy catalogue batch coverage without duplicates") {
     const nlohmann::json catalog = {
         {"catalog_id", "test:exact-policy-catalog"},
         {"presets", nlohmann::json::array({routing_preset()})},
@@ -1970,22 +2022,13 @@ TEST_CASE(
     config.dns->rules = std::vector<DnsRule>{shared_dns};
     validate_config(config);
 
-    const auto repaired =
+    const auto repeated =
         plan_catalog_setup(outbound_intent(), catalog, config);
-    REQUIRE(repaired.summary.route_rule.has_value());
-    REQUIRE(repaired.summary.dns_rule.has_value());
-    const auto& dedicated_route =
-        repaired.candidate.route->rules->at(
-            repaired.summary.route_rule->insertion_index);
-    const auto& dedicated_dns =
-        repaired.candidate.dns->rules->at(
-            repaired.summary.dns_rule->insertion_index);
-    CHECK(
-        dedicated_route.list ==
-        std::optional<std::vector<std::string>>{{"category_ai"}});
-    CHECK(
-        dedicated_dns.list ==
-        std::vector<std::string>{"category_ai"});
+    CHECK_FALSE(repeated.summary.route_rule.has_value());
+    CHECK_FALSE(repeated.summary.dns_rule.has_value());
+    CHECK(repeated.summary.route_rules.empty());
+    CHECK(repeated.summary.dns_rules.empty());
+    CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(config));
 }
 
 TEST_CASE(
@@ -2100,20 +2143,21 @@ TEST_CASE(
         "existing_ai");
     CHECK_FALSE(plan.summary.lists.at(1).already_installed);
     REQUIRE(plan.summary.route_rule.has_value());
-    REQUIRE(plan.summary.route_rules.size() == 2U);
-    for (const auto& summary : plan.summary.route_rules) {
-        const auto& route_rule =
-            plan.candidate.route->rules->at(
-                summary.insertion_index);
-        REQUIRE(route_rule.list.has_value());
-        CHECK(route_rule.list->size() == 1U);
-    }
+    REQUIRE(plan.summary.route_rules.size() == 1U);
+    const auto& route_rule =
+        plan.candidate.route->rules->at(
+            plan.summary.route_rules.front().insertion_index);
+    CHECK(
+        route_rule.list ==
+        std::optional<std::vector<std::string>>{
+            {"existing_ai", "category_video"}});
     REQUIRE(plan.summary.dns_rule.has_value());
-    REQUIRE(plan.summary.dns_rules.size() == 2U);
-    for (const auto& summary : plan.summary.dns_rules) {
-        const auto& dns_rule =
-            plan.candidate.dns->rules->at(
-                summary.insertion_index);
-        CHECK(dns_rule.list.size() == 1U);
-    }
+    REQUIRE(plan.summary.dns_rules.size() == 1U);
+    const auto& dns_rule =
+        plan.candidate.dns->rules->at(
+            plan.summary.dns_rules.front().insertion_index);
+    CHECK(
+        dns_rule.list ==
+        std::vector<std::string>{
+            "existing_ai", "category_video"});
 }

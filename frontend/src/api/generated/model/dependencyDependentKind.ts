@@ -15,5 +15,6 @@ export const DependencyDependentKind = {
   dns_server: 'dns_server',
   outbound_group: 'outbound_group',
   list: 'list',
+  list_refresh: 'list_refresh',
   dns_fallback: 'dns_fallback',
 } as const;

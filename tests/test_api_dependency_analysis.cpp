@@ -53,6 +53,45 @@ TEST_CASE("dependency API mapper preserves cascade and typed references") {
         }));
 }
 
+TEST_CASE(
+    "dependency API mapper serializes global list refresh references") {
+    Config config;
+
+    Outbound vpn;
+    vpn.tag = "vpn";
+    vpn.type = OutboundType::INTERFACE;
+    vpn.interface = "tun0";
+    config.outbounds = std::vector<Outbound>{vpn};
+
+    ListRefreshConfig refresh;
+    refresh.detour = "vpn";
+    config.list_refresh = refresh;
+
+    api::DependencyAnalysisTargetRequest target;
+    target.kind = api::DependencyEntityKind::OUTBOUND;
+    target.id = "vpn";
+    api::DependencyAnalysisRequest request;
+    request.targets = {target};
+
+    const auto response =
+        build_dependency_analysis_response(config, request);
+    const auto reference = std::find_if(
+        response.references.begin(),
+        response.references.end(),
+        [](const api::DependencyReference& candidate) {
+            return candidate.dependent_kind ==
+                       api::DependencyDependentKind::LIST_REFRESH &&
+                   candidate.dependent_id == "global";
+        });
+
+    REQUIRE(reference != response.references.end());
+    CHECK(reference->path == "list_refresh.detour");
+    CHECK(reference->href == "/general?tab=general");
+
+    const nlohmann::json serialized = *reference;
+    CHECK(serialized.at("dependent_kind") == "list_refresh");
+}
+
 } // namespace keen_pbr3
 
 #endif // WITH_API

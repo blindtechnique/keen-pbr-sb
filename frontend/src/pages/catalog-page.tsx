@@ -817,6 +817,21 @@ export function CatalogPage() {
           </DialogHeader>
           {setupIntent ? (
             <div className="space-y-5">
+              <Alert>
+                <ShieldCheckIcon className="size-4" />
+                <AlertTitle>
+                  {t("pages.catalog.setup.batchPolicyTitle")}
+                </AlertTitle>
+                <AlertDescription>
+                  {t(
+                    setupIntent.mode === "outbound"
+                      ? "pages.catalog.setup.batchPolicyOutbound"
+                      : setupIntent.mode === "block"
+                        ? "pages.catalog.setup.batchPolicyBlock"
+                        : "pages.catalog.setup.batchPolicyDirect"
+                  )}
+                </AlertDescription>
+              </Alert>
               <div className="space-y-3">
                 {setupIntent.selections.map((selection, index) => (
                   <div className="space-y-1.5" key={selection.preset_id}>

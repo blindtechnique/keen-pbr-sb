@@ -432,13 +432,12 @@ Daemon::snapshot_owned_conntrack_marks() const {
     if (config_.lists.has_value()) {
         for (const auto& [name, list] : *config_.lists) {
             (void)name;
-            if (list.detour.has_value()) {
-                add_tag(*list.detour, /*priority=*/false);
+            if (!list.url.has_value()) {
+                continue;
             }
-            for (const auto& fallback :
-                 list.fallback_detours.value_or(
-                     std::vector<std::string>{})) {
-                add_tag(fallback, /*priority=*/false);
+            for (const auto& detour :
+                 effective_list_refresh_detours(config_, list)) {
+                add_tag(detour, /*priority=*/false);
             }
         }
     }

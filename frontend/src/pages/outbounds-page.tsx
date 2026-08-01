@@ -488,9 +488,7 @@ function getOutboundDeleteImpactItems(
   }
 
   for (const server of impact.dnsServerDetours) {
-    const dnsServer = config?.dns?.servers?.find(
-      (item) => item.tag === server
-    )
+    const dnsServer = config?.dns?.servers?.find((item) => item.tag === server)
     items.push({
       label: t("pages.outbounds.deleteDialog.items.dnsDetour", {
         server: dnsServer
@@ -519,9 +517,21 @@ function getOutboundDeleteImpactItems(
       details: [
         formatDetail(
           t("pages.outbounds.deleteDialog.items.downloadRoutes"),
+          formatTransition(listRoute.before, listRoute.after, t, outboundNames)
+        ),
+      ],
+    })
+  }
+
+  if (impact.globalListRefreshRoute) {
+    items.push({
+      label: t("pages.outbounds.deleteDialog.items.globalListRefreshRoutes"),
+      details: [
+        formatDetail(
+          t("pages.outbounds.deleteDialog.items.downloadRoutes"),
           formatTransition(
-            listRoute.before,
-            listRoute.after,
+            impact.globalListRefreshRoute.before,
+            impact.globalListRefreshRoute.after,
             t,
             outboundNames
           )

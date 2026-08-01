@@ -13,6 +13,7 @@ export type DependencyKind =
   | "dnsRule"
   | "dnsServer"
   | "failoverGroup"
+  | "listRefresh"
   | "list"
 
 export type Dependency = {
@@ -106,6 +107,39 @@ export function findBrokenReferences(
         href: `/lists/${name}/edit`,
       })
     }
+    for (const [index, fallback] of (list.fallback_detours ?? []).entries()) {
+      if (outbounds.has(fallback)) continue
+      add({
+        id: `list:${name}:fallback:${index}:${fallback}`,
+        label: `Список ${getListReferenceLabel(name, config.lists)} → ${
+          outboundDisplayNames.get(fallback) ?? fallback
+        }`,
+        href: `/lists/${name}/edit`,
+      })
+    }
+  }
+  const globalListRefresh = config.list_refresh
+  if (globalListRefresh?.detour && !outbounds.has(globalListRefresh.detour)) {
+    add({
+      id: `list-refresh:detour:${globalListRefresh.detour}`,
+      label: `Обновление URL-списков → ${
+        outboundDisplayNames.get(globalListRefresh.detour) ??
+        globalListRefresh.detour
+      }`,
+      href: "/general?tab=general",
+    })
+  }
+  for (const [index, fallback] of (
+    globalListRefresh?.fallback_detours ?? []
+  ).entries()) {
+    if (outbounds.has(fallback)) continue
+    add({
+      id: `list-refresh:fallback:${index}:${fallback}`,
+      label: `Обновление URL-списков → ${
+        outboundDisplayNames.get(fallback) ?? fallback
+      }`,
+      href: "/general?tab=general",
+    })
   }
   return [...found.values()]
 }

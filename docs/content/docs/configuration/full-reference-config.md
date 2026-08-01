@@ -246,10 +246,15 @@ List names, outbound tags, and DNS server tags must match `^[a-z][a-z0-9_]*$` an
       // Remote list URL.
       "url": "https://raw.githubusercontent.com/v2fly/domain-list-community/refs/heads/master/data/apple",
 
-      // Optional outbound used to download this list.
+      // Override the global list_refresh chain for this list.
+      "refresh_detour_mode": "override",
+
+      // Primary outbound used to download this list.
       // Supported detour targets are routable outbounds such as interface, table, or urltest.
-      // Default: null (use the system's normal routing)
       "detour": "auto_select",
+
+      // Optional ordered fallbacks. Direct routing is not added after them.
+      "fallback_detours": ["vpn", "wan"],
 
       // How long dnsmasq-resolved IPs for these domains stay in the dynamic set.
       // 0 means no timeout.
@@ -513,6 +518,13 @@ List names, outbound tags, and DNS server tags must match `^[a-z][a-z0-9_]*$` an
     // Required when enabled=true.
     // No default value.
     "cron": "0 4 * * 0"
+  },
+
+  // Global ordered route chain for every URL-list download.
+  // Used by manual and scheduled refreshes alike.
+  "list_refresh": {
+    "detour": "auto_select",
+    "fallback_detours": ["vpn", "wan"]
   }
 }
 ```
@@ -520,6 +532,6 @@ List names, outbound tags, and DNS server tags must match `^[a-z][a-z0-9_]*$` an
 ## Notes
 
 - `dns.servers[].detour` supports `interface`, `table`, and `urltest` outbounds, but not `blackhole` or `ignore`.
-- `lists[].detour` is useful when a remote list should be downloaded through a VPN or other non-default path.
+- URL lists inherit `list_refresh` unless `refresh_detour_mode` is `override`; legacy lists with an existing `detour` remain overrides.
 - `route.rules[]` must include at least one matching condition: `list`, `dscp`, `src_port`, `dest_port`, `src_addr`, or `dest_addr`.
 - `dns.rules[].allow_domain_rebinding` is mainly for internal domains that intentionally resolve to private IP ranges.

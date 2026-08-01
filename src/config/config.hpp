@@ -60,6 +60,8 @@ using RouteConfig          = api::Route;
 using FwmarkConfig         = api::Fwmark;
 using IprouteConfig        = api::Iproute;
 using ListsAutoupdateConfig = api::ListsAutoupdate;
+using ListRefreshConfig     = api::ListRefresh;
+using ListRefreshDetourMode = api::RefreshDetourMode;
 using PlainDnsTemplate      = api::PlainDnsTemplateElement;
 using UiPreferencesConfig   = api::UiPreferences;
 // Note: DnsRule.list (not .lists) and RouteRule.list (not .lists) match JSON keys.
@@ -97,6 +99,17 @@ void validate_config(const Config& config);
 Config parse_and_validate_config(const std::string& json_str);
 size_t max_file_size_bytes(const Config& config);
 FirewallBackendPreference firewall_backend_preference(const Config& config);
+
+// Resolves the URL-list download policy without rewriting legacy configs.
+// An omitted mode keeps an existing per-list detour as an override and
+// otherwise inherits the global list_refresh chain.
+ListRefreshDetourMode effective_list_refresh_detour_mode(
+    const ListConfig& list_config);
+std::vector<std::string> configured_list_refresh_detours(
+    const ListRefreshConfig& refresh_config);
+std::vector<std::string> effective_list_refresh_detours(
+    const Config& config,
+    const ListConfig& list_config);
 
 // --- Fwmark allocation ---
 

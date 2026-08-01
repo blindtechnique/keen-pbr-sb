@@ -812,6 +812,100 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "catalog setup applies a multi-selection as one route and one DNS rule") {
+    constexpr int api_port = 18483;
+    CatalogSetupTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto original = catalog_base_config();
+    write_text(
+        config_path,
+        serialize_config_for_persistence(original));
+
+    auto snapshot = catalog_snapshot();
+    auto video = snapshot.at("presets").at(0);
+    video["id"] = "category-video";
+    video["name"] = "Видео";
+    video["engines"]["dns"]["domains"] =
+        nlohmann::json::array({"video.example"});
+    video["engines"]["dns"].erase("subnets");
+    video["engines"]["singbox"]["ruleSets"][0]["tag"] =
+        "geosite-video";
+    video["engines"]["singbox"]["ruleSets"][0]["url"] =
+        "https://repo.hoaxisr.ru/rulesets/srs/video.srs";
+    snapshot["presets"].push_back(std::move(video));
+
+    auto intent = catalog_intent();
+    intent["selections"].push_back({
+        {"preset_id", "category-video"},
+        {"display_name", "Видео"},
+    });
+    intent["route_display_name"] = "AI и видео";
+    intent["dns_display_name"] = "DNS для AI и видео";
+
+    ConfigStore store(original);
+    SseBroadcaster broadcaster;
+    ConfigOperationGate operation_gate;
+    std::size_t apply_calls = 0;
+    auto context = make_catalog_context(
+        config_path.string(),
+        broadcaster,
+        store,
+        operation_gate,
+        apply_calls);
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_catalog_test_handler(
+        server,
+        context,
+        [snapshot] { return snapshot; },
+        directory);
+    server.start();
+
+    httplib::Client client("127.0.0.1", api_port);
+    const auto preview_response = client.Post(
+        "/api/setup/catalog/preview",
+        nlohmann::json{{"intent", intent}}.dump(),
+        "application/json");
+    REQUIRE(preview_response != nullptr);
+    REQUIRE(preview_response->status == 200);
+    const auto preview =
+        nlohmann::json::parse(preview_response->body);
+    const auto& summary = preview.at("summary");
+    REQUIRE(summary.at("lists").size() == 2U);
+    REQUIRE(summary.at("route_rules").size() == 1U);
+    REQUIRE(summary.at("dns_rules").size() == 1U);
+    CHECK(summary.at("route_rule") == summary.at("route_rules").at(0));
+    CHECK(summary.at("dns_rule") == summary.at("dns_rules").at(0));
+
+    const auto apply_response = client.Post(
+        "/api/setup/catalog/apply",
+        apply_request(intent, preview, false).dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(apply_response != nullptr);
+    REQUIRE(apply_response->status == 200);
+    CHECK(apply_calls == 1U);
+    const auto persisted = parse_and_validate_config(
+        read_text(config_path));
+    REQUIRE(persisted.route->rules.has_value());
+    REQUIRE(persisted.route->rules->size() == 1U);
+    CHECK(
+        persisted.route->rules->front().list ==
+        std::optional<std::vector<std::string>>{
+            {"category_ai", "category_video"}});
+    REQUIRE(persisted.dns->rules.has_value());
+    REQUIRE(persisted.dns->rules->size() == 1U);
+    CHECK(
+        persisted.dns->rules->front().list ==
+        std::vector<std::string>{
+            "category_ai", "category_video"});
+}
+
+TEST_CASE(
     "catalog setup reuses a legacy list and applies missing route and DNS policies") {
     constexpr int api_port = 18479;
     CatalogSetupTempDir directory;

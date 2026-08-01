@@ -377,6 +377,175 @@ TEST_CASE("remote list fallback validation prevents implicit or invalid routes")
               duplicate, "lists.remote.fallback_detours[0]") != nullptr);
 }
 
+TEST_CASE("global list refresh chain accepts ordered routable fallbacks and round-trips") {
+    const auto config = parse_test_config(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"eth0"},
+            {"tag":"backup_a","type":"interface","interface":"eth1"},
+            {"tag":"backup_b","type":"table","table":201}
+        ],
+        "list_refresh":{
+            "detour":"primary",
+            "fallback_detours":["backup_a","backup_b"]
+        },
+        "lists":{
+            "inherited":{"url":"https://example.test/inherited.txt"},
+            "explicit_inherited":{
+                "url":"https://example.test/explicit.txt",
+                "refresh_detour_mode":"inherit"
+            }
+        }
+    })");
+
+    REQUIRE(config.list_refresh.has_value());
+    REQUIRE(config.list_refresh->detour.has_value());
+    CHECK(*config.list_refresh->detour == "primary");
+    REQUIRE(config.list_refresh->fallback_detours.has_value());
+    CHECK(*config.list_refresh->fallback_detours ==
+          std::vector<std::string>{"backup_a", "backup_b"});
+
+    REQUIRE(config.lists.has_value());
+    CHECK(effective_list_refresh_detour_mode(
+              config.lists->at("inherited")) ==
+          ListRefreshDetourMode::INHERIT);
+    CHECK(effective_list_refresh_detours(
+              config, config.lists->at("inherited")) ==
+          std::vector<std::string>{"primary", "backup_a", "backup_b"});
+    CHECK(effective_list_refresh_detours(
+              config, config.lists->at("explicit_inherited")) ==
+          std::vector<std::string>{"primary", "backup_a", "backup_b"});
+
+    const auto reparsed = parse_test_config(nlohmann::json(config).dump());
+    REQUIRE(reparsed.list_refresh.has_value());
+    REQUIRE(reparsed.list_refresh->fallback_detours.has_value());
+    CHECK(*reparsed.list_refresh->fallback_detours ==
+          std::vector<std::string>{"backup_a", "backup_b"});
+    REQUIRE(reparsed.lists->at("explicit_inherited")
+                .refresh_detour_mode.has_value());
+    CHECK(*reparsed.lists->at("explicit_inherited")
+               .refresh_detour_mode ==
+          ListRefreshDetourMode::INHERIT);
+}
+
+TEST_CASE("legacy per-list refresh chain remains an override when global routing is configured") {
+    const auto config = parse_test_config(R"({
+        "outbounds":[
+            {"tag":"global","type":"interface","interface":"eth0"},
+            {"tag":"legacy","type":"interface","interface":"eth1"},
+            {"tag":"legacy_backup","type":"table","table":202}
+        ],
+        "list_refresh":{"detour":"global"},
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "detour":"legacy",
+            "fallback_detours":["legacy_backup"]
+        }}
+    })");
+
+    const auto& remote = config.lists->at("remote");
+    CHECK_FALSE(remote.refresh_detour_mode.has_value());
+    CHECK(effective_list_refresh_detour_mode(remote) ==
+          ListRefreshDetourMode::OVERRIDE);
+    CHECK(effective_list_refresh_detours(config, remote) ==
+          std::vector<std::string>{"legacy", "legacy_backup"});
+
+    const auto serialized = nlohmann::json(config);
+    CHECK(serialized.at("lists")
+              .at("remote")
+              .at("refresh_detour_mode")
+              .is_null());
+}
+
+TEST_CASE("explicit list refresh override replaces the global chain") {
+    const auto config = parse_test_config(R"({
+        "outbounds":[
+            {"tag":"global","type":"interface","interface":"eth0"},
+            {"tag":"special","type":"interface","interface":"eth1"},
+            {"tag":"special_backup","type":"table","table":203}
+        ],
+        "list_refresh":{"detour":"global"},
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "refresh_detour_mode":"override",
+            "detour":"special",
+            "fallback_detours":["special_backup"]
+        }}
+    })");
+
+    const auto& remote = config.lists->at("remote");
+    CHECK(effective_list_refresh_detour_mode(remote) ==
+          ListRefreshDetourMode::OVERRIDE);
+    CHECK(effective_list_refresh_detours(config, remote) ==
+          std::vector<std::string>{"special", "special_backup"});
+}
+
+TEST_CASE("list refresh route validation rejects ambiguous or unroutable policies") {
+    const auto global_without_primary = validate_issues(R"({
+        "outbounds":[
+            {"tag":"backup","type":"interface","interface":"eth1"}
+        ],
+        "list_refresh":{"fallback_detours":["backup"]}
+    })");
+    CHECK(find_issue(
+              global_without_primary,
+              "list_refresh.fallback_detours") != nullptr);
+
+    const auto global_duplicate = validate_issues(R"({
+        "outbounds":[
+            {"tag":"primary","type":"interface","interface":"eth0"}
+        ],
+        "list_refresh":{
+            "detour":"primary",
+            "fallback_detours":["primary"]
+        }
+    })");
+    CHECK(find_issue(
+              global_duplicate,
+              "list_refresh.fallback_detours[0]") != nullptr);
+
+    const auto inherit_with_local_chain = validate_issues(R"({
+        "outbounds":[
+            {"tag":"vpn","type":"interface","interface":"eth0"}
+        ],
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "refresh_detour_mode":"inherit",
+            "detour":"vpn"
+        }}
+    })");
+    CHECK(find_issue(
+              inherit_with_local_chain,
+              "lists.remote.refresh_detour_mode") != nullptr);
+
+    const auto override_without_primary = validate_issues(R"({
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "refresh_detour_mode":"override"
+        }}
+    })");
+    CHECK(find_issue(
+              override_without_primary,
+              "lists.remote.detour") != nullptr);
+
+    const auto mode_on_inline_list = validate_issues(R"({
+        "lists":{"inline":{
+            "domains":["example.test"],
+            "refresh_detour_mode":"inherit"
+        }}
+    })");
+    CHECK(find_issue(
+              mode_on_inline_list,
+              "lists.inline.refresh_detour_mode") != nullptr);
+
+    const auto unroutable_global = validate_issues(R"({
+        "outbounds":[{"tag":"blocked","type":"blackhole"}],
+        "list_refresh":{"detour":"blocked"}
+    })");
+    CHECK(find_issue(
+              unroutable_global,
+              "list_refresh.detour") != nullptr);
+}
+
 TEST_CASE("legacy config without aliases or stable rule ids round-trips") {
     const auto parsed = parse_test_config(R"({
         "lists":{"legacy":{"domains":["example.com"]}},

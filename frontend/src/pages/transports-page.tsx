@@ -30,8 +30,6 @@ import {
   type TransportStatus,
 } from "@/api/generated/model"
 import {
-  createLinkedTransportApplyRequest,
-  usePostTransportConfigApplyMutation,
   usePostTransportActionMutation,
   usePostTransportConfigMutation,
   usePostConfigMutation,
@@ -66,7 +64,6 @@ import {
 } from "@/components/transports/transport-latency-model"
 import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
 import { formatTransportPath } from "@/components/transports/transport-path"
-import { TransportConfigDialog } from "@/components/transports/transport-config-dialog"
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -91,11 +88,14 @@ import { queryKeys } from "@/api/query-keys"
 import { countryFlag } from "@/data/countries"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import {
+  buildTransportEditHref,
+  transportCreateHref,
+} from "@/lib/transport-upsert-route"
+import {
   dedupeLegacyNativeTransports,
   mapNativeInterfaces,
 } from "@/lib/native-interfaces"
 import {
-  buildNativeTransportCandidates,
   getHiddenNativeInterfaceIds,
   updateHiddenNativeInterfacePreference,
 } from "@/lib/hidden-native-interfaces"
@@ -183,11 +183,9 @@ export function TransportsPage() {
   const queryClient = useQueryClient()
   const { t, i18n } = useTranslation()
   const [, navigate] = useLocation()
-  const [dialogOpen, setDialogOpen] = useState(false)
   const [processModeDialogOpen, setProcessModeDialogOpen] = useState(false)
   const [selectedProcessMode, setSelectedProcessMode] =
     useState<SingBoxProcessMode>("isolated")
-  const [editing, setEditing] = useState<TransportSpec | undefined>()
   const [deleting, setDeleting] = useState<TransportSpec | undefined>()
   const [transportExportPending, setTransportExportPending] = useState(false)
   const [expandedTransportIds, setExpandedTransportIds] = useState(
@@ -251,10 +249,6 @@ export function TransportsPage() {
   const hiddenNativeCount = nativeInterfaces.filter((nativeInterface) =>
     hiddenNativeIds.has(nativeInterface.id)
   ).length
-  const nativeTransportCandidates = buildNativeTransportCandidates(
-    nativeInterfaces,
-    keenConfig
-  )
   const displayedNativeInterfaces = nativeInterfaces.filter(
     (nativeInterface) =>
       showHiddenNative || !hiddenNativeIds.has(nativeInterface.id)
@@ -553,8 +547,6 @@ export function TransportsPage() {
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
-        setDialogOpen(false)
-        setEditing(undefined)
         setDeleting(undefined)
         toast.success(
           t(`transports.configMessages.${variables.data.operation}`)
@@ -567,7 +559,6 @@ export function TransportsPage() {
       },
     },
   })
-  const configApplyMutation = usePostTransportConfigApplyMutation()
   const transferMutation = useMutation({
     mutationFn: async (file: File) => {
       const parsed = JSON.parse(await file.text()) as {
@@ -746,53 +737,6 @@ export function TransportsPage() {
     })
   }
 
-  const saveTransport = (
-    spec: TransportSpec,
-    options: { createOutbound: boolean }
-  ) => {
-    if (
-      spec.display_name &&
-      environmentQuery.data?.transport_api_version !== 2
-    ) {
-      toast.error(t("transports.form.backendUpdateRequired"), {
-        richColors: true,
-      })
-      return
-    }
-
-    if (!editing && options.createOutbound) {
-      configApplyMutation.mutate(
-        { data: createLinkedTransportApplyRequest(spec) },
-        {
-          onSuccess: () => {
-            setDialogOpen(false)
-            setEditing(undefined)
-            toast.success(t("transports.configMessages.create"))
-          },
-          onError: (mutationError) => {
-            toast.error(getApiErrorMessage(mutationError), {
-              richColors: true,
-            })
-          },
-        }
-      )
-      return
-    }
-
-    configMutation.mutate({
-      data: editing
-        ? {
-            operation: TransportConfigOperationOperation.update,
-            tag: editing.tag,
-            transport: spec,
-          }
-        : {
-            operation: TransportConfigOperationOperation.create,
-            transport: spec,
-          },
-    })
-  }
-
   return (
     <div className="space-y-3">
       <PageHeader
@@ -830,12 +774,7 @@ export function TransportsPage() {
           ref={transportImportRef}
           type="file"
         />
-        <Button
-          onClick={() => {
-            setEditing(undefined)
-            setDialogOpen(true)
-          }}
-        >
+        <Button onClick={() => navigate(transportCreateHref)}>
           <PlusIcon />
           {t("transports.add")}
         </Button>
@@ -1225,15 +1164,9 @@ export function TransportsPage() {
                           <Button
                             aria-label={t("common.edit")}
                             className="size-8"
-                            onClick={() => {
-                              const spec = configured.find(
-                                (entry) => entry.tag === item.tag
-                              )
-                              if (spec) {
-                                setEditing(spec)
-                                setDialogOpen(true)
-                              }
-                            }}
+                            onClick={() =>
+                              navigate(buildTransportEditHref(item.tag))
+                            }
                             size="icon"
                             title={t("common.edit")}
                             variant="ghost"
@@ -1314,29 +1247,6 @@ export function TransportsPage() {
           )
         })}
       </div>
-      {dialogOpen ? (
-        <TransportConfigDialog
-          existingInterfaces={[
-            ...configured.map((spec) => spec.interface),
-            ...items.map((item) => item.interface),
-            ...(keenConfig?.outbounds ?? []).flatMap((outbound) =>
-              typeof outbound.interface === "string" ? [outbound.interface] : []
-            ),
-          ]}
-          existingTags={[
-            ...configured.map((spec) => spec.tag),
-            ...items.map((item) => item.tag),
-            ...(keenConfig?.outbounds ?? []).map((outbound) => outbound.tag),
-          ]}
-          initial={editing}
-          isPending={configMutation.isPending || configApplyMutation.isPending}
-          nativeCandidates={nativeTransportCandidates}
-          onOpenChange={setDialogOpen}
-          onSubmit={saveTransport}
-          open
-          singBoxAvailable={environmentQuery.data?.sing_box_installed !== false}
-        />
-      ) : null}
       {processModeQuery.data ? (
         <SingBoxProcessModeDialog
           currentMode={processModeQuery.data.sing_box_process_mode}

@@ -329,12 +329,16 @@ export const usePostServiceActionMutation = (action: ServiceAction) => {
 export function isConfigMutationPending(
   postConfigCount: number,
   postConfigSaveCount: number,
-  listDeleteStageCount = 0
+  listDeleteStageCount = 0,
+  postTransportConfigCount = 0,
+  postTransportConfigApplyCount = 0
 ) {
   return (
     postConfigCount > 0 ||
     postConfigSaveCount > 0 ||
-    listDeleteStageCount > 0
+    listDeleteStageCount > 0 ||
+    postTransportConfigCount > 0 ||
+    postTransportConfigApplyCount > 0
   )
 }
 
@@ -344,11 +348,19 @@ export const useConfigMutationPending = () => {
   const listDeleteStageCount = useIsMutating({
     mutationKey: ["postListDeleteStage"],
   })
+  const postTransportConfigCount = useIsMutating({
+    mutationKey: ["postTransportConfig"],
+  })
+  const postTransportConfigApplyCount = useIsMutating({
+    mutationKey: ["postTransportConfigApply"],
+  })
 
   return isConfigMutationPending(
     postConfigCount,
     postConfigSaveCount,
-    listDeleteStageCount
+    listDeleteStageCount,
+    postTransportConfigCount,
+    postTransportConfigApplyCount
   )
 }
 

@@ -79,6 +79,8 @@ api::DependencyDependentKind to_api(DependencyDependentKind kind) {
         return api::DependencyDependentKind::OUTBOUND_GROUP;
     case DependencyDependentKind::List:
         return api::DependencyDependentKind::LIST;
+    case DependencyDependentKind::ListRefresh:
+        return api::DependencyDependentKind::LIST_REFRESH;
     case DependencyDependentKind::DnsFallback:
         return api::DependencyDependentKind::DNS_FALLBACK;
     }

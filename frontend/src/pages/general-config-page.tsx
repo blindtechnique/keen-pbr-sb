@@ -28,6 +28,7 @@ import {
   FieldSeparator,
 } from "@/components/shared/field"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
+import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
@@ -84,6 +85,11 @@ import {
 } from "@/lib/internal-vpn-server-policy"
 import { reconcileInternalVpnServiceOverrides } from "@/lib/internal-vpn-service-policy"
 import { getListSearchText, sortListIdsByDisplayName } from "@/lib/list-display"
+import {
+  getGlobalListRefreshRouteChain,
+  getListRefreshDetourMode,
+  normalizeListRefreshRouteChain,
+} from "@/lib/list-refresh-route"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
 import { getGeneralConfigActionState } from "@/pages/general-config-form-state"
 import { useSectionTab } from "@/hooks/use-section-tab"
@@ -107,6 +113,8 @@ type SettingsDraft = {
   internalVpnServices?: InternalVpnService[]
   listsAutoupdateEnabled: boolean
   cron: string
+  listRefreshDetour: string
+  listRefreshFallbackDetours: string[]
   fwmarkStart: string
   fwmarkMask: string
   tableStart: string
@@ -123,6 +131,8 @@ const fallbackDraft: SettingsDraft = {
   inboundInterfaces: [],
   listsAutoupdateEnabled: false,
   cron: "0 4 * * 0",
+  listRefreshDetour: "",
+  listRefreshFallbackDetours: [],
   fwmarkStart: "0x00010000",
   fwmarkMask: "0xffff0000",
   tableStart: "150",
@@ -143,6 +153,8 @@ const SETTINGS_FIELD_NAMES = {
   internalVpnServices: "internalVpnServices",
   listsAutoupdateEnabled: "listsAutoupdateEnabled",
   cron: "cron",
+  listRefreshDetour: "listRefreshDetour",
+  listRefreshFallbackDetours: "listRefreshFallbackDetours",
   fwmarkStart: "fwmarkStart",
   fwmarkMask: "fwmarkMask",
   tableStart: "tableStart",
@@ -318,6 +330,9 @@ function LoadedGeneralConfigPage({
   )
 
   const isPending = postConfigMutation.isPending || deferredSavePending
+  const inheritedUrlListCount = Object.values(loadedConfig.lists ?? {}).filter(
+    (list) => Boolean(list.url) && getListRefreshDetourMode(list) === "inherit"
+  ).length
   const internalVpnServerInventoryState: InternalVpnServerInventoryState =
     ndmsInventoryQuery.isLoading
       ? "loading"
@@ -1094,6 +1109,56 @@ function LoadedGeneralConfigPage({
                   )
                 }}
               </form.Field>
+
+              <FieldSeparator />
+
+              <div className="space-y-1">
+                <FieldLabel>
+                  {t("pages.settings.autoupdate.routeTitle")}
+                </FieldLabel>
+                <FieldDescription>
+                  {t("pages.settings.autoupdate.routeDescription")}
+                </FieldDescription>
+              </div>
+
+              <form.Field name={SETTINGS_FIELD_NAMES.listRefreshDetour}>
+                {(detourField) => (
+                  <form.Field
+                    name={SETTINGS_FIELD_NAMES.listRefreshFallbackDetours}
+                  >
+                    {(fallbackField) => (
+                      <ListRefreshRouteFields
+                        chain={{
+                          detour: detourField.state.value,
+                          fallbackDetours: fallbackField.state.value,
+                        }}
+                        detourError={getFirstFieldError(
+                          detourField.state.meta.errors
+                        )}
+                        detourFieldName={SETTINGS_FIELD_NAMES.listRefreshDetour}
+                        fallbackError={getFirstFieldError(
+                          fallbackField.state.meta.errors
+                        )}
+                        fallbackFieldName={
+                          SETTINGS_FIELD_NAMES.listRefreshFallbackDetours
+                        }
+                        onChange={(chain) => {
+                          detourField.handleChange(chain.detour)
+                          fallbackField.handleChange(chain.fallbackDetours)
+                        }}
+                        outbounds={loadedConfig.outbounds ?? []}
+                      />
+                    )}
+                  </form.Field>
+                )}
+              </form.Field>
+
+              <FieldHint
+                description={t(
+                  "pages.settings.autoupdate.inheritedListsCount",
+                  { count: inheritedUrlListCount }
+                )}
+              />
             </FieldGroup>
           </CardContent>
         </Card>
@@ -1631,6 +1696,11 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     listsAutoupdateEnabled:
       config.lists_autoupdate?.enabled ?? fallbackDraft.listsAutoupdateEnabled,
     cron: config.lists_autoupdate?.cron ?? fallbackDraft.cron,
+    listRefreshDetour: getGlobalListRefreshRouteChain(config.list_refresh)
+      .detour,
+    listRefreshFallbackDetours: getGlobalListRefreshRouteChain(
+      config.list_refresh
+    ).fallbackDetours,
     fwmarkStart: toHex32(config.fwmark?.start, fallbackDraft.fwmarkStart),
     fwmarkMask: toHex32(config.fwmark?.mask, fallbackDraft.fwmarkMask),
     tableStart: toStringInt(
@@ -1645,8 +1715,12 @@ function buildUpdatedConfig(
   draft: SettingsDraft
 ): ConfigObject {
   const tableStart = parseStrictDecimalToNumber(draft.tableStart)
+  const listRefreshRoute = normalizeListRefreshRouteChain({
+    detour: draft.listRefreshDetour,
+    fallbackDetours: draft.listRefreshFallbackDetours,
+  })
 
-  return {
+  const updatedConfig: ConfigObject = {
     ...config,
     daemon: {
       ...config.daemon,
@@ -1692,6 +1766,17 @@ function buildUpdatedConfig(
       cron: draft.cron.trim(),
     },
   }
+
+  if (listRefreshRoute.detour) {
+    updatedConfig.list_refresh = {
+      detour: listRefreshRoute.detour,
+      fallback_detours: listRefreshRoute.fallbackDetours,
+    }
+  } else {
+    delete updatedConfig.list_refresh
+  }
+
+  return updatedConfig
 }
 
 function toHex32(value: string | undefined, fallback: string) {
@@ -1734,6 +1819,10 @@ function toBackendIntegerValue(parsed: number | null, raw: string): number {
 }
 
 function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
+  if (path.startsWith("list_refresh.fallback_detours")) {
+    return SETTINGS_FIELD_NAMES.listRefreshFallbackDetours
+  }
+
   if (
     path === "route.inbound_interfaces" ||
     path.startsWith("route.inbound_interfaces[")
@@ -1779,6 +1868,10 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.listsAutoupdateEnabled
     case "lists_autoupdate.cron":
       return SETTINGS_FIELD_NAMES.cron
+    case "list_refresh.detour":
+      return SETTINGS_FIELD_NAMES.listRefreshDetour
+    case "list_refresh.fallback_detours":
+      return SETTINGS_FIELD_NAMES.listRefreshFallbackDetours
     case "fwmark.start":
       return SETTINGS_FIELD_NAMES.fwmarkStart
     case "fwmark.mask":

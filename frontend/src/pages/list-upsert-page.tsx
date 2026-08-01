@@ -30,7 +30,7 @@ import {
   type DnsPresetSelection,
 } from "@/components/dns/dns-preset-selection"
 import { OutboundSelect } from "@/components/shared/outbound-select"
-import { MultiSelectList } from "@/components/shared/multi-select-list"
+import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
 import {
   Field,
   FieldContent,
@@ -78,9 +78,10 @@ import { isSemanticallyDirty } from "@/lib/semantic-dirty"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { makeTechnicalId } from "@/lib/technical-id"
 import {
-  getOutboundDisplayName,
-  getOutboundReferenceLabel,
-} from "@/lib/outbound-display"
+  getGlobalListRefreshRouteChain,
+  getListRefreshCapableOutbounds,
+} from "@/lib/list-refresh-route"
+import { getOutboundDisplayName } from "@/lib/outbound-display"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   NO_DNS_RULE,
@@ -105,6 +106,7 @@ const LIST_FIELD_NAMES = {
   displayName: "displayName",
   name: "name",
   ttlMs: "ttlMs",
+  refreshDetourMode: "refreshDetourMode",
   detour: "detour",
   fallbackDetours: "fallbackDetours",
   domains: "domains",
@@ -127,6 +129,7 @@ const sampleNewList: ListDraft = {
   displayName: "",
   name: "",
   ttlMs: "7200000",
+  refreshDetourMode: "inherit",
   detour: "",
   fallbackDetours: [],
   domains: "",
@@ -291,14 +294,12 @@ function ListForm({
     dnsServers,
     t("pages.listUpsert.dnsRule.none")
   )
-  const downloadOutbounds = outbounds.filter(
-    (outbound) =>
-      outbound.type === "interface" ||
-      outbound.type === "table" ||
-      outbound.type === "urltest"
-  )
+  const downloadOutbounds = getListRefreshCapableOutbounds(outbounds)
   const downloadOutboundByTag = new Map(
     downloadOutbounds.map((outbound) => [outbound.tag, outbound])
+  )
+  const globalRefreshRoute = getGlobalListRefreshRouteChain(
+    loadedConfig.list_refresh
   )
   const recommendedPair = downloadOutbounds
     .map((outbound) => ({
@@ -409,6 +410,17 @@ function ListForm({
             richColors: true,
           })
           return undefined
+        }
+        if (
+          valueToPersist.url.trim() &&
+          valueToPersist.refreshDetourMode === "override" &&
+          !valueToPersist.detour.trim()
+        ) {
+          const message = t("pages.listUpsert.validation.refreshDetourRequired")
+          setFormServerErrors(form, {
+            fields: { [LIST_FIELD_NAMES.detour]: message },
+          })
+          return { fields: { [LIST_FIELD_NAMES.detour]: message } }
         }
         if (
           mode === "create" &&
@@ -616,6 +628,7 @@ function ListForm({
       form.setFieldValue(LIST_FIELD_NAMES.ipCidrs, "")
     }
     if (group !== "url") {
+      form.setFieldValue(LIST_FIELD_NAMES.refreshDetourMode, "inherit")
       form.setFieldValue(LIST_FIELD_NAMES.detour, "")
       form.setFieldValue(LIST_FIELD_NAMES.fallbackDetours, [])
     }
@@ -871,116 +884,134 @@ function ListForm({
               </form.Field>
 
               {presentation === "page" ? (
-                <form.Field name={LIST_FIELD_NAMES.detour}>
-                  {(field) => {
-                    const error = getFirstFieldError(field.state.meta.errors)
-
-                    return (
-                      <Field invalid={Boolean(error)}>
-                        <FieldLabel>
-                          {t("pages.listUpsert.fields.detour")}
-                        </FieldLabel>
-                        <FieldContent>
-                          <OutboundSelect
-                            allowEmpty
-                            ariaInvalid={Boolean(error)}
-                            emptyLabel={t(
-                              "pages.listUpsert.fields.detourEmpty"
-                            )}
-                            onValueChange={(nextDetour) => {
-                              field.handleChange(nextDetour)
+                <form.Field name={LIST_FIELD_NAMES.refreshDetourMode}>
+                  {(field) => (
+                    <Field>
+                      <FieldLabel>
+                        {t("pages.listUpsert.refreshRoute.modeLabel")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Select
+                          onValueChange={(value) => {
+                            const nextMode = value as "inherit" | "override"
+                            field.handleChange(nextMode)
+                            if (nextMode === "inherit") {
+                              form.setFieldValue(LIST_FIELD_NAMES.detour, "")
                               form.setFieldValue(
                                 LIST_FIELD_NAMES.fallbackDetours,
-                                nextDetour
-                                  ? form.state.values.fallbackDetours.filter(
-                                      (fallback) => fallback !== nextDetour
-                                    )
-                                  : []
+                                []
                               )
-                            }}
-                            outbounds={downloadOutbounds}
-                            placeholder={t(
-                              "pages.listUpsert.fields.detourPlaceholder"
-                            )}
-                            value={field.state.value}
-                          />
-                          <FieldHint
-                            description={t(
-                              "pages.listUpsert.fields.detourHint"
-                            )}
-                            error={error}
-                          />
-                        </FieldContent>
-                      </Field>
-                    )
-                  }}
+                              return
+                            }
+
+                            if (
+                              !form.state.values.detour &&
+                              globalRefreshRoute.detour
+                            ) {
+                              form.setFieldValue(
+                                LIST_FIELD_NAMES.detour,
+                                globalRefreshRoute.detour
+                              )
+                              form.setFieldValue(
+                                LIST_FIELD_NAMES.fallbackDetours,
+                                globalRefreshRoute.fallbackDetours
+                              )
+                            }
+                          }}
+                          value={field.state.value}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="inherit">
+                                {t(
+                                  "pages.listUpsert.refreshRoute.modes.inherit"
+                                )}
+                              </SelectItem>
+                              <SelectItem value="override">
+                                {t(
+                                  "pages.listUpsert.refreshRoute.modes.override"
+                                )}
+                              </SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <FieldHint
+                          description={t(
+                            `pages.listUpsert.refreshRoute.${field.state.value}Hint`
+                          )}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )}
                 </form.Field>
               ) : null}
 
-              {presentation === "page" ? (
-                <form.Subscribe selector={(state) => state.values.detour}>
-                  {(primaryDetour) =>
-                    primaryDetour ? (
-                      <form.Field name={LIST_FIELD_NAMES.fallbackDetours}>
-                        {(field) => (
-                          <Field>
-                            <FieldLabel>
-                              {t("pages.listUpsert.fields.fallbackDetours")}
-                            </FieldLabel>
-                            <FieldContent>
-                              <MultiSelectList
-                                addLabel={t(
-                                  "pages.listUpsert.fields.fallbackDetoursAdd"
-                                )}
-                                allowReorder
-                                emptyMessage={t(
-                                  "pages.listUpsert.fields.fallbackDetoursEmpty"
-                                )}
-                                getSearchText={(tag) => {
-                                  const outbound =
-                                    downloadOutboundByTag.get(tag)
-                                  return outbound
-                                    ? getOutboundReferenceLabel(outbound)
-                                    : tag
-                                }}
-                                limitMessage={t(
-                                  "pages.listUpsert.fields.fallbackDetoursLimit"
-                                )}
-                                maxItems={3}
-                                name={LIST_FIELD_NAMES.fallbackDetours}
-                                onChange={field.handleChange}
-                                options={downloadOutbounds.map(
-                                  (outbound) => outbound.tag
-                                )}
-                                placeholderDescription={t(
-                                  "pages.listUpsert.fields.fallbackDetoursPlaceholderDescription"
-                                )}
-                                placeholderTitle={t(
-                                  "pages.listUpsert.fields.fallbackDetoursPlaceholder"
-                                )}
-                                renderItem={(tag) => {
-                                  const outbound =
-                                    downloadOutboundByTag.get(tag)
-                                  return outbound
-                                    ? getOutboundDisplayName(outbound)
-                                    : tag
-                                }}
-                                unavailable={[primaryDetour]}
-                                value={field.state.value}
-                              />
-                              <FieldHint
-                                description={t(
-                                  "pages.listUpsert.fields.fallbackDetoursHint"
-                                )}
-                              />
-                            </FieldContent>
-                          </Field>
+              <form.Subscribe
+                selector={(state) => ({
+                  detour: state.values.detour,
+                  fallbackDetours: state.values.fallbackDetours,
+                  mode: state.values.refreshDetourMode,
+                })}
+              >
+                {(refreshRoute) =>
+                  presentation === "page" &&
+                  refreshRoute.mode === "override" ? (
+                    <form.Field name={LIST_FIELD_NAMES.detour}>
+                      {(detourField) => (
+                        <form.Field name={LIST_FIELD_NAMES.fallbackDetours}>
+                          {(fallbackField) => (
+                            <ListRefreshRouteFields
+                              chain={refreshRoute}
+                              detourError={getFirstFieldError(
+                                detourField.state.meta.errors
+                              )}
+                              detourFieldName={LIST_FIELD_NAMES.detour}
+                              fallbackError={getFirstFieldError(
+                                fallbackField.state.meta.errors
+                              )}
+                              fallbackFieldName={
+                                LIST_FIELD_NAMES.fallbackDetours
+                              }
+                              onChange={(chain) => {
+                                detourField.handleChange(chain.detour)
+                                fallbackField.handleChange(
+                                  chain.fallbackDetours
+                                )
+                              }}
+                              outbounds={outbounds}
+                              primaryEmptyLabel={t(
+                                "pages.listUpsert.fields.detourEmpty"
+                              )}
+                            />
+                          )}
+                        </form.Field>
+                      )}
+                    </form.Field>
+                  ) : (
+                    <Alert>
+                      <AlertDescription>
+                        {t(
+                          refreshRoute.mode === "override"
+                            ? "pages.listUpsert.refreshRoute.overrideSummary"
+                            : "pages.listUpsert.refreshRoute.inheritSummary",
+                          {
+                            chain: formatListRefreshRouteChain(
+                              refreshRoute.mode === "override"
+                                ? refreshRoute
+                                : globalRefreshRoute,
+                              downloadOutboundByTag,
+                              t("common.listRefreshRoute.systemDirect")
+                            ),
+                          }
                         )}
-                      </form.Field>
-                    ) : null
-                  }
-                </form.Subscribe>
-              ) : null}
+                      </AlertDescription>
+                    </Alert>
+                  )
+                }
+              </form.Subscribe>
             </FieldGroup>
           </CardContent>
         </Card>
@@ -1511,5 +1542,38 @@ function resolveListFieldPath(
     return LIST_FIELD_NAMES.detour
   }
 
+  if (
+    normalizedName &&
+    path === `lists.${normalizedName}.refresh_detour_mode`
+  ) {
+    return LIST_FIELD_NAMES.refreshDetourMode
+  }
+
+  if (
+    normalizedName &&
+    (path === `lists.${normalizedName}.fallback_detours` ||
+      path.startsWith(`lists.${normalizedName}.fallback_detours[`))
+  ) {
+    return LIST_FIELD_NAMES.fallbackDetours
+  }
+
   return undefined
+}
+
+function formatListRefreshRouteChain(
+  chain: { detour: string; fallbackDetours: string[] },
+  outboundByTag: ReadonlyMap<string, Outbound>,
+  systemDirectLabel: string
+) {
+  const tags = [chain.detour, ...chain.fallbackDetours].filter(Boolean)
+  if (tags.length === 0) {
+    return systemDirectLabel
+  }
+
+  return tags
+    .map((tag) => {
+      const outbound = outboundByTag.get(tag)
+      return outbound ? getOutboundDisplayName(outbound) : tag
+    })
+    .join(" → ")
 }

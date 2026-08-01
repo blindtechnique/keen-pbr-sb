@@ -282,6 +282,47 @@ DependencyAnalysis analyze_dependencies(
         }
     }
 
+    if (config.list_refresh.has_value()) {
+        const auto& refresh = *config.list_refresh;
+        if (refresh.detour.has_value() &&
+            removed_outbounds.find(*refresh.detour) !=
+                removed_outbounds.end()) {
+            add_reference(
+                analysis,
+                seen_references,
+                {{DependencyEntityKind::Outbound, *refresh.detour, false},
+                 DependencyDependentKind::ListRefresh,
+                 "global",
+                 DependencyRelation::DetoursVia,
+                 DependencyConsequence::Disconnect,
+                 "list_refresh.detour",
+                 "/general?tab=general"});
+        }
+        const auto fallback_detours =
+            refresh.fallback_detours.value_or(
+                std::vector<std::string>{});
+        for (std::size_t index = 0;
+             index < fallback_detours.size();
+             ++index) {
+            const auto& fallback = fallback_detours[index];
+            if (removed_outbounds.find(fallback) ==
+                removed_outbounds.end()) {
+                continue;
+            }
+            add_reference(
+                analysis,
+                seen_references,
+                {{DependencyEntityKind::Outbound, fallback, false},
+                 DependencyDependentKind::ListRefresh,
+                 "global",
+                 DependencyRelation::DetoursVia,
+                 DependencyConsequence::Modify,
+                 "list_refresh.fallback_detours[" +
+                     std::to_string(index) + "]",
+                 "/general?tab=general"});
+        }
+    }
+
     if (config.lists) {
         for (const auto& [list_name, list] : *config.lists) {
             if (list.detour &&

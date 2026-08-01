@@ -5,6 +5,7 @@
  * REST API for the keen-pbr policy-based routing daemon.
  * OpenAPI spec version: 3.0.0
  */
+import type { ListRefreshDetourMode } from './listRefreshDetourMode';
 
 /**
  * Defines a named list of domains and/or IP CIDRs used in routing and DNS rules. At least one of `url`, `domains`, `ip_cidrs`, or `file` must be provided. List names (the keys under `lists`) must match `^[a-z][a-z0-9_]*$` and be at most 24 characters. `display_name` is presentation-only: rules, caches, sets, and API references always use the map key.
@@ -35,7 +36,8 @@ export interface ListConfig {
   /** TTL for dnsmasq-resolved ipset entries in milliseconds. `0` means no timeout.
    */
   ttl_ms?: number;
-  /** Optional outbound tag to use when downloading this list. If set, download traffic is marked with the outbound's fwmark and routed via its dedicated routing table. If omitted, the system default routing table is used.
+  refresh_detour_mode?: ListRefreshDetourMode;
+  /** Primary outbound tag used when `refresh_detour_mode=override`. Legacy configurations that set this field without a mode are treated as per-list overrides. When neither a per-list override nor a global chain is configured, the system default routing table is used.
    */
   detour?: string;
   /**

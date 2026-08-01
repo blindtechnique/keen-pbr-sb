@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DependencyReference } from "@/api/generated/model/dependencyReference"
 import { mapDependencyReferences } from "@/hooks/use-config-dependencies"
+import { findBrokenReferences } from "@/lib/dependencies"
 
 describe("backend dependency mapping", () => {
   test("keeps backend ownership and only formats labels in the UI", () => {
@@ -136,6 +137,56 @@ describe("backend dependency mapping", () => {
         label: "DNS для AI → secure_dns",
         href: "/dns-rules/dns_ai/edit",
       },
+    ])
+  })
+
+  test("maps the global URL list refresh dependency", () => {
+    const config: ConfigObject = {
+      outbounds: [{ type: "interface", tag: "vpn", display_name: "Основной" }],
+      list_refresh: { detour: "vpn", fallback_detours: ["backup"] },
+    }
+    const references: DependencyReference[] = [
+      {
+        target: { kind: "outbound", id: "vpn", cascaded: false },
+        dependent_kind: "list_refresh",
+        dependent_id: "global",
+        relation: "detours_via",
+        consequence: "disconnect",
+        path: "list_refresh.detour",
+        href: "/general?tab=general",
+      },
+    ]
+
+    expect(
+      mapDependencyReferences(config, references).get("outbound:vpn")
+    ).toEqual([
+      {
+        kind: "listRefresh",
+        label: "Основной → backup",
+        href: "/general?tab=general",
+      },
+    ])
+  })
+
+  test("finds broken per-list and global fallback routes", () => {
+    const broken = findBrokenReferences({
+      outbounds: [{ type: "interface", tag: "vpn" }],
+      lists: {
+        ai: {
+          refresh_detour_mode: "override",
+          detour: "vpn",
+          fallback_detours: ["missing_list_backup"],
+        },
+      },
+      list_refresh: {
+        detour: "vpn",
+        fallback_detours: ["missing_global_backup"],
+      },
+    })
+
+    expect(broken.map((item) => item.id)).toEqual([
+      "list:ai:fallback:0:missing_list_backup",
+      "list-refresh:fallback:0:missing_global_backup",
     ])
   })
 })

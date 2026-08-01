@@ -1383,6 +1383,45 @@ void validate_route_internal_vpn_services(
 
 } // namespace
 
+ListRefreshDetourMode effective_list_refresh_detour_mode(
+    const ListConfig& list_config) {
+    if (list_config.refresh_detour_mode.has_value()) {
+        return *list_config.refresh_detour_mode;
+    }
+    if (list_config.detour.has_value() ||
+        !list_config.fallback_detours.value_or(
+             std::vector<std::string>{}).empty()) {
+        return ListRefreshDetourMode::OVERRIDE;
+    }
+    return ListRefreshDetourMode::INHERIT;
+}
+
+std::vector<std::string> configured_list_refresh_detours(
+    const ListRefreshConfig& refresh_config) {
+    std::vector<std::string> detours;
+    if (refresh_config.detour.has_value()) {
+        detours.push_back(*refresh_config.detour);
+    }
+    const auto fallbacks = refresh_config.fallback_detours.value_or(
+        std::vector<std::string>{});
+    detours.insert(detours.end(), fallbacks.begin(), fallbacks.end());
+    return detours;
+}
+
+std::vector<std::string> effective_list_refresh_detours(
+    const Config& config,
+    const ListConfig& list_config) {
+    if (effective_list_refresh_detour_mode(list_config) ==
+        ListRefreshDetourMode::OVERRIDE) {
+        ListRefreshConfig override_config;
+        override_config.detour = list_config.detour;
+        override_config.fallback_detours = list_config.fallback_detours;
+        return configured_list_refresh_detours(override_config);
+    }
+    return configured_list_refresh_detours(
+        config.list_refresh.value_or(ListRefreshConfig{}));
+}
+
 void validate_config(const Config& cfg) {
     std::vector<ConfigValidationIssue> issues;
 
@@ -1537,49 +1576,40 @@ void validate_config(const Config& cfg) {
         }
     }
 
-    for (const auto& [name, list_cfg] :
-         cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
-        const std::string list_path =
-            name.empty() ? "lists" : "lists." + name;
-        const auto fallbacks = list_cfg.fallback_detours.value_or(
-            std::vector<std::string>{});
-
-        if (!fallbacks.empty() && !list_cfg.detour.has_value()) {
+    const auto validate_download_chain =
+        [&](const std::optional<std::string>& primary,
+            const std::vector<std::string>& fallbacks,
+            const std::string& path) {
+        if (!fallbacks.empty() && !primary.has_value()) {
             add_issue(
                 issues,
-                list_path + ".fallback_detours",
-                list_path +
+                path + ".fallback_detours",
+                path +
                     ".fallback_detours requires an explicit primary detour");
         }
         if (fallbacks.size() > 3U) {
             add_issue(
                 issues,
-                list_path + ".fallback_detours",
-                list_path +
+                path + ".fallback_detours",
+                path +
                     ".fallback_detours supports at most 3 entries");
-        }
-        if ((!fallbacks.empty() || list_cfg.detour.has_value()) &&
-            !list_cfg.url.has_value()) {
-            add_issue(
-                issues,
-                list_path + ".detour",
-                list_path +
-                    " download detours are only valid for URL-backed lists");
         }
 
         std::set<std::string> seen_detours;
         const auto validate_download_detour =
-            [&](const std::string& tag, const std::string& path) {
+            [&](const std::string& tag, const std::string& detour_path) {
                 if (tag.empty()) {
                     add_issue(
-                        issues, path, path + " must not be empty");
+                        issues,
+                        detour_path,
+                        detour_path + " must not be empty");
                     return;
                 }
                 if (!seen_detours.insert(tag).second) {
                     add_issue(
                         issues,
-                        path,
-                        path + " repeats outbound tag '" + tag + "'");
+                        detour_path,
+                        detour_path + " repeats outbound tag '" + tag + "'");
                     return;
                 }
 
@@ -1587,8 +1617,8 @@ void validate_config(const Config& cfg) {
                 if (outbound_it == outbounds_by_tag.end()) {
                     add_issue(
                         issues,
-                        path,
-                        path + ": unknown outbound tag '" + tag + "'");
+                        detour_path,
+                        detour_path + ": unknown outbound tag '" + tag + "'");
                     return;
                 }
                 const auto type = outbound_it->second->type;
@@ -1597,21 +1627,78 @@ void validate_config(const Config& cfg) {
                     type != OutboundType::URLTEST) {
                     add_issue(
                         issues,
-                        path,
-                        path + ": outbound '" + tag +
+                        detour_path,
+                        detour_path + ": outbound '" + tag +
                             "' has no routable download table");
                 }
             };
 
-        if (list_cfg.detour.has_value()) {
+        if (primary.has_value()) {
             validate_download_detour(
-                *list_cfg.detour, list_path + ".detour");
+                *primary, path + ".detour");
         }
         for (std::size_t index = 0; index < fallbacks.size(); ++index) {
             validate_download_detour(
                 fallbacks[index],
-                list_path + ".fallback_detours[" +
+                path + ".fallback_detours[" +
                     std::to_string(index) + "]");
+        }
+    };
+
+    if (cfg.list_refresh.has_value()) {
+        validate_download_chain(
+            cfg.list_refresh->detour,
+            cfg.list_refresh->fallback_detours.value_or(
+                std::vector<std::string>{}),
+            "list_refresh");
+    }
+
+    for (const auto& [name, list_cfg] :
+         cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
+        const std::string list_path =
+            name.empty() ? "lists" : "lists." + name;
+        const auto fallbacks = list_cfg.fallback_detours.value_or(
+            std::vector<std::string>{});
+        const bool has_local_chain =
+            list_cfg.detour.has_value() || !fallbacks.empty();
+        const auto mode = effective_list_refresh_detour_mode(list_cfg);
+
+        if (list_cfg.refresh_detour_mode.has_value() &&
+            !list_cfg.url.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".refresh_detour_mode",
+                list_path +
+                    ".refresh_detour_mode is only valid for URL-backed lists");
+        }
+        if (mode == ListRefreshDetourMode::INHERIT && has_local_chain) {
+            add_issue(
+                issues,
+                list_path + ".refresh_detour_mode",
+                list_path +
+                    " cannot inherit the global download route while local "
+                    "detours are configured");
+        }
+        if (mode == ListRefreshDetourMode::OVERRIDE &&
+            !list_cfg.detour.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".detour",
+                list_path +
+                    ".detour is required when refresh_detour_mode is override");
+        }
+        if (has_local_chain && !list_cfg.url.has_value()) {
+            add_issue(
+                issues,
+                list_path + ".detour",
+                list_path +
+                    " download detours are only valid for URL-backed lists");
+        }
+
+        if (has_local_chain ||
+            mode == ListRefreshDetourMode::OVERRIDE) {
+            validate_download_chain(
+                list_cfg.detour, fallbacks, list_path);
         }
     }
 
@@ -2157,12 +2244,11 @@ void validate_config(const Config& cfg) {
     for (const auto& [list_name, list] :
          cfg.lists.value_or(std::map<std::string, ListConfig>{})) {
         (void)list_name;
-        if (list.detour.has_value()) {
-            direct_list_detours.insert(*list.detour);
+        if (!list.url.has_value()) {
+            continue;
         }
         for (const auto& detour :
-             list.fallback_detours.value_or(
-                 std::vector<std::string>{})) {
+             effective_list_refresh_detours(cfg, list)) {
             direct_list_detours.insert(detour);
         }
     }

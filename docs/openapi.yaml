@@ -1011,8 +1011,9 @@ components:
         route_rules:
           type: array
           description: >
-            Independently editable route rules created by the plan. A beginner
-            setup creates at most one route rule for each selected list.
+            Independently editable route rules created by the plan. A
+            catalogue setup session creates at most one route rule containing
+            every selected list that still needs the requested route.
           items:
             $ref: "#/components/schemas/CatalogSetupRouteRuleSummary"
         dns_rule:
@@ -1022,8 +1023,9 @@ components:
         dns_rules:
           type: array
           description: >
-            Independently editable DNS rules created by the plan. A beginner
-            setup creates at most one DNS rule for each selected list.
+            Independently editable DNS rules created by the plan. A catalogue
+            setup session creates at most one DNS rule containing every
+            DNS-eligible selected list that still needs the requested server.
           items:
             $ref: "#/components/schemas/CatalogSetupDnsRuleSummary"
         dns_server:
@@ -1772,6 +1774,17 @@ components:
       type: string
       enum: [preserve, delete, delete_on_failure]
 
+    ListRefreshDetourMode:
+      type: string
+      enum: [inherit, override]
+      description: >
+        Selects which ordered outbound chain is used to download this remote
+        list. `inherit` uses the global chain from `list_refresh`.
+        `override` uses this list's `detour` and `fallback_detours` instead.
+        For backward compatibility an omitted value behaves as `override`
+        when the list already has an explicit `detour`, and as `inherit`
+        otherwise.
+
     ListConfig:
       type: object
       description: >
@@ -1826,13 +1839,16 @@ components:
             `0` means no timeout.
           default: 0
           example: 86400000
+        refresh_detour_mode:
+          $ref: "#/components/schemas/ListRefreshDetourMode"
         detour:
           type: string
           description: >
-            Optional outbound tag to use when downloading this list.
-            If set, download traffic is marked with the outbound's fwmark
-            and routed via its dedicated routing table.
-            If omitted, the system default routing table is used.
+            Primary outbound tag used when `refresh_detour_mode=override`.
+            Legacy configurations that set this field without a mode are
+            treated as per-list overrides. When neither a per-list override
+            nor a global chain is configured, the system default routing
+            table is used.
         fallback_detours:
           type: array
           maxItems: 3
@@ -2222,6 +2238,31 @@ components:
             Required when `enabled` is `true`. Validated even when `enabled` is `false`.
           example: "0 4 * * 0"
 
+    ListRefreshConfig:
+      type: object
+      description: >
+        Global route policy for downloading URL-backed lists. It is shared by
+        scheduled refreshes, manual refreshes, and refreshes triggered after
+        applying configuration.
+      properties:
+        detour:
+          type: string
+          description: >
+            Primary outbound used by URL-backed lists whose
+            `refresh_detour_mode` is `inherit`. If omitted together with
+            `fallback_detours`, inherited downloads use the system default
+            route.
+        fallback_detours:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          description: >
+            Ordered fallback outbounds for the global URL-list download
+            chain. Direct routing is never added implicitly after a
+            configured chain fails.
+          items:
+            type: string
+
     PlainDnsTemplate:
       type: object
       required: [name, primary_ipv4]
@@ -2299,6 +2340,8 @@ components:
           $ref: "#/components/schemas/IprouteConfig"
         lists_autoupdate:
           $ref: "#/components/schemas/ListsAutoupdateConfig"
+        list_refresh:
+          $ref: "#/components/schemas/ListRefreshConfig"
         ui_preferences:
           $ref: "#/components/schemas/UiPreferencesConfig"
       example:
@@ -2383,6 +2426,9 @@ components:
         lists_autoupdate:
           enabled: true
           cron: "0 4 * * 0"
+        list_refresh:
+          detour: "vpn"
+          fallback_detours: ["wan"]
         route:
           rules:
             - list: ["my-domains", "my-ips", "remote-list"]
@@ -3613,7 +3659,7 @@ components:
     DependencyDependentKind:
       title: DependencyDependentKind
       type: string
-      enum: [routing_rule, dns_rule, dns_server, outbound_group, list, dns_fallback]
+      enum: [routing_rule, dns_rule, dns_server, outbound_group, list, list_refresh, dns_fallback]
 
     DependencyReference:
       title: DependencyReference

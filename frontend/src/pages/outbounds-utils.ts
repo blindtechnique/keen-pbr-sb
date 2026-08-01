@@ -1,5 +1,6 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { ListConfig } from "@/api/generated/model/listConfig"
+import type { ListRefreshConfig } from "@/api/generated/model/listRefreshConfig"
 import type { Outbound } from "@/api/generated/model/outbound"
 
 export type OutboundDeleteImpact = {
@@ -11,6 +12,10 @@ export type OutboundDeleteImpact = {
     before: string[]
     after: string[]
   }>
+  globalListRefreshRoute?: {
+    before: string[]
+    after: string[]
+  }
   urltestMemberships: Array<{
     outboundTag: string
     groupIndex: number
@@ -89,6 +94,10 @@ export function getOutboundDeleteImpact(
         },
       ]
     })
+  const globalListRefreshRoute = getListRefreshRouteImpact(
+    config.list_refresh,
+    deletedTags
+  )
   const urltestMemberships: OutboundDeleteImpact["urltestMemberships"] = []
   const removedUrltestGroups: OutboundDeleteImpact["removedUrltestGroups"] = []
 
@@ -127,6 +136,7 @@ export function getOutboundDeleteImpact(
     routeRuleIndexes,
     dnsServerDetours,
     listDownloadRoutes,
+    globalListRefreshRoute,
     urltestMemberships,
     removedUrltestGroups,
   }
@@ -168,7 +178,62 @@ export function buildUpdatedConfigForOutboundsDelete(
         cleanupListDownloadRoutes(list, deletedTags),
       ])
     ),
+    list_refresh: cleanupListRefreshRoute(config.list_refresh, deletedTags),
   }
+}
+
+function getListRefreshRouteImpact(
+  refresh: ListRefreshConfig | undefined,
+  deletedTags: ReadonlySet<string>
+): OutboundDeleteImpact["globalListRefreshRoute"] {
+  const primaryDetour = refresh?.detour
+  const fallbackDetours = refresh?.fallback_detours ?? []
+  const before = [...(primaryDetour ? [primaryDetour] : []), ...fallbackDetours]
+
+  if (primaryDetour && deletedTags.has(primaryDetour)) {
+    return { before, after: [] }
+  }
+
+  const remainingFallbacks = fallbackDetours.filter(
+    (tag) => !deletedTags.has(tag)
+  )
+  if (remainingFallbacks.length === fallbackDetours.length) {
+    return undefined
+  }
+
+  return {
+    before,
+    after: [...(primaryDetour ? [primaryDetour] : []), ...remainingFallbacks],
+  }
+}
+
+function cleanupListRefreshRoute(
+  refresh: ListRefreshConfig | undefined,
+  deletedTags: ReadonlySet<string>
+): ListRefreshConfig | undefined {
+  if (!refresh) {
+    return undefined
+  }
+
+  if (refresh.detour && deletedTags.has(refresh.detour)) {
+    return {}
+  }
+
+  const fallbackDetours = refresh.fallback_detours ?? []
+  const remainingFallbacks = fallbackDetours.filter(
+    (tag) => !deletedTags.has(tag)
+  )
+  if (remainingFallbacks.length === fallbackDetours.length) {
+    return refresh
+  }
+
+  const nextRefresh = { ...refresh }
+  if (remainingFallbacks.length > 0) {
+    nextRefresh.fallback_detours = remainingFallbacks
+  } else {
+    delete nextRefresh.fallback_detours
+  }
+  return nextRefresh
 }
 
 function cleanupListDownloadRoutes(

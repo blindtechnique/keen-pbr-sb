@@ -470,6 +470,189 @@ TEST_CASE("refresh_remote_lists retries network failures through ordered fallbac
     std::filesystem::remove_all(temp_dir);
 }
 
+TEST_CASE("effective_list_refresh_detours preserves legacy per-list overrides") {
+    Config legacy_config;
+    ListConfig legacy_direct;
+    legacy_direct.url = "https://example.com/direct.txt";
+    CHECK(effective_list_refresh_detours(legacy_config, legacy_direct).empty());
+
+    Config config;
+    ListRefreshConfig global;
+    global.detour = "global-primary";
+    global.fallback_detours =
+        std::vector<std::string>{"global-backup"};
+    config.list_refresh = global;
+
+    ListConfig legacy_override;
+    legacy_override.url = "https://example.com/legacy.txt";
+    legacy_override.detour = "legacy-primary";
+    legacy_override.fallback_detours =
+        std::vector<std::string>{"legacy-backup"};
+
+    CHECK(effective_list_refresh_detour_mode(legacy_override) ==
+          ListRefreshDetourMode::OVERRIDE);
+    CHECK(effective_list_refresh_detours(legacy_config, legacy_override) ==
+          std::vector<std::string>{"legacy-primary", "legacy-backup"});
+    CHECK(effective_list_refresh_detours(config, legacy_override) ==
+          std::vector<std::string>{"legacy-primary", "legacy-backup"});
+
+    ListConfig legacy_inherit;
+    legacy_inherit.url = "https://example.com/inherit.txt";
+
+    CHECK(effective_list_refresh_detour_mode(legacy_inherit) ==
+          ListRefreshDetourMode::INHERIT);
+    CHECK(effective_list_refresh_detours(config, legacy_inherit) ==
+          std::vector<std::string>{"global-primary", "global-backup"});
+}
+
+TEST_CASE("effective_list_refresh_detours honors explicit inherit and override modes") {
+    Config config;
+    ListRefreshConfig global;
+    global.detour = "global-primary";
+    global.fallback_detours =
+        std::vector<std::string>{"global-backup"};
+    config.list_refresh = global;
+
+    ListConfig inherited;
+    inherited.url = "https://example.com/inherited.txt";
+    inherited.refresh_detour_mode = ListRefreshDetourMode::INHERIT;
+    CHECK(effective_list_refresh_detours(config, inherited) ==
+          std::vector<std::string>{"global-primary", "global-backup"});
+
+    ListConfig overridden;
+    overridden.url = "https://example.com/overridden.txt";
+    overridden.refresh_detour_mode = ListRefreshDetourMode::OVERRIDE;
+    overridden.detour = "local-primary";
+    overridden.fallback_detours =
+        std::vector<std::string>{"local-backup"};
+    CHECK(effective_list_refresh_detours(config, overridden) ==
+          std::vector<std::string>{"local-primary", "local-backup"});
+}
+
+TEST_CASE("refresh_remote_lists inherits the ordered global detour chain") {
+    CurlGlobalGuard curl_guard;
+    HttpResponse response;
+    response.body = "example.com\n";
+    response.fail_first_requests = 1;
+    response.transient_status = 503;
+    response.transient_reason = "Service Unavailable";
+    TestHttpServer server({{"/global-fallback.txt", response}});
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/global-fallback.txt");
+    remote.refresh_detour_mode = ListRefreshDetourMode::INHERIT;
+
+    Config config;
+    ListRefreshConfig global;
+    global.detour = "global-primary";
+    global.fallback_detours =
+        std::vector<std::string>{"global-backup", "global-unused"};
+    config.list_refresh = global;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result = service.refresh_remote_lists(
+        config,
+        OutboundMarkMap{{"global-primary", 0},
+                        {"global-backup", 0},
+                        {"global-unused", 0}});
+
+    CHECK(result.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(result.failed_lists.empty());
+    CHECK(server.request_count("/global-fallback.txt") == 2);
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.last_refresh_detour ==
+          std::optional<std::string>{"global-backup"});
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists uses an explicit per-list override before the global chain") {
+    CurlGlobalGuard curl_guard;
+    HttpResponse response;
+    response.body = "example.com\n";
+    response.fail_first_requests = 1;
+    response.transient_status = 503;
+    response.transient_reason = "Service Unavailable";
+    TestHttpServer server({{"/override-fallback.txt", response}});
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/override-fallback.txt");
+    remote.refresh_detour_mode = ListRefreshDetourMode::OVERRIDE;
+    remote.detour = "local-primary";
+    remote.fallback_detours =
+        std::vector<std::string>{"local-backup"};
+
+    Config config;
+    ListRefreshConfig global;
+    global.detour = "global-primary";
+    global.fallback_detours =
+        std::vector<std::string>{"global-backup"};
+    config.list_refresh = global;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result = service.refresh_remote_lists(
+        config,
+        OutboundMarkMap{{"local-primary", 0},
+                        {"local-backup", 0},
+                        {"global-primary", 0},
+                        {"global-backup", 0}});
+
+    CHECK(result.changed_lists == std::vector<std::string>{"remote"});
+    CHECK(server.request_count("/override-fallback.txt") == 2);
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    CHECK(metadata.last_refresh_detour ==
+          std::optional<std::string>{"local-backup"});
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("refresh_remote_lists never adds direct fallback to a configured global chain") {
+    CurlGlobalGuard curl_guard;
+    TestHttpServer server({
+        {"/global-marked.txt", HttpResponse{200, "OK", "example.com\n"}},
+    });
+
+    const auto temp_dir = make_temp_dir();
+    ListService service(temp_dir);
+    service.ensure_dir();
+
+    ListConfig remote;
+    remote.url = server.url("/global-marked.txt");
+
+    Config config;
+    ListRefreshConfig global;
+    global.detour = "missing-primary";
+    global.fallback_detours =
+        std::vector<std::string>{"missing-backup"};
+    config.list_refresh = global;
+    config.lists =
+        std::map<std::string, ListConfig>{{"remote", remote}};
+
+    const auto result =
+        service.refresh_remote_lists(config, OutboundMarkMap{});
+
+    CHECK(result.failed_lists == std::vector<std::string>{"remote"});
+    CHECK(result.changed_lists.empty());
+    CHECK(server.request_count("/global-marked.txt") == 0);
+    const auto metadata = service.cache_manager().load_metadata("remote");
+    REQUIRE(metadata.last_refresh_error.has_value());
+    CHECK(metadata.last_refresh_error->find("routing mark") !=
+          std::string::npos);
+    CHECK_FALSE(metadata.last_refresh_detour.has_value());
+
+    std::filesystem::remove_all(temp_dir);
+}
+
 TEST_CASE("refresh_remote_lists records an unrouteable explicit detour chain") {
     CurlGlobalGuard curl_guard;
     TestHttpServer server({
@@ -715,6 +898,47 @@ TEST_CASE("remote_list_sources_changed detects URL detour and membership changes
     Config added = removed;
     added.lists = current.lists;
     CHECK(remote_list_sources_changed(removed, added));
+}
+
+TEST_CASE("remote_list_sources_changed compares effective global and override chains") {
+    ListConfig inherited;
+    inherited.url = "https://example.com/inherited.txt";
+    inherited.refresh_detour_mode = ListRefreshDetourMode::INHERIT;
+
+    ListConfig overridden;
+    overridden.url = "https://example.com/overridden.txt";
+    overridden.refresh_detour_mode = ListRefreshDetourMode::OVERRIDE;
+    overridden.detour = "local-primary";
+
+    Config current;
+    ListRefreshConfig global;
+    global.detour = "global-primary";
+    global.fallback_detours =
+        std::vector<std::string>{"global-backup"};
+    current.list_refresh = global;
+    current.lists = std::map<std::string, ListConfig>{
+        {"inherited", inherited},
+        {"overridden", overridden},
+    };
+
+    Config changed_global = current;
+    changed_global.list_refresh->fallback_detours =
+        std::vector<std::string>{"global-backup-2"};
+    CHECK(remote_list_sources_changed(current, changed_global));
+
+    Config override_only = current;
+    override_only.lists =
+        std::map<std::string, ListConfig>{{"overridden", overridden}};
+    Config override_only_changed_global = override_only;
+    override_only_changed_global.list_refresh->detour = "other-global";
+    CHECK_FALSE(remote_list_sources_changed(
+        override_only, override_only_changed_global));
+
+    Config changed_mode = current;
+    changed_mode.lists->at("inherited").refresh_detour_mode =
+        ListRefreshDetourMode::OVERRIDE;
+    changed_mode.lists->at("inherited").detour = "local-primary";
+    CHECK(remote_list_sources_changed(current, changed_mode));
 }
 
 TEST_CASE("refresh_remote_lists: failed curl request logs clear transport error") {

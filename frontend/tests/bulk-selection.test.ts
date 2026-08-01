@@ -53,6 +53,8 @@ describe("config mutation pending helper", () => {
     expect(isConfigMutationPending(1, 0)).toBe(true)
     expect(isConfigMutationPending(0, 1)).toBe(true)
     expect(isConfigMutationPending(0, 0, 1)).toBe(true)
+    expect(isConfigMutationPending(0, 0, 0, 1)).toBe(true)
+    expect(isConfigMutationPending(0, 0, 0, 0, 1)).toBe(true)
   })
 })
 
@@ -146,7 +148,9 @@ describe("bulk list delete helpers", () => {
       },
     }
 
-    expect(buildUpdatedConfigForListsDelete(config, ["ads"]).route?.rules).toEqual([
+    expect(
+      buildUpdatedConfigForListsDelete(config, ["ads"]).route?.rules
+    ).toEqual([
       {
         list: [],
         src_addr: "192.168.1.10",

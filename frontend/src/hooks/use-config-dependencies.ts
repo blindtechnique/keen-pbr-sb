@@ -29,10 +29,12 @@ function configRelationshipFingerprint(
   return JSON.stringify({
     targets,
     outbounds: config.outbounds ?? [],
+    listRefresh: config.list_refresh ?? {},
     lists: Object.fromEntries(
       Object.entries(config.lists ?? {}).map(([name, list]) => [
         name,
         {
+          refreshDetourMode: list.refresh_detour_mode,
           detour: list.detour,
           fallbackDetours: list.fallback_detours,
           displayName: list.display_name,
@@ -81,6 +83,13 @@ function dependencyLabel(reference: DependencyReference, config: ConfigObject) {
       )
     case "list":
       return getListReferenceLabel(reference.dependent_id, config.lists)
+    case "list_refresh": {
+      const refresh = config.list_refresh
+      const route = [refresh?.detour, ...(refresh?.fallback_detours ?? [])]
+        .filter((tag): tag is string => Boolean(tag))
+        .map((tag) => outboundDisplayNames.get(tag) ?? tag)
+      return route.length > 0 ? route.join(" → ") : reference.dependent_id
+    }
     default:
       return reference.dependent_id
   }
@@ -99,22 +108,19 @@ function dependencyKind(reference: DependencyReference): Dependency["kind"] {
       return "failoverGroup"
     case "list":
       return "list"
+    case "list_refresh":
+      return "listRefresh"
   }
 }
 
-function dependencyHref(
-  reference: DependencyReference,
-  config: ConfigObject
-) {
+function dependencyHref(reference: DependencyReference, config: ConfigObject) {
   const index = Number(reference.dependent_id)
   if (!Number.isInteger(index) || index < 0) {
     return reference.href
   }
   if (reference.dependent_kind === "routing_rule") {
     const rule = config.route?.rules?.[index]
-    return rule
-      ? getRuleEditHref("routing-rules", rule, index)
-      : reference.href
+    return rule ? getRuleEditHref("routing-rules", rule, index) : reference.href
   }
   if (reference.dependent_kind === "dns_rule") {
     const rule = config.dns?.rules?.[index]

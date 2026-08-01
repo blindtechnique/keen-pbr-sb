@@ -130,9 +130,10 @@ struct CatalogBlackholePlanSummary {
 struct CatalogSetupSummary {
     CatalogSetupMode mode{CatalogSetupMode::none};
     std::vector<CatalogListPlanSummary> lists;
-    // One list receives one independently editable rule. The singular fields
-    // remain as a compatibility projection for clients predating sb.12:
-    // they contain the only rule, or the first rule of a multi-list plan.
+    // One catalogue setup session receives one independently editable route
+    // rule and one DNS rule containing every uncovered list reference. The
+    // vectors remain extensible and the singular fields remain compatibility
+    // projections for clients predating sb.12.
     std::vector<CatalogRouteRulePlanSummary> route_rules;
     std::vector<CatalogDnsRulePlanSummary> dns_rules;
     std::optional<CatalogRouteRulePlanSummary> route_rule;
@@ -168,9 +169,9 @@ CatalogSetupPlan plan_catalog_setup(
 
 // Validates the deliberately narrow beginner setup contract used by the
 // simple list dialog. Advanced editors continue to stage any configuration
-// accepted by validate_config(). A beginner list must have exactly one
-// dedicated route rule and one dedicated DNS rule, and both must use the same
-// routable outbound path.
+// accepted by validate_config(). This separate single-list endpoint still
+// requires exactly one dedicated route rule and one dedicated DNS rule; the
+// catalogue batch planner is intentionally not constrained by this contract.
 void validate_recommended_list_setup(
     const Config& candidate,
     const std::string& list_id);

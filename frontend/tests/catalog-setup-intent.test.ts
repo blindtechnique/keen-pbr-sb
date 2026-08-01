@@ -119,6 +119,32 @@ describe("catalog setup intent", () => {
     expect(JSON.stringify(renamed)).not.toContain("technical")
   })
 
+  test("keeps a multi-list catalogue setup in one server-owned policy session", () => {
+    const intent = createCatalogSetupIntent({
+      presets,
+      selectedIds: new Set(["instagram", "youtube"]),
+      selectionMode: "route",
+      destination: "vpn",
+      directDestination: "__direct__",
+      sourceDetour: "",
+      combinedDisplayName: "Соцсети",
+    })
+
+    expect(intent).toEqual({
+      selections: [
+        { preset_id: "instagram", display_name: "Instagram" },
+        { preset_id: "youtube", display_name: "YouTube" },
+      ],
+      mode: "outbound",
+      outbound_tag: "vpn",
+      dns_mode: "automatic",
+      route_display_name: "Соцсети",
+      dns_display_name: "Соцсети",
+    })
+    expect(JSON.stringify(intent)).not.toContain("route_rules")
+    expect(JSON.stringify(intent)).not.toContain("dns_rules")
+  })
+
   test("rejects stale selections that are absent from the loaded catalogue", () => {
     expect(
       createCatalogSetupIntent({

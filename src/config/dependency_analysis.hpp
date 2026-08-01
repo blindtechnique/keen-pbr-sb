@@ -34,6 +34,7 @@ enum class DependencyDependentKind {
     DnsServer,
     OutboundGroup,
     List,
+    ListRefresh,
     DnsFallback,
 };
 

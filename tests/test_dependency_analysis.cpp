@@ -79,6 +79,22 @@ bool has_reference(const DependencyAnalysis& analysis,
         });
 }
 
+const DependencyReference* find_reference(
+    const DependencyAnalysis& analysis,
+    DependencyDependentKind dependent_kind,
+    const std::string& dependent_id,
+    DependencyConsequence consequence) {
+    const auto it = std::find_if(
+        analysis.references.begin(),
+        analysis.references.end(),
+        [&](const DependencyReference& reference) {
+            return reference.dependent_kind == dependent_kind &&
+                   reference.dependent_id == dependent_id &&
+                   reference.consequence == consequence;
+        });
+    return it == analysis.references.end() ? nullptr : &*it;
+}
+
 } // namespace
 
 TEST_CASE("outbound dependency analysis includes list fallback detours") {
@@ -91,6 +107,40 @@ TEST_CASE("outbound dependency analysis includes list fallback detours") {
         DependencyDependentKind::List,
         "ai",
         DependencyConsequence::Modify));
+}
+
+TEST_CASE("outbound dependency analysis includes global list refresh primary and fallback") {
+    auto config = dependency_fixture();
+    ListRefreshConfig refresh;
+    refresh.detour = "vpn";
+    refresh.fallback_detours = std::vector<std::string>{"backup"};
+    config.list_refresh = refresh;
+
+    const auto primary_analysis = analyze_dependencies(
+        config,
+        {{DependencyEntityKind::Outbound, "vpn", false}});
+    const auto* primary = find_reference(
+        primary_analysis,
+        DependencyDependentKind::ListRefresh,
+        "global",
+        DependencyConsequence::Disconnect);
+    REQUIRE(primary != nullptr);
+    CHECK(primary->relation == DependencyRelation::DetoursVia);
+    CHECK(primary->path == "list_refresh.detour");
+    CHECK(primary->href == "/general?tab=general");
+
+    const auto fallback_analysis = analyze_dependencies(
+        config,
+        {{DependencyEntityKind::Outbound, "backup", false}});
+    const auto* fallback = find_reference(
+        fallback_analysis,
+        DependencyDependentKind::ListRefresh,
+        "global",
+        DependencyConsequence::Modify);
+    REQUIRE(fallback != nullptr);
+    CHECK(fallback->relation == DependencyRelation::DetoursVia);
+    CHECK(fallback->path == "list_refresh.fallback_detours[0]");
+    CHECK(fallback->href == "/general?tab=general");
 }
 
 TEST_CASE("list dependency analysis distinguishes modified and deleted rules") {

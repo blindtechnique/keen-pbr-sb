@@ -32,15 +32,12 @@ std::string refresh_flight_key(const Config& config,
 }
 
 std::vector<std::optional<std::string>> list_download_detours(
+    const Config& config,
     const ListConfig& list_config) {
     std::vector<std::optional<std::string>> detours;
-    if (list_config.detour.has_value()) {
-        detours.emplace_back(*list_config.detour);
-    }
-    for (const auto& fallback :
-         list_config.fallback_detours.value_or(
-             std::vector<std::string>{})) {
-        detours.emplace_back(fallback);
+    for (const auto& detour :
+         effective_list_refresh_detours(config, list_config)) {
+        detours.emplace_back(detour);
     }
     if (detours.empty()) {
         detours.emplace_back(std::nullopt);
@@ -128,7 +125,7 @@ std::string format_list_names(const std::vector<std::string>& list_names) {
 
 bool remote_list_sources_changed(const Config& current, const Config& next) {
     using RemoteListSource =
-        std::tuple<std::string, std::string, std::vector<std::string>>;
+        std::tuple<std::string, std::vector<std::string>>;
     const auto sources = [](const Config& config) {
         std::map<std::string, RemoteListSource> result;
         for (const auto& [name, list] : config_lists(config)) {
@@ -139,9 +136,7 @@ bool remote_list_sources_changed(const Config& current, const Config& next) {
                 name,
                 RemoteListSource{
                     *list.url,
-                    list.detour.value_or(""),
-                    list.fallback_detours.value_or(
-                        std::vector<std::string>{})});
+                    effective_list_refresh_detours(config, list)});
         }
         return result;
     };
@@ -268,7 +263,8 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
 
             CacheDownloadResult download_result;
             bool attempted = false;
-            for (const auto& detour : list_download_detours(list_cfg)) {
+            for (const auto& detour :
+                 list_download_detours(config, list_cfg)) {
                 uint32_t fwmark = 0;
                 if (detour.has_value()) {
                     const auto mark_it = outbound_marks.find(*detour);

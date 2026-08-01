@@ -1279,7 +1279,8 @@ bool route_rule_covers_list(const RouteRule& rule,
         rule.dest_addr.has_value() || rule.proto.has_value()) {
         return false;
     }
-    return *rule.list == std::vector<std::string>{list_id};
+    return std::find(rule.list->begin(), rule.list->end(), list_id) !=
+           rule.list->end();
 }
 
 bool route_policy_covers_list(const Config& config,
@@ -1305,7 +1306,9 @@ bool dns_policy_covers_list(const Config& config,
         rules.begin(), rules.end(),
         [&](const DnsRule& rule) {
             return dns_rule_enabled(rule) && rule.server == server &&
-                   rule.list == std::vector<std::string>{list_id};
+                   std::find(
+                       rule.list.begin(), rule.list.end(), list_id) !=
+                       rule.list.end();
         });
 }
 
@@ -1320,7 +1323,9 @@ bool dns_policy_covers_list_on_detour(
         rules.begin(), rules.end(),
         [&](const DnsRule& rule) {
             if (!dns_rule_enabled(rule) ||
-                rule.list != std::vector<std::string>{list_id}) {
+                std::find(
+                    rule.list.begin(), rule.list.end(), list_id) ==
+                    rule.list.end()) {
                 return false;
             }
             const auto* server = find_dns_server(config, rule.server);
@@ -1741,7 +1746,10 @@ CatalogSetupPlan plan_catalog_setup(
         list.url = preset.url;
         if (!preset.domains.empty()) list.domains = preset.domains;
         if (!preset.ip_cidrs.empty()) list.ip_cidrs = preset.ip_cidrs;
-        if (preset.url && source_detour) list.detour = source_detour;
+        if (preset.url && source_detour) {
+            list.refresh_detour_mode = ListRefreshDetourMode::OVERRIDE;
+            list.detour = source_detour;
+        }
         lists.emplace(technical_id, std::move(list));
         selected_lists.emplace_back(technical_id, preset);
         plan.summary.lists.push_back({
@@ -1880,42 +1888,34 @@ CatalogSetupPlan plan_catalog_setup(
             }
         }
 
-        for (std::size_t offset = 0U;
-             offset < missing_route_list_ids.size();
-             ++offset) {
-            const auto& list_id = missing_route_list_ids[offset];
-            const auto& preset = preset_for_list_id(list_id);
-            const bool single_rule =
-                missing_route_list_ids.size() == 1U;
-            const auto route_display_name = generated_display_name(
-                single_rule ? intent.route_display_name : std::nullopt,
-                std::vector<ParsedPreset>{preset});
-
-            RouteRule rule;
-            rule.id = unique_technical_id(
-                rule_seed(std::vector<std::string>{list_id}),
-                "rule",
-                ids);
-            rule.display_name = route_display_name;
-            rule.enabled = true;
-            rule.list = std::vector<std::string>{list_id};
-            rule.outbound = *route_outbound;
-
-            const auto insertion_index =
-                base_insertion_index + offset;
-            rules.insert(
-                rules.begin() +
-                    static_cast<std::ptrdiff_t>(insertion_index),
-                rule);
-            plan.summary.route_rules.push_back(
-                CatalogRouteRulePlanSummary{
-                    *rule.id,
-                    route_display_name,
-                    *route_outbound,
-                    insertion_index,
-                    intent.mode == CatalogSetupMode::block,
-                });
+        std::vector<ParsedPreset> route_presets;
+        route_presets.reserve(missing_route_list_ids.size());
+        for (const auto& list_id : missing_route_list_ids) {
+            route_presets.push_back(preset_for_list_id(list_id));
         }
+        const auto route_display_name = generated_display_name(
+            intent.route_display_name, route_presets);
+
+        RouteRule rule;
+        rule.id = unique_technical_id(
+            rule_seed(missing_route_list_ids), "rule", ids);
+        rule.display_name = route_display_name;
+        rule.enabled = true;
+        rule.list = missing_route_list_ids;
+        rule.outbound = *route_outbound;
+
+        rules.insert(
+            rules.begin() +
+                static_cast<std::ptrdiff_t>(base_insertion_index),
+            rule);
+        plan.summary.route_rules.push_back(
+            CatalogRouteRulePlanSummary{
+                *rule.id,
+                route_display_name,
+                *route_outbound,
+                base_insertion_index,
+                intent.mode == CatalogSetupMode::block,
+            });
         route.rules = std::move(rules);
         candidate.route = std::move(route);
         plan.summary.route_rule =
@@ -1926,34 +1926,31 @@ CatalogSetupPlan plan_catalog_setup(
         auto dns = candidate.dns.value_or(DnsConfig{});
         auto rules = dns.rules.value_or(std::vector<DnsRule>{});
         auto ids = occupied_dns_rule_ids(active_config);
+        std::vector<ParsedPreset> dns_presets;
+        dns_presets.reserve(missing_dns_list_ids.size());
         for (const auto& list_id : missing_dns_list_ids) {
-            const auto& preset = preset_for_list_id(list_id);
-            const bool single_rule =
-                missing_dns_list_ids.size() == 1U;
-            const auto dns_display_name = generated_display_name(
-                single_rule ? intent.dns_display_name : std::nullopt,
-                std::vector<ParsedPreset>{preset});
-
-            DnsRule rule;
-            rule.id = unique_technical_id(
-                rule_seed(std::vector<std::string>{list_id}),
-                "dns_rule",
-                ids);
-            rule.display_name = dns_display_name;
-            rule.enabled = true;
-            rule.list = std::vector<std::string>{list_id};
-            rule.server = *dns_server;
-            rule.allow_domain_rebinding = false;
-            const auto insertion_index = rules.size();
-            rules.push_back(rule);
-            plan.summary.dns_rules.push_back(
-                CatalogDnsRulePlanSummary{
-                    *rule.id,
-                    dns_display_name,
-                    *dns_server,
-                    insertion_index,
-                });
+            dns_presets.push_back(preset_for_list_id(list_id));
         }
+        const auto dns_display_name = generated_display_name(
+            intent.dns_display_name, dns_presets);
+
+        DnsRule rule;
+        rule.id = unique_technical_id(
+            rule_seed(missing_dns_list_ids), "dns_rule", ids);
+        rule.display_name = dns_display_name;
+        rule.enabled = true;
+        rule.list = missing_dns_list_ids;
+        rule.server = *dns_server;
+        rule.allow_domain_rebinding = false;
+        const auto insertion_index = rules.size();
+        rules.push_back(rule);
+        plan.summary.dns_rules.push_back(
+            CatalogDnsRulePlanSummary{
+                *rule.id,
+                dns_display_name,
+                *dns_server,
+                insertion_index,
+            });
         dns.rules = std::move(rules);
         candidate.dns = std::move(dns);
         plan.summary.dns_rule =
