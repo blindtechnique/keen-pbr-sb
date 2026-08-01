@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -42,6 +43,13 @@ public:
     // Buffer an ipset create command (hash:net family, optional timeout).
     void create_ipset(const std::string& set_name, int family,
                       uint32_t timeout = 0) override;
+    void create_udp_peer_set(const std::string& set_name,
+                             int family,
+                             uint32_t timeout) override;
+    bool add_udp_peer(const std::string& set_name,
+                      const std::string& source,
+                      std::uint16_t destination_port,
+                      const std::string& destination) override;
 
     // Buffer an iptables/ip6tables -j MARK --set-mark rule for the given ipset.
     void create_mark_rule(uint32_t fwmark,
@@ -111,6 +119,7 @@ private:
         std::string name;
         std::string family_str; // "inet" or "inet6"
         uint32_t timeout;       // entry TTL in seconds (0 = no timeout)
+        bool source_udp_peer{false};
     };
 
     // Describes an iptables/ip6tables rule to be added to KeenPbrTable.
@@ -122,6 +131,20 @@ private:
         uint32_t fwmark_mask{0xFFFFFFFFu}; // only for Mark
         FirewallRuleCriteria criteria; // optional packet match criteria
         bool output{false}; // true → KeenPbrOutput (mangle OUTPUT), false → KeenPbrTable (PREROUTING)
+    };
+
+    struct PublishedUdpPeerClassifier {
+        int family{AF_INET};
+        uint32_t timeout{0};
+        FirewallSetGeneration generation{FirewallSetGeneration::A};
+        // Exact rules as rendered by `iptables -S <active generation>`.
+        // The vector includes MARK, optional CONNMARK save, and RETURN so a
+        // surviving set match cannot silently fall through to later policy.
+        std::vector<std::string> expected_rules;
+        // RAW PREROUTING classifies before conntrack. Its mangle companion
+        // must return this expiring tuple before any generic save-mark rule,
+        // otherwise the temporary authority can leak into persistent ctmark.
+        std::optional<std::string> expected_raw_conntrack_bypass_rule;
     };
 
     enum class LiveGenerationState { A, B, Missing, Invalid };
@@ -156,7 +179,8 @@ private:
         const FirewallGlobalPrefilter& prefilter = {});
     static std::string build_raw_conntrack_script(
         bool replace_active_chain,
-        const FirewallGlobalPrefilter& prefilter = {});
+        const FirewallGlobalPrefilter& prefilter = {},
+        const std::vector<PendingRule>& rules = {});
     static std::string build_conntrack_prefilter_lines(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain);
@@ -223,6 +247,21 @@ private:
     void verify_applied_generation(
         bool ipv6,
         FirewallSetGeneration target) const;
+    std::map<std::string, PublishedUdpPeerClassifier>
+    build_pending_udp_peer_classifiers(
+        const FirewallGlobalPrefilter& prefilter,
+        bool effective_ipv6) const;
+    bool udp_peer_classifier_is_published(
+        const std::string& set_name,
+        const PublishedUdpPeerClassifier& classifier) const noexcept;
+    static bool classifier_rules_present(
+        const std::string& rules,
+        const std::string& set_name,
+        const std::vector<std::string>& expected_rules);
+    static bool raw_conntrack_bypass_precedes_save(
+        const std::string& rules,
+        const std::string& set_name,
+        const std::string& expected_rule);
     static size_t count_exact_jump(
         const std::string& rules,
         const std::string& source_chain,
@@ -283,6 +322,13 @@ private:
 
     // Track created ipsets: set_name -> family (AF_INET/AF_INET6)
     std::map<std::string, int> created_sets_;
+    // Pair sets additionally retain their default timeout for safe live adds.
+    std::map<std::string, std::pair<int, uint32_t>> udp_peer_sets_;
+    // Snapshot committed only after the full firewall apply and its health
+    // checks succeed. Pending declarations are never treated as live proof.
+    std::map<std::string, PublishedUdpPeerClassifier>
+        published_udp_peer_classifiers_;
+    mutable std::mutex pair_state_mutex_;
 
     // Track whether chain + jump rule exist for each protocol
     bool chain_v4_created_ = false;
@@ -332,7 +378,9 @@ private:
         bool ipv6 = false,
         uint32_t fwmark_mask = 0xFFFFFFFFu,
         const std::vector<FirewallSourceEgressSnatSelector>&
-            source_egress_snat_selectors = {});
+            source_egress_snat_selectors = {},
+        const std::map<std::string, std::pair<int, uint32_t>>&
+            udp_peer_sets = {});
     static std::string build_nat_validation_script(
         const std::string& nat_script);
     static void preflight_nat_restore(

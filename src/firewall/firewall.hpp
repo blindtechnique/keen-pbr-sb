@@ -38,8 +38,16 @@ inline const char* l4_proto_name(L4Proto proto) {
 // All fields default to empty meaning "any".
 struct FirewallRuleCriteria {
     std::optional<std::string> dst_set_name; // named destination set matcher, if any
+    // Named set of exact source + UDP destination port + destination tuples.
+    // This is reserved for bounded runtime affinity overlays; unlike
+    // dst_set_name it never grants a peer address authority for every LAN
+    // client or every service on the peer.
+    std::optional<std::string> src_udp_peer_set_name;
     std::optional<uint8_t> dscp;        // DSCP tag selector, empty = any
     L4Proto proto = L4Proto::Any;
+    // Runtime affinity is refreshed from live traffic and must expire with its
+    // kernel tuple rather than leaving an owned ctmark behind indefinitely.
+    bool persist_conntrack_mark = true;
     PortSpec src_port;                 // parsed source port selector
     PortSpec dst_port;                 // parsed destination port selector
     std::vector<std::string> src_addr; // CIDR list, empty = any source address
@@ -49,14 +57,16 @@ struct FirewallRuleCriteria {
     bool negate_src_addr = false;      // if true, match packets NOT from src_addr
     bool negate_dst_addr = false;      // if true, match packets NOT to dst_addr
     bool empty() const {
-        return !dst_set_name.has_value() && !dscp.has_value()
+        return !dst_set_name.has_value() && !src_udp_peer_set_name.has_value()
+            && !dscp.has_value()
             && proto == L4Proto::Any
             && src_port.empty() && dst_port.empty()
             && src_addr.empty() && dst_addr.empty();
     }
 
     bool has_rule_selector() const {
-        return dst_set_name.has_value() || dscp.has_value()
+        return dst_set_name.has_value() || src_udp_peer_set_name.has_value()
+            || dscp.has_value()
             || !src_port.empty() || !dst_port.empty()
             || !src_addr.empty() || !dst_addr.empty();
     }
@@ -255,12 +265,40 @@ public:
         return std::string(family == AF_INET6 ? "kpbr6d_" : "kpbr4d_") + list_name;
     }
 
+    virtual std::string media_affinity_set_name(
+        const std::string& list_name,
+        int family) const {
+        // Seven-byte prefix preserves the existing 24-byte technical list-ID
+        // allowance under ipset's 31-byte name limit.
+        return std::string(family == AF_INET6 ? "kpbr6m_" : "kpbr4m_") +
+               list_name;
+    }
+
     // Create a named IP set for storing IP addresses and/or CIDR subnets.
     // set_name: unique name for the set
     // family: AF_INET or AF_INET6
     // timeout: TTL in seconds for entries (0 = no timeout)
     virtual void create_ipset(const std::string& set_name, int family,
                               uint32_t timeout = 0) = 0;
+
+    // Create an initially empty, expiring set keyed by exact source host, UDP
+    // destination port and destination host. Runtime call affinity populates
+    // it only after a bounded conntrack observation proves an active selected
+    // call context.
+    virtual void create_udp_peer_set(const std::string& set_name,
+                                     int family,
+                                     uint32_t timeout) = 0;
+
+    // Add one exact UDP peer tuple to a previously applied affinity set.
+    // Implementations validate both addresses and the non-zero port, then
+    // return true only after the element update and a fresh read-only proof
+    // that the corresponding classifier rule is still published through the
+    // active chain. A missing set, family mismatch, or out-of-band rule drift
+    // fails closed.
+    virtual bool add_udp_peer(const std::string& set_name,
+                              const std::string& source,
+                              std::uint16_t destination_port,
+                              const std::string& destination) = 0;
 
     // Create a firewall rule that marks packets matching the given criteria
     // with the specified firewall mark (fwmark).

@@ -2192,6 +2192,7 @@ void Daemon::run() {
                       cleanup_error.what());
         }
         try {
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
             firewall_->cleanup();
         } catch (const std::exception& cleanup_error) {
             log.error("Startup rollback: firewall cleanup failed: {}",

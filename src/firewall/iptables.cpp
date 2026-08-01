@@ -8,6 +8,7 @@
 #include <rapidxml.hpp>
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -84,6 +85,23 @@ IptablesFirewall::IptablesFirewall(bool use_raw_prerouting)
     // taking down the API process.
 }
 
+static bool exact_udp_peer_matches_family(const std::string& source,
+                                          std::uint16_t destination_port,
+                                          const std::string& destination,
+                                          int family) {
+    if ((family != AF_INET && family != AF_INET6) || destination_port == 0U ||
+        source.empty() ||
+        destination.empty() || source.find('/') != std::string::npos ||
+        destination.find('/') != std::string::npos) {
+        return false;
+    }
+    std::array<unsigned char, 16> source_bytes{};
+    std::array<unsigned char, 16> destination_bytes{};
+    return ::inet_pton(family, source.c_str(), source_bytes.data()) == 1 &&
+           ::inet_pton(
+               family, destination.c_str(), destination_bytes.data()) == 1;
+}
+
 const char* IptablesFirewall::generation_prerouting_chain(
     FirewallSetGeneration generation) {
     return generation == FirewallSetGeneration::A
@@ -106,9 +124,11 @@ const char* IptablesFirewall::raw_generation_prerouting_chain(
 }
 
 void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    udp_peer_sets_.clear();
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
@@ -148,10 +168,86 @@ void IptablesFirewall::create_ipset(const std::string& set_name, int family,
         [&set_name](const PendingSet& pending) { return pending.name == set_name; });
     if (existing == pending_sets_.end()) {
         pending_sets_.push_back(std::move(ps));
-    } else if (existing->family_str != ps.family_str || existing->timeout != ps.timeout) {
+    } else if (existing->family_str != ps.family_str ||
+               existing->timeout != ps.timeout ||
+               existing->source_udp_peer != ps.source_udp_peer) {
         throw FirewallError("conflicting ipset declaration for " + set_name);
     }
     created_sets_[set_name] = family;
+}
+
+void IptablesFirewall::create_udp_peer_set(const std::string& set_name,
+                                            int family,
+                                            uint32_t timeout) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    if (timeout == 0U) {
+        throw FirewallError("UDP peer set requires a non-zero timeout");
+    }
+    if (family != AF_INET && family != AF_INET6) {
+        throw FirewallError("invalid UDP peer set family");
+    }
+    PendingSet ps;
+    ps.name = set_name;
+    ps.family_str = family == AF_INET6 ? "inet6" : "inet";
+    ps.timeout = timeout;
+    ps.source_udp_peer = true;
+    const auto existing = std::find_if(
+        pending_sets_.begin(), pending_sets_.end(),
+        [&set_name](const PendingSet& pending) {
+            return pending.name == set_name;
+        });
+    if (existing == pending_sets_.end()) {
+        pending_sets_.push_back(std::move(ps));
+    } else if (existing->family_str != ps.family_str ||
+               existing->timeout != ps.timeout ||
+               !existing->source_udp_peer) {
+        throw FirewallError("conflicting ipset declaration for " + set_name);
+    }
+    created_sets_[set_name] = family;
+    udp_peer_sets_[set_name] = {family, timeout};
+}
+
+bool IptablesFirewall::add_udp_peer(const std::string& set_name,
+                                    const std::string& source,
+                                    std::uint16_t destination_port,
+                                    const std::string& destination) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    const auto set = published_udp_peer_classifiers_.find(set_name);
+    if (set == published_udp_peer_classifiers_.end() ||
+        !exact_udp_peer_matches_family(
+            source, destination_port, destination, set->second.family)) {
+        return false;
+    }
+    // Refuse to grant even a short-lived tuple into already-drifted rules.
+    // Re-check after the write as well, because KeeneticOS can replace its
+    // firewall between these two operations.
+    if (!udp_peer_classifier_is_published(set_name, set->second)) {
+        return false;
+    }
+    const std::string peer = source + ",udp:" +
+        std::to_string(destination_port) + "," + destination;
+    const bool inserted = safe_exec(
+            {"ipset",
+             "-exist",
+             "add",
+             set_name,
+             peer,
+             "timeout",
+             std::to_string(set->second.timeout)},
+            /*suppress_output=*/true) == 0;
+    if (!inserted) {
+        return false;
+    }
+    if (udp_peer_classifier_is_published(set_name, set->second)) {
+        return true;
+    }
+
+    // A successful element write without a live classifier must not remain
+    // latent: firmware may restore an old chain after our proof failed.
+    (void)safe_exec(
+        {"ipset", "-exist", "del", set_name, peer},
+        /*suppress_output=*/true);
+    return false;
 }
 
 void IptablesFirewall::append_rules_for_family(bool ipv6,
@@ -202,8 +298,16 @@ void IptablesFirewall::append_rules_for_family(bool ipv6,
 
 void IptablesFirewall::create_mark_rule(uint32_t fwmark,
                                         const FirewallRuleCriteria& criteria) {
-    if (criteria.dst_set_name.has_value()) {
-        auto it = created_sets_.find(*criteria.dst_set_name);
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    const auto& set_name = criteria.src_udp_peer_set_name.has_value()
+        ? criteria.src_udp_peer_set_name
+        : criteria.dst_set_name;
+    if (set_name.has_value()) {
+        auto it = created_sets_.find(*set_name);
         bool ipv6 = (it != created_sets_.end() && it->second == AF_INET6);
         append_rules_for_family(ipv6, PendingRule::Mark, fwmark, criteria);
         return;
@@ -226,8 +330,16 @@ void IptablesFirewall::create_output_mark_rule(uint32_t fwmark,
 }
 
 void IptablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
-    if (criteria.dst_set_name.has_value()) {
-        auto it = created_sets_.find(*criteria.dst_set_name);
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    const auto& set_name = criteria.src_udp_peer_set_name.has_value()
+        ? criteria.src_udp_peer_set_name
+        : criteria.dst_set_name;
+    if (set_name.has_value()) {
+        auto it = created_sets_.find(*set_name);
         bool ipv6 = (it != created_sets_.end() && it->second == AF_INET6);
         append_rules_for_family(ipv6, PendingRule::Drop, 0, criteria);
         return;
@@ -237,8 +349,16 @@ void IptablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
 }
 
 void IptablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
-    if (criteria.dst_set_name.has_value()) {
-        auto it = created_sets_.find(*criteria.dst_set_name);
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    const auto& set_name = criteria.src_udp_peer_set_name.has_value()
+        ? criteria.src_udp_peer_set_name
+        : criteria.dst_set_name;
+    if (set_name.has_value()) {
+        auto it = created_sets_.find(*set_name);
         bool ipv6 = (it != created_sets_.end() && it->second == AF_INET6);
         append_rules_for_family(ipv6, PendingRule::Pass, 0, criteria);
         return;
@@ -294,7 +414,9 @@ std::string IptablesFirewall::build_dns_nat_script(
     bool ipv6,
     uint32_t fwmark_mask,
     const std::vector<FirewallSourceEgressSnatSelector>&
-        source_egress_snat_selectors) {
+        source_egress_snat_selectors,
+    const std::map<std::string, std::pair<int, uint32_t>>&
+        udp_peer_sets) {
     std::vector<std::string> iface_frags;
     if (prefilter.has_inbound_interfaces()
         && prefilter.inbound_interfaces.has_value()) {
@@ -340,6 +462,20 @@ std::string IptablesFirewall::build_dns_nat_script(
                 DNS_NAT_CHAIN_NAME,
                 selector.interface,
                 selector.cidr);
+        }
+        for (const auto& [set_name, declaration] : udp_peer_sets) {
+            const bool set_is_ipv6 = declaration.first == AF_INET6;
+            if (set_is_ipv6 != ipv6) {
+                continue;
+            }
+            // WhatsApp media may use UDP/53 without carrying DNS. Only an
+            // already-confirmed exact source+port+destination tuple bypasses
+            // client DNS enforcement; ordinary UDP/53 is still redirected.
+            s += keen_pbr3::format(
+                "-A {} -p udp --dport 53 -m set --match-set {} "
+                "src,dst,dst -j RETURN\n",
+                DNS_NAT_CHAIN_NAME,
+                set_name);
         }
         for (const auto& iface_frag : iface_frags) {
             for (const char* proto : {"udp", "tcp"}) {
@@ -1144,12 +1280,18 @@ void IptablesFirewall::preflight_nat_restore(
 }
 
 std::string IptablesFirewall::build_ipset_create_line(const PendingSet& ps) {
+    // Keenetic's netfilter-addons package exposes hash:ip,port,ip across the
+    // supported firmware line, while older kernels may not expose
+    // hash:ip,port,ip. The middle dimension is the UDP destination port.
+    const char* type = ps.source_udp_peer
+        ? "hash:ip,port,ip"
+        : "hash:net";
     if (ps.timeout > 0) {
-        return keen_pbr3::format("create {} hash:net family {} timeout {} -exist\n",
-                                 ps.name, ps.family_str, ps.timeout);
+        return keen_pbr3::format("create {} {} family {} timeout {} -exist\n",
+                                 ps.name, type, ps.family_str, ps.timeout);
     } else {
-        return keen_pbr3::format("create {} hash:net family {} -exist\n",
-                                 ps.name, ps.family_str);
+        return keen_pbr3::format("create {} {} family {} -exist\n",
+                                 ps.name, type, ps.family_str);
     }
 }
 
@@ -1218,7 +1360,9 @@ bool IptablesFirewall::dynamic_set_schema_compatible(
         }
     }
     return live_name == expected.name &&
-           live_type == "hash:net" &&
+           live_type == (expected.source_udp_peer
+                             ? "hash:ip,port,ip"
+                             : "hash:net") &&
            live_family == expected.family_str &&
            live_timeout == expected.timeout;
 }
@@ -2193,6 +2337,294 @@ void IptablesFirewall::verify_applied_generation(
         "iptables generation changed before verification completed");
 }
 
+std::map<std::string, IptablesFirewall::PublishedUdpPeerClassifier>
+IptablesFirewall::build_pending_udp_peer_classifiers(
+    const FirewallGlobalPrefilter& prefilter,
+    bool effective_ipv6) const {
+    std::map<std::string, PublishedUdpPeerClassifier> published;
+    const auto is_exact_udp_peer_classifier = [](
+        const PendingRule& rule,
+        const std::string& set_name,
+        bool ipv6) {
+        const auto& criteria = rule.criteria;
+        return rule.action == PendingRule::Mark && !rule.output &&
+               rule.ipv6 == ipv6 &&
+               !criteria.dst_set_name.has_value() &&
+               criteria.src_udp_peer_set_name == set_name &&
+               !criteria.dscp.has_value() &&
+               criteria.proto == L4Proto::Udp &&
+               !criteria.persist_conntrack_mark &&
+               criteria.src_port.empty() && criteria.dst_port.empty() &&
+               criteria.src_addr.empty() && criteria.dst_addr.empty() &&
+               !criteria.negate_src_port && !criteria.negate_dst_port &&
+               !criteria.negate_src_addr && !criteria.negate_dst_addr;
+    };
+
+    for (const auto& set : pending_sets_) {
+        if (!set.source_udp_peer) {
+            continue;
+        }
+        const bool ipv6 = set.family_str == "inet6";
+        if ((ipv6 && !effective_ipv6) ||
+            (!ipv6 && set.family_str != "inet")) {
+            continue;
+        }
+
+        const PendingRule* classifier = nullptr;
+        bool ambiguous = false;
+        for (const auto& rule : pending_rules_) {
+            if (!is_exact_udp_peer_classifier(rule, set.name, ipv6)) {
+                continue;
+            }
+            if (classifier != nullptr) {
+                ambiguous = true;
+                break;
+            }
+            classifier = &rule;
+        }
+        if (classifier == nullptr || ambiguous) {
+            continue;
+        }
+
+        PublishedUdpPeerClassifier state;
+        state.family = ipv6 ? AF_INET6 : AF_INET;
+        state.timeout = set.timeout;
+        state.generation = ipv6
+            ? target_v6_generation_
+            : target_v4_generation_;
+        const std::string active_chain =
+            prerouting_generation_chain(state.generation, ipv6);
+        const bool allow_conntrack = !(use_raw_prerouting_ && !ipv6);
+        bool valid = true;
+        for (auto line : build_rule_lines(
+                 *classifier, prefilter, allow_conntrack)) {
+            while (!line.empty() &&
+                   (line.back() == '\n' || line.back() == '\r')) {
+                line.pop_back();
+            }
+            const std::string prefix =
+                std::string("-A ") + CHAIN_NAME + " ";
+            if (line.rfind(prefix, 0) != 0) {
+                valid = false;
+                break;
+            }
+            line.replace(3U, std::strlen(CHAIN_NAME), active_chain);
+            state.expected_rules.push_back(std::move(line));
+        }
+        if (valid && !state.expected_rules.empty()) {
+            if (use_raw_prerouting_ && !ipv6) {
+                state.expected_raw_conntrack_bypass_rule =
+                    keen_pbr3::format(
+                        "-A {} -p udp -m set --match-set {} "
+                        "src,dst,dst -j RETURN",
+                        RAW_CONNTRACK_CHAIN_NAME,
+                        set.name);
+            }
+            published.emplace(set.name, std::move(state));
+        }
+    }
+    return published;
+}
+
+bool IptablesFirewall::classifier_rules_present(
+    const std::string& rules,
+    const std::string& set_name,
+    const std::vector<std::string>& expected_rules) {
+    if (set_name.empty() || expected_rules.empty()) {
+        return false;
+    }
+
+    const auto tokenize = [](const std::string& line) {
+        std::vector<std::string> tokens;
+        std::istringstream input(line);
+        std::string token;
+        while (input >> token) {
+            tokens.push_back(std::move(token));
+        }
+        return tokens;
+    };
+    const auto canonical_rule_key = [&tokenize](const std::string& line)
+        -> std::optional<std::string> {
+        auto tokens = tokenize(line);
+        if (tokens.size() < 5U || tokens[0] != "-A" ||
+            tokens[1].empty()) {
+            return std::nullopt;
+        }
+        const auto jump = std::find(
+            tokens.begin() + 2, tokens.end(), "-j");
+        if (jump == tokens.end() || jump + 1 == tokens.end() ||
+            std::find(jump + 1, tokens.end(), "-j") != tokens.end()) {
+            return std::nullopt;
+        }
+
+        // Match predicates before -j form a conjunction, so iptables may
+        // render them in a different canonical order than iptables-restore
+        // received. Compare their exact token multisets while retaining the
+        // chain and target boundary. Inputs here are kernel-rendered valid
+        // rules or our own valid builder output, never arbitrary shell text.
+        std::vector<std::string> matches(tokens.begin() + 2, jump);
+        std::sort(matches.begin(), matches.end());
+        const std::string target = *(jump + 1);
+        std::vector<std::string> target_options(jump + 2, tokens.end());
+        std::sort(target_options.begin(), target_options.end());
+
+        std::string key = tokens[1];
+        const auto append = [&key](const std::string& value) {
+            key += "\x1f" + std::to_string(value.size()) + ":" + value;
+        };
+        append("matches");
+        for (const auto& token : matches) {
+            append(token);
+        }
+        append("target");
+        append(target);
+        for (const auto& token : target_options) {
+            append(token);
+        }
+        return key;
+    };
+    const auto references_set = [&tokenize, &set_name](
+                                    const std::string& line) {
+        const auto tokens = tokenize(line);
+        for (std::size_t index = 0U; index + 1U < tokens.size(); ++index) {
+            if (tokens[index] == "--match-set" &&
+                tokens[index + 1U] == set_name) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::map<std::string, std::size_t> expected_counts;
+    for (const auto& expected : expected_rules) {
+        const auto key = canonical_rule_key(expected);
+        if (!key.has_value() ||
+            !expected_counts.emplace(*key, 0U).second) {
+            return false;
+        }
+    }
+
+    std::istringstream input(rules);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        const auto key = canonical_rule_key(line);
+        if (key.has_value()) {
+            const auto expected = expected_counts.find(*key);
+            if (expected != expected_counts.end()) {
+                ++expected->second;
+                continue;
+            }
+        }
+        if (references_set(line)) {
+            // Any extra rule referencing the same authority is drift: it may
+            // alter the mark, omit the RETURN, or broaden the protocol.
+            return false;
+        }
+    }
+    return std::all_of(
+        expected_counts.begin(), expected_counts.end(),
+        [](const auto& item) { return item.second == 1U; });
+}
+
+bool IptablesFirewall::udp_peer_classifier_is_published(
+    const std::string& set_name,
+    const PublishedUdpPeerClassifier& classifier) const noexcept {
+    try {
+        const bool ipv6 = classifier.family == AF_INET6;
+        if (!ipv6 && classifier.family != AF_INET) {
+            return false;
+        }
+        verify_applied_generation(ipv6, classifier.generation);
+        const char* command = ipv6 ? "ip6tables" : "iptables";
+        const std::string chain =
+            prerouting_generation_chain(classifier.generation, ipv6);
+        const std::vector<std::string> args{
+            command,
+            "-t",
+            prerouting_table_name(ipv6),
+            "-S",
+            chain};
+        const auto result = run_iptables_control(args);
+        if (classify_iptables_command(result) !=
+            IptablesCommandOutcome::Success) {
+            return false;
+        }
+        if (!classifier_rules_present(
+                result.stdout_output,
+                set_name,
+                classifier.expected_rules)) {
+            return false;
+        }
+        if (!classifier.expected_raw_conntrack_bypass_rule.has_value()) {
+            return true;
+        }
+
+        const std::vector<std::string> companion_args{
+            "iptables", "-t", "mangle", "-S", RAW_CONNTRACK_CHAIN_NAME};
+        const auto companion = run_iptables_control(companion_args);
+        if (classify_iptables_command(companion) !=
+            IptablesCommandOutcome::Success) {
+            return false;
+        }
+        return raw_conntrack_bypass_precedes_save(
+            companion.stdout_output,
+            set_name,
+            *classifier.expected_raw_conntrack_bypass_rule);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool IptablesFirewall::raw_conntrack_bypass_precedes_save(
+    const std::string& rules,
+    const std::string& set_name,
+    const std::string& expected_rule) {
+    if (!classifier_rules_present(
+            rules, set_name, {expected_rule})) {
+        return false;
+    }
+
+    bool saw_bypass = false;
+    std::istringstream input(rules);
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream tokens(line);
+        std::vector<std::string> values;
+        std::string value;
+        while (tokens >> value) {
+            values.push_back(std::move(value));
+        }
+
+        bool references_set = false;
+        bool saves_conntrack_mark = false;
+        for (std::size_t index = 0U; index < values.size(); ++index) {
+            if (index + 1U < values.size() &&
+                values[index] == "--match-set" &&
+                values[index + 1U] == set_name) {
+                references_set = true;
+            }
+            if (index + 1U < values.size() && values[index] == "-j" &&
+                values[index + 1U] == "CONNMARK" &&
+                std::find(
+                    values.begin() + static_cast<std::ptrdiff_t>(index + 2U),
+                    values.end(),
+                    "--save-mark") != values.end()) {
+                saves_conntrack_mark = true;
+            }
+        }
+        if (saves_conntrack_mark && !saw_bypass) {
+            return false;
+        }
+        if (references_set) {
+            saw_bypass = true;
+        }
+    }
+    return saw_bypass;
+}
+
 std::vector<std::string> IptablesFirewall::build_proto_port_fragments(
     L4Proto proto,
     const PortSpec& src_port,
@@ -2475,7 +2907,8 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
     lines.reserve(iface_frags.size() * 2);
     auto append_mark_and_save = [&](std::string mark_line) {
         lines.push_back(mark_line);
-        if (!allow_conntrack || !prefilter.restore_conntrack_mark ||
+        if (!pr.criteria.persist_conntrack_mark || !allow_conntrack ||
+            !prefilter.restore_conntrack_mark ||
             prefilter.conntrack_mark_mask == 0) {
             return;
         }
@@ -2502,7 +2935,15 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
 
         for (const auto& pp : port_fragments) {
             for (const auto& iface_frag : iface_frags) {
-                if (!pr.criteria.dst_set_name.has_value()) {
+                const auto& set_name =
+                    pr.criteria.src_udp_peer_set_name.has_value()
+                    ? pr.criteria.src_udp_peer_set_name
+                    : pr.criteria.dst_set_name;
+                const char* set_dimensions =
+                    pr.criteria.src_udp_peer_set_name.has_value()
+                    ? "src,dst,dst"
+                    : "dst";
+                if (!set_name.has_value()) {
                     if (pr.action == PendingRule::Mark) {
                         const std::string mark_target = keen_pbr3::format(
                             "-j MARK --set-xmark {:#x}/{:#x}",
@@ -2547,39 +2988,43 @@ std::vector<std::string> IptablesFirewall::build_rule_lines(
                             pr.fwmark,
                             pr.fwmark_mask);
                         append_mark_and_save(keen_pbr3::format(
-                            "-A {} -m set --match-set {} dst{}{}{}{} {}\n",
+                            "-A {} -m set --match-set {} {}{}{}{}{} {}\n",
                             chain,
-                            *pr.criteria.dst_set_name,
+                            *set_name,
+                            set_dimensions,
                             iface_frag,
                             addr_frag,
                             dscp_frag,
                             pp,
                             mark_target));
                         lines.push_back(keen_pbr3::format(
-                            "-A {} -m set --match-set {} dst{}{}{}{} "
+                            "-A {} -m set --match-set {} {}{}{}{}{} "
                             "-j RETURN\n",
                             chain,
-                            *pr.criteria.dst_set_name,
+                            *set_name,
+                            set_dimensions,
                             iface_frag,
                             addr_frag,
                             dscp_frag,
                             pp));
                     } else if (pr.action == PendingRule::Drop) {
                         lines.push_back(keen_pbr3::format(
-                            "-A {} -m set --match-set {} dst{}{}{}{} "
+                            "-A {} -m set --match-set {} {}{}{}{}{} "
                             "-j DROP\n",
                             chain,
-                            *pr.criteria.dst_set_name,
+                            *set_name,
+                            set_dimensions,
                             iface_frag,
                             addr_frag,
                             dscp_frag,
                             pp));
                     } else {
                         lines.push_back(keen_pbr3::format(
-                            "-A {} -m set --match-set {} dst{}{}{}{} "
+                            "-A {} -m set --match-set {} {}{}{}{}{} "
                             "-j RETURN\n",
                             chain,
-                            *pr.criteria.dst_set_name,
+                            *set_name,
+                            set_dimensions,
                             iface_frag,
                             addr_frag,
                             dscp_frag,
@@ -2732,7 +3177,8 @@ std::string IptablesFirewall::build_raw_prerouting_script(
 
 std::string IptablesFirewall::build_raw_conntrack_script(
     bool replace_active_chain,
-    const FirewallGlobalPrefilter& prefilter) {
+    const FirewallGlobalPrefilter& prefilter,
+    const std::vector<PendingRule>& rules) {
     (void)replace_active_chain;
     std::string script = "*mangle\n";
     script += keen_pbr3::format(
@@ -2748,6 +3194,27 @@ std::string IptablesFirewall::build_raw_conntrack_script(
         prefilter, RAW_CONNTRACK_CHAIN_NAME, /*ipv6=*/false);
     script += build_conntrack_prefilter_lines(
         prefilter, RAW_CONNTRACK_CHAIN_NAME);
+    std::set<std::string> transient_udp_peer_sets;
+    for (const auto& rule : rules) {
+        if (!rule.ipv6 && !rule.output &&
+            rule.action == PendingRule::Mark &&
+            !rule.criteria.persist_conntrack_mark &&
+            rule.criteria.proto == L4Proto::Udp &&
+            rule.criteria.src_udp_peer_set_name.has_value()) {
+            transient_udp_peer_sets.insert(
+                *rule.criteria.src_udp_peer_set_name);
+        }
+    }
+    // raw PREROUTING runs before conntrack exists. Its small mangle companion
+    // normally copies every owned packet mark into ctmark; skip that copy for
+    // expiring call-affinity tuples so their authority really ends with the
+    // set lease.
+    for (const auto& set_name : transient_udp_peer_sets) {
+        script += keen_pbr3::format(
+            "-A {} -p udp -m set --match-set {} src,dst,dst -j RETURN\n",
+            RAW_CONNTRACK_CHAIN_NAME,
+            set_name);
+    }
     if (prefilter.restore_conntrack_mark &&
         prefilter.conntrack_mark_mask != 0) {
         const std::string mask =
@@ -2827,7 +3294,8 @@ void IptablesFirewall::apply_nat_rules(
                   snat_interfaces_,
                   /*ipv6=*/false,
                   fwmark_mask(),
-                  source_egress_snat_selectors_)
+                  source_egress_snat_selectors_,
+                  udp_peer_sets_)
             : std::string{};
     const std::string nat_script_v6 =
         nat_requested
@@ -2838,7 +3306,8 @@ void IptablesFirewall::apply_nat_rules(
                   snat_interfaces_,
                   /*ipv6=*/true,
                   fwmark_mask(),
-                  source_egress_snat_selectors_)
+                  source_egress_snat_selectors_,
+                  udp_peer_sets_)
             : std::string{};
 
     bool ipv6_nat_backend_available = false;
@@ -2999,6 +3468,7 @@ void IptablesFirewall::apply_nat_rules(
 }
 
 void IptablesFirewall::apply(FirewallApplyMode mode) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
     if (!apply_prepared_) {
         throw FirewallError("iptables apply was not prepared");
     }
@@ -3013,6 +3483,9 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     const auto effective_prefilter =
         iptables_effective_prefilter(
             global_prefilter_, effective_ipv6);
+    const auto candidate_udp_peer_classifiers =
+        build_pending_udp_peer_classifiers(
+            effective_prefilter, effective_ipv6);
 
     // `create -exist` rejects incompatible existing set schemas. Detect a
     // dnsmasq-owned mismatch before cleanup or inactive-slot staging mutates
@@ -3099,7 +3572,8 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
                 {"iptables-restore", "--noflush", "--counters"},
                 build_raw_conntrack_script(
                     /*replace_active_chain=*/true,
-                    effective_prefilter));
+                    effective_prefilter,
+                    pending_rules_));
             pipe_to_cmd(
                 {"iptables-restore", "--noflush", "--counters"},
                 build_output_generation_script(
@@ -3156,6 +3630,10 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     // router-originated detour traffic usable. Preserve-set applies validate
     // the replacement first and only then remove the active NAT generation.
     apply_nat_rules(effective_ipv6, mode, effective_prefilter);
+
+    // Pending declarations become live authority only after rules, hooks, and
+    // the independent NAT contract have all converged successfully.
+    published_udp_peer_classifiers_ = candidate_udp_peer_classifiers;
 
     // Clear pending buffers
     pending_sets_.clear();
@@ -3378,7 +3856,8 @@ void IptablesFirewall::cleanup_saved_sets(bool preserve_dynamic_sets) {
             name.rfind("kpbr4_", 0) == 0 || name.rfind("kpbr6_", 0) == 0 ||
             name.rfind("kpbr4s_", 0) == 0 || name.rfind("kpbr6s_", 0) == 0 ||
             name.rfind("kpbr4S_", 0) == 0 || name.rfind("kpbr6S_", 0) == 0 ||
-            name.rfind("kpbr4d_", 0) == 0 || name.rfind("kpbr6d_", 0) == 0;
+            name.rfind("kpbr4d_", 0) == 0 || name.rfind("kpbr6d_", 0) == 0 ||
+            name.rfind("kpbr4m_", 0) == 0 || name.rfind("kpbr6m_", 0) == 0;
         if (!managed) {
             continue;
         }
@@ -3422,6 +3901,8 @@ void IptablesFirewall::cleanup_impl() {
     last_applied_source_egress_snat_selectors_v6_.clear();
     last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     created_sets_.clear();
+    udp_peer_sets_.clear();
+    published_udp_peer_classifiers_.clear();
 
     pending_sets_.clear();
     pending_elements_.clear();
@@ -3430,6 +3911,7 @@ void IptablesFirewall::cleanup_impl() {
 }
 
 void IptablesFirewall::cleanup() {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
     cleanup_impl();
 }
 

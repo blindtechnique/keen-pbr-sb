@@ -59,8 +59,10 @@ inline bool firewall_criteria_equal(
     const FirewallRuleCriteria& left,
     const FirewallRuleCriteria& right) noexcept {
     return left.dst_set_name == right.dst_set_name &&
+           left.src_udp_peer_set_name == right.src_udp_peer_set_name &&
            left.dscp == right.dscp &&
            left.proto == right.proto &&
+           left.persist_conntrack_mark == right.persist_conntrack_mark &&
            left.src_port == right.src_port &&
            left.dst_port == right.dst_port &&
            left.src_addr == right.src_addr &&
@@ -109,6 +111,7 @@ inline bool destination_only_conntrack_cleanup_eligible(
         !criteria.dst_addr.empty();
     return has_positive_destination &&
            !has_mixed_destination_selectors &&
+           !criteria.src_udp_peer_set_name.has_value() &&
            !criteria.dscp.has_value() &&
            criteria.proto == L4Proto::Any &&
            criteria.src_port.empty() &&

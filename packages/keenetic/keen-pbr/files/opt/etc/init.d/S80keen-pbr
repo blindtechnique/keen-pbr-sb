@@ -59,7 +59,9 @@ PREARGS=""
 POSTCMD=""
 DESC="keen-pbr"
 PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-IPSET_PROBE_SET="kpbr_probe_hash_net"
+IPSET_PROBE_SET="kpbr_probe_hash_net_$$"
+IPSET_UDP_PEER_PROBE_SET="kpbr_probe_udp_peer_$$"
+IPTABLES_UDP_PEER_PROBE_CHAIN="KpbrUdpProbe$$"
 IPSET_COMPONENTS_MESSAGE="ipset kernel modules are not available. Make sure that you followed the installation process and installed all required components: Netfilter Subsystem Kernel Modules and Xtables-addons Extension Package for Netfilter."
 
 log() {
@@ -121,16 +123,53 @@ try_kernel_module_loaded() {
     insmod "$module_path" 2>/dev/null
 }
 
-ipset_hash_net_available() {
+ipset_base_type_available() {
     command -v ipset >/dev/null 2>&1 || return 1
 
-    if ipset create "$IPSET_PROBE_SET" hash:net family inet -exist >/dev/null 2>&1; then
+    ipset create "$IPSET_PROBE_SET" hash:net family inet -exist \
+        >/dev/null 2>&1 || {
         ipset destroy "$IPSET_PROBE_SET" >/dev/null 2>&1 || true
-        return 0
-    fi
-
+        return 1
+    }
     ipset destroy "$IPSET_PROBE_SET" >/dev/null 2>&1 || true
-    return 1
+    return 0
+}
+
+ipset_udp_peer_type_available() {
+    command -v ipset >/dev/null 2>&1 || return 1
+
+    ipset create "$IPSET_UDP_PEER_PROBE_SET" hash:ip,port,ip \
+        family inet timeout 90 -exist >/dev/null 2>&1 || {
+        ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
+        return 1
+    }
+    ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
+    return 0
+}
+
+iptables_udp_peer_match_available() {
+    local status=1
+
+    command -v iptables >/dev/null 2>&1 || return 1
+    command -v ipset >/dev/null 2>&1 || return 1
+    ipset create "$IPSET_UDP_PEER_PROBE_SET" hash:ip,port,ip \
+        family inet timeout 90 >/dev/null 2>&1 || return 1
+    if iptables -w 10 -t mangle -N "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
+           >/dev/null 2>&1; then
+        if iptables -w 10 -t mangle \
+               -A "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
+               -p udp -m set \
+               --match-set "$IPSET_UDP_PEER_PROBE_SET" src,dst,dst \
+               -j RETURN >/dev/null 2>&1; then
+            status=0
+        fi
+        iptables -w 10 -t mangle \
+            -F "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
+        iptables -w 10 -t mangle \
+            -X "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
+    fi
+    ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
+    return "$status"
 }
 
 check_netfilter_addons_component() {
@@ -153,21 +192,26 @@ check_netfilter_addons_component() {
 }
 
 ensure_ipset_modules_loaded() {
-    if ipset_hash_net_available; then
-        try_kernel_module_loaded xt_set >/dev/null 2>&1 || true
-        return 0
-    fi
+    remove_daemon_arg --disable-udp-call-affinity-ipset
 
-    try_kernel_module_loaded nfnetlink >/dev/null 2>&1 || true
-    try_kernel_module_loaded ip_set >/dev/null 2>&1 || true
-    try_kernel_module_loaded ip_set_hash_net >/dev/null 2>&1 || true
+    if ! ipset_base_type_available ||
+       ! ipset_udp_peer_type_available; then
+        try_kernel_module_loaded nfnetlink >/dev/null 2>&1 || true
+        try_kernel_module_loaded ip_set >/dev/null 2>&1 || true
+        try_kernel_module_loaded ip_set_hash_net >/dev/null 2>&1 || true
+        try_kernel_module_loaded ip_set_hash_ipportip >/dev/null 2>&1 || true
+    fi
     try_kernel_module_loaded xt_set >/dev/null 2>&1 || true
 
-    if ipset_hash_net_available; then
-        return 0
+    if ! ipset_base_type_available; then
+        log_error "$IPSET_COMPONENTS_MESSAGE Required probe failed: hash:net"
     fi
 
-    log_error "$IPSET_COMPONENTS_MESSAGE Required probe failed: ipset create $IPSET_PROBE_SET hash:net family inet -exist"
+    if ! ipset_udp_peer_type_available ||
+       ! iptables_udp_peer_match_available; then
+        add_daemon_arg --disable-udp-call-affinity-ipset
+        log "WARNING: the exact UDP tuple set/matcher is unavailable; WhatsApp call affinity is disabled for the iptables backend while normal list routing remains active"
+    fi
 }
 
 ensure_xt_multiport_loaded() {

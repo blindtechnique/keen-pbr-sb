@@ -1181,11 +1181,19 @@ ConntrackManager::observe_forwarded_destination_flows(
     const std::vector<std::string>& local_interface_addresses,
     uint32_t owned_mask,
     ConntrackFlowObservationOptions options,
-    const std::vector<std::string>& media_guard_source_addresses) const {
+    const std::vector<std::string>& media_guard_source_addresses,
+    const std::vector<std::string>& media_seed_destination_cidrs,
+    const std::set<uint32_t>& media_seed_owned_marks) const {
     ConntrackFlowObservation observation;
     if (owned_mask == 0U) {
         observation.invalid_owned_mask = true;
         return observation;
+    }
+    for (const auto mark : media_seed_owned_marks) {
+        if (mark == 0U || (mark & ~owned_mask) != 0U) {
+            observation.invalid_owned_mask = true;
+            return observation;
+        }
     }
 
     std::vector<NormalizedTargetCidr> selectors;
@@ -1219,6 +1227,40 @@ ConntrackManager::observe_forwarded_destination_flows(
         }
     }
     if (selectors.empty()) {
+        return observation;
+    }
+
+    std::vector<NormalizedTargetCidr> media_seed_selectors;
+    media_seed_selectors.reserve(std::min(
+        media_seed_destination_cidrs.size(),
+        options.max_destination_input_cidrs));
+    std::set<std::string> seen_media_seed_selectors;
+    const std::size_t media_seed_input_limit = std::min(
+        media_seed_destination_cidrs.size(),
+        options.max_destination_input_cidrs);
+    if (media_seed_input_limit < media_seed_destination_cidrs.size()) {
+        observation.media_seed_destination_input_truncated = true;
+    }
+    for (std::size_t index = 0U; index < media_seed_input_limit; ++index) {
+        const auto normalized = normalize_targeted_cidr(
+            media_seed_destination_cidrs[index]);
+        if (!normalized.has_value()) {
+            ++observation.invalid_media_seed_destination_selectors;
+            continue;
+        }
+        if (normalized->family == TargetAddressFamily::Ipv6 &&
+            !options.ipv6_enabled) {
+            continue;
+        }
+        const std::string key =
+            (normalized->family == TargetAddressFamily::Ipv6 ? "6:" : "4:") +
+            normalized->value;
+        if (seen_media_seed_selectors.insert(key).second) {
+            media_seed_selectors.push_back(*normalized);
+        }
+    }
+    if (observation.invalid_media_seed_destination_selectors != 0U ||
+        observation.media_seed_destination_input_truncated) {
         return observation;
     }
 
@@ -1307,6 +1349,22 @@ ConntrackManager::observe_forwarded_destination_flows(
         std::uint32_t>;
     std::set<FlowIdentity> seen_flows;
     std::set<FlowIdentity> seen_media_flows;
+    std::set<FlowIdentity> seen_media_seed_flows;
+    // One conntrack entry may intentionally appear in more than one semantic
+    // view (for example, a selected WhatsApp seed is also part of the
+    // source-wide UDP guard). Charge the bounded observation budget once per
+    // exact identity, not once per output vector containing that identity.
+    std::set<FlowIdentity> budgeted_flows;
+    const auto claim_flow_budget = [&](const FlowIdentity& identity) {
+        if (budgeted_flows.find(identity) != budgeted_flows.end()) {
+            return true;
+        }
+        if (budgeted_flows.size() >= options.max_flows) {
+            return false;
+        }
+        budgeted_flows.insert(identity);
+        return true;
+    };
     std::size_t cursor = 0U;
     std::size_t line_count = 0U;
     while (cursor < content.size()) {
@@ -1334,7 +1392,11 @@ ConntrackManager::observe_forwarded_destination_flows(
             !options.ipv6_enabled) {
             continue;
         }
-        if (!mark_is_observer_eligible(parsed->mark, owned_mask)) {
+        const bool ordinary_mark_eligible =
+            mark_is_observer_eligible(parsed->mark, owned_mask);
+        const bool media_mark_eligible = ordinary_mark_eligible ||
+            options.allow_foreign_mark_bits_for_media;
+        if (!media_mark_eligible) {
             continue;
         }
 
@@ -1358,9 +1420,7 @@ ConntrackManager::observe_forwarded_destination_flows(
         if (parsed->protocol == ConntrackFlowProtocol::Udp &&
             media_guard_sources.count(source_key) != 0U &&
             seen_media_flows.insert(identity).second) {
-            if (observation.flows.size() +
-                    observation.source_wide_udp_flows.size() >=
-                options.max_flows) {
+            if (!claim_flow_budget(identity)) {
                 observation.flow_limit_reached = true;
                 break;
             }
@@ -1389,16 +1449,7 @@ ConntrackManager::observe_forwarded_destination_flows(
             continue;
         }
 
-        if (!seen_flows.insert(identity).second) {
-            continue;
-        }
-        if (observation.flows.size() +
-                observation.source_wide_udp_flows.size() >=
-            options.max_flows) {
-            observation.flow_limit_reached = true;
-            break;
-        }
-        observation.flows.push_back(ConntrackExactForwardedFlow{
+        ConntrackExactForwardedFlow observed_flow{
             parsed->family,
             parsed->protocol,
             parsed->original.source.value,
@@ -1411,7 +1462,139 @@ ConntrackManager::observe_forwarded_destination_flows(
             parsed->tcp_state,
             parsed->assured,
             parsed->seen_reply,
-            parsed->fastnat});
+            parsed->fastnat};
+        const bool media_seed_matches = std::any_of(
+            media_seed_selectors.begin(), media_seed_selectors.end(),
+            [&parsed](const NormalizedTargetCidr& selector) {
+                return cidr_contains(selector, parsed->original.destination);
+            });
+        if (ordinary_mark_eligible &&
+            seen_flows.insert(identity).second) {
+            if (!claim_flow_budget(identity)) {
+                observation.flow_limit_reached = true;
+                break;
+            }
+            observation.flows.push_back(observed_flow);
+        }
+        if (media_seed_matches &&
+            seen_media_seed_flows.insert(identity).second) {
+            if (!claim_flow_budget(identity)) {
+                observation.flow_limit_reached = true;
+                break;
+            }
+            observation.media_seed_flows.push_back(
+                std::move(observed_flow));
+        }
+    }
+
+    // Discover source-scoped call candidates from the same immutable snapshot
+    // instead of reading /proc a second time. The first pass establishes only
+    // trusted companion destinations and owned marks; this second bounded pass
+    // can therefore recover UDP peers regardless of line order without making
+    // an idle WhatsApp session double the kernel-read rate.
+    std::set<std::string> derived_media_guard_sources;
+    if (!media_seed_owned_marks.empty() &&
+        !observation.snapshot_truncated &&
+        !observation.line_limit_reached &&
+        !observation.flow_limit_reached) {
+        for (const auto& flow : observation.media_seed_flows) {
+            const bool transport_ready =
+                flow.protocol == ConntrackFlowProtocol::Udp
+                ? !flow.tcp_state.has_value()
+                : flow.protocol == ConntrackFlowProtocol::Tcp &&
+                      flow.tcp_state == ConntrackTcpState::Established;
+            if (!transport_ready || flow.destination_port != 443U ||
+                !flow.assured || !flow.seen_reply ||
+                flow.original.packets == 0U ||
+                flow.reply.packets == 0U ||
+                media_seed_owned_marks.count(flow.mark & owned_mask) == 0U) {
+                continue;
+            }
+            const bool ipv6 = flow.family == ConntrackFlowFamily::Ipv6;
+            const std::string source_key =
+                (ipv6 ? "6:" : "4:") + flow.source;
+            if (media_guard_sources.count(source_key) == 0U) {
+                derived_media_guard_sources.insert(source_key);
+            }
+        }
+    }
+
+    if (!derived_media_guard_sources.empty()) {
+        cursor = 0U;
+        line_count = 0U;
+        while (cursor < content.size()) {
+            if (line_count >= options.max_snapshot_lines) {
+                observation.line_limit_reached = true;
+                observation.snapshot_truncated = true;
+                break;
+            }
+            const auto newline = content.find('\n', cursor);
+            const std::size_t line_end = newline == std::string_view::npos
+                ? content.size()
+                : newline;
+            const std::string_view line = content.substr(
+                cursor, line_end - cursor);
+            cursor = newline == std::string_view::npos
+                ? content.size()
+                : newline + 1U;
+            ++line_count;
+
+            const auto parsed = parse_exact_conntrack_flow(line);
+            if (!parsed.has_value() ||
+                parsed->protocol != ConntrackFlowProtocol::Udp ||
+                (parsed->family == ConntrackFlowFamily::Ipv6 &&
+                 !options.ipv6_enabled)) {
+                continue;
+            }
+            const bool ordinary_mark_eligible =
+                mark_is_observer_eligible(parsed->mark, owned_mask);
+            if (!ordinary_mark_eligible &&
+                !options.allow_foreign_mark_bits_for_media) {
+                continue;
+            }
+            const bool ipv6 =
+                parsed->family == ConntrackFlowFamily::Ipv6;
+            const std::string source_key =
+                (ipv6 ? "6:" : "4:") + parsed->original.source.value;
+            const std::string destination_key =
+                (ipv6 ? "6:" : "4:") +
+                parsed->original.destination.value;
+            if (derived_media_guard_sources.count(source_key) == 0U ||
+                local_addresses.count(source_key) != 0U ||
+                local_addresses.count(destination_key) != 0U) {
+                continue;
+            }
+            const FlowIdentity identity{
+                parsed->family,
+                parsed->protocol,
+                parsed->original.source.value,
+                parsed->original.destination.value,
+                parsed->original.source_port,
+                parsed->original.destination_port,
+                parsed->mark};
+            if (!seen_media_flows.insert(identity).second) {
+                continue;
+            }
+            if (!claim_flow_budget(identity)) {
+                observation.flow_limit_reached = true;
+                break;
+            }
+            observation.source_wide_udp_flows.push_back(
+                ConntrackExactForwardedFlow{
+                    parsed->family,
+                    parsed->protocol,
+                    parsed->original.source.value,
+                    parsed->original.destination.value,
+                    parsed->original.source_port,
+                    parsed->original.destination_port,
+                    parsed->mark,
+                    parsed->original.counters,
+                    parsed->reply.counters,
+                    parsed->tcp_state,
+                    parsed->assured,
+                    parsed->seen_reply,
+                    parsed->fastnat});
+        }
     }
 
     return observation;
@@ -1419,9 +1602,22 @@ ConntrackManager::observe_forwarded_destination_flows(
 
 ConntrackCleanupResult ConntrackManager::delete_exact_forwarded_flow(
     const ConntrackExactForwardedFlow& flow,
-    uint32_t owned_mask) const {
-    if (owned_mask == 0U ||
-        !mark_is_observer_eligible(flow.mark, owned_mask)) {
+    uint32_t owned_mask,
+    std::optional<std::uint32_t> expected_owned_mark) const {
+    if (owned_mask == 0U) {
+        return ConntrackCleanupResult::Failed;
+    }
+    if (expected_owned_mark.has_value()) {
+        if (*expected_owned_mark == 0U ||
+            (*expected_owned_mark & ~owned_mask) != 0U) {
+            return ConntrackCleanupResult::Failed;
+        }
+        const auto live_owned_mark = flow.mark & owned_mask;
+        if (live_owned_mark != 0U &&
+            live_owned_mark != *expected_owned_mark) {
+            return ConntrackCleanupResult::Failed;
+        }
+    } else if (!mark_is_observer_eligible(flow.mark, owned_mask)) {
         return ConntrackCleanupResult::Failed;
     }
 

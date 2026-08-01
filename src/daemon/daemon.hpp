@@ -33,6 +33,7 @@
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/conntrack_manager.hpp"
 #include "../runtime/idle_stall_detector.hpp"
+#include "../runtime/udp_call_affinity.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../firewall/firewall.hpp"
@@ -116,6 +117,10 @@ using FdCallback = std::function<void(uint32_t events)>;
 struct DaemonOptions {
     bool no_api{false};
     bool use_raw_prerouting{false};
+    // The init script probes the optional three-dimensional ipset type. A
+    // missing legacy-kernel feature must disable only the iptables call
+    // overlay, never the ordinary list-routing service.
+    bool udp_call_affinity_ipset_available{true};
 };
 
 struct ListsRefreshExecutionResult {
@@ -463,9 +468,17 @@ private:
         ConntrackFlowObservation observation,
         std::vector<std::string> observed_local_interface_addresses,
         std::vector<std::string> destination_selectors,
+        std::vector<UdpCallAffinityTarget> call_affinity_targets,
         bool ipv6_enabled,
         bool coverage_complete,
         std::string failure_detail);
+    void dispatch_udp_call_affinity_mutations(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t expected_coverage_generation,
+        std::uint32_t owned_mask,
+        bool ipv6_enabled,
+        UdpCallAffinityDetector::TimePoint decision_deadline,
+        std::vector<UdpCallAffinityDecision> decisions);
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
                                                   RemoteListPreparationMode list_mode =
                                                       RemoteListPreparationMode::RefreshAll);
@@ -670,9 +683,19 @@ private:
     // flush. All detector state belongs to the control/event-loop thread.
     int idle_stall_observer_task_id_{-1};
     IdleStallDetector idle_stall_detector_;
+    UdpCallAffinityDetector udp_call_affinity_detector_;
     std::vector<std::string> idle_stall_destination_selectors_;
+    std::vector<std::string> udp_call_affinity_destination_selectors_;
     std::atomic<bool> idle_stall_observer_enabled_{false};
     std::atomic<bool> idle_stall_observer_inflight_{false};
+    // Pair publication and exact conntrack retirement execute on the bounded
+    // worker pool. Detector reservations remain control-loop owned while this
+    // single-flight mutation is outstanding.
+    std::atomic<bool> udp_call_affinity_mutation_inflight_{false};
+    // Serializes the worker's live pair/conntrack mutation with every
+    // firewall apply or cleanup lifecycle boundary. Generation fences decide
+    // whether queued work is still eligible after acquiring this barrier.
+    TracedMutex udp_call_affinity_mutation_mutex_;
     std::atomic<std::uint64_t> idle_stall_coverage_generation_{1};
 
     // Epoll state

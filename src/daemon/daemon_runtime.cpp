@@ -68,6 +68,15 @@ constexpr auto IDLE_STALL_ACTIVE_SCAN_INTERVAL =
     std::chrono::seconds{5};
 constexpr auto IDLE_STALL_QUIET_SCAN_INTERVAL =
     std::chrono::seconds{30};
+// Catalog presence alone uses a moderate discovery cadence. Once matching
+// traffic appears, the existing five-second active cadence takes over; this
+// avoids a permanent high-frequency conntrack parse on otherwise idle routers.
+constexpr auto UDP_CALL_AFFINITY_DISCOVERY_SCAN_INTERVAL =
+    std::chrono::seconds{10};
+constexpr auto UDP_CALL_AFFINITY_FAST_SCAN_INTERVAL =
+    std::chrono::seconds{2};
+constexpr auto UDP_CALL_AFFINITY_MUTATION_DEADLINE =
+    std::chrono::seconds{10};
 constexpr std::size_t IDLE_STALL_MAX_FLOWS = 256U;
 constexpr std::size_t IDLE_STALL_MAX_DESTINATION_CIDRS = 1024U;
 constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_BYTES =
@@ -134,6 +143,39 @@ IdleStallFlowSample idle_stall_sample_from(
 struct IdleStallPendingDelete {
     IdleStallDeleteDecision decision;
     ConntrackExactForwardedFlow flow;
+};
+
+struct UdpCallAffinityMutationWork {
+    UdpCallAffinityDecision decision;
+    std::string set_name;
+};
+
+enum class UdpCallAffinityRevalidationMode {
+    BeforePublication,
+    RefreshBeforePublication,
+    AfterPublication,
+};
+
+bool same_forwarded_five_tuple(
+    const ConntrackExactForwardedFlow& left,
+    const ConntrackExactForwardedFlow& right) noexcept {
+    return left.family == right.family &&
+           left.protocol == right.protocol &&
+           left.source == right.source &&
+           left.destination == right.destination &&
+           left.source_port == right.source_port &&
+           left.destination_port == right.destination_port;
+}
+
+struct UdpCallAffinityMutationOutcome {
+    UdpCallAffinityDecision decision;
+    std::vector<ConntrackExactForwardedFlow> revalidated_flows;
+    bool publication_attempted{false};
+    bool installed{false};
+    bool revalidation_failed{false};
+    bool deadline_expired{false};
+    std::size_t retired_flows{0U};
+    std::size_t failed_flows{0U};
 };
 
 class AtomicFlagResetGuard {
@@ -814,15 +856,18 @@ void Daemon::stop_routing_runtime() {
 
     runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
 
-    if (urltest_manager_) {
-        urltest_manager_->clear();
+    {
+        KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+        if (urltest_manager_) {
+            urltest_manager_->clear();
+        }
+        urltest_apply_incidents_.clear();
+        cleanup_owned_conntrack_marks("while stopping routing");
+        cancel_owned_conntrack_cleanup_retry();
+        policy_rules_.clear();
+        route_table_.clear();
+        firewall_->cleanup();
     }
-    urltest_apply_incidents_.clear();
-    cleanup_owned_conntrack_marks("while stopping routing");
-    cancel_owned_conntrack_cleanup_retry();
-    policy_rules_.clear();
-    route_table_.clear();
-    firewall_->cleanup();
     if (keenetic_dns_refresh_task_id_ >= 0) {
         scheduler_->cancel(keenetic_dns_refresh_task_id_);
         keenetic_dns_refresh_task_id_ = -1;
@@ -958,6 +1003,7 @@ void Daemon::start_routing_runtime() {
                       cleanup_error.what());
         }
         try {
+            KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
             firewall_->cleanup();
         } catch (const std::exception& cleanup_error) {
             log.error("Failed to clean firewall after start failure: {}",
@@ -1200,6 +1246,14 @@ void Daemon::reconcile_static_routing() {
 }
 
 void Daemon::apply_firewall(FirewallApplyMode mode) {
+    // Every backend apply may flush the runtime-only pair sets. Invalidate the
+    // observer epoch before touching live chains so an outstanding worker can
+    // never acknowledge an old pair after a URLTest or recovery rebuild.
+    cancel_idle_stall_observer();
+
+    KPBR_UNIQUE_LOCK(
+        affinity_mutation_lock,
+        udp_call_affinity_mutation_mutex_);
     const auto interface_snapshot =
         shared_ndms_catalog_cache().peek();
     const auto service_snapshot =
@@ -1232,7 +1286,8 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         &effective_interface_servers,
         &runtime_targets,
         &native_vpn_direct_egress_snat_selectors,
-        &candidate_list_content_state);
+        &candidate_list_content_state,
+        opts_.udp_call_affinity_ipset_available);
     firewall_state_.set_rules(std::move(candidate_rules));
     applied_list_content_state_ =
         std::move(candidate_list_content_state);
@@ -1247,6 +1302,12 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
                                   ? config_.api->listen.value_or(std::string{})
                                   : std::string{});
 #endif
+    affinity_mutation_lock.unlock();
+
+    // Re-arm only after the replacement firewall transaction and its remote
+    // access companion have committed successfully. A failed apply remains
+    // fail-closed and its caller may retry the whole transaction.
+    reset_idle_stall_observer(/*schedule_if_eligible=*/true);
 }
 
 void Daemon::normalize_urltest_selections() {
@@ -2688,7 +2749,9 @@ void Daemon::cancel_idle_stall_observer() noexcept {
     }
     idle_stall_observer_task_id_ = -1;
     idle_stall_detector_.reset();
+    udp_call_affinity_detector_.reset();
     idle_stall_destination_selectors_.clear();
+    udp_call_affinity_destination_selectors_.clear();
     idle_stall_coverage_generation_.fetch_add(
         1U, std::memory_order_acq_rel);
 }
@@ -2718,7 +2781,9 @@ void Daemon::schedule_idle_stall_observer_after(
         idle_stall_observer_enabled_.store(
             false, std::memory_order_release);
         idle_stall_detector_.reset();
+        udp_call_affinity_detector_.reset();
         idle_stall_destination_selectors_.clear();
+        udp_call_affinity_destination_selectors_.clear();
         idle_stall_coverage_generation_.fetch_add(
             1U, std::memory_order_acq_rel);
         try {
@@ -2732,7 +2797,9 @@ void Daemon::schedule_idle_stall_observer_after(
         idle_stall_observer_enabled_.store(
             false, std::memory_order_release);
         idle_stall_detector_.reset();
+        udp_call_affinity_detector_.reset();
         idle_stall_destination_selectors_.clear();
+        udp_call_affinity_destination_selectors_.clear();
         idle_stall_coverage_generation_.fetch_add(
             1U, std::memory_order_acq_rel);
     }
@@ -2772,6 +2839,14 @@ void Daemon::run_idle_stall_observer() noexcept {
             cancel_idle_stall_observer();
             return;
         }
+        auto call_affinity_targets =
+            firewall_->backend() == FirewallBackend::iptables &&
+                    !opts_.udp_call_affinity_ipset_available
+                ? std::vector<UdpCallAffinityTarget>{}
+                : active_udp_call_affinity_targets(
+                      whatsapp_call_affinity_list_names(config_),
+                      firewall_state_.get_rules(),
+                      firewall_state_.get_fwmark_mask());
 
         const auto coverage =
             collect_conntrack_destination_retirement_coverage(
@@ -2793,6 +2868,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                 coverage);
         if (!coverage_complete) {
             idle_stall_detector_.reset();
+            udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_.clear();
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
@@ -2801,13 +2877,57 @@ void Daemon::run_idle_stall_observer() noexcept {
             return;
         }
 
+        std::vector<std::string> call_affinity_destination_selectors;
+        if (!call_affinity_targets.empty()) {
+            std::set<std::string> call_affinity_list_names;
+            for (const auto& target : call_affinity_targets) {
+                call_affinity_list_names.insert(target.list_name);
+            }
+            const auto call_coverage =
+                collect_conntrack_destination_retirement_coverage(
+                    destination_retirement_plan_for_lists(
+                        call_affinity_list_names),
+                    applied_list_content_state_);
+            call_affinity_destination_selectors =
+                call_coverage.destination_selectors;
+            std::sort(
+                call_affinity_destination_selectors.begin(),
+                call_affinity_destination_selectors.end());
+            call_affinity_destination_selectors.erase(
+                std::unique(
+                    call_affinity_destination_selectors.begin(),
+                    call_affinity_destination_selectors.end()),
+                call_affinity_destination_selectors.end());
+            const bool call_coverage_complete =
+                !call_coverage.partial() &&
+                !call_affinity_destination_selectors.empty() &&
+                !runtime_recovery_detail::
+                    contains_global_destination_selector(call_coverage);
+            if (!call_coverage_complete) {
+                call_affinity_targets.clear();
+                call_affinity_destination_selectors.clear();
+                udp_call_affinity_detector_.reset();
+            }
+        }
         if (destination_selectors !=
             idle_stall_destination_selectors_) {
             idle_stall_detector_.reset();
+            udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_ = destination_selectors;
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
         }
+        if (call_affinity_destination_selectors !=
+            udp_call_affinity_destination_selectors_) {
+            udp_call_affinity_detector_.reset();
+            udp_call_affinity_destination_selectors_ =
+                call_affinity_destination_selectors;
+        }
+        const auto retained_affinity_sources =
+            call_affinity_targets.empty()
+            ? std::vector<std::string>{}
+            : udp_call_affinity_detector_.retained_guard_sources(
+                  UdpCallAffinityDetector::Clock::now());
 
         const auto runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
@@ -2819,6 +2939,7 @@ void Daemon::run_idle_stall_observer() noexcept {
         if (runtime_generation == 0U || coverage_generation == 0U ||
             owned_mask == 0U) {
             idle_stall_detector_.reset();
+            udp_call_affinity_detector_.reset();
             schedule_idle_stall_observer_after(
                 IDLE_STALL_QUIET_SCAN_INTERVAL);
             return;
@@ -2841,6 +2962,9 @@ void Daemon::run_idle_stall_observer() noexcept {
              owned_mask,
              ipv6_enabled,
              coverage_complete,
+             call_affinity_targets,
+             retained_affinity_sources,
+             call_affinity_destination_selectors,
              destination_selectors =
                  std::move(destination_selectors)]() mutable {
                 AtomicFlagResetGuard inflight_guard(
@@ -2870,6 +2994,10 @@ void Daemon::run_idle_stall_observer() noexcept {
                     }
                     // This is the last fence before the bounded /proc scan.
                     if (generation_is_current()) {
+                        std::set<std::uint32_t> call_affinity_marks;
+                        for (const auto& target : call_affinity_targets) {
+                            call_affinity_marks.insert(target.fwmark);
+                        }
                         observation = conntrack_manager_.
                             observe_forwarded_destination_flows(
                                 destination_selectors,
@@ -2880,7 +3008,11 @@ void Daemon::run_idle_stall_observer() noexcept {
                                     IDLE_STALL_MAX_FLOWS,
                                     IDLE_STALL_MAX_DESTINATION_CIDRS,
                                     IDLE_STALL_MAX_SNAPSHOT_BYTES,
-                                    IDLE_STALL_MAX_SNAPSHOT_LINES});
+                                    IDLE_STALL_MAX_SNAPSHOT_LINES,
+                                    /*allow_foreign_mark_bits_for_media=*/true},
+                                retained_affinity_sources,
+                                call_affinity_destination_selectors,
+                                call_affinity_marks);
                     }
                 } catch (const std::exception& error) {
                     failure_detail = error.what();
@@ -2900,6 +3032,8 @@ void Daemon::run_idle_stall_observer() noexcept {
                          std::move(local_interface_addresses),
                      destination_selectors =
                          std::move(destination_selectors),
+                     call_affinity_targets =
+                         std::move(call_affinity_targets),
                      ipv6_enabled,
                      coverage_complete,
                      failure_detail =
@@ -2912,6 +3046,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                                 std::move(observation),
                                 std::move(local_interface_addresses),
                                 std::move(destination_selectors),
+                                std::move(call_affinity_targets),
                                 ipv6_enabled,
                                 coverage_complete,
                                 std::move(failure_detail));
@@ -2919,6 +3054,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                             idle_stall_observer_inflight_.store(
                                 false, std::memory_order_release);
                             idle_stall_detector_.reset();
+                            udp_call_affinity_detector_.reset();
                             Logger::instance().info(
                                 "Idle forwarded-flow observation commit "
                                 "failed closed: {}",
@@ -2929,6 +3065,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                             idle_stall_observer_inflight_.store(
                                 false, std::memory_order_release);
                             idle_stall_detector_.reset();
+                            udp_call_affinity_detector_.reset();
                             schedule_idle_stall_observer_after(
                                 IDLE_STALL_QUIET_SCAN_INTERVAL);
                         }
@@ -2951,6 +3088,7 @@ void Daemon::run_idle_stall_observer() noexcept {
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
         idle_stall_detector_.reset();
+        udp_call_affinity_detector_.reset();
         Logger::instance().info(
             "Idle forwarded-flow observation failed closed: {}",
             error.what());
@@ -2960,8 +3098,534 @@ void Daemon::run_idle_stall_observer() noexcept {
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
         idle_stall_detector_.reset();
+        udp_call_affinity_detector_.reset();
         schedule_idle_stall_observer_after(
             IDLE_STALL_QUIET_SCAN_INTERVAL);
+    }
+}
+
+void Daemon::dispatch_udp_call_affinity_mutations(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t expected_coverage_generation,
+    std::uint32_t owned_mask,
+    bool ipv6_enabled,
+    UdpCallAffinityDetector::TimePoint decision_deadline,
+    std::vector<UdpCallAffinityDecision> decisions) {
+    if (decisions.empty()) {
+        return;
+    }
+
+    const auto release_decisions = [this, &decisions]() {
+        for (const auto& decision : decisions) {
+            udp_call_affinity_detector_.release_failed(decision);
+        }
+    };
+    const auto generation_is_current = [this,
+                                        expected_runtime_generation,
+                                        expected_coverage_generation]() {
+        return running_.load(std::memory_order_acquire) &&
+               routing_runtime_active_ &&
+               idle_stall_observer_enabled_.load(
+                   std::memory_order_acquire) &&
+               runtime_generation_.load(std::memory_order_acquire) ==
+                   expected_runtime_generation &&
+               idle_stall_coverage_generation_.load(
+                   std::memory_order_acquire) ==
+                   expected_coverage_generation;
+    };
+    if (!generation_is_current() || !firewall_) {
+        release_decisions();
+        return;
+    }
+
+    bool expected = false;
+    if (!udp_call_affinity_mutation_inflight_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        // The earlier batch owns the exact pairs it reserved. Release this
+        // later observation so it may be reconsidered after that batch ends.
+        release_decisions();
+        return;
+    }
+    AtomicFlagResetGuard dispatch_guard(
+        udp_call_affinity_mutation_inflight_);
+
+    std::vector<UdpCallAffinityMutationWork> work;
+    work.reserve(decisions.size());
+    for (const auto& decision : decisions) {
+        const int family = decision.family == ConntrackFlowFamily::Ipv6
+            ? AF_INET6
+            : AF_INET;
+        const std::string set_name = firewall_->media_affinity_set_name(
+            decision.list_name, family);
+        work.push_back(UdpCallAffinityMutationWork{
+            decision,
+            set_name});
+    }
+
+    const TraceId trace_id = ensure_trace_id();
+    const bool enqueued = blocking_executor_.try_post(
+        "udp-call-affinity-mutation",
+        [this,
+         expected_runtime_generation,
+         expected_coverage_generation,
+         owned_mask,
+         ipv6_enabled,
+         decision_deadline,
+         work = std::move(work)]() mutable {
+            AtomicFlagResetGuard inflight_guard(
+                udp_call_affinity_mutation_inflight_);
+            const auto generation_is_current = [this,
+                                                 expected_runtime_generation,
+                                                 expected_coverage_generation]() {
+                // Worker code may consult only atomics. The control-owned
+                // routing_runtime_active_ flag is checked before dispatch and
+                // again by the posted control-loop completion.
+                return running_.load(std::memory_order_acquire) &&
+                       idle_stall_observer_enabled_.load(
+                           std::memory_order_acquire) &&
+                       runtime_generation_.load(
+                           std::memory_order_acquire) ==
+                           expected_runtime_generation &&
+                       idle_stall_coverage_generation_.load(
+                           std::memory_order_acquire) ==
+                           expected_coverage_generation;
+            };
+
+            std::vector<UdpCallAffinityMutationOutcome> outcomes;
+            outcomes.reserve(work.size());
+            for (auto& item : work) {
+                outcomes.push_back(UdpCallAffinityMutationOutcome{
+                    std::move(item.decision)});
+            }
+
+            bool conntrack_unavailable = false;
+            {
+                // The lifecycle path cancels the observer epoch before taking
+                // this same barrier. Therefore queued work must re-check all
+                // atomic fences only after it has exclusive mutation access.
+                KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+
+                const auto revalidate_decision =
+                    [this,
+                     owned_mask,
+                     ipv6_enabled,
+                     decision_deadline,
+                     &generation_is_current](
+                        const UdpCallAffinityDecision& decision,
+                        UdpCallAffinityRevalidationMode mode)
+                        -> std::optional<
+                            std::vector<ConntrackExactForwardedFlow>> {
+                    if (!generation_is_current() ||
+                        UdpCallAffinityDetector::Clock::now() >=
+                            decision_deadline) {
+                        return std::nullopt;
+                    }
+                    try {
+                        const auto local_addresses =
+                            local_interface_addresses_from(
+                                netlink_.dump_interfaces());
+                        if (local_addresses.empty()) {
+                            return std::nullopt;
+                        }
+                        const std::vector<std::string> destinations{
+                            decision.destination};
+                        const std::vector<std::string> sources{
+                            decision.source};
+                        const auto current = conntrack_manager_.
+                            observe_forwarded_destination_flows(
+                                destinations,
+                                local_addresses,
+                                owned_mask,
+                                ConntrackFlowObservationOptions{
+                                    ipv6_enabled,
+                                    IDLE_STALL_MAX_FLOWS,
+                                    IDLE_STALL_MAX_DESTINATION_CIDRS,
+                                    IDLE_STALL_MAX_SNAPSHOT_BYTES,
+                                    IDLE_STALL_MAX_SNAPSHOT_LINES,
+                                    /*allow_foreign_mark_bits_for_media=*/true},
+                                sources);
+                        if (!generation_is_current() ||
+                            UdpCallAffinityDetector::Clock::now() >=
+                                decision_deadline ||
+                            current.snapshot_unavailable ||
+                            current.snapshot_truncated ||
+                            current.line_limit_reached ||
+                            current.flow_limit_reached ||
+                            current.local_address_scope_missing ||
+                            current.destination_input_truncated ||
+                            current.invalid_destination_selectors != 0U ||
+                            current.invalid_media_guard_sources != 0U ||
+                            current.invalid_owned_mask) {
+                            return std::nullopt;
+                        }
+
+                        if (mode == UdpCallAffinityRevalidationMode::
+                                BeforePublication) {
+                            const bool peer_became_ambiguous = std::any_of(
+                                current.source_wide_udp_flows.begin(),
+                                current.source_wide_udp_flows.end(),
+                                [&decision, owned_mask](const auto& candidate) {
+                                    if (candidate.family != decision.family ||
+                                        candidate.source != decision.source ||
+                                        candidate.destination_port !=
+                                            decision.destination_port ||
+                                        candidate.destination !=
+                                            decision.destination) {
+                                        return false;
+                                    }
+                                    return
+                                           (candidate.mark & owned_mask) != 0U ||
+                                           candidate.assured ||
+                                           candidate.seen_reply ||
+                                           candidate.reply.packets != 0U ||
+                                           candidate.reply.bytes != 0U;
+                                });
+                            if (peer_became_ambiguous) {
+                                return std::vector<
+                                    ConntrackExactForwardedFlow>{};
+                            }
+                        }
+
+                        std::vector<ConntrackExactForwardedFlow>
+                            revalidated_flows;
+                        revalidated_flows.reserve(
+                            decision.baseline_flows.size());
+                        for (const auto& baseline :
+                             decision.baseline_flows) {
+                            const auto live = std::find_if(
+                                current.source_wide_udp_flows.begin(),
+                                current.source_wide_udp_flows.end(),
+                                [&baseline,
+                                 &decision,
+                                 mode,
+                                 owned_mask](
+                                    const auto& candidate) {
+                                    if (!same_forwarded_five_tuple(
+                                            candidate, baseline)) {
+                                        return false;
+                                    }
+                                    if (mode ==
+                                        UdpCallAffinityRevalidationMode::
+                                            BeforePublication) {
+                                        return candidate.mark ==
+                                               baseline.mark;
+                                    }
+                                    if (mode ==
+                                        UdpCallAffinityRevalidationMode::
+                                            RefreshBeforePublication) {
+                                        const auto owned_mark =
+                                            candidate.mark & owned_mask;
+                                        return owned_mark == 0U ||
+                                               owned_mark == decision.fwmark;
+                                    }
+                                    const auto owned_mark =
+                                        candidate.mark & owned_mask;
+                                    return owned_mark == 0U ||
+                                           owned_mark == decision.fwmark;
+                                });
+                            const bool mark_is_allowed =
+                                live !=
+                                    current.source_wide_udp_flows.end() &&
+                                ((mode == UdpCallAffinityRevalidationMode::
+                                              BeforePublication &&
+                                  live->mark == baseline.mark) ||
+                                 (mode == UdpCallAffinityRevalidationMode::
+                                              AfterPublication &&
+                                  ((live->mark & owned_mask) == 0U ||
+                                   (live->mark & owned_mask) ==
+                                       decision.fwmark)) ||
+                                 (mode == UdpCallAffinityRevalidationMode::
+                                              RefreshBeforePublication &&
+                                  ((live->mark & owned_mask) == 0U ||
+                                   (live->mark & owned_mask) ==
+                                       decision.fwmark)));
+                            const bool refresh_still_active =
+                                live !=
+                                    current.source_wide_udp_flows.end() &&
+                                live->protocol ==
+                                    ConntrackFlowProtocol::Udp &&
+                                mark_is_allowed && live->assured &&
+                                live->seen_reply &&
+                                live->original.packets >=
+                                    baseline.original.packets &&
+                                live->original.bytes >=
+                                    baseline.original.bytes &&
+                                live->reply.packets >=
+                                    baseline.reply.packets &&
+                                live->reply.bytes >=
+                                    baseline.reply.bytes;
+                            const bool still_unanswered =
+                                live !=
+                                    current.source_wide_udp_flows.end() &&
+                                live->protocol ==
+                                    ConntrackFlowProtocol::Udp &&
+                                mark_is_allowed && !live->assured &&
+                                !live->seen_reply &&
+                                live->reply.packets == 0U &&
+                                live->reply.bytes == 0U &&
+                                live->original.packets >=
+                                    baseline.original.packets &&
+                                live->original.bytes >=
+                                    baseline.original.bytes;
+                            if ((mode == UdpCallAffinityRevalidationMode::
+                                             RefreshBeforePublication &&
+                                 refresh_still_active) ||
+                                (mode != UdpCallAffinityRevalidationMode::
+                                             RefreshBeforePublication &&
+                                 still_unanswered)) {
+                                revalidated_flows.push_back(*live);
+                            }
+                        }
+                        return revalidated_flows;
+                    } catch (...) {
+                        return std::nullopt;
+                    }
+                };
+
+                for (std::size_t index = 0U;
+                     index < outcomes.size();
+                     ++index) {
+                    if (!generation_is_current()) {
+                        break;
+                    }
+                    auto& outcome = outcomes[index];
+                    if (UdpCallAffinityDetector::Clock::now() >=
+                        decision_deadline) {
+                        outcome.deadline_expired = true;
+                        continue;
+                    }
+
+                    {
+                        const auto before_publication = revalidate_decision(
+                            outcome.decision,
+                            outcome.decision.refresh_only
+                                ? UdpCallAffinityRevalidationMode::
+                                      RefreshBeforePublication
+                                : UdpCallAffinityRevalidationMode::
+                                      BeforePublication);
+                        if (!before_publication.has_value()) {
+                            if (!generation_is_current()) {
+                                break;
+                            }
+                            if (UdpCallAffinityDetector::Clock::now() >=
+                                decision_deadline) {
+                                outcome.deadline_expired = true;
+                            } else {
+                                outcome.revalidation_failed = true;
+                            }
+                            continue;
+                        }
+                        if (before_publication->empty()) {
+                            continue;
+                        }
+                    }
+
+                    if (!generation_is_current()) {
+                        break;
+                    }
+                    if (UdpCallAffinityDetector::Clock::now() >=
+                        decision_deadline) {
+                        outcome.deadline_expired = true;
+                        continue;
+                    }
+                    outcome.publication_attempted = true;
+                    try {
+                        outcome.installed = firewall_->add_udp_peer(
+                            work[index].set_name,
+                            outcome.decision.source,
+                            outcome.decision.destination_port,
+                            outcome.decision.destination);
+                    } catch (...) {
+                        outcome.installed = false;
+                    }
+                    if (!outcome.installed ||
+                        outcome.decision.refresh_only ||
+                        conntrack_unavailable) {
+                        continue;
+                    }
+                    if (!generation_is_current()) {
+                        break;
+                    }
+                    if (UdpCallAffinityDetector::Clock::now() >=
+                        decision_deadline) {
+                        outcome.deadline_expired = true;
+                        continue;
+                    }
+
+                    // Publishing the UDP peer tuple can immediately make a retried
+                    // tuple acquire the intended mark without replacing its
+                    // old direct-WAN NAT binding. Re-read the exact 5-tuple
+                    // without using mark as identity; only an empty or intended
+                    // owned mark, still unanswered and unassured, may be
+                    // retired with its current full-width exact mark selector.
+                    const auto after_publication =
+                        revalidate_decision(
+                            outcome.decision,
+                            UdpCallAffinityRevalidationMode::
+                                AfterPublication);
+                    if (!after_publication.has_value()) {
+                        if (!generation_is_current()) {
+                            break;
+                        }
+                        if (UdpCallAffinityDetector::Clock::now() >=
+                            decision_deadline) {
+                            outcome.deadline_expired = true;
+                        } else {
+                            outcome.revalidation_failed = true;
+                        }
+                        continue;
+                    }
+                    outcome.revalidated_flows = *after_publication;
+
+                    for (const auto& flow : outcome.revalidated_flows) {
+                        if (!generation_is_current()) {
+                            break;
+                        }
+                        if (UdpCallAffinityDetector::Clock::now() >=
+                            decision_deadline) {
+                            outcome.deadline_expired = true;
+                            break;
+                        }
+                        ConntrackCleanupResult result =
+                            ConntrackCleanupResult::Failed;
+                        try {
+                            result = conntrack_manager_.
+                                delete_exact_forwarded_flow(
+                                    flow,
+                                    owned_mask,
+                                    outcome.decision.fwmark);
+                        } catch (...) {
+                            ++outcome.failed_flows;
+                            continue;
+                        }
+                        if (result ==
+                            ConntrackCleanupResult::Succeeded) {
+                            ++outcome.retired_flows;
+                        } else if (result ==
+                                   ConntrackCleanupResult::CommandUnavailable) {
+                            conntrack_unavailable = true;
+                            ++outcome.failed_flows;
+                            break;
+                        } else {
+                            ++outcome.failed_flows;
+                        }
+                    }
+                }
+            }
+
+            const bool completion_posted = post_control_task(
+                [this,
+                 expected_runtime_generation,
+                 expected_coverage_generation,
+                 outcomes = std::move(outcomes),
+                 conntrack_unavailable]() mutable {
+                    udp_call_affinity_mutation_inflight_.store(
+                        false, std::memory_order_release);
+                    const bool generation_is_current =
+                        running_.load(std::memory_order_acquire) &&
+                        routing_runtime_active_ &&
+                        idle_stall_observer_enabled_.load(
+                            std::memory_order_acquire) &&
+                        runtime_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_runtime_generation &&
+                        idle_stall_coverage_generation_.load(
+                            std::memory_order_acquire) ==
+                            expected_coverage_generation;
+                    if (!generation_is_current) {
+                        return;
+                    }
+
+                    std::size_t installed = 0U;
+                    std::size_t refreshed = 0U;
+                    std::size_t retired = 0U;
+                    std::size_t pair_failures = 0U;
+                    std::size_t flow_failures = 0U;
+                    std::size_t deadline_expirations = 0U;
+                    std::size_t revalidation_skips = 0U;
+                    const auto completed_at =
+                        UdpCallAffinityDetector::Clock::now();
+                    for (const auto& outcome : outcomes) {
+                        retired += outcome.retired_flows;
+                        flow_failures += outcome.failed_flows;
+                        deadline_expirations +=
+                            outcome.deadline_expired ? 1U : 0U;
+                        revalidation_skips +=
+                            outcome.revalidation_failed ? 1U : 0U;
+                        if (outcome.installed) {
+                            // The expiring kernel pair is authoritative once
+                            // published. A best-effort exact retirement
+                            // failure must not erase the detector lease and
+                            // cause duplicate promotion attempts.
+                            udp_call_affinity_detector_.confirm_installed(
+                                outcome.decision, completed_at);
+                            if (outcome.decision.refresh_only) {
+                                ++refreshed;
+                            } else {
+                                ++installed;
+                            }
+                        } else {
+                            udp_call_affinity_detector_.release_failed(
+                                outcome.decision);
+                            if (outcome.publication_attempted) {
+                                ++pair_failures;
+                            }
+                        }
+                    }
+                    if (deadline_expirations != 0U ||
+                        revalidation_skips != 0U) {
+                        Logger::instance().trace(
+                            "udp_call_affinity_mutation_skip",
+                            "generation={} deadline_expired={} "
+                            "revalidation_failed={}",
+                            expected_runtime_generation,
+                            deadline_expirations,
+                            revalidation_skips);
+                    }
+
+                    if (installed != 0U) {
+                        Logger::instance().info(
+                            "Activated {} short-lived WhatsApp call peer "
+                            "pair(s) and retired {} revalidated direct-WAN "
+                            "flow(s)",
+                            installed,
+                            retired);
+                    } else if (pair_failures != 0U) {
+                        Logger::instance().info(
+                            "WhatsApp call peer affinity left {} pair "
+                            "publication(s) inactive; no unverified "
+                            "conntrack flow was removed",
+                            pair_failures);
+                    }
+                    if (refreshed != 0U) {
+                        Logger::instance().verbose(
+                            "Refreshed {} active WhatsApp call peer lease(s)",
+                            refreshed);
+                    }
+                    if (conntrack_unavailable) {
+                        Logger::instance().info(
+                            "WhatsApp call peer rules were activated, but "
+                            "exact stale-flow retirement is unavailable "
+                            "because conntrack could not be run");
+                    } else if (flow_failures != 0U) {
+                        Logger::instance().info(
+                            "WhatsApp call peer affinity left {} exact "
+                            "stale-flow retirement(s) incomplete; no broad "
+                            "cleanup was attempted",
+                            flow_failures);
+                    }
+                },
+                "udp-call-affinity-mutation-commit");
+            if (completion_posted) {
+                inflight_guard.release();
+            }
+        },
+        trace_id);
+
+    if (enqueued) {
+        dispatch_guard.release();
+    } else {
+        release_decisions();
     }
 }
 
@@ -2972,6 +3636,7 @@ void Daemon::commit_idle_stall_observation(
     ConntrackFlowObservation observation,
     std::vector<std::string> observed_local_interface_addresses,
     std::vector<std::string> destination_selectors,
+    std::vector<UdpCallAffinityTarget> call_affinity_targets,
     bool ipv6_enabled,
     bool coverage_complete,
     std::string failure_detail) {
@@ -3019,16 +3684,52 @@ void Daemon::commit_idle_stall_observation(
         coverage_complete &&
         !observation.destination_input_truncated &&
         observation.invalid_destination_selectors == 0U &&
+        observation.invalid_media_seed_destination_selectors == 0U &&
+        !observation.media_seed_destination_input_truncated &&
+        observation.invalid_media_guard_sources == 0U &&
         !observation.invalid_owned_mask;
     scan.flows.reserve(observation.flows.size());
     for (const auto& flow : observation.flows) {
         scan.flows.push_back(idle_stall_sample_from(flow));
     }
 
+    const auto observation_time = UdpCallAffinityDetector::Clock::now();
+    std::vector<UdpCallAffinityDecision> affinity_decisions;
+    try {
+        affinity_decisions = udp_call_affinity_detector_.observe(
+            scan.epoch,
+            scan.status,
+            owned_mask,
+            call_affinity_targets,
+            observation.media_seed_flows,
+            observation.source_wide_udp_flows,
+            observation_time);
+    } catch (const std::exception& error) {
+        udp_call_affinity_detector_.reset();
+        Logger::instance().info(
+            "UDP call affinity detector failed closed: {}",
+            error.what());
+    } catch (...) {
+        udp_call_affinity_detector_.reset();
+    }
+    const bool affinity_fast_followup =
+        udp_call_affinity_detector_.needs_fast_followup(
+            observation_time);
+    const bool affinity_discovery_enabled =
+        !call_affinity_targets.empty();
+
+    dispatch_udp_call_affinity_mutations(
+        expected_runtime_generation,
+        expected_coverage_generation,
+        owned_mask,
+        ipv6_enabled,
+        observation_time + UDP_CALL_AFFINITY_MUTATION_DEADLINE,
+        std::move(affinity_decisions));
+
     std::vector<IdleStallDeleteDecision> decisions;
     try {
         decisions = idle_stall_detector_.observe(
-            scan, IdleStallDetector::Clock::now());
+            scan, observation_time);
     } catch (const std::exception& error) {
         idle_stall_detector_.reset();
         Logger::instance().info(
@@ -3038,15 +3739,26 @@ void Daemon::commit_idle_stall_observation(
         idle_stall_detector_.reset();
     }
 
-    const bool relevant_flows_observed = !observation.flows.empty();
+    const bool relevant_flows_observed =
+        !observation.flows.empty() ||
+        !observation.source_wide_udp_flows.empty();
     if (decisions.empty()) {
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
-        schedule_idle_stall_observer_after(
-            relevant_flows_observed ||
-                    idle_stall_detector_.tracked_flow_count() != 0U
-                ? IDLE_STALL_ACTIVE_SCAN_INTERVAL
-                : IDLE_STALL_QUIET_SCAN_INTERVAL);
+        // A bounded/truncated snapshot cannot produce a safe decision. Back
+        // off instead of reparsing the same oversized conntrack table every
+        // five seconds on a small router.
+        const auto next_interval = !scan.status.trustworthy()
+            ? IDLE_STALL_QUIET_SCAN_INTERVAL
+            : (affinity_fast_followup
+                   ? UDP_CALL_AFFINITY_FAST_SCAN_INTERVAL
+                   : (relevant_flows_observed ||
+                              idle_stall_detector_.tracked_flow_count() != 0U
+                          ? IDLE_STALL_ACTIVE_SCAN_INTERVAL
+                          : (affinity_discovery_enabled
+                                 ? UDP_CALL_AFFINITY_DISCOVERY_SCAN_INTERVAL
+                                 : IDLE_STALL_QUIET_SCAN_INTERVAL)));
+        schedule_idle_stall_observer_after(next_interval);
         return;
     }
 
@@ -3155,7 +3867,8 @@ void Daemon::commit_idle_stall_observation(
                                     IDLE_STALL_MAX_FLOWS,
                                     IDLE_STALL_MAX_DESTINATION_CIDRS,
                                     IDLE_STALL_MAX_SNAPSHOT_BYTES,
-                                IDLE_STALL_MAX_SNAPSHOT_LINES},
+                                    IDLE_STALL_MAX_SNAPSHOT_LINES,
+                                    /*allow_foreign_mark_bits_for_media=*/true},
                                 media_guard_sources);
                         live_scope_changed =
                             current_observation.snapshot_unavailable ||

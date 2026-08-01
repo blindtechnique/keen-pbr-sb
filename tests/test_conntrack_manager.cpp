@@ -836,6 +836,152 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "ConntrackManager keeps WhatsApp media seeds separate from shared-mark lists") {
+    const std::string snapshot =
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.44 dst=31.13.66.10 sport=50000 dport=443 "
+        "packets=40 bytes=32000 "
+        "src=31.13.66.10 dst=192.168.1.44 sport=443 dport=50000 "
+        "packets=38 bytes=30000 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n"
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.44 dst=149.154.167.50 sport=50001 dport=443 "
+        "packets=50 bytes=40000 "
+        "src=149.154.167.50 dst=192.168.1.44 sport=443 dport=50001 "
+        "packets=48 bytes=38000 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n";
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18", "149.154.160.0/20"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{},
+        {},
+        {"31.13.64.0/18"});
+
+    REQUIRE(observation.flows.size() == 2U);
+    REQUIRE(observation.media_seed_flows.size() == 1U);
+    CHECK(observation.media_seed_flows.front().destination ==
+          "31.13.66.10");
+    CHECK(observation.media_seed_flows.front().mark == 458752U);
+}
+
+TEST_CASE(
+    "ConntrackManager media views retain foreign bits without broadening ordinary flows") {
+    const std::string snapshot =
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.44 dst=31.13.66.10 sport=50000 dport=443 "
+        "packets=40 bytes=32000 "
+        "src=31.13.66.10 dst=192.168.1.44 sport=443 dport=50000 "
+        "packets=38 bytes=30000 [ASSURED] [SEEN_REPLY] "
+        "mark=17235968 zone=0 use=2\n"
+        "ipv4 2 udp 17 20 "
+        "src=192.168.1.44 dst=64.176.66.4 sport=50001 dport=3478 "
+        "packets=2 bytes=192 [UNREPLIED] "
+        "src=64.176.66.4 dst=192.168.1.44 sport=3478 dport=50001 "
+        "packets=0 bytes=0 mark=16777216 zone=0 use=2\n";
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{
+            /*ipv6_enabled=*/true,
+            /*max_flows=*/8U,
+            /*max_destination_input_cidrs=*/8U,
+            /*max_snapshot_bytes=*/64U * 1024U,
+            /*max_snapshot_lines=*/8U,
+            /*allow_foreign_mark_bits_for_media=*/true},
+        {"192.168.1.44"},
+        {"31.13.64.0/18"});
+
+    CHECK(observation.flows.empty());
+    REQUIRE(observation.media_seed_flows.size() == 1U);
+    CHECK(observation.media_seed_flows.front().mark == 0x01070000U);
+    REQUIRE(observation.source_wide_udp_flows.size() == 2U);
+    CHECK(observation.source_wide_udp_flows[1].mark == 0x01000000U);
+}
+
+TEST_CASE(
+    "ConntrackManager charges overlapping observation views once against the flow cap") {
+    const std::string overlapping =
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.44 dst=31.13.66.10 sport=50000 dport=443 "
+        "packets=40 bytes=32000 "
+        "src=31.13.66.10 dst=192.168.1.44 sport=443 dport=50000 "
+        "packets=38 bytes=30000 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n";
+    const std::string distinct =
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.44 dst=64.176.66.4 sport=50001 dport=554 "
+        "packets=5 bytes=6000 "
+        "src=64.176.66.4 dst=192.168.1.44 sport=554 dport=50001 "
+        "packets=0 bytes=0 mark=0 zone=0 use=2\n";
+
+    const auto observe = [](const std::string& snapshot) {
+        ConntrackManager manager(
+            [](const std::vector<std::string>&) {
+                return ConntrackManager::CommandResult{0, {}};
+            },
+            [&snapshot](std::size_t) {
+                return std::optional<ConntrackManager::Snapshot>{
+                    ConntrackManager::Snapshot{snapshot, false}};
+            });
+        return manager.observe_forwarded_destination_flows(
+            {"31.13.64.0/18"},
+            {"192.168.1.1/24"},
+            0x00FF0000U,
+            ConntrackFlowObservationOptions{
+                /*ipv6_enabled=*/true,
+                /*max_flows=*/1U,
+                /*max_destination_input_cidrs=*/8U,
+                /*max_snapshot_bytes=*/64U * 1024U,
+                /*max_snapshot_lines=*/8U},
+            {"192.168.1.44"},
+            {"31.13.64.0/18"});
+    };
+
+    SUBCASE("one identity can populate every semantic view") {
+        const auto observation = observe(overlapping);
+        CHECK_FALSE(observation.flow_limit_reached);
+        REQUIRE(observation.flows.size() == 1U);
+        REQUIRE(observation.source_wide_udp_flows.size() == 1U);
+        REQUIRE(observation.media_seed_flows.size() == 1U);
+        CHECK(observation.flows.front().destination == "31.13.66.10");
+        CHECK(observation.source_wide_udp_flows.front().destination ==
+              "31.13.66.10");
+        CHECK(observation.media_seed_flows.front().destination ==
+              "31.13.66.10");
+    }
+
+    SUBCASE("the next distinct identity exhausts the cap") {
+        const auto observation = observe(overlapping + distinct);
+        CHECK(observation.flow_limit_reached);
+        REQUIRE(observation.flows.size() == 1U);
+        REQUIRE(observation.source_wide_udp_flows.size() == 1U);
+        REQUIRE(observation.media_seed_flows.size() == 1U);
+        CHECK(observation.source_wide_udp_flows.front().destination ==
+              "31.13.66.10");
+    }
+}
+
+TEST_CASE(
     "ConntrackManager observer guards arbitrary UDP media for selected sources") {
     std::size_t command_calls = 0U;
     std::size_t snapshot_calls = 0U;
@@ -921,6 +1067,54 @@ TEST_CASE(
     CHECK(observation.source_wide_udp_flows.empty());
     CHECK(snapshot_calls == 0U);
     CHECK(command_calls == 0U);
+}
+
+TEST_CASE(
+    "ConntrackManager derives media guard from one immutable seed snapshot") {
+    std::size_t snapshot_calls = 0U;
+    const std::string snapshot =
+        // Peer intentionally precedes the trusted seed: the bounded second
+        // parse must use the same bytes rather than reading conntrack again.
+        "ipv4 2 udp 17 29 "
+        "src=192.168.1.44 dst=64.176.66.4 sport=51000 dport=3478 "
+        "packets=3 bytes=3600 "
+        "src=64.176.66.4 dst=192.168.1.44 sport=3478 dport=51000 "
+        "packets=0 bytes=0 mark=0 zone=0 use=2\n"
+        "ipv4 2 udp 17 119 "
+        "src=192.168.1.44 dst=31.13.66.10 sport=50000 dport=443 "
+        "packets=12 bytes=9000 "
+        "src=31.13.66.10 dst=192.168.1.44 sport=443 dport=50000 "
+        "packets=8 bytes=7000 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n";
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot, &snapshot_calls](std::size_t) {
+            ++snapshot_calls;
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{},
+        {},
+        {"31.13.64.0/18"},
+        {0x00070000U});
+
+    CHECK(snapshot_calls == 1U);
+    REQUIRE(observation.media_seed_flows.size() == 1U);
+    REQUIRE(observation.source_wide_udp_flows.size() == 2U);
+    CHECK(std::any_of(
+        observation.source_wide_udp_flows.begin(),
+        observation.source_wide_udp_flows.end(),
+        [](const auto& flow) {
+            return flow.destination == "64.176.66.4" &&
+                   flow.destination_port == 3478U;
+        }));
 }
 
 TEST_CASE(
@@ -1055,6 +1249,43 @@ TEST_CASE(
     CHECK(manager.delete_exact_forwarded_flow(flow, 0x00FF0000U) ==
           ConntrackCleanupResult::Failed);
     CHECK(commands.size() == 1U);
+}
+
+TEST_CASE(
+    "ConntrackManager scoped affinity deletion accepts only the expected owned mark") {
+    std::vector<std::vector<std::string>> commands;
+    ConntrackManager manager(
+        [&commands](const std::vector<std::string>& args) {
+            commands.push_back(args);
+            return ConntrackManager::CommandResult{0, {}};
+        });
+    ConntrackExactForwardedFlow flow;
+    flow.family = ConntrackFlowFamily::Ipv4;
+    flow.protocol = ConntrackFlowProtocol::Udp;
+    flow.source = "192.168.1.44";
+    flow.destination = "64.176.66.4";
+    flow.source_port = 50001U;
+    flow.destination_port = 3478U;
+    flow.mark = 0x01070000U;
+
+    CHECK(manager.delete_exact_forwarded_flow(
+              flow, 0x00FF0000U, 0x00070000U) ==
+          ConntrackCleanupResult::Succeeded);
+    REQUIRE(commands.size() == 1U);
+    CHECK(commands.front().back() == "17235968/4294967295");
+
+    flow.mark = 0x01000000U;
+    CHECK(manager.delete_exact_forwarded_flow(
+              flow, 0x00FF0000U, 0x00070000U) ==
+          ConntrackCleanupResult::Succeeded);
+    REQUIRE(commands.size() == 2U);
+    CHECK(commands.back().back() == "16777216/4294967295");
+
+    flow.mark = 0x01080000U;
+    CHECK(manager.delete_exact_forwarded_flow(
+              flow, 0x00FF0000U, 0x00070000U) ==
+          ConntrackCleanupResult::Failed);
+    CHECK(commands.size() == 2U);
 }
 
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {

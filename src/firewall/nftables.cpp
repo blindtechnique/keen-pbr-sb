@@ -7,6 +7,9 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <arpa/inet.h>
+#include <array>
+#include <cctype>
 #include <limits>
 #include <optional>
 #include <set>
@@ -44,9 +47,27 @@ std::vector<L4Proto> expand_l4_protos(L4Proto proto) {
 
 bool needs_family_specific_rule(const FirewallRuleCriteria& criteria) {
     return criteria.dst_set_name.has_value()
+        || criteria.src_udp_peer_set_name.has_value()
         || criteria.dscp.has_value()
         || !criteria.src_addr.empty()
         || !criteria.dst_addr.empty();
+}
+
+bool exact_udp_peer_matches_family(const std::string& source,
+                                   std::uint16_t destination_port,
+                                   const std::string& destination,
+                                   int family) {
+    if ((family != AF_INET && family != AF_INET6) || destination_port == 0U ||
+        source.empty() ||
+        destination.empty() || source.find('/') != std::string::npos ||
+        destination.find('/') != std::string::npos) {
+        return false;
+    }
+    std::array<unsigned char, 16> source_bytes{};
+    std::array<unsigned char, 16> destination_bytes{};
+    return ::inet_pton(family, source.c_str(), source_bytes.data()) == 1 &&
+           ::inet_pton(
+               family, destination.c_str(), destination_bytes.data()) == 1;
 }
 
 nlohmann::json interface_name_rhs(
@@ -86,6 +107,42 @@ nlohmann::json cidr_list_to_nft_rhs(
         values.push_back(addr_to_rhs(address));
     }
     return {{"set", values}};
+}
+
+void append_named_set_match(nlohmann::json& expressions,
+                            const std::string& ip_proto,
+                            const FirewallRuleCriteria& criteria) {
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    if (criteria.src_udp_peer_set_name.has_value()) {
+        const nlohmann::json left = {{
+            "concat",
+            nlohmann::json::array({
+                {{"payload",
+                  {{"protocol", ip_proto}, {"field", "saddr"}}}},
+                {{"payload",
+                  {{"protocol", "udp"}, {"field", "dport"}}}},
+                {{"payload",
+                  {{"protocol", ip_proto}, {"field", "daddr"}}}},
+            })}};
+        expressions.push_back({{"match",
+                                {{"op", "=="},
+                                 {"left", left},
+                                 {"right", "@" +
+                                     *criteria.src_udp_peer_set_name}}}});
+    } else if (criteria.dst_set_name.has_value()) {
+        expressions.push_back({{"match",
+                                {{"op", "=="},
+                                 {"left",
+                                  {{"payload",
+                                    {{"protocol", ip_proto},
+                                     {"field", "daddr"}}}}},
+                                 {"right", "@" +
+                                     *criteria.dst_set_name}}}});
+    }
 }
 
 nlohmann::json source_address_match(
@@ -300,9 +357,11 @@ NftablesFirewall::MarkMergeMode NftablesFirewall::mark_merge_mode() {
 }
 
 void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    udp_peer_sets_.clear();
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
@@ -336,10 +395,110 @@ void NftablesFirewall::create_ipset(const std::string& set_name, int family,
         [&set_name](const PendingSet& pending) { return pending.name == set_name; });
     if (existing == pending_sets_.end()) {
         pending_sets_.push_back(std::move(ps));
-    } else if (existing->type != ps.type || existing->timeout != ps.timeout) {
+    } else if (existing->type != ps.type ||
+               existing->timeout != ps.timeout ||
+               existing->source_udp_peer != ps.source_udp_peer) {
         throw FirewallError("conflicting nft set declaration for " + set_name);
     }
     created_sets_[set_name] = family;
+}
+
+void NftablesFirewall::create_udp_peer_set(const std::string& set_name,
+                                            int family,
+                                            uint32_t timeout) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    if (timeout == 0U) {
+        throw FirewallError("UDP peer set requires a non-zero timeout");
+    }
+    if (family == AF_INET6 && !ipv6_enabled()) {
+        return;
+    }
+    if (family != AF_INET && family != AF_INET6) {
+        throw FirewallError("invalid UDP peer set family");
+    }
+
+    PendingSet ps;
+    ps.name = set_name;
+    ps.type = family == AF_INET6 ? "ipv6_addr" : "ipv4_addr";
+    ps.timeout = timeout;
+    ps.source_udp_peer = true;
+    const auto existing = std::find_if(
+        pending_sets_.begin(), pending_sets_.end(),
+        [&set_name](const PendingSet& pending) {
+            return pending.name == set_name;
+        });
+    if (existing == pending_sets_.end()) {
+        pending_sets_.push_back(std::move(ps));
+    } else if (existing->type != ps.type ||
+               existing->timeout != ps.timeout ||
+               !existing->source_udp_peer) {
+        throw FirewallError("conflicting nft set declaration for " + set_name);
+    }
+    created_sets_[set_name] = family;
+    udp_peer_sets_[set_name] = {family, timeout};
+}
+
+bool NftablesFirewall::add_udp_peer(const std::string& set_name,
+                                    const std::string& source,
+                                    std::uint16_t destination_port,
+                                    const std::string& destination) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    const auto set = published_udp_peer_classifiers_.find(set_name);
+    if (set == published_udp_peer_classifiers_.end() ||
+        !exact_udp_peer_matches_family(
+            source, destination_port, destination, set->second.family)) {
+        return false;
+    }
+
+    const bool already_present = safe_exec(
+            {"nft",
+             "get",
+             "element",
+             "inet",
+             std::string(TABLE_NAME),
+             set_name,
+             "{",
+             source,
+             ".",
+             std::to_string(destination_port),
+             ".",
+             destination,
+             "}"},
+            /*suppress_output=*/true) == 0;
+
+    const bool inserted = safe_exec_pipe_stdin(
+            {"nft", "-j", "-f", "-"},
+            build_udp_peer_update_document(
+                set_name, source, destination_port, destination,
+                already_present).dump(),
+            nullptr,
+            SafeExecFailureLog::Suppressed) == 0;
+    if (!inserted) {
+        return false;
+    }
+    if (udp_peer_classifier_is_published(set_name, set->second)) {
+        return true;
+    }
+
+    // Do not leave an unproved element waiting for an out-of-band chain
+    // restore. The daemon will keep the original conntrack flow when false is
+    // returned, so this rollback is strictly fail-closed.
+    (void)safe_exec(
+        {"nft",
+         "delete",
+         "element",
+         "inet",
+         std::string(TABLE_NAME),
+         set_name,
+         "{",
+         source,
+         ".",
+         std::to_string(destination_port),
+         ".",
+         destination,
+         "}"},
+        /*suppress_output=*/true);
+    return false;
 }
 
 void NftablesFirewall::append_rules_for_family(int family,
@@ -388,8 +547,16 @@ void NftablesFirewall::append_rules_for_family(int family,
 
 void NftablesFirewall::create_mark_rule(uint32_t fwmark,
                                         const FirewallRuleCriteria& criteria) {
-    if (criteria.dst_set_name.has_value()) {
-        auto it = created_sets_.find(*criteria.dst_set_name);
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    const auto& set_name = criteria.src_udp_peer_set_name.has_value()
+        ? criteria.src_udp_peer_set_name
+        : criteria.dst_set_name;
+    if (set_name.has_value()) {
+        auto it = created_sets_.find(*set_name);
         int family = (it != created_sets_.end()) ? it->second : AF_INET;
         append_rules_for_family(family, PendingRule::Mark, fwmark, criteria);
         return;
@@ -453,8 +620,16 @@ void NftablesFirewall::create_dns_redirect_rules() {
 }
 
 void NftablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
-    if (criteria.dst_set_name.has_value()) {
-        auto it = created_sets_.find(*criteria.dst_set_name);
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    const auto& set_name = criteria.src_udp_peer_set_name.has_value()
+        ? criteria.src_udp_peer_set_name
+        : criteria.dst_set_name;
+    if (set_name.has_value()) {
+        auto it = created_sets_.find(*set_name);
         int family = (it != created_sets_.end()) ? it->second : AF_INET;
         append_rules_for_family(family, PendingRule::Drop, 0, criteria);
         return;
@@ -468,8 +643,16 @@ void NftablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
 }
 
 void NftablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
-    if (criteria.dst_set_name.has_value()) {
-        auto it = created_sets_.find(*criteria.dst_set_name);
+    if (criteria.dst_set_name.has_value() &&
+        criteria.src_udp_peer_set_name.has_value()) {
+        throw FirewallError(
+            "a rule cannot match both destination and UDP peer sets");
+    }
+    const auto& set_name = criteria.src_udp_peer_set_name.has_value()
+        ? criteria.src_udp_peer_set_name
+        : criteria.dst_set_name;
+    if (set_name.has_value()) {
+        auto it = created_sets_.find(*set_name);
         int family = (it != created_sets_.end()) ? it->second : AF_INET;
         append_rules_for_family(family, PendingRule::Pass, 0, criteria);
         return;
@@ -526,18 +709,27 @@ nlohmann::json NftablesFirewall::build_table_json() {
 }
 
 nlohmann::json NftablesFirewall::build_set_json(const PendingSet& ps) {
-    nlohmann::json flags = nlohmann::json::array({"interval"});
+    nlohmann::json flags = ps.source_udp_peer
+        ? nlohmann::json::array()
+        : nlohmann::json::array({"interval"});
     if (ps.timeout > 0) {
         flags.push_back("timeout");
+    }
+    nlohmann::json type = ps.type;
+    if (ps.source_udp_peer) {
+        type = nlohmann::json::array(
+            {ps.type, "inet_service", ps.type});
     }
     nlohmann::json set = {
         {"family", "inet"},
         {"table", TABLE_NAME},
         {"name", ps.name},
-        {"type", ps.type},
-        {"flags", flags},
-        {"auto-merge", true}
+        {"type", type},
+        {"flags", flags}
     };
+    if (!ps.source_udp_peer) {
+        set["auto-merge"] = true;
+    }
     if (ps.timeout > 0) {
         set["timeout"] = ps.timeout;
     }
@@ -616,11 +808,17 @@ bool NftablesFirewall::is_managed_set_name(const std::string& set_name) {
            set_name.rfind("kpbr6s_", 0) == 0 ||
            set_name.rfind("kpbr4S_", 0) == 0 ||
            set_name.rfind("kpbr6S_", 0) == 0 ||
+           set_name.rfind("kpbr4m_", 0) == 0 ||
+           set_name.rfind("kpbr6m_", 0) == 0 ||
            is_dynamic_set_name(set_name);
 }
 
 std::string NftablesFirewall::set_schema_key(const PendingSet& set) {
-    return set.type + ":" + std::to_string(set.timeout);
+    return set.type +
+           (set.source_udp_peer
+                ? ".inet_service." + set.type
+                : "") +
+           ":" + std::to_string(set.timeout);
 }
 
 nlohmann::json NftablesFirewall::build_dns_nat_chain_json() {
@@ -739,7 +937,9 @@ nlohmann::json NftablesFirewall::build_source_egress_snat_rule_json(
 }
 
 nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
-    const FirewallGlobalPrefilter& prefilter) {
+    const FirewallGlobalPrefilter& prefilter,
+    const std::map<std::string, std::pair<int, uint32_t>>&
+        udp_peer_sets) {
     nlohmann::json commands = nlohmann::json::array();
 
     if (prefilter.has_bypass_inbound_interfaces()) {
@@ -771,6 +971,38 @@ nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
         prefilter.dns_redirect_bypass_source_selectors_v6);
     append_extended_inbound_guard_rules(
         commands, prefilter, DNS_NAT_CHAIN_NAME);
+
+    for (const auto& [set_name, declaration] : udp_peer_sets) {
+        const char* ip_proto = declaration.first == AF_INET6 ? "ip6" : "ip";
+        nlohmann::json expr = nlohmann::json::array();
+        expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"meta", {{"key", "l4proto"}}}}},
+            {"right", "udp"}
+        }}});
+        expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"payload", {{"protocol", "udp"}, {"field", "dport"}}}}},
+            {"right", 53}
+        }}});
+        expr.push_back({{"match", {
+            {"op", "=="},
+            {"left", {{"concat", nlohmann::json::array({
+                {{"payload", {{"protocol", ip_proto}, {"field", "saddr"}}}},
+                {{"payload", {{"protocol", "udp"}, {"field", "dport"}}}},
+                {{"payload", {{"protocol", ip_proto}, {"field", "daddr"}}}}
+            })}}},
+            {"right", "@" + set_name}
+        }}});
+        expr.push_back({{"counter", nullptr}});
+        expr.push_back({{"accept", nullptr}});
+        commands.push_back({{"add", {{"rule", {
+            {"family", "inet"},
+            {"table", TABLE_NAME},
+            {"chain", DNS_NAT_CHAIN_NAME},
+            {"expr", expr}
+        }}}}});
+    }
 
     nlohmann::json iface_match = nullptr;
     if (prefilter.has_inbound_interfaces()
@@ -1159,10 +1391,7 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(
     MarkMergeMode mark_merge_mode) {
     std::string ip_proto = (pr.family == AF_INET6) ? "ip6" : "ip";
     nlohmann::json expr = nlohmann::json::array();
-    if (pr.criteria.dst_set_name.has_value()) {
-        // set-membership match
-        expr.push_back({{"match", {{"op", "=="}, {"left", {{"payload", {{"protocol", ip_proto}, {"field", "daddr"}}}}}, {"right", "@" + *pr.criteria.dst_set_name}}}});
-    }
+    append_named_set_match(expr, ip_proto, pr.criteria);
     for (const auto& e : build_dscp_match_exprs(ip_proto, pr.criteria.dscp)) {
         expr.push_back(e);
     }
@@ -1171,10 +1400,18 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(
                                                  pr.criteria.negate_src_addr, pr.criteria.negate_dst_addr)) {
         expr.push_back(e);
     }
-    // Append proto/port match expressions
-    for (const auto& e : build_port_match_exprs(pr.criteria.proto, pr.criteria.src_port, pr.criteria.dst_port,
-                                                  pr.criteria.negate_src_port, pr.criteria.negate_dst_port)) {
-        expr.push_back(e);
+    // The exact UDP peer concat already contains an `udp dport` payload. nft
+    // canonicalizes away a separate meta-l4proto match, so emitting both would
+    // make the post-publication proof differ from the live JSON document.
+    if (!pr.criteria.src_udp_peer_set_name.has_value()) {
+        for (const auto& e : build_port_match_exprs(
+                 pr.criteria.proto,
+                 pr.criteria.src_port,
+                 pr.criteria.dst_port,
+                 pr.criteria.negate_src_port,
+                 pr.criteria.negate_dst_port)) {
+            expr.push_back(e);
+        }
     }
     expr.push_back({{"counter", nullptr}});
     if (pr.fwmark_mask == 0xFFFFFFFFu) {
@@ -1188,13 +1425,14 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(
             {"value", {{"|", nlohmann::json::array({
                 {{"&", nlohmann::json::array({
                     {{"meta", {{"key", "mark"}}}},
-                    static_cast<uint32_t>(~pr.fwmark_mask)
+                    static_cast<uint32_t>(~pr.fwmark_mask) | pr.fwmark
                 })}},
                 pr.fwmark
             })}}}
         }}});
     }
-    if (conntrack_mark_mask != 0) {
+    if (conntrack_mark_mask != 0 &&
+        pr.criteria.persist_conntrack_mark) {
         nlohmann::json saved_value;
         if (mark_merge_mode == MarkMergeMode::RegisterMerge) {
             saved_value = {{"|", nlohmann::json::array({
@@ -1233,9 +1471,7 @@ nlohmann::json NftablesFirewall::build_mark_rule_json(
 nlohmann::json NftablesFirewall::build_drop_rule_json(const PendingRule& pr) {
     std::string ip_proto = (pr.family == AF_INET6) ? "ip6" : "ip";
     nlohmann::json expr = nlohmann::json::array();
-    if (pr.criteria.dst_set_name.has_value()) {
-        expr.push_back({{"match", {{"op", "=="}, {"left", {{"payload", {{"protocol", ip_proto}, {"field", "daddr"}}}}}, {"right", "@" + *pr.criteria.dst_set_name}}}});
-    }
+    append_named_set_match(expr, ip_proto, pr.criteria);
     for (const auto& e : build_dscp_match_exprs(ip_proto, pr.criteria.dscp)) {
         expr.push_back(e);
     }
@@ -1262,9 +1498,7 @@ nlohmann::json NftablesFirewall::build_drop_rule_json(const PendingRule& pr) {
 nlohmann::json NftablesFirewall::build_pass_rule_json(const PendingRule& pr) {
     std::string ip_proto = (pr.family == AF_INET6) ? "ip6" : "ip";
     nlohmann::json expr = nlohmann::json::array();
-    if (pr.criteria.dst_set_name.has_value()) {
-        expr.push_back({{"match", {{"op", "=="}, {"left", {{"payload", {{"protocol", ip_proto}, {"field", "daddr"}}}}}, {"right", "@" + *pr.criteria.dst_set_name}}}});
-    }
+    append_named_set_match(expr, ip_proto, pr.criteria);
     for (const auto& e : build_dscp_match_exprs(ip_proto, pr.criteria.dscp)) {
         expr.push_back(e);
     }
@@ -1294,6 +1528,299 @@ nlohmann::json NftablesFirewall::build_elements_json(const std::string& set_name
         {"name", set_name},
         {"elem", elems}
     }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_udp_peer_update_document(
+    const std::string& set_name,
+    const std::string& source,
+    std::uint16_t destination_port,
+    const std::string& destination,
+    bool already_present) {
+    const nlohmann::json elements = nlohmann::json::array({
+        {{"concat", nlohmann::json::array(
+            {source, destination_port, destination})}},
+    });
+    nlohmann::json document;
+    auto& commands = document["nftables"];
+    commands = nlohmann::json::array({
+        {{"metainfo", {{"json_schema_version", 1}}}},
+    });
+    if (already_present) {
+        commands.push_back({{"delete", {{"element", {
+            {"family", "inet"},
+            {"table", TABLE_NAME},
+            {"name", set_name},
+            {"elem", elements},
+        }}}}});
+    }
+    commands.push_back(build_elements_json(set_name, elements));
+    return document;
+}
+
+std::optional<nlohmann::json> NftablesFirewall::normalize_rule_expr(
+    nlohmann::json expr) {
+    if (!expr.is_array()) {
+        return std::nullopt;
+    }
+    for (auto& expression : expr) {
+        if (!expression.is_object() || expression.size() != 1U) {
+            return std::nullopt;
+        }
+        if (expression.contains("counter")) {
+            // `nft list` expands a counter to packets/bytes while builders use
+            // null. Placement is contractual; volatile values are not.
+            const auto& counter = expression["counter"];
+            bool canonical = counter.is_null() || counter.is_object();
+            if (counter.is_object()) {
+                for (auto it = counter.begin(); it != counter.end(); ++it) {
+                    if (it.key() != "packets" && it.key() != "bytes") {
+                        canonical = false;
+                        break;
+                    }
+                }
+            }
+            if (!canonical) {
+                return std::nullopt;
+            }
+            expression["counter"] = nullptr;
+        } else if (expression.contains("masquerade")) {
+            // Different nft releases render a flag-less masquerade as either
+            // null or an empty object.
+            const auto& masquerade = expression["masquerade"];
+            if (!masquerade.is_null() &&
+                (!masquerade.is_object() || !masquerade.empty())) {
+                return std::nullopt;
+            }
+            expression["masquerade"] = nlohmann::json::object();
+        }
+    }
+    return expr;
+}
+
+bool NftablesFirewall::udp_peer_classifier_document_matches(
+    const std::string& document,
+    const std::string& set_name,
+    const PublishedUdpPeerClassifier& classifier) {
+    if (set_name.empty() || classifier.timeout == 0U ||
+        (classifier.family != AF_INET && classifier.family != AF_INET6)) {
+        return false;
+    }
+
+    nlohmann::json doc;
+    try {
+        doc = nlohmann::json::parse(document);
+    } catch (...) {
+        return false;
+    }
+    const auto nftables = doc.find("nftables");
+    if (nftables == doc.end() || !nftables->is_array()) {
+        return false;
+    }
+
+    const auto expected_expr = normalize_rule_expr(classifier.expected_expr);
+    if (!expected_expr.has_value()) {
+        return false;
+    }
+    const std::string address_type =
+        classifier.family == AF_INET6 ? "ipv6_addr" : "ipv4_addr";
+    const std::string concatenated_type =
+        address_type + ".inet_service." + address_type;
+    const std::string authority = "@" + set_name;
+    std::size_t table_count = 0U;
+    std::size_t chain_count = 0U;
+    std::size_t set_count = 0U;
+    std::size_t classifier_count = 0U;
+    bool chain_valid = false;
+    bool set_valid = false;
+
+    try {
+        for (const auto& item : *nftables) {
+            if (!item.is_object()) {
+                continue;
+            }
+            if (const auto table = item.find("table");
+                table != item.end() && table->is_object()) {
+                if (table->value("family", "") == "inet" &&
+                    table->value("name", "") == TABLE_NAME) {
+                    ++table_count;
+                }
+                continue;
+            }
+            if (const auto chain = item.find("chain");
+                chain != item.end() && chain->is_object()) {
+                if (chain->value("family", "") == "inet" &&
+                    chain->value("table", "") == TABLE_NAME &&
+                    chain->value("name", "") == CHAIN_NAME) {
+                    ++chain_count;
+                    chain_valid =
+                        chain_count == 1U &&
+                        chain->value("type", "") == "filter" &&
+                        chain->value("hook", "") == "prerouting" &&
+                        chain->value(
+                            "prio", std::numeric_limits<int>::min()) == -150 &&
+                        chain->value("policy", "") == "accept";
+                }
+                continue;
+            }
+            if (const auto set = item.find("set");
+                set != item.end() && set->is_object()) {
+                if (set->value("family", "") != "inet" ||
+                    set->value("table", "") != TABLE_NAME ||
+                    set->value("name", "") != set_name) {
+                    continue;
+                }
+                ++set_count;
+                bool type_valid = false;
+                const auto type = set->find("type");
+                if (type != set->end() && type->is_array() &&
+                    type->size() == 3U) {
+                    type_valid = (*type)[0] == address_type &&
+                                 (*type)[1] == "inet_service" &&
+                                 (*type)[2] == address_type;
+                } else if (type != set->end() && type->is_string()) {
+                    std::string value = type->get<std::string>();
+                    value.erase(
+                        std::remove_if(
+                            value.begin(), value.end(),
+                            [](unsigned char ch) {
+                                return std::isspace(ch) != 0;
+                            }),
+                        value.end());
+                    type_valid = value == concatenated_type;
+                }
+                std::set<std::string> flags;
+                const auto live_flags = set->find("flags");
+                if (live_flags != set->end() && live_flags->is_array()) {
+                    for (const auto& flag : *live_flags) {
+                        if (!flag.is_string()) {
+                            flags.clear();
+                            break;
+                        }
+                        flags.insert(flag.get<std::string>());
+                    }
+                }
+                set_valid =
+                    set_count == 1U && type_valid &&
+                    flags == std::set<std::string>{"timeout"} &&
+                    set->value("timeout", 0U) == classifier.timeout;
+                continue;
+            }
+            if (const auto rule = item.find("rule");
+                rule != item.end() && rule->is_object()) {
+                if (rule->value("family", "") != "inet" ||
+                    rule->value("table", "") != TABLE_NAME ||
+                    rule->value("chain", "") != CHAIN_NAME) {
+                    continue;
+                }
+                const auto expr = rule->find("expr");
+                if (expr == rule->end()) {
+                    continue;
+                }
+                const bool references_udp_peer_authority =
+                    expr->dump().find(authority) != std::string::npos;
+                if (!references_udp_peer_authority) {
+                    continue;
+                }
+                const auto normalized = normalize_rule_expr(*expr);
+                if (!normalized.has_value() ||
+                    *normalized != *expected_expr) {
+                    // A second or altered classifier for the same peer set is
+                    // drift even if the expected rule also survives.
+                    return false;
+                }
+                ++classifier_count;
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+
+    return table_count == 1U && chain_count == 1U && chain_valid &&
+           set_count == 1U && set_valid && classifier_count == 1U;
+}
+
+std::map<std::string, NftablesFirewall::PublishedUdpPeerClassifier>
+NftablesFirewall::build_pending_udp_peer_classifiers(
+    MarkMergeMode mark_merge_mode) const {
+    std::map<std::string, PublishedUdpPeerClassifier> published;
+    const auto is_exact_udp_peer_classifier = [](
+        const PendingRule& rule,
+        const std::string& set_name,
+        int family) {
+        const auto& criteria = rule.criteria;
+        return rule.action == PendingRule::Mark && !rule.output &&
+               rule.family == family &&
+               !criteria.dst_set_name.has_value() &&
+               criteria.src_udp_peer_set_name == set_name &&
+               !criteria.dscp.has_value() &&
+               criteria.proto == L4Proto::Udp &&
+               !criteria.persist_conntrack_mark &&
+               criteria.src_port.empty() && criteria.dst_port.empty() &&
+               criteria.src_addr.empty() && criteria.dst_addr.empty() &&
+               !criteria.negate_src_port && !criteria.negate_dst_port &&
+               !criteria.negate_src_addr && !criteria.negate_dst_addr;
+    };
+    const uint32_t conntrack_mark_mask =
+        global_prefilter_.restore_conntrack_mark
+        ? global_prefilter_.conntrack_mark_mask
+        : 0U;
+
+    for (const auto& set : pending_sets_) {
+        if (!set.source_udp_peer) {
+            continue;
+        }
+        const int family = set.type == "ipv6_addr" ? AF_INET6 : AF_INET;
+        if (set.type != "ipv4_addr" && set.type != "ipv6_addr") {
+            continue;
+        }
+        const PendingRule* classifier = nullptr;
+        bool ambiguous = false;
+        for (const auto& rule : pending_rules_) {
+            if (!is_exact_udp_peer_classifier(rule, set.name, family)) {
+                continue;
+            }
+            if (classifier != nullptr) {
+                ambiguous = true;
+                break;
+            }
+            classifier = &rule;
+        }
+        if (classifier == nullptr || ambiguous) {
+            continue;
+        }
+        const auto command = build_mark_rule_json(
+            *classifier, conntrack_mark_mask, mark_merge_mode);
+        const auto expected = normalize_rule_expr(
+            command["add"]["rule"]["expr"]);
+        if (!expected.has_value()) {
+            continue;
+        }
+        published.emplace(
+            set.name,
+            PublishedUdpPeerClassifier{family, set.timeout, *expected});
+    }
+    return published;
+}
+
+bool NftablesFirewall::udp_peer_classifier_is_published(
+    const std::string& set_name,
+    const PublishedUdpPeerClassifier& classifier) const noexcept {
+    try {
+        const auto result = safe_exec_capture(
+            {"nft", "-j", "-t", "list", "table", "inet",
+             std::string(TABLE_NAME)},
+            /*suppress_stderr=*/true,
+            /*max_bytes=*/256U * 1024U,
+            /*capture_stderr=*/false,
+            /*drain_after_limit=*/true,
+            SafeExecFailureLog::Suppressed);
+        return result.exit_code == 0 && !result.timed_out &&
+               !result.truncated &&
+               udp_peer_classifier_document_matches(
+                   result.stdout_output, set_name, classifier);
+    } catch (...) {
+        return false;
+    }
 }
 
 // --- apply / cleanup ---
@@ -1598,7 +2125,23 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
                 const std::string name = set.value("name", "");
                 if (!name.empty()) {
                     state.set_names.insert(name);
-                    const std::string type = set.value("type", "");
+                    std::string type;
+                    const auto type_it = set.find("type");
+                    if (type_it != set.end() && type_it->is_string()) {
+                        type = type_it->get<std::string>();
+                    } else if (type_it != set.end() &&
+                               type_it->is_array()) {
+                        for (const auto& component : *type_it) {
+                            if (!component.is_string()) {
+                                type.clear();
+                                break;
+                            }
+                            if (!type.empty()) {
+                                type += ".";
+                            }
+                            type += component.get<std::string>();
+                        }
+                    }
                     const uint32_t timeout = set.value("timeout", 0U);
                     state.set_schemas[name] = type + ":" + std::to_string(timeout);
                 }
@@ -1670,6 +2213,11 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
         const auto schema_it = live_state.set_schemas.find(ps.name);
         if (existing && schema_it != live_state.set_schemas.end() &&
             schema_it->second == set_schema_key(ps)) {
+            if (ps.source_udp_peer) {
+                // Affinity belongs to the current runtime generation and must
+                // never retain a mark after policy/outbound changes.
+                arr.push_back(build_flush_set_json(ps.name));
+            }
             continue;
         }
         if (existing) {
@@ -1697,7 +2245,8 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     if (dns_redirect_requested_) {
         arr.push_back(build_dns_nat_chain_json());
         for (const auto& cmd :
-             build_dns_redirect_rules_json(effective_prefilter)) {
+             build_dns_redirect_rules_json(
+                 effective_prefilter, udp_peer_sets_)) {
             arr.push_back(cmd);
         }
     }
@@ -1752,12 +2301,15 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 }
 
 void NftablesFirewall::apply(FirewallApplyMode mode) {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
     const bool snat_expected = router_origin_snat_requested_;
     const auto expected_snat_interfaces = snat_interfaces_;
     const auto expected_source_egress_snat_selectors =
         source_egress_snat_selectors_;
     const uint32_t expected_snat_fwmark_mask = fwmark_mask();
     const MarkMergeMode active_mark_merge_mode = mark_merge_mode();
+    const auto candidate_udp_peer_classifiers =
+        build_pending_udp_peer_classifiers(active_mark_merge_mode);
     if (!global_prefilter_.bypass_bridge_source_selectors_v4.empty() ||
         !global_prefilter_.bypass_bridge_source_selectors_v6.empty()) {
         Logger::instance().verbose(
@@ -1839,6 +2391,7 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     last_applied_source_egress_snat_selectors_ =
         expected_source_egress_snat_selectors;
     last_applied_snat_fwmark_mask_ = expected_snat_fwmark_mask;
+    published_udp_peer_classifiers_ = candidate_udp_peer_classifiers;
     // Clear pending buffers
     pending_sets_.clear();
     pending_elements_.clear();
@@ -1866,6 +2419,8 @@ void NftablesFirewall::cleanup_impl() {
     last_applied_source_egress_snat_selectors_.clear();
     last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
     created_sets_.clear();
+    udp_peer_sets_.clear();
+    published_udp_peer_classifiers_.clear();
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
@@ -1873,6 +2428,7 @@ void NftablesFirewall::cleanup_impl() {
 }
 
 void NftablesFirewall::cleanup() {
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
     cleanup_impl();
 }
 

@@ -29,7 +29,8 @@ std::vector<RuleState> apply_runtime_firewall(
         effective_internal_vpn_targets = nullptr,
     const std::vector<FirewallSourceEgressSnatSelector>*
         native_vpn_direct_egress_snat_selectors = nullptr,
-    AppliedListContentState* applied_list_content_state = nullptr);
+    AppliedListContentState* applied_list_content_state = nullptr,
+    bool udp_call_affinity_ipset_available = true);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
 // L2TP and IKEv1 servers. Their clients need this on the ordinary WAN path

@@ -5,6 +5,7 @@
 #include "../lists/list_entry_visitor.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../lists/list_streamer.hpp"
+#include "../runtime/udp_call_affinity.hpp"
 #include "../util/ipv6_support.hpp"
 #include "../util/network_routes.hpp"
 
@@ -130,7 +131,8 @@ std::vector<RuleState> apply_runtime_firewall(
         effective_internal_vpn_targets,
     const std::vector<FirewallSourceEgressSnatSelector>*
         native_vpn_direct_egress_snat_selectors,
-    AppliedListContentState* applied_list_content_state) {
+    AppliedListContentState* applied_list_content_state,
+    bool udp_call_affinity_ipset_available) {
     ListStreamer list_streamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
@@ -405,6 +407,34 @@ std::vector<RuleState> apply_runtime_firewall(
         firewall.create_source_egress_snat_rules(
             select_native_vpn_direct_egress_snat_selectors(
                 *effective_internal_vpn_targets));
+    }
+
+    // User rules and generated DNS mark/drop rules retain priority. The empty
+    // runtime overlay is deliberately the final packet-classification rule,
+    // then populated with exact source+destination pairs only after a bounded
+    // active-call observation.
+    const bool call_affinity_backend_available =
+        firewall.backend() != FirewallBackend::iptables ||
+        udp_call_affinity_ipset_available;
+    const auto call_affinity_targets = call_affinity_backend_available
+        ? active_udp_call_affinity_targets(
+              whatsapp_call_affinity_list_names(config),
+              rule_states,
+              firewall.fwmark_mask())
+        : std::vector<UdpCallAffinityTarget>{};
+    for (const auto& target : call_affinity_targets) {
+        // The trusted packaged Meta/WhatsApp companion currently contains
+        // authoritative IPv4 ranges only. Do not publish an inert IPv6
+        // classifier until the catalog can authorize IPv6 signalling seeds.
+        const std::string set_name =
+            firewall.media_affinity_set_name(target.list_name, AF_INET);
+        firewall.create_udp_peer_set(
+            set_name, AF_INET, kUdpCallAffinityPairTimeoutSeconds);
+        FirewallRuleCriteria affinity;
+        affinity.src_udp_peer_set_name = set_name;
+        affinity.proto = L4Proto::Udp;
+        affinity.persist_conntrack_mark = false;
+        firewall.create_mark_rule(target.fwmark, affinity);
     }
 
     firewall.apply(mode);

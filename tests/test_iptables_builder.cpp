@@ -143,11 +143,13 @@ public:
 
   static std::string build_ipset_create_line(const std::string &name,
                                              const std::string &family_str,
-                                             uint32_t timeout) {
+                                             uint32_t timeout,
+                                             bool source_udp_peer = false) {
     IptablesFirewall::PendingSet ps;
     ps.name = name;
     ps.family_str = family_str;
     ps.timeout = timeout;
+    ps.source_udp_peer = source_udp_peer;
     return IptablesFirewall::build_ipset_create_line(ps);
   }
 
@@ -165,6 +167,22 @@ public:
     expected.family_str = family;
     expected.timeout = timeout;
     return IptablesFirewall::dynamic_set_schema_compatible(xml, expected);
+  }
+
+  static bool classifier_rules_present(
+      const std::string& rules,
+      const std::string& set_name,
+      const std::vector<std::string>& expected_rules) {
+    return IptablesFirewall::classifier_rules_present(
+        rules, set_name, expected_rules);
+  }
+
+  static bool raw_conntrack_bypass_precedes_save(
+      const std::string& rules,
+      const std::string& set_name,
+      const std::string& expected_rule) {
+    return IptablesFirewall::raw_conntrack_bypass_precedes_save(
+        rules, set_name, expected_rule);
   }
 
   static std::string build_ipt_script(bool ipv6,
@@ -250,7 +268,9 @@ public:
       bool ipv6 = false,
       uint32_t fwmark_mask = 0xFFFFFFFFu,
       const std::vector<FirewallSourceEgressSnatSelector>
-          &source_egress_snat_selectors = {}) {
+          &source_egress_snat_selectors = {},
+      const std::map<std::string, std::pair<int, uint32_t>>
+          &udp_peer_sets = {}) {
     return IptablesFirewall::build_dns_nat_script(
         prefilter,
         dns_redirect,
@@ -258,7 +278,8 @@ public:
         snat_interfaces,
         ipv6,
         fwmark_mask,
-        source_egress_snat_selectors);
+        source_egress_snat_selectors,
+        udp_peer_sets);
   }
 
   static OwnedSnatState inspect_owned_snat_state(
@@ -357,9 +378,18 @@ public:
 
   static std::string build_raw_conntrack_script(
       bool replace_active,
-      const FirewallGlobalPrefilter& prefilter = {}) {
+      const FirewallGlobalPrefilter& prefilter = {},
+      bool include_transient_udp_peer = false) {
+    IptablesFirewall fw;
+    if (include_transient_udp_peer) {
+      FirewallRuleCriteria criteria;
+      criteria.src_udp_peer_set_name = "kpbr4m_meta_whatsapp_ip";
+      criteria.proto = L4Proto::Udp;
+      criteria.persist_conntrack_mark = false;
+      fw.create_mark_rule(0x00070000U, criteria);
+    }
     return IptablesFirewall::build_raw_conntrack_script(
-        replace_active, prefilter);
+        replace_active, prefilter, fw.pending_rules_);
   }
 
   static std::pair<std::string, std::string> generation_set_names() {
@@ -1817,6 +1847,123 @@ TEST_CASE("build_ipset_create_line: IPv6 without timeout") {
   CHECK(line == "create myset hash:net family inet6 -exist\n");
 }
 
+TEST_CASE("UDP peer ipset is exact and expiring") {
+  auto line = T::build_ipset_create_line(
+      "kpbr4m_meta_whatsapp_ip", "inet", 90, true);
+  CHECK(line ==
+        "create kpbr4m_meta_whatsapp_ip hash:ip,port,ip family inet timeout 90 -exist\n");
+}
+
+TEST_CASE("UDP peer mark is exact and does not persist conntrack state") {
+  FirewallRuleCriteria criteria;
+  criteria.src_udp_peer_set_name = "kpbr4m_meta_whatsapp_ip";
+  criteria.proto = L4Proto::Udp;
+  criteria.persist_conntrack_mark = false;
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000U;
+
+  const auto script = T::build_ipt_script_for_rule(
+      false,
+      T::RuleDesc::Mark,
+      0x00070000U,
+      criteria,
+      /*list_backed=*/false,
+      0x00FF0000U,
+      prefilter);
+  CHECK(script.find(
+      "--match-set kpbr4m_meta_whatsapp_ip src,dst,dst") !=
+      std::string::npos);
+  CHECK(script.find("-p udp") != std::string::npos);
+  CHECK(script.find("--set-xmark 0x70000/0xff0000") !=
+        std::string::npos);
+  CHECK(script.find("CONNMARK --save-mark") == std::string::npos);
+}
+
+TEST_CASE(
+    "UDP peer classifier verification accepts canonical iptables -S order") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  const std::vector<std::string> expected{
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j MARK --set-xmark 0x70000/0xff0000",
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j RETURN",
+  };
+  const std::string live =
+      "-N KeenPbrTable_A\n"
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j MARK --set-xmark 0x70000/0xff0000\n"
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j RETURN\n";
+
+  CHECK(T::classifier_rules_present(live, set_name, expected));
+}
+
+TEST_CASE("UDP peer classifier rejects duplicate or altered authority") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  const std::vector<std::string> expected{
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j MARK --set-xmark 0x70000/0xff0000",
+      "-A KeenPbrTable_A -m set --match-set " + set_name +
+          " src,dst,dst -p udp -j RETURN",
+  };
+  const std::string live =
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j MARK --set-xmark 0x70000/0xff0000\n"
+      "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j RETURN\n";
+
+  SUBCASE("exact duplicate") {
+    CHECK_FALSE(T::classifier_rules_present(
+        live + "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+            " src,dst,dst -j RETURN\n",
+        set_name,
+        expected));
+  }
+  SUBCASE("different mark") {
+    CHECK_FALSE(T::classifier_rules_present(
+        live + "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+            " src,dst,dst -j MARK --set-xmark 0x80000/0xff0000\n",
+        set_name,
+        expected));
+  }
+  SUBCASE("different dimensions") {
+    CHECK_FALSE(T::classifier_rules_present(
+        live + "-A KeenPbrTable_A -p udp -m set --match-set " + set_name +
+            " src,dst -j RETURN\n",
+        set_name,
+        expected));
+  }
+}
+
+TEST_CASE(
+    "RAW UDP peer proof requires exact bypass before conntrack save") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  const std::string expected =
+      "-A KeenPbrRawCt -p udp -m set --match-set " + set_name +
+      " src,dst,dst -j RETURN";
+  const std::string bypass =
+      "-A KeenPbrRawCt -m set --match-set " + set_name +
+      " src,dst,dst -p udp -j RETURN\n";
+  const std::string save =
+      "-A KeenPbrRawCt -m conntrack --ctdir ORIGINAL "
+      "-m mark ! --mark 0/0xff0000 -j CONNMARK --save-mark "
+      "--nfmask 0xff0000 --ctmask 0xff0000\n";
+
+  CHECK(T::raw_conntrack_bypass_precedes_save(
+      bypass + save, set_name, expected));
+  CHECK_FALSE(T::raw_conntrack_bypass_precedes_save(
+      save + bypass, set_name, expected));
+  CHECK_FALSE(T::raw_conntrack_bypass_precedes_save(
+      save, set_name, expected));
+  CHECK_FALSE(T::raw_conntrack_bypass_precedes_save(
+      bypass +
+          "-A KeenPbrRawCt -p udp -m set --match-set " + set_name +
+          " src,dst -j RETURN\n" + save,
+      set_name,
+      expected));
+}
+
 TEST_CASE("ipset reconcile: only dnsmasq names are dynamic") {
   CHECK(T::is_dynamic_set_name("kpbr4d_domains"));
   CHECK(T::is_dynamic_set_name("kpbr6d_domains"));
@@ -1990,6 +2137,24 @@ TEST_CASE("build_dns_nat_script: no inbound interfaces redirects from any interf
   auto s = T::build_dns_nat_script({});
   CHECK(s.find("-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n") != std::string::npos);
   CHECK(s.find("-i ") == std::string::npos);
+}
+
+TEST_CASE("build_dns_nat_script: exact UDP peer 53 bypass precedes DNS redirect") {
+  const std::map<std::string, std::pair<int, uint32_t>> peer_sets{
+      {"kpbr4_call_peer", {AF_INET, 90U}},
+      {"kpbr6_call_peer", {AF_INET6, 90U}}};
+  const auto v4 = T::build_dns_nat_script(
+      {}, true, false, {}, false, 0xFFFFFFFFu, {}, peer_sets);
+  const auto bypass = v4.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -m set --match-set "
+      "kpbr4_call_peer src,dst,dst -j RETURN\n");
+  const auto redirect = v4.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT --to-ports 53\n");
+  REQUIRE(bypass != std::string::npos);
+  REQUIRE(redirect != std::string::npos);
+  CHECK(bypass < redirect);
+  CHECK(v4.find("kpbr6_call_peer") == std::string::npos);
+  CHECK(v4.find("-p tcp --dport 53 -m set") == std::string::npos);
 }
 
 TEST_CASE("build_dns_nat_script: internal VPN bypass precedes every DNS redirect") {
@@ -2717,6 +2882,24 @@ TEST_CASE("raw conntrack companion bypasses internal VPN before restore") {
   REQUIRE(restore != std::string::npos);
   CHECK(bypass < restore);
 }
+
+TEST_CASE("raw conntrack companion does not persist expiring UDP peer marks") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.restore_conntrack_mark = true;
+  prefilter.conntrack_mark_mask = 0x00FF0000;
+
+  const auto script = T::build_raw_conntrack_script(
+      false, prefilter, /*include_transient_udp_peer=*/true);
+  const auto transient_return = script.find(
+      "-A KeenPbrRawCt -p udp -m set --match-set "
+      "kpbr4m_meta_whatsapp_ip src,dst,dst -j RETURN\n");
+  const auto save = script.find(
+      "CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000");
+  REQUIRE(transient_return != std::string::npos);
+  REQUIRE(save != std::string::npos);
+  CHECK(transient_return < save);
+}
+
 TEST_CASE("build_ipt_script: skip_marked_packets prefilter can be disabled") {
   FirewallGlobalPrefilter prefilter;
   prefilter.skip_established_or_dnat = true;

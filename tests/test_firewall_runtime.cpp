@@ -1,13 +1,88 @@
 #include <doctest/doctest.h>
 
 #include "../src/firewall/firewall_runtime.hpp"
+#include "../src/config/config.hpp"
+#include "../src/lists/list_entry_visitor.hpp"
 
+#include <algorithm>
+#include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
 using namespace keen_pbr3;
 
 namespace {
+
+class RecordingFirewall final : public Firewall {
+public:
+    explicit RecordingFirewall(
+        FirewallBackend backend = FirewallBackend::nftables)
+        : backend_(backend) {}
+
+    std::vector<std::string> events;
+
+    void create_ipset(const std::string&, int, uint32_t) override {}
+    void create_udp_peer_set(
+        const std::string&, int, uint32_t) override {
+        events.push_back("affinity-set");
+    }
+    bool add_udp_peer(
+        const std::string&,
+        const std::string&,
+        std::uint16_t,
+        const std::string&) override {
+        return true;
+    }
+    void create_mark_rule(
+        uint32_t, const FirewallRuleCriteria& criteria) override {
+        if (criteria.src_udp_peer_set_name.has_value()) {
+            events.push_back(criteria.persist_conntrack_mark
+                                 ? "affinity-mark-persistent"
+                                 : "affinity-mark");
+        } else if (!criteria.dst_port.empty()) {
+            events.push_back(
+                "mark:" + criteria.dst_port.to_config_string());
+        } else {
+            events.push_back("route-mark");
+        }
+    }
+    void create_output_mark_rule(
+        uint32_t, const FirewallRuleCriteria& criteria) override {
+        events.push_back(
+            "output-mark:" + criteria.dst_port.to_config_string());
+    }
+    void create_drop_rule(const FirewallRuleCriteria& criteria) override {
+        events.push_back(
+            "drop:" + criteria.dst_port.to_config_string());
+    }
+    void create_dns_redirect_rules() override {
+        events.push_back("dns-redirect");
+    }
+    void create_tunnel_snat_rules(
+        const std::vector<std::string>&) override {}
+    void create_source_egress_snat_rules(
+        const std::vector<FirewallSourceEgressSnatSelector>&) override {}
+    OwnedSnatState inspect_owned_snat_state() const override {
+        return OwnedSnatState::healthy;
+    }
+    void create_pass_rule(const FirewallRuleCriteria&) override {
+        events.push_back("pass");
+    }
+    std::unique_ptr<ListEntryVisitor> create_batch_loader(
+        const std::string&) override {
+        return std::make_unique<FunctionalVisitor>(
+            [](EntryType, std::string_view) {});
+    }
+    void apply(FirewallApplyMode) override { events.push_back("apply"); }
+    void cleanup() override {}
+    FirewallBackend backend() const override {
+        return backend_;
+    }
+
+private:
+    FirewallBackend backend_;
+};
 
 InternalVpnRuntimeTarget service_target(
     std::string stable_id,
@@ -24,6 +99,133 @@ InternalVpnRuntimeTarget service_target(
 }
 
 } // namespace
+
+TEST_CASE(
+    "WhatsApp call overlay remains behind user and generated DNS policy") {
+    const auto config = parse_config(R"json({
+      "daemon": {"ipv6_enabled": false},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "renamed_whatsapp": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["31.13.64.0/18"]
+        }
+      },
+      "route": {
+        "rules": [
+          {"list": ["renamed_whatsapp"], "outbound": "vpn"}
+        ]
+      },
+      "dns": {
+        "servers": [
+          {"tag": "vpn_dns", "address": "1.1.1.1:53", "detour": "vpn"}
+        ],
+        "client_dns_enforcement": {"enabled": true, "block_dot": true}
+      }
+    })json");
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    firewall.set_fwmark_mask(0x00FF0000U);
+
+    const auto rules = apply_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets);
+
+    REQUIRE(rules.size() == 1U);
+    const auto affinity = std::find(
+        firewall.events.begin(), firewall.events.end(), "affinity-mark");
+    const auto dns_mark = std::find(
+        firewall.events.begin(), firewall.events.end(), "mark:53");
+    const auto dot_drop = std::find(
+        firewall.events.begin(), firewall.events.end(), "drop:853");
+    REQUIRE(affinity != firewall.events.end());
+    REQUIRE(dns_mark != firewall.events.end());
+    REQUIRE(dot_drop != firewall.events.end());
+    CHECK(dns_mark < affinity);
+    CHECK(dot_drop < affinity);
+    CHECK(std::next(affinity) != firewall.events.end());
+    CHECK(*std::next(affinity) == "apply");
+}
+
+TEST_CASE(
+    "Missing optional tuple ipset disables only the iptables call overlay") {
+    const auto config = parse_config(R"json({
+      "daemon": {"ipv6_enabled": false},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "renamed_whatsapp": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["31.13.64.0/18"]
+        }
+      },
+      "route": {
+        "rules": [
+          {"list": ["renamed_whatsapp"], "outbound": "vpn"}
+        ]
+      }
+    })json");
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+
+    SUBCASE("iptables keeps ordinary routing and skips affinity") {
+        RecordingFirewall firewall{FirewallBackend::iptables};
+        firewall.set_fwmark_mask(0x00FF0000U);
+        const auto rules = apply_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::PreserveSets,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            /*udp_call_affinity_ipset_available=*/false);
+
+        REQUIRE(rules.size() == 1U);
+        CHECK(std::find(
+                  firewall.events.begin(),
+                  firewall.events.end(),
+                  "route-mark") != firewall.events.end());
+        CHECK(std::find(
+                  firewall.events.begin(),
+                  firewall.events.end(),
+                  "affinity-set") == firewall.events.end());
+        CHECK(firewall.events.back() == "apply");
+    }
+
+    SUBCASE("nftables does not depend on the ipset capability") {
+        RecordingFirewall firewall{FirewallBackend::nftables};
+        firewall.set_fwmark_mask(0x00FF0000U);
+        apply_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::PreserveSets,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            /*udp_call_affinity_ipset_available=*/false);
+
+        CHECK(std::find(
+                  firewall.events.begin(),
+                  firewall.events.end(),
+                  "affinity-set") != firewall.events.end());
+    }
+}
 
 TEST_CASE(
     "Native VPN direct egress covers SSTP L2TP and IKEv1 in both modes") {

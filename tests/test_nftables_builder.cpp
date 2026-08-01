@@ -48,12 +48,35 @@ public:
 
   static nlohmann::json build_set_json(const std::string &name,
                                        const std::string &type,
-                                       uint32_t timeout) {
+                                       uint32_t timeout,
+                                       bool source_udp_peer = false) {
     NftablesFirewall::PendingSet ps;
     ps.name = name;
     ps.type = type;
     ps.timeout = timeout;
+    ps.source_udp_peer = source_udp_peer;
     return NftablesFirewall::build_set_json(ps);
+  }
+
+  static nlohmann::json build_udp_peer_update_document(
+      const std::string &name, const std::string &source,
+      std::uint16_t destination_port,
+      const std::string &destination, bool already_present) {
+    return NftablesFirewall::build_udp_peer_update_document(
+        name, source, destination_port, destination, already_present);
+  }
+
+  static bool udp_peer_classifier_document_matches(
+      const nlohmann::json& document,
+      const std::string& set_name,
+      int family,
+      uint32_t timeout,
+      const nlohmann::json& expected_expr) {
+    return NftablesFirewall::udp_peer_classifier_document_matches(
+        document.dump(),
+        set_name,
+        NftablesFirewall::PublishedUdpPeerClassifier{
+            family, timeout, expected_expr});
   }
 
   static nlohmann::json build_chain_json() {
@@ -159,8 +182,11 @@ public:
   }
 
   static nlohmann::json build_dns_redirect_rules_json(
-      const FirewallGlobalPrefilter& prefilter) {
-    return NftablesFirewall::build_dns_redirect_rules_json(prefilter);
+      const FirewallGlobalPrefilter& prefilter,
+      const std::map<std::string, std::pair<int, uint32_t>>&
+          udp_peer_sets = {}) {
+    return NftablesFirewall::build_dns_redirect_rules_json(
+        prefilter, udp_peer_sets);
   }
 
   static nlohmann::json build_interface_snat_rule_json(
@@ -512,6 +538,134 @@ TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") 
   CHECK(cmds[4]["add"]["rule"]["expr"][0]["match"]["left"]["meta"]["key"] == "mark");
 }
 
+TEST_CASE("nft UDP peer set is exact and expiring") {
+  const auto command = T::build_set_json(
+      "kpbr4m_meta_whatsapp_ip", "ipv4_addr", 90, true);
+  const auto& set = command.at("add").at("set");
+  CHECK(set.at("type") ==
+        nlohmann::json::array(
+            {"ipv4_addr", "inet_service", "ipv4_addr"}));
+  CHECK(set.at("flags") == nlohmann::json::array({"timeout"}));
+  CHECK(set.at("timeout") == 90U);
+  CHECK_FALSE(set.contains("auto-merge"));
+}
+
+TEST_CASE("nft UDP peer mark uses source port destination tuple") {
+  FirewallRuleCriteria criteria;
+  criteria.src_udp_peer_set_name = "kpbr4m_meta_whatsapp_ip";
+  criteria.proto = L4Proto::Udp;
+  criteria.persist_conntrack_mark = false;
+  const auto command = T::build_mark_rule_json(
+      "", AF_INET, 0x00070000U, criteria,
+      0x00FF0000U, /*direct=*/true, 0x00FF0000U);
+  const auto serialized = command.dump();
+  CHECK(serialized.find("\"concat\"") != std::string::npos);
+  CHECK(serialized.find("\"saddr\"") != std::string::npos);
+  CHECK(serialized.find("\"daddr\"") != std::string::npos);
+  CHECK(serialized.find("\"dport\"") != std::string::npos);
+  CHECK(serialized.find("@kpbr4m_meta_whatsapp_ip") !=
+        std::string::npos);
+  CHECK(serialized.find("\"udp\"") != std::string::npos);
+  CHECK(serialized.find("\"ct\"") == std::string::npos);
+  CHECK(command["add"]["rule"]["expr"][2]["mangle"]["value"]["|"]
+               [0]["&"][1] == 0xFF07FFFFU);
+  for (const auto& expression : command["add"]["rule"]["expr"]) {
+    if (expression.contains("match") &&
+        expression["match"]["left"].contains("meta")) {
+      CHECK(expression["match"]["left"]["meta"]["key"] !=
+            "l4proto");
+    }
+  }
+}
+
+TEST_CASE("nft UDP peer refresh is one atomic transaction") {
+  const auto document = T::build_udp_peer_update_document(
+      "kpbr4m_meta_whatsapp_ip",
+      "192.168.1.44",
+      3478U,
+      "64.176.66.4",
+      /*already_present=*/true);
+  const auto& commands = document.at("nftables");
+  REQUIRE(commands.size() == 3U);
+  CHECK(commands[1].contains("delete"));
+  CHECK(commands[2].contains("add"));
+  const auto expected = nlohmann::json::array({
+      {{"concat", nlohmann::json::array(
+          {"192.168.1.44", 3478U, "64.176.66.4"})}},
+  });
+  CHECK(commands[1]["delete"]["element"]["elem"] == expected);
+  CHECK(commands[2]["add"]["element"]["elem"] == expected);
+}
+
+TEST_CASE("nft UDP peer classifier proof matches the live table contract") {
+  const std::string set_name = "kpbr4m_meta_whatsapp_ip";
+  FirewallRuleCriteria criteria;
+  criteria.src_udp_peer_set_name = set_name;
+  criteria.proto = L4Proto::Udp;
+  criteria.persist_conntrack_mark = false;
+  const auto command = T::build_mark_rule_json(
+      "", AF_INET, 0x00070000U, criteria,
+      0x00FF0000U, /*direct=*/true, 0x00FF0000U);
+  const auto expected_expr = command["add"]["rule"]["expr"];
+  auto live_expr = expected_expr;
+  for (auto& expression : live_expr) {
+    if (expression.contains("counter")) {
+      expression["counter"] = {
+          {"packets", 12U}, {"bytes", 4096U}};
+    }
+  }
+
+  const auto live_document = [&](nlohmann::json expr) {
+    return nlohmann::json{{"nftables", nlohmann::json::array({
+        {{"metainfo", {{"json_schema_version", 1}}}},
+        {{"table", {
+            {"family", "inet"}, {"name", "KeenPbrTable"}}}},
+        {{"chain", {
+            {"family", "inet"}, {"table", "KeenPbrTable"},
+            {"name", "prerouting"}, {"type", "filter"},
+            {"hook", "prerouting"}, {"prio", -150},
+            {"policy", "accept"}}}},
+        {{"set", {
+            {"family", "inet"}, {"table", "KeenPbrTable"},
+            {"name", set_name},
+            {"type", nlohmann::json::array(
+                {"ipv4_addr", "inet_service", "ipv4_addr"})},
+            {"flags", nlohmann::json::array({"timeout"})},
+            {"timeout", 90U}}}},
+        {{"rule", {
+            {"family", "inet"}, {"table", "KeenPbrTable"},
+            {"chain", "prerouting"}, {"expr", std::move(expr)}}}},
+    })}};
+  };
+
+  const auto valid = live_document(live_expr);
+  CHECK(T::udp_peer_classifier_document_matches(
+      valid, set_name, AF_INET, 90U, expected_expr));
+
+  SUBCASE("wrong timeout") {
+    auto drift = valid;
+    drift["nftables"][3]["set"]["timeout"] = 30U;
+    CHECK_FALSE(T::udp_peer_classifier_document_matches(
+        drift, set_name, AF_INET, 90U, expected_expr));
+  }
+  SUBCASE("altered classifier") {
+    auto drift_expr = live_expr;
+    drift_expr.back() = {{"drop", nullptr}};
+    CHECK_FALSE(T::udp_peer_classifier_document_matches(
+        live_document(std::move(drift_expr)),
+        set_name,
+        AF_INET,
+        90U,
+        expected_expr));
+  }
+  SUBCASE("duplicate authority") {
+    auto drift = valid;
+    drift["nftables"].push_back(drift["nftables"].back());
+    CHECK_FALSE(T::udp_peer_classifier_document_matches(
+        drift, set_name, AF_INET, 90U, expected_expr));
+  }
+}
+
 TEST_CASE("nft tunnel SNAT only masquerades keen-pbr-marked traffic") {
   const auto command =
       T::build_interface_snat_rule_json("nwg2", 0x00FF0000u);
@@ -806,6 +960,29 @@ TEST_CASE("nft DNS redirect bypasses internal VPN interfaces first") {
   for (size_t i = 1; i < commands.size(); ++i) {
     const auto& expr = commands[i]["add"]["rule"]["expr"];
     CHECK(expr.back().contains("redirect"));
+  }
+}
+
+TEST_CASE("nft exact UDP peer 53 bypasses DNS redirect") {
+  const std::map<std::string, std::pair<int, uint32_t>> peer_sets{
+      {"kpbr4_call_peer", {AF_INET, 90U}},
+      {"kpbr6_call_peer", {AF_INET6, 90U}}};
+  const auto commands =
+      T::build_dns_redirect_rules_json({}, peer_sets);
+  REQUIRE(commands.is_array());
+  REQUIRE(commands.size() == 4U);
+
+  for (std::size_t index = 0U; index < 2U; ++index) {
+    const auto& expr = commands[index]["add"]["rule"]["expr"];
+    const auto serialized = expr.dump();
+    CHECK(serialized.find("@kpbr") != std::string::npos);
+    CHECK(serialized.find("\"dport\"") != std::string::npos);
+    CHECK(serialized.find("53") != std::string::npos);
+    CHECK(expr.back().contains("accept"));
+  }
+  for (std::size_t index = 2U; index < commands.size(); ++index) {
+    CHECK(commands[index]["add"]["rule"]["expr"].back().contains(
+        "redirect"));
   }
 }
 
@@ -1235,7 +1412,7 @@ TEST_CASE("build_mark_rule_json: masked mark rule preserves non-fwmark bits") {
                                    0x00FF0000);
   const auto& value = j["add"]["rule"]["expr"][2]["mangle"]["value"];
   CHECK(value["|"][0]["&"][0]["meta"]["key"] == "mark");
-  CHECK(value["|"][0]["&"][1] == 0xFF00FFFFu);
+  CHECK(value["|"][0]["&"][1] == 0xFF01FFFFu);
   CHECK(value["|"][1] == 0x00010000u);
 }
 

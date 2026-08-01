@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
@@ -27,6 +28,13 @@ public:
     // Buffer an nftables named set (ipv4_addr/ipv6_addr, optional timeout).
     void create_ipset(const std::string& set_name, int family,
                       uint32_t timeout = 0) override;
+    void create_udp_peer_set(const std::string& set_name,
+                             int family,
+                             uint32_t timeout) override;
+    bool add_udp_peer(const std::string& set_name,
+                      const std::string& source,
+                      std::uint16_t destination_port,
+                      const std::string& destination) override;
 
     // Buffer a meta mark set rule that matches the given criteria.
     void create_mark_rule(uint32_t fwmark,
@@ -101,6 +109,7 @@ private:
         std::string name;
         std::string type;   // "ipv4_addr" or "ipv6_addr"
         uint32_t timeout;   // entry TTL in seconds (0 = no timeout)
+        bool source_udp_peer{false};
     };
 
     // Describes a rule to be added to the prerouting chain.
@@ -111,6 +120,12 @@ private:
         uint32_t fwmark_mask{0xFFFFFFFFu}; // only for Mark
         FirewallRuleCriteria criteria; // optional packet match criteria
         bool output{false}; // true → output chain (router-originated traffic)
+    };
+
+    struct PublishedUdpPeerClassifier {
+        int family{AF_INET};
+        uint32_t timeout{0};
+        nlohmann::json expected_expr;
     };
 
     // Build the nftables JSON object for creating the inet KeenPbrTable table.
@@ -134,7 +149,9 @@ private:
     static nlohmann::json build_dns_nat_chain_json();
     static nlohmann::json build_delete_dns_nat_chain_json();
     static nlohmann::json build_dns_redirect_rules_json(
-        const FirewallGlobalPrefilter& prefilter);
+        const FirewallGlobalPrefilter& prefilter,
+        const std::map<std::string, std::pair<int, uint32_t>>&
+            udp_peer_sets = {});
     static nlohmann::json build_snat_chain_json();
     static nlohmann::json build_delete_snat_chain_json();
     static nlohmann::json build_snat_rule_json();
@@ -192,6 +209,23 @@ private:
     // Build the JSON element-add object for bulk-loading elems into a named set.
     static nlohmann::json build_elements_json(const std::string& set_name,
                                               const nlohmann::json& elems);
+    static nlohmann::json build_udp_peer_update_document(
+        const std::string& set_name,
+        const std::string& source,
+        std::uint16_t destination_port,
+        const std::string& destination,
+        bool already_present);
+    static std::optional<nlohmann::json> normalize_rule_expr(
+        nlohmann::json expr);
+    static bool udp_peer_classifier_document_matches(
+        const std::string& document,
+        const std::string& set_name,
+        const PublishedUdpPeerClassifier& classifier);
+    std::map<std::string, PublishedUdpPeerClassifier>
+    build_pending_udp_peer_classifiers(MarkMergeMode mark_merge_mode) const;
+    bool udp_peer_classifier_is_published(
+        const std::string& set_name,
+        const PublishedUdpPeerClassifier& classifier) const noexcept;
     void append_rules_for_family(int family,
                                  PendingRule::Action action,
                                  uint32_t fwmark,
@@ -213,6 +247,10 @@ private:
 
     // Track created sets for family lookup: set_name -> family (AF_INET/AF_INET6)
     std::map<std::string, int> created_sets_;
+    std::map<std::string, std::pair<int, uint32_t>> udp_peer_sets_;
+    std::map<std::string, PublishedUdpPeerClassifier>
+        published_udp_peer_classifiers_;
+    mutable std::mutex pair_state_mutex_;
 
     // True once the inet KeenPbrTable table has been created via apply().
     bool table_created_ = false;

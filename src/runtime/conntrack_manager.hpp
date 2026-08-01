@@ -180,20 +180,29 @@ struct ConntrackFlowObservationOptions {
     std::size_t max_destination_input_cidrs{1024};
     std::size_t max_snapshot_bytes{2U * 1024U * 1024U};
     std::size_t max_snapshot_lines{8192};
+    // Call-affinity media views may retain unrelated mark bits owned by QoS
+    // or another service. The ordinary destination-flow view remains strict.
+    bool allow_foreign_mark_bits_for_media{false};
 };
 
 struct ConntrackFlowObservation {
     std::vector<ConntrackExactForwardedFlow> flows;
+    // Destination-selected subset belonging specifically to the caller's
+    // trusted media-seed coverage. Keeping this separate prevents an outbound
+    // mark shared by unrelated lists from being mistaken for a call seed.
+    std::vector<ConntrackExactForwardedFlow> media_seed_flows;
     // Read-only, source-scoped UDP media guard. These flows may target an
     // arbitrary peer outside destination_cidrs and are never deletion
     // candidates; callers use them only to protect a same-source signalling
     // flow while a P2P call is active.
     std::vector<ConntrackExactForwardedFlow> source_wide_udp_flows;
     std::size_t invalid_destination_selectors{0};
+    std::size_t invalid_media_seed_destination_selectors{0};
     std::size_t invalid_media_guard_sources{0};
     std::size_t skipped_destination_selectors{0};
     bool invalid_owned_mask{false};
     bool destination_input_truncated{false};
+    bool media_seed_destination_input_truncated{false};
     bool snapshot_unavailable{false};
     bool snapshot_truncated{false};
     bool line_limit_reached{false};
@@ -297,24 +306,32 @@ public:
         ConntrackForwardedFlowCleanupOptions options = {}) const;
 
     // Observe only exact forwarded TCP/UDP flows whose destination belongs to
-    // one of the validated, non-/0 selectors. Eligible marks are either zero
-    // or entirely inside owned_mask; foreign-only and mixed foreign/owned
-    // marks are excluded. Local-address inventory is authoritative and any
-    // missing/invalid entry fails closed before reading conntrack.
+    // one of the validated, non-/0 selectors. The ordinary `flows` view keeps
+    // only zero or entirely owned marks. A caller may opt the separate media
+    // seed/source views into retaining foreign mark bits; this never broadens
+    // the ordinary deletion-candidate view. Local-address inventory is
+    // authoritative and any missing/invalid entry fails closed before reading
+    // conntrack.
     ConntrackFlowObservation observe_forwarded_destination_flows(
         const std::vector<std::string>& destination_cidrs,
         const std::vector<std::string>& local_interface_addresses,
         uint32_t owned_mask,
         ConntrackFlowObservationOptions options = {},
-        const std::vector<std::string>& media_guard_source_addresses = {})
+        const std::vector<std::string>& media_guard_source_addresses = {},
+        const std::vector<std::string>& media_seed_destination_cidrs = {},
+        const std::set<uint32_t>& media_seed_owned_marks = {})
         const;
 
     // Delete one previously observed flow by its full original 5-tuple and
-    // full-width mark. The tuple is revalidated and marks with foreign bits
-    // are rejected; this method never issues a CIDR selector or global flush.
+    // full-width mark. By default marks with foreign bits are rejected. A
+    // caller that supplies expected_owned_mark may delete a tuple whose owned
+    // component is either zero or exactly that mark while preserving the full
+    // live mark in the conntrack selector. This method never issues a CIDR
+    // selector or global flush.
     ConntrackCleanupResult delete_exact_forwarded_flow(
         const ConntrackExactForwardedFlow& flow,
-        uint32_t owned_mask) const;
+        uint32_t owned_mask,
+        std::optional<std::uint32_t> expected_owned_mark = std::nullopt) const;
 
 private:
     ConntrackPolicy active_;
