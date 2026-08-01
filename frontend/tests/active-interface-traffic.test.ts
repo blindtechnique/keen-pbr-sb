@@ -9,9 +9,53 @@ import {
   activeTrafficStatusTranslationKey,
   collectActiveTrafficPaths,
   interfaceConnectionState,
+  isTrafficChartExpanded,
+  parseTrafficChartPreferences,
+  serializeTrafficChartPreferences,
+  toggleTrafficChartPreference,
 } from "@/components/overview/active-interface-traffic-model"
 
 describe("dashboard active interface traffic", () => {
+  test("opens only the first two charts until the user stores a choice", () => {
+    const preferences = parseTrafficChartPreferences(null)
+
+    expect(isTrafficChartExpanded(preferences, "nwg1", 0)).toBe(true)
+    expect(isTrafficChartExpanded(preferences, "vless1", 1)).toBe(true)
+    expect(isTrafficChartExpanded(preferences, "hys1", 2)).toBe(false)
+  })
+
+  test("persists every visible chart and restores by stable interface name", () => {
+    const initial = parseTrafficChartPreferences(null)
+    const changed = toggleTrafficChartPreference(
+      initial,
+      ["nwg1", "vless1", "hys1"],
+      "nwg1"
+    )
+    const restored = parseTrafficChartPreferences(
+      serializeTrafficChartPreferences(changed)
+    )
+
+    expect(isTrafficChartExpanded(restored, "nwg1", 2)).toBe(false)
+    expect(isTrafficChartExpanded(restored, "vless1", 0)).toBe(true)
+    expect(isTrafficChartExpanded(restored, "hys1", 1)).toBe(false)
+    expect(isTrafficChartExpanded(restored, "new-interface", 0)).toBe(false)
+  })
+
+  test("ignores damaged or incompatible browser preferences", () => {
+    expect(
+      isTrafficChartExpanded(parseTrafficChartPreferences("not-json"), "a", 0)
+    ).toBe(true)
+    expect(
+      isTrafficChartExpanded(
+        parseTrafficChartPreferences(
+          JSON.stringify({ version: 2, states: { a: false } })
+        ),
+        "a",
+        0
+      )
+    ).toBe(true)
+  })
+
   test("uses the dashboard namespace for member status labels", () => {
     expect(activeTrafficStatusTranslationKey("active")).toBe(
       "overview.outbounds.member.active"

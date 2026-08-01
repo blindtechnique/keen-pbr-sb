@@ -427,6 +427,35 @@ TEST_CASE("global list refresh chain accepts ordered routable fallbacks and roun
           ListRefreshDetourMode::INHERIT);
 }
 
+TEST_CASE("list refresh parse errors preserve their field paths") {
+    const auto wrong_global_type = parse_issues(R"({
+        "list_refresh":"proxy"
+    })");
+    CHECK(find_issue(wrong_global_type, "list_refresh") != nullptr);
+
+    const auto wrong_mode_type = parse_issues(R"({
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "refresh_detour_mode":true
+        }}
+    })");
+    CHECK(find_issue(
+              wrong_mode_type,
+              "lists.remote.refresh_detour_mode") != nullptr);
+
+    const auto unknown_mode = parse_issues(R"({
+        "lists":{"remote":{
+            "url":"https://example.test/list.txt",
+            "refresh_detour_mode":"automatic"
+        }}
+    })");
+    const auto* issue = find_issue(
+        unknown_mode,
+        "lists.remote.refresh_detour_mode");
+    REQUIRE(issue != nullptr);
+    CHECK(issue->message.find("inherit, override") != std::string::npos);
+}
+
 TEST_CASE("legacy per-list refresh chain remains an override when global routing is configured") {
     const auto config = parse_test_config(R"({
         "outbounds":[

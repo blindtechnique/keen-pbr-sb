@@ -73,3 +73,29 @@ describe("global list refresh route outbound cleanup", () => {
     ).toEqual({ detour: "primary" })
   })
 })
+
+describe("per-list refresh route outbound cleanup", () => {
+  test("falls back to the global chain when the override primary is deleted", () => {
+    const config: ConfigObject = {
+      outbounds: [
+        { type: "interface", tag: "primary" },
+        { type: "interface", tag: "backup" },
+      ],
+      list_refresh: { detour: "global_primary" },
+      lists: {
+        remote: {
+          url: "https://example.test/list.txt",
+          refresh_detour_mode: "override",
+          detour: "primary",
+          fallback_detours: ["backup"],
+        },
+      },
+    }
+
+    expect(
+      buildUpdatedConfigForOutboundsDelete(config, ["primary"]).lists?.remote
+    ).toEqual({
+      url: "https://example.test/list.txt",
+    })
+  })
+})

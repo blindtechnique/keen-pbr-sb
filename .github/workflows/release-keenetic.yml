@@ -33,14 +33,22 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
+
+      - name: Set up Node for backend API code generation
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
 
       - name: Build frontend
         run: |
+          git diff --check
           cd frontend
           bun install --frozen-lockfile
+          make -C .. generate-check
           bun run lint
           bun run api:check
+          bun run i18n:check
           bun test
           bun run typecheck
           bun run build

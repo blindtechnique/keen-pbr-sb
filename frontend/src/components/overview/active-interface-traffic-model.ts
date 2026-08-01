@@ -21,6 +21,16 @@ export type InterfaceConnectionState = Readonly<{
   connected: boolean
 }>
 
+export type TrafficChartPreferences = Readonly<{
+  initialized: boolean
+  states: Readonly<Record<string, boolean>>
+}>
+
+export const TRAFFIC_CHART_PREFERENCES_STORAGE_KEY =
+  "keen-pbr.dashboard.traffic-charts.v1"
+
+const TRAFFIC_CHART_PREFERENCES_VERSION = 1
+
 const ACTIVE_TRAFFIC_STATUS_TRANSLATION_KEYS = {
   active: "overview.outbounds.member.active",
   backup: "overview.outbounds.member.backup",
@@ -33,6 +43,83 @@ export function activeTrafficStatusTranslationKey(
   status: RuntimeInterfaceStatus
 ) {
   return ACTIVE_TRAFFIC_STATUS_TRANSLATION_KEYS[status]
+}
+
+export function parseTrafficChartPreferences(
+  raw: string | null
+): TrafficChartPreferences {
+  if (!raw) return emptyTrafficChartPreferences()
+
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      !isRecord(parsed) ||
+      parsed.version !== TRAFFIC_CHART_PREFERENCES_VERSION
+    ) {
+      return emptyTrafficChartPreferences()
+    }
+    if (!isRecord(parsed.states)) return emptyTrafficChartPreferences()
+
+    const states: Record<string, boolean> = {}
+    for (const [interfaceName, expanded] of Object.entries(parsed.states)) {
+      if (interfaceName.length > 0 && typeof expanded === "boolean") {
+        states[interfaceName] = expanded
+      }
+    }
+    return { initialized: true, states }
+  } catch {
+    return emptyTrafficChartPreferences()
+  }
+}
+
+export function serializeTrafficChartPreferences(
+  preferences: TrafficChartPreferences
+): string {
+  return JSON.stringify({
+    version: TRAFFIC_CHART_PREFERENCES_VERSION,
+    states: preferences.states,
+  })
+}
+
+export function isTrafficChartExpanded(
+  preferences: TrafficChartPreferences,
+  interfaceName: string,
+  index: number
+): boolean {
+  const stored = preferences.states[interfaceName]
+  if (stored !== undefined) return stored
+  return !preferences.initialized && index < 2
+}
+
+export function toggleTrafficChartPreference(
+  preferences: TrafficChartPreferences,
+  interfaceNames: readonly string[],
+  interfaceName: string
+): TrafficChartPreferences {
+  const states: Record<string, boolean> = { ...preferences.states }
+  for (const [index, currentName] of interfaceNames.entries()) {
+    if (states[currentName] === undefined) {
+      states[currentName] = isTrafficChartExpanded(
+        preferences,
+        currentName,
+        index
+      )
+    }
+  }
+  states[interfaceName] = !isTrafficChartExpanded(
+    preferences,
+    interfaceName,
+    interfaceNames.indexOf(interfaceName)
+  )
+  return { initialized: true, states }
+}
+
+function emptyTrafficChartPreferences(): TrafficChartPreferences {
+  return { initialized: false, states: {} }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 export function collectActiveTrafficPaths(

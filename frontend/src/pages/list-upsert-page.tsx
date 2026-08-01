@@ -980,6 +980,12 @@ function ListForm({
                                 fallbackField.handleChange(
                                   chain.fallbackDetours
                                 )
+                                if (!chain.detour) {
+                                  form.setFieldValue(
+                                    LIST_FIELD_NAMES.refreshDetourMode,
+                                    "inherit"
+                                  )
+                                }
                               }}
                               outbounds={outbounds}
                               primaryEmptyLabel={t(

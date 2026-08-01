@@ -244,6 +244,10 @@ function cleanupListDownloadRoutes(
     const nextList = { ...list }
     delete nextList.detour
     delete nextList.fallback_detours
+    // Removing the primary route invalidates an explicit override. Removing
+    // the mode as well restores the schema's inherited default and avoids
+    // leaving an override without its required detour.
+    delete nextList.refresh_detour_mode
     return nextList
   }
 

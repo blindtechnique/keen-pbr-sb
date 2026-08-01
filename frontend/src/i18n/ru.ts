@@ -1654,7 +1654,11 @@ export const ruTranslation = {
         selected: "Выбрано: {{count}}",
         enable: "Включить выбранные",
         disable: "Выключить выбранные",
+        enableAction: "включить",
+        disableAction: "выключить",
         delete: "Удалить выбранные",
+        confirmSetEnabled:
+          "{{action}} выбранные правила ({{count}})? Изменения попадут в черновик только после подтверждения.",
         confirmDelete:
           "Удалить {{count}} правил(о/а) маршрутизации? До сохранения действие можно отменить.",
       },

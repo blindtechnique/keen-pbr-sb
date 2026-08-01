@@ -45,8 +45,27 @@ bool address_belongs_to_local_interface(int family, const void* address) {
     return found;
 }
 
+class SystemLocalAddressProvider final
+    : public KeeneticAuthLocalAddressProvider {
+public:
+    bool contains(KeeneticAuthAddressFamily family,
+                  std::string_view canonical_address) const override {
+        const int native_family =
+            family == KeeneticAuthAddressFamily::ipv4 ? AF_INET : AF_INET6;
+        std::array<unsigned char, sizeof(in6_addr)> address{};
+        const std::string address_text{canonical_address};
+        if (inet_pton(native_family, address_text.c_str(), address.data()) != 1) {
+            return false;
+        }
+        return address_belongs_to_local_interface(native_family,
+                                                  address.data());
+    }
+};
+
 bool is_canonical_local_ip_literal(const std::string& host,
                                    int family,
+                                   const KeeneticAuthLocalAddressProvider&
+                                       local_addresses,
                                    std::string* error) {
     std::array<unsigned char, sizeof(in6_addr)> address{};
     if (inet_pton(family, host.c_str(), address.data()) != 1) {
@@ -60,7 +79,10 @@ bool is_canonical_local_ip_literal(const std::string& host,
         if (error) *error = "endpoint host must use canonical IP notation";
         return false;
     }
-    if (!address_belongs_to_local_interface(family, address.data())) {
+    const auto address_family =
+        family == AF_INET ? KeeneticAuthAddressFamily::ipv4
+                          : KeeneticAuthAddressFamily::ipv6;
+    if (!local_addresses.contains(address_family, host)) {
         if (error) {
             *error = "endpoint address is not assigned to this router";
         }
@@ -73,6 +95,7 @@ bool is_canonical_local_ip_literal(const std::string& host,
 
 std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
     const std::string& endpoint,
+    const KeeneticAuthLocalAddressProvider& local_addresses,
     std::string* error) {
     const auto reject = [&](const char* message)
         -> std::optional<KeeneticAuthEndpoint> {
@@ -105,7 +128,8 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
             port_text = suffix.substr(1);
         }
         std::string address_error;
-        if (!is_canonical_local_ip_literal(host, AF_INET6, &address_error)) {
+        if (!is_canonical_local_ip_literal(
+                host, AF_INET6, local_addresses, &address_error)) {
             if (error) *error = address_error;
             return std::nullopt;
         }
@@ -122,7 +146,8 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
             if (port_text.empty()) return reject("port is empty");
         }
         std::string address_error;
-        if (!is_canonical_local_ip_literal(host, AF_INET, &address_error)) {
+        if (!is_canonical_local_ip_literal(
+                host, AF_INET, local_addresses, &address_error)) {
             if (error) *error = address_error;
             return std::nullopt;
         }
@@ -152,6 +177,13 @@ std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
             : host + ":" + std::to_string(port);
     if (error) error->clear();
     return parsed;
+}
+
+std::optional<KeeneticAuthEndpoint> parse_keenetic_auth_endpoint(
+    const std::string& endpoint,
+    std::string* error) {
+    static const SystemLocalAddressProvider local_addresses;
+    return parse_keenetic_auth_endpoint(endpoint, local_addresses, error);
 }
 
 bool probe_keenetic_auth_challenge(const std::string& endpoint) {

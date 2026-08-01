@@ -1264,11 +1264,9 @@ std::set<std::string> occupied_dns_rule_ids(const Config& config) {
     return result;
 }
 
-bool route_rule_covers_list(const RouteRule& rule,
-                            const std::string& list_id,
-                            const std::string& outbound) {
-    if (!route_rule_enabled(rule) || rule.outbound != outbound ||
-        !rule.list.has_value()) {
+bool route_rule_matches_whole_list(const RouteRule& rule,
+                                   const std::string& list_id) {
+    if (!route_rule_enabled(rule) || !rule.list.has_value()) {
         return false;
     }
     // Other route conditions are combined with the list condition, so such a
@@ -1289,11 +1287,14 @@ bool route_policy_covers_list(const Config& config,
     const auto rules =
         config.route.value_or(RouteConfig{}).rules.value_or(
             std::vector<RouteRule>{});
-    return std::any_of(
-        rules.begin(), rules.end(),
-        [&](const RouteRule& rule) {
-            return route_rule_covers_list(rule, list_id, outbound);
-        });
+    for (const auto& rule : rules) {
+        if (!route_rule_matches_whole_list(rule, list_id)) continue;
+        // Route rules are evaluated top to bottom. A later matching rule does
+        // not provide coverage when an earlier whole-list rule already sends
+        // the same traffic somewhere else (including blackhole).
+        return rule.outbound == outbound;
+    }
+    return false;
 }
 
 bool dns_policy_covers_list(const Config& config,
@@ -1302,14 +1303,15 @@ bool dns_policy_covers_list(const Config& config,
     const auto rules =
         config.dns.value_or(DnsConfig{}).rules.value_or(
             std::vector<DnsRule>{});
-    return std::any_of(
-        rules.begin(), rules.end(),
-        [&](const DnsRule& rule) {
-            return dns_rule_enabled(rule) && rule.server == server &&
-                   std::find(
-                       rule.list.begin(), rule.list.end(), list_id) !=
-                       rule.list.end();
-        });
+    for (const auto& rule : rules) {
+        if (!dns_rule_enabled(rule) ||
+            std::find(rule.list.begin(), rule.list.end(), list_id) ==
+                rule.list.end()) {
+            continue;
+        }
+        return rule.server == server;
+    }
+    return false;
 }
 
 bool dns_policy_covers_list_on_detour(
@@ -1319,19 +1321,17 @@ bool dns_policy_covers_list_on_detour(
     const auto rules =
         config.dns.value_or(DnsConfig{}).rules.value_or(
             std::vector<DnsRule>{});
-    return std::any_of(
-        rules.begin(), rules.end(),
-        [&](const DnsRule& rule) {
-            if (!dns_rule_enabled(rule) ||
-                std::find(
-                    rule.list.begin(), rule.list.end(), list_id) ==
-                    rule.list.end()) {
-                return false;
-            }
-            const auto* server = find_dns_server(config, rule.server);
-            return server != nullptr && server->detour.has_value() &&
-                   *server->detour == detour;
-        });
+    for (const auto& rule : rules) {
+        if (!dns_rule_enabled(rule) ||
+            std::find(rule.list.begin(), rule.list.end(), list_id) ==
+                rule.list.end()) {
+            continue;
+        }
+        const auto* server = find_dns_server(config, rule.server);
+        return server != nullptr && server->detour.has_value() &&
+               *server->detour == detour;
+    }
+    return false;
 }
 
 std::optional<std::string> usable_source_detour(
@@ -1694,6 +1694,15 @@ CatalogSetupPlan plan_catalog_setup(
 
     std::vector<std::pair<std::string, ParsedPreset>> selected_lists;
     selected_lists.reserve(resolved.size());
+    const auto effective_source_detour =
+        [&](const ListConfig& list, bool url_backed)
+        -> std::optional<std::string> {
+        if (!url_backed) return std::nullopt;
+        const auto chain = effective_list_refresh_detours(candidate, list);
+        return chain.empty()
+                   ? std::nullopt
+                   : std::optional<std::string>{chain.front()};
+    };
     for (const auto& item : resolved) {
         const auto& preset = item.preset;
         if (item.existing_technical_id.has_value()) {
@@ -1732,7 +1741,7 @@ CatalogSetupPlan plan_catalog_setup(
                 preset.url.has_value(),
                 !preset.domains.empty(),
                 !preset.ip_cidrs.empty(),
-                preset.url ? list.detour : std::nullopt,
+                effective_source_detour(list, preset.url.has_value()),
             });
             selected_lists.emplace_back(
                 *item.existing_technical_id, preset);
@@ -1750,6 +1759,8 @@ CatalogSetupPlan plan_catalog_setup(
             list.refresh_detour_mode = ListRefreshDetourMode::OVERRIDE;
             list.detour = source_detour;
         }
+        const auto summary_source_detour =
+            effective_source_detour(list, preset.url.has_value());
         lists.emplace(technical_id, std::move(list));
         selected_lists.emplace_back(technical_id, preset);
         plan.summary.lists.push_back({
@@ -1760,7 +1771,7 @@ CatalogSetupPlan plan_catalog_setup(
             preset.url.has_value(),
             !preset.domains.empty(),
             !preset.ip_cidrs.empty(),
-            preset.url ? source_detour : std::nullopt,
+            summary_source_detour,
         });
     }
     candidate.lists = std::move(lists);

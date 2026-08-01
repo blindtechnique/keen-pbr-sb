@@ -473,12 +473,15 @@ paths:
       summary: Stream live WebUI status
       description: >
         Streams named Server-Sent Events for service health, runtime outbounds,
-        system interfaces, and conntrack change notifications. Every connection
+        system interfaces, interactive DNS probes, and conntrack change
+        notifications. Every connection
         receives a runtime snapshot first, followed by the current conntrack
         event-source state when available. Later events contain the complete
         dataset that changed or a revision which invalidates connection pages.
         Heartbeat comments are sent every 15 seconds; reconnecting starts with
         fresh state and no event replay is performed.
+        DNS probe notifications use the `dns_probe` event name and are not
+        included in the initial snapshot.
       operationId: getStatusEvents
       responses:
         "200":
@@ -497,7 +500,10 @@ paths:
       description: >
         Streams DNS query names observed by the built-in `dns.test_server`
         listener as Server-Sent Events. Each connection receives `HELLO`
-        first, then one event per queried DNS name.
+        first, then one event per queried DNS name. This compatibility stream
+        remains available to API clients; the WebUI consumes the same probe
+        notifications from `/api/status/events` to avoid opening a second
+        long-lived HTTP connection for every check.
       operationId: getDnsTest
       responses:
         "200":
@@ -1781,6 +1787,9 @@ components:
         Selects which ordered outbound chain is used to download this remote
         list. `inherit` uses the global chain from `list_refresh`.
         `override` uses this list's `detour` and `fallback_detours` instead.
+        The field is valid only for URL-backed lists. `inherit` must not be
+        combined with per-list `detour` or `fallback_detours`; `override`
+        requires a non-empty `detour`.
         For backward compatibility an omitted value behaves as `override`
         when the list already has an explicit `detour`, and as `inherit`
         otherwise.

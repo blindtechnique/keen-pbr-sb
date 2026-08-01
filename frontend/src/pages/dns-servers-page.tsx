@@ -400,7 +400,7 @@ function getDnsServerDeleteImpactItems(
       label: t("pages.dnsServers.deleteDialog.items.fallback"),
       details: [
         formatDetail(
-          t("pages.dnsRules.primaryServers.title"),
+          t("pages.dnsRules.fallback.title"),
           <ChangeValue
             after={formatListValue(
               fallback.filter((tag) => !serverTags.includes(tag)),

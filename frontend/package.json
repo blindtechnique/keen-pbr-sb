@@ -11,7 +11,8 @@
     "typecheck": "tsc -b",
     "preview": "vite preview",
     "api:generate": "orval --config ./orval.config.ts",
-    "api:check": "bun run api:generate && git diff --exit-code -- src/api/generated"
+    "api:check": "bun run api:generate && git diff --exit-code -- src/api/generated",
+    "i18n:check": "bun ./scripts/check-i18n.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",

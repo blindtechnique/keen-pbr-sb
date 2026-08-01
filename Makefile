@@ -26,7 +26,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         test \
         firewall-it-images firewall-it \
         clang-build clang-check clang-tidy \
-        generate \
+        generate generate-check \
         cross-setup cross-build cross-deploy \
         help
 
@@ -71,6 +71,9 @@ transport-manager-build: transport-manager-test ## Cross-compile transport manag
 
 generate: ## Regenerate src/api/generated/api_types.hpp from docs/openapi.yaml (requires Node.js)
 	bash build_scripts/generate_api_types.sh
+
+generate-check: ## Verify backend API types match docs/openapi.yaml without modifying tracked files
+	bash build_scripts/generate_api_types.sh --check
 
 test: ## Build and run unit tests (doctest)
 	sh -n install.sh

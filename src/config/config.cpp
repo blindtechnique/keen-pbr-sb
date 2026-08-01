@@ -913,6 +913,41 @@ void validate_route_internal_vpn_services(
     const json& root,
     std::vector<ConfigValidationIssue>& issues);
 
+void validate_list_refresh_fields(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto refresh_it = root.find("list_refresh");
+    if (refresh_it != root.end() && !refresh_it->is_null() &&
+        !refresh_it->is_object()) {
+        add_issue(
+            issues,
+            "list_refresh",
+            "list_refresh must be an object");
+    }
+
+    const auto lists_it = root.find("lists");
+    if (lists_it == root.end() || !lists_it->is_object()) return;
+    for (auto it = lists_it->begin(); it != lists_it->end(); ++it) {
+        if (!it.value().is_object()) continue;
+        const auto mode_it = it.value().find("refresh_detour_mode");
+        if (mode_it == it.value().end() || mode_it->is_null()) continue;
+
+        const std::string path =
+            "lists." + it.key() + ".refresh_detour_mode";
+        if (!mode_it->is_string()) {
+            add_issue(issues, path, path + " must be a string");
+            continue;
+        }
+        const auto& mode = mode_it->get_ref<const std::string&>();
+        if (mode != "inherit" && mode != "override") {
+            add_issue(
+                issues,
+                path,
+                path + " must be one of: inherit, override");
+        }
+    }
+}
+
 } // namespace
 
 Config parse_config(const std::string& json_str) {
@@ -961,6 +996,7 @@ Config parse_config(const std::string& json_str) {
     validate_route_inbound_interfaces(parsed_json, issues);
     validate_route_internal_vpn_servers(parsed_json, issues);
     validate_route_internal_vpn_services(parsed_json, issues);
+    validate_list_refresh_fields(parsed_json, issues);
 
     if (!issues.empty()) {
         throw ConfigValidationError(std::move(issues));

@@ -28,7 +28,11 @@ SseBroadcaster::SubscriptionPtr SseBroadcaster::subscribe(
     KPBR_LOCK_GUARD(mutex_);
     compact_locked();
     if (subscriptions_.size() >= max_subscriptions_) {
-        Logger::instance().warn(
+        // Admission control is working as intended here.  The caller returns
+        // HTTP 503/Retry-After to the rejected client, while an operator-facing
+        // warning would incorrectly turn a busy/reloading browser into a
+        // system incident in the notification bell.
+        Logger::instance().info(
             "Rejecting SSE subscription: active={} limit={}",
             subscriptions_.size(),
             max_subscriptions_);

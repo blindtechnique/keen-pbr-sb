@@ -185,6 +185,12 @@ void StatusStream::publish_connections(api::ConnectionEventState state) {
     broadcaster_.publish(frame);
 }
 
+void StatusStream::publish_dns_probe(nlohmann::json state) {
+    broadcaster_.publish(make_named_sse_frame(
+        "dns_probe",
+        make_event_payload("dns_probe", std::move(state))));
+}
+
 void StatusStream::close_all() {
     broadcaster_.close_all();
 }

@@ -959,3 +959,18 @@
     0 1px 3px rgb(0 0 0 / 35%),
     0 1px 2px rgb(0 0 0 / 38%);
 }
+
+/* Chromium paints saved credentials with its own blue background. Keep the
+ * login form on the same Keenetic surface in light/dark and focused states. */
+.keen-auth-input:-webkit-autofill,
+.keen-auth-input:-webkit-autofill:hover,
+.keen-auth-input:-webkit-autofill:focus,
+.keen-auth-input:-webkit-autofill:active {
+  -webkit-text-fill-color: var(--foreground) !important;
+  caret-color: var(--foreground) !important;
+  background-color: var(--card) !important;
+  background-image: none !important;
+  -webkit-box-shadow: 0 0 0 1000px var(--card) inset !important;
+  box-shadow: 0 0 0 1000px var(--card) inset !important;
+  transition: background-color 9999s ease-out 0s;
+}

@@ -9,13 +9,9 @@
 #include "../src/api/server.hpp"
 
 #include <atomic>
-#include <arpa/inet.h>
-#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <ifaddrs.h>
-#include <netinet/in.h>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -23,6 +19,7 @@
 #include <thread>
 #include <unordered_set>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -45,28 +42,25 @@ public:
     std::filesystem::path path;
 };
 
-std::string first_non_loopback_ipv4() {
-    ifaddrs* interfaces = nullptr;
-    if (::getifaddrs(&interfaces) != 0) return {};
-    std::string result;
-    for (const auto* current = interfaces; current != nullptr;
-         current = current->ifa_next) {
-        if (!current->ifa_addr ||
-            current->ifa_addr->sa_family != AF_INET) {
-            continue;
-        }
-        const auto* address =
-            &reinterpret_cast<const sockaddr_in*>(current->ifa_addr)->sin_addr;
-        std::array<char, INET_ADDRSTRLEN> text{};
-        if (::inet_ntop(AF_INET, address, text.data(), text.size()) &&
-            std::string_view{text.data()} != "127.0.0.1") {
-            result = text.data();
-            break;
-        }
+class FixedLocalAddressProvider final
+    : public KeeneticAuthLocalAddressProvider {
+public:
+    FixedLocalAddressProvider(std::unordered_set<std::string> ipv4,
+                              std::unordered_set<std::string> ipv6)
+        : ipv4_(std::move(ipv4))
+        , ipv6_(std::move(ipv6)) {}
+
+    bool contains(KeeneticAuthAddressFamily family,
+                  std::string_view canonical_address) const override {
+        const auto& addresses =
+            family == KeeneticAuthAddressFamily::ipv4 ? ipv4_ : ipv6_;
+        return addresses.find(std::string{canonical_address}) != addresses.end();
     }
-    ::freeifaddrs(interfaces);
-    return result;
-}
+
+private:
+    std::unordered_set<std::string> ipv4_;
+    std::unordered_set<std::string> ipv6_;
+};
 
 class EnvironmentVariableGuard {
 public:
@@ -364,16 +358,20 @@ TEST_CASE("public auth status hides the configured Keenetic endpoint") {
 }
 
 TEST_CASE("Keenetic endpoint parser accepts canonical local targets") {
+    const FixedLocalAddressProvider local_addresses{
+        {"127.0.0.1", "192.0.2.20"},
+        {"::1"},
+    };
     const auto ipv4_default =
-        parse_keenetic_auth_endpoint("127.0.0.1");
+        parse_keenetic_auth_endpoint("127.0.0.1", local_addresses);
     const auto ipv4_legacy =
-        parse_keenetic_auth_endpoint("127.0.0.1:80");
+        parse_keenetic_auth_endpoint("127.0.0.1:80", local_addresses);
     const auto ipv4_custom =
-        parse_keenetic_auth_endpoint("127.0.0.1:65535");
+        parse_keenetic_auth_endpoint("127.0.0.1:65535", local_addresses);
     const auto ipv6_default =
-        parse_keenetic_auth_endpoint("[::1]");
+        parse_keenetic_auth_endpoint("[::1]", local_addresses);
     const auto ipv6_custom =
-        parse_keenetic_auth_endpoint("[::1]:8080");
+        parse_keenetic_auth_endpoint("[::1]:8080", local_addresses);
 
     REQUIRE(ipv4_default);
     CHECK(ipv4_default->host == "127.0.0.1");
@@ -389,16 +387,18 @@ TEST_CASE("Keenetic endpoint parser accepts canonical local targets") {
     REQUIRE(ipv6_custom);
     CHECK(ipv6_custom->canonical == "[::1]:8080");
 
-    const auto interface_address = first_non_loopback_ipv4();
-    REQUIRE_FALSE(interface_address.empty());
     const auto lan_endpoint =
-        parse_keenetic_auth_endpoint(interface_address + ":777");
+        parse_keenetic_auth_endpoint("192.0.2.20:777", local_addresses);
     REQUIRE(lan_endpoint);
-    CHECK(lan_endpoint->host == interface_address);
+    CHECK(lan_endpoint->host == "192.0.2.20");
     CHECK(lan_endpoint->port == 777);
 }
 
 TEST_CASE("Keenetic endpoint parser rejects SSRF and parser bypass forms") {
+    const FixedLocalAddressProvider local_addresses{
+        {"127.0.0.1"},
+        {"::1"},
+    };
     const std::vector<std::string> rejected{
         "",
         "localhost:80",
@@ -431,7 +431,8 @@ TEST_CASE("Keenetic endpoint parser rejects SSRF and parser bypass forms") {
     for (const auto& endpoint : rejected) {
         CAPTURE(endpoint);
         std::string error;
-        CHECK_FALSE(parse_keenetic_auth_endpoint(endpoint, &error));
+        CHECK_FALSE(parse_keenetic_auth_endpoint(
+            endpoint, local_addresses, &error));
         CHECK_FALSE(error.empty());
     }
 }

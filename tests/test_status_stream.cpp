@@ -302,4 +302,30 @@ TEST_CASE("status stream replays and publishes conntrack revisions") {
     CHECK(queued(subscription) == 0);
 }
 
+TEST_CASE("status stream publishes transient DNS probes without snapshot state") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    (void)pop(subscription);
+
+    stream.publish_dns_probe(nlohmann::json{
+        {"type", "DNS"},
+        {"domain", "token.check.keen.pbr"},
+        {"source_ip", "192.0.2.10"},
+        {"ecs", nullptr},
+    });
+
+    const auto frame = pop(subscription);
+    CHECK(frame.rfind("event: dns_probe\n", 0) == 0);
+    CHECK(frame.find("\"type\":\"dns_probe\"") != std::string::npos);
+    CHECK(frame.find("token.check.keen.pbr") != std::string::npos);
+
+    stream.unsubscribe(subscription);
+    auto reconnected = stream.subscribe();
+    REQUIRE(reconnected);
+    CHECK(pop(reconnected).rfind("event: snapshot\n", 0) == 0);
+    CHECK(queued(reconnected) == 0);
+}
+
 #endif

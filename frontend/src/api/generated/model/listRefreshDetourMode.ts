@@ -7,7 +7,7 @@
  */
 
 /**
- * Selects which ordered outbound chain is used to download this remote list. `inherit` uses the global chain from `list_refresh`. `override` uses this list's `detour` and `fallback_detours` instead. For backward compatibility an omitted value behaves as `override` when the list already has an explicit `detour`, and as `inherit` otherwise.
+ * Selects which ordered outbound chain is used to download this remote list. `inherit` uses the global chain from `list_refresh`. `override` uses this list's `detour` and `fallback_detours` instead. The field is valid only for URL-backed lists. `inherit` must not be combined with per-list `detour` or `fallback_detours`; `override` requires a non-empty `detour`. For backward compatibility an omitted value behaves as `override` when the list already has an explicit `detour`, and as `inherit` otherwise.
 
  */
 export type ListRefreshDetourMode = typeof ListRefreshDetourMode[keyof typeof ListRefreshDetourMode];

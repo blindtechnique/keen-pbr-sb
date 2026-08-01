@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
@@ -12,12 +12,18 @@ import {
   activeTrafficStatusTranslationKey,
   collectActiveTrafficPaths,
   interfaceConnectionState,
+  isTrafficChartExpanded,
+  parseTrafficChartPreferences,
+  serializeTrafficChartPreferences,
+  toggleTrafficChartPreference,
+  TRAFFIC_CHART_PREFERENCES_STORAGE_KEY,
   type ActiveTrafficPath,
 } from "@/components/overview/active-interface-traffic-model"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
+import { safeStorageGet, safeStorageSet } from "@/lib/safe-storage"
 import { cn } from "@/lib/utils"
 
 export function ActiveInterfaceTraffic({
@@ -38,10 +44,26 @@ export function ActiveInterfaceTraffic({
 }) {
   const { i18n, t } = useTranslation()
   const { protocolOf } = useInterfaceProtocols()
-  const [expandedInterfaces, setExpandedInterfaces] = useState<
-    ReadonlySet<string>
-  >(() => new Set())
+  const [chartPreferences, setChartPreferences] = useState(() =>
+    parseTrafficChartPreferences(
+      typeof window === "undefined"
+        ? null
+        : safeStorageGet(
+            () => window.localStorage,
+            TRAFFIC_CHART_PREFERENCES_STORAGE_KEY
+          )
+    )
+  )
   const paths = collectActiveTrafficPaths(outbounds, rules, runtimeByTag)
+
+  useEffect(() => {
+    if (!chartPreferences.initialized || typeof window === "undefined") return
+    safeStorageSet(
+      () => window.localStorage,
+      TRAFFIC_CHART_PREFERENCES_STORAGE_KEY,
+      serializeTrafficChartPreferences(chartPreferences)
+    )
+  }, [chartPreferences])
 
   if (paths.length === 0) {
     return null
@@ -56,9 +78,13 @@ export function ActiveInterfaceTraffic({
         {t("overview.outbounds.trafficCountersHint")}
       </p>
       <div className="grid gap-3 lg:grid-cols-2">
-        {paths.map((path) => {
+        {paths.map((path, index) => {
           const protocol = protocolOf(path.interfaceName)
-          const expanded = expandedInterfaces.has(path.interfaceName)
+          const expanded = isTrafficChartExpanded(
+            chartPreferences,
+            path.interfaceName,
+            index
+          )
           const chartId = `dashboard-traffic-${safeDomId(path.interfaceName)}`
           const runtimeInterface = runtimeInterfaceByName.get(
             path.interfaceName
@@ -100,12 +126,18 @@ export function ActiveInterfaceTraffic({
                   }
                   aria-expanded={expanded}
                   className={cn(
-                    "grid size-8 shrink-0 place-items-center rounded-[4px] border bg-success/15 text-foreground transition-[border-color,background-color] outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    expanded ? "border-success" : "border-success/15"
+                    "grid size-8 shrink-0 place-items-center rounded-[4px] border transition-[border-color,background-color,color] outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    expanded
+                      ? "border-success bg-success/15 text-foreground"
+                      : "border-input bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
                   )}
                   onClick={() =>
-                    setExpandedInterfaces((current) =>
-                      toggledSet(current, path.interfaceName)
+                    setChartPreferences((current) =>
+                      toggleTrafficChartPreference(
+                        current,
+                        paths.map((candidate) => candidate.interfaceName),
+                        path.interfaceName
+                      )
                     )
                   }
                   title={
@@ -185,19 +217,6 @@ function TrafficChartToggleIcon() {
       />
     </svg>
   )
-}
-
-function toggledSet(
-  current: ReadonlySet<string>,
-  value: string
-): ReadonlySet<string> {
-  const next = new Set(current)
-  if (next.has(value)) {
-    next.delete(value)
-  } else {
-    next.add(value)
-  }
-  return next
 }
 
 function safeDomId(value: string): string {

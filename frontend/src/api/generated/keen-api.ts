@@ -2011,7 +2011,7 @@ export function useGetNdmsVpnServerServices<TData = Awaited<ReturnType<typeof ge
 
 
 /**
- * Streams named Server-Sent Events for service health, runtime outbounds, system interfaces, and conntrack change notifications. Every connection receives a runtime snapshot first, followed by the current conntrack event-source state when available. Later events contain the complete dataset that changed or a revision which invalidates connection pages. Heartbeat comments are sent every 15 seconds; reconnecting starts with fresh state and no event replay is performed.
+ * Streams named Server-Sent Events for service health, runtime outbounds, system interfaces, interactive DNS probes, and conntrack change notifications. Every connection receives a runtime snapshot first, followed by the current conntrack event-source state when available. Later events contain the complete dataset that changed or a revision which invalidates connection pages. Heartbeat comments are sent every 15 seconds; reconnecting starts with fresh state and no event replay is performed. DNS probe notifications use the `dns_probe` event name and are not included in the initial snapshot.
 
  * @summary Stream live WebUI status
  */
@@ -2124,7 +2124,7 @@ export function useGetStatusEvents<TData = Awaited<ReturnType<typeof getStatusEv
 
 
 /**
- * Streams DNS query names observed by the built-in `dns.test_server` listener as Server-Sent Events. Each connection receives `HELLO` first, then one event per queried DNS name.
+ * Streams DNS query names observed by the built-in `dns.test_server` listener as Server-Sent Events. Each connection receives `HELLO` first, then one event per queried DNS name. This compatibility stream remains available to API clients; the WebUI consumes the same probe notifications from `/api/status/events` to avoid opening a second long-lived HTTP connection for every check.
 
  * @summary Stream DNS test queries
  */

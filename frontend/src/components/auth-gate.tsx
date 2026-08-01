@@ -61,7 +61,7 @@ function AuthInput({
         aria-invalid={error}
         autoComplete={autoComplete}
         className={cn(
-          "peer h-12 rounded-[4px] bg-card px-3 pt-0.5 text-[15px] shadow-none transition-[border-color,box-shadow] placeholder:text-transparent hover:shadow-none focus-visible:ring-0 lg:h-10 lg:text-sm",
+          "keen-auth-input peer h-12 rounded-[4px] bg-card px-3 pt-0.5 text-[15px] shadow-none transition-[border-color,box-shadow] placeholder:text-transparent hover:shadow-none focus-visible:ring-0 lg:h-10 lg:text-sm",
           isPassword && "pr-11"
         )}
         id={id}

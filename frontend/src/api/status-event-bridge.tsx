@@ -2,7 +2,12 @@ import { useEffect } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 
 import { applyStatusEvent } from "@/api/status-event-cache"
-import { setStatusEventConnectionState } from "@/api/status-event-connection"
+import {
+  hasStatusEventKeepAliveLease,
+  setStatusEventConnectionState,
+  subscribeStatusEventKeepAliveLease,
+} from "@/api/status-event-connection"
+import { applyDnsProbeStatusEvent } from "@/api/dns-probe-events"
 
 const HIDDEN_DISCONNECT_DELAY_MS = 60_000
 const STATUS_EVENT_NAMES = [
@@ -12,6 +17,7 @@ const STATUS_EVENT_NAMES = [
   "interfaces",
   "interface_traffic",
   "connections",
+  "dns_probe",
 ] as const
 
 export function StatusEventBridge() {
@@ -29,7 +35,12 @@ export function StatusEventBridge() {
       source.onerror = () => setStatusEventConnectionState("disconnected")
       for (const eventName of STATUS_EVENT_NAMES) {
         source.addEventListener(eventName, (event) => {
-          applyStatusEvent(queryClient, (event as MessageEvent<string>).data)
+          const data = (event as MessageEvent<string>).data
+          if (eventName === "dns_probe") {
+            applyDnsProbeStatusEvent(data)
+          } else {
+            applyStatusEvent(queryClient, data)
+          }
         })
       }
     }
@@ -40,10 +51,13 @@ export function StatusEventBridge() {
       setStatusEventConnectionState(state)
     }
 
-    const onVisibilityChange = () => {
+    const reconcileVisibility = () => {
       if (hiddenTimer !== null) clearTimeout(hiddenTimer)
       hiddenTimer = null
-      if (document.visibilityState === "visible") {
+      if (
+        document.visibilityState === "visible" ||
+        hasStatusEventKeepAliveLease()
+      ) {
         connect()
       } else {
         hiddenTimer = setTimeout(
@@ -54,10 +68,13 @@ export function StatusEventBridge() {
     }
 
     connect()
-    onVisibilityChange()
-    document.addEventListener("visibilitychange", onVisibilityChange)
+    reconcileVisibility()
+    document.addEventListener("visibilitychange", reconcileVisibility)
+    const unsubscribeKeepAlive =
+      subscribeStatusEventKeepAliveLease(reconcileVisibility)
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange)
+      document.removeEventListener("visibilitychange", reconcileVisibility)
+      unsubscribeKeepAlive()
       if (hiddenTimer !== null) clearTimeout(hiddenTimer)
       disconnect("disconnected")
     }

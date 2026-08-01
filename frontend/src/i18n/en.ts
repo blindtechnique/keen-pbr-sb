@@ -1636,7 +1636,11 @@ export const enTranslation = {
         selected: "{{count}} selected",
         enable: "Enable selected",
         disable: "Disable selected",
+        enableAction: "enable",
+        disableAction: "disable",
         delete: "Delete selected",
+        confirmSetEnabled:
+          "{{action}} the selected rules ({{count}})? The draft will change only after confirmation.",
         confirmDelete:
           "Delete {{count}} routing rule(s)? You can cancel before saving.",
       },

@@ -361,6 +361,27 @@ TEST_CASE("catalog planner preserves URL and inline domains") {
         plan.candidate, "category_ai"));
 }
 
+TEST_CASE("catalog summary reports the inherited global refresh route") {
+    auto config = base_config();
+    config.list_refresh = ListRefreshConfig{};
+    config.list_refresh->detour = "proxy";
+    validate_config(config);
+
+    auto intent = outbound_intent();
+    intent.source_detour_tag.reset();
+    const auto plan = plan_catalog_setup(
+        intent,
+        nlohmann::json::array({routing_preset()}),
+        config);
+
+    REQUIRE(plan.summary.lists.size() == 1U);
+    CHECK(plan.summary.lists.front().source_detour == "proxy");
+    const auto& list = plan.candidate.lists->at("category_ai");
+    CHECK_FALSE(list.detour.has_value());
+    CHECK(effective_list_refresh_detour_mode(list) ==
+          ListRefreshDetourMode::INHERIT);
+}
+
 TEST_CASE(
     "catalog planner persists an explicit refresh override for a chosen source detour") {
     const auto plan = plan_catalog_setup(
@@ -2029,6 +2050,44 @@ TEST_CASE(
     CHECK(repeated.summary.route_rules.empty());
     CHECK(repeated.summary.dns_rules.empty());
     CHECK(nlohmann::json(repeated.candidate) == nlohmann::json(config));
+}
+
+TEST_CASE(
+    "catalog coverage respects the first whole-list route and DNS rules") {
+    const nlohmann::json catalog = {
+        {"catalog_id", "test:ordered-policy-coverage"},
+        {"presets", nlohmann::json::array({routing_preset()})},
+    };
+    auto list_only_intent = outbound_intent();
+    list_only_intent.mode = CatalogSetupMode::none;
+    list_only_intent.outbound_tag.reset();
+    list_only_intent.dns_mode = CatalogDnsMode::none;
+    auto config =
+        plan_catalog_setup(list_only_intent, catalog, base_config())
+            .candidate;
+
+    RouteRule earlier_route;
+    earlier_route.enabled = true;
+    earlier_route.list = std::vector<std::string>{"category_ai"};
+    earlier_route.outbound = "wan";
+    RouteRule later_route = earlier_route;
+    later_route.outbound = "proxy";
+    config.route->rules =
+        std::vector<RouteRule>{earlier_route, later_route};
+
+    DnsRule earlier_dns;
+    earlier_dns.enabled = true;
+    earlier_dns.list = std::vector<std::string>{"category_ai"};
+    earlier_dns.server = "direct_dns";
+    DnsRule later_dns = earlier_dns;
+    later_dns.server = "proxy_dns";
+    config.dns->rules = std::vector<DnsRule>{earlier_dns, later_dns};
+    validate_config(config);
+
+    const auto repaired =
+        plan_catalog_setup(outbound_intent(), catalog, config);
+    CHECK(repaired.summary.route_rule.has_value());
+    CHECK(repaired.summary.dns_rule.has_value());
 }
 
 TEST_CASE(

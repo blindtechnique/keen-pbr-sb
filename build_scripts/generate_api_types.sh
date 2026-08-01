@@ -3,6 +3,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$REPO_ROOT/src/api/generated"
 
+MODE="write"
+if [ "${1:-}" = "--check" ]; then
+  MODE="check"
+  shift
+fi
+
+# Code generation must be reproducible: an unpinned QuickType update can
+# otherwise change a committed header while docs/openapi.yaml stays untouched.
+JS_YAML_PACKAGE="js-yaml@5.2.3"
+QUICKTYPE_PACKAGE="quicktype@26.0.0"
+if [ "$#" -ne 0 ]; then
+  echo "Usage: $0 [--check]" >&2
+  exit 2
+fi
+
 # Step 1: Extract components/schemas from the OpenAPI 3.1 YAML and create a
 # JSON Schema $defs document with a synthetic root that references ALL schemas.
 # This ensures QuickType generates types for config, health, cache, and routing.
@@ -16,7 +31,7 @@ SCHEMA_TMP="$TMP_DIR/api-types.json"
 TYPES_TMP="$TMP_DIR/api-types.hpp"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-npx --yes js-yaml "$REPO_ROOT/docs/openapi.yaml" \
+npx --yes "$JS_YAML_PACKAGE" "$REPO_ROOT/docs/openapi.yaml" \
   | node -e "
 let d = '';
 process.stdin.on('data', c => d += c);
@@ -65,7 +80,7 @@ process.stdin.on('end', () => {
 " > "$SCHEMA_TMP"
 
 # Step 2: Run QuickType to generate C++ types
-npx --yes quicktype \
+npx --yes "$QUICKTYPE_PACKAGE" \
   --lang cpp \
   --src "$SCHEMA_TMP" \
   --src-lang schema \
@@ -93,5 +108,18 @@ const header = '// Generated from docs/openapi.yaml via build_scripts/generate_a
                '// Run \"make generate\" to regenerate (requires Node.js).\n\n';
 content = header + content;
 
-fs.writeFileSync('$REPO_ROOT/src/api/generated/api_types.hpp', content);
+fs.writeFileSync('$TYPES_TMP', content);
 "
+
+GENERATED_TYPES="$REPO_ROOT/src/api/generated/api_types.hpp"
+if [ "$MODE" = "check" ]; then
+  if ! cmp -s "$TYPES_TMP" "$GENERATED_TYPES"; then
+    echo "Generated backend API types are out of date." >&2
+    echo "Run 'make generate' and commit src/api/generated/api_types.hpp." >&2
+    diff -u "$GENERATED_TYPES" "$TYPES_TMP" || true
+    exit 1
+  fi
+  echo "Backend API types are up to date."
+else
+  cp "$TYPES_TMP" "$GENERATED_TYPES"
+fi

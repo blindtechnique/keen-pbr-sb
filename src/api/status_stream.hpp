@@ -32,6 +32,11 @@ public:
     // schema is owned by the status stream rather than the REST OpenAPI model.
     void publish_interface_traffic(nlohmann::json state);
     void publish_connections(api::ConnectionEventState state);
+    // Interactive DNS checks reuse the application-wide status stream.  A
+    // separate EventSource per check used to leave short-lived subscriptions
+    // behind until cpp-httplib observed the closed socket, exhausting the
+    // small diagnostic broadcaster during reloads and quick rechecks.
+    void publish_dns_probe(nlohmann::json state);
     void close_all();
     bool has_subscribers();
 
