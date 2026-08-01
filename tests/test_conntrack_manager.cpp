@@ -2,6 +2,7 @@
 
 #include "runtime/conntrack_manager.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
