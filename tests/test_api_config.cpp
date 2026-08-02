@@ -395,6 +395,41 @@ void check_config_lifecycle_milestones(
         actual.back(), expected.back()));
 }
 
+void check_config_draft_unchanged(
+    ConfigStore& store,
+    const StagedConfigSnapshot& expected) {
+    const auto actual = store.staged_cas_snapshot();
+    REQUIRE(actual.has_value());
+    CHECK(store.config_is_draft());
+    CHECK(actual->serialized == expected.serialized);
+    CHECK(actual->base_revision == expected.base_revision);
+    CHECK(actual->active_revision == expected.active_revision);
+    CHECK(nlohmann::json(actual->config) ==
+          nlohmann::json(expected.config));
+}
+
+bool corrupt_active_config_save_rollback(
+    const std::filesystem::path& journal_path) noexcept {
+    try {
+        RestoreJournal journal(journal_path);
+        const auto active = journal.read_active();
+        if (!active.has_value()) return false;
+
+        std::ofstream output(
+            journal_path /
+                (active->transaction_id + ".rollback"),
+            std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        output << "corrupt rollback payload";
+        output.flush();
+        const bool written = output.good();
+        output.close();
+        return written && !output.fail();
+    } catch (...) {
+        return false;
+    }
+}
+
 } // namespace
 
 TEST_CASE(
@@ -1208,6 +1243,420 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "config save WAL begin failure stays before reservation and fails closed") {
+    constexpr int api_port = 18268;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const auto recovery_root = directory.path / "recovery";
+    const auto operation_journal = recovery_root / "config-save";
+
+    const Config original = make_valid_config("127.0.0.1:18268");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+    const Config staged = make_valid_config("127.0.0.1:18269");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    ConfigStore store(original);
+    store.stage_config(staged, staged_json);
+    const auto draft_before = store.staged_cas_snapshot();
+    REQUIRE(draft_before.has_value());
+
+    RestoreJournal(operation_journal).mark_unknown();
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t validation_calls = 0;
+    std::size_t write_calls = 0;
+    std::size_t apply_calls = 0;
+    std::size_t stop_calls = 0;
+    std::size_t emergency_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    context.validate_candidate_config_fn =
+        [&](const Config&) { ++validation_calls; };
+    context.enqueue_apply_validated_config_fn =
+        [&](Config, std::string) {
+            ++apply_calls;
+            return ConfigApplyResult{};
+        };
+    context.stop_runtime_fn = [&] { ++stop_calls; };
+    context.emergency_quiesce_runtime_fn = [&] {
+        ++emergency_calls;
+        throw std::runtime_error(
+            "synthetic emergency quiesce failure");
+    };
+
+    LifecycleOperationStore lifecycle_store;
+    LifecycleOperationCoordinator lifecycle(lifecycle_store);
+    std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+    lifecycle_store.set_publish_callback([&] {
+        const auto snapshot = lifecycle_store.snapshot();
+        if (snapshot.has_value()) {
+            lifecycle_updates.push_back(*snapshot);
+        }
+    });
+    context.lifecycle_operations = &lifecycle;
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    ConfigSaveTestOptions options;
+    options.recovery_state_root = recovery_root;
+    register_config_handler_for_test(
+        server,
+        context,
+        [&](const std::string&, const std::string&) {
+            ++write_calls;
+        },
+        std::move(options));
+    server.start();
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/save", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 503);
+    const auto payload = nlohmann::json::parse(response->body);
+    CHECK(payload.at("error") ==
+          "Cannot start the durable configuration recovery journal: "
+          "Restore journal is unsafe: UNKNOWN marker is present");
+    CHECK(payload.at("saved") == false);
+    CHECK(payload.at("applied") == false);
+    CHECK(payload.at("rolled_back") == false);
+    CHECK(payload.at("recovery_required") == true);
+    CHECK(payload.at("runtime_quiesced") == false);
+    CHECK_FALSE(payload.contains("recovery_error"));
+    CHECK(validation_calls == 1U);
+    CHECK(write_calls == 0U);
+    CHECK(apply_calls == 0U);
+    CHECK(maintenance->reserve_calls == 0U);
+    CHECK(emergency_calls == 1U);
+    CHECK(stop_calls == 0U);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(maintenance->active_leases == 0U);
+    CHECK(read_text(config_path) == original_json);
+    check_config_draft_unchanged(store, *draft_before);
+    CHECK(RestoreJournal(operation_journal).unknown_present());
+
+    check_config_lifecycle_milestones(
+        lifecycle_updates,
+        {
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Running,
+             false,
+             {}},
+            {LifecycleOperationResult::Failed,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Failed,
+             true,
+             "Cannot start configuration recovery journal"},
+        });
+}
+
+TEST_CASE(
+    "config save converts a direct runtime ApiError into recovery required") {
+    constexpr int api_port = 18270;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:18270");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+    const Config staged = make_valid_config("127.0.0.1:18271");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    ConfigStore store(original);
+    store.stage_config(staged, staged_json);
+    const auto draft_before = store.staged_cas_snapshot();
+    REQUIRE(draft_before.has_value());
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t validation_calls = 0;
+    std::size_t write_calls = 0;
+    std::size_t apply_calls = 0;
+    std::size_t emergency_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    context.validate_candidate_config_fn =
+        [&](const Config&) { ++validation_calls; };
+    context.enqueue_apply_validated_config_fn =
+        [&](Config, std::string) -> ConfigApplyResult {
+            ++apply_calls;
+            throw ApiError(
+                "synthetic runtime conflict",
+                409,
+                nlohmann::json{{"error", "must not escape"}}.dump());
+        };
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++emergency_calls; };
+
+    LifecycleOperationStore lifecycle_store;
+    LifecycleOperationCoordinator lifecycle(lifecycle_store);
+    std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+    lifecycle_store.set_publish_callback([&] {
+        const auto snapshot = lifecycle_store.snapshot();
+        if (snapshot.has_value()) {
+            lifecycle_updates.push_back(*snapshot);
+        }
+    });
+    context.lifecycle_operations = &lifecycle;
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [&](const std::string& path, const std::string& body) {
+            ++write_calls;
+            write_config_atomically(path, body);
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/save", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 503);
+    const auto payload = nlohmann::json::parse(response->body);
+    CHECK(payload.at("error") ==
+          "Configuration runtime apply was interrupted; runtime state is "
+          "unknown");
+    CHECK(payload.at("saved") == false);
+    CHECK(payload.at("applied") == false);
+    CHECK(payload.at("rolled_back") == false);
+    CHECK(payload.at("recovery_required") == true);
+    CHECK(payload.at("runtime_quiesced") == true);
+    CHECK_FALSE(payload.contains("recovery_error"));
+    CHECK(validation_calls == 1U);
+    CHECK(write_calls == 1U);
+    CHECK(apply_calls == 1U);
+    CHECK(emergency_calls == 1U);
+    CHECK(maintenance->reserve_calls == 1U);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(maintenance->active_leases == 0U);
+    CHECK(read_text(config_path) == staged_json);
+    check_config_draft_unchanged(store, *draft_before);
+
+    RestoreJournal journal(config_save_journal_path(directory));
+    const auto active = journal.read_active();
+    REQUIRE(active.has_value());
+    CHECK(active->phase == RestoreJournalPhase::files_committed);
+
+    check_config_lifecycle_milestones(
+        lifecycle_updates,
+        {
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Running,
+             false,
+             {}},
+            {LifecycleOperationResult::Failed,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Failed,
+             true,
+             "Configuration runtime apply was interrupted"},
+        });
+}
+
+TEST_CASE(
+    "config save fails closed when exact persistent recovery cannot be proven") {
+    struct RecoveryFailureCase {
+        bool runtime_rolled_back;
+        int api_port;
+        const char* expected_error;
+    };
+    const std::vector<RecoveryFailureCase> cases{
+        {
+            false,
+            18272,
+            "Configuration write failed and exact recovery could not be "
+            "proven",
+        },
+        {
+            true,
+            18273,
+            "Runtime rolled back, but exact persistent recovery could not be "
+            "proven",
+        },
+    };
+
+    for (const auto& failure : cases) {
+        CAPTURE(failure.runtime_rolled_back);
+        ConfigApiTempDir directory;
+        const auto config_path = directory.path / "config.json";
+        const auto recovery_root =
+            directory.path / ".keen-pbr-recovery";
+        const auto operation_journal =
+            recovery_root / "config-save";
+        const Config original = make_valid_config(
+            "127.0.0.1:" + std::to_string(failure.api_port));
+        const std::string original_json =
+            nlohmann::json(original).dump(1, '\t') + "\n";
+        write_text(config_path, original_json);
+        const Config staged = make_valid_config(
+            "127.0.0.1:" +
+            std::to_string(failure.api_port + 10));
+        const std::string staged_json =
+            nlohmann::json(staged).dump(1, '\t') + "\n";
+        ConfigStore store(original);
+        store.stage_config(staged, staged_json);
+        const auto draft_before = store.staged_cas_snapshot();
+        REQUIRE(draft_before.has_value());
+
+        SseBroadcaster broadcaster;
+        std::size_t begin_calls = 0;
+        std::size_t finish_calls = 0;
+        std::size_t validation_calls = 0;
+        std::size_t write_calls = 0;
+        std::size_t apply_calls = 0;
+        std::size_t emergency_calls = 0;
+        bool rollback_corrupted = false;
+        auto context = make_config_context(
+            config_path.string(),
+            broadcaster,
+            staged,
+            staged_json,
+            begin_calls,
+            finish_calls,
+            apply_calls);
+        connect_config_store(context, store);
+        const auto maintenance =
+            std::make_shared<FakeMaintenanceState>();
+        install_fake_maintenance(context, maintenance);
+        context.validate_candidate_config_fn =
+            [&](const Config&) { ++validation_calls; };
+        context.enqueue_apply_validated_config_fn =
+            [&](Config, std::string) {
+                ++apply_calls;
+                REQUIRE(failure.runtime_rolled_back);
+                rollback_corrupted =
+                    corrupt_active_config_save_rollback(
+                        operation_journal);
+                ConfigApplyResult result;
+                result.error = "synthetic runtime apply failure";
+                result.rolled_back = true;
+                return result;
+            };
+        context.emergency_quiesce_runtime_fn =
+            [&] { ++emergency_calls; };
+
+        LifecycleOperationStore lifecycle_store;
+        LifecycleOperationCoordinator lifecycle(lifecycle_store);
+        std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+        lifecycle_store.set_publish_callback([&] {
+            const auto snapshot = lifecycle_store.snapshot();
+            if (snapshot.has_value()) {
+                lifecycle_updates.push_back(*snapshot);
+            }
+        });
+        context.lifecycle_operations = &lifecycle;
+
+        ApiConfig api_config;
+        api_config.listen =
+            "127.0.0.1:" + std::to_string(failure.api_port);
+        ApiServer server(api_config);
+        register_config_handler_for_test(
+            server,
+            context,
+            [&](const std::string& path, const std::string& body) {
+                ++write_calls;
+                write_config_atomically(path, body);
+                if (!failure.runtime_rolled_back) {
+                    rollback_corrupted =
+                        corrupt_active_config_save_rollback(
+                            operation_journal);
+                    throw std::runtime_error(
+                        "synthetic config write failure");
+                }
+            });
+        server.start();
+        httplib::Client client("127.0.0.1", failure.api_port);
+        const auto response = client.Post(
+            "/api/config/save", "", "application/json");
+        server.stop();
+
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 503);
+        REQUIRE(rollback_corrupted);
+        const auto payload =
+            nlohmann::json::parse(response->body);
+        CHECK(payload.at("error") == failure.expected_error);
+        CHECK(payload.at("saved") == false);
+        CHECK(payload.at("applied") == false);
+        CHECK(payload.at("rolled_back") ==
+              failure.runtime_rolled_back);
+        CHECK(payload.at("recovery_required") == true);
+        CHECK(payload.at("runtime_quiesced") == true);
+        CHECK(payload.at("recovery_error") ==
+              "Cannot verify config-save recovery journal: Restore journal "
+              "is unsafe: Restore rollback payload size does not match "
+              "active marker");
+        CHECK(validation_calls == 1U);
+        CHECK(write_calls == 1U);
+        CHECK(apply_calls ==
+              (failure.runtime_rolled_back ? 1U : 0U));
+        CHECK(emergency_calls == 1U);
+        CHECK(maintenance->reserve_calls == 1U);
+        CHECK(begin_calls == 1U);
+        CHECK(finish_calls == 1U);
+        CHECK(maintenance->active_leases == 0U);
+        CHECK(read_text(config_path) == staged_json);
+        check_config_draft_unchanged(store, *draft_before);
+        CHECK(std::filesystem::exists(
+            operation_journal / "active.json"));
+        CHECK(RestoreJournal(operation_journal).unknown_present());
+        CHECK(RestoreJournal(recovery_root).unknown_present());
+
+        check_config_lifecycle_milestones(
+            lifecycle_updates,
+            {
+                {LifecycleOperationResult::Running,
+                 LifecycleOperationStatus::Succeeded,
+                 LifecycleOperationStatus::Running,
+                 false,
+                 {}},
+                {LifecycleOperationResult::Failed,
+                 LifecycleOperationStatus::Succeeded,
+                 LifecycleOperationStatus::Failed,
+                 true,
+                 "Configuration file recovery failed"},
+            });
+    }
+}
+
+TEST_CASE(
     "config save maintenance contention and stale generation do not mutate draft") {
     struct FailureCase {
         MaintenanceLockErrorKind kind;
@@ -1305,11 +1754,16 @@ TEST_CASE(
     const Config staged = make_valid_config("127.0.0.1:18240");
     const std::string staged_json =
         nlohmann::json(staged).dump(1, '\t') + "\n";
+    ConfigStore store(original);
+    store.stage_config(staged, staged_json);
+    const auto draft_before = store.staged_cas_snapshot();
+    REQUIRE(draft_before.has_value());
 
     SseBroadcaster broadcaster;
     std::size_t begin_calls = 0;
     std::size_t finish_calls = 0;
     std::size_t apply_calls = 0;
+    std::size_t emergency_calls = 0;
     auto context = make_config_context(
         config_path.string(),
         broadcaster,
@@ -1318,6 +1772,7 @@ TEST_CASE(
         begin_calls,
         finish_calls,
         apply_calls);
+    connect_config_store(context, store);
     const auto maintenance =
         std::make_shared<FakeMaintenanceState>();
     install_fake_maintenance(context, maintenance);
@@ -1335,6 +1790,8 @@ TEST_CASE(
             result.rolled_back = true;
             return result;
         };
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++emergency_calls; };
     std::size_t write_calls = 0;
     const auto writer =
         [&](const std::string& path, const std::string& body) {
@@ -1342,6 +1799,17 @@ TEST_CASE(
             ++write_calls;
             write_config_atomically(path, body);
         };
+
+    LifecycleOperationStore lifecycle_store;
+    LifecycleOperationCoordinator lifecycle(lifecycle_store);
+    std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+    lifecycle_store.set_publish_callback([&] {
+        const auto snapshot = lifecycle_store.snapshot();
+        if (snapshot.has_value()) {
+            lifecycle_updates.push_back(*snapshot);
+        }
+    });
+    context.lifecycle_operations = &lifecycle;
 
     ApiConfig api_config;
     api_config.listen =
@@ -1356,14 +1824,44 @@ TEST_CASE(
 
     REQUIRE(response != nullptr);
     CHECK(response->status == 500);
+    const auto payload = nlohmann::json::parse(response->body);
+    CHECK(payload.at("saved") == false);
+    CHECK(payload.at("applied") == false);
+    CHECK(payload.at("rolled_back") == true);
+    CHECK(payload.at("runtime_unchanged") == false);
+    CHECK(payload.at("file_rolled_back") == true);
+    CHECK(payload.at("recovery_required") == false);
     CHECK(read_text(config_path) == original_json);
     CHECK(write_calls == 1U);
+    CHECK(apply_calls == 1U);
+    CHECK(emergency_calls == 0U);
     CHECK(maintenance->reserve_calls == 1U);
     CHECK(event_index(maintenance->events, "apply-failed") <
           event_index(maintenance->events, "finish-config"));
     CHECK(event_index(maintenance->events, "finish-config") <
           event_index(maintenance->events, "lease-release"));
     CHECK(maintenance->active_leases == 0U);
+    CHECK_FALSE(std::filesystem::exists(
+        config_save_journal_path(directory) / "active.json"));
+    CHECK_FALSE(RestoreJournal(
+                    config_save_journal_path(directory))
+                    .unknown_present());
+    check_config_draft_unchanged(store, *draft_before);
+
+    check_config_lifecycle_milestones(
+        lifecycle_updates,
+        {
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Running,
+             false,
+             {}},
+            {LifecycleOperationResult::Failed,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Failed,
+             true,
+             "Configuration commit or apply failed"},
+        });
 }
 
 TEST_CASE(
@@ -1378,12 +1876,17 @@ TEST_CASE(
     const Config staged = make_valid_config("127.0.0.1:18260");
     const std::string staged_json =
         nlohmann::json(staged).dump(1, '\t') + "\n";
+    ConfigStore store(original);
+    store.stage_config(staged, staged_json);
+    const auto draft_before = store.staged_cas_snapshot();
+    REQUIRE(draft_before.has_value());
 
     SseBroadcaster broadcaster;
     std::size_t begin_calls = 0;
     std::size_t finish_calls = 0;
     std::size_t apply_calls = 0;
     std::size_t stop_calls = 0;
+    std::size_t write_calls = 0;
     auto context = make_config_context(
         config_path.string(),
         broadcaster,
@@ -1392,6 +1895,7 @@ TEST_CASE(
         begin_calls,
         finish_calls,
         apply_calls);
+    connect_config_store(context, store);
     const auto maintenance =
         std::make_shared<FakeMaintenanceState>();
     install_fake_maintenance(context, maintenance);
@@ -1406,6 +1910,17 @@ TEST_CASE(
     context.emergency_quiesce_runtime_fn =
         [&] { ++stop_calls; };
 
+    LifecycleOperationStore lifecycle_store;
+    LifecycleOperationCoordinator lifecycle(lifecycle_store);
+    std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+    lifecycle_store.set_publish_callback([&] {
+        const auto snapshot = lifecycle_store.snapshot();
+        if (snapshot.has_value()) {
+            lifecycle_updates.push_back(*snapshot);
+        }
+    });
+    context.lifecycle_operations = &lifecycle;
+
     ApiConfig api_config;
     api_config.listen =
         "127.0.0.1:" + std::to_string(api_port);
@@ -1413,7 +1928,8 @@ TEST_CASE(
     register_config_handler_for_test(
         server,
         context,
-        [](const std::string& path, const std::string& body) {
+        [&](const std::string& path, const std::string& body) {
+            ++write_calls;
             write_config_atomically(path, body);
         });
     server.start();
@@ -1432,9 +1948,32 @@ TEST_CASE(
     CHECK(payload.at("file_rolled_back") == true);
     CHECK(payload.at("recovery_required") == false);
     CHECK(read_text(config_path) == original_json);
+    CHECK(write_calls == 1U);
     CHECK(apply_calls == 1U);
     CHECK(stop_calls == 0U);
+    CHECK(maintenance->reserve_calls == 1U);
     CHECK(maintenance->active_leases == 0U);
+    CHECK_FALSE(std::filesystem::exists(
+        config_save_journal_path(directory) / "active.json"));
+    CHECK_FALSE(RestoreJournal(
+                    config_save_journal_path(directory))
+                    .unknown_present());
+    check_config_draft_unchanged(store, *draft_before);
+
+    check_config_lifecycle_milestones(
+        lifecycle_updates,
+        {
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Running,
+             false,
+             {}},
+            {LifecycleOperationResult::Failed,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Failed,
+             true,
+             "Configuration commit or apply failed"},
+        });
 }
 
 TEST_CASE(
