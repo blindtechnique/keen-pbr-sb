@@ -8,9 +8,11 @@
 #include "../src/util/traced_mutex.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <future>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -96,9 +98,50 @@ TEST_CASE("blocking executor emits queue and completion trace events") {
     CHECK(capture.wait_for_contains("event=executor_end"));
 }
 
-TEST_CASE("blocking executor rejects new tasks after shutdown") {
-    BlockingExecutor executor(1, 4);
-    executor.shutdown();
+TEST_CASE("blocking executor shutdown drains queued tasks before joining") {
+    BlockingExecutor executor(1, 1);
+    std::atomic<int> first_runs{0};
+    std::atomic<int> queued_runs{0};
+    std::promise<void> first_started_promise;
+    auto first_started = first_started_promise.get_future();
+    std::promise<void> release_first_promise;
+    auto release_first = release_first_promise.get_future().share();
+
+    auto first = executor.submit("held-task", [&]() {
+        ++first_runs;
+        first_started_promise.set_value();
+        release_first.wait();
+    });
+    first_started.wait();
+
+    auto queued = executor.submit("queued-task", [&]() {
+        ++queued_runs;
+    });
+
+    std::promise<void> shutdown_started_promise;
+    auto shutdown_started = shutdown_started_promise.get_future();
+    std::promise<void> shutdown_complete_promise;
+    auto shutdown_complete = shutdown_complete_promise.get_future();
+    std::thread shutdown_thread([&]() {
+        shutdown_started_promise.set_value();
+        executor.shutdown();
+        shutdown_complete_promise.set_value();
+    });
+
+    shutdown_started.wait();
+    CHECK(shutdown_complete.wait_for(std::chrono::milliseconds(25)) ==
+          std::future_status::timeout);
+    CHECK(queued_runs.load() == 0);
+
+    release_first_promise.set_value();
+    shutdown_thread.join();
+
+    CHECK(shutdown_complete.wait_for(std::chrono::milliseconds(0)) ==
+          std::future_status::ready);
+    CHECK_NOTHROW(first.get());
+    CHECK_NOTHROW(queued.get());
+    CHECK(first_runs.load() == 1);
+    CHECK(queued_runs.load() == 1);
 
     CHECK_FALSE(executor.try_post("late-task", []() {}));
 
