@@ -607,6 +607,18 @@ void populate_routing_state(const Config& cfg,
     }
 }
 
+void reconcile_kernel_routing_state(
+    RouteTable& routes,
+    PolicyRuleManager& rules,
+    const std::vector<RouteSpec>& desired_routes,
+    const std::vector<RuleSpec>& desired_rules,
+    RouteReconcileMode mode) {
+    routes.add_missing(desired_routes, mode);
+    rules.add_missing(desired_rules);
+    rules.remove_obsolete(desired_rules);
+    routes.remove_obsolete(desired_routes);
+}
+
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink) {
     return is_interface_outbound_reachable(outbound, netlink.dump_routes_in_table(254));
 }

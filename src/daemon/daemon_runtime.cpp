@@ -1239,10 +1239,12 @@ void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
     // The URLTest policy rule does not change on a selected-child switch, but
     // its route does. Add all desired routes first so marked traffic never
     // observes an empty table, then retire only obsolete owned state.
-    route_table_.add_missing(desired_routes.get_routes(), mode);
-    policy_rules_.add_missing(desired_rules.get_rules());
-    policy_rules_.remove_obsolete(desired_rules.get_rules());
-    route_table_.remove_obsolete(desired_routes.get_routes());
+    reconcile_kernel_routing_state(
+        route_table_,
+        policy_rules_,
+        desired_routes.get_routes(),
+        desired_rules.get_rules(),
+        mode);
 }
 
 void Daemon::apply_firewall(FirewallApplyMode mode) {

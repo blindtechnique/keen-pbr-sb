@@ -46,6 +46,17 @@ void populate_routing_state(const Config& cfg,
                             const std::map<std::string, std::string>* urltest_selections = nullptr,
                             bool ipv6_enabled = true);
 
+// Reconcile one already-planned kernel generation without exposing policy
+// rules before their routes exist. A failed add intentionally leaves the
+// successfully installed prefix tracked for a later convergent retry; obsolete
+// owned state is retired only after both add phases complete.
+void reconcile_kernel_routing_state(
+    RouteTable& routes,
+    PolicyRuleManager& rules,
+    const std::vector<RouteSpec>& desired_routes,
+    const std::vector<RuleSpec>& desired_rules,
+    RouteReconcileMode mode = RouteReconcileMode::Strict);
+
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink);
 bool is_interface_outbound_reachable(
     const Outbound& outbound,
