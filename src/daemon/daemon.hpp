@@ -674,18 +674,15 @@ private:
     // Low-frequency fallback for firmware NAT rebuilds that do not invoke the
     // netfilter hook. The callback runs on the control/event-loop thread.
     int owned_snat_health_task_id_{-1};
-    // One bounded retry chain for races with NDMS firewall publication.
-    int runtime_firewall_retry_task_id_{-1};
+    // One bounded retry chain for races with NDMS firewall publication. The
+    // coordinator owns its timer slot and the latched owned-SNAT request.
+    RuntimeFirewallRetryCoordinator runtime_firewall_retry_;
     // Best-effort targeted conntrack retirement can be incomplete under a
     // short embedded-router command budget. Retain only exact owned marks and
     // retry them on this runtime generation; never flush global conntrack.
     int owned_conntrack_cleanup_retry_task_id_{-1};
     std::optional<OwnedConntrackCleanupRetry>
         pending_owned_conntrack_cleanup_retry_;
-    // Latches a confirmed firmware NAT loss across retry cancellation,
-    // observation-gap recovery, and a concurrent transactional config apply.
-    // Cleared only after the desired SNAT state is verified live.
-    OwnedSnatRecovery pending_owned_snat_recovery_;
     // Separate bounded repair chain for a resolver hook that failed after
     // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq.
     int resolver_reload_retry_task_id_{-1};

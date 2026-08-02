@@ -1280,8 +1280,8 @@ void Daemon::cancel_owned_snat_health_check() {
 
 void Daemon::check_owned_snat_health() {
     const bool recovery_pending =
-        runtime_firewall_retry_task_id_ >= 0 ||
-        pending_owned_snat_recovery_.requested;
+        runtime_firewall_retry_.retry_pending() ||
+        runtime_firewall_retry_.owned_snat_recovery_pending();
     const bool netfilter_refresh_pending =
         netfilter_refresh_task_id_ >= 0 ||
         pending_netfilter_refresh_reasons_ != 0;
@@ -1373,7 +1373,7 @@ void Daemon::schedule_netfilter_runtime_refresh(
                 "Netfilter event: applying {} runtime refresh...",
                 reason_label);
             if (nat_refresh &&
-                runtime_firewall_retry_task_id_ >= 0) {
+                runtime_firewall_retry_.retry_pending()) {
                 // Do not coalesce away a confirmed firmware NAT rebuild behind
                 // an older generic recovery. Replace that retry with an
                 // immediate attempt whose bounded retry chain remembers that
@@ -1474,13 +1474,10 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             "Skipping runtime routing/firewall refresh because routing is stopped.");
         return false;
     }
-    pending_owned_snat_recovery_ =
-        merge_owned_snat_recovery(
-            pending_owned_snat_recovery_, snat_recovery);
-    snat_recovery = pending_owned_snat_recovery_;
-    if (runtime_recovery_request_should_coalesce(
-            retry_attempt,
-            runtime_firewall_retry_task_id_ >= 0)) {
+    const auto admission = runtime_firewall_retry_.begin_attempt(
+        retry_attempt, std::move(snat_recovery));
+    snat_recovery = admission.snat_recovery;
+    if (admission.coalesced) {
         log.verbose(
             "Coalescing runtime routing/firewall refresh with the pending "
             "recovery retry.");
@@ -1540,7 +1537,9 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                     ? std::optional<OwnedConntrackCleanupSnapshot>{
                           snapshot_owned_conntrack_marks()}
                     : std::nullopt);
-        pending_owned_snat_recovery_ = snat_recovery;
+        snat_recovery =
+            runtime_firewall_retry_.retain_recovery(
+                std::move(snat_recovery));
         reconcile_static_routing(RouteReconcileMode::DeferredRepair);
         apply_firewall(FirewallApplyMode::PreserveSets);
         const OwnedSnatState inspected_snat_after =
@@ -1555,7 +1554,9 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                     ? std::optional<OwnedConntrackCleanupSnapshot>{
                           snapshot_owned_conntrack_marks()}
                     : std::nullopt);
-        pending_owned_snat_recovery_ = snat_recovery;
+        snat_recovery =
+            runtime_firewall_retry_.retain_recovery(
+                std::move(snat_recovery));
         const OwnedSnatState snat_after = inspected_snat_after;
         if (snat_recovery.requested &&
             snat_after != OwnedSnatState::healthy) {
@@ -1623,9 +1624,8 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                     "keen-pbr-marked flows.");
             }
         }
-        if (snat_recovery.requested) {
-            pending_owned_snat_recovery_ = {};
-        }
+        runtime_firewall_retry_.complete_attempt(
+            /*succeeded=*/true, snat_recovery);
         runtime_firewall_incidents_.clear();
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
@@ -1642,7 +1642,9 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         log.verbose(
             "Runtime route reconciliation is waiting for an interface: {}",
             e.what());
-        if (snat_recovery.requested) {
+        runtime_firewall_retry_.complete_attempt(
+            /*succeeded=*/false, snat_recovery);
+        if (runtime_firewall_retry_.route_unavailable_retry_required()) {
             schedule_runtime_firewall_retry(
                 retry_attempt,
                 runtime_generation_.load(std::memory_order_acquire),
@@ -1650,6 +1652,8 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         }
         return false;
     } catch (const TransientFirewallError& e) {
+        runtime_firewall_retry_.complete_attempt(
+            /*succeeded=*/false, snat_recovery);
         if (retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
             if (snat_recovery.requested) {
                 // Keep one quiet, capped maintenance retry alive while the
@@ -1698,6 +1702,8 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             snat_recovery);
         return false;
     } catch (const std::exception& e) {
+        runtime_firewall_retry_.complete_attempt(
+            /*succeeded=*/false, snat_recovery);
         // A permanent rule/configuration failure is actionable and must remain
         // visible to the user. Stable-ID changes also retain a bounded retry:
         // the generation guard has restored the previous in-memory map, so
@@ -1741,53 +1747,55 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
 }
 
 void Daemon::cancel_runtime_firewall_retry() {
-    if (runtime_firewall_retry_task_id_ < 0) {
-        return;
-    }
-    scheduler_->cancel(runtime_firewall_retry_task_id_);
-    runtime_firewall_retry_task_id_ = -1;
+    runtime_firewall_retry_.cancel(
+        [this](int task_id) { scheduler_->cancel(task_id); });
 }
 
 void Daemon::schedule_runtime_firewall_retry(
     std::size_t attempt,
     std::uint64_t runtime_generation,
     OwnedSnatRecovery snat_recovery) {
-    if (runtime_firewall_retry_task_id_ >= 0) {
-        return;
-    }
-    const auto retry_plan = plan_runtime_firewall_retry(
+    const auto retry_plan = runtime_firewall_retry_.schedule(
         attempt,
+        runtime_generation,
         RUNTIME_FIREWALL_RETRY_DELAYS.size(),
-        snat_recovery.requested);
+        std::move(snat_recovery),
+        [this, attempt](const RuntimeFirewallRetryPlan& plan,
+                        auto callback) {
+            const auto delay = plan.maintenance
+                ? std::chrono::seconds{60}
+                : RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
+            return scheduler_->schedule_oneshot(
+                delay,
+                std::move(callback),
+                "runtime-firewall-retry");
+        },
+        [this](std::uint64_t expected_generation) {
+            const bool current = runtime_recovery_is_current(
+                routing_runtime_active_,
+                expected_generation,
+                runtime_generation_.load(std::memory_order_acquire));
+            if (!current) {
+                Logger::instance().verbose(
+                    "Discarding stale runtime firewall recovery retry.");
+            }
+            return current;
+        },
+        [this](std::size_t next_attempt,
+               OwnedSnatRecovery scheduled_snat_recovery) {
+            refresh_iproute_and_firewall_runtime(
+                next_attempt,
+                std::nullopt,
+                std::nullopt,
+                /*schedule_catalog_refresh=*/true,
+                std::move(scheduled_snat_recovery));
+        });
     if (!retry_plan.schedule) {
         return;
     }
     const auto delay = retry_plan.maintenance
         ? std::chrono::seconds{60}
         : RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
-    runtime_firewall_retry_task_id_ = scheduler_->schedule_oneshot(
-        delay,
-        [this,
-         next_attempt = retry_plan.next_attempt,
-         runtime_generation,
-         snat_recovery]() {
-            runtime_firewall_retry_task_id_ = -1;
-            if (!runtime_recovery_is_current(
-                    routing_runtime_active_,
-                    runtime_generation,
-                    runtime_generation_.load(std::memory_order_acquire))) {
-                Logger::instance().verbose(
-                    "Discarding stale runtime firewall recovery retry.");
-                return;
-            }
-            refresh_iproute_and_firewall_runtime(
-                next_attempt,
-                std::nullopt,
-                std::nullopt,
-                /*schedule_catalog_refresh=*/true,
-                snat_recovery);
-        },
-        "runtime-firewall-retry");
     if (retry_plan.maintenance) {
         Logger::instance().verbose(
             "SNAT maintenance recovery scheduled in {}s.",

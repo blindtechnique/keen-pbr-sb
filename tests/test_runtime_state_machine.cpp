@@ -4,10 +4,28 @@
 #include "runtime/runtime_state_machine.hpp"
 
 #include <chrono>
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
 using namespace keen_pbr3;
+
+namespace {
+
+struct FakeRuntimeFirewallRetryScheduler {
+    template <typename Callback>
+    int schedule(const RuntimeFirewallRetryPlan& plan, Callback&& callback) {
+        plans.push_back(plan);
+        callbacks.emplace_back(std::forward<Callback>(callback));
+        return next_task_id++;
+    }
+
+    std::vector<RuntimeFirewallRetryPlan> plans;
+    std::vector<std::function<void()>> callbacks;
+    int next_task_id{1};
+};
+
+} // namespace
 
 TEST_CASE("runtime state machine accepts recovery and rejects impossible transitions") {
     RuntimeStateMachine machine;
@@ -320,6 +338,208 @@ TEST_CASE("runtime firewall retry becomes quiet SNAT maintenance after exhaustio
     CHECK(snat_maintenance.schedule);
     CHECK(snat_maintenance.maintenance);
     CHECK(snat_maintenance.next_attempt == 0U);
+}
+
+TEST_CASE("runtime firewall retry merges owned recovery before coalescing") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto schedule = [&scheduler](
+                              const RuntimeFirewallRetryPlan& plan,
+                              auto callback) {
+        return scheduler.schedule(plan, std::move(callback));
+    };
+
+    const auto initial = coordinator.begin_attempt(0, {});
+    REQUIRE_FALSE(initial.coalesced);
+    const auto retry = coordinator.schedule(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        initial.snat_recovery,
+        schedule,
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {});
+    REQUIRE(retry.schedule);
+    REQUIRE(coordinator.retry_pending());
+
+    const auto coalesced = coordinator.begin_attempt(
+        0,
+        OwnedSnatRecovery{
+            /*requested=*/true,
+            /*missing_observed=*/true});
+    CHECK(coalesced.coalesced);
+    CHECK(coalesced.snat_recovery.requested);
+    CHECK(coalesced.snat_recovery.missing_observed);
+    CHECK(coordinator.owned_snat_recovery_pending());
+}
+
+TEST_CASE("stale runtime firewall retry releases its slot and skips the attempt") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::size_t attempt_calls = 0;
+    std::uint64_t checked_generation = 0;
+    const auto admission = coordinator.begin_attempt(
+        0,
+        OwnedSnatRecovery{
+            /*requested=*/true,
+            /*missing_observed=*/false});
+    const auto retry = coordinator.schedule(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        admission.snat_recovery,
+        [&scheduler](const RuntimeFirewallRetryPlan& plan, auto callback) {
+            return scheduler.schedule(plan, std::move(callback));
+        },
+        [&](std::uint64_t expected_generation) {
+            checked_generation = expected_generation;
+            return false;
+        },
+        [&](std::size_t, OwnedSnatRecovery) { ++attempt_calls; });
+    REQUIRE(retry.schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+
+    auto callback = scheduler.callbacks.front();
+    callback();
+
+    CHECK(checked_generation == 17U);
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK(attempt_calls == 0U);
+    CHECK(coordinator.owned_snat_recovery_pending());
+}
+
+TEST_CASE("runtime firewall retry releases its slot before a reentrant successor") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto schedule = [&scheduler](
+                              const RuntimeFirewallRetryPlan& plan,
+                              auto callback) {
+        return scheduler.schedule(plan, std::move(callback));
+    };
+    RuntimeFirewallRetryPlan successor;
+    const auto admission = coordinator.begin_attempt(0, {});
+    const auto retry = coordinator.schedule(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        admission.snat_recovery,
+        schedule,
+        [](std::uint64_t) { return true; },
+        [&](std::size_t retry_attempt, OwnedSnatRecovery snat_recovery) {
+            CHECK(retry_attempt == 1U);
+            CHECK_FALSE(coordinator.retry_pending());
+            successor = coordinator.schedule(
+                retry_attempt,
+                /*runtime_generation=*/17,
+                /*bounded_retry_count=*/6,
+                std::move(snat_recovery),
+                schedule,
+                [](std::uint64_t) { return true; },
+                [](std::size_t, OwnedSnatRecovery) {});
+        });
+    REQUIRE(retry.schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+
+    auto callback = scheduler.callbacks.front();
+    callback();
+
+    CHECK(successor.schedule);
+    CHECK(successor.next_attempt == 2U);
+    CHECK(coordinator.retry_pending());
+    CHECK(scheduler.callbacks.size() == 2U);
+}
+
+TEST_CASE("runtime firewall retry exhausts generic work but keeps owned maintenance") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const auto schedule = [&scheduler](
+                              const RuntimeFirewallRetryPlan& plan,
+                              auto callback) {
+        return scheduler.schedule(plan, std::move(callback));
+    };
+
+    const auto generic = coordinator.schedule(
+        6,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        OwnedSnatRecovery{},
+        schedule,
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {});
+    CHECK_FALSE(generic.schedule);
+    CHECK(scheduler.callbacks.empty());
+
+    const auto latched = coordinator.begin_attempt(
+        0,
+        OwnedSnatRecovery{
+            /*requested=*/true,
+            /*missing_observed=*/true});
+    REQUIRE_FALSE(latched.coalesced);
+    OwnedSnatRecovery callback_recovery;
+    const auto owned = coordinator.schedule(
+        6,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        /*snat_recovery=*/{},
+        schedule,
+        [](std::uint64_t) { return true; },
+        [&](std::size_t, OwnedSnatRecovery recovery) {
+            callback_recovery = std::move(recovery);
+        });
+    CHECK(owned.schedule);
+    CHECK(owned.maintenance);
+    CHECK(owned.next_attempt == 0U);
+    CHECK(scheduler.callbacks.size() == 1U);
+
+    auto callback = scheduler.callbacks.front();
+    callback();
+    CHECK(callback_recovery.requested);
+    CHECK(callback_recovery.missing_observed);
+}
+
+TEST_CASE("route unavailability schedules runtime retry only for owned SNAT") {
+    RuntimeFirewallRetryCoordinator coordinator;
+
+    const auto generic = coordinator.begin_attempt(0, {});
+    coordinator.complete_attempt(
+        /*succeeded=*/false, generic.snat_recovery);
+    CHECK_FALSE(coordinator.route_unavailable_retry_required());
+
+    const auto owned = coordinator.begin_attempt(
+        0,
+        OwnedSnatRecovery{
+            /*requested=*/true,
+            /*missing_observed=*/false});
+    coordinator.complete_attempt(
+        /*succeeded=*/false, owned.snat_recovery);
+    CHECK(coordinator.route_unavailable_retry_required());
+}
+
+TEST_CASE("runtime firewall success clears owned recovery while failure retains it") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    const OwnedSnatRecovery recovery{
+        /*requested=*/true,
+        /*missing_observed=*/true,
+        OwnedConntrackCleanupSnapshot{
+            /*runtime_generation=*/17,
+            /*owned_mask=*/0x00ff0000U,
+            /*marks=*/{0x00010000U}}};
+    const auto admission = coordinator.begin_attempt(0, recovery);
+
+    coordinator.complete_attempt(
+        /*succeeded=*/false, admission.snat_recovery);
+    REQUIRE(coordinator.owned_snat_recovery_pending());
+    CHECK(coordinator.pending_owned_snat_recovery().missing_observed);
+    CHECK(coordinator.pending_owned_snat_recovery()
+              .cleanup_snapshot.has_value());
+
+    coordinator.complete_attempt(
+        /*succeeded=*/true,
+        coordinator.pending_owned_snat_recovery());
+    CHECK_FALSE(coordinator.owned_snat_recovery_pending());
+    CHECK_FALSE(coordinator.pending_owned_snat_recovery().missing_observed);
+    CHECK_FALSE(coordinator.pending_owned_snat_recovery()
+                    .cleanup_snapshot.has_value());
 }
 
 TEST_CASE("single-flight refresh hands one pending request to an immediate rerun") {

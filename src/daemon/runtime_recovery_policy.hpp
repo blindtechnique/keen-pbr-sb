@@ -664,6 +664,152 @@ inline OwnedSnatRecovery merge_owned_snat_recovery(
     };
 }
 
+struct RuntimeFirewallRetryAdmission {
+    bool coalesced{false};
+    OwnedSnatRecovery snat_recovery;
+};
+
+// Event-loop-owned retry state for runtime routing/firewall reconciliation.
+// The coordinator deliberately does not perform reconciliation itself: it
+// only owns the single timer slot, its generation/attempt payload, and the
+// latched owned-SNAT recovery request carried across coalesced attempts.
+class RuntimeFirewallRetryCoordinator {
+public:
+    RuntimeFirewallRetryAdmission begin_attempt(
+        std::size_t retry_attempt,
+        OwnedSnatRecovery snat_recovery) {
+        pending_owned_snat_recovery_ = merge_owned_snat_recovery(
+            std::move(pending_owned_snat_recovery_),
+            std::move(snat_recovery));
+        return RuntimeFirewallRetryAdmission{
+            runtime_recovery_request_should_coalesce(
+                retry_attempt, retry_pending()),
+            pending_owned_snat_recovery_};
+    }
+
+    OwnedSnatRecovery retain_recovery(
+        OwnedSnatRecovery snat_recovery) {
+        pending_owned_snat_recovery_ = merge_owned_snat_recovery(
+            std::move(pending_owned_snat_recovery_),
+            std::move(snat_recovery));
+        return pending_owned_snat_recovery_;
+    }
+
+    void complete_attempt(bool succeeded,
+                          OwnedSnatRecovery snat_recovery) {
+        const bool owned_recovery_completed =
+            succeeded && snat_recovery.requested;
+        (void)retain_recovery(std::move(snat_recovery));
+        if (owned_recovery_completed) {
+            pending_owned_snat_recovery_ = {};
+        }
+    }
+
+    bool retry_pending() const noexcept {
+        return retry_task_id_ >= 0;
+    }
+
+    bool owned_snat_recovery_pending() const noexcept {
+        return pending_owned_snat_recovery_.requested;
+    }
+
+    bool route_unavailable_retry_required() const noexcept {
+        return owned_snat_recovery_pending();
+    }
+
+    const OwnedSnatRecovery& pending_owned_snat_recovery() const noexcept {
+        return pending_owned_snat_recovery_;
+    }
+
+    void clear_owned_snat_recovery() noexcept {
+        pending_owned_snat_recovery_ = {};
+    }
+
+    template <typename Schedule, typename IsCurrent, typename RunAttempt>
+    RuntimeFirewallRetryPlan schedule(
+        std::size_t attempt,
+        std::uint64_t runtime_generation,
+        std::size_t bounded_retry_count,
+        OwnedSnatRecovery snat_recovery,
+        Schedule&& schedule,
+        IsCurrent&& is_current,
+        RunAttempt&& run_attempt) {
+        // The coordinator owns the recovery latch, so callers cannot
+        // accidentally downgrade an exhausted owned-SNAT recovery to a
+        // finished generic retry by passing an empty or stale payload.
+        snat_recovery = retain_recovery(std::move(snat_recovery));
+        if (retry_pending()) {
+            return {};
+        }
+
+        const auto retry_plan = plan_runtime_firewall_retry(
+            attempt,
+            bounded_retry_count,
+            snat_recovery.requested);
+        if (!retry_plan.schedule) {
+            return retry_plan;
+        }
+
+        scheduled_runtime_generation_ = runtime_generation;
+        scheduled_retry_attempt_ = retry_plan.next_attempt;
+        scheduled_snat_recovery_ = std::move(snat_recovery);
+        try {
+            retry_task_id_ = std::forward<Schedule>(schedule)(
+                retry_plan,
+                [this,
+                 is_current = std::forward<IsCurrent>(is_current),
+                 run_attempt = std::forward<RunAttempt>(run_attempt)]()
+                    mutable {
+                    const auto retry_attempt = scheduled_retry_attempt_;
+                    const auto runtime_generation =
+                        scheduled_runtime_generation_;
+                    auto snat_recovery = scheduled_snat_recovery_;
+
+                    // Release the single-flight slot before either the stale
+                    // fence or the attempt callback. A reentrant failure may
+                    // therefore install its successor immediately.
+                    release_retry_slot();
+                    if (!is_current(runtime_generation)) {
+                        return;
+                    }
+                    run_attempt(
+                        retry_attempt, std::move(snat_recovery));
+                });
+        } catch (...) {
+            release_retry_slot();
+            throw;
+        }
+        if (retry_task_id_ < 0) {
+            release_retry_slot();
+        }
+        return retry_plan;
+    }
+
+    template <typename Cancel>
+    void cancel(Cancel&& cancel) {
+        if (!retry_pending()) {
+            return;
+        }
+        const int task_id = retry_task_id_;
+        std::forward<Cancel>(cancel)(task_id);
+        release_retry_slot();
+    }
+
+private:
+    void release_retry_slot() noexcept {
+        retry_task_id_ = -1;
+        scheduled_runtime_generation_ = 0;
+        scheduled_retry_attempt_ = 0;
+        scheduled_snat_recovery_ = {};
+    }
+
+    int retry_task_id_{-1};
+    std::uint64_t scheduled_runtime_generation_{0};
+    std::size_t scheduled_retry_attempt_{0};
+    OwnedSnatRecovery scheduled_snat_recovery_;
+    OwnedSnatRecovery pending_owned_snat_recovery_;
+};
+
 // A firmware NAT rebuild may remove keen-pbr's postrouting scaffold while
 // leaving already-classified conntrack entries alive. Evict only our marked
 // flows, and only after observing that a genuinely missing scaffold was

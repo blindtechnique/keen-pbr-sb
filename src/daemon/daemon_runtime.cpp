@@ -744,7 +744,8 @@ void Daemon::cancel_owned_conntrack_cleanup_retry() {
 void Daemon::complete_pending_snat_recovery_before_generation_change() {
     // An earlier verified repair may have restored the SNAT scaffold while
     // its exact conntrack retirement remained incomplete. That remainder is
-    // independent of pending_owned_snat_recovery_: it must be drained before
+    // independent of the coordinator's pending SNAT recovery: it must be
+    // drained before
     // numerical marks can be reused by a newer generation.
     if (pending_owned_conntrack_cleanup_retry_.has_value()) {
         const auto retry = *pending_owned_conntrack_cleanup_retry_;
@@ -767,11 +768,11 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
         }
     }
 
-    if (!pending_owned_snat_recovery_.requested) {
+    if (!runtime_firewall_retry_.owned_snat_recovery_pending()) {
         return;
     }
 
-    auto recovery = pending_owned_snat_recovery_;
+    auto recovery = runtime_firewall_retry_.pending_owned_snat_recovery();
     const auto before = firewall_->inspect_owned_snat_state();
     recovery = observe_owned_snat_state(
         std::move(recovery),
@@ -833,7 +834,7 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
                 "generation change");
         }
     }
-    pending_owned_snat_recovery_ = {};
+    runtime_firewall_retry_.clear_owned_snat_recovery();
     cancel_runtime_firewall_retry();
 }
 
@@ -843,7 +844,7 @@ void Daemon::stop_routing_runtime() {
     cancel_owned_snat_health_check();
     cancel_owned_conntrack_cleanup_retry();
     cancel_runtime_firewall_retry();
-    pending_owned_snat_recovery_ = {};
+    runtime_firewall_retry_.clear_owned_snat_recovery();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
     if (!routing_runtime_active_) {
@@ -1048,7 +1049,7 @@ void Daemon::restart_routing_runtime() {
         // This is a same-config replacement. Keeping the generation stable is
         // required so a URLTEST transition already committed by the probe
         // manager cannot be discarded while its control task is queued.
-        if (!pending_owned_snat_recovery_.requested) {
+        if (!runtime_firewall_retry_.owned_snat_recovery_pending()) {
             cancel_runtime_firewall_retry();
         }
         cancel_resolver_reload_retry();
@@ -1142,14 +1143,14 @@ void Daemon::restart_routing_runtime() {
         transition_runtime_or_throw(
             RuntimeState::running, "transactional runtime restart complete");
         publish_runtime_state();
-        if (pending_owned_snat_recovery_.requested &&
-            runtime_firewall_retry_task_id_ < 0) {
+        if (runtime_firewall_retry_.owned_snat_recovery_pending() &&
+            !runtime_firewall_retry_.retry_pending()) {
             (void)refresh_iproute_and_firewall_runtime(
                 0,
                 std::nullopt,
                 std::nullopt,
                 /*schedule_catalog_refresh=*/false,
-                pending_owned_snat_recovery_);
+                runtime_firewall_retry_.pending_owned_snat_recovery());
         }
         log.info(
             "Routing runtime restarted in place without a forwarding teardown.");
@@ -4820,7 +4821,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         internal_vpn_service_lkg_update.state);
     transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
     publish_runtime_state();
-    if (pending_owned_snat_recovery_.requested) {
+    if (runtime_firewall_retry_.owned_snat_recovery_pending()) {
         // The transactional save may have replaced the firewall while a
         // firmware-NAT recovery retry was pending. Reconcile once against the
         // newly committed generation so the latched missing-SNAT observation
@@ -4830,7 +4831,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
             std::nullopt,
             std::nullopt,
             /*schedule_catalog_refresh=*/false,
-            pending_owned_snat_recovery_);
+            runtime_firewall_retry_.pending_owned_snat_recovery());
     }
     // Conntrack retirement is irreversible. Keep it as the final, no-throw
     // phase after the replacement has been persisted, published and fully
