@@ -27,23 +27,28 @@ void register_status_events_handler(ApiServer& server, ApiContext& ctx) {
         res.set_chunked_content_provider(
             "text/event-stream",
             [subscription](size_t, httplib::DataSink& sink) -> bool {
-                std::string frame;
-                {
-                    KPBR_UNIQUE_LOCK(lock, subscription->mutex);
-                    if (!subscription->closed && subscription->messages.empty()) {
-                        subscription->cv.wait_for(lock, std::chrono::seconds(15));
-                    }
-                    if (!subscription->messages.empty()) {
-                        frame = std::move(subscription->messages.front());
-                        subscription->messages.pop_front();
-                    } else if (subscription->closed) {
+                auto result = wait_for_sse_subscription(
+                    subscription,
+                    std::chrono::seconds(15),
+                    std::chrono::seconds(1),
+                    [&sink] {
+                        return !sink.is_writable || sink.is_writable();
+                    });
+                switch (result.status) {
+                    case SseSubscriptionWaitStatus::MESSAGE:
+                        return sink.write(
+                            result.message.data(), result.message.size());
+                    case SseSubscriptionWaitStatus::CLOSED:
                         sink.done();
                         return true;
-                    } else {
-                        frame = ": heartbeat\n\n";
-                    }
+                    case SseSubscriptionWaitStatus::PEER_DISCONNECTED:
+                        return false;
+                    case SseSubscriptionWaitStatus::HEARTBEAT:
+                        static constexpr char kHeartbeat[] = ": heartbeat\n\n";
+                        return sink.write(
+                            kHeartbeat, sizeof(kHeartbeat) - 1);
                 }
-                return sink.write(frame.data(), frame.size());
+                return false;
             },
             [&ctx, subscription](bool) {
                 ctx.status_stream->unsubscribe(subscription);

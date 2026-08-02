@@ -5,6 +5,8 @@
 #include "api/status_stream.hpp"
 #include "daemon/daemon.hpp"
 
+#include <chrono>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -320,6 +322,108 @@ TEST_CASE("status stream shutdown permanently closes subscription admission") {
     }
     CHECK_FALSE(stream.has_subscribers());
     CHECK_FALSE(stream.subscribe());
+}
+
+TEST_CASE("SSE wait drains queued messages without probing the peer") {
+    auto subscription = std::make_shared<SseBroadcaster::Subscription>();
+    {
+        KPBR_LOCK_GUARD(subscription->mutex);
+        subscription->messages.push_back("queued");
+    }
+    int probes = 0;
+
+    const auto result = wait_for_sse_subscription(
+        subscription,
+        std::chrono::seconds(15),
+        std::chrono::seconds(1),
+        [&] {
+            ++probes;
+            return false;
+        });
+
+    CHECK(result.status == SseSubscriptionWaitStatus::MESSAGE);
+    CHECK(result.message == "queued");
+    CHECK(probes == 0);
+}
+
+TEST_CASE("SSE wait observes closed subscriptions without probing the peer") {
+    auto subscription = std::make_shared<SseBroadcaster::Subscription>();
+    {
+        KPBR_LOCK_GUARD(subscription->mutex);
+        subscription->closed = true;
+    }
+    int probes = 0;
+
+    const auto result = wait_for_sse_subscription(
+        subscription,
+        std::chrono::seconds(15),
+        std::chrono::seconds(1),
+        [&] {
+            ++probes;
+            return true;
+        });
+
+    CHECK(result.status == SseSubscriptionWaitStatus::CLOSED);
+    CHECK(probes == 0);
+}
+
+TEST_CASE("SSE wait rejects a dead peer and rechecks subscription state") {
+    using namespace std::chrono_literals;
+
+    auto subscription = std::make_shared<SseBroadcaster::Subscription>();
+    std::promise<void> probe_started;
+    auto probe_started_future = probe_started.get_future();
+    std::promise<void> release_probe;
+    auto release_probe_future = release_probe.get_future();
+
+    auto waiter = std::async(std::launch::async, [&] {
+        return wait_for_sse_subscription(
+            subscription,
+            2s,
+            std::chrono::milliseconds::zero(),
+            [&] {
+                probe_started.set_value();
+                release_probe_future.wait();
+                return false;
+            });
+    });
+
+    const bool probe_observed =
+        probe_started_future.wait_for(3s) == std::future_status::ready;
+    if (probe_observed) {
+        // This acquisition also proves that the peer probe is not executed
+        // while Subscription::mutex is held.
+        KPBR_LOCK_GUARD(subscription->mutex);
+        subscription->messages.push_back("published-during-probe");
+    }
+    subscription->cv.notify_all();
+    release_probe.set_value();
+
+    const auto waiter_ready = waiter.wait_for(5s);
+    REQUIRE(probe_observed);
+    REQUIRE(waiter_ready == std::future_status::ready);
+    const auto result = waiter.get();
+    CHECK(result.status == SseSubscriptionWaitStatus::MESSAGE);
+    CHECK(result.message == "published-during-probe");
+
+    auto dead = std::make_shared<SseBroadcaster::Subscription>();
+    const auto disconnected = wait_for_sse_subscription(
+        dead,
+        std::chrono::seconds(15),
+        std::chrono::milliseconds::zero(),
+        [] { return false; });
+    CHECK(disconnected.status ==
+          SseSubscriptionWaitStatus::PEER_DISCONNECTED);
+}
+
+TEST_CASE("SSE wait emits an immediate zero heartbeat without probing") {
+    auto subscription = std::make_shared<SseBroadcaster::Subscription>();
+    const auto result = wait_for_sse_subscription(
+        subscription,
+        std::chrono::milliseconds::zero(),
+        std::chrono::seconds(1));
+
+    CHECK(result.status == SseSubscriptionWaitStatus::HEARTBEAT);
 }
 
 TEST_CASE("status stream reserves API capacity by limiting long-lived clients") {

@@ -54,36 +54,32 @@ void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
                     return true;
                 }
 
-                std::string next_message;
-                {
-                    KPBR_UNIQUE_LOCK(lock, subscription->mutex);
-                    if (!subscription->closed &&
-                        subscription->messages.empty()) {
-                        subscription->cv.wait_for(
-                            lock, std::chrono::seconds(15));
-                    }
-
-                    if (subscription->closed &&
-                        subscription->messages.empty()) {
+                auto result = wait_for_sse_subscription(
+                    subscription,
+                    std::chrono::seconds(15),
+                    std::chrono::seconds(1),
+                    [&sink] {
+                        return !sink.is_writable || sink.is_writable();
+                    });
+                switch (result.status) {
+                    case SseSubscriptionWaitStatus::CLOSED:
                         Logger::instance().trace("sse_done", "path=/api/dns/test");
                         sink.done();
                         return true;
+                    case SseSubscriptionWaitStatus::PEER_DISCONNECTED:
+                        return false;
+                    case SseSubscriptionWaitStatus::HEARTBEAT: {
+                        static constexpr char kHeartbeat[] = ": heartbeat\n\n";
+                        return sink.write(kHeartbeat, sizeof(kHeartbeat) - 1);
                     }
-
-                    if (!subscription->messages.empty()) {
-                        next_message =
-                            std::move(subscription->messages.front());
-                        subscription->messages.pop_front();
+                    case SseSubscriptionWaitStatus::MESSAGE: {
+                        const auto frame = make_sse_frame(result.message);
+                        Logger::instance().trace(
+                            "sse_event", "path=/api/dns/test bytes={}", frame.size());
+                        return sink.write(frame.data(), frame.size());
                     }
                 }
-
-                if (next_message.empty()) {
-                    static constexpr char kHeartbeat[] = ": heartbeat\n\n";
-                    return sink.write(kHeartbeat, sizeof(kHeartbeat) - 1);
-                }
-                const auto frame = make_sse_frame(next_message);
-                Logger::instance().trace("sse_event", "path=/api/dns/test bytes={}", frame.size());
-                return sink.write(frame.data(), frame.size());
+                return false;
             },
             [&ctx, subscription](bool) {
                 Logger::instance().trace("sse_close", "path=/api/dns/test");

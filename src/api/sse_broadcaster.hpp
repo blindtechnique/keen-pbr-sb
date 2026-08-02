@@ -4,8 +4,10 @@
 
 #include "../util/traced_mutex.hpp"
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +44,28 @@ private:
     std::vector<std::weak_ptr<Subscription>> subscriptions_ GUARDED_BY(mutex_);
     bool admission_closed_ GUARDED_BY(mutex_){false};
 };
+
+enum class SseSubscriptionWaitStatus {
+    MESSAGE,
+    HEARTBEAT,
+    CLOSED,
+    PEER_DISCONNECTED,
+};
+
+struct SseSubscriptionWaitResult {
+    SseSubscriptionWaitStatus status{SseSubscriptionWaitStatus::HEARTBEAT};
+    std::string message;
+};
+
+// Waits for queued SSE data without making the transport part of the
+// broadcaster. The peer probe is deliberately invoked without holding the
+// subscription mutex, then the queue and closed flag are checked again so a
+// concurrent publish/close cannot be lost while the transport is inspected.
+SseSubscriptionWaitResult wait_for_sse_subscription(
+    const SseBroadcaster::SubscriptionPtr& subscription,
+    std::chrono::milliseconds heartbeat_interval,
+    std::chrono::milliseconds peer_probe_interval,
+    const std::function<bool()>& peer_is_writable = {});
 
 } // namespace keen_pbr3
 

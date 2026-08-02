@@ -4,6 +4,8 @@
 
 #include "../log/logger.hpp"
 
+#include <algorithm>
+
 namespace keen_pbr3 {
 
 SseBroadcaster::SseBroadcaster(size_t max_queue_size,
@@ -140,6 +142,94 @@ void SseBroadcaster::compact_locked() {
         *out++ = *it;
     }
     subscriptions_.erase(out, subscriptions_.end());
+}
+
+SseSubscriptionWaitResult wait_for_sse_subscription(
+    const SseBroadcaster::SubscriptionPtr& subscription,
+    std::chrono::milliseconds heartbeat_interval,
+    std::chrono::milliseconds peer_probe_interval,
+    const std::function<bool()>& peer_is_writable) {
+    using Clock = std::chrono::steady_clock;
+
+    const auto started_at = Clock::now();
+    const auto heartbeat_deadline =
+        started_at +
+        std::max(heartbeat_interval, std::chrono::milliseconds::zero());
+    const auto probe_interval =
+        std::max(peer_probe_interval, std::chrono::milliseconds::zero());
+    auto next_probe_at =
+        peer_is_writable
+            ? started_at + probe_interval
+            : heartbeat_deadline;
+
+    const auto inspect_subscription = [&]() -> SseSubscriptionWaitResult {
+        KPBR_UNIQUE_LOCK(lock, subscription->mutex);
+        if (!subscription->messages.empty()) {
+            auto message = std::move(subscription->messages.front());
+            subscription->messages.pop_front();
+            return {SseSubscriptionWaitStatus::MESSAGE, std::move(message)};
+        }
+        if (subscription->closed) {
+            return {SseSubscriptionWaitStatus::CLOSED, {}};
+        }
+        return {SseSubscriptionWaitStatus::HEARTBEAT, {}};
+    };
+
+    while (true) {
+        {
+            KPBR_UNIQUE_LOCK(lock, subscription->mutex);
+            if (!subscription->messages.empty()) {
+                auto message = std::move(subscription->messages.front());
+                subscription->messages.pop_front();
+                return {SseSubscriptionWaitStatus::MESSAGE, std::move(message)};
+            }
+            if (subscription->closed) {
+                return {SseSubscriptionWaitStatus::CLOSED, {}};
+            }
+
+            const auto now = Clock::now();
+            if (now >= heartbeat_deadline) {
+                return {SseSubscriptionWaitStatus::HEARTBEAT, {}};
+            }
+
+            const auto wake_at = std::min(heartbeat_deadline, next_probe_at);
+            subscription->cv.wait_until(lock, wake_at, [&] {
+                return subscription->closed || !subscription->messages.empty();
+            });
+
+            if (!subscription->messages.empty() || subscription->closed) {
+                continue;
+            }
+            if (Clock::now() >= heartbeat_deadline) {
+                return {SseSubscriptionWaitStatus::HEARTBEAT, {}};
+            }
+        }
+
+        // Transport inspection may call into the socket implementation. It
+        // must never run under Subscription::mutex because publish/close need
+        // that mutex to wake this waiter.
+        const bool peer_writable = !peer_is_writable || peer_is_writable();
+
+        // A publish or close may have raced with the probe. Prefer that
+        // authoritative subscription state over the transport result.
+        auto current = inspect_subscription();
+        if (current.status != SseSubscriptionWaitStatus::HEARTBEAT) {
+            return current;
+        }
+        if (!peer_writable) {
+            return {SseSubscriptionWaitStatus::PEER_DISCONNECTED, {}};
+        }
+
+        const auto now = Clock::now();
+        if (now >= heartbeat_deadline) {
+            return {SseSubscriptionWaitStatus::HEARTBEAT, {}};
+        }
+        // A zero probe interval is useful for deterministic one-shot tests,
+        // but a successful probe must not turn into a busy loop.
+        next_probe_at = probe_interval > std::chrono::milliseconds::zero()
+                            ? now + probe_interval
+                            : heartbeat_deadline;
+    }
 }
 
 } // namespace keen_pbr3
