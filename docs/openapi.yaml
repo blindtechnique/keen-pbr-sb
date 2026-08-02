@@ -2588,9 +2588,30 @@ components:
     # Internal: cache metadata (not exposed via API paths)
     # -------------------------------------------------------------------------
 
+    CacheGeneration:
+      type: object
+      required: [filename, size, sha256]
+      properties:
+        filename:
+          type: string
+          description: Basename of an immutable cache body generation.
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Exact cache body size in bytes.
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Lowercase SHA-256 digest of the cache body.
+
     CacheMetadata:
       type: object
       properties:
+        current:
+          $ref: "#/components/schemas/CacheGeneration"
+        previous:
+          $ref: "#/components/schemas/CacheGeneration"
         etag:
           type: string
         last_modified:

@@ -7,6 +7,7 @@
  */
 
 export * from './apiConfig';
+export * from './cacheGeneration';
 export * from './cacheMetadata';
 export * from './catalogPresetSelection';
 export * from './catalogSetupApplyRequest';

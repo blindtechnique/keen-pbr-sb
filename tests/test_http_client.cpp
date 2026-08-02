@@ -111,6 +111,28 @@ TEST_CASE("http client builds conditional transport request and maps errors") {
     CHECK_THROWS_AS(client.download("https://example.test/a"), keen_pbr3::HttpError);
 }
 
+TEST_CASE("http client propagates and honors cooperative cancellation") {
+    auto transport = std::make_shared<FakeTransport>();
+    transport->response.status_code = 200;
+    transport->response.body = "ok";
+    keen_pbr3::HttpClient client(transport);
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+
+    CHECK(client.download(
+              "https://example.test/a",
+              keen_pbr3::HttpRequestOptions{42, cancellation}) == "ok");
+    CHECK(transport->request.cancellation == cancellation);
+    CHECK(transport->calls == 1);
+
+    cancellation->store(true, std::memory_order_relaxed);
+    CHECK_THROWS_AS(
+        client.download(
+            "https://example.test/a",
+            keen_pbr3::HttpRequestOptions{42, cancellation}),
+        keen_pbr3::HttpRequestCancelled);
+    CHECK(transport->calls == 1);
+}
+
 TEST_CASE("url tester uses discard transport probes and retry policy") {
     auto transport = std::make_shared<FakeTransport>();
     transport->response = {204, {}, {}, std::chrono::milliseconds(12)};

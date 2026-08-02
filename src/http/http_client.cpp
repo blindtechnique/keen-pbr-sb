@@ -17,7 +17,8 @@ std::string trim_header_value(const std::string& value) {
 }
 HttpTransportRequest request_for(const std::string& url, std::chrono::seconds timeout,
                                  const std::string& user_agent, size_t max_size,
-                                 uint32_t fwmark) {
+                                 uint32_t fwmark,
+                                 HttpCancellationToken cancellation) {
     HttpTransportRequest request;
     request.url = url;
     request.timeout_ms = static_cast<long>(timeout.count() * 1000);
@@ -25,7 +26,16 @@ HttpTransportRequest request_for(const std::string& url, std::chrono::seconds ti
     request.fwmark = fwmark;
     request.max_redirects = 5;
     request.max_response_size = max_size;
+    request.cancellation = std::move(cancellation);
     return request;
+}
+bool cancellation_requested(const HttpCancellationToken& cancellation) {
+    return cancellation && cancellation->load(std::memory_order_relaxed);
+}
+void throw_if_cancelled(const HttpCancellationToken& cancellation) {
+    if (cancellation_requested(cancellation)) {
+        throw HttpRequestCancelled("HTTP request cancelled");
+    }
 }
 void throw_for_status(long status) {
     if (status >= 400) throw HttpError("HTTP error " + std::to_string(status), status);
@@ -56,10 +66,16 @@ void HttpClient::set_user_agent(const std::string& user_agent) { user_agent_ = u
 void HttpClient::set_max_response_size(size_t bytes) { max_response_size_ = bytes; }
 
 std::string HttpClient::download(const std::string& url, const HttpRequestOptions& options) {
+    throw_if_cancelled(options.cancellation);
     try {
-        auto response = transport_->perform(request_for(url, timeout_, user_agent_, max_response_size_, options.fwmark));
+        auto response = transport_->perform(request_for(
+            url, timeout_, user_agent_, max_response_size_, options.fwmark,
+            options.cancellation));
+        throw_if_cancelled(options.cancellation);
         throw_for_status(response.status_code);
         return response.body;
+    } catch (const HttpTransportCancelled& error) {
+        throw HttpRequestCancelled(error.what());
     } catch (const HttpTransportError& error) {
         throw HttpError(error.what());
     }
@@ -68,11 +84,14 @@ std::string HttpClient::download(const std::string& url, const HttpRequestOption
 ConditionalDownloadResult HttpClient::download_conditional(
     const std::string& url, const std::string& if_none_match, const std::string& if_modified_since,
     const HttpRequestOptions& options) {
-    auto request = request_for(url, timeout_, user_agent_, max_response_size_, options.fwmark);
+    throw_if_cancelled(options.cancellation);
+    auto request = request_for(url, timeout_, user_agent_, max_response_size_,
+                               options.fwmark, options.cancellation);
     if (!if_none_match.empty()) request.headers.push_back("If-None-Match: " + if_none_match);
     if (!if_modified_since.empty()) request.headers.push_back("If-Modified-Since: " + if_modified_since);
     try {
         const auto response = transport_->perform(request);
+        throw_if_cancelled(options.cancellation);
         ConditionalDownloadResult result;
         result.not_modified = response.status_code == 304;
         if (!result.not_modified) throw_for_status(response.status_code);
@@ -82,6 +101,8 @@ ConditionalDownloadResult HttpClient::download_conditional(
         const auto modified = response.headers.find("last-modified");
         if (modified != response.headers.end()) result.last_modified = modified->second;
         return result;
+    } catch (const HttpTransportCancelled& error) {
+        throw HttpRequestCancelled(error.what());
     } catch (const HttpTransportError& error) {
         throw HttpError(error.what());
     }

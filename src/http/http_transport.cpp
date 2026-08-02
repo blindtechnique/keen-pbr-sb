@@ -25,6 +25,14 @@ void setopt(CURL* curl, CURLoption option, T value) {
 }
 
 struct TransferContext { const HttpTransportRequest* request; HttpTransportResponse* response; int mark_errno{0}; };
+bool cancellation_requested(const HttpTransportRequest& request) {
+    return request.cancellation &&
+           request.cancellation->load(std::memory_order_relaxed);
+}
+int progress_callback(void* opaque, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    const auto* context = static_cast<const TransferContext*>(opaque);
+    return cancellation_requested(*context->request) ? 1 : 0;
+}
 size_t write_callback(char* data, size_t size, size_t count, void* opaque) {
     if (count && size > SIZE_MAX / count) return 0;
     auto* context = static_cast<TransferContext*>(opaque);
@@ -73,6 +81,9 @@ void restrict_protocols(CURL* curl) {
 } // namespace
 
 HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& request) {
+    if (cancellation_requested(request)) {
+        throw HttpTransportCancelled("HTTP request cancelled");
+    }
     EasyHandle curl(curl_easy_init());
     if (!curl) throw HttpTransportError("Failed to initialize curl handle");
     HttpTransportResponse response;
@@ -91,6 +102,11 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
     setopt(curl.get(), CURLOPT_SOCKOPTFUNCTION, sockopt_callback);
     setopt(curl.get(), CURLOPT_SOCKOPTDATA, &context);
     setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
+    if (request.cancellation) {
+        setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
+        setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, progress_callback);
+        setopt(curl.get(), CURLOPT_XFERINFODATA, &context);
+    }
     if (!request.discard_body) setopt(curl.get(), CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(request.max_response_size));
     restrict_protocols(curl.get());
     HeaderList headers;
@@ -104,6 +120,10 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
     const CURLcode result = curl_easy_perform(curl.get());
     response.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     if (result != CURLE_OK) {
+        if (result == CURLE_ABORTED_BY_CALLBACK &&
+            cancellation_requested(request)) {
+            throw HttpTransportCancelled("HTTP request cancelled");
+        }
         std::string message = error_buffer[0] ? error_buffer : curl_easy_strerror(result);
         if (context.mark_errno) message += "; SO_MARK failed: " + std::string(std::strerror(context.mark_errno));
         throw HttpTransportError("HTTP request failed: " + message);

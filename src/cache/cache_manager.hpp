@@ -6,22 +6,41 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 
 namespace keen_pbr3 {
 
+#ifdef KEEN_PBR3_TESTING
+enum class AtomicFileWriteStage;
+#endif
+
 // Use generated CacheMetadata from the API schema
 using CacheMetadata = api::CacheMetadata;
+using CacheCommitCallback =
+    std::function<void(const std::function<void()>&)>;
 
 struct CacheDownloadOptions {
     uint32_t fwmark{0};
     std::optional<std::string> detour;
+    HttpCancellationToken cancellation;
+    CacheCommitCallback commit;
+#ifdef KEEN_PBR3_TESTING
+    // Deterministic cache-metadata fault seam. Production builds do not carry
+    // this field; tests use it to exercise the rename/directory-fsync boundary.
+    std::function<void(AtomicFileWriteStage)> metadata_fault_injector;
+    // Observes the point immediately before failed refresh metadata is
+    // persisted. Tests use it to assert that an uncommitted immutable body no
+    // longer consumes the space needed by that metadata write.
+    std::function<void()> before_failure_metadata_persist;
+#endif
 };
 
 enum class CacheDownloadStatus {
     Updated,
     NotModified,
+    Cancelled,
     Failed,
 };
 
@@ -43,12 +62,18 @@ struct CacheDownloadResult {
     bool failed() const {
         return status == CacheDownloadStatus::Failed;
     }
+
+    bool cancelled() const {
+        return status == CacheDownloadStatus::Cancelled;
+    }
 };
 
 class CacheManager {
 public:
     explicit CacheManager(const std::filesystem::path& cache_dir,
-                          size_t max_file_size_bytes = kDefaultMaxFileSizeBytes);
+                          size_t max_file_size_bytes = kDefaultMaxFileSizeBytes,
+                          std::shared_ptr<HttpTransport> transport =
+                              default_http_transport());
 
     // Create cache directory if it doesn't exist.
     void ensure_dir();
@@ -87,7 +112,9 @@ public:
     bool has_usable_same_source_cache(const std::string& name,
                                       const std::string& url) const;
 
-    // Path to the cached list file: <cache_dir>/<name>.txt
+    // Resolve the verified current generation named by metadata, falling back
+    // to its verified previous generation and then to a legacy <name>.txt
+    // cache only when generation pointers have not been introduced yet.
     std::filesystem::path cache_path(const std::string& name) const;
 
     // Path to the metadata file: <cache_dir>/<name>.meta.json

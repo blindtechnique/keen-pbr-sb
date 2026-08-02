@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,8 @@
 
 namespace keen_pbr3 {
 
+using HttpCancellationToken = std::shared_ptr<const std::atomic<bool>>;
+
 struct HttpTransportRequest {
     std::string url;
     long timeout_ms{0};
@@ -20,6 +23,7 @@ struct HttpTransportRequest {
     std::vector<std::string> headers;
     bool discard_body{false};
     size_t max_response_size{size_t{8} * 1024U * 1024U};
+    HttpCancellationToken cancellation;
 };
 
 struct HttpTransportResponse {
@@ -33,6 +37,12 @@ struct HttpTransportResponse {
 class HttpTransportError : public std::runtime_error {
 public:
     explicit HttpTransportError(const std::string& message) : std::runtime_error(message) {}
+};
+
+class HttpTransportCancelled : public HttpTransportError {
+public:
+    explicit HttpTransportCancelled(const std::string& message)
+        : HttpTransportError(message) {}
 };
 
 class HttpTransport {

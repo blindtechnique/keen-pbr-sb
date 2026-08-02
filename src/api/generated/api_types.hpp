@@ -95,8 +95,15 @@ namespace api {
         std::optional<std::string> listen;
     };
 
+    struct CacheGeneration {
+        std::string filename;
+        std::string sha256;
+        int64_t size;
+    };
+
     struct CacheMetadata {
         std::optional<int64_t> cidrs;
+        std::optional<CacheGeneration> current;
         std::optional<int64_t> domains;
         std::optional<std::string> download_time;
         std::optional<std::string> etag;
@@ -106,6 +113,7 @@ namespace api {
         std::optional<std::string> last_refresh_detour;
         std::optional<std::string> last_refresh_error;
         std::optional<std::string> last_refresh_url;
+        std::optional<CacheGeneration> previous;
         std::optional<int64_t> srs_decoder_revision;
         std::optional<std::string> url;
     };
@@ -1063,6 +1071,7 @@ namespace api {
 
     struct ApiTypes {
         std::optional<ApiConfig> api_config;
+        std::optional<CacheGeneration> cache_generation;
         std::optional<CacheMetadata> cache_metadata;
         std::optional<CatalogPresetSelection> catalog_preset_selection;
         std::optional<CatalogSetupApplyRequest> catalog_setup_apply_request;
@@ -1199,6 +1208,9 @@ namespace keen_pbr3 {
 namespace api {
     void from_json(const json & j, ApiConfig & x);
     void to_json(json & j, const ApiConfig & x);
+
+    void from_json(const json & j, CacheGeneration & x);
+    void to_json(json & j, const CacheGeneration & x);
 
     void from_json(const json & j, CacheMetadata & x);
     void to_json(json & j, const CacheMetadata & x);
@@ -1712,8 +1724,22 @@ namespace api {
         j["listen"] = x.listen;
     }
 
+    inline void from_json(const json & j, CacheGeneration& x) {
+        x.filename = j.at("filename").get<std::string>();
+        x.sha256 = j.at("sha256").get<std::string>();
+        x.size = j.at("size").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const CacheGeneration & x) {
+        j = json::object();
+        j["filename"] = x.filename;
+        j["sha256"] = x.sha256;
+        j["size"] = x.size;
+    }
+
     inline void from_json(const json & j, CacheMetadata& x) {
         x.cidrs = get_stack_optional<int64_t>(j, "cidrs");
+        x.current = get_stack_optional<CacheGeneration>(j, "current");
         x.domains = get_stack_optional<int64_t>(j, "domains");
         x.download_time = get_stack_optional<std::string>(j, "download_time");
         x.etag = get_stack_optional<std::string>(j, "etag");
@@ -1723,6 +1749,7 @@ namespace api {
         x.last_refresh_detour = get_stack_optional<std::string>(j, "last_refresh_detour");
         x.last_refresh_error = get_stack_optional<std::string>(j, "last_refresh_error");
         x.last_refresh_url = get_stack_optional<std::string>(j, "last_refresh_url");
+        x.previous = get_stack_optional<CacheGeneration>(j, "previous");
         x.srs_decoder_revision = get_stack_optional<int64_t>(j, "srs_decoder_revision");
         x.url = get_stack_optional<std::string>(j, "url");
     }
@@ -1730,6 +1757,7 @@ namespace api {
     inline void to_json(json & j, const CacheMetadata & x) {
         j = json::object();
         j["cidrs"] = x.cidrs;
+        j["current"] = x.current;
         j["domains"] = x.domains;
         j["download_time"] = x.download_time;
         j["etag"] = x.etag;
@@ -1739,6 +1767,7 @@ namespace api {
         j["last_refresh_detour"] = x.last_refresh_detour;
         j["last_refresh_error"] = x.last_refresh_error;
         j["last_refresh_url"] = x.last_refresh_url;
+        j["previous"] = x.previous;
         j["srs_decoder_revision"] = x.srs_decoder_revision;
         j["url"] = x.url;
     }
@@ -3517,6 +3546,7 @@ namespace api {
 
     inline void from_json(const json & j, ApiTypes& x) {
         x.api_config = get_stack_optional<ApiConfig>(j, "ApiConfig");
+        x.cache_generation = get_stack_optional<CacheGeneration>(j, "CacheGeneration");
         x.cache_metadata = get_stack_optional<CacheMetadata>(j, "CacheMetadata");
         x.catalog_preset_selection = get_stack_optional<CatalogPresetSelection>(j, "CatalogPresetSelection");
         x.catalog_setup_apply_request = get_stack_optional<CatalogSetupApplyRequest>(j, "CatalogSetupApplyRequest");
@@ -3650,6 +3680,7 @@ namespace api {
     inline void to_json(json & j, const ApiTypes & x) {
         j = json::object();
         j["ApiConfig"] = x.api_config;
+        j["CacheGeneration"] = x.cache_generation;
         j["CacheMetadata"] = x.cache_metadata;
         j["CatalogPresetSelection"] = x.catalog_preset_selection;
         j["CatalogSetupApplyRequest"] = x.catalog_setup_apply_request;

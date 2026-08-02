@@ -22,6 +22,7 @@ void capture_response_header_line(std::string_view header,
 
 struct HttpRequestOptions {
     uint32_t fwmark{0};
+    HttpCancellationToken cancellation;
 };
 
 class HttpError : public std::runtime_error {
@@ -31,6 +32,12 @@ public:
 
 private:
     long status_code_;
+};
+
+class HttpRequestCancelled : public HttpError {
+public:
+    explicit HttpRequestCancelled(const std::string& message)
+        : HttpError(message) {}
 };
 
 struct ConditionalDownloadResult {

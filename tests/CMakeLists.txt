@@ -24,6 +24,7 @@ add_executable(keen-pbr-tests
   test_dns_probe_server.cpp
   test_list_set_usage.cpp
   test_list_service.cpp
+  test_cache_manager_durability.cpp
   test_control_protocol.cpp
   test_status_command.cpp
   test_resolver_fallback.cpp
