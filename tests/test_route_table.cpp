@@ -2,8 +2,11 @@
 
 #include "../src/routing/route_table.hpp"
 
+#include <array>
 #include <chrono>
+#include <functional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -14,6 +17,9 @@ class FakeRouteNetlink : public RouteNetlinkOperations {
 public:
     RouteAddResult add_route(const RouteSpec& spec) override {
         added.push_back(spec);
+        if (add_hook) {
+            return add_hook(spec);
+        }
         if (fail_add) {
             throw std::runtime_error("injected failure");
         }
@@ -30,6 +36,7 @@ public:
 
     RouteAddResult add_result{RouteAddResult::Created};
     bool fail_add{false};
+    std::function<RouteAddResult(const RouteSpec&)> add_hook;
     std::vector<RouteSpec> added;
     std::vector<RouteSpec> deleted;
     std::vector<DumpedRoute> live;
@@ -40,6 +47,30 @@ RouteSpec route(std::string destination, std::uint32_t table) {
     value.destination = std::move(destination);
     value.table = table;
     value.blackhole = true;
+    return value;
+}
+
+RouteSpec interface_route(std::string destination,
+                          std::uint32_t table,
+                          std::string interface) {
+    RouteSpec value;
+    value.destination = std::move(destination);
+    value.table = table;
+    value.interface = std::move(interface);
+    return value;
+}
+
+DumpedRoute live_route(const RouteSpec& route) {
+    DumpedRoute value;
+    value.destination = route.destination;
+    value.table = route.table;
+    value.interface = route.interface;
+    value.gateway = route.gateway;
+    value.blackhole = route.blackhole;
+    value.unreachable = route.unreachable;
+    value.family = route.family;
+    value.metric = route.metric;
+    value.protocol = route.protocol;
     return value;
 }
 
@@ -79,6 +110,472 @@ TEST_CASE("RouteTable propagates route installation failures") {
     RouteTable routes(netlink);
 
     CHECK_THROWS(routes.add(route("default", 150)));
+    CHECK(routes.get_routes().empty());
+}
+
+TEST_CASE("new interface route remains transactional while link is down") {
+    FakeRouteNetlink netlink;
+    std::size_t readiness_checks = 0;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return netlink_detail::InterfaceAdminState::Down;
+        });
+
+    const auto expected = interface_route("default", 153, "tun0");
+    CHECK_THROWS_AS(
+        routes.add(expected), RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 1);
+    CHECK(netlink.added.empty());
+    CHECK(routes.get_routes().empty());
+}
+
+TEST_CASE("unknown interface readiness fails closed before netlink") {
+    FakeRouteNetlink netlink;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Unknown;
+        });
+
+    CHECK_THROWS_AS(
+        routes.add(interface_route("default", 153, "tun0")),
+        RouteInterfaceUnavailableError);
+    CHECK(netlink.added.empty());
+    CHECK(routes.get_routes().empty());
+}
+
+TEST_CASE("new route keeps transactional failure while deferred retries back off") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Down;
+    std::size_t readiness_checks = 0;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return state;
+        },
+        [&]() { return now; });
+    const auto expected = interface_route("default", 153, "tun0");
+
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 1);
+    CHECK(netlink.added.empty());
+    CHECK(routes.get_routes().empty());
+
+    now += std::chrono::milliseconds{999};
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 1);
+
+    now += std::chrono::milliseconds{1};
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 2);
+
+    state = netlink_detail::InterfaceAdminState::Up;
+    routes.notify_interface_up("tun0");
+    CHECK_NOTHROW(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair));
+    CHECK(readiness_checks == 3);
+    CHECK(netlink.added.size() == 1);
+    CHECK(routes.get_routes().size() == 1);
+}
+
+TEST_CASE("tracked route repair backs off independently while link is down") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Up;
+    std::size_t readiness_checks = 0;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return state;
+        },
+        [&]() { return now; });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+    state = netlink_detail::InterfaceAdminState::Down;
+
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    const auto checks_after_first_deferral = readiness_checks;
+    REQUIRE(checks_after_first_deferral == 2);
+    CHECK(netlink.added.empty());
+
+    constexpr std::array<std::chrono::seconds, 7> delays{
+        std::chrono::seconds{1},
+        std::chrono::seconds{2},
+        std::chrono::seconds{4},
+        std::chrono::seconds{8},
+        std::chrono::seconds{16},
+        std::chrono::seconds{32},
+        std::chrono::seconds{60},
+    };
+    std::size_t expected_checks = checks_after_first_deferral;
+    for (const auto delay : delays) {
+        now += delay - std::chrono::milliseconds{1};
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+        CHECK(readiness_checks == expected_checks);
+        now += std::chrono::milliseconds{1};
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+        ++expected_checks;
+        CHECK(readiness_checks == expected_checks);
+        CHECK(netlink.added.empty());
+    }
+
+    now += std::chrono::seconds{59};
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    CHECK(readiness_checks == expected_checks);
+    now += std::chrono::seconds{1};
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    CHECK(readiness_checks == expected_checks + 1);
+}
+
+TEST_CASE("strict reconciliation never hides an unavailable tracked route") {
+    FakeRouteNetlink netlink;
+    auto state = netlink_detail::InterfaceAdminState::Up;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) { return state; });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+    state = netlink_detail::InterfaceAdminState::Down;
+
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::Strict),
+        RouteInterfaceUnavailableError);
+    CHECK(netlink.added.empty());
+    CHECK(routes.get_routes().size() == 1);
+}
+
+TEST_CASE("typed netlink disappearance is deferred only in repair mode") {
+    FakeRouteNetlink netlink;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+    netlink.add_hook = [](const RouteSpec&) -> RouteAddResult {
+        throw RouteInterfaceUnavailableError("interface vanished");
+    };
+
+    CHECK_NOTHROW(routes.reconcile(
+        {expected}, RouteReconcileMode::DeferredRepair));
+    REQUIRE(netlink.added.size() == 1);
+    CHECK_NOTHROW(routes.reconcile(
+        {expected}, RouteReconcileMode::DeferredRepair));
+    CHECK(netlink.added.size() == 1);
+}
+
+TEST_CASE("typed netlink disappearance propagates in strict mode") {
+    FakeRouteNetlink netlink;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+    netlink.add_hook = [](const RouteSpec&) -> RouteAddResult {
+        throw RouteInterfaceUnavailableError("interface vanished");
+    };
+
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::Strict),
+        RouteInterfaceUnavailableError);
+    CHECK(netlink.added.size() == 1);
+}
+
+TEST_CASE("deferred repair does not hide permanent netlink errors") {
+    FakeRouteNetlink netlink;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+    netlink.fail_add = true;
+
+    CHECK_THROWS_WITH(
+        routes.reconcile(
+            {expected}, RouteReconcileMode::DeferredRepair),
+        "injected failure");
+}
+
+TEST_CASE("interface UP resets only matching route repair backoff") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Up;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) { return state; },
+        [&]() { return now; });
+    const auto first = interface_route("default", 153, "tun0");
+    const auto second = interface_route("default", 154, "tun1");
+    routes.add(first);
+    routes.add(second);
+    netlink.added.clear();
+    state = netlink_detail::InterfaceAdminState::Down;
+    routes.reconcile({first, second}, RouteReconcileMode::DeferredRepair);
+
+    state = netlink_detail::InterfaceAdminState::Up;
+    routes.notify_interface_up("tun0");
+    routes.reconcile({first, second}, RouteReconcileMode::DeferredRepair);
+
+    REQUIRE(netlink.added.size() == 1);
+    CHECK(netlink.added.front().interface == first.interface);
+}
+
+TEST_CASE("live route observation clears a pending repair deadline") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Up;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) { return state; },
+        [&]() { return now; });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+
+    state = netlink_detail::InterfaceAdminState::Down;
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    netlink.live = {live_route(expected)};
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+
+    netlink.live.clear();
+    state = netlink_detail::InterfaceAdminState::Up;
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    CHECK(netlink.added.size() == 1);
+}
+
+TEST_CASE("successful repair is cooled down until observed live") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        },
+        [&]() { return now; });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.added.clear();
+
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    REQUIRE(netlink.added.size() == 1);
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    CHECK(netlink.added.size() == 1);
+
+    now += std::chrono::seconds{1};
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    CHECK(netlink.added.size() == 2);
+}
+
+TEST_CASE("competing replacement is never claimed or deleted") {
+    FakeRouteNetlink netlink;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    netlink.add_result = RouteAddResult::AlreadyPresent;
+    netlink.added.clear();
+
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    routes.clear();
+
+    CHECK(netlink.added.size() == 1);
+    CHECK(netlink.deleted.empty());
+}
+
+TEST_CASE("removing obsolete route clears deferred retry state") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Up;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) { return state; },
+        [&]() { return now; });
+    const auto expected = interface_route("default", 153, "tun0");
+    routes.add(expected);
+    state = netlink_detail::InterfaceAdminState::Down;
+    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    routes.reconcile({}, RouteReconcileMode::DeferredRepair);
+
+    state = netlink_detail::InterfaceAdminState::Up;
+    netlink.added.clear();
+    routes.add(expected);
+    CHECK(netlink.added.size() == 1);
+}
+
+TEST_CASE("removing never-installed desired route clears pending retry state") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Down;
+    std::size_t readiness_checks = 0;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return state;
+        },
+        [&]() { return now; });
+    const auto expected = interface_route("default", 153, "tun0");
+
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 1);
+    CHECK_NOTHROW(routes.reconcile({}, RouteReconcileMode::DeferredRepair));
+
+    state = netlink_detail::InterfaceAdminState::Up;
+    CHECK_NOTHROW(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair));
+    CHECK(readiness_checks == 2);
+    CHECK(netlink.added.size() == 1);
+    CHECK(routes.get_routes().size() == 1);
+}
+
+TEST_CASE("new failing desired route cannot retain obsolete pending backoff") {
+    using Clock = RouteTable::Clock;
+
+    FakeRouteNetlink netlink;
+    auto now = Clock::time_point{} + std::chrono::hours{1};
+    auto state = netlink_detail::InterfaceAdminState::Down;
+    std::size_t readiness_checks = 0;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return state;
+        },
+        [&]() { return now; });
+    const auto old_route = interface_route("default", 153, "tun0");
+    const auto replacement = interface_route("default", 154, "tun1");
+
+    CHECK_THROWS_AS(
+        routes.add_missing({old_route}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    CHECK_THROWS_AS(
+        routes.add_missing(
+            {replacement}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 2);
+
+    state = netlink_detail::InterfaceAdminState::Up;
+    CHECK_NOTHROW(
+        routes.add_missing(
+            {old_route}, RouteReconcileMode::DeferredRepair));
+    CHECK(readiness_checks == 3);
+    CHECK(netlink.added.size() == 1);
+}
+
+TEST_CASE("clear removes pending state for a never-installed route") {
+    FakeRouteNetlink netlink;
+    auto state = netlink_detail::InterfaceAdminState::Down;
+    std::size_t readiness_checks = 0;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return state;
+        });
+    const auto expected = interface_route("default", 153, "tun0");
+
+    CHECK_THROWS_AS(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair),
+        RouteInterfaceUnavailableError);
+    routes.clear();
+    state = netlink_detail::InterfaceAdminState::Up;
+    CHECK_NOTHROW(
+        routes.reconcile({expected}, RouteReconcileMode::DeferredRepair));
+    CHECK(readiness_checks == 2);
+    CHECK(netlink.added.size() == 1);
+}
+
+TEST_CASE("route add TOCTOU converts a vanished interface to transient error") {
+    FakeRouteNetlink netlink;
+    std::size_t readiness_checks = 0;
+    netlink.fail_add = true;
+    RouteTable routes(
+        netlink,
+        false,
+        [&](const std::string&) {
+            ++readiness_checks;
+            return readiness_checks == 1
+                ? netlink_detail::InterfaceAdminState::Up
+                : netlink_detail::InterfaceAdminState::Missing;
+        });
+
+    CHECK_THROWS_AS(
+        routes.add(interface_route("default", 153, "tun0")),
+        RouteInterfaceUnavailableError);
+    CHECK(readiness_checks == 2);
+    CHECK(routes.get_routes().empty());
+}
+
+TEST_CASE("permanent route add error is not hidden by readiness handling") {
+    FakeRouteNetlink netlink;
+    netlink.fail_add = true;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+
+    CHECK_THROWS_WITH(
+        routes.add(interface_route("default", 153, "tun0")),
+        "injected failure");
     CHECK(routes.get_routes().empty());
 }
 

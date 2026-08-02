@@ -13,6 +13,19 @@ namespace keen_pbr3 {
 
 namespace netlink_detail {
 
+enum class InterfaceAdminState {
+    Unknown,
+    Missing,
+    Down,
+    Up,
+};
+
+// Lightweight last-moment readiness check for route installation. TUN and
+// WireGuard links frequently report an unknown operstate or no carrier, so
+// administrative IFF_UP is the only portable requirement here.
+InterfaceAdminState query_interface_admin_state(
+    const std::string& interface_name) noexcept;
+
 // libnl reports removal of an object that the kernel already discarded as an
 // error. Route deletion is idempotent, so these codes mean the requested
 // postcondition has already been reached.
@@ -23,6 +36,15 @@ bool route_delete_target_absent(int error_code) noexcept;
 class NetlinkError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
+};
+
+// A route could not be installed because its output interface disappeared or
+// is not administratively ready.  Keeping this distinct from permanent
+// netlink/configuration failures lets the reconciler defer only transient
+// repairs without weakening transactional application of new routes.
+class RouteInterfaceUnavailableError : public NetlinkError {
+public:
+    using NetlinkError::NetlinkError;
 };
 
 enum class RouteType {

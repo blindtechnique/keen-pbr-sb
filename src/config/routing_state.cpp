@@ -5,13 +5,8 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
-#include <cstring>
 #include <set>
 #include <tuple>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <net/if.h>
 
 namespace keen_pbr3 {
 
@@ -100,25 +95,6 @@ int detect_ip_family(const std::string& ip) {
     }
 
     throw ConfigError("Invalid IP address: " + ip);
-}
-
-bool is_interface_up(const std::string& iface) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        return false;
-    }
-
-    struct ifreq ifr {};
-    std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
-    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-
-    const int rc = ioctl(fd, SIOCGIFFLAGS, &ifr);
-    close(fd);
-    if (rc < 0) {
-        return false;
-    }
-
-    return (ifr.ifr_flags & IFF_UP) != 0;
 }
 
 bool ipv4_prefix_contains(const in_addr& network, const in_addr& candidate, int prefix_len) {
@@ -643,10 +619,8 @@ bool is_interface_outbound_reachable(
     }
 
     const auto iface = outbound.interface.value_or("");
-    if (iface.empty() || if_nametoindex(iface.c_str()) == 0) {
-        return false;
-    }
-    if (!is_interface_up(iface)) {
+    if (netlink_detail::query_interface_admin_state(iface) !=
+        netlink_detail::InterfaceAdminState::Up) {
         return false;
     }
 

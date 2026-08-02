@@ -1524,7 +1524,7 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                           snapshot_owned_conntrack_marks()}
                     : std::nullopt);
         pending_owned_snat_recovery_ = snat_recovery;
-        reconcile_static_routing();
+        reconcile_static_routing(RouteReconcileMode::DeferredRepair);
         apply_firewall(FirewallApplyMode::PreserveSets);
         const OwnedSnatState inspected_snat_after =
             snat_recovery.requested
@@ -1613,6 +1613,25 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
         return true;
+    } catch (const RouteInterfaceUnavailableError& e) {
+        // A TUN/WireGuard link may disappear between the desired-state
+        // snapshot and RTM_NEWROUTE. This is transient runtime churn, not a
+        // broken configuration and not a user-facing permanent incident. Do
+        // not create a second retry timer: a kernel UP event resets per-route
+        // backoff and the existing interface probe is the observation-gap
+        // fallback. If this pass also owns a pending SNAT repair, keep that
+        // request on the existing coalescing runtime-retry coordinator so a
+        // missed UP event cannot leave SNAT recovery latched forever.
+        log.verbose(
+            "Runtime route reconciliation is waiting for an interface: {}",
+            e.what());
+        if (snat_recovery.requested) {
+            schedule_runtime_firewall_retry(
+                retry_attempt,
+                runtime_generation_.load(std::memory_order_acquire),
+                snat_recovery);
+        }
+        return false;
     } catch (const TransientFirewallError& e) {
         if (retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
             if (snat_recovery.requested) {
@@ -1779,6 +1798,13 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     if (event.observation_gap) {
         recover_internal_vpn_catalog_after_observation_gap();
         return;
+    }
+    if (event.is_up &&
+        (event.administrative_state_changed || event.topology_changed)) {
+        // The kernel just made this link usable. Let only its deferred route
+        // repairs bypass their remaining backoff before the event-driven
+        // reconciliation below; unrelated/flapping links stay isolated.
+        route_table_.notify_interface_up(event.interface_name);
     }
     const bool reconcile_immediately =
         interface_event_affects_managed_runtime(

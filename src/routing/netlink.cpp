@@ -5,11 +5,15 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <netlink/cache.h>
 #include <netlink/errno.h>
@@ -23,6 +27,37 @@
 namespace keen_pbr3 {
 
 namespace netlink_detail {
+
+InterfaceAdminState query_interface_admin_state(
+    const std::string& interface_name) noexcept {
+    if (interface_name.empty() || interface_name.size() >= IFNAMSIZ) {
+        return InterfaceAdminState::Missing;
+    }
+
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return InterfaceAdminState::Unknown;
+    }
+
+    struct ifreq ifr {};
+    std::strncpy(ifr.ifr_name, interface_name.c_str(), IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
+    const int rc = ioctl(fd, SIOCGIFFLAGS, &ifr);
+    const int saved_errno = errno;
+    close(fd);
+    if (rc < 0) {
+        if (saved_errno == ENODEV || saved_errno == ENXIO ||
+            saved_errno == ENOENT) {
+            return InterfaceAdminState::Missing;
+        }
+        return InterfaceAdminState::Unknown;
+    }
+
+    return (ifr.ifr_flags & IFF_UP) != 0
+        ? InterfaceAdminState::Up
+        : InterfaceAdminState::Down;
+}
 
 bool route_delete_target_absent(int error_code) noexcept {
     return error_code == -NLE_OBJ_NOTFOUND || error_code == -NLE_NODEV;
@@ -200,7 +235,8 @@ RouteAddResult NetlinkManager::add_route(const RouteSpec& spec) {
         if (spec.interface) {
             unsigned int ifindex = if_nametoindex(spec.interface->c_str());
             if (ifindex == 0) {
-                throw NetlinkError("Interface not found: " + *spec.interface);
+                throw RouteInterfaceUnavailableError(
+                    "Interface not found: " + *spec.interface);
             }
             rtnl_route_nh_set_ifindex(nh.get(), static_cast<int>(ifindex));
         }
@@ -218,6 +254,14 @@ RouteAddResult NetlinkManager::add_route(const RouteSpec& spec) {
     if (err < 0) {
         if (err == -NLE_EXIST) {
             return RouteAddResult::AlreadyPresent;
+        }
+        if (err == -NLE_NODEV) {
+            throw RouteInterfaceUnavailableError(keen_pbr3::format(
+                "Route interface is unavailable: {} (dst={}, table={}, iface={})",
+                nl_geterror(err),
+                spec.destination,
+                spec.table,
+                spec.interface.value_or("(none)")));
         }
         throw NetlinkError(keen_pbr3::format(
             "Failed to add route: {} (dst={}, table={}, iface={}, gw={}, family={}, blackhole={})",

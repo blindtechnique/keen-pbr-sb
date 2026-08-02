@@ -1068,7 +1068,7 @@ void Daemon::restart_routing_runtime() {
             [this]() {
                 // Recreate missing routes first and retire obsolete owned
                 // entries only after their replacements exist.
-                reconcile_static_routing();
+                reconcile_static_routing(RouteReconcileMode::Strict);
             },
             [this]() {
                 // PreserveSets keeps the currently committed firewall
@@ -1219,7 +1219,7 @@ void Daemon::setup_static_routing() {
         ipv6_decision.enabled);
 }
 
-void Daemon::reconcile_static_routing() {
+void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config_);
     log_ipv6_support_decision_once(ipv6_decision);
     RouteTable desired_routes(netlink_, true);
@@ -1239,7 +1239,7 @@ void Daemon::reconcile_static_routing() {
     // The URLTest policy rule does not change on a selected-child switch, but
     // its route does. Add all desired routes first so marked traffic never
     // observes an empty table, then retire only obsolete owned state.
-    route_table_.add_missing(desired_routes.get_routes());
+    route_table_.add_missing(desired_routes.get_routes(), mode);
     policy_rules_.add_missing(desired_rules.get_rules());
     policy_rules_.remove_obsolete(desired_rules.get_rules());
     route_table_.remove_obsolete(desired_routes.get_routes());
@@ -1434,7 +1434,7 @@ void Daemon::handle_urltest_selection_change(
             change.urltest_tag, change.new_child_tag);
         bool runtime_rebuilt = false;
         try {
-            reconcile_static_routing();
+            reconcile_static_routing(RouteReconcileMode::Strict);
             apply_firewall(FirewallApplyMode::PreserveSets);
             runtime_rebuilt = true;
             urltest_apply_incidents_.reset(change.urltest_tag);
@@ -1461,7 +1461,7 @@ void Daemon::handle_urltest_selection_change(
             }
 
             try {
-                reconcile_static_routing();
+                reconcile_static_routing(RouteReconcileMode::Strict);
                 apply_firewall(FirewallApplyMode::PreserveSets);
                 log.info(
                     "Urltest '{}' switch to '{}' was rolled back; the next "
@@ -1651,7 +1651,33 @@ void Daemon::probe_interfaces_now() {
                     // its administrative UP state. Reconcile the owned policy
                     // tables after the regular probe so vanished urltest
                     // fallback routes heal without a service restart.
-                    reconcile_static_routing();
+                    try {
+                        reconcile_static_routing(
+                            RouteReconcileMode::DeferredRepair);
+                    } catch (const RouteInterfaceUnavailableError& error) {
+                        // A not-yet-ready new route remains transactional, but
+                        // a periodic probe must not immediately repeat it or
+                        // turn ordinary tunnel churn into a bell incident. UP
+                        // events and the next probe are existing retry sources.
+                        Logger::instance().verbose(
+                            "Interface-probe route reconciliation is waiting "
+                            "for its interface: {}",
+                            error.what());
+                    } catch (const std::exception& error) {
+                        // Posted control tasks must never let a transient or
+                        // permanent netlink failure escape into the daemon
+                        // event loop. Hand the uncommon hard failure to the
+                        // existing bounded runtime recovery coordinator.
+                        Logger::instance().info(
+                            "Interface-probe route reconciliation was "
+                            "deferred: {}",
+                            error.what());
+                        (void)refresh_iproute_and_firewall_runtime(
+                            0,
+                            std::nullopt,
+                            std::nullopt,
+                            /*schedule_catalog_refresh=*/false);
+                    }
                 }
 #ifdef WITH_API
                 if (status_stream_) {
@@ -4697,7 +4723,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     // Reconcile in place: install replacement routes/rules before removing
     // obsolete owned state. Clearing first creates a visible traffic gap on
     // every configuration save and makes failover briefly lose its path.
-    reconcile_static_routing();
+    reconcile_static_routing(RouteReconcileMode::Strict);
     register_urltest_outbounds();
     (void)refresh_keenetic_dns_cache(true);
     retry_hot_apply_firewall(

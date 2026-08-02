@@ -440,7 +440,7 @@ private:
 
     // lifecycle and runtime apply
     void setup_static_routing();
-    void reconcile_static_routing();
+    void reconcile_static_routing(RouteReconcileMode mode);
     // Runtime callers must deliberately choose preserving or destructive
     // semantics; an omitted mode is a compile-time error.
     void apply_firewall(FirewallApplyMode mode);

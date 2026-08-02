@@ -3,9 +3,11 @@
 #include "../log/logger.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <iterator>
 #include <sys/socket.h>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -21,6 +23,27 @@ bool routes_equal(const RouteSpec& a, const RouteSpec& b) {
            a.family == b.family &&
            a.metric == b.metric &&
            a.protocol == b.protocol;
+}
+
+bool route_requires_interface_readiness(const RouteSpec& route) {
+    return !route.blackhole &&
+           !route.unreachable &&
+           route.interface.has_value() &&
+           !route.interface->empty();
+}
+
+bool interface_is_unavailable(
+    netlink_detail::InterfaceAdminState state) {
+    return state == netlink_detail::InterfaceAdminState::Unknown ||
+           state == netlink_detail::InterfaceAdminState::Missing ||
+           state == netlink_detail::InterfaceAdminState::Down;
+}
+
+std::string route_interface_unavailable_message(const RouteSpec& route) {
+    return "Route interface is not ready: " +
+           route.interface.value_or("(none)") +
+           " (dst=" + route.destination +
+           ", table=" + std::to_string(route.table) + ")";
 }
 
 } // anonymous namespace
@@ -102,9 +125,20 @@ RouteRepairLogDecision record_route_repair(
 
 } // namespace route_table_detail
 
-RouteTable::RouteTable(RouteNetlinkOperations& netlink, bool dry_run)
+RouteTable::RouteTable(
+    RouteNetlinkOperations& netlink,
+    bool dry_run,
+    InterfaceReadinessProbe interface_readiness_probe,
+    NowFunction now)
     : netlink_(netlink),
-      dry_run_(dry_run) {}
+      dry_run_(dry_run),
+      interface_readiness_probe_(
+          interface_readiness_probe
+              ? std::move(interface_readiness_probe)
+              : InterfaceReadinessProbe{
+                    netlink_detail::query_interface_admin_state}),
+      now_(now ? std::move(now)
+               : NowFunction{[]() { return Clock::now(); }}) {}
 
 RouteTable::~RouteTable() {
     // Best-effort cleanup on destruction
@@ -125,6 +159,12 @@ bool RouteTable::is_tracked(const RouteSpec& spec) const {
 
 route_table_detail::RouteRepairLogDecision RouteTable::record_repair(
     const RouteSpec& spec) {
+    auto& record = repair_record(spec);
+    return route_table_detail::record_route_repair(record.rate, now_());
+}
+
+RouteTable::RouteRepairRecord& RouteTable::repair_record(
+    const RouteSpec& spec) {
     auto it = std::find_if(
         repair_records_.begin(),
         repair_records_.end(),
@@ -135,8 +175,77 @@ route_table_detail::RouteRepairLogDecision RouteTable::record_repair(
         repair_records_.push_back({spec, {}});
         it = std::prev(repair_records_.end());
     }
-    return route_table_detail::record_route_repair(
-        it->rate, std::chrono::steady_clock::now());
+    return *it;
+}
+
+bool RouteTable::repair_retry_due(const RouteSpec& spec) const {
+    const auto it = std::find_if(
+        repair_records_.begin(),
+        repair_records_.end(),
+        [&](const RouteRepairRecord& record) {
+            return routes_equal(record.route, spec);
+        });
+    return it == repair_records_.end() ||
+           !it->retry_after.has_value() ||
+           now_() >= *it->retry_after;
+}
+
+void RouteTable::defer_repair(const RouteSpec& spec) {
+    static constexpr std::array<std::chrono::seconds, 7> delays{
+        std::chrono::seconds{1},
+        std::chrono::seconds{2},
+        std::chrono::seconds{4},
+        std::chrono::seconds{8},
+        std::chrono::seconds{16},
+        std::chrono::seconds{32},
+        std::chrono::seconds{60},
+    };
+    auto& record = repair_record(spec);
+    const auto delay_index = std::min(
+        record.consecutive_deferrals, delays.size() - 1);
+    record.retry_after = now_() + delays[delay_index];
+    if (record.consecutive_deferrals < delays.size() - 1) {
+        ++record.consecutive_deferrals;
+    }
+}
+
+void RouteTable::reset_repair_backoff(const RouteSpec& spec) {
+    const auto it = std::find_if(
+        repair_records_.begin(),
+        repair_records_.end(),
+        [&](const RouteRepairRecord& record) {
+            return routes_equal(record.route, spec);
+        });
+    if (it == repair_records_.end()) {
+        return;
+    }
+    it->consecutive_deferrals = 0;
+    it->retry_after.reset();
+}
+
+RouteAddResult RouteTable::add_route_checked(const RouteSpec& spec) {
+    const bool needs_interface =
+        route_requires_interface_readiness(spec);
+    if (needs_interface && interface_is_unavailable(
+            interface_readiness_probe_(*spec.interface))) {
+        throw RouteInterfaceUnavailableError(
+            route_interface_unavailable_message(spec));
+    }
+
+    try {
+        return netlink_.add_route(spec);
+    } catch (const RouteInterfaceUnavailableError&) {
+        throw;
+    } catch (...) {
+        // Close the readiness-check/netlink TOCTOU window. A route can pass
+        // the pre-check and lose its TUN/WireGuard link before RTM_NEWROUTE.
+        if (needs_interface && interface_is_unavailable(
+                interface_readiness_probe_(*spec.interface))) {
+            throw RouteInterfaceUnavailableError(
+                route_interface_unavailable_message(spec));
+        }
+        throw;
+    }
 }
 
 void RouteTable::forget_repair_record(const RouteSpec& spec) {
@@ -150,13 +259,24 @@ void RouteTable::forget_repair_record(const RouteSpec& spec) {
         repair_records_.end());
 }
 
+void RouteTable::forget_owned_route(const RouteSpec& spec) {
+    owned_routes_.erase(
+        std::remove_if(
+            owned_routes_.begin(),
+            owned_routes_.end(),
+            [&](const RouteSpec& route) {
+                return routes_equal(route, spec);
+            }),
+        owned_routes_.end());
+}
+
 void RouteTable::add(const RouteSpec& spec) {
     if (is_tracked(spec)) {
         return;
     }
     bool owned = dry_run_;
     if (!dry_run_) {
-        owned = netlink_.add_route(spec) == RouteAddResult::Created;
+        owned = add_route_checked(spec) == RouteAddResult::Created;
     }
     routes_.push_back(spec);
     if (owned) {
@@ -197,14 +317,52 @@ void RouteTable::remove(const RouteSpec& spec) {
     routes_.erase(it);
 }
 
-void RouteTable::reconcile(const std::vector<RouteSpec>& desired) {
-    add_missing(desired);
+void RouteTable::reconcile(const std::vector<RouteSpec>& desired,
+                           RouteReconcileMode mode) {
+    add_missing(desired, mode);
     remove_obsolete(desired);
 }
 
-void RouteTable::add_missing(const std::vector<RouteSpec>& desired) {
+void RouteTable::add_missing(const std::vector<RouteSpec>& desired,
+                             RouteReconcileMode mode) {
+    // Deferred state can exist for a route that never reached routes_. Prune
+    // obsolete records before any installation attempt, because a different
+    // new route may throw transactionally and postpone remove_obsolete().
+    // Production intentionally calls add_missing(), applies policy rules,
+    // then calls remove_obsolete(), so this phase must own the pruning.
+    repair_records_.erase(
+        std::remove_if(
+            repair_records_.begin(),
+            repair_records_.end(),
+            [&](const RouteRepairRecord& record) {
+                return std::none_of(
+                    desired.begin(),
+                    desired.end(),
+                    [&](const RouteSpec& route) {
+                        return routes_equal(record.route, route);
+                    });
+            }),
+        repair_records_.end());
+
     if (!dry_run_) {
         const auto live = netlink_.dump_routes();
+
+        for (const auto& route : desired) {
+            if (!is_tracked(route)) {
+                continue;
+            }
+            const bool present = std::any_of(
+                live.begin(),
+                live.end(),
+                [&](const DumpedRoute& candidate) {
+                    return route_table_detail::route_matches_live(
+                        route, candidate);
+                });
+            if (present) {
+                reset_repair_backoff(route);
+            }
+        }
+
         const auto missing_live =
             route_table_detail::find_missing_live_routes(desired, live);
 
@@ -213,7 +371,32 @@ void RouteTable::add_missing(const std::vector<RouteSpec>& desired) {
                 continue;
             }
 
-            if (netlink_.add_route(route) == RouteAddResult::Created) {
+            // A live dump confirmed that the object previously created by
+            // this process no longer exists. Drop that old ownership before
+            // any retry: an AlreadyPresent result below belongs to whoever
+            // won the replacement race and must never be deleted by us.
+            forget_owned_route(route);
+
+            if (mode == RouteReconcileMode::DeferredRepair &&
+                !repair_retry_due(route)) {
+                continue;
+            }
+
+            RouteAddResult result;
+            try {
+                result = add_route_checked(route);
+            } catch (const RouteInterfaceUnavailableError&) {
+                if (mode == RouteReconcileMode::Strict) {
+                    throw;
+                }
+                // A tracked route vanished with its interface. Keep the
+                // desired ownership record, but wait for the per-route
+                // deadline or an explicit UP event instead of spinning.
+                defer_repair(route);
+                continue;
+            }
+
+            if (result == RouteAddResult::Created) {
                 const auto log_decision = record_repair(route);
                 if (log_decision ==
                     route_table_detail::RouteRepairLogDecision::Info) {
@@ -246,11 +429,43 @@ void RouteTable::add_missing(const std::vector<RouteSpec>& desired) {
                     owned_routes_.push_back(route);
                 }
             }
+            if (mode == RouteReconcileMode::DeferredRepair) {
+                // Arm a cooldown even after Created: if firmware or a
+                // competing owner removes the route again before a later live
+                // dump observes it as stable, repeated successful repair must
+                // still back off. AlreadyPresent is cooled and stays foreign.
+                defer_repair(route);
+            } else {
+                reset_repair_backoff(route);
+            }
         }
     }
 
     for (const RouteSpec& route : desired) {
-        add(route);
+        if (is_tracked(route)) {
+            continue;
+        }
+
+        if (mode == RouteReconcileMode::DeferredRepair &&
+            !repair_retry_due(route)) {
+            // Preserve the transactional contract for a route that has never
+            // been installed: the caller must not continue with policy rules
+            // or firewall state that points at a missing table. At the same
+            // time, avoid probing the same unavailable interface on every
+            // maintenance pass while its per-route deadline is active.
+            throw RouteInterfaceUnavailableError(
+                "route installation is waiting for its interface retry deadline");
+        }
+
+        try {
+            add(route);
+            reset_repair_backoff(route);
+        } catch (const RouteInterfaceUnavailableError&) {
+            if (mode == RouteReconcileMode::DeferredRepair) {
+                defer_repair(route);
+            }
+            throw;
+        }
     }
 }
 
@@ -265,11 +480,25 @@ void RouteTable::remove_obsolete(const std::vector<RouteSpec>& desired) {
             remove(route);
         }
     }
+
 }
 
 void RouteTable::adopt_desired(const std::vector<RouteSpec>& desired) {
     routes_ = desired;
     owned_routes_.clear();
+    repair_records_.clear();
+}
+
+void RouteTable::notify_interface_up(const std::string& interface_name) {
+    if (interface_name.empty()) {
+        return;
+    }
+    for (auto& record : repair_records_) {
+        if (record.route.interface == interface_name) {
+            record.consecutive_deferrals = 0;
+            record.retry_after.reset();
+        }
+    }
 }
 
 void RouteTable::clear() {
@@ -280,6 +509,7 @@ void RouteTable::clear() {
     for (auto it = tracked.rbegin(); it != tracked.rend(); ++it) {
         remove(*it);
     }
+    repair_records_.clear();
 }
 
 } // namespace keen_pbr3
