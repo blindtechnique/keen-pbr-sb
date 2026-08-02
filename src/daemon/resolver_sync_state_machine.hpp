@@ -86,8 +86,26 @@ api::ResolverConfigProbeStatus resolver_probe_status_from_hash_probe_status(
 bool resolver_sync_semantically_equal(const ResolverSyncSnapshot& lhs,
                                       const ResolverSyncSnapshot& rhs);
 
-// Retry only while a freshly applied resolver generation is converging.
-// Attempts are zero-based: 1, 2, 4, 8, 16, 32, then 60 seconds.
+// Retry while the resolver generation has not converged. Attempts are
+// zero-based: 1, 2, 4, 8, 16, 32, then 60 seconds. A successful mismatch
+// remains actionable after the initial convergence window expires.
 std::chrono::seconds resolver_convergence_retry_delay(std::uint32_t attempt);
+
+// Side-effect-free policy for committing one resolver probe. The state
+// machine remains authoritative for resolver health; this plan only decides
+// whether the changed state is worth publishing and how the caller should
+// advance its single convergence-retry timer.
+struct ResolverProbeCommitPlan {
+    bool publish_runtime_state{false};
+    bool report_stale_txt_observation{false};
+    bool schedule_convergence_retry{false};
+    std::chrono::seconds convergence_retry_delay{0};
+    std::uint32_t next_retry_attempt{0};
+};
+
+ResolverProbeCommitPlan plan_resolver_probe_commit(
+    const ResolverSyncSnapshot& previous,
+    const ResolverSyncSnapshot& current,
+    std::uint32_t retry_attempt);
 
 } // namespace keen_pbr3

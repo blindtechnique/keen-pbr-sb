@@ -597,7 +597,6 @@ private:
     // state publication and resolver sync
     void refresh_resolver_config_hash_actual_async();
     void maybe_schedule_resolver_config_hash_actual_refresh();
-    void schedule_resolver_config_hash_actual_retry();
     void schedule_keenetic_dns_refresh();
     bool refresh_keenetic_dns_cache(bool force_refresh);
     void reset_resolver_actual_state();
@@ -658,7 +657,7 @@ private:
         std::chrono::seconds delay,
         const char* task_name);
     RuntimeStateSnapshot build_runtime_state_snapshot() const;
-    void publish_runtime_state(bool reconcile_status_stream = true);
+    void publish_runtime_state();
     void transition_runtime_or_throw(RuntimeState next, const char* reason);
 
     // Lists autoupdate state

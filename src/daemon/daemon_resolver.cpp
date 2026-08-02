@@ -135,7 +135,7 @@ void Daemon::transition_runtime_or_throw(RuntimeState next, const char* reason) 
     }
 }
 
-void Daemon::publish_runtime_state(bool reconcile_status_stream) {
+void Daemon::publish_runtime_state() {
     Logger::instance().trace(
         "runtime_state_publish",
         "routing_runtime_active={} runtime_state={} reason={}",
@@ -144,7 +144,7 @@ void Daemon::publish_runtime_state(bool reconcile_status_stream) {
         runtime_state_machine_.reason());
     runtime_state_store_.publish(build_runtime_state_snapshot());
 #ifdef WITH_API
-    if (reconcile_status_stream && status_stream_) {
+    if (status_stream_) {
         status_stream_->reconcile();
     }
 #endif
@@ -239,17 +239,6 @@ bool Daemon::refresh_keenetic_dns_cache(bool force_refresh) {
     return false;
 }
 
-void Daemon::schedule_resolver_config_hash_actual_retry() {
-    const auto delay = resolver_convergence_retry_delay(
-        resolver_config_hash_actual_retry_attempt_);
-    if (resolver_config_hash_actual_retry_attempt_ < 6) {
-        ++resolver_config_hash_actual_retry_attempt_;
-    }
-    schedule_resolver_config_hash_actual_after(
-        delay,
-        "resolver-config-hash-actual-retry");
-}
-
 void Daemon::reset_resolver_actual_state() {
     resolver_sync_.resolver_not_configured();
 }
@@ -286,8 +275,6 @@ void Daemon::commit_resolver_hash_probe_result(
                 return;
             }
 
-            const std::int64_t apply_started_ts =
-                apply_started_ts_.load(std::memory_order_acquire);
             const std::int64_t now_ts = unix_timestamp_now_seconds();
             const auto previous_snapshot =
                 resolver_sync_.snapshot(now_ts);
@@ -301,18 +288,6 @@ void Daemon::commit_resolver_hash_probe_result(
                     Logger::instance().verbose(
                         "Resolver config hash (actual): {}",
                         probe_result->parsed_value.hash);
-                }
-                if (probe_result->parsed_value.ts.has_value() &&
-                    apply_started_ts > 0 &&
-                    *probe_result->parsed_value.ts < apply_started_ts &&
-                    previous_snapshot.expected_hash !=
-                        probe_result->parsed_value.hash) {
-                    Logger::instance().verbose(
-                        "Resolver config hash TXT is older than current apply; using live actual value "
-                        "(resolver={}, txt_ts={}, apply_started_ts={})",
-                        resolver_addr,
-                        *probe_result->parsed_value.ts,
-                        apply_started_ts);
                 }
             } else if (probe_result.has_value()) {
                 resolver_sync_.probe_failed(probe_result->status, probe_completed_ts);
@@ -360,22 +335,36 @@ void Daemon::commit_resolver_hash_probe_result(
                 }
             }
             const auto resolver_snapshot = resolver_sync_.snapshot(now_ts);
-            const bool semantic_state_changed =
-                !resolver_sync_semantically_equal(previous_snapshot,
-                                                   resolver_snapshot);
-            if (resolver_snapshot.sync_state ==
-                api::ResolverConfigSyncState::CONVERGING) {
-                schedule_resolver_config_hash_actual_retry();
+            const ResolverProbeCommitPlan commit_plan =
+                plan_resolver_probe_commit(
+                    previous_snapshot,
+                    resolver_snapshot,
+                    resolver_config_hash_actual_retry_attempt_);
+            if (commit_plan.report_stale_txt_observation) {
+                Logger::instance().verbose(
+                    "Resolver config hash TXT is older than current apply; using live actual value "
+                    "(resolver={}, txt_ts={}, apply_started_ts={})",
+                    resolver_addr,
+                    *resolver_snapshot.actual_ts,
+                    *resolver_snapshot.apply_started_ts);
+            }
+            resolver_config_hash_actual_retry_attempt_ =
+                commit_plan.next_retry_attempt;
+            if (commit_plan.schedule_convergence_retry) {
+                schedule_resolver_config_hash_actual_after(
+                    commit_plan.convergence_retry_delay,
+                    "resolver-config-hash-actual-retry");
             } else {
-                resolver_config_hash_actual_retry_attempt_ = 0;
                 schedule_resolver_config_hash_actual_refresh();
             }
-            publish_runtime_state(semantic_state_changed);
+            if (commit_plan.publish_runtime_state) {
+                publish_runtime_state();
+            }
             if (task_metrics) {
                 if (probe_result.has_value() &&
                     probe_result->status ==
                         ResolverConfigHashProbeStatus::SUCCESS) {
-                    if (semantic_state_changed) {
+                    if (commit_plan.publish_runtime_state) {
                         task_metrics->success();
                     } else {
                         task_metrics->noop();

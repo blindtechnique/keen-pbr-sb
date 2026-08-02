@@ -47,6 +47,53 @@ std::chrono::seconds resolver_convergence_retry_delay(std::uint32_t attempt) {
     return std::chrono::seconds{1U << attempt};
 }
 
+ResolverProbeCommitPlan plan_resolver_probe_commit(
+    const ResolverSyncSnapshot& previous,
+    const ResolverSyncSnapshot& current,
+    std::uint32_t retry_attempt) {
+    ResolverProbeCommitPlan plan;
+    plan.publish_runtime_state =
+        !resolver_sync_semantically_equal(previous, current);
+    plan.next_retry_attempt = retry_attempt;
+
+    // CONVERGING covers the initial apply window. A successful hash mismatch
+    // remains actionable after that window becomes STALE: treating it as a
+    // steady refresh reset the attempt counter and could turn a persistent
+    // mismatch into a tight sequence of first-attempt retries.
+    const bool successful_hash_mismatch =
+        current.probe_status == api::ResolverConfigProbeStatus::SUCCESS &&
+        !current.expected_hash.empty() &&
+        current.actual_hash != current.expected_hash;
+    plan.report_stale_txt_observation =
+        plan.publish_runtime_state &&
+        successful_hash_mismatch &&
+        current.actual_ts.has_value() &&
+        current.apply_started_ts.has_value() &&
+        *current.actual_ts < *current.apply_started_ts;
+    plan.schedule_convergence_retry =
+        current.sync_state == api::ResolverConfigSyncState::CONVERGING ||
+        successful_hash_mismatch;
+
+    if (plan.schedule_convergence_retry) {
+        plan.convergence_retry_delay =
+            resolver_convergence_retry_delay(retry_attempt);
+        constexpr std::uint32_t kMaximumRetryAttempt = 6;
+        plan.next_retry_attempt = retry_attempt >= kMaximumRetryAttempt
+            ? kMaximumRetryAttempt
+            : retry_attempt + 1;
+    } else if (current.sync_state ==
+                   api::ResolverConfigSyncState::CONVERGED ||
+               current.probe_status ==
+                   api::ResolverConfigProbeStatus::NOT_CONFIGURED) {
+        // A transient unavailable/stale observation outside the initial apply
+        // window uses the existing steady 60-second refresh, but it is not
+        // evidence that convergence happened. Preserve the accumulated retry
+        // attempt so a later successful mismatch cannot jump back to 1s.
+        plan.next_retry_attempt = 0;
+    }
+    return plan;
+}
+
 void ResolverSyncStateMachine::runtime_stopped() {
     runtime_active_ = false;
     resolver_configured_ = false;
