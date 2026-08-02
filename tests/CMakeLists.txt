@@ -52,6 +52,7 @@ add_executable(keen-pbr-tests
   test_udp_call_affinity.cpp
   test_interface_traffic_sampler.cpp
   test_periodic_task_metrics.cpp
+  test_daemon_link_contract.cpp
   test_api_status_events.cpp
   test_api_logs.cpp
   test_api_remote_access.cpp
@@ -94,6 +95,11 @@ add_executable(keen-pbr-tests
   test_crash_diagnostics.cpp
   ../src/config/config.cpp
   ../src/daemon/config_store.cpp
+  ../src/daemon/daemon_core.cpp
+  ../src/daemon/daemon_runtime.cpp
+  ../src/daemon/daemon_resolver.cpp
+  ../src/daemon/daemon_api.cpp
+  ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp
   ../src/config/config_writer.cpp
   ../src/util/last_command_failure.cpp
@@ -147,6 +153,8 @@ add_executable(keen-pbr-tests
   ../src/daemon/pid_file.cpp
   ../src/daemon/resolver_health.cpp
   ../src/daemon/resolver_sync_state_machine.cpp
+  ../src/daemon/runtime_state_store.cpp
+  ../src/daemon/scheduler.cpp
   ../src/http/http_client.cpp
   ../src/api/update_version.cpp
   ../src/http/http_transport.cpp
@@ -163,6 +171,7 @@ add_executable(keen-pbr-tests
   ../src/keenetic/ndms_rci_restorable_snapshot.cpp
   ../src/health/url_tester.cpp
   ../src/health/circuit_breaker.cpp
+  ../src/health/interface_probe.cpp
   ../src/health/routing_health_checker.cpp
   ../src/routing/firewall_state.cpp
   ../src/routing/urltest_manager.cpp
@@ -421,6 +430,8 @@ target_compile_definitions(keen-pbr-tests PRIVATE USE_KEENETIC_API)
 if(WITH_API)
   target_compile_definitions(keen-pbr-tests PRIVATE WITH_API)
   target_sources(keen-pbr-tests PRIVATE
+    test_api_reload.cpp
+    test_api_lists_refresh.cpp
     test_api_catalog_setup.cpp
     test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
@@ -433,19 +444,31 @@ if(WITH_API)
     ../src/api/status_stream.cpp
     ../src/api/health_response.cpp
     ../src/api/handler_status_events.cpp
+    ../src/api/handler_health_service.cpp
+    ../src/api/handler_health_routing.cpp
+    ../src/api/handler_reload.cpp
+    ../src/api/handler_lists_refresh.cpp
     ../src/api/handler_logs.cpp
     ../src/api/handler_remote_access.cpp
     ../src/api/handler_ndms_names.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
+    ../src/api/handler_runtime_outbounds.cpp
     ../src/api/handler_diagnostic_tasks.cpp
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
+    ../src/api/handler_dns_test.cpp
+    ../src/api/handler_connections.cpp
+    ../src/api/handler_nfqws.cpp
+    ../src/api/handler_router_info.cpp
     ../src/api/handler_config.cpp
     ../src/api/handler_catalog.cpp
     ../src/api/handler_catalog_setup.cpp
+    ../src/api/handler_geo.cpp
+    ../src/api/handler_naive.cpp
     ../src/api/handler_backup.cpp
+    ../src/api/handlers.cpp
     ../src/health/runtime_interface_inventory.cpp
     ../src/health/runtime_outbound_state.cpp
     ../src/log/file_sink.cpp
