@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>keen-pbr-sb — маршрутизация по спискам для Keenetic</title>
-<meta name="description" content="Веб-панель policy-based routing для роутеров Keenetic и Netcraze: нативные WireGuard/AmneziaWG, sing-box, резервирование, DNS, каталог списков и nfqws2 в одном интерфейсе.">
+<title>keen-pbr-sb — нужные сайты через VPN, остальное напрямую | Keenetic и Netcraze</title>
+<meta name="description" content="Панель для роутеров Keenetic и Netcraze: отмечаете сайты и сервисы — они идут через ваш VPN, всё остальное напрямую. Готовые списки, запасной канал, защита от утечек, обход блокировок. Настраивается мышкой.">
 <meta name="theme-color" content="#0086cb">
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <meta property="og:type" content="website">
-<meta property="og:title" content="keen-pbr-sb — маршрутизация по спискам для Keenetic">
-<meta property="og:description" content="Нативные VPN прошивки, sing-box, резервирование, DNS и обход блокировок — в одной панели, без правки конфигов по SSH.">
+<meta property="og:title" content="keen-pbr-sb — нужные сайты через VPN, остальное напрямую">
+<meta property="og:description" content="Отмечаете YouTube, ChatGPT или соцсети — роутер сам отправляет их через VPN. Банки и госуслуги остаются на обычном канале. Для Keenetic и Netcraze.">
 <meta property="og:image" content="assets/img/dash-light.webp">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/roboto-cyrillic-400-normal.woff2" crossorigin>
@@ -25,11 +25,11 @@
       <span>KEEN-PBR<b>-SB</b></span>
     </a>
     <nav class="nav" id="nav">
-      <a href="#features">Возможности</a>
+      <a href="#why">Зачем это</a>
+      <a href="#features">Что умеет</a>
       <a href="#how">Как работает</a>
-      <a href="#shots">Интерфейс</a>
+      <a href="#shots">Как выглядит</a>
       <a href="#install">Установка</a>
-      <a href="#honest">Ограничения</a>
     </nav>
     <div class="hdr__act">
       <button class="iconbtn burger" id="burger" aria-label="Меню" aria-expanded="false">
@@ -53,138 +53,197 @@
     <div class="hero__grid">
       <div>
         <div class="badges" style="margin-bottom:20px">
-          <span class="badge badge--ok">● Активная разработка</span>
+          <span class="badge badge--ok">● Проект живой, обновляется</span>
           <span class="badge">Версия 3.1.1-sb.12</span>
           <span class="badge badge--warn">beta</span>
-          <span class="badge">GPL-3.0</span>
+          <span class="badge">Бесплатно, открытый код</span>
         </div>
-        <h1>Маршрутизация по спискам для Keenetic — в одной панели</h1>
+        <h1>Через VPN — только то, что нужно. Остальное напрямую</h1>
         <p class="hero__lead">
-          Нативные WireGuard и AmneziaWG из прошивки, туннели sing-box, резервирование,
-          DNS и обход блокировок настраиваются мышкой, а не правкой нескольких конфигов по SSH.
-          Маршрутами владеет один демон — компоненты не спорят за <code>ip rule</code> и firewall.
+          Отмечаете галочками YouTube, ChatGPT, соцсети — роутер сам отправляет их через ваш VPN.
+          Банк, госуслуги, маркетплейсы и торренты продолжают ходить обычным путём, на полной скорости.
+          Всё делается мышкой в браузере: ни одного файла править по SSH не нужно.
         </p>
         <div class="hero__cta">
           <a class="btn btn--primary" href="#install">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
-            Установить одной командой
+            Как установить
           </a>
-          <a class="btn btn--ghost" href="https://github.com/blindtechnique/keen-pbr-sb" rel="noopener">Исходный код</a>
+          <a class="btn btn--ghost" href="#shots">Посмотреть панель</a>
         </div>
         <div class="badges">
-          <span class="badge">Keenetic · Netcraze</span>
-          <span class="badge">Entware aarch64 / mips / mipsel</span>
-          <span class="badge">Русский интерфейс</span>
-          <span class="badge">Тёмная тема</span>
+          <span class="badge">Keenetic и Netcraze</span>
+          <span class="badge">Нужен Entware</span>
+          <span class="badge">Всё на русском</span>
+          <span class="badge">Светлая и тёмная темы</span>
         </div>
       </div>
     </div>
     <figure class="hero__shot" style="margin:56px 0 0">
-      <img src="assets/img/dash-light.webp" width="1800" height="969" alt="Дашборд keen-pbr-sb: состояние системы, маршруты и резервирование, службы">
+      <img src="assets/img/dash-light.webp" width="1800" height="966" alt="Главный экран keen-pbr-sb: состояние системы, список маршрутов, панель служб">
     </figure>
   </div>
 </section>
 
-<!-- ─── ЦИФРЫ ─────────────────────────────────────── -->
-<section class="section">
-  <div class="wrap">
-    <div class="stats">
-      <div class="stat"><b>9</b><span>протоколов через share-link: VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS, HTTP(S)</span></div>
-      <div class="stat"><b>89</b><span>готовых наборов в каталоге — от YouTube и AI до игр и блокировки рекламы</span></div>
-      <div class="stat"><b>1400+</b><span>автотестов бэкенда плюс интеграционные прогоны firewall в сетевых пространствах имён</span></div>
-      <div class="stat"><b>0</b><span>внешних баз данных на роутере: конфигурация в JSON, история соединений — в памяти</span></div>
-    </div>
-  </div>
-</section>
-
-<!-- ─── ВОЗМОЖНОСТИ ───────────────────────────────── -->
-<section class="section section--alt" id="features">
+<!-- ─── ЗАЧЕМ ЭТО ─────────────────────────────────── -->
+<section class="section" id="why">
   <div class="wrap">
     <div class="section__head">
-      <div class="eyebrow">Возможности</div>
-      <h2>Всё, что нужно для маршрутизации, — и ничего лишнего на роутере</h2>
-      <p>Проект вырос из <a href="https://github.com/maksimkurb/keen-pbr" rel="noopener">keen-pbr</a> и сохраняет его главное решение: маршрутами владеет один специализированный демон. Остальные компоненты дают ему интерфейсы и данные.</p>
+      <div class="eyebrow">Зачем это нужно</div>
+      <h2>Проблема не в том, чтобы включить VPN. Проблема — во всём остальном</h2>
+      <p>Если завернуть в туннель весь трафик роутера, начинается знакомое: банк просит подтверждений, доставка не видит адрес, видео тормозит, а скорость падает вдвое. Хочется наоборот — чтобы через VPN шло только то, что без него не работает.</p>
     </div>
 
     <div class="cards">
-
-      <article class="card card--wide">
-        <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15.05 5A5 5 0 0 1 19 8.95M15.05 1A9 9 0 0 1 23 8.94m-1 7.98v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.1 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-        </div>
-        <h3>Звонки WhatsApp переживают смену маршрута</h3>
-        <p>
-          UDP-звонок не понимает, что маршрут изменился, и продолжает слать пакеты в старый туннель.
-          keen-pbr-sb удерживает пару «клиент ↔ пир» и аккуратно переподключает только её:
-          conntrack-метки залипают за уже установленными соединениями, глобальная очистка
-          conntrack не выполняется, чужие сервисы и метки не затрагиваются. Механизм намеренно
-          привязан к встроенному списку Meta / WhatsApp IP — произвольный пользовательский список
-          не получает власть над всем UDP-трафиком источника.
-        </p>
-      </article>
-
       <article class="card">
         <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
         </div>
-        <h3>Нативные VPN прошивки — полноправные маршруты</h3>
-        <p>WireGuard, AmneziaWG, OpenVPN и IKEv2, поднятые штатными средствами KeeneticOS, участвуют в тех же правилах, что и прокси-туннели. Протокол определяется по типизированным данным прошивки, а не угадывается по имени.</p>
-      </article>
-
-      <article class="card">
-        <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 9h8M8 13h5"/></svg>
-        </div>
-        <h3>sing-box как транспорт, а не второй маршрутизатор</h3>
-        <p>Каждый прокси поднимает TUN с <code>auto_route: false</code> и получает детерминированный адрес. Таблицы, метки и failover остаются у keen-pbr, поэтому обновление или падение sing-box не разрушает маршруты остальных интерфейсов. Без прокси он вообще не нужен.</p>
+        <h3>Выбираете из готового списка</h3>
+        <p>В панели есть каталог: YouTube, ChatGPT и другие AI-сервисы, соцсети, стриминги, магазины приложений, игровые платформы — всего 89 наборов. Отмечаете нужное, указываете туннель, нажимаете «Добавить». Списки доменов составлять вручную не надо.</p>
       </article>
 
       <article class="card">
         <div class="card__ico">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
         </div>
-        <h3>Резервирование с возвратом на приоритет</h3>
-        <p>Группа <code>urltest</code> сама выбирает исправный выход и возвращается на приоритетный, когда тот оживает. Очистка conntrack выполняется только для переключаемой группы — соседние соединения не рвутся.</p>
+        <h3>Упал туннель — переключит сам</h3>
+        <p>Можно завести несколько серверов и объединить их в группу. Роутер сам проверяет, какой из них жив, переключается на запасной и возвращается на основной, когда тот оживёт. Вам ничего делать не нужно.</p>
       </article>
 
       <article class="card">
         <div class="card__ico">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         </div>
-        <h3>Kill-switch включён по умолчанию</h3>
-        <p>Если туннель упал или перезапускается, помеченный трафик блокируется unreachable-маршрутом, а не проваливается в прямое подключение с настоящим IP. Для туннельных выходов режим включён из коробки.</p>
+        <h3>Не утечёт мимо туннеля</h3>
+        <p>Если туннель упал и запасного нет, трафик просто останавливается — вместо того чтобы тихо пойти напрямую с вашим настоящим адресом. Для сервисов, ради которых всё и затевалось, это важнее пары секунд простоя.</p>
       </article>
 
       <article class="card">
         <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
         </div>
-        <h3>Каталог из 89 готовых наборов</h3>
-        <p>YouTube, AI-сервисы, соцсети, медиа, разработка, облака, игры, блокировка рекламы. Выбрали набор, указали куда направить — правило маршрутизации и DNS создаются вместе со списком. Каталог обновляется раз в неделю, копия вшита в пакет.</p>
+        <h3>Ваш VPN из прошивки — тоже маршрут</h3>
+        <p>WireGuard, AmneziaWG, OpenVPN или IKEv2, поднятые обычными средствами Keenetic, работают наравне с прокси-туннелями. Не нужно поднимать всё заново в чужом формате: что уже настроено — то и используется.</p>
+      </article>
+
+      <article class="card card--wide">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+        </div>
+        <h3>Уехали — а роутер остался дома</h3>
+        <p>
+          Если провайдер выдаёт роутеру публичный IP-адрес, в самом Keenetic можно поднять
+          VPN-сервер — WireGuard, SSTP, IKEv2, L2TP/IPsec или IKEv1 IPsec — и подключаться
+          к своему дому откуда угодно. И тут получается приятное: для банка, госуслуг
+          и маркетплейсов вы как будто дома — заходите с обычного российского домашнего адреса,
+          никаких блокировок и подозрительных входов. А YouTube, нейросети и всё, что вы отметили
+          в каталоге, из того же подключения уходят дальше, в зарубежный туннель — по тем же правилам,
+          что работают дома.
+        </p>
+        <p style="margin-top:12px">
+          Выходит цепочка: ноутбук в отпуске → ваш роутер в России → нужный туннель. Роутер работает
+          сразу и входом, и выходом. Само по себе это не заводится: трафик подключившихся к роутеру
+          гостей обычно проходит мимо правил и уходит напрямую — keen-pbr-sb специально научен
+          пропускать его через ваши списки, включая гостевые сети.
+        </p>
+        <p style="margin-top:12px;font-size:15px;color:var(--fg-muted)">
+          Из серверов проще всего WireGuard — он поднимается прямо в веб-конфигураторе роутера
+          за несколько минут. AmneziaWG сервером прошивка пока быть не умеет, только клиентом.
+          OpenVPN-сервер в роутере есть, но настраивается файлом конфигурации с компьютера,
+          без графического интерфейса, поэтому его обычно оставляют на крайний случай.
+        </p>
+      </article>
+
+      <article class="card">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        </div>
+        <h3>Одна панель вместо трёх проектов</h3>
+        <p>Туннели, списки, правила, DNS, обход блокировок, диагностика и резервные копии живут в одном месте и в одном оформлении. Не нужно ставить рядом несколько независимых надстроек и следить, чтобы они не подрались за настройки роутера.</p>
+      </article>
+
+      <article class="card">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M3 20h4l11-11a2.8 2.8 0 0 0-4-4L3 16z"/></svg>
+        </div>
+        <h3>Ничего не ломает в роутере</h3>
+        <p>Панель не переписывает настройки прошивки и не требует замены прошивки. Она читает состояние интерфейсов и добавляет свои правила рядом, а чужие не трогает. Захотите удалить — роутер вернётся к тому, что было.</p>
+      </article>
+    </div>
+
+    <p style="margin-top:32px;color:var(--fg-muted);font-size:16px;max-width:70ch">
+      Сравнивать себя с конкретными проектами не будем: они развиваются, и любая табличка устареет через месяц.
+      Просто посмотрите на список выше и сверьте с тем, чем пользуетесь сейчас.
+    </p>
+  </div>
+</section>
+
+<!-- ─── ЦИФРЫ ─────────────────────────────────────── -->
+<section class="section section--alt">
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><b>89</b><span>готовых наборов в каталоге — от YouTube и нейросетей до игр и блокировки рекламы</span></div>
+      <div class="stat"><b>9</b><span>видов прокси-подключений: VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS и HTTP</span></div>
+      <div class="stat"><b>0 ₽</b><span>стоимость: открытый код, никакой подписки и регистрации</span></div>
+      <div class="stat"><b>1400+</b><span>автоматических проверок перед каждым выпуском, чтобы обновление не сломало роутер</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── ЧТО УМЕЕТ ─────────────────────────────────── -->
+<section class="section" id="features">
+  <div class="wrap">
+    <div class="section__head">
+      <div class="eyebrow">Что умеет</div>
+      <h2>Мелочи, из-за которых обычно всё и разваливается</h2>
+      <p>Направить трафик в туннель умеет любой похожий проект. Разница — в том, что происходит дальше: когда туннель моргнул, когда вы поменяли настройки, когда провайдер начал мешать.</p>
+    </div>
+
+    <div class="cards">
+
+      <article class="card card--wide">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z"/></svg>
+        </div>
+        <h3>WhatsApp и Telegram не «залипают» после перенастройки</h3>
+        <p>
+          Знакомая история: вы поменяли маршрут или добавили список — и мессенджер перестаёт отправлять
+          сообщения, а звонок обрывается. Причина простая: уже открытые соединения продолжают идти старым
+          путём, которого больше нет. Само это не чинится — приходится выключать и включать Wi-Fi на
+          телефоне или перезапускать приложение.
+        </p>
+        <p style="margin-top:12px">
+          keen-pbr-sb замечает соединения, которые после смены маршрута замолчали, и аккуратно закрывает
+          именно их — приложение тут же переподключается по новому пути. Всё остальное на роутере
+          продолжает работать: соседние соединения, чужие сервисы и торренты никто не рвёт.
+          Для WhatsApp это включено сразу, а в настройках можно добавить любой другой список — например
+          Telegram, — и он получит такую же защиту.
+        </p>
+      </article>
+
+      <article class="card">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 9h8M8 13h5"/></svg>
+        </div>
+        <h3>Прокси добавляется одной ссылкой</h3>
+        <p>Купили доступ к VLESS или Hysteria2 — скопировали ссылку из личного кабинета, вставили в панель, нажали «Запустить». Разбираться в форматах конфигов не нужно. Поддерживаются девять видов подключений.</p>
       </article>
 
       <article class="card">
         <div class="card__ico">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
         </div>
-        <h3>DNS, который действительно доходит</h3>
-        <p>DNS Override через dnsmasq, отдельные серверы, detour через туннель и bootstrap DNS. Принудительный DNS клиентов перехватывает порт 53 и закрывает DoT — главный источник утечек доменных правил.</p>
+        <h3>Правила по именам сайтов, а не по адресам</h3>
+        <p>Пишете <code>youtube.com</code> — и роутер сам отслеживает, какие адреса за этим именем прячутся сегодня. Адреса у крупных сервисов меняются постоянно, вручную за ними не угнаться.</p>
       </article>
 
       <article class="card">
         <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
         </div>
-        <h3>Списки любых форматов, включая <code>.srs</code></h3>
-        <p>Домены, IP и подсети, локальные и удалённые списки, расписание обновления. Бинарные rule-set sing-box декодируются встроенным парсером — sing-box для этого запускать не нужно.</p>
-      </article>
-
-      <article class="card">
-        <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6m0 0 3-3m-3 3L9 5"/><rect x="3" y="8" width="18" height="13" rx="2"/><path d="M7 14h10"/></svg>
-        </div>
-        <h3>Резервные копии и анализ зависимостей</h3>
-        <p>Выборочная копия настроек, транспортов, списков, правил и nfqws2. Перед удалением списка или соединения панель показывает, что от него зависит, и открывает связанные объекты по ссылке.</p>
+        <h3>Обход блокировок без VPN</h3>
+        <p>Иногда сайт открывается и без туннеля — достаточно немного изменить пакеты, чтобы провайдер перестал их узнавать. Для этого есть nfqws2: ставится отдельно, а управляется из той же панели — стратегии, списки, журналы и проверка сайта.</p>
       </article>
 
       <article class="card">
@@ -192,41 +251,65 @@
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
         </div>
         <h3>Видно, что происходит прямо сейчас</h3>
-        <p>Активные соединения с адресами, портами, доменами и именами устройств из NDMS. Задержка каждого туннеля, графики трафика интерфейсов, проверка маршрута для конкретного домена и журнал в файл.</p>
+        <p>Какие устройства к чему подключены, через какой туннель идёт трафик, сколько миллисекунд до каждого сервера, графики нагрузки. Есть проверка: вводите адрес сайта — панель показывает, каким путём он пойдёт.</p>
       </article>
 
       <article class="card">
         <div class="card__ico">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6m0 0 3-3m-3 3L9 5"/><rect x="3" y="8" width="18" height="13" rx="2"/><path d="M7 14h10"/></svg>
         </div>
-        <h3>nfqws2 — целиком из панели</h3>
-        <p>Служба, конфигурация, стратегии, списки, Lua-скрипты (в том числе сжатые <code>.lua.gz</code>), журналы, обновление пакета и проверка доступности сайта. Отдельный механизм обхода DPI, когда VPN не нужен.</p>
+        <h3>Резервная копия и подсказка перед удалением</h3>
+        <p>Настройки сохраняются одной кнопкой и скачиваются на компьютер. А если решите удалить список или туннель — панель заранее покажет, что от него зависит, чтобы не сломать половину правил случайно.</p>
+      </article>
+
+      <article class="card">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.2-8.6"/><path d="M22 4l-10 10-3-3"/></svg>
+        </div>
+        <h3>Выдернули из розетки — ничего не рассыпалось</h3>
+        <p>Настройки записываются так, чтобы отключение питания посреди сохранения не оставило роутер в непонятном состоянии. При следующем включении панель проверит целостность и вернёт последнюю рабочую конфигурацию.</p>
+      </article>
+
+      <article class="card">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h6"/></svg>
+        </div>
+        <h3>Интерфейс в стиле самого роутера</h3>
+        <p>Меню, шрифты и цвета повторяют веб-конфигуратор Keenetic, поэтому панель не выглядит чужой рядом с ним. Есть тёмная тема и отдельная раскладка для телефона. Всё на русском, без машинного перевода.</p>
+      </article>
+
+      <article class="card">
+        <div class="card__ico">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
+        </div>
+        <h3>Обновляется из панели</h3>
+        <p>Кнопка «Проверить обновления» покажет, что нового, и поставит новую версию сама. Перед этим создаётся копия настроек, а если что-то пойдёт не так — вернётся предыдущая версия.</p>
       </article>
 
     </div>
 
     <div class="more">
-      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Транзакционное сохранение.</b> Конфигурация пишется атомарно, при ошибке возвращается предыдущее состояние.</span></div>
-      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Восстановление после выключения питания.</b> Журнал операций и офлайн-восстановление с побайтовой проверкой.</span></div>
-      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Обновление из веб-интерфейса.</b> Со сверкой SHA256, заметками релиза и откатом при неудаче.</span></div>
-      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Импорт и экспорт.</b> Списки, правила, соединения, транспорты и файлы nfqws2 — по отдельности.</span></div>
-      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Вход учётной записью роутера</b> или локальный пароль; внешний доступ включается отдельно и только при активной защите.</span></div>
-      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Мобильная вёрстка</b> со своей компоновкой списков, массовыми действиями и перетаскиванием правил.</span></div>
+      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Своё расписание обновления списков</b> — раз в день, раз в неделю или как удобно.</span></div>
+      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Правила не только по сайтам</b>, но и по конкретному устройству в доме, порту или протоколу.</span></div>
+      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Свои DNS-серверы</b> — Яндекс, Google, Cloudflare, Quad9 или любой другой, при желании через туннель.</span></div>
+      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Вход по паролю роутера</b> или отдельным паролем; снаружи панель закрыта, пока не откроете сами.</span></div>
+      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Перенос настроек на другой роутер</b> через файл: списки, правила и туннели выгружаются и загружаются обратно.</span></div>
+      <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Журнал работы</b> с понятными сообщениями — есть что приложить, если понадобится помощь.</span></div>
     </div>
   </div>
 </section>
 
 <!-- ─── КАК РАБОТАЕТ ──────────────────────────────── -->
-<section class="section" id="how">
+<section class="section section--alt" id="how">
   <div class="wrap">
     <div class="section__head">
-      <div class="eyebrow">Как это устроено</div>
-      <h2>Один демон владеет маршрутами</h2>
-      <p>В IP-пакете нет имени сайта. dnsmasq видит запрос домена и складывает полученные адреса в набор firewall, а keen-pbr применяет к ним правило и отправляет трафик в нужный выход.</p>
+      <div class="eyebrow">Как это работает</div>
+      <h2>Если коротко — роутер запоминает, за каким именем какие адреса</h2>
+      <p>Внутри интернета названий сайтов нет, там только числовые адреса. Поэтому роутер подслушивает момент, когда ваш телефон спрашивает «а какой адрес у youtube.com», запоминает ответ и с этого момента отправляет всё, что идёт на этот адрес, в выбранный туннель. Остальное едет как обычно.</p>
     </div>
 
     <div class="diagram">
-      <svg viewBox="0 0 920 330" width="100%" role="img" aria-label="Схема: клиент, dnsmasq, keen-pbr, исходящее соединение, нативный VPN или sing-box или прямой WAN, интернет">
+      <svg viewBox="0 0 920 330" width="100%" role="img" aria-label="Схема: устройство в доме, определение адресов, keen-pbr, выбор пути — VPN роутера, прокси или прямой канал — и интернет">
         <defs>
           <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0 10 5 0 10z" fill="currentColor"/>
@@ -241,134 +324,171 @@
           </style>
         </defs>
 
-        <rect class="bx" x="14" y="128" width="140" height="62" rx="11"/>
-        <text class="t" x="84" y="154">Клиент в сети</text>
-        <text class="s" x="84" y="172">телефон, ТВ, ПК</text>
+        <rect class="bx" x="14" y="128" width="146" height="62" rx="11"/>
+        <text class="t" x="87" y="154">Ваше устройство</text>
+        <text class="s" x="87" y="172">телефон, ТВ, ноутбук</text>
 
-        <rect class="bx" x="204" y="42" width="150" height="62" rx="11"/>
-        <text class="t" x="279" y="68">dnsmasq</text>
-        <text class="s" x="279" y="86">домены → наборы IP</text>
+        <rect class="bx" x="210" y="42" width="152" height="62" rx="11"/>
+        <text class="t" x="286" y="68">Запрос адреса</text>
+        <text class="s" x="286" y="86">«какой IP у youtube»</text>
 
-        <rect class="bx-a" x="204" y="214" width="150" height="62" rx="11"/>
-        <text class="t" x="279" y="240">keen-pbr</text>
-        <text class="s" x="279" y="258">правила и таблицы</text>
+        <rect class="bx-a" x="210" y="214" width="152" height="62" rx="11"/>
+        <text class="t" x="286" y="240">keen-pbr-sb</text>
+        <text class="s" x="286" y="258">сверяет со списками</text>
 
-        <rect class="bx" x="404" y="128" width="160" height="62" rx="11"/>
-        <text class="t" x="484" y="154">Исходящее</text>
-        <text class="s" x="484" y="172">одно или группа urltest</text>
+        <rect class="bx" x="410" y="128" width="158" height="62" rx="11"/>
+        <text class="t" x="489" y="154">Выбор пути</text>
+        <text class="s" x="489" y="172">основной и запасной</text>
 
-        <rect class="bx" x="614" y="24" width="164" height="58" rx="11"/>
-        <text class="t" x="696" y="48">Нативный VPN</text>
-        <text class="s" x="696" y="66">WireGuard · AmneziaWG</text>
+        <rect class="bx" x="616" y="24" width="164" height="58" rx="11"/>
+        <text class="t" x="698" y="48">VPN роутера</text>
+        <text class="s" x="698" y="66">WireGuard · AmneziaWG</text>
 
-        <rect class="bx" x="614" y="130" width="164" height="58" rx="11"/>
-        <text class="t" x="696" y="154">sing-box TUN</text>
-        <text class="s" x="696" y="172">если установлен</text>
+        <rect class="bx" x="616" y="130" width="164" height="58" rx="11"/>
+        <text class="t" x="698" y="154">Прокси</text>
+        <text class="s" x="698" y="172">VLESS и другие</text>
 
-        <rect class="bx" x="614" y="236" width="164" height="58" rx="11"/>
-        <text class="t" x="696" y="260">Прямой WAN</text>
-        <text class="s" x="696" y="278">опционально nfqws2</text>
+        <rect class="bx" x="616" y="236" width="164" height="58" rx="11"/>
+        <text class="t" x="698" y="260">Обычный канал</text>
+        <text class="s" x="698" y="278">можно с обходом DPI</text>
 
         <rect class="bx" x="812" y="128" width="104" height="62" rx="11"/>
         <text class="t" x="864" y="165">Интернет</text>
 
-        <path class="ln"   d="M154 148 L204 90"   marker-end="url(#ar)"/>
-        <path class="ln-a" d="M154 170 L204 236"  marker-end="url(#ar)"/>
-        <path class="ln"   d="M279 104 L279 214"  marker-end="url(#ar)"/>
-        <path class="ln-a" d="M354 240 L404 180"  marker-end="url(#ar)"/>
-        <path class="ln-a" d="M564 148 L614 70"   marker-end="url(#ar)"/>
-        <path class="ln-a" d="M564 159 L614 159"  marker-end="url(#ar)"/>
-        <path class="ln"   d="M564 172 L614 250"  marker-end="url(#ar)"/>
-        <path class="ln-a" d="M778 58 L812 140"   marker-end="url(#ar)"/>
-        <path class="ln-a" d="M778 159 L812 159"  marker-end="url(#ar)"/>
-        <path class="ln"   d="M778 262 L812 180"  marker-end="url(#ar)"/>
+        <path class="ln"   d="M160 148 L210 90"   marker-end="url(#ar)"/>
+        <path class="ln-a" d="M160 170 L210 236"  marker-end="url(#ar)"/>
+        <path class="ln"   d="M286 104 L286 214"  marker-end="url(#ar)"/>
+        <path class="ln-a" d="M362 240 L410 180"  marker-end="url(#ar)"/>
+        <path class="ln-a" d="M568 148 L616 70"   marker-end="url(#ar)"/>
+        <path class="ln-a" d="M568 159 L616 159"  marker-end="url(#ar)"/>
+        <path class="ln"   d="M568 172 L616 250"  marker-end="url(#ar)"/>
+        <path class="ln-a" d="M780 58 L812 140"   marker-end="url(#ar)"/>
+        <path class="ln-a" d="M780 159 L812 159"  marker-end="url(#ar)"/>
+        <path class="ln"   d="M780 262 L812 180"  marker-end="url(#ar)"/>
       </svg>
     </div>
 
     <div class="notes" style="margin-top:34px">
       <div class="note">
-        <h3>Почему sing-box не рулит маршрутами</h3>
-        <p>Два компонента не должны одновременно переписывать <code>ip rule</code> и firewall. Нативные туннели прошивки и прокси участвуют в одних правилах, а обновление прокси-ядра не связано с обновлением системы маршрутизации.</p>
+        <h3>Почему устройства должны спрашивать адреса у роутера</h3>
+        <p>Если телефон ходит за адресами мимо роутера — через «Частный DNS» или собственный VPN, — роутер не видит, какой сайт запрашивают, и правило по имени не срабатывает. В настройках есть переключатель, который возвращает такие устройства на роутер. В браузере при этом лучше выключить «Безопасный DNS».</p>
       </div>
       <div class="note">
-        <h3>Почему доменам нужен DNS роутера</h3>
-        <p>Если устройство ходит в сторонний DoH или свой VPN, роутер не видит исходный домен. Универсально отличить DoH от другого HTTPS на 443 нельзя — для строгих доменных правил Secure DNS в браузере лучше выключить.</p>
+        <h3>Почему прокси не управляет маршрутами</h3>
+        <p>Маршрутами занимается только keen-pbr-sb, а прокси-программа просто поднимает туннель. Так они не спорят между собой: обновление или сбой прокси не ломает остальные пути, а если прокси вам не нужен — его можно вообще не устанавливать.</p>
       </div>
       <div class="note">
-        <h3>Почему сервис остаётся лёгким</h3>
-        <p>Нет отдельной базы и бесконечной телеметрии: конфигурация в JSON, история соединений ограничена 1500 записями в памяти, полная GeoIP-база в пакет не входит. Демон на C++ занимается только маршрутизацией, DNS и API.</p>
+        <h3>Почему роутер не начинает тормозить</h3>
+        <p>Панель не хранит базу данных и не пишет бесконечную статистику: настройки лежат в обычном файле, история подключений — в памяти и ограничена. Тяжёлые географические базы в комплект не входят. Роутер остаётся роутером.</p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ─── ИНТЕРФЕЙС ─────────────────────────────────── -->
-<section class="section section--alt" id="shots">
+<!-- ─── КАК ВЫГЛЯДИТ ──────────────────────────────── -->
+<section class="section" id="shots">
   <div class="wrap">
     <div class="section__head">
-      <div class="eyebrow">Интерфейс</div>
-      <h2>Знакомая логика KeeneticOS</h2>
-      <p>Единая типографика и палитра, компактные карточки, светлая и тёмная темы. На скриншотах — рабочая установка; имена туннелей, маршрутов и списков заменены на условные.</p>
+      <div class="eyebrow">Как выглядит</div>
+      <h2>Всё в браузере, всё по-русски</h2>
+      <p>Оформление вдохновлено интерфейсом самого роутера, поэтому переключаться между ним и панелью не приходится заново привыкать. Снимки сделаны на рабочем роутере; названия туннелей и списков заменены на условные. Нажмите на любой, чтобы рассмотреть.</p>
     </div>
 
     <div class="tabs" role="tablist">
-      <button class="tab" role="tab" aria-selected="true"  data-p="p1">Дашборд</button>
-      <button class="tab" role="tab" aria-selected="false" data-p="p2">Туннели и прокси</button>
+      <button class="tab" role="tab" aria-selected="true"  data-p="p1">Главный экран</button>
+      <button class="tab" role="tab" aria-selected="false" data-p="p2">Туннели</button>
       <button class="tab" role="tab" aria-selected="false" data-p="p3">Каталог</button>
       <button class="tab" role="tab" aria-selected="false" data-p="p4">Списки и правила</button>
-      <button class="tab" role="tab" aria-selected="false" data-p="p5">nfqws2</button>
-      <button class="tab" role="tab" aria-selected="false" data-p="p6">Настройки</button>
-      <button class="tab" role="tab" aria-selected="false" data-p="p7">Тёмная тема</button>
+      <button class="tab" role="tab" aria-selected="false" data-p="p5">Соединения</button>
+      <button class="tab" role="tab" aria-selected="false" data-p="p6">DNS-серверы</button>
+      <button class="tab" role="tab" aria-selected="false" data-p="p7">Обход блокировок</button>
+      <button class="tab" role="tab" aria-selected="false" data-p="p8">Настройки</button>
+      <button class="tab" role="tab" aria-selected="false" data-p="p9">Тёмная тема</button>
     </div>
 
     <div class="panel" id="p1">
-      <figure class="shot"><img loading="lazy" src="assets/img/dash-light.webp" alt="Дашборд: состояние системы, карточка роутера, маршруты и резервирование, службы">
-        <figcaption><b>Дашборд.</b> Состояние маршрутизации и DNS, карточка роутера с процессором, памятью и клиентами, все маршруты с активным и запасным выходом, задержкой и числом списков. Справа — службы с выключателями.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px;max-width:560px"><img loading="lazy" src="assets/img/traffic.webp" alt="График трафика туннеля: приём, передача, накопленные байты">
-        <figcaption><b>Трафик интерфейса.</b> Счётчики читаются без запуска внешних процессов и передаются в браузер по уже открытому каналу событий.</figcaption></figure>
+      <figure class="shot"><img loading="lazy" src="assets/img/dash-light.webp" alt="Главный экран: состояние системы, карточка роутера, список маршрутов, службы">
+        <figcaption><b>Главный экран.</b> Сверху — работает ли всё как надо и что сейчас с роутером: загрузка, память, сколько устройств подключено. Ниже — все ваши пути с задержкой в миллисекундах и пометкой, какой сейчас основной, а какой запасной. Справа — выключатели служб.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px;max-width:560px"><img loading="lazy" src="assets/img/traffic.webp" alt="График трафика туннеля: приём, передача, всего за сессию">
+        <figcaption><b>Нагрузка на туннель.</b> Видно, идёт ли через него трафик прямо сейчас и сколько прошло всего.</figcaption></figure>
     </div>
 
     <div class="panel" id="p2" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/tunnels.webp" alt="Туннели и прокси: карточки Hysteria2, VLESS и AmneziaWG с состоянием и задержкой">
-        <figcaption><b>Туннели и прокси.</b> Управляемые sing-box и нативные интерфейсы KeeneticOS в одном списке: протокол, страна, задержка, выключатель и перезапуск для каждого. Импорт и экспорт, переключение режима процессов sing-box.</figcaption></figure>
+      <figure class="shot"><img loading="lazy" src="assets/img/tunnels.webp" alt="Список туннелей: карточки Hysteria2, VLESS и AmneziaWG с состоянием и задержкой">
+        <figcaption><b>Туннели.</b> Прокси и VPN из прошивки — в одном списке. У каждого видно тип, страну сервера, задержку и выключатель. Новый добавляется вставкой ссылки, старый перезапускается одной кнопкой.</figcaption></figure>
     </div>
 
     <div class="panel" id="p3" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/catalog.webp" alt="Каталог списков: категории, поиск, отметка добавленных наборов">
-        <figcaption><b>Каталог списков.</b> 89 готовых наборов по категориям с поиском и отметкой уже добавленных. Отдельно выбирается соединение, через которое скачивается сам каталог, — он лежит на GitHub, куда напрямую дотянуться удаётся не всем.</figcaption></figure>
+      <figure class="shot"><img loading="lazy" src="assets/img/catalog.webp" alt="Каталог: категории, поиск, отметки уже добавленных наборов">
+        <figcaption><b>Каталог.</b> 89 готовых наборов по категориям, с поиском и пометкой того, что уже добавлено. Отмечаете нужное, внизу выбираете, куда направить, — и правила создаются сами.</figcaption></figure>
     </div>
 
     <div class="panel" id="p4" hidden>
       <figure class="shot"><img loading="lazy" src="assets/img/lists.webp" alt="Списки: источники, количество записей, где используется">
-        <figcaption><b>Списки.</b> Источник, число записей и колонка «где используется» — сразу видно, какие правила маршрутизации и DNS зависят от списка.</figcaption></figure>
-      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/rules.webp" alt="Правила маршрутизации: порядок, условия, маршрут">
-        <figcaption><b>Правила маршрутизации.</b> Проверяются сверху вниз, порядок меняется перетаскиванием. Условие — списки, адрес устройства, протокол или порт; маршрут — туннель, группа резервирования, прямой выход или блокировка.</figcaption></figure>
+        <figcaption><b>Списки.</b> Что откуда берётся, сколько в нём записей и — самое полезное — где он используется. Сразу видно, какие правила сломаются, если его удалить.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px;max-width:760px"><img loading="lazy" src="assets/img/list-modal.webp" alt="Окно создания списка: источник, быстрая настройка правил">
+        <figcaption><b>Добавление своего списка.</b> Можно дать ссылку, загрузить файл или вписать домены руками. Внизу — «Быстрая настройка правил»: панель сама создаст правило маршрутизации и DNS-правило, проверит их и сохранит вместе со списком, чтобы он заработал сразу, а не остался лежать без дела.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/rules.webp" alt="Правила: порядок, условия, маршрут">
+        <figcaption><b>Правила.</b> Читаются сверху вниз, порядок меняется перетаскиванием. Слева — что подходит под правило, справа — куда это отправить: в туннель, в группу с резервом, напрямую или в никуда.</figcaption></figure>
     </div>
 
     <div class="panel" id="p5" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/nfqws.webp" alt="Страница nfqws2: служба, параметры, стратегии, списки, журналы">
-        <figcaption><b>nfqws2.</b> Служба, параметры, стратегии, списки, Lua-скрипты, журналы и проверка сайта. Пакет ставится отдельно и остаётся необязательным — панель управляет его файлами и штатным init-скриптом.</figcaption></figure>
+      <figure class="shot"><img loading="lazy" src="assets/img/connections.webp" alt="Соединения: устройства домашней сети и их активные подключения">
+        <figcaption><b>Соединения.</b> Кто в доме сейчас в сети и сколько у него открытых подключений — телевизор, колонки, телефоны, умные лампы. Устройства показаны по именам из роутера, а не голыми адресами. Строку можно развернуть и увидеть, куда именно идёт трафик и каким путём.</figcaption></figure>
     </div>
 
     <div class="panel" id="p6" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/settings.webp" alt="Настройки, вкладка «Дополнительно»: переподключение соединений после смены маршрутов">
-        <figcaption><b>Настройки → Дополнительно.</b> Переподключение соединений после смены маршрутов и выбор списков для усиленного переподключения — тот самый механизм, который не даёт звонку продолжать идти по старому пути.</figcaption></figure>
+      <figure class="shot"><img loading="lazy" src="assets/img/dns.webp" alt="DNS-серверы: основные серверы и таблица со списком">
+        <figcaption><b>DNS-серверы.</b> Какими серверами роутер узнаёт адреса сайтов и в каком порядке их спрашивать. У каждого можно указать маршрут — например, отправлять запросы к нему через туннель, чтобы провайдер их не видел.</figcaption></figure>
+      <figure class="shot" style="margin-top:20px"><img loading="lazy" src="assets/img/dns-modal.webp" alt="Окно добавления DNS-сервера с готовыми провайдерами">
+        <figcaption><b>Добавление DNS.</b> Яндекс, Google, Cloudflare, Quad9, OpenDNS — выбираете плиткой, адрес подставится сам. Или вписываете свой сервер и, если нужно, выбираете, через какой маршрут к нему обращаться.</figcaption></figure>
     </div>
 
     <div class="panel" id="p7" hidden>
-      <figure class="shot"><img loading="lazy" src="assets/img/dash-dark.webp" alt="Тот же дашборд в тёмной теме">
+      <figure class="shot"><img loading="lazy" src="assets/img/nfqws.webp" alt="Страница nfqws2: служба, параметры, стратегии, списки, журналы">
+        <figcaption><b>Обход блокировок (nfqws2).</b> Запуск и остановка, готовые стратегии, свои списки сайтов, журналы и проверка «открывается ли сайт». Сам пакет ставится отдельно и нужен не всем.</figcaption></figure>
+    </div>
+
+    <div class="panel" id="p8" hidden>
+      <figure class="shot"><img loading="lazy" src="assets/img/settings.webp" alt="Настройки, вкладка «Дополнительно»">
+        <figcaption><b>Настройки.</b> Здесь же живёт тот самый переключатель, который не даёт мессенджерам залипнуть после смены маршрута — и выбор списков, для которых это работает особенно бережно.</figcaption></figure>
+    </div>
+
+    <div class="panel" id="p9" hidden>
+      <figure class="shot"><img loading="lazy" src="assets/img/dash-dark.webp" alt="Тот же главный экран в тёмной теме">
         <figcaption><b>Тёмная тема.</b> Переключается в шапке панели. Оформление вдохновлено интерфейсом самого роутера, поэтому переход между веб-конфигуратором и keen-pbr-sb не требует привыкания.</figcaption></figure>
     </div>
   </div>
 </section>
 
 <!-- ─── УСТАНОВКА ─────────────────────────────────── -->
-<section class="section" id="install">
+<section class="section section--alt" id="install">
   <div class="wrap">
     <div class="section__head">
       <div class="eyebrow">Установка</div>
-      <h2>Одна команда по SSH</h2>
-      <p>Установщик определит архитектуру, скачает IPK из последнего релиза, сверит <code>SHA256SUMS</code> и предложит дополнительные компоненты. Повторный запуск обновляет пакет, не затирая конфигурацию.</p>
+      <h2>Одна команда — и панель открывается в браузере</h2>
+      <p>Установщик сам определит модель роутера, скачает нужную версию, проверит её и спросит, что ещё поставить. Если позже запустить ту же команду ещё раз — она обновит панель, не тронув ваши настройки.</p>
+    </div>
+
+    <div class="cards" style="margin-bottom:32px">
+      <article class="card card--wide">
+        <h3>Сначала — Entware</h3>
+        <p style="margin-bottom:14px">
+          keen-pbr-sb — это программа для роутера, а роутеру нужно место, куда её ставить. Такое место
+          даёт Entware: небольшая система дополнительных пакетов для Keenetic. Ставится один раз,
+          занимает пару минут и делается через веб-интерфейс роутера. Если Entware у вас уже есть —
+          этот шаг можно пропустить.
+        </p>
+        <div class="more" style="margin-top:0;grid-template-columns:1fr">
+          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Если у роутера есть свободная встроенная память:</b> <a href="https://help.keenetic.com/hc/ru/articles/360021888880-%D0%A3%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-OPKG-Entware-%D0%BD%D0%B0-%D0%B2%D1%81%D1%82%D1%80%D0%BE%D0%B5%D0%BD%D0%BD%D1%83%D1%8E-%D0%BF%D0%B0%D0%BC%D1%8F%D1%82%D1%8C-%D1%80%D0%BE%D1%83%D1%82%D0%B5%D1%80%D0%B0" rel="noopener nofollow">инструкция Keenetic про установку во встроенную память</a>.</span></div>
+          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Если памяти мало — понадобится флешка:</b> <a href="https://help.keenetic.com/hc/en-us/articles/360021214160-Installing-the-Entware-repository-package-system-on-a-USB-drive" rel="noopener nofollow">инструкция про установку на USB-накопитель</a>.</span></div>
+          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Что такое OPKG и зачем он нужен</b> — <a href="https://help.keenetic.com/hc/en-us/articles/360000948719-OPKG" rel="noopener nofollow">общая статья Keenetic</a>. Компонент «Система → OPKG» включается в самом роутере, в разделе обновлений.</span></div>
+          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>Понадобится доступ по SSH</b> — он включается там же, в настройках роутера, вместе с OPKG. Подключаться можно любой программой с поддержкой SSH; в Windows подойдёт встроенная командная строка.</span></div>
+        </div>
+        <p style="margin-top:16px;font-size:15px;color:var(--fg-muted)">
+          Ссылки ведут в базу знаний Keenetic — она сама подставляет статью под вашу модель роутера.
+        </p>
+      </article>
     </div>
 
     <div class="term">
@@ -376,72 +496,67 @@
         <span class="term__dot" style="background:#ff5f57"></span>
         <span class="term__dot" style="background:#febc2e"></span>
         <span class="term__dot" style="background:#28c840"></span>
-        <span class="term__ttl">root@keenetic</span>
-        <button class="term__copy" id="copy" data-cmd='sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"'>Скопировать</button>
+        <span class="term__ttl">подключитесь к роутеру по SSH и вставьте эту строку</span>
+        <button class="term__copy" id="copy" data-cmd='sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"'>Скопировать</button>
       </div>
-<pre><span class="p">#</span> sh -c "$(curl -fsSL https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"
-
-<span class="c"># если curl отсутствует:</span>
-<span class="p">#</span> sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"</pre>
+<pre><span class="p">#</span> sh -c "$(wget -qO- https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)"</pre>
     </div>
 
-    <div class="cards" style="margin-top:36px">
+    <div class="cards" style="margin-top:32px">
       <article class="card">
-        <h3>Что нужно</h3>
-        <div class="more" style="margin-top:14px;grid-template-columns:1fr">
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span>Keenetic или Netcraze с Entware в <code>/opt</code></span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span>SSH-доступ от <code>root</code></span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span>policy routing и netfilter в прошивке</span></div>
-          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span>клиенты используют DNS роутера, если правила заданы доменами</span></div>
+        <h3>Что дальше</h3>
+        <div class="steps" style="margin-top:16px">
+          <div class="step"><p><b>Откройте панель.</b> Установщик покажет адрес — обычно это адрес роутера с номером порта. Логин и пароль можно взять от самого роутера.</p></div>
+          <div class="step"><p><b>Добавьте туннель.</b> Либо поднимите WireGuard или AmneziaWG обычным способом в роутере, либо вставьте ссылку на прокси в разделе «Туннели и прокси».</p></div>
+          <div class="step"><p><b>Зайдите в «Каталог списков»</b> и отметьте, что должно ходить через туннель: YouTube, нейросети, соцсети. Внизу выберите туннель и нажмите «Добавить».</p></div>
+          <div class="step"><p><b>Проверьте.</b> На главном экране есть проверка маршрута: вводите адрес сайта и смотрите, каким путём он пойдёт.</p></div>
         </div>
-        <p style="margin-top:16px;font-size:15px">sing-box и nfqws2 <b>не обязательны</b>: если маршруты ведут только в нативные VPN прошивки, всё работает без них.</p>
       </article>
 
       <article class="card">
-        <h3>Первый маршрут за четыре шага</h3>
-        <div class="steps" style="margin-top:16px">
-          <div class="step"><p><b>Поднимите туннель.</b> Нативный WireGuard или AmneziaWG в штатном интерфейсе роутера — либо вставьте share-link в «Туннели и прокси».</p></div>
-          <div class="step"><p><b>Создайте исходящее соединение</b> для этого интерфейса, а при нескольких серверах — группу <code>urltest</code>.</p></div>
-          <div class="step"><p><b>Откройте каталог</b> и выберите готовый набор — YouTube, AI-сервисы, соцсети — указав, куда направить трафик.</p></div>
-          <div class="step"><p><b>Проверьте.</b> На дашборде есть проверка маршрута для конкретного домена и проверка DNS.</p></div>
+        <h3>Что ещё предложит установщик</h3>
+        <p style="margin-bottom:14px">Оба компонента — по желанию, панель работает и без них.</p>
+        <div class="more" style="margin-top:0;grid-template-columns:1fr">
+          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>sing-box</b> — нужен, если хотите подключать прокси по ссылке (VLESS и остальные восемь видов). Если пользуетесь только VPN из прошивки — не нужен.</span></div>
+          <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg><span><b>nfqws2</b> — обход блокировок без туннеля. Ставится из официального репозитория и только с вашего согласия.</span></div>
         </div>
+        <p style="margin-top:16px;font-size:15px;color:var(--fg-muted)">Удалить всё можно так же одной командой — роутер вернётся к исходному состоянию.</p>
       </article>
     </div>
   </div>
 </section>
 
 <!-- ─── ЧЕСТНО ────────────────────────────────────── -->
-<section class="section section--alt" id="honest">
+<section class="section" id="honest">
   <div class="wrap">
     <div class="section__head">
-      <div class="eyebrow">Честно об ограничениях</div>
-      <h2>Что стоит знать до установки</h2>
-      <p>Проект выпускается как beta. Основные сценарии пригодны для повседневного использования, но сочетаний прошивок, архитектур и сетевых конфигураций больше, чем можно проверить на одном стенде.</p>
+      <div class="eyebrow">Честно</div>
+      <h2>Что стоит знать заранее</h2>
+      <p>Проект молодой и развивается быстро. Основные вещи работают каждый день у живых пользователей, но роутеров, прошивок и домашних сетей на свете сильно больше, чем можно проверить на одном столе.</p>
     </div>
 
     <div class="notes">
       <div class="note">
-        <h3>DNS-over-HTTPS не перехватывается</h3>
-        <p>Порт 53 перенаправляется, DoT на 853 блокируется, но универсально отличить DoH от другого HTTPS-трафика на 443 нельзя. Для строгих доменных правил Secure DNS в браузере нужно выключить.</p>
+        <h3>Устройство может ходить мимо роутера</h3>
+        <p>Если в телефоне включён «Частный DNS», а в браузере «Безопасный DNS», роутер не увидит, какой сайт запрашивают, и правило по имени не сработает. Лечится переключателем в настройках панели и выключением этих опций на устройстве.</p>
       </div>
       <div class="note">
-        <h3>Переключение резерва не бесшовно</h3>
-        <p>При смене внешнего IP часть TCP-сессий устанавливается заново. Задача <code>urltest</code> — быстро выбрать исправный маршрут и не выпустить защищаемый трафик напрямую, а не сохранить каждое соединение.</p>
+        <h3>Переключение на запасной туннель не бесшовное</h3>
+        <p>Когда меняется внешний адрес, часть открытых соединений приходится устанавливать заново. Задача запасного канала — быстро найти рабочий путь и не выпустить трафик напрямую, а не сохранить каждое соединение.</p>
       </div>
       <div class="note">
-        <h3>Новые правила ждут перезапроса DNS</h3>
-        <p>Доменное правило начинает работать, когда устройство заново спросит адрес. Иногда достаточно закрыть и открыть вкладку, иногда нужен <code>ipconfig /flushdns</code>.</p>
+        <h3>Новое правило начинает работать не мгновенно</h3>
+        <p>Устройству нужно заново спросить адрес сайта. Обычно достаточно закрыть и открыть вкладку; иногда помогает переподключение к Wi-Fi.</p>
       </div>
       <div class="note">
-        <h3>Сохраняйте резервную копию</h3>
-        <p>Перед обновлением панель делает rollback-копию, и её можно скачать на компьютер. Пользуйтесь этим — и присылайте воспроизводимые ошибки вместе с диагностическим отчётом.</p>
+        <h3>Делайте резервную копию перед обновлением</h3>
+        <p>Панель создаёт её сама, и её можно скачать на компьютер. Если что-то сломается — напишите на GitHub и приложите диагностический отчёт, он собирается одной кнопкой.</p>
       </div>
     </div>
 
     <div style="margin-top:36px;display:flex;flex-wrap:wrap;gap:12px">
-      <a class="btn btn--primary" href="https://github.com/blindtechnique/keen-pbr-sb/releases" rel="noopener">Релизы и заметки</a>
-      <a class="btn btn--ghost" href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/CHANGELOG.md" rel="noopener">Полный журнал изменений</a>
-      <a class="btn btn--ghost" href="https://github.com/blindtechnique/keen-pbr-sb/issues" rel="noopener">Сообщить об ошибке</a>
+      <a class="btn btn--primary" href="https://github.com/blindtechnique/keen-pbr-sb/releases" rel="noopener">Скачать и посмотреть, что нового</a>
+      <a class="btn btn--ghost" href="https://github.com/blindtechnique/keen-pbr-sb/issues" rel="noopener">Сообщить о проблеме</a>
     </div>
   </div>
 </section>
@@ -456,30 +571,40 @@
           <img src="assets/logo.png" alt="" width="32" height="32">
           <span>KEEN-PBR<b>-SB</b></span>
         </a>
-        <p>Форк <a href="https://github.com/maksimkurb/keen-pbr" rel="noopener">keen-pbr</a> с веб-панелью, управляемыми транспортами и интеграцией с прошивкой. Демон на C++, компаньон транспортов на Go, интерфейс на React.</p>
+        <p>
+          Автор и сопровождающий — <a href="https://github.com/blindtechnique" rel="noopener">blindtechnique</a>.
+          Панель, управление туннелями, каталог, резервные копии, обход блокировок и интеграция с прошивкой
+          сделаны в рамках этого проекта.
+        </p>
+        <p style="font-size:14px">
+          В основе — <a href="https://github.com/maksimkurb/keen-pbr" rel="noopener">keen-pbr</a>.
+          Проект открытый и бесплатный, распространяется по лицензии
+          <a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/LICENSE" rel="noopener">GPL-3.0</a>:
+          исходный код доступен всем, его можно изучать и менять, сохраняя ту же лицензию и указание авторов.
+        </p>
       </div>
       <div>
         <h4>Проект</h4>
         <ul>
-          <li><a href="https://github.com/blindtechnique/keen-pbr-sb" rel="noopener">Репозиторий</a></li>
-          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/releases" rel="noopener">Релизы</a></li>
-          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/CHANGELOG.md" rel="noopener">Журнал изменений</a></li>
-          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/issues" rel="noopener">Issues</a></li>
+          <li><a href="https://github.com/blindtechnique/keen-pbr-sb" rel="noopener">Исходный код</a></li>
+          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/releases" rel="noopener">Версии и загрузки</a></li>
+          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/blob/main/CHANGELOG.md" rel="noopener">Что менялось</a></li>
+          <li><a href="https://github.com/blindtechnique/keen-pbr-sb/issues" rel="noopener">Вопросы и проблемы</a></li>
         </ul>
       </div>
       <div>
-        <h4>Основано на</h4>
+        <h4>Спасибо проектам</h4>
         <ul>
           <li><a href="https://github.com/maksimkurb/keen-pbr" rel="noopener">keen-pbr</a></li>
           <li><a href="https://github.com/SagerNet/sing-box" rel="noopener">sing-box</a></li>
-          <li><a href="https://github.com/hoaxisr/awg-manager" rel="noopener">awg-manager (каталог)</a></li>
-          <li><a href="https://github.com/Waujito/youtubeUnblock" rel="noopener">nfqws / DPI-обход</a></li>
+          <li><a href="https://github.com/hoaxisr/awg-manager" rel="noopener">awg-manager</a></li>
+          <li><a href="https://github.com/Entware/Entware" rel="noopener">Entware</a></li>
         </ul>
       </div>
     </div>
     <div class="ftr__bottom">
-      <span>GPL-3.0 · Сайт проекта keen-pbr-sb</span>
-      <span>Скриншоты сделаны на рабочей установке; имена туннелей, маршрутов и списков заменены на условные.</span>
+      <span>© blindtechnique · GPL-3.0 · Keenetic и Netcraze — торговые марки своих владельцев</span>
+      <span>Снимки сделаны на рабочем роутере; названия туннелей и списков заменены на условные.</span>
     </div>
   </div>
 </footer>

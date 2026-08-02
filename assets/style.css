@@ -116,7 +116,7 @@ code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-s
 .badge--ok{background:var(--ok-bg);border-color:transparent;color:var(--ok)}
 .badge--warn{background:var(--warn-bg);border-color:transparent;color:var(--warn)}
 .hero__shot{
-  margin-top:56px;border-radius:var(--radius);overflow:hidden;
+  margin-top:56px;border-radius:var(--radius);overflow:hidden;cursor:zoom-in;
   border:1px solid var(--line);box-shadow:var(--shadow-lg)
 }
 

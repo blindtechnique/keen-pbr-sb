@@ -51,7 +51,7 @@
   /* ── лайтбокс ─────────────────────────────────── */
   const lb = document.getElementById('lb');
   const lbimg = document.getElementById('lbimg');
-  document.querySelectorAll('.shot img').forEach((img) => {
+  document.querySelectorAll('.shot img, .hero__shot img').forEach((img) => {
     img.parentElement.addEventListener('click', () => {
       lbimg.src = img.src;
       lbimg.alt = img.alt;
