@@ -52,6 +52,7 @@ add_executable(keen-pbr-tests
   test_interface_traffic_sampler.cpp
   test_api_status_events.cpp
   test_api_logs.cpp
+  test_api_remote_access.cpp
   test_api_transports.cpp
   test_update_version.cpp
   test_api_test_routing.cpp
@@ -430,6 +431,7 @@ if(WITH_API)
     ../src/api/health_response.cpp
     ../src/api/handler_status_events.cpp
     ../src/api/handler_logs.cpp
+    ../src/api/handler_remote_access.cpp
     ../src/api/handler_ndms_names.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
