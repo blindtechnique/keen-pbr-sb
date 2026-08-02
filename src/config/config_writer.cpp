@@ -5,13 +5,14 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <utility>
-#include <vector>
 
 namespace keen_pbr3 {
 namespace {
@@ -37,80 +38,240 @@ void write_all(int fd, const std::string& body) {
 }
 
 void fsync_fd(int fd, const std::string& what) {
-    if (::fsync(fd) != 0) throw errno_error("Cannot fsync " + what);
-}
-
-void require_directory(const std::filesystem::path& path) {
-    struct stat metadata {};
-    if (::lstat(path.c_str(), &metadata) != 0) {
-        throw errno_error("Cannot inspect atomic file directory");
-    }
-    if (!S_ISDIR(metadata.st_mode) || S_ISLNK(metadata.st_mode)) {
-        throw std::runtime_error(
-            "Refusing to use a non-directory or symbolic-link parent");
+    while (::fsync(fd) != 0) {
+        if (errno == EINTR) continue;
+        throw errno_error("Cannot fsync " + what);
     }
 }
 
 int open_directory(const std::filesystem::path& directory);
 
-void ensure_parent_directory(
-    const std::filesystem::path& directory,
+struct DirectoryEntryKey {
+    dev_t parent_device{};
+    ino_t parent_inode{};
+    std::string name;
+
+    bool operator<(const DirectoryEntryKey& other) const noexcept {
+        if (parent_device != other.parent_device) {
+            return parent_device < other.parent_device;
+        }
+        if (parent_inode != other.parent_inode) {
+            return parent_inode < other.parent_inode;
+        }
+        return name < other.name;
+    }
+};
+
+std::mutex& parent_directory_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+// A failed fsync must not become a false success merely because mkdir(2)
+// already made the directory visible. Remember only those exceptional paths;
+// ordinary cache/config writes do not fsync every ancestor on every call.
+std::map<DirectoryEntryKey, mode_t>& uncertain_parent_entries() {
+    static std::map<DirectoryEntryKey, mode_t> entries;
+    return entries;
+}
+
+#ifdef KEEN_PBR3_TESTING
+void inject_parent_directory_fault(
+    const AtomicFileWriteOptions& options,
+    AtomicParentDirectoryStage stage) {
+    if (options.parent_directory_fault_injector) {
+        options.parent_directory_fault_injector(stage);
+    }
+}
+#else
+void inject_parent_directory_fault(
+    const AtomicFileWriteOptions&,
+    AtomicParentDirectoryStage) {}
+#endif
+
+int open_child_directory(int parent_fd,
+                         const std::string& name,
+                         const struct stat& expected) {
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int descriptor = ::openat(parent_fd, name.c_str(), flags);
+    if (descriptor < 0) {
+        throw errno_error("Cannot open atomic file directory component");
+    }
+#ifndef O_CLOEXEC
+    if (::fcntl(descriptor, F_SETFD, FD_CLOEXEC) != 0) {
+        const int error = errno;
+        ::close(descriptor);
+        errno = error;
+        throw errno_error(
+            "Cannot mark atomic file directory component close-on-exec");
+    }
+#endif
+    struct stat opened {};
+    if (::fstat(descriptor, &opened) != 0) {
+        const int error = errno;
+        ::close(descriptor);
+        errno = error;
+        throw errno_error("Cannot inspect atomic file directory component");
+    }
+    if (!S_ISDIR(opened.st_mode) || opened.st_dev != expected.st_dev ||
+        opened.st_ino != expected.st_ino) {
+        ::close(descriptor);
+        throw std::runtime_error(
+            "Atomic file directory component changed while it was opened");
+    }
+    return descriptor;
+}
+
+int open_parent_directory(
+    const std::filesystem::path& requested_directory,
     const AtomicFileWriteOptions& options) {
-    struct stat metadata {};
-    if (::lstat(directory.c_str(), &metadata) == 0) {
-        require_directory(directory);
-        return;
-    }
-    if (errno != ENOENT) {
-        throw errno_error("Cannot inspect atomic file directory");
-    }
-    if (!options.create_parent_directories) {
-        throw errno_error("Cannot open atomic file directory");
-    }
-
-    std::vector<std::filesystem::path> missing;
-    auto current = directory;
-    while (true) {
-        if (current.empty()) current = ".";
-        if (::lstat(current.c_str(), &metadata) == 0) {
-            require_directory(current);
-            break;
-        }
-        if (errno != ENOENT) {
-            throw errno_error("Cannot inspect atomic file directory");
-        }
-        missing.push_back(current);
-        auto parent = current.parent_path();
-        if (parent.empty()) parent = ".";
-        if (parent == current) {
+    std::lock_guard<std::mutex> lock(parent_directory_mutex());
+    const auto raw_directory = requested_directory.empty()
+                                   ? std::filesystem::path(".")
+                                   : requested_directory;
+    const auto raw_relative = raw_directory.is_absolute()
+                                  ? raw_directory.relative_path()
+                                  : raw_directory;
+    for (const auto& part : raw_relative) {
+        if (part == "..") {
             throw std::runtime_error(
-                "Cannot locate an existing atomic file parent directory");
+                "Refusing an atomic file parent containing '..'");
         }
-        current = std::move(parent);
     }
+    const auto directory = raw_directory.lexically_normal();
+    int current_fd = open_directory(
+        directory.is_absolute() ? std::filesystem::path("/")
+                                : std::filesystem::path("."));
 
-    for (auto component = missing.rbegin(); component != missing.rend();
-         ++component) {
-        bool created = false;
-        if (::mkdir(component->c_str(), options.created_directory_mode) == 0) {
-            created = true;
-        } else if (errno != EEXIST) {
-            throw errno_error("Cannot create atomic file directory");
-        }
-        require_directory(*component);
-        if (created) {
-            int directory_fd = open_directory(*component);
-            if (::fchmod(directory_fd, options.created_directory_mode) != 0) {
+    try {
+        const auto relative = directory.is_absolute()
+                                  ? directory.relative_path()
+                                  : directory;
+        for (const auto& part : relative) {
+            const auto name = part.string();
+            if (name.empty() || name == ".") continue;
+            if (name == "..") {
+                throw std::runtime_error(
+                    "Refusing an atomic file parent containing '..'");
+            }
+
+            struct stat parent_metadata {};
+            if (::fstat(current_fd, &parent_metadata) != 0) {
+                throw errno_error("Cannot inspect atomic file parent");
+            }
+            const DirectoryEntryKey key{
+                parent_metadata.st_dev,
+                parent_metadata.st_ino,
+                name,
+            };
+
+            struct stat child_metadata {};
+            bool created = false;
+            const int inspect_result = ::fstatat(
+                current_fd,
+                name.c_str(),
+                &child_metadata,
+#ifdef AT_SYMLINK_NOFOLLOW
+                AT_SYMLINK_NOFOLLOW
+#else
+                0
+#endif
+            );
+            if (inspect_result != 0) {
+                if (errno != ENOENT) {
+                    throw errno_error(
+                        "Cannot inspect atomic file directory component");
+                }
+                if (!options.create_parent_directories) {
+                    throw errno_error("Cannot open atomic file directory");
+                }
+                if (::mkdirat(
+                        current_fd,
+                        name.c_str(),
+                        options.created_directory_mode) != 0) {
+                    if (errno != EEXIST) {
+                        throw errno_error(
+                            "Cannot create atomic file directory");
+                    }
+                } else {
+                    created = true;
+                    uncertain_parent_entries()[key] =
+                        options.created_directory_mode;
+                }
+                if (::fstatat(
+                        current_fd,
+                        name.c_str(),
+                        &child_metadata,
+#ifdef AT_SYMLINK_NOFOLLOW
+                        AT_SYMLINK_NOFOLLOW
+#else
+                        0
+#endif
+                        ) != 0) {
+                    throw errno_error(
+                        "Cannot inspect created atomic file directory");
+                }
+            }
+            if (!S_ISDIR(child_metadata.st_mode) ||
+                S_ISLNK(child_metadata.st_mode)) {
+                throw std::runtime_error(
+                    "Refusing a non-directory or symbolic-link parent component");
+            }
+
+            int child_fd = open_child_directory(
+                current_fd, name, child_metadata);
+            try {
+                const auto uncertain = uncertain_parent_entries().find(key);
+                if (created || uncertain != uncertain_parent_entries().end()) {
+                    const mode_t mode =
+                        uncertain != uncertain_parent_entries().end()
+                            ? uncertain->second
+                            : options.created_directory_mode;
+                    inject_parent_directory_fault(
+                        options, AtomicParentDirectoryStage::mode);
+                    if (::fchmod(child_fd, mode) != 0) {
+                        throw errno_error(
+                            "Cannot set atomic file directory mode");
+                    }
+                    inject_parent_directory_fault(
+                        options,
+                        AtomicParentDirectoryStage::directory_fsync);
+                    fsync_fd(
+                        child_fd, "newly created atomic file directory");
+                    inject_parent_directory_fault(
+                        options,
+                        AtomicParentDirectoryStage::parent_fsync);
+                    fsync_fd(current_fd, "atomic file directory parent");
+                    uncertain_parent_entries().erase(key);
+                }
+            } catch (...) {
+                ::close(child_fd);
+                throw;
+            }
+
+            if (::close(current_fd) != 0) {
                 const int error = errno;
-                ::close(directory_fd);
+                current_fd = -1;
+                ::close(child_fd);
                 errno = error;
-                throw errno_error("Cannot set atomic file directory mode");
-            }
-            if (::close(directory_fd) != 0) {
                 throw errno_error(
-                    "Cannot close newly created atomic file directory");
+                    "Cannot close atomic file directory parent");
             }
+            current_fd = child_fd;
         }
+        return current_fd;
+    } catch (...) {
+        if (current_fd >= 0) ::close(current_fd);
+        throw;
     }
 }
 
@@ -235,9 +396,12 @@ bool AtomicFileWriteError::committed() const noexcept {
     return committed_;
 }
 
-void write_file_atomically(const std::string& destination,
-                           const std::string& body,
-                           const AtomicFileWriteOptions& options) {
+void write_file_atomically_with(const std::string& destination,
+                                const AtomicFilePopulate& populate,
+                                const AtomicFileWriteOptions& options) {
+    if (!populate) {
+        throw std::invalid_argument("Atomic file populate callback is empty");
+    }
     if (options.committed_result != nullptr) {
         *options.committed_result = false;
     }
@@ -248,10 +412,8 @@ void write_file_atomically(const std::string& destination,
     }
     const auto directory = path.has_parent_path() ? path.parent_path()
                                                    : std::filesystem::path(".");
-    ensure_parent_directory(directory, options);
-
     struct stat existing {};
-    int directory_fd = open_directory(directory);
+    int directory_fd = open_parent_directory(directory, options);
     int temporary_fd = -1;
     std::string temporary_name;
     bool temporary_exists = false;
@@ -288,7 +450,7 @@ void write_file_atomically(const std::string& destination,
             options.fault_injector(AtomicFileWriteStage::write);
         }
 #endif
-        write_all(temporary_fd, body);
+        populate(temporary_fd);
 #ifdef KEEN_PBR3_TESTING
         if (options.fault_injector) {
             options.fault_injector(AtomicFileWriteStage::file_fsync);
@@ -306,16 +468,40 @@ void write_file_atomically(const std::string& destination,
             options.fault_injector(AtomicFileWriteStage::rename);
         }
 #endif
-        if (::renameat(directory_fd,
-                       temporary_name.c_str(),
-                       directory_fd,
-                       filename.c_str()) != 0) {
-            throw errno_error("Cannot replace atomic file");
+        if (options.replace_existing) {
+            if (::renameat(directory_fd,
+                           temporary_name.c_str(),
+                           directory_fd,
+                           filename.c_str()) != 0) {
+                throw errno_error("Cannot replace atomic file");
+            }
+            temporary_exists = false;
+        } else {
+            // linkat(2) is the portable no-replace commit primitive available
+            // on the older Keenetic kernels we support. EEXIST leaves the
+            // existing destination and our private temporary inode untouched.
+            if (::linkat(directory_fd,
+                         temporary_name.c_str(),
+                         directory_fd,
+                         filename.c_str(),
+                         0) != 0) {
+                throw errno_error("Cannot create atomic file exclusively");
+            }
+            committed = true;
+            if (options.committed_result != nullptr) {
+                *options.committed_result = true;
+            }
+            if (::unlinkat(directory_fd, temporary_name.c_str(), 0) != 0) {
+                throw errno_error(
+                    "Cannot unlink committed atomic temporary file");
+            }
+            temporary_exists = false;
         }
-        temporary_exists = false;
-        committed = true;
-        if (options.committed_result != nullptr) {
-            *options.committed_result = true;
+        if (!committed) {
+            committed = true;
+            if (options.committed_result != nullptr) {
+                *options.committed_result = true;
+            }
         }
 
 #ifdef KEEN_PBR3_TESTING
@@ -346,6 +532,15 @@ void write_file_atomically(const std::string& destination,
         throw AtomicFileWriteError(
             "Unknown atomic file write failure", committed);
     }
+}
+
+void write_file_atomically(const std::string& destination,
+                           const std::string& body,
+                           const AtomicFileWriteOptions& options) {
+    write_file_atomically_with(
+        destination,
+        [&body](int descriptor) { write_all(descriptor, body); },
+        options);
 }
 
 void write_config_atomically(const std::string& config_path,

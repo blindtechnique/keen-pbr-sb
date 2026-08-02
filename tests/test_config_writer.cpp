@@ -3,8 +3,10 @@
 #include "../src/config/config_writer.hpp"
 
 #include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <system_error>
 #include <sys/stat.h>
@@ -102,6 +104,71 @@ TEST_CASE("generic atomic writer preserves an existing directory mode") {
     CHECK(file_mode(existing_directory) == 0750);
 }
 
+#ifdef KEEN_PBR3_TESTING
+TEST_CASE(
+    "parent directory durability failures are repaired on the next write") {
+    const std::vector<AtomicParentDirectoryStage> stages{
+        AtomicParentDirectoryStage::mode,
+        AtomicParentDirectoryStage::directory_fsync,
+        AtomicParentDirectoryStage::parent_fsync,
+    };
+    for (std::size_t index = 0; index < stages.size(); ++index) {
+        CAPTURE(index);
+        TempDir dir;
+        const auto target =
+            dir.path / "new-parent" / "nested" / "config.json";
+        bool injected = false;
+        AtomicFileWriteOptions options;
+        options.create_parent_directories = true;
+        options.created_directory_mode = 0700;
+        options.parent_directory_fault_injector =
+            [stage_to_fail = stages[index], &injected](
+                AtomicParentDirectoryStage stage) {
+                if (!injected && stage == stage_to_fail) {
+                    injected = true;
+                    throw std::system_error(
+                        EIO,
+                        std::generic_category(),
+                        "injected parent directory durability failure");
+                }
+            };
+
+        CHECK_THROWS_AS(
+            write_file_atomically(target.string(), "first", options),
+            std::system_error);
+        CHECK(injected);
+        CHECK_FALSE(std::filesystem::exists(target));
+
+        // mkdir already made at least one component visible. The retry must
+        // repair its mode and parent-entry durability before publishing the
+        // file instead of treating the existing path as proven durable.
+        write_file_atomically(target.string(), "second", options);
+        CHECK(read_file(target) == "second");
+        CHECK(file_mode(dir.path / "new-parent") == 0700);
+        CHECK(file_mode(dir.path / "new-parent" / "nested") == 0700);
+    }
+}
+
+TEST_CASE(
+    "existing parent directories do not trigger durability fsync stages") {
+    TempDir dir;
+    const auto existing = dir.path / "existing" / "nested";
+    REQUIRE(std::filesystem::create_directories(existing));
+    std::size_t parent_stage_calls = 0;
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+    options.parent_directory_fault_injector =
+        [&parent_stage_calls](AtomicParentDirectoryStage) {
+            ++parent_stage_calls;
+        };
+
+    write_file_atomically(
+        (existing / "config.json").string(), "content", options);
+
+    CHECK(parent_stage_calls == 0U);
+}
+#endif
+
 TEST_CASE("generic atomic writer preserves metadata and adds requested mode bits") {
     TempDir dir;
     const auto target = dir.path / "nfqws.conf";
@@ -124,6 +191,39 @@ TEST_CASE("generic atomic writer preserves metadata and adds requested mode bits
     CHECK(after.st_gid == before.st_gid);
 }
 
+TEST_CASE("streaming atomic writer discards a partial ENOSPC write") {
+    TempDir dir;
+    const auto target = dir.path / "config.json";
+    { std::ofstream output(target); output << "last-known-good"; }
+
+    try {
+        write_file_atomically_with(
+            target.string(),
+            [](int descriptor) {
+                const char partial[] = "partial";
+                REQUIRE(::write(descriptor, partial, sizeof(partial) - 1) ==
+                        static_cast<ssize_t>(sizeof(partial) - 1));
+                throw std::system_error(
+                    ENOSPC,
+                    std::generic_category(),
+                    "injected out-of-space failure");
+            });
+        FAIL("out-of-space fault must abort the atomic replacement");
+    } catch (const AtomicFileWriteError& error) {
+        CHECK_FALSE(error.committed());
+        CHECK(std::string(error.what()).find("out-of-space") !=
+              std::string::npos);
+    }
+
+    CHECK(read_file(target) == "last-known-good");
+    std::size_t entries = 0;
+    for (const auto& ignored : std::filesystem::directory_iterator(dir.path)) {
+        (void)ignored;
+        ++entries;
+    }
+    CHECK(entries == 1U);
+}
+
 TEST_CASE("generic atomic writer refuses a symlink parent") {
     TempDir dir;
     const auto real_directory = dir.path / "real";
@@ -137,6 +237,51 @@ TEST_CASE("generic atomic writer refuses a symlink parent") {
         (linked_directory / "backup.json").string(), "blocked", options));
     CHECK_FALSE(std::filesystem::exists(real_directory / "backup.json"));
 }
+
+TEST_CASE("generic atomic writer rejects raw parent traversal") {
+    TempDir dir;
+    const auto target =
+        dir.path / "allowed" / ".." / "escaped.json";
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+
+    CHECK_THROWS(write_file_atomically(target.string(), "blocked", options));
+    CHECK_FALSE(std::filesystem::exists(dir.path / "escaped.json"));
+    CHECK_FALSE(std::filesystem::exists(dir.path / "allowed"));
+}
+
+TEST_CASE("generic atomic writer create-only mode never replaces a file") {
+    TempDir dir;
+    const auto target = dir.path / "existing.json";
+    { std::ofstream output(target); output << "original"; }
+
+    AtomicFileWriteOptions options;
+    options.replace_existing = false;
+    CHECK_THROWS_AS(
+        write_file_atomically(target.string(), "replacement", options),
+        AtomicFileWriteError);
+    CHECK(read_file(target) == "original");
+}
+
+#ifdef KEEN_PBR3_TESTING
+TEST_CASE("generic atomic writer create-only commit closes the stat race") {
+    TempDir dir;
+    const auto target = dir.path / "raced.json";
+
+    AtomicFileWriteOptions options;
+    options.replace_existing = false;
+    options.fault_injector = [&target](AtomicFileWriteStage stage) {
+        if (stage != AtomicFileWriteStage::rename) return;
+        std::ofstream competing(target);
+        competing << "competing";
+    };
+
+    CHECK_THROWS_AS(
+        write_file_atomically(target.string(), "ours", options),
+        AtomicFileWriteError);
+    CHECK(read_file(target) == "competing");
+}
+#endif
 
 TEST_CASE("generic atomic writer ignores the legacy predictable temp path") {
     TempDir dir;
