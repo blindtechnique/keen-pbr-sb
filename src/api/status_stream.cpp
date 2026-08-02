@@ -92,13 +92,14 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
                 "list_refresh",
                 make_event_payload("list_refresh", list_refresh_)));
         }
+        // Keep cache mutation, delivery to the previous subscriber cohort and
+        // newcomer registration in one order.  Registering first and excluding
+        // just that pointer lets a concurrent second subscriber receive a
+        // stale delta after its fresh snapshot.
+        for (const auto& frame : changed_frames) {
+            broadcaster_.publish(frame);
+        }
         subscription = broadcaster_.subscribe(std::move(initial_frames));
-    }
-
-    // Never publish while holding StatusStream::mutex_: a slow subscriber
-    // must not block snapshot reconciliation or create a lock-order cycle.
-    for (const auto& frame : changed_frames) {
-        broadcaster_.publish(frame);
     }
     return subscription;
 }
@@ -143,10 +144,9 @@ void StatusStream::reconcile() {
             frames.push_back(make_named_sse_frame(
                 "interfaces", make_event_payload("interfaces", interfaces)));
         }
-    }
-
-    for (const auto& frame : frames) {
-        broadcaster_.publish(frame);
+        for (const auto& frame : frames) {
+            broadcaster_.publish(frame);
+        }
     }
 }
 
@@ -165,8 +165,8 @@ void StatusStream::publish_interfaces(
         interfaces_ = std::move(serialized);
         frame = make_named_sse_frame(
             "interfaces", make_event_payload("interfaces", interfaces_));
+        broadcaster_.publish(frame);
     }
-    broadcaster_.publish(frame);
 }
 
 void StatusStream::publish_interface_traffic(nlohmann::json state) {
@@ -186,8 +186,8 @@ void StatusStream::publish_connections(api::ConnectionEventState state) {
         frame = make_named_sse_frame(
             "connections",
             make_event_payload("connections", connections_));
+        broadcaster_.publish(frame);
     }
-    broadcaster_.publish(frame);
 }
 
 void StatusStream::publish_dns_probe(nlohmann::json state) {
@@ -206,8 +206,8 @@ void StatusStream::publish_list_refresh(nlohmann::json state) {
         frame = make_named_sse_frame(
             "list_refresh",
             make_event_payload("list_refresh", list_refresh_));
+        broadcaster_.publish(frame);
     }
-    broadcaster_.publish(frame);
 }
 
 void StatusStream::close_all() {

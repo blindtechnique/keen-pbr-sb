@@ -95,6 +95,62 @@ TEST_CASE("status stream reconnect starts with a fresh current snapshot") {
     CHECK(snapshot.find("\"tag\":\"outbound0\"") != std::string::npos);
 }
 
+TEST_CASE("status stream subscribe sends changed state only to existing clients") {
+    auto current = make_snapshot("1");
+    StatusStream stream([&] { return current; });
+    auto existing = stream.subscribe();
+    REQUIRE(existing);
+    (void)pop(existing);
+
+    api::ConnectionEventState connections;
+    connections.revision = 4;
+    connections.changed_at = 100;
+    connections.available = true;
+    stream.publish_connections(connections);
+    (void)pop(existing);
+
+    const nlohmann::json list_refresh{
+        {"task_id", "list-refresh-subscribe"},
+        {"state", "running"},
+    };
+    stream.publish_list_refresh(list_refresh);
+    (void)pop(existing);
+
+    current = make_snapshot("2", 1);
+    api::RuntimeInterfaceInventoryEntry interface;
+    interface.name = "wg-subscribe";
+    interface.status = api::RuntimeInterfaceInventoryStatusEnum::UP;
+    interface.admin_up = true;
+    current.interfaces.interfaces.push_back(std::move(interface));
+    auto newcomer = stream.subscribe();
+    REQUIRE(newcomer);
+
+    const auto service_delta = pop(existing);
+    CHECK(service_delta.rfind("event: service\n", 0) == 0);
+    CHECK(service_delta.find("\"version\":\"2\"") !=
+          std::string::npos);
+    const auto outbounds_delta = pop(existing);
+    CHECK(outbounds_delta.rfind("event: outbounds\n", 0) == 0);
+    CHECK(outbounds_delta.find("\"tag\":\"outbound0\"") !=
+          std::string::npos);
+    const auto interfaces_delta = pop(existing);
+    CHECK(interfaces_delta.rfind("event: interfaces\n", 0) == 0);
+    CHECK(interfaces_delta.find("\"name\":\"wg-subscribe\"") !=
+          std::string::npos);
+    CHECK(queued(existing) == 0);
+
+    const auto snapshot = pop(newcomer);
+    CHECK(snapshot.rfind("event: snapshot\n", 0) == 0);
+    CHECK(snapshot.find("\"version\":\"2\"") != std::string::npos);
+    CHECK(snapshot.find("\"tag\":\"outbound0\"") !=
+          std::string::npos);
+    CHECK(snapshot.find("\"name\":\"wg-subscribe\"") !=
+          std::string::npos);
+    CHECK(pop(newcomer).rfind("event: connections\n", 0) == 0);
+    CHECK(pop(newcomer).rfind("event: list_refresh\n", 0) == 0);
+    CHECK(queued(newcomer) == 0);
+}
+
 TEST_CASE("status stream suppresses identical data and names changed datasets") {
     auto current = make_snapshot();
     StatusStream stream([&] { return current; });
