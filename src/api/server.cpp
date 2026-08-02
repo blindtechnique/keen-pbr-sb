@@ -39,6 +39,33 @@ std::string make_error_json(const std::string& message) {
     return nlohmann::json{{"error", message}}.dump();
 }
 
+#ifdef KEEN_PBR3_TESTING
+void configure_auth_settings_write_fault(
+    AtomicFileWriteOptions& options) {
+    const char* configured =
+        std::getenv("KEEN_PBR_TEST_AUTH_WRITE_FAULT");
+    if (configured == nullptr || *configured == '\0') return;
+    const std::string requested(configured);
+    options.fault_injector = [requested](AtomicFileWriteStage stage) {
+        const char* current = "";
+        switch (stage) {
+            case AtomicFileWriteStage::write: current = "write"; break;
+            case AtomicFileWriteStage::file_fsync:
+                current = "file_fsync";
+                break;
+            case AtomicFileWriteStage::rename: current = "rename"; break;
+            case AtomicFileWriteStage::directory_fsync:
+                current = "directory_fsync";
+                break;
+        }
+        if (requested == current) {
+            throw std::runtime_error(
+                "injected auth settings atomic write failure");
+        }
+    };
+}
+#endif
+
 std::string get_mime_type_for_path(const std::filesystem::path& path) {
     static const std::unordered_map<std::string, std::string> kMimeByExtension{
         {".css", "text/css"},
@@ -929,11 +956,36 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             AtomicFileWriteOptions write_options;
             write_options.default_file_mode = 0600;
             write_options.file_mode = static_cast<mode_t>(0600);
+            bool auth_settings_committed = false;
+            bool auth_settings_durable = true;
+            write_options.committed_result = &auth_settings_committed;
+#ifdef KEEN_PBR3_TESTING
+            configure_auth_settings_write_fault(write_options);
+#endif
             try {
                 write_file_atomically(
                     path.string(),
                     document.dump() + "\n",
                     write_options);
+            } catch (const AtomicFileWriteError& error) {
+                if (auth_settings_committed || error.committed()) {
+                    // The file visible to future requests is already the new
+                    // one. Reload it below even though directory fsync failed;
+                    // otherwise authentication on disk and in memory diverge.
+                    auth_settings_durable = false;
+                    Logger::instance().warn(
+                        "auth.json was published but directory sync failed: {}",
+                        error.what());
+                } else {
+                    Logger::instance().error(
+                        "Cannot write auth.json atomically: {}",
+                        error.what());
+                    res.status = 500;
+                    res.set_content(
+                        R"({"error":"cannot write auth.json"})",
+                        "application/json");
+                    return;
+                }
             } catch (const std::exception& error) {
                 Logger::instance().error(
                     "Cannot write auth.json atomically: {}",
@@ -958,7 +1010,16 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             state->replace_auth(replacement);
             // Existing sessions belong to the previous mode.
             state->sessions.clear();
-            res.set_content(R"({"saved":true})", "application/json");
+            nlohmann::json response{
+                {"saved", true},
+                {"durable", auth_settings_durable},
+            };
+            if (!auth_settings_durable) {
+                response["warning"] =
+                    "authentication settings are visible but directory "
+                    "durability could not be confirmed";
+            }
+            res.set_content(response.dump(), "application/json");
         } catch (const std::exception& error) {
             res.status = 400;
             res.set_content(nlohmann::json{{"error", error.what()}}.dump(),

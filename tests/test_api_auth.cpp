@@ -283,6 +283,98 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
             .get<bool>());
 }
 
+TEST_CASE(
+    "post-commit auth durability failure reloads the visible settings") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"old","password":"old-secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login_response = client.Post(
+        "/api/auth/login",
+        R"({"username":"old","password":"old-secret"})",
+        "application/json");
+    REQUIRE(login_response != nullptr);
+    REQUIRE(login_response->status == 200);
+    const httplib::Headers headers{
+        {"Cookie", session_cookie(*login_response)},
+    };
+
+    EnvironmentVariableGuard write_fault(
+        "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "directory_fsync");
+    const auto settings_response = client.Post(
+        "/api/auth/settings",
+        headers,
+        R"({"enabled":true,"provider":"local","username":"new","password":"new-secret"})",
+        "application/json");
+
+    REQUIRE(settings_response != nullptr);
+    REQUIRE(settings_response->status == 200);
+    const auto result = nlohmann::json::parse(settings_response->body);
+    CHECK(result.at("saved").get<bool>());
+    CHECK_FALSE(result.at("durable").get<bool>());
+    CHECK(result.contains("warning"));
+
+    std::ifstream stored_file(auth_path);
+    REQUIRE(stored_file.is_open());
+    const auto stored = nlohmann::json::parse(stored_file);
+    CHECK(stored.at("username") == "new");
+    CHECK(stored.at("password") == "new-secret");
+
+    // The old session is invalidated and the newly visible credentials are
+    // authoritative in memory immediately, not only after a process restart.
+    const auto old_session_status =
+        client.Get("/api/auth/status", headers);
+    REQUIRE(old_session_status != nullptr);
+    CHECK_FALSE(
+        nlohmann::json::parse(old_session_status->body)
+            .at("authenticated")
+            .get<bool>());
+    const auto new_login = client.Post(
+        "/api/auth/login",
+        R"({"username":"new","password":"new-secret"})",
+        "application/json");
+    REQUIRE(new_login != nullptr);
+    CHECK(new_login->status == 200);
+}
+
+TEST_CASE("pre-commit auth write failure preserves disk and memory") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "missing-auth.json";
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard write_fault(
+        "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "write");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto settings_response = client.Post(
+        "/api/auth/settings",
+        R"({"enabled":false,"provider":"local","username":"new","password":"new-secret"})",
+        "application/json");
+
+    REQUIRE(settings_response != nullptr);
+    CHECK(settings_response->status == 500);
+    CHECK(nlohmann::json::parse(settings_response->body).at("error") ==
+          "cannot write auth.json");
+    CHECK_FALSE(std::filesystem::exists(auth_path));
+
+    const auto status = get_auth_status(client);
+    CHECK_FALSE(status.at("enabled").get<bool>());
+    CHECK(status.at("authenticated").get<bool>());
+}
+
 TEST_CASE("concurrent auth settings writes leave disk and memory consistent") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";

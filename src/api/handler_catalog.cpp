@@ -3,6 +3,7 @@
 #include "handler_catalog.hpp"
 
 #include "../config/config.hpp"
+#include "../config/config_writer.hpp"
 #include "../http/http_client.hpp"
 #include "../log/logger.hpp"
 #include "../setup/catalog_setup_planner.hpp"
@@ -55,13 +56,26 @@ std::string read_file(const std::string& path) {
     return out.str();
 }
 
-bool write_file(const std::string& path, const std::string& content) {
-    std::ofstream file(path, std::ios::out | std::ios::trunc);
-    if (!file.is_open()) {
+// False means the replacement is visible but its directory fsync failed. It is
+// still the authoritative file for this process and readers must not pretend
+// that the previous generation remains active.
+bool write_file(const std::string& path,
+                const std::string& content,
+                mode_t mode) {
+    bool committed = false;
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+    options.created_directory_mode = 0755;
+    options.default_file_mode = mode;
+    options.file_mode = mode;
+    options.committed_result = &committed;
+    try {
+        write_file_atomically(path, content, options);
+        return true;
+    } catch (const AtomicFileWriteError& error) {
+        if (!committed && !error.committed()) throw;
         return false;
     }
-    file << content;
-    return file.good();
 }
 
 std::optional<std::chrono::system_clock::time_point> file_mtime(
@@ -227,7 +241,13 @@ bool store_if_valid(const std::string& payload) {
     } catch (const std::exception&) {
         return false;
     }
-    return write_file(kCachePath, payload);
+    const bool durable = write_file(kCachePath, payload, 0644);
+    if (!durable) {
+        Logger::instance().warn(
+            "List catalogue cache is visible, but its durability could not "
+            "be confirmed");
+    }
+    return true;
 }
 
 // Resolves an outbound tag to its fwmark using the same allocation the rest of
@@ -515,6 +535,7 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
     server.post("/api/catalog/refresh", [&ctx](const std::string& body) -> std::string {
         nlohmann::json response;
         std::string detour = catalog_detour();
+        bool settings_durable = true;
 
         try {
             if (!body.empty()) {
@@ -525,20 +546,34 @@ void register_catalog_handler(ApiServer& server, ApiContext& ctx) {
                                  : std::string{};
                     nlohmann::json settings;
                     settings["detour"] = detour;
-                    std::ofstream file(kSettingsPath, std::ios::out | std::ios::trunc);
-                    if (file.is_open()) {
-                        file << settings.dump(2) << "\n";
+                    settings_durable = write_file(
+                        kSettingsPath,
+                        settings.dump(2) + "\n",
+                        0600);
+                    if (!settings_durable) {
+                        Logger::instance().warn(
+                            "Catalog source settings are visible, but their "
+                            "durability could not be confirmed");
                     }
                 }
             }
         } catch (const std::exception& e) {
-            response["error"] = e.what();
+            Logger::instance().error(
+                "Cannot write catalog-source.json atomically: {}",
+                e.what());
+            response["error"] = "cannot write catalog-source.json";
             return response.dump();
         }
 
         const auto mark = mark_for_detour(ctx.get_visible_config(), detour);
         response["updated"] = refresh_catalog_if_stale(/*force=*/true, mark);
         response["detour"] = detour;
+        response["settings_durable"] = settings_durable;
+        if (!settings_durable) {
+            response["warning"] =
+                "catalog source settings are visible but directory "
+                "durability could not be confirmed";
+        }
         return response.dump();
     });
 }

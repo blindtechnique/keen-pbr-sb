@@ -2,6 +2,7 @@
 
 #include "handler_logs.hpp"
 
+#include "../config/config_writer.hpp"
 #include "../log/file_sink.hpp"
 #include "../log/logger.hpp"
 #include "../util/last_command_failure.hpp"
@@ -9,10 +10,13 @@
 #include <httplib.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -29,6 +33,42 @@ constexpr std::size_t kMaxTailBytes = 512U * 1024U;
 // validated against the API schema, while this is a local preference that must
 // survive a config that fails to load.
 constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/logging.json";
+
+std::mutex& settings_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+#ifdef KEEN_PBR3_TESTING
+std::mutex& test_hook_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+LogSettingsTestHook& test_hook() {
+    static LogSettingsTestHook hook;
+    return hook;
+}
+
+void invoke_test_hook(LogSettingsTestStage stage) {
+    LogSettingsTestHook hook;
+    {
+        const std::lock_guard<std::mutex> lock(test_hook_mutex());
+        hook = test_hook();
+    }
+    if (hook) hook(stage);
+}
+#endif
+
+std::string settings_path() {
+#ifdef KEEN_PBR3_TESTING
+    if (const char* configured =
+            std::getenv("KEEN_PBR_TEST_LOG_SETTINGS_FILE")) {
+        if (*configured != '\0') return configured;
+    }
+#endif
+    return kSettingsPath;
+}
 
 std::string log_file_path() {
 #ifdef KEEN_PBR_DEFAULT_LOG_FILE
@@ -103,7 +143,7 @@ nlohmann::json read_settings() {
     settings["file_enabled"] = file_logging_enabled();
     settings["level"] = level_name(Logger::instance().level());
 
-    std::ifstream file(kSettingsPath);
+    std::ifstream file(settings_path());
     if (!file.is_open()) {
         return settings;
     }
@@ -121,18 +161,45 @@ nlohmann::json read_settings() {
     return settings;
 }
 
+// False means that rename(2) made the new file visible but the directory fsync
+// failed. Runtime must still adopt the visible settings so disk and memory do
+// not disagree until the next process start.
 bool write_settings(const nlohmann::json& settings) {
-    std::ofstream file(kSettingsPath, std::ios::out | std::ios::trunc);
-    if (!file.is_open()) {
+    bool committed = false;
+    AtomicFileWriteOptions options;
+    options.default_file_mode = 0600;
+    options.file_mode = static_cast<mode_t>(0600);
+    options.committed_result = &committed;
+#ifdef KEEN_PBR3_TESTING
+    if (const char* fault =
+            std::getenv("KEEN_PBR_TEST_LOG_SETTINGS_WRITE_FAULT")) {
+        if (std::string(fault) == "directory_fsync") {
+            options.fault_injector = [](AtomicFileWriteStage stage) {
+                if (stage == AtomicFileWriteStage::directory_fsync) {
+                    throw std::runtime_error(
+                        "injected logging settings directory sync failure");
+                }
+            };
+        }
+    }
+#endif
+    try {
+        write_file_atomically(
+            settings_path(), settings.dump(2) + "\n", options);
+        return true;
+    } catch (const AtomicFileWriteError& error) {
+        if (!committed && !error.committed()) throw;
+        Logger::instance().warn(
+            "Logging settings were published but directory sync failed: {}",
+            error.what());
         return false;
     }
-    file << settings.dump(2) << "\n";
-    return file.good();
 }
 
 } // namespace
 
 void apply_stored_log_settings() {
+    const std::lock_guard<std::mutex> lock(settings_mutex());
     const auto settings = read_settings();
     set_file_logging_enabled(settings.value("file_enabled", true));
     try {
@@ -188,14 +255,24 @@ void register_logs_handler(ApiServer& server) {
 
     // GET /api/logs/settings - current logging preferences.
     server.get("/api/logs/settings",
-               []() -> std::string { return read_settings().dump(); });
+               []() -> std::string {
+                   const std::lock_guard<std::mutex> lock(settings_mutex());
+                   return read_settings().dump();
+               });
 
     // POST /api/logs/settings - turn the log file on or off, set verbosity.
     server.post("/api/logs/settings", [](const std::string& body) -> std::string {
         nlohmann::json response;
         try {
             const auto request = nlohmann::json::parse(body);
+#ifdef KEEN_PBR3_TESTING
+            invoke_test_hook(LogSettingsTestStage::request_ready);
+#endif
+            const std::lock_guard<std::mutex> lock(settings_mutex());
             auto settings = read_settings();
+#ifdef KEEN_PBR3_TESTING
+            invoke_test_hook(LogSettingsTestStage::after_read);
+#endif
 
             if (request.contains("file_enabled") && request["file_enabled"].is_boolean()) {
                 settings["file_enabled"] = request["file_enabled"].get<bool>();
@@ -207,7 +284,13 @@ void register_logs_handler(ApiServer& server) {
                 settings["level"] = level;
             }
 
-            if (!write_settings(settings)) {
+            bool settings_durable = false;
+            try {
+                settings_durable = write_settings(settings);
+            } catch (const std::exception& error) {
+                Logger::instance().error(
+                    "Cannot write logging.json atomically: {}",
+                    error.what());
                 response["error"] = "cannot write logging.json";
                 return response.dump();
             }
@@ -217,6 +300,12 @@ void register_logs_handler(ApiServer& server) {
                 parse_log_level(settings.value("level", "info")));
 
             response["ok"] = true;
+            response["durable"] = settings_durable;
+            if (!settings_durable) {
+                response["warning"] =
+                    "logging settings are visible but directory durability "
+                    "could not be confirmed";
+            }
             response["settings"] = settings;
         } catch (const std::exception& e) {
             response["error"] = e.what();
@@ -224,6 +313,13 @@ void register_logs_handler(ApiServer& server) {
         return response.dump();
     });
 }
+
+#ifdef KEEN_PBR3_TESTING
+void set_log_settings_test_hook(LogSettingsTestHook hook) {
+    const std::lock_guard<std::mutex> lock(test_hook_mutex());
+    test_hook() = std::move(hook);
+}
+#endif
 
 } // namespace keen_pbr3
 

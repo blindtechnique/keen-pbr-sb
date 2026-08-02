@@ -1,10 +1,13 @@
 #ifdef WITH_API
 
 #include "handler_health_service.hpp"
+
+#include "../config/config_writer.hpp"
 #include "generated/api_types.hpp"
 #include "update_version.hpp"
 #include "handler_backup.hpp"
 #include "../http/http_client.hpp"
+#include "../log/logger.hpp"
 #include "../update/rescue_integrity.hpp"
 
 #include <keen-pbr/version.hpp>
@@ -226,28 +229,24 @@ nlohmann::json read_release_cache() {
 
 void write_release_cache(const nlohmann::json& release,
                          std::int64_t cached_at) {
-    const std::filesystem::path path(kReleaseCacheFile);
-    const auto temporary = path.string() + ".tmp";
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) return;
-
-    {
-        std::ofstream output(temporary,
-                             std::ios::binary | std::ios::trunc);
-        if (!output) return;
-        output << nlohmann::json{{"cached_at", cached_at},
-                                 {"release", release}}
-                      .dump();
-        if (!output) return;
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+    options.created_directory_mode = 0755;
+    options.default_file_mode = 0644;
+    options.file_mode = static_cast<mode_t>(0644);
+    try {
+        write_file_atomically(
+            kReleaseCacheFile,
+            nlohmann::json{{"cached_at", cached_at}, {"release", release}}
+                .dump(),
+            options);
+    } catch (const std::exception& error) {
+        // Release metadata can always be fetched again. Preserve the previous
+        // valid cache and keep update checks non-fatal.
+        Logger::instance().warn(
+            "Cannot persist software release cache atomically: {}",
+            error.what());
     }
-
-    std::filesystem::rename(temporary, path, ec);
-    if (!ec) return;
-    ec.clear();
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary, path, ec);
 }
 
 std::int64_t unix_time_now() {
