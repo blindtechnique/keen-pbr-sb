@@ -32,6 +32,7 @@
 #include "../routing/route_table.hpp"
 #include "../runtime/lifecycle_operation.hpp"
 #include "../runtime/list_refresh_task.hpp"
+#include "../runtime/periodic_task_metrics.hpp"
 #include "../runtime/conntrack_manager.hpp"
 #include "../runtime/idle_stall_detector.hpp"
 #include "../runtime/udp_call_affinity.hpp"
@@ -604,7 +605,9 @@ private:
                                            std::uint64_t generation,
                                            std::optional<ResolverConfigHashProbeResult> probe_result,
                                            std::optional<std::int64_t> probe_completed_ts,
-                                           TraceId trace_id);
+                                           TraceId trace_id,
+                                           std::shared_ptr<PeriodicTaskRunToken>
+                                               task_metrics);
 
 #ifdef WITH_API
     // API integration
@@ -797,6 +800,15 @@ private:
     std::vector<InternalVpnRuntimeTarget>
         internal_vpn_service_verified_includes_lkg_
             GUARDED_BY(internal_vpn_lkg_mutex_);
+    // Registered before scheduler/executor members so their reverse-order
+    // destruction completes before this pull-only metrics registry is freed.
+    PeriodicTaskMetricsRegistry periodic_task_metrics_{
+        std::vector<std::string>{
+            "resolver-hash-refresh",
+            "owned-snat-health",
+            "interface-probe",
+            "interface-traffic-sample",
+        }};
     std::unique_ptr<Scheduler> scheduler_;
     std::unique_ptr<UrltestManager> urltest_manager_;
     RuntimeIncidentLatch urltest_apply_incidents_{3};

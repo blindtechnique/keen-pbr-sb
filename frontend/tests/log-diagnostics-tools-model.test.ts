@@ -148,6 +148,77 @@ describe("log diagnostics collector", () => {
     expect(bundle.sections.service_health).toMatchObject({ ok: true })
   })
 
+  test("captures periodic task metrics only while collecting diagnostics", async () => {
+    const requested: string[] = []
+    const fetcher: FetchLike = async (input) => {
+      const url = requestUrl(input)
+      requested.push(url)
+      return jsonResponse(
+        url === LOG_DIAGNOSTICS_ENDPOINTS.tasks
+          ? { tracked: 1, tasks: [{ label: "resolver_hash_refresh" }] }
+          : { ok: true }
+      )
+    }
+
+    expect(requested).toEqual([])
+
+    const bundle = await collectLogDiagnostics({ fetcher })
+
+    expect(requested).toContain("/api/diagnostics/tasks")
+    expect(bundle.sections.tasks).toEqual({
+      ok: true,
+      endpoint: "/api/diagnostics/tasks",
+      http_status: 200,
+      data: {
+        tracked: 1,
+        tasks: [{ label: "resolver_hash_refresh" }],
+      },
+    })
+  })
+
+  test("records periodic task metrics HTTP errors without rejecting the bundle", async () => {
+    const fetcher: FetchLike = async (input) => {
+      const url = requestUrl(input)
+      if (url === LOG_DIAGNOSTICS_ENDPOINTS.tasks) {
+        return jsonResponse({ error: "metrics unavailable" }, 503)
+      }
+      return jsonResponse({ ok: true })
+    }
+
+    const bundle = await collectLogDiagnostics({ fetcher })
+
+    expect(bundle.sections.tasks).toEqual({
+      ok: false,
+      endpoint: "/api/diagnostics/tasks",
+      http_status: 503,
+      error: "metrics unavailable",
+      details: { error: "metrics unavailable" },
+    })
+  })
+
+  test("times out periodic task metrics without blocking the remaining bundle", async () => {
+    const fetcher: FetchLike = async (input) => {
+      const url = requestUrl(input)
+      if (url === LOG_DIAGNOSTICS_ENDPOINTS.tasks) {
+        return await new Promise<Response>(() => undefined)
+      }
+      return jsonResponse({ ok: true })
+    }
+
+    const bundle = await collectLogDiagnostics({
+      fetcher,
+      requestTimeoutMs: 5,
+    })
+
+    expect(bundle.sections.tasks).toEqual({
+      ok: false,
+      endpoint: "/api/diagnostics/tasks",
+      http_status: null,
+      error: "Request timed out after 5 ms",
+    })
+    expect(bundle.sections.router).toMatchObject({ ok: true })
+  })
+
   test("records network, HTTP and JSON errors without rejecting the bundle", async () => {
     const fetcher: FetchLike = async (input) => {
       const url = requestUrl(input)

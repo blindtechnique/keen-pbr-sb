@@ -24,6 +24,7 @@
 #include "../health/runtime_interface_inventory.hpp"
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
+#include "../api/handler_diagnostic_tasks.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
 #include "../util/system_info.hpp"
@@ -69,91 +70,110 @@ const char* config_operation_state_name(ConfigOperationState state) {
 
 void Daemon::sample_interface_traffic_now() {
     if (!status_stream_ || !status_stream_->has_subscribers()) {
-        if (traffic_sampling_active_) {
+        const bool sampling_stopped =
+            traffic_sampling_active_ ||
+            !traffic_sampled_interfaces_.empty();
+        if (sampling_stopped) {
             interface_traffic_sampler_.clear_all();
             traffic_sampled_interfaces_.clear();
             traffic_sampling_active_ = false;
+            periodic_task_metrics_.record_skipped(
+                "interface-traffic-sample",
+                "status stream has no subscribers");
         }
         return;
     }
 
-    std::set<std::string> target_interfaces;
-    {
-        std::lock_guard<std::mutex> lock(interface_traffic_targets_mutex_);
-        for (const auto& [source, interfaces] :
-             interface_traffic_targets_by_source_) {
-            (void)source;
-            target_interfaces.insert(
-                interfaces.begin(), interfaces.end());
-        }
-    }
-
-    if (target_interfaces.empty()) {
-        if (traffic_sampling_active_ ||
-            !traffic_sampled_interfaces_.empty()) {
-            interface_traffic_sampler_.clear_all();
-            traffic_sampled_interfaces_.clear();
-            traffic_sampling_active_ = false;
-        }
-        return;
-    }
-
-    const auto target_plan = plan_interface_traffic_targets(
-        target_interfaces, traffic_sampled_interfaces_);
-    nlohmann::json interfaces = nlohmann::json::array();
-    for (const auto& interface_name : target_plan.reported) {
-        if (target_plan.removed.find(interface_name) !=
-            target_plan.removed.end()) {
-            interface_traffic_sampler_.clear(interface_name);
-            interfaces.push_back(
-                nlohmann::json{
-                    {"name", interface_name},
-                    {"available", false},
-                    {"reset", false},
-                });
-            continue;
-        }
-
-        const auto result =
-            interface_traffic_sampler_.sample(interface_name);
-        const bool unavailable =
-            result.status ==
-                InterfaceTrafficSampler::SampleStatus::Unavailable ||
-            result.status ==
-                InterfaceTrafficSampler::SampleStatus::InvalidInterfaceName;
-        nlohmann::json entry{
-            {"name", interface_name},
-            {"available", !unavailable},
-            {"reset",
-             result.status ==
-                 InterfaceTrafficSampler::SampleStatus::CounterReset},
-        };
-        if (result.point) {
-            entry["rx_bytes"] =
-                interface_traffic_api_integer(result.point->rx_bytes);
-            entry["tx_bytes"] =
-                interface_traffic_api_integer(result.point->tx_bytes);
-            if (result.point->rx_bits_per_second) {
-                entry["rx_bits_per_second"] =
-                    interface_traffic_api_integer(
-                        *result.point->rx_bits_per_second);
-            }
-            if (result.point->tx_bits_per_second) {
-                entry["tx_bits_per_second"] =
-                    interface_traffic_api_integer(
-                        *result.point->tx_bits_per_second);
+    auto task_metrics =
+        periodic_task_metrics_.begin("interface-traffic-sample");
+    try {
+        std::set<std::string> target_interfaces;
+        {
+            std::lock_guard<std::mutex> lock(
+                interface_traffic_targets_mutex_);
+            for (const auto& [source, interfaces] :
+                 interface_traffic_targets_by_source_) {
+                (void)source;
+                target_interfaces.insert(
+                    interfaces.begin(), interfaces.end());
             }
         }
-        interfaces.push_back(std::move(entry));
-    }
 
-    traffic_sampled_interfaces_ = target_interfaces;
-    traffic_sampling_active_ = true;
-    status_stream_->publish_interface_traffic(
-        nlohmann::json{
-            {"sampled_at_unix_ms", interface_traffic_timestamp_ms()},
-            {"interfaces", std::move(interfaces)},
-        });
+        if (target_interfaces.empty()) {
+            if (traffic_sampling_active_ ||
+                !traffic_sampled_interfaces_.empty()) {
+                interface_traffic_sampler_.clear_all();
+                traffic_sampled_interfaces_.clear();
+                traffic_sampling_active_ = false;
+            }
+            task_metrics.noop();
+            return;
+        }
+
+        const auto target_plan = plan_interface_traffic_targets(
+            target_interfaces, traffic_sampled_interfaces_);
+        nlohmann::json interfaces = nlohmann::json::array();
+        for (const auto& interface_name : target_plan.reported) {
+            if (target_plan.removed.find(interface_name) !=
+                target_plan.removed.end()) {
+                interface_traffic_sampler_.clear(interface_name);
+                interfaces.push_back(
+                    nlohmann::json{
+                        {"name", interface_name},
+                        {"available", false},
+                        {"reset", false},
+                    });
+                continue;
+            }
+
+            const auto result =
+                interface_traffic_sampler_.sample(interface_name);
+            const bool unavailable =
+                result.status ==
+                    InterfaceTrafficSampler::SampleStatus::Unavailable ||
+                result.status ==
+                    InterfaceTrafficSampler::SampleStatus::InvalidInterfaceName;
+            nlohmann::json entry{
+                {"name", interface_name},
+                {"available", !unavailable},
+                {"reset",
+                 result.status ==
+                     InterfaceTrafficSampler::SampleStatus::CounterReset},
+            };
+            if (result.point) {
+                entry["rx_bytes"] =
+                    interface_traffic_api_integer(result.point->rx_bytes);
+                entry["tx_bytes"] =
+                    interface_traffic_api_integer(result.point->tx_bytes);
+                if (result.point->rx_bits_per_second) {
+                    entry["rx_bits_per_second"] =
+                        interface_traffic_api_integer(
+                            *result.point->rx_bits_per_second);
+                }
+                if (result.point->tx_bits_per_second) {
+                    entry["tx_bits_per_second"] =
+                        interface_traffic_api_integer(
+                            *result.point->tx_bits_per_second);
+                }
+            }
+            interfaces.push_back(std::move(entry));
+        }
+
+        traffic_sampled_interfaces_ = target_interfaces;
+        traffic_sampling_active_ = true;
+        status_stream_->publish_interface_traffic(
+            nlohmann::json{
+                {"sampled_at_unix_ms", interface_traffic_timestamp_ms()},
+                {"interfaces", std::move(interfaces)},
+            });
+        task_metrics.success();
+    } catch (const std::exception& error) {
+        task_metrics.failure(error.what());
+        throw;
+    } catch (...) {
+        task_metrics.failure("interface traffic sampling failed");
+        throw;
+    }
 }
 
 void Daemon::replace_interface_traffic_targets(
@@ -724,6 +744,9 @@ void Daemon::setup_api() {
         nullptr,
         &lifecycle_operations_,
     });
+    api_ctx_->get_diagnostic_tasks_fn = [this]() {
+        return build_diagnostic_tasks_response(periodic_task_metrics_);
+    };
     status_stream_ = std::make_unique<StatusStream>([this]() {
         return build_runtime_inventory(*api_ctx_);
     });

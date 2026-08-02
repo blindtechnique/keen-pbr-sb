@@ -131,6 +131,12 @@ struct ApiContext {
     // Tests shorten this bounded poll without weakening production defaults.
     std::size_t transport_runtime_ready_wait_attempts{60U};
     std::uint32_t transport_runtime_ready_wait_interval_ms{250U};
+    // Keep this callback absolutely last: many tests and embedders use
+    // positional aggregate initialization. Periodic metrics are pull-only and
+    // intentionally do not participate in HealthResponse, RuntimeInventory,
+    // or StatusStream reconciliation.
+    std::function<api::PeriodicTaskMetricsResponse()>
+        get_diagnostic_tasks_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -300,6 +306,16 @@ struct ApiContext {
         }
         return lease;
     }
+
+    api::PeriodicTaskMetricsResponse get_diagnostic_tasks() const {
+        if (get_diagnostic_tasks_fn) {
+            return get_diagnostic_tasks_fn();
+        }
+        api::PeriodicTaskMetricsResponse response;
+        response.capacity = 0;
+        response.tracked = 0;
+        return response;
+    }
 };
 
 // Register all API endpoint handlers on the given ApiServer.
@@ -316,6 +332,7 @@ struct ApiContext {
 //   GET  /api/runtime/outbounds - live outbound/interface runtime state
 //   GET  /api/runtime/interfaces - live system interface inventory
 //   GET  /api/runtime/inventory - unified service/outbound/interface snapshot
+//   GET  /api/diagnostics/tasks - pull-only periodic task counters
 //   GET  /api/transports       - transport manager runtime state
 //   POST /api/transports       - start or stop a managed transport
 //   GET  /api/transports/config - editable transport definitions

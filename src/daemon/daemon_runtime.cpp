@@ -1626,67 +1626,104 @@ void Daemon::probe_interfaces_now() {
     interface_probe_.retain_only(known_tags);
 
     if (targets.empty()) {
+        auto task_metrics =
+            periodic_task_metrics_.begin("interface-probe");
+        task_metrics.noop();
         return;
     }
+    auto task_metrics = std::make_shared<PeriodicTaskRunToken>(
+        periodic_task_metrics_.begin("interface-probe"));
     // Probing blocks on the network, so it must not run on the event loop.
-    blocking_executor_.try_post("interface-probe", [this, targets]() {
-        auto transitioned_tags = interface_probe_.probe(targets);
-        post_control_task(
-            [this, transitioned_tags = std::move(transitioned_tags)]() {
-                if (urltest_manager_ && !transitioned_tags.empty()) {
-                    const auto affected_urltests = find_affected_urltests(
-                        config_.outbounds.value_or(std::vector<Outbound>{}),
-                        transitioned_tags);
-                    for (const auto& urltest_tag : affected_urltests) {
-                        Logger::instance().trace(
-                            "urltest_transition_probe",
-                            "tag={} changed_children={}",
-                            urltest_tag,
-                            transitioned_tags.size());
-                        urltest_manager_->trigger_immediate_test(urltest_tag);
+    const bool enqueued = blocking_executor_.try_post(
+        "interface-probe",
+        [this, targets, task_metrics]() {
+            std::vector<std::string> transitioned_tags;
+            try {
+                transitioned_tags = interface_probe_.probe(targets);
+            } catch (const std::exception& error) {
+                task_metrics->failure(error.what());
+                return;
+            } catch (...) {
+                task_metrics->failure("interface probe failed");
+                return;
+            }
+            const bool posted = post_control_task(
+                [this,
+                 transitioned_tags = std::move(transitioned_tags),
+                 task_metrics]() {
+                    std::string reconciliation_error;
+                    if (urltest_manager_ && !transitioned_tags.empty()) {
+                        const auto affected_urltests = find_affected_urltests(
+                            config_.outbounds.value_or(
+                                std::vector<Outbound>{}),
+                            transitioned_tags);
+                        for (const auto& urltest_tag : affected_urltests) {
+                            Logger::instance().trace(
+                                "urltest_transition_probe",
+                                "tag={} changed_children={}",
+                                urltest_tag,
+                                transitioned_tags.size());
+                            urltest_manager_->trigger_immediate_test(
+                                urltest_tag);
+                        }
                     }
-                }
-                if (routing_runtime_active_) {
-                    // Keenetic may recreate a tunnel route without changing
-                    // its administrative UP state. Reconcile the owned policy
-                    // tables after the regular probe so vanished urltest
-                    // fallback routes heal without a service restart.
-                    try {
-                        reconcile_static_routing(
-                            RouteReconcileMode::DeferredRepair);
-                    } catch (const RouteInterfaceUnavailableError& error) {
-                        // A not-yet-ready new route remains transactional, but
-                        // a periodic probe must not immediately repeat it or
-                        // turn ordinary tunnel churn into a bell incident. UP
-                        // events and the next probe are existing retry sources.
-                        Logger::instance().verbose(
-                            "Interface-probe route reconciliation is waiting "
-                            "for its interface: {}",
-                            error.what());
-                    } catch (const std::exception& error) {
-                        // Posted control tasks must never let a transient or
-                        // permanent netlink failure escape into the daemon
-                        // event loop. Hand the uncommon hard failure to the
-                        // existing bounded runtime recovery coordinator.
-                        Logger::instance().info(
-                            "Interface-probe route reconciliation was "
-                            "deferred: {}",
-                            error.what());
-                        (void)refresh_iproute_and_firewall_runtime(
-                            0,
-                            std::nullopt,
-                            std::nullopt,
-                            /*schedule_catalog_refresh=*/false);
+                    if (routing_runtime_active_) {
+                        // Keenetic may recreate a tunnel route without
+                        // changing its administrative UP state. Reconcile the
+                        // owned policy tables after the regular probe so
+                        // vanished urltest fallback routes heal without a
+                        // service restart.
+                        try {
+                            reconcile_static_routing(
+                                RouteReconcileMode::DeferredRepair);
+                        } catch (const RouteInterfaceUnavailableError& error) {
+                            // A not-yet-ready new route remains transactional,
+                            // but a periodic probe must not immediately repeat
+                            // it or turn ordinary tunnel churn into a bell
+                            // incident. UP events and the next probe are
+                            // existing retry sources.
+                            Logger::instance().verbose(
+                                "Interface-probe route reconciliation is "
+                                "waiting for its interface: {}",
+                                error.what());
+                        } catch (const std::exception& error) {
+                            // Posted control tasks must never let a transient
+                            // or permanent netlink failure escape into the
+                            // daemon event loop. Hand the uncommon hard failure
+                            // to the existing bounded runtime recovery
+                            // coordinator.
+                            Logger::instance().info(
+                                "Interface-probe route reconciliation was "
+                                "deferred: {}",
+                                error.what());
+                            reconciliation_error = error.what();
+                            (void)refresh_iproute_and_firewall_runtime(
+                                0,
+                                std::nullopt,
+                                std::nullopt,
+                                /*schedule_catalog_refresh=*/false);
+                        }
                     }
-                }
 #ifdef WITH_API
-                if (status_stream_) {
-                    status_stream_->reconcile();
-                }
+                    if (status_stream_) {
+                        status_stream_->reconcile();
+                    }
 #endif
-            },
-            "interface-probe-status");
-    });
+                    if (reconciliation_error.empty()) {
+                        task_metrics->success();
+                    } else {
+                        task_metrics->failure(reconciliation_error);
+                    }
+                },
+                "interface-probe-status");
+            if (!posted) {
+                task_metrics->skipped(
+                    "control loop is not accepting commits");
+            }
+        });
+    if (!enqueued) {
+        task_metrics->skipped("blocking executor is unavailable");
+    }
 }
 
 void Daemon::schedule_catalog_refresh() {

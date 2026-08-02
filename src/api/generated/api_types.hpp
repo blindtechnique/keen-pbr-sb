@@ -720,6 +720,33 @@ namespace api {
         std::vector<NdmsVpnServerService> services;
     };
 
+    enum class LastOutcome : int { ABANDONED, FAILURE, NOOP, SKIPPED, SUCCESS };
+
+    struct PeriodicTaskMetricsEntry {
+        int64_t abandoned;
+        int64_t failure;
+        int64_t in_flight;
+        std::string label;
+        std::optional<int64_t> last_duration_ms;
+        std::optional<std::string> last_error;
+        std::optional<int64_t> last_event_at_unix_ms;
+        std::optional<int64_t> last_finished_at_unix_ms;
+        std::optional<LastOutcome> last_outcome;
+        std::optional<int64_t> last_started_at_unix_ms;
+        int64_t max_duration_ms;
+        int64_t noop;
+        int64_t runs;
+        int64_t skipped;
+        int64_t success;
+        int64_t total_duration_ms;
+    };
+
+    struct PeriodicTaskMetricsResponse {
+        int64_t capacity;
+        std::vector<PeriodicTaskMetricsEntry> tasks;
+        int64_t tracked;
+    };
+
     struct PolicyRuleCheck {
         std::optional<std::string> detail;
         int64_t expected_table;
@@ -1149,6 +1176,9 @@ namespace api {
         std::optional<NdmsVpnServerServiceInventoryResponse> ndms_vpn_server_service_inventory_response;
         std::optional<OutboundElement> outbound;
         std::optional<OutboundGroupElement> outbound_group;
+        std::optional<PeriodicTaskMetricsEntry> periodic_task_metrics_entry;
+        std::optional<PeriodicTaskMetricsResponse> periodic_task_metrics_response;
+        std::optional<LastOutcome> periodic_task_outcome;
         std::optional<PlainDnsTemplateElement> plain_dns_template;
         std::optional<PolicyRuleCheck> policy_rule_check;
         std::optional<RecommendedListSetupRequest> recommended_list_setup_request;
@@ -1416,6 +1446,12 @@ namespace api {
     void from_json(const json & j, NdmsVpnServerServiceInventoryResponse & x);
     void to_json(json & j, const NdmsVpnServerServiceInventoryResponse & x);
 
+    void from_json(const json & j, PeriodicTaskMetricsEntry & x);
+    void to_json(json & j, const PeriodicTaskMetricsEntry & x);
+
+    void from_json(const json & j, PeriodicTaskMetricsResponse & x);
+    void to_json(json & j, const PeriodicTaskMetricsResponse & x);
+
     void from_json(const json & j, PolicyRuleCheck & x);
     void to_json(json & j, const PolicyRuleCheck & x);
 
@@ -1634,6 +1670,9 @@ namespace api {
 
     void from_json(const json & j, NdmsVpnServerKind & x);
     void to_json(json & j, const NdmsVpnServerKind & x);
+
+    void from_json(const json & j, LastOutcome & x);
+    void to_json(json & j, const LastOutcome & x);
 
     void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
     void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
@@ -2911,6 +2950,58 @@ namespace api {
         j["services"] = x.services;
     }
 
+    inline void from_json(const json & j, PeriodicTaskMetricsEntry& x) {
+        x.abandoned = j.at("abandoned").get<int64_t>();
+        x.failure = j.at("failure").get<int64_t>();
+        x.in_flight = j.at("in_flight").get<int64_t>();
+        x.label = j.at("label").get<std::string>();
+        x.last_duration_ms = get_stack_optional<int64_t>(j, "last_duration_ms");
+        x.last_error = get_stack_optional<std::string>(j, "last_error");
+        x.last_event_at_unix_ms = get_stack_optional<int64_t>(j, "last_event_at_unix_ms");
+        x.last_finished_at_unix_ms = get_stack_optional<int64_t>(j, "last_finished_at_unix_ms");
+        x.last_outcome = get_stack_optional<LastOutcome>(j, "last_outcome");
+        x.last_started_at_unix_ms = get_stack_optional<int64_t>(j, "last_started_at_unix_ms");
+        x.max_duration_ms = j.at("max_duration_ms").get<int64_t>();
+        x.noop = j.at("noop").get<int64_t>();
+        x.runs = j.at("runs").get<int64_t>();
+        x.skipped = j.at("skipped").get<int64_t>();
+        x.success = j.at("success").get<int64_t>();
+        x.total_duration_ms = j.at("total_duration_ms").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const PeriodicTaskMetricsEntry & x) {
+        j = json::object();
+        j["abandoned"] = x.abandoned;
+        j["failure"] = x.failure;
+        j["in_flight"] = x.in_flight;
+        j["label"] = x.label;
+        j["last_duration_ms"] = x.last_duration_ms;
+        j["last_error"] = x.last_error;
+        j["last_event_at_unix_ms"] = x.last_event_at_unix_ms;
+        j["last_finished_at_unix_ms"] = x.last_finished_at_unix_ms;
+        j["last_outcome"] = x.last_outcome;
+        j["last_started_at_unix_ms"] = x.last_started_at_unix_ms;
+        j["max_duration_ms"] = x.max_duration_ms;
+        j["noop"] = x.noop;
+        j["runs"] = x.runs;
+        j["skipped"] = x.skipped;
+        j["success"] = x.success;
+        j["total_duration_ms"] = x.total_duration_ms;
+    }
+
+    inline void from_json(const json & j, PeriodicTaskMetricsResponse& x) {
+        x.capacity = j.at("capacity").get<int64_t>();
+        x.tasks = j.at("tasks").get<std::vector<PeriodicTaskMetricsEntry>>();
+        x.tracked = j.at("tracked").get<int64_t>();
+    }
+
+    inline void to_json(json & j, const PeriodicTaskMetricsResponse & x) {
+        j = json::object();
+        j["capacity"] = x.capacity;
+        j["tasks"] = x.tasks;
+        j["tracked"] = x.tracked;
+    }
+
     inline void from_json(const json & j, PolicyRuleCheck& x) {
         x.detail = get_stack_optional<std::string>(j, "detail");
         x.expected_table = j.at("expected_table").get<int64_t>();
@@ -3624,6 +3715,9 @@ namespace api {
         x.ndms_vpn_server_service_inventory_response = get_stack_optional<NdmsVpnServerServiceInventoryResponse>(j, "NdmsVpnServerServiceInventoryResponse");
         x.outbound = get_stack_optional<OutboundElement>(j, "Outbound");
         x.outbound_group = get_stack_optional<OutboundGroupElement>(j, "OutboundGroup");
+        x.periodic_task_metrics_entry = get_stack_optional<PeriodicTaskMetricsEntry>(j, "PeriodicTaskMetricsEntry");
+        x.periodic_task_metrics_response = get_stack_optional<PeriodicTaskMetricsResponse>(j, "PeriodicTaskMetricsResponse");
+        x.periodic_task_outcome = get_stack_optional<LastOutcome>(j, "PeriodicTaskOutcome");
         x.plain_dns_template = get_stack_optional<PlainDnsTemplateElement>(j, "PlainDnsTemplate");
         x.policy_rule_check = get_stack_optional<PolicyRuleCheck>(j, "PolicyRuleCheck");
         x.recommended_list_setup_request = get_stack_optional<RecommendedListSetupRequest>(j, "RecommendedListSetupRequest");
@@ -3758,6 +3852,9 @@ namespace api {
         j["NdmsVpnServerServiceInventoryResponse"] = x.ndms_vpn_server_service_inventory_response;
         j["Outbound"] = x.outbound;
         j["OutboundGroup"] = x.outbound_group;
+        j["PeriodicTaskMetricsEntry"] = x.periodic_task_metrics_entry;
+        j["PeriodicTaskMetricsResponse"] = x.periodic_task_metrics_response;
+        j["PeriodicTaskOutcome"] = x.periodic_task_outcome;
         j["PlainDnsTemplate"] = x.plain_dns_template;
         j["PolicyRuleCheck"] = x.policy_rule_check;
         j["RecommendedListSetupRequest"] = x.recommended_list_setup_request;
@@ -4396,6 +4493,26 @@ namespace api {
             case NdmsVpnServerKind::OPENCONNECT: j = "openconnect"; break;
             case NdmsVpnServerKind::SSTP: j = "sstp"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"NdmsVpnServerKind\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, LastOutcome & x) {
+        if (j == "abandoned") x = LastOutcome::ABANDONED;
+        else if (j == "failure") x = LastOutcome::FAILURE;
+        else if (j == "noop") x = LastOutcome::NOOP;
+        else if (j == "skipped") x = LastOutcome::SKIPPED;
+        else if (j == "success") x = LastOutcome::SUCCESS;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"LastOutcome\""); }
+    }
+
+    inline void to_json(json & j, const LastOutcome & x) {
+        switch (x) {
+            case LastOutcome::ABANDONED: j = "abandoned"; break;
+            case LastOutcome::FAILURE: j = "failure"; break;
+            case LastOutcome::NOOP: j = "noop"; break;
+            case LastOutcome::SKIPPED: j = "skipped"; break;
+            case LastOutcome::SUCCESS: j = "success"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"LastOutcome\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

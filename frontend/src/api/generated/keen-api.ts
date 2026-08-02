@@ -44,6 +44,7 @@ import type {
   ListRefreshResponse,
   NdmsInterfaceInventoryResponse,
   NdmsVpnServerServiceInventoryResponse,
+  PeriodicTaskMetricsResponse,
   RecommendedListSetupRequest,
   ReloadResponse,
   RoutingHealthErrorResponse,
@@ -1677,6 +1678,119 @@ export function useGetRuntimeInventory<TData = Awaited<ReturnType<typeof getRunt
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetRuntimeInventoryQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+/**
+ * Returns a bounded, pull-only snapshot of pre-registered periodic task counters. Reading this endpoint does not subscribe the client to the runtime status stream and the counters are deliberately excluded from health and runtime-inventory payloads.
+
+ * @summary Periodic background task diagnostics
+ */
+export type getDiagnosticTasksResponse200 = {
+  data: PeriodicTaskMetricsResponse
+  status: 200
+}
+
+export type getDiagnosticTasksResponseSuccess = (getDiagnosticTasksResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getDiagnosticTasksResponse = (getDiagnosticTasksResponseSuccess)
+
+export const getGetDiagnosticTasksUrl = () => {
+
+
+
+
+  return `/api/diagnostics/tasks`
+}
+
+export const getDiagnosticTasks = async ( options?: RequestInit): Promise<getDiagnosticTasksResponse> => {
+
+  return apiFetch<getDiagnosticTasksResponse>(getGetDiagnosticTasksUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetDiagnosticTasksQueryKey = () => {
+    return [
+    `/api/diagnostics/tasks`
+    ] as const;
+    }
+
+
+export const getGetDiagnosticTasksQueryOptions = <TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetDiagnosticTasksQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getDiagnosticTasks>>> = ({ signal }) => getDiagnosticTasks({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetDiagnosticTasksQueryResult = NonNullable<Awaited<ReturnType<typeof getDiagnosticTasks>>>
+export type GetDiagnosticTasksQueryError = unknown
+
+
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getDiagnosticTasks>>,
+          TError,
+          Awaited<ReturnType<typeof getDiagnosticTasks>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getDiagnosticTasks>>,
+          TError,
+          Awaited<ReturnType<typeof getDiagnosticTasks>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Periodic background task diagnostics
+ */
+
+export function useGetDiagnosticTasks<TData = Awaited<ReturnType<typeof getDiagnosticTasks>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getDiagnosticTasks>>, TError, TData>>, request?: SecondParameter<typeof apiFetch>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetDiagnosticTasksQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

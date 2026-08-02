@@ -274,6 +274,7 @@ set(SOURCES
   src/connections/conntrack_event_monitor.cpp
   src/runtime/conntrack_manager.cpp
   src/runtime/interface_traffic_sampler.cpp
+  src/runtime/periodic_task_metrics.cpp
   src/cmd/recover_persistent_state.cpp
   src/cmd/status.cpp
   src/cmd/test_routing.cpp
@@ -361,6 +362,7 @@ if(WITH_API)
     src/api/handler_runtime_interfaces.cpp
     src/api/handler_runtime_outbounds.cpp
     src/api/handler_runtime_inventory.cpp
+    src/api/handler_diagnostic_tasks.cpp
     src/api/handler_transports.cpp
     src/api/handler_test_routing.cpp
     src/api/handler_dns_test.cpp

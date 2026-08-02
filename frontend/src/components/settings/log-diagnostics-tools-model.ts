@@ -17,6 +17,7 @@ export const LOG_DIAGNOSTICS_ENDPOINTS = {
   routing_health: "/api/health/routing",
   runtime_outbounds: "/api/runtime/outbounds",
   runtime_interfaces: "/api/runtime/interfaces",
+  tasks: "/api/diagnostics/tasks",
   transports: "/api/transports",
   config: "/api/config",
 } as const
@@ -84,6 +85,7 @@ export async function collectLogDiagnostics({
     routingHealth,
     runtimeOutbounds,
     runtimeInterfaces,
+    tasks,
     transports,
     rawConfig,
   ] = await Promise.all([
@@ -93,6 +95,7 @@ export async function collectLogDiagnostics({
     capture("routing_health"),
     capture("runtime_outbounds"),
     capture("runtime_interfaces"),
+    capture("tasks"),
     capture("transports"),
     capture("config"),
   ])
@@ -114,6 +117,7 @@ export async function collectLogDiagnostics({
       routing_health: routingHealth,
       runtime_outbounds: runtimeOutbounds,
       runtime_interfaces: runtimeInterfaces,
+      tasks,
       transports,
       config,
     },

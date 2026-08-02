@@ -1288,15 +1288,26 @@ void Daemon::check_owned_snat_health() {
     if (!routing_runtime_active_ ||
         recovery_pending ||
         netfilter_refresh_pending) {
+        periodic_task_metrics_.record_skipped(
+            "owned-snat-health",
+            !routing_runtime_active_
+                ? "routing runtime is inactive"
+                : "netfilter recovery is already pending");
         return;
     }
 
+    auto task_metrics =
+        periodic_task_metrics_.begin("owned-snat-health");
     OwnedSnatState state = OwnedSnatState::unknown;
     try {
         state = firewall_->inspect_owned_snat_state();
-    } catch (...) {
+    } catch (const std::exception& error) {
         // This is a fallback guard, not an alert source. An inspection error
         // must neither disrupt the event loop nor emit one message per tick.
+        task_metrics.failure(error.what());
+        return;
+    } catch (...) {
+        task_metrics.failure("owned SNAT inspection failed");
         return;
     }
     if (!should_run_periodic_snat_repair(
@@ -1304,6 +1315,7 @@ void Daemon::check_owned_snat_health() {
             recovery_pending,
             netfilter_refresh_pending,
             state)) {
+        task_metrics.noop();
         return;
     }
 
@@ -1311,7 +1323,7 @@ void Daemon::check_owned_snat_health() {
         "Periodic SNAT health check detected a {} owned scaffold; "
         "repairing it.",
         state == OwnedSnatState::missing ? "missing" : "stale");
-    (void)refresh_iproute_and_firewall_runtime(
+    const bool repaired = refresh_iproute_and_firewall_runtime(
         0,
         std::nullopt,
         std::nullopt,
@@ -1319,6 +1331,11 @@ void Daemon::check_owned_snat_health() {
         OwnedSnatRecovery{
             /*requested=*/true,
             /*missing_observed=*/false});
+    if (repaired) {
+        task_metrics.success();
+    } else {
+        task_metrics.failure("owned SNAT repair did not converge");
+    }
 }
 
 void Daemon::schedule_netfilter_runtime_refresh(

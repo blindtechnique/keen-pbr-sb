@@ -259,18 +259,23 @@ void Daemon::commit_resolver_hash_probe_result(
     std::uint64_t generation,
     std::optional<ResolverConfigHashProbeResult> probe_result,
     std::optional<std::int64_t> probe_completed_ts,
-    TraceId trace_id) {
-    post_control_task(
+    TraceId trace_id,
+    std::shared_ptr<PeriodicTaskRunToken> task_metrics) {
+    const bool posted = post_control_task(
         [this,
          resolver_addr,
          generation,
          probe_result = std::move(probe_result),
          probe_completed_ts,
-         trace_id]() mutable {
+         trace_id,
+         task_metrics]() mutable {
             ScopedTraceContext trace_scope_inner(trace_id);
             resolver_hash_refresh_inflight_.store(false, std::memory_order_release);
 
             if (generation != runtime_generation_.load(std::memory_order_acquire)) {
+                if (task_metrics) {
+                    task_metrics->skipped("stale runtime generation");
+                }
                 Logger::instance().trace("resolver_hash_refresh_skip",
                                          "resolver={} generation={} reason=stale_runtime",
                                          resolver_addr,
@@ -355,6 +360,9 @@ void Daemon::commit_resolver_hash_probe_result(
                 }
             }
             const auto resolver_snapshot = resolver_sync_.snapshot(now_ts);
+            const bool semantic_state_changed =
+                !resolver_sync_semantically_equal(previous_snapshot,
+                                                   resolver_snapshot);
             if (resolver_snapshot.sync_state ==
                 api::ResolverConfigSyncState::CONVERGING) {
                 schedule_resolver_config_hash_actual_retry();
@@ -362,11 +370,30 @@ void Daemon::commit_resolver_hash_probe_result(
                 resolver_config_hash_actual_retry_attempt_ = 0;
                 schedule_resolver_config_hash_actual_refresh();
             }
-            publish_runtime_state(
-                !resolver_sync_semantically_equal(previous_snapshot,
-                                                  resolver_snapshot));
+            publish_runtime_state(semantic_state_changed);
+            if (task_metrics) {
+                if (probe_result.has_value() &&
+                    probe_result->status ==
+                        ResolverConfigHashProbeStatus::SUCCESS) {
+                    if (semantic_state_changed) {
+                        task_metrics->success();
+                    } else {
+                        task_metrics->noop();
+                    }
+                } else {
+                    const std::string error =
+                        probe_result.has_value() && !probe_result->error.empty()
+                            ? probe_result->error
+                            : "resolver hash probe did not succeed";
+                    task_metrics->failure(error);
+                }
+            }
         },
         "resolver-hash-refresh-commit");
+    if (!posted && task_metrics) {
+        resolver_hash_refresh_inflight_.store(false, std::memory_order_release);
+        task_metrics->skipped("control loop is not accepting commits");
+    }
 }
 
 void Daemon::refresh_resolver_config_hash_actual_async() {
@@ -374,6 +401,11 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
     if (!routing_runtime_active_ ||
         !dns_cfg_opt.has_value() ||
         !dns_cfg_opt->system_resolver.has_value()) {
+        periodic_task_metrics_.record_skipped(
+            "resolver-hash-refresh",
+            !routing_runtime_active_
+                ? "routing runtime is inactive"
+                : "system resolver is not configured");
         if (!routing_runtime_active_) {
             resolver_sync_.runtime_stopped();
         } else {
@@ -385,6 +417,8 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
 
     const std::string resolver_addr = dns_cfg_opt->system_resolver->address;
     if (resolver_addr.empty()) {
+        periodic_task_metrics_.record_skipped(
+            "resolver-hash-refresh", "resolver address is empty");
         reset_resolver_actual_state();
         publish_runtime_state();
         return;
@@ -394,6 +428,8 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
     if (!resolver_hash_refresh_inflight_.compare_exchange_strong(expected,
                                                                  true,
                                                                  std::memory_order_acq_rel)) {
+        periodic_task_metrics_.record_skipped(
+            "resolver-hash-refresh", "probe is already in flight");
         Logger::instance().trace("resolver_hash_refresh_skip", "reason=inflight");
         schedule_resolver_config_hash_actual_after(
             std::chrono::seconds{1},
@@ -403,9 +439,15 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
 
     const auto generation = runtime_generation_.load(std::memory_order_acquire);
     const TraceId trace_id = ensure_trace_id();
+    auto task_metrics = std::make_shared<PeriodicTaskRunToken>(
+        periodic_task_metrics_.begin("resolver-hash-refresh"));
     const bool enqueued = resolver_io_executor_.try_post(
         "resolver-config-hash-actual",
-        [this, resolver_addr, generation, trace_id]() mutable {
+        [this,
+         resolver_addr,
+         generation,
+         trace_id,
+         task_metrics]() mutable {
             ScopedTraceContext trace_scope(trace_id);
             std::optional<ResolverConfigHashProbeResult> probe_result;
             std::optional<std::int64_t> probe_completed_ts;
@@ -459,12 +501,14 @@ void Daemon::refresh_resolver_config_hash_actual_async() {
                                               generation,
                                               std::move(probe_result),
                                               probe_completed_ts,
-                                              trace_id);
+                                              trace_id,
+                                              task_metrics);
         },
         trace_id);
 
     if (!enqueued) {
         resolver_hash_refresh_inflight_.store(false, std::memory_order_release);
+        task_metrics->skipped("resolver executor is unavailable");
         Logger::instance().trace("resolver_hash_refresh_skip",
                                  "reason=executor_unavailable");
         schedule_resolver_config_hash_actual_after(

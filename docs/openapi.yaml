@@ -397,6 +397,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/RuntimeInventoryResponse"
 
+  /api/diagnostics/tasks:
+    get:
+      summary: Periodic background task diagnostics
+      description: >
+        Returns a bounded, pull-only snapshot of pre-registered periodic task
+        counters. Reading this endpoint does not subscribe the client to the
+        runtime status stream and the counters are deliberately excluded from
+        health and runtime-inventory payloads.
+      operationId: getDiagnosticTasks
+      responses:
+        "200":
+          description: Bounded periodic task metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeriodicTaskMetricsResponse"
+
   /api/connections/query:
     post:
       summary: Query a stable page of observed connections
@@ -3037,6 +3054,104 @@ components:
           $ref: "#/components/schemas/RuntimeOutboundsResponse"
         interfaces:
           $ref: "#/components/schemas/RuntimeInterfaceInventoryResponse"
+
+    PeriodicTaskOutcome:
+      type: string
+      enum: [success, noop, failure, skipped, abandoned]
+
+    PeriodicTaskMetricsEntry:
+      type: object
+      required:
+        - label
+        - runs
+        - success
+        - noop
+        - failure
+        - skipped
+        - abandoned
+        - in_flight
+        - total_duration_ms
+        - max_duration_ms
+      properties:
+        label:
+          type: string
+          maxLength: 64
+          description: Stable pre-registered task label.
+        runs:
+          type: integer
+          format: int64
+          minimum: 0
+        success:
+          type: integer
+          format: int64
+          minimum: 0
+        noop:
+          type: integer
+          format: int64
+          minimum: 0
+        failure:
+          type: integer
+          format: int64
+          minimum: 0
+        skipped:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Attempts skipped before becoming counted runs.
+        abandoned:
+          type: integer
+          format: int64
+          minimum: 0
+        in_flight:
+          type: integer
+          format: int64
+          minimum: 0
+        total_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        max_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        last_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        last_started_at_unix_ms:
+          type: integer
+          format: int64
+        last_finished_at_unix_ms:
+          type: integer
+          format: int64
+        last_event_at_unix_ms:
+          type: integer
+          format: int64
+        last_outcome:
+          $ref: "#/components/schemas/PeriodicTaskOutcome"
+        last_error:
+          type: string
+          maxLength: 256
+
+    PeriodicTaskMetricsResponse:
+      type: object
+      required: [capacity, tracked, tasks]
+      properties:
+        capacity:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Fixed registry capacity.
+        tracked:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of pre-registered task labels.
+        tasks:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/PeriodicTaskMetricsEntry"
 
     NdmsTunnelKind:
       type: string

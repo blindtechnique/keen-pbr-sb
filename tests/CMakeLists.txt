@@ -43,6 +43,7 @@ add_executable(keen-pbr-tests
   test_api_ndms_names.cpp
   test_api_runtime_interfaces.cpp
   test_api_runtime_inventory.cpp
+  test_api_diagnostic_tasks.cpp
   test_api_dependency_analysis.cpp
   test_connection_query.cpp
   test_conntrack_event_monitor.cpp
@@ -50,6 +51,7 @@ add_executable(keen-pbr-tests
   test_idle_stall_detector.cpp
   test_udp_call_affinity.cpp
   test_interface_traffic_sampler.cpp
+  test_periodic_task_metrics.cpp
   test_api_status_events.cpp
   test_api_logs.cpp
   test_api_remote_access.cpp
@@ -132,6 +134,7 @@ add_executable(keen-pbr-tests
   ../src/connections/conntrack_event_monitor.cpp
   ../src/runtime/conntrack_manager.cpp
   ../src/runtime/interface_traffic_sampler.cpp
+  ../src/runtime/periodic_task_metrics.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
   ../src/lists/list_streamer.cpp
@@ -435,6 +438,7 @@ if(WITH_API)
     ../src/api/handler_ndms_names.cpp
     ../src/api/handler_runtime_interfaces.cpp
     ../src/api/handler_runtime_inventory.cpp
+    ../src/api/handler_diagnostic_tasks.cpp
     ../src/api/handler_dependency_analysis.cpp
     ../src/api/handler_transports.cpp
     ../src/api/handler_test_routing.cpp
