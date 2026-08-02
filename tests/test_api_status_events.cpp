@@ -8,6 +8,10 @@
 #include "api/server.hpp"
 #include "api/status_stream.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <future>
+
 namespace keen_pbr3 {
 
 namespace {
@@ -95,6 +99,89 @@ TEST_CASE("status events endpoint returns SSE headers and snapshot first") {
     CHECK(status == 200);
     CHECK(content_type.find("text/event-stream") != std::string::npos);
     CHECK(body.rfind("event: snapshot\ndata: ", 0) == 0);
+}
+
+TEST_CASE("status events endpoint rejects excess streams with retry guidance") {
+    SseBroadcaster dns_broadcaster;
+    StatusStream status_stream([] { return api_snapshot(); }, 32, 1);
+    auto held_subscription = status_stream.subscribe();
+    REQUIRE(held_subscription);
+
+    auto context = make_status_context(dns_broadcaster, status_stream);
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18194");
+    ApiServer server(config);
+    register_status_events_handler(server, context);
+    server.start();
+
+    httplib::Client client("127.0.0.1", 18194);
+    const auto response = client.Get("/api/status/events");
+    server.stop();
+
+    REQUIRE(response);
+    CHECK(response->status == 503);
+    CHECK(response->get_header_value("Retry-After") == "5");
+    CHECK(response->get_header_value("Content-Type").find("application/json") !=
+          std::string::npos);
+    CHECK(response->body ==
+          R"({"error":"too many active status streams"})");
+}
+
+TEST_CASE("status events endpoint wakes promptly when streams close") {
+    using namespace std::chrono_literals;
+
+    SseBroadcaster dns_broadcaster;
+    StatusStream status_stream([] { return api_snapshot(); });
+    auto context = make_status_context(dns_broadcaster, status_stream);
+    ApiConfig config;
+    config.listen = std::string("127.0.0.1:18195");
+    ApiServer server(config);
+    register_status_events_handler(server, context);
+    server.start();
+
+    std::promise<void> response_started;
+    auto response_started_future = response_started.get_future();
+    std::atomic_bool received_snapshot{false};
+    auto request = std::async(std::launch::async, [&] {
+        httplib::Client client("127.0.0.1", 18195);
+        client.set_connection_timeout(1, 0);
+        // Bound the worker even if a future shutdown regression prevents the
+        // streaming handler from observing close_all().  Without a client
+        // timeout the std::async future destructor could hang the test binary.
+        client.set_read_timeout(3, 0);
+        return client.Get(
+            "/api/status/events",
+            [&response_started](const httplib::Response&) {
+                response_started.set_value();
+                return true;
+            },
+            [&received_snapshot](const char*, size_t) {
+                received_snapshot.store(true, std::memory_order_release);
+                return true;
+            });
+    });
+
+    const bool response_opened =
+        response_started_future.wait_for(2s) == std::future_status::ready;
+    const bool admitted = response_opened && status_stream.has_subscribers();
+    if (response_opened) {
+        status_stream.close_all();
+    }
+    const auto completion_before_stop = request.wait_for(2s);
+    server.stop();
+    auto completion = completion_before_stop;
+    if (completion != std::future_status::ready) {
+        completion = request.wait_for(4s);
+    }
+
+    CHECK(response_opened);
+    CHECK(admitted);
+    CHECK(received_snapshot.load(std::memory_order_acquire));
+    CHECK(completion_before_stop == std::future_status::ready);
+    REQUIRE(completion == std::future_status::ready);
+    const auto result = request.get();
+    REQUIRE(result);
+    CHECK(result->status == 200);
 }
 
 } // namespace keen_pbr3

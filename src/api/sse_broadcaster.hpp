@@ -40,6 +40,7 @@ private:
     size_t max_subscriptions_;
     TracedMutex mutex_;
     std::vector<std::weak_ptr<Subscription>> subscriptions_ GUARDED_BY(mutex_);
+    bool admission_closed_ GUARDED_BY(mutex_){false};
 };
 
 } // namespace keen_pbr3

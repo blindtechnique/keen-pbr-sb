@@ -26,6 +26,10 @@ SseBroadcaster::SubscriptionPtr SseBroadcaster::subscribe(
             std::make_move_iterator(initial_messages.end()));
     }
     KPBR_LOCK_GUARD(mutex_);
+    if (admission_closed_) {
+        Logger::instance().trace("sse_subscribe_rejected", "reason=closed");
+        return nullptr;
+    }
     compact_locked();
     if (subscriptions_.size() >= max_subscriptions_) {
         // Admission control is working as intended here.  The caller returns
@@ -95,6 +99,7 @@ void SseBroadcaster::close_all() {
     std::vector<SubscriptionPtr> active;
     {
         KPBR_LOCK_GUARD(mutex_);
+        admission_closed_ = true;
         for (auto& weak : subscriptions_) {
             if (auto subscription = weak.lock()) {
                 active.push_back(std::move(subscription));

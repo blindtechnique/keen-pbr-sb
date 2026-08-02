@@ -306,6 +306,22 @@ TEST_CASE("status stream closes slow and shutdown subscribers") {
     }
 }
 
+TEST_CASE("status stream shutdown permanently closes subscription admission") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+
+    stream.close_all();
+
+    {
+        KPBR_LOCK_GUARD(subscription->mutex);
+        CHECK(subscription->closed);
+    }
+    CHECK_FALSE(stream.has_subscribers());
+    CHECK_FALSE(stream.subscribe());
+}
+
 TEST_CASE("status stream reserves API capacity by limiting long-lived clients") {
     auto current = make_snapshot();
     StatusStream stream([&] { return current; }, 128, 2);
