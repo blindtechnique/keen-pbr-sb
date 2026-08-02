@@ -6,6 +6,7 @@
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
 #include "../util/nfqws_config.hpp"
+#include "../util/nfqws_file_writer.hpp"
 #include "../util/nfqws_strategy_assets.hpp"
 
 #include <algorithm>
@@ -28,6 +29,7 @@
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 #include <zlib.h>
 
@@ -45,9 +47,46 @@ constexpr const char* kLogDir = "/opt/var/log";
 constexpr const char* kBuiltinStrategies = "/opt/usr/share/keen-pbr/nfqws-strategies";
 constexpr const char* kBuiltinBlobs = "/opt/usr/share/keen-pbr/nfqws-blobs";
 constexpr const char* kUserStrategies = "/opt/etc/keen-pbr/nfqws-strategies";
+constexpr const char* kDurabilityWarning =
+    "Warning: the nfqws file is visible, but directory durability could not "
+    "be confirmed. Runtime reconciliation continued.";
 
 std::string read_file(const fs::path& path, std::size_t limit = 2U * 1024U * 1024U);
-void write_file_atomic(const fs::path& path, const std::string& content);
+
+NfqwsFileWriteResult save_nfqws_file(
+    const fs::path& path,
+    const std::string& content,
+    AtomicFileWriteOptions options = {}) {
+    try {
+        return write_nfqws_file_atomically(
+            path, content, std::move(options));
+    } catch (const std::length_error& error) {
+        throw ApiError(error.what(), 413);
+    } catch (const AtomicFileWriteError& error) {
+        if (error.committed()) return {false};
+        throw ApiError(
+            "failed to write nfqws file", 500);
+    } catch (const std::exception& error) {
+        throw ApiError(error.what(), 500);
+    }
+}
+
+void merge_durability(bool& durable, const NfqwsFileWriteResult& result) {
+    durable = durable && result.durable;
+}
+
+void append_durability_warning(std::string& output, bool durable) {
+    if (durable) return;
+    if (!output.empty() && output.back() != '\n') output += '\n';
+    output += kDurabilityWarning;
+    output += '\n';
+}
+
+nlohmann::json successful_write_response(bool durable) {
+    nlohmann::json response{{"ok", true}, {"durable", durable}};
+    if (!durable) response["warning"] = kDurabilityWarning;
+    return response;
+}
 
 std::string render_wan_interfaces(const std::string& content) {
     return nfqws_config_with_isp_interfaces(content, default_route_interfaces());
@@ -99,7 +138,8 @@ std::map<std::string, std::string> read_candidate_configs() {
 
 std::string save_updated_default_strategy(
     const std::string& previous,
-    const std::map<std::string, std::string>& candidates_before_upgrade) {
+    const std::map<std::string, std::string>& candidates_before_upgrade,
+    bool& durable) {
     const auto old_semantics = nfqws_config_without_ipv6_toggle(previous);
     std::error_code ec;
     for (const auto& candidate : nfqws_config_candidates()) {
@@ -123,7 +163,8 @@ std::string save_updated_default_strategy(
                 }
                 continue;
             }
-            write_file_atomic(destination, updated);
+            merge_durability(
+                durable, save_nfqws_file(destination, updated));
             return name;
         }
         throw ApiError("too many nfqws default strategies for this date", 409);
@@ -164,50 +205,6 @@ std::string read_file(const fs::path& path, std::size_t limit) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw ApiError("failed to read nfqws file", 500);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-}
-
-void write_file_atomic(const fs::path& path, const std::string& content) {
-    if (content.size() > 2U * 1024U * 1024U) throw ApiError("nfqws file is too large", 413);
-    std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
-    if (ec) throw ApiError("failed to create nfqws directory", 500);
-    // keen-pbr can run with a restrictive umask, while nfqws2 drops privileges
-    // to nobody. Preserve an existing file's ownership/mode and make new
-    // editable nfqws files world-readable so the service can reopen them.
-    ::chmod(path.parent_path().c_str(), 0755);
-    struct stat previous{};
-    const bool had_previous = ::stat(path.c_str(), &previous) == 0;
-    auto temporary = path;
-    temporary += ".keen-pbr-sb.tmp";
-    if (path.extension() == ".gz") {
-        gzFile output = gzopen(temporary.c_str(), "wb9");
-        if (!output) throw ApiError("failed to write compressed nfqws file", 500);
-        const auto written = gzwrite(output, content.data(), static_cast<unsigned int>(content.size()));
-        const auto close_status = gzclose(output);
-        if (written != static_cast<int>(content.size()) || close_status != Z_OK) {
-            fs::remove(temporary, ec);
-            throw ApiError("failed to compress nfqws file", 500);
-        }
-    } else {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output || !(output << content)) throw ApiError("failed to write nfqws file", 500);
-    }
-    const mode_t mode = had_previous ? ((previous.st_mode & 0777) | 0444) : 0644;
-    if (::chmod(temporary.c_str(), mode) != 0) {
-        fs::remove(temporary, ec);
-        throw ApiError("failed to set nfqws file permissions", 500);
-    }
-    if (had_previous && ::chown(temporary.c_str(), previous.st_uid, previous.st_gid) != 0) {
-        fs::remove(temporary, ec);
-        throw ApiError("failed to preserve nfqws file ownership", 500);
-    }
-    fs::rename(temporary, path, ec);
-    if (ec) {
-        fs::remove(path, ec);
-        ec.clear();
-        fs::rename(temporary, path, ec);
-    }
-    if (ec) throw ApiError("failed to replace nfqws file", 500);
 }
 
 bool natural_less(const std::string& lhs, const std::string& rhs) {
@@ -623,11 +620,19 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
         }
         if (action == "save_file" || action == "create_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
-            if (action == "create_file" && fs::exists(path)) throw ApiError("nfqws file already exists", 409);
             if (category == "log" && action == "create_file") throw ApiError("cannot create a log", 400);
             const std::lock_guard lock(nfqws_operation_mutex());
-            write_file_atomic(path, request.value("content", std::string{}));
-            return R"({"ok":true})";
+            const bool create_only = action == "create_file";
+            if (create_only && fs::exists(path)) {
+                throw ApiError("nfqws file already exists", 409);
+            }
+            AtomicFileWriteOptions write_options;
+            write_options.replace_existing = !create_only;
+            const auto saved = save_nfqws_file(
+                path,
+                request.value("content", std::string{}),
+                write_options);
+            return successful_write_response(saved.durable).dump();
         }
         if (action == "delete_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
@@ -641,8 +646,8 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             const auto [path, category] = file_path("log", request.value("name", ""));
             if (category != "log") throw ApiError("only nfqws logs can be cleared", 400);
             const std::lock_guard lock(nfqws_operation_mutex());
-            write_file_atomic(path, "");
-            return R"({"ok":true})";
+            const auto saved = save_nfqws_file(path, "");
+            return successful_write_response(saved.durable).dump();
         }
         if (action == "service") {
             const auto command = request.value("command", std::string{});
@@ -669,23 +674,32 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             int status = 0;
             auto output = std::string("Rollback backup created.\n") +
                           run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
+            bool durable = true;
             const auto created = status == 0
-                                     ? save_updated_default_strategy(previous, candidates_before_upgrade)
+                                     ? save_updated_default_strategy(
+                                           previous,
+                                           candidates_before_upgrade,
+                                           durable)
                                      : std::string{};
             if (status == 0) {
                 output += "\nInstalled nfqws2 version: " + installed_version() + "\n";
             }
+            append_durability_warning(output, durable);
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
-                                  {"strategy_created", created}}.dump();
+                                  {"strategy_created", created},
+                                  {"durable", durable},
+                                  {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
         if (action == "save_strategy") {
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
             const std::lock_guard lock(nfqws_operation_mutex());
-            write_file_atomic(fs::path(kUserStrategies) / (name + ".conf"), request.value("content", std::string{}));
+            const auto saved = save_nfqws_file(
+                fs::path(kUserStrategies) / (name + ".conf"),
+                request.value("content", std::string{}));
             std::error_code ec2;
             fs::remove(fs::path(kUserStrategies) / ".deleted" / name, ec2);
-            return R"({"ok":true})";
+            return successful_write_response(saved.durable).dump();
         }
         if (action == "apply_strategy") {
             const std::lock_guard lock(nfqws_operation_mutex());
@@ -698,7 +712,8 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
                                : read_file(strategy_source(name));
             if (automatic_wan_strategy(name)) content = render_wan_interfaces(content);
             const auto assets = provision_strategy_assets(name);
-            write_file_atomic(fs::path(kConfigDir) / "nfqws2.conf", content);
+            const auto saved = save_nfqws_file(
+                fs::path(kConfigDir) / "nfqws2.conf", content);
             int status = 0;
             auto output = run_nfqws_service_command("restart", status);
             if (!assets.installed.empty()) {
@@ -708,9 +723,14 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
                 details << "\n";
                 output = details.str() + output;
             }
+            append_durability_warning(output, saved.durable);
             return nlohmann::json{{"ok", status == 0},
                                   {"output", output},
                                   {"status", status},
+                                  {"durable", saved.durable},
+                                  {"warning", saved.durable
+                                                  ? ""
+                                                  : kDurabilityWarning},
                                   {"installed_blobs", assets.installed},
                                   {"preserved_blobs", assets.preserved}}
                 .dump();
@@ -746,14 +766,21 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             }
 
             const std::lock_guard lock(nfqws_operation_mutex());
-            for (const auto& item : pending) write_file_atomic(item.path, item.content);
+            bool durable = true;
+            for (const auto& item : pending) {
+                merge_durability(
+                    durable, save_nfqws_file(item.path, item.content));
+            }
             std::string output = "Saved " + std::to_string(pending.size()) + " nfqws file(s).\n";
             int status = 0;
             if (request.value("restart", false)) {
                 output += run_nfqws_service_command("restart", status);
             }
+            append_durability_warning(output, durable);
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
-                                  {"saved", pending.size()}}.dump();
+                                  {"saved", pending.size()},
+                                  {"durable", durable},
+                                  {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
         if (action == "delete_strategy") {
             const auto name = request.value("name", std::string{});
@@ -761,18 +788,24 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             const std::lock_guard lock(nfqws_operation_mutex());
             std::error_code ec2;
             fs::remove(fs::path(kUserStrategies) / (name + ".conf"), ec2);
-            write_file_atomic(fs::path(kUserStrategies) / ".deleted" / name, "deleted\n");
-            return R"({"ok":true})";
+            const auto saved = save_nfqws_file(
+                fs::path(kUserStrategies) / ".deleted" / name,
+                "deleted\n");
+            return successful_write_response(saved.durable).dump();
         }
         if (action == "import_lists") {
             if (!request.contains("files") || !request["files"].is_object()) throw ApiError("nfqws list bundle is invalid", 400);
             const std::lock_guard lock(nfqws_operation_mutex());
+            bool durable = true;
             for (const auto& item : request["files"].items()) {
                 const auto [path, category] = file_path("list", item.key());
                 if (!item.value().is_string()) throw ApiError("nfqws list content must be text", 400);
-                write_file_atomic(path, item.value().get<std::string>());
+                merge_durability(
+                    durable,
+                    save_nfqws_file(
+                        path, item.value().get<std::string>()));
             }
-            return R"({"ok":true})";
+            return successful_write_response(durable).dump();
         }
         if (action == "import_bundle") {
             if (!request.contains("files") || !request["files"].is_object())
@@ -803,10 +836,14 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             }
             if (pending.empty()) throw ApiError("nfqws bundle is empty", 400);
             // Validate the entire bundle before the first write. Each file is
-            // then replaced atomically by write_file_atomic().
+            // then replaced atomically by save_nfqws_file().
             const std::lock_guard lock(nfqws_operation_mutex());
-            for (const auto& item : pending) write_file_atomic(item.path, item.content);
-            return R"({"ok":true})";
+            bool durable = true;
+            for (const auto& item : pending) {
+                merge_durability(
+                    durable, save_nfqws_file(item.path, item.content));
+            }
+            return successful_write_response(durable).dump();
         }
         if (action == "check_url") {
             const auto url = request.value("url", std::string{});

@@ -332,6 +332,7 @@ set(SOURCES
   src/util/last_command_failure.cpp
   src/util/network_routes.cpp
   src/util/nfqws_config.cpp
+  src/util/nfqws_file_writer.cpp
   src/util/nfqws_strategy_assets.cpp
   src/util/system_info.cpp
   src/util/traced_mutex.cpp
