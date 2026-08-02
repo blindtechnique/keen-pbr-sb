@@ -347,6 +347,54 @@ void connect_config_store(
         };
 }
 
+struct ExpectedConfigLifecycleProjection {
+    LifecycleOperationResult result;
+    LifecycleOperationStatus validation;
+    LifecycleOperationStatus commit;
+    bool finished;
+    std::string error;
+};
+
+bool matches_config_lifecycle_projection(
+    const LifecycleOperationSnapshot& actual,
+    const ExpectedConfigLifecycleProjection& expected) {
+    return actual.result == expected.result &&
+           actual.finished_at.has_value() == expected.finished &&
+           actual.error == expected.error &&
+           actual.stages.size() == 2U &&
+           actual.stages[0].status == expected.validation &&
+           actual.stages[1].status == expected.commit;
+}
+
+void check_config_lifecycle_milestones(
+    const std::vector<LifecycleOperationSnapshot>& actual,
+    const std::vector<ExpectedConfigLifecycleProjection>& expected) {
+    REQUIRE_FALSE(actual.empty());
+    REQUIRE_FALSE(expected.empty());
+
+    const std::string operation_id = actual.front().id;
+    REQUIRE_FALSE(operation_id.empty());
+
+    std::size_t next_expected = 0;
+    for (const auto& snapshot : actual) {
+        CHECK(snapshot.id == operation_id);
+        CHECK(snapshot.type == LifecycleOperationType::ApplyConfig);
+        REQUIRE(snapshot.stages.size() == 2U);
+        CHECK(snapshot.stages[0].id == "validate_config");
+        CHECK(snapshot.stages[1].id == "commit_and_apply");
+
+        if (next_expected < expected.size() &&
+            matches_config_lifecycle_projection(
+                snapshot, expected[next_expected])) {
+            ++next_expected;
+        }
+    }
+
+    CHECK(next_expected == expected.size());
+    CHECK(matches_config_lifecycle_projection(
+        actual.back(), expected.back()));
+}
+
 } // namespace
 
 TEST_CASE(
@@ -913,6 +961,250 @@ TEST_CASE(
           event_index(maintenance->events, "write"));
     CHECK(event_index(maintenance->events, "finish-config") <
           event_index(maintenance->events, "lease-release"));
+}
+
+TEST_CASE(
+    "successful config save publishes ordered apply lifecycle milestones") {
+    constexpr int api_port = 18265;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:18265");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+
+    const Config staged = make_valid_config("127.0.0.1:18266");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    std::size_t validation_calls = 0;
+    std::size_t write_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    context.validate_candidate_config_fn =
+        [&](const Config&) {
+            ++validation_calls;
+            maintenance->events.push_back("validate");
+        };
+    context.enqueue_apply_validated_config_fn =
+        [&](Config, std::string) {
+            ++apply_calls;
+            maintenance->events.push_back("apply");
+            ConfigApplyResult result;
+            result.applied = true;
+            return result;
+        };
+
+    LifecycleOperationStore lifecycle_store;
+    LifecycleOperationCoordinator lifecycle(lifecycle_store);
+    std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+    lifecycle_store.set_publish_callback([&] {
+        const auto snapshot = lifecycle_store.snapshot();
+        if (snapshot.has_value()) {
+            lifecycle_updates.push_back(*snapshot);
+        }
+    });
+    context.lifecycle_operations = &lifecycle;
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [&](const std::string& path, const std::string& body) {
+            ++write_calls;
+            maintenance->events.push_back("write");
+            write_config_atomically(path, body);
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/save", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 200);
+    const auto payload = nlohmann::json::parse(response->body);
+    CHECK(payload.at("saved") == true);
+    CHECK(payload.at("applied") == true);
+    CHECK(validation_calls == 1U);
+    CHECK(write_calls == 1U);
+    CHECK(apply_calls == 1U);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(maintenance->reserve_calls == 1U);
+    CHECK(maintenance->active_leases == 0U);
+    CHECK(read_text(config_path) == staged_json);
+    CHECK(event_index(maintenance->events, "validate") <
+          event_index(maintenance->events, "write"));
+    CHECK(event_index(maintenance->events, "write") <
+          event_index(maintenance->events, "apply"));
+
+    check_config_lifecycle_milestones(
+        lifecycle_updates,
+        {
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Running,
+             LifecycleOperationStatus::Pending,
+             false,
+             {}},
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Running,
+             false,
+             {}},
+            {LifecycleOperationResult::Succeeded,
+             LifecycleOperationStatus::Succeeded,
+             LifecycleOperationStatus::Succeeded,
+             true,
+             {}},
+        });
+}
+
+TEST_CASE(
+    "invalid config never crosses the persistent or runtime boundary") {
+    constexpr int api_port = 18266;
+    ConfigApiTempDir directory;
+    const auto config_path = directory.path / "config.json";
+    const Config original = make_valid_config("127.0.0.1:18266");
+    const std::string original_json =
+        nlohmann::json(original).dump(1, '\t') + "\n";
+    write_text(config_path, original_json);
+
+    const Config staged = make_valid_config("127.0.0.1:18267");
+    const std::string staged_json =
+        nlohmann::json(staged).dump(1, '\t') + "\n";
+    ConfigStore store(original);
+    store.stage_config(staged, staged_json);
+    const auto draft_before = store.staged_cas_snapshot();
+    REQUIRE(draft_before.has_value());
+
+    SseBroadcaster broadcaster;
+    std::size_t begin_calls = 0;
+    std::size_t finish_calls = 0;
+    std::size_t apply_calls = 0;
+    std::size_t validation_calls = 0;
+    std::size_t write_calls = 0;
+    std::size_t stop_calls = 0;
+    std::size_t emergency_calls = 0;
+    auto context = make_config_context(
+        config_path.string(),
+        broadcaster,
+        staged,
+        staged_json,
+        begin_calls,
+        finish_calls,
+        apply_calls);
+    connect_config_store(context, store);
+    const auto maintenance =
+        std::make_shared<FakeMaintenanceState>();
+    install_fake_maintenance(context, maintenance);
+    context.validate_candidate_config_fn =
+        [&](const Config&) {
+            ++validation_calls;
+            throw ConfigValidationError(
+                std::vector<ConfigValidationIssue>{{
+                    "route.rules[0]",
+                    "synthetic invalid candidate",
+                }});
+        };
+    context.enqueue_apply_validated_config_fn =
+        [&](Config, std::string) {
+            ++apply_calls;
+            return ConfigApplyResult{};
+        };
+    context.stop_runtime_fn = [&] { ++stop_calls; };
+    context.emergency_quiesce_runtime_fn =
+        [&] { ++emergency_calls; };
+
+    LifecycleOperationStore lifecycle_store;
+    LifecycleOperationCoordinator lifecycle(lifecycle_store);
+    std::vector<LifecycleOperationSnapshot> lifecycle_updates;
+    lifecycle_store.set_publish_callback([&] {
+        const auto snapshot = lifecycle_store.snapshot();
+        if (snapshot.has_value()) {
+            lifecycle_updates.push_back(*snapshot);
+        }
+    });
+    context.lifecycle_operations = &lifecycle;
+
+    ApiConfig api_config;
+    api_config.listen =
+        "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(api_config);
+    register_config_handler_for_test(
+        server,
+        context,
+        [&](const std::string&, const std::string&) {
+            ++write_calls;
+        });
+    server.start();
+    httplib::Client client("127.0.0.1", api_port);
+    const auto response =
+        client.Post("/api/config/save", "", "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 400);
+    const auto payload = nlohmann::json::parse(response->body);
+    CHECK(payload.at("error") == "synthetic invalid candidate");
+    CHECK(payload.at("saved") == false);
+    CHECK(payload.at("applied") == false);
+    CHECK(payload.at("rolled_back") == false);
+    REQUIRE(payload.at("validation_errors").size() == 1U);
+    CHECK(payload.at("validation_errors")[0].at("path") ==
+          "route.rules[0]");
+    CHECK(payload.at("validation_errors")[0].at("message") ==
+          "synthetic invalid candidate");
+    CHECK(validation_calls == 1U);
+    CHECK(write_calls == 0U);
+    CHECK(apply_calls == 0U);
+    CHECK(stop_calls == 0U);
+    CHECK(emergency_calls == 0U);
+    CHECK(begin_calls == 1U);
+    CHECK(finish_calls == 1U);
+    CHECK(maintenance->reserve_calls == 0U);
+    CHECK(maintenance->active_leases == 0U);
+    CHECK(read_text(config_path) == original_json);
+    CHECK_FALSE(std::filesystem::exists(
+        config_save_journal_path(directory)));
+
+    const auto draft_after = store.staged_cas_snapshot();
+    REQUIRE(draft_after.has_value());
+    CHECK(store.config_is_draft());
+    CHECK(draft_after->serialized == draft_before->serialized);
+    CHECK(draft_after->base_revision == draft_before->base_revision);
+    CHECK(draft_after->active_revision ==
+          draft_before->active_revision);
+
+    check_config_lifecycle_milestones(
+        lifecycle_updates,
+        {
+            {LifecycleOperationResult::Running,
+             LifecycleOperationStatus::Running,
+             LifecycleOperationStatus::Pending,
+             false,
+             {}},
+            {LifecycleOperationResult::Failed,
+             LifecycleOperationStatus::Failed,
+             LifecycleOperationStatus::Skipped,
+             true,
+             "synthetic invalid candidate"},
+        });
 }
 
 TEST_CASE(

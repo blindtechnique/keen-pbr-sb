@@ -596,6 +596,56 @@ TEST_CASE("RouteTable reconciliation adds replacements before removing obsolete 
     CHECK(routes.get_routes().size() == 1);
 }
 
+TEST_CASE("RouteTable failed reconcile keeps the installed prefix and obsolete routes") {
+    FakeRouteNetlink netlink;
+    RouteTable routes(netlink);
+    const auto old_first = route("192.0.2.0/24", 150);
+    const auto old_second = route("198.51.100.0/24", 151);
+    const auto new_first = route("203.0.113.0/25", 152);
+    const auto failing = route("203.0.113.128/26", 153);
+    const auto never_attempted = route("203.0.113.192/26", 154);
+
+    routes.add(old_first);
+    routes.add(old_second);
+    netlink.added.clear();
+    netlink.add_hook = [&](const RouteSpec& spec) {
+        if (spec.destination == failing.destination) {
+            throw std::runtime_error("injected batch failure");
+        }
+        return RouteAddResult::Created;
+    };
+
+    CHECK_THROWS_WITH(
+        routes.reconcile({new_first, failing, never_attempted}),
+        "injected batch failure");
+
+    REQUIRE(netlink.added.size() == 2);
+    CHECK(netlink.added[0].destination == new_first.destination);
+    CHECK(netlink.added[1].destination == failing.destination);
+    CHECK(netlink.deleted.empty());
+    const auto installed = routes.get_routes();
+    REQUIRE(installed.size() == 3);
+    const auto contains_destination = [&](const std::string& destination) {
+        return std::any_of(
+            installed.begin(), installed.end(), [&](const RouteSpec& spec) {
+                return spec.destination == destination;
+            });
+    };
+    CHECK(contains_destination(old_first.destination));
+    CHECK(contains_destination(old_second.destination));
+    CHECK(contains_destination(new_first.destination));
+
+    // The successful prefix is intentionally not rolled back.  Shutdown
+    // cleanup still owns it and removes all owned routes in reverse order.
+    netlink.add_hook = {};
+    routes.clear();
+
+    REQUIRE(netlink.deleted.size() == 3);
+    CHECK(netlink.deleted[0].destination == new_first.destination);
+    CHECK(netlink.deleted[1].destination == old_second.destination);
+    CHECK(netlink.deleted[2].destination == old_first.destination);
+}
+
 TEST_CASE("RouteTable treats protocol as route identity") {
     FakeRouteNetlink netlink;
     RouteTable routes(netlink);

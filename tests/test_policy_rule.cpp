@@ -3,6 +3,7 @@
 #include "../src/routing/policy_rule.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <netinet/in.h>
 #include <stdexcept>
@@ -15,6 +16,10 @@ class FakeRuleNetlink : public RuleNetlinkOperations {
 public:
     RuleAddResult add_rule_for_family(const RuleSpec& spec, int family) override {
         added.push_back(family);
+        added_specs.push_back(spec);
+        if (add_hook) {
+            return add_hook(spec, family);
+        }
         if (family == failing_family) {
             throw std::runtime_error("injected failure");
         }
@@ -28,6 +33,7 @@ public:
 
     void delete_rule_for_family(const RuleSpec& spec, int family) override {
         deleted.push_back(family);
+        deleted_specs.push_back(spec);
         erase_live(spec, family);
     }
 
@@ -72,8 +78,11 @@ public:
 
     int failing_family{0};
     int existing_family{0};
+    std::function<RuleAddResult(const RuleSpec&, int)> add_hook;
     std::vector<int> added;
     std::vector<int> deleted;
+    std::vector<RuleSpec> added_specs;
+    std::vector<RuleSpec> deleted_specs;
     std::vector<DumpedRule> live;
 
 private:
@@ -102,6 +111,17 @@ RuleSpec dual_stack_rule() {
     rule.fwmark = 10;
     rule.table = 110;
     rule.priority = 10010;
+    return rule;
+}
+
+RuleSpec ipv4_rule(std::uint32_t fwmark,
+                   std::uint32_t table,
+                   std::uint32_t priority) {
+    RuleSpec rule;
+    rule.fwmark = fwmark;
+    rule.table = table;
+    rule.priority = priority;
+    rule.family = AF_INET;
     return rule;
 }
 
@@ -151,6 +171,58 @@ TEST_CASE("PolicyRuleManager reconciliation leaves an identical plan untouched")
 
     CHECK(netlink.added.empty());
     CHECK(netlink.deleted.empty());
+}
+
+TEST_CASE("PolicyRuleManager failed reconcile keeps the installed prefix and obsolete rules") {
+    FakeRuleNetlink netlink;
+    PolicyRuleManager rules(netlink);
+    const auto old_first = ipv4_rule(10, 110, 10010);
+    const auto old_second = ipv4_rule(20, 120, 10020);
+    const auto new_first = ipv4_rule(30, 130, 10030);
+    const auto failing = ipv4_rule(40, 140, 10040);
+    const auto never_attempted = ipv4_rule(50, 150, 10050);
+
+    rules.add(old_first);
+    rules.add(old_second);
+    netlink.added.clear();
+    netlink.added_specs.clear();
+    netlink.add_hook = [&](const RuleSpec& spec, int) {
+        if (spec.priority == failing.priority) {
+            throw std::runtime_error("injected batch failure");
+        }
+        netlink.add_live(spec, spec.family);
+        return RuleAddResult::Created;
+    };
+
+    CHECK_THROWS_WITH(
+        rules.reconcile({new_first, failing, never_attempted}),
+        "injected batch failure");
+
+    REQUIRE(netlink.added_specs.size() == 2);
+    CHECK(netlink.added_specs[0].priority == new_first.priority);
+    CHECK(netlink.added_specs[1].priority == failing.priority);
+    CHECK(netlink.deleted.empty());
+    const auto installed = rules.get_rules();
+    REQUIRE(installed.size() == 3);
+    const auto contains_priority = [&](const std::uint32_t priority) {
+        return std::any_of(
+            installed.begin(), installed.end(), [&](const RuleSpec& spec) {
+                return spec.priority == priority;
+            });
+    };
+    CHECK(contains_priority(old_first.priority));
+    CHECK(contains_priority(old_second.priority));
+    CHECK(contains_priority(new_first.priority));
+
+    // The successful prefix is intentionally not rolled back.  Shutdown
+    // cleanup still owns it and removes all owned rules in reverse order.
+    netlink.add_hook = {};
+    rules.clear();
+
+    REQUIRE(netlink.deleted_specs.size() == 3);
+    CHECK(netlink.deleted_specs[0].priority == new_first.priority);
+    CHECK(netlink.deleted_specs[1].priority == old_second.priority);
+    CHECK(netlink.deleted_specs[2].priority == old_first.priority);
 }
 
 TEST_CASE("PolicyRuleManager adopts desired state without claiming ownership") {
