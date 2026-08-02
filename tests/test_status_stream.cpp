@@ -328,4 +328,63 @@ TEST_CASE("status stream publishes transient DNS probes without snapshot state")
     CHECK(queued(reconnected) == 0);
 }
 
+TEST_CASE("status stream caches and replays the latest list refresh task") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    (void)pop(subscription);
+
+    const nlohmann::json queued_task{
+        {"task_id", "list-refresh-7"},
+        {"state", "queued"},
+        {"completed", 0},
+        {"total", 3},
+    };
+    stream.publish_list_refresh(queued_task);
+
+    const auto frame = pop(subscription);
+    CHECK(frame.rfind("event: list_refresh\n", 0) == 0);
+    CHECK(frame.find("\"type\":\"list_refresh\"") != std::string::npos);
+    CHECK(frame.find("\"task_id\":\"list-refresh-7\"") !=
+          std::string::npos);
+
+    stream.unsubscribe(subscription);
+    auto reconnected = stream.subscribe();
+    REQUIRE(reconnected);
+    CHECK(pop(reconnected).rfind("event: snapshot\n", 0) == 0);
+    const auto replay = pop(reconnected);
+    CHECK(replay.rfind("event: list_refresh\n", 0) == 0);
+    CHECK(replay.find("\"state\":\"queued\"") != std::string::npos);
+    CHECK(queued(reconnected) == 0);
+}
+
+TEST_CASE("status stream suppresses identical list refresh snapshots") {
+    auto current = make_snapshot();
+    StatusStream stream([&] { return current; });
+    auto subscription = stream.subscribe();
+    REQUIRE(subscription);
+    (void)pop(subscription);
+
+    nlohmann::json task{
+        {"task_id", "list-refresh-8"},
+        {"state", "running"},
+        {"completed", 1},
+        {"total", 2},
+    };
+    stream.publish_list_refresh(task);
+    CHECK(pop(subscription).rfind("event: list_refresh\n", 0) == 0);
+
+    stream.publish_list_refresh(task);
+    CHECK(queued(subscription) == 0);
+
+    task["completed"] = 2;
+    task["state"] = "succeeded";
+    stream.publish_list_refresh(task);
+    const auto changed = pop(subscription);
+    CHECK(changed.find("\"completed\":2") != std::string::npos);
+    CHECK(changed.find("\"state\":\"succeeded\"") !=
+          std::string::npos);
+}
+
 #endif

@@ -1,4 +1,6 @@
 #include <cstdlib>
+#include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <cstring>
 #include <fstream>
@@ -6,6 +8,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 #include <csignal>
 #include <cerrno>
@@ -41,6 +45,63 @@
 #endif
 
 namespace {
+
+constexpr auto kListRefreshStatusPollInterval =
+    std::chrono::milliseconds{250};
+
+bool list_refresh_task_is_terminal(std::string_view state) {
+    return state == "succeeded" || state == "failed" ||
+           state == "cancelled";
+}
+
+nlohmann::json wait_for_list_refresh_task(
+    nlohmann::json response) {
+    const auto result = response.value(
+        "result", nlohmann::json::object());
+    const auto task_id = result.value("task_id", "");
+    if (!response.value("ok", false) || task_id.empty()) {
+        // Backward compatibility with daemons which still return the final
+        // download result from the initial request.
+        return response;
+    }
+
+    std::uint64_t poll_sequence = 0;
+    std::string state = result.value("state", "queued");
+    while (!list_refresh_task_is_terminal(state)) {
+        std::this_thread::sleep_for(kListRefreshStatusPollInterval);
+        response = keen_pbr3::ipc::request_control(
+            KEEN_PBR_CONTROL_SOCKET,
+            {{"protocol_version",
+              keen_pbr3::ipc::kControlProtocolVersion},
+             {"request_id",
+              "cli-download-status-" +
+                  std::to_string(++poll_sequence)},
+             {"operation", "download-status"},
+             {"task_id", task_id}});
+        if (!response.value("ok", false)) {
+            return response;
+        }
+        state = response.value(
+            "result", nlohmann::json::object())
+                    .value("state", "failed");
+    }
+    return response;
+}
+
+bool list_refresh_response_succeeded(
+    const nlohmann::json& response) {
+    if (!response.value("ok", false)) return false;
+    const auto result = response.value(
+        "result", nlohmann::json::object());
+    const auto state = result.value("state", "");
+    if (state.empty()) {
+        return true;
+    }
+    return state == "succeeded" &&
+           result.value("failed_lists",
+                        std::vector<std::string>{})
+               .empty();
+}
 
 struct CliOptions {
     std::string config_path{KEEN_PBR_DEFAULT_CONFIG_PATH};
@@ -344,14 +405,25 @@ int main(int argc, char* argv[]) {
                            : (opts.download_lists
                                   ? "download"
                                   : "test-routing"));
-            const auto response = keen_pbr3::ipc::request_control(
-                KEEN_PBR_CONTROL_SOCKET,
+            nlohmann::json request =
                 {{"protocol_version",
                   keen_pbr3::ipc::kControlProtocolVersion},
                  {"request_id", "cli-" + operation},
                  {"operation", operation},
                  {"reload", opts.download_reload},
-                 {"target", opts.test_routing_target}});
+                 {"target", opts.test_routing_target}};
+            if (opts.download_lists) {
+                // Protocol v1 keeps the legacy terminal response unless the
+                // caller explicitly advertises support for task polling.
+                request["task_response"] = true;
+            }
+            auto response = keen_pbr3::ipc::request_control(
+                KEEN_PBR_CONTROL_SOCKET,
+                request);
+            if (opts.download_lists) {
+                response = wait_for_list_refresh_task(
+                    std::move(response));
+            }
             if (opts.run_status) {
                 if (response.value("ok", false)) {
                     return keen_pbr3::run_status_command(response);
@@ -373,7 +445,9 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << response.dump() << '\n';
             }
-            return response.value("ok", false) ? 0 : 1;
+            return opts.download_lists
+                       ? (list_refresh_response_succeeded(response) ? 0 : 1)
+                       : (response.value("ok", false) ? 0 : 1);
         }
 
         keen_pbr3::CurlRuntime curl_runtime;

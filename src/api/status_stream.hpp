@@ -37,6 +37,10 @@ public:
     // behind until cpp-httplib observed the closed socket, exhausting the
     // small diagnostic broadcaster during reloads and quick rechecks.
     void publish_dns_probe(nlohmann::json state);
+    // List downloads are long-lived background operations. Keep their latest
+    // opaque task snapshot on the shared status stream so a reconnecting WebUI
+    // can immediately resume progress rendering without another poller.
+    void publish_list_refresh(nlohmann::json state);
     void close_all();
     bool has_subscribers();
 
@@ -49,6 +53,8 @@ private:
     nlohmann::json interfaces_ GUARDED_BY(mutex_);
     nlohmann::json connections_ GUARDED_BY(mutex_);
     bool connections_initialized_ GUARDED_BY(mutex_){false};
+    nlohmann::json list_refresh_ GUARDED_BY(mutex_);
+    bool list_refresh_initialized_ GUARDED_BY(mutex_){false};
     bool initialized_ GUARDED_BY(mutex_){false};
 };
 

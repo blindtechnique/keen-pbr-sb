@@ -21,6 +21,7 @@
 #include <mutex>
 #include <netinet/in.h>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -83,6 +84,68 @@ struct HttpResponse {
     int transient_status{503};
     std::string transient_reason{"Service Unavailable"};
     size_t fail_after_requests{0};
+};
+
+class StaticHttpTransport final : public HttpTransport {
+public:
+    HttpTransportResponse perform(const HttpTransportRequest& request) override {
+        last_request = request;
+        ++calls;
+        HttpTransportResponse response;
+        response.status_code = 200;
+        response.body = "example.com\n";
+        return response;
+    }
+
+    HttpTransportRequest last_request;
+    size_t calls{0};
+};
+
+class CancelThenSucceedHttpTransport final : public HttpTransport {
+public:
+    HttpTransportResponse perform(const HttpTransportRequest& request) override {
+        const auto call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call == 1) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            first_entered_ = true;
+            condition_.notify_all();
+            condition_.wait(lock, [&] { return release_first_; });
+            if (request.cancellation &&
+                request.cancellation->load(std::memory_order_acquire)) {
+                throw HttpTransportCancelled("injected cancellation");
+            }
+        }
+
+        HttpTransportResponse response;
+        response.status_code = 200;
+        response.body = "example.com\n";
+        return response;
+    }
+
+    bool wait_until_first_entered() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(
+            lock,
+            std::chrono::seconds(5),
+            [&] { return first_entered_; });
+    }
+
+    void release_first() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_first_ = true;
+        condition_.notify_all();
+    }
+
+    std::size_t calls() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<std::size_t> calls_{0};
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool first_entered_{false};
+    bool release_first_{false};
 };
 
 class TestHttpServer {
@@ -366,6 +429,191 @@ TEST_CASE("build_list_refresh_state_map exposes successful and failed refresh me
     CHECK(remote_it->second.last_detour ==
           std::optional<std::string>{"backup"});
     CHECK(refresh_state.find("local") == refresh_state.end());
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("cache cancellation does not persist refresh failure metadata") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    CacheManager cache_manager(
+        temp_dir, kDefaultMaxFileSizeBytes, transport);
+    cache_manager.ensure_dir();
+    auto cancellation = std::make_shared<std::atomic<bool>>(true);
+
+    const auto result = cache_manager.download(
+        "remote",
+        "https://example.test/remote.txt",
+        CacheDownloadOptions{0, std::nullopt, cancellation});
+
+    CHECK(result.cancelled());
+    CHECK(transport->calls == 0);
+    const auto metadata = cache_manager.load_metadata("remote");
+    CHECK_FALSE(metadata.last_refresh_attempt.has_value());
+    CHECK_FALSE(metadata.last_refresh_error.has_value());
+    CHECK_FALSE(cache_manager.has_cache("remote"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("list refresh reports bounded per-list progress and cancels distinctly") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+
+    Config config;
+    ListConfig first;
+    first.url = "https://example.test/first.txt";
+    ListConfig second;
+    second.url = "https://example.test/second.txt";
+    config.lists = std::map<std::string, ListConfig>{
+        {"first", first},
+        {"second", second},
+    };
+
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    std::vector<RemoteListRefreshProgress> progress;
+    RemoteListRefreshControl control;
+    control.cancellation = cancellation;
+    control.progress = [&](const RemoteListRefreshProgress& update) {
+        progress.push_back(update);
+        cancellation->store(true, std::memory_order_relaxed);
+    };
+
+    try {
+        (void)service.refresh_remote_lists(
+            config, OutboundMarkMap{}, nullptr, nullptr, nullptr, control);
+        FAIL("expected list refresh cancellation");
+    } catch (const RemoteListRefreshCancelled& error) {
+        CHECK(error.partial_result().changed_lists ==
+              std::vector<std::string>{"first"});
+    }
+    REQUIRE(progress.size() == 1);
+    CHECK(progress.front().completed == 1);
+    CHECK(progress.front().total == 2);
+    CHECK(progress.front().list_name == "first");
+    CHECK(progress.front().status == RemoteListRefreshProgressStatus::Updated);
+    CHECK(transport->calls == 1);
+    CHECK(service.cache_manager().has_cache("first"));
+    CHECK_FALSE(service.cache_manager().has_cache("second"));
+
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("cancellation racing cache commit preserves relevant changed lists") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<StaticHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+
+    Config config;
+    ListConfig remote;
+    remote.url = "https://example.test/remote.txt";
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+    const std::set<std::string> relevant{"remote"};
+    const std::set<std::string> dns_relevant{"remote"};
+
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    RemoteListRefreshControl control;
+    control.cancellation = cancellation;
+    control.cache_commit = [&](const std::function<void()>& commit) {
+        commit();
+        cancellation->store(true, std::memory_order_release);
+    };
+
+    try {
+        (void)service.refresh_remote_lists(
+            config,
+            OutboundMarkMap{},
+            &relevant,
+            nullptr,
+            &dns_relevant,
+            control);
+        FAIL("expected list refresh cancellation");
+    } catch (const RemoteListRefreshCancelled& error) {
+        CHECK(error.partial_result().changed_lists ==
+              std::vector<std::string>{"remote"});
+        CHECK(error.partial_result().relevant_changed_lists ==
+              std::vector<std::string>{"remote"});
+        CHECK(error.partial_result().dns_relevant_changed_lists ==
+              std::vector<std::string>{"remote"});
+    }
+
+    CHECK(service.cache_manager().has_cache("remote"));
+    std::filesystem::remove_all(temp_dir);
+}
+
+TEST_CASE("cancelling an IPC-owned flight does not cancel an independent refresh") {
+    const auto temp_dir = make_temp_dir();
+    auto transport = std::make_shared<CancelThenSucceedHttpTransport>();
+    ListService service(temp_dir, kDefaultMaxFileSizeBytes, transport);
+    service.ensure_dir();
+
+    Config config;
+    ListConfig remote;
+    remote.url = "https://example.test/remote.txt";
+    config.lists = std::map<std::string, ListConfig>{{"remote", remote}};
+
+    auto cancellation = std::make_shared<std::atomic<bool>>(false);
+    RemoteListRefreshControl cancellable_control;
+    cancellable_control.cancellation = cancellation;
+    std::exception_ptr cancellable_error;
+    std::exception_ptr independent_error;
+    std::optional<RemoteListsRefreshResult> independent_result;
+
+    std::thread cancellable_worker([&] {
+        try {
+            (void)service.refresh_remote_lists(
+                config,
+                OutboundMarkMap{},
+                nullptr,
+                nullptr,
+                nullptr,
+                cancellable_control);
+        } catch (...) {
+            cancellable_error = std::current_exception();
+        }
+    });
+    if (!transport->wait_until_first_entered()) {
+        cancellation->store(true, std::memory_order_release);
+        transport->release_first();
+        cancellable_worker.join();
+        FAIL("cancellable refresh did not reach the transport");
+    }
+
+    std::atomic<bool> independent_started{false};
+    std::thread independent_worker([&] {
+        independent_started.store(true, std::memory_order_release);
+        try {
+            independent_result = service.refresh_remote_lists(
+                config, OutboundMarkMap{});
+        } catch (...) {
+            independent_error = std::current_exception();
+        }
+    });
+    while (!independent_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    cancellation->store(true, std::memory_order_release);
+    transport->release_first();
+    cancellable_worker.join();
+    independent_worker.join();
+
+    REQUIRE(cancellable_error);
+    try {
+        std::rethrow_exception(cancellable_error);
+    } catch (const RemoteListRefreshCancelled&) {
+        CHECK(true);
+    } catch (...) {
+        FAIL("cancellable owner returned the wrong exception");
+    }
+    CHECK_FALSE(independent_error);
+    REQUIRE(independent_result);
+    CHECK(independent_result->changed_lists ==
+          std::vector<std::string>{"remote"});
+    CHECK(transport->calls() == 2);
 
     std::filesystem::remove_all(temp_dir);
 }

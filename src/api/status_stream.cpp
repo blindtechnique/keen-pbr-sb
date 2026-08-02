@@ -87,6 +87,11 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
                 "connections",
                 make_event_payload("connections", connections_)));
         }
+        if (list_refresh_initialized_) {
+            initial_frames.push_back(make_named_sse_frame(
+                "list_refresh",
+                make_event_payload("list_refresh", list_refresh_)));
+        }
         subscription = broadcaster_.subscribe(std::move(initial_frames));
     }
 
@@ -189,6 +194,20 @@ void StatusStream::publish_dns_probe(nlohmann::json state) {
     broadcaster_.publish(make_named_sse_frame(
         "dns_probe",
         make_event_payload("dns_probe", std::move(state))));
+}
+
+void StatusStream::publish_list_refresh(nlohmann::json state) {
+    std::string frame;
+    {
+        KPBR_LOCK_GUARD(mutex_);
+        if (list_refresh_initialized_ && state == list_refresh_) return;
+        list_refresh_ = std::move(state);
+        list_refresh_initialized_ = true;
+        frame = make_named_sse_frame(
+            "list_refresh",
+            make_event_payload("list_refresh", list_refresh_));
+    }
+    broadcaster_.publish(frame);
 }
 
 void StatusStream::close_all() {

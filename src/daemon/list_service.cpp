@@ -2,8 +2,10 @@
 
 #include "../log/logger.hpp"
 
+#include <chrono>
 #include <sstream>
 #include <tuple>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -43,6 +45,50 @@ std::vector<std::optional<std::string>> list_download_detours(
         detours.emplace_back(std::nullopt);
     }
     return detours;
+}
+
+bool cancellation_requested(const RemoteListRefreshControl& control) {
+    return control.cancellation &&
+           control.cancellation->load(std::memory_order_relaxed);
+}
+
+void throw_if_cancelled(const RemoteListRefreshControl& control) {
+    if (cancellation_requested(control)) {
+        throw RemoteListRefreshCancelled();
+    }
+}
+
+size_t remote_list_target_count(const Config& config,
+                                const std::set<std::string>* target_lists) {
+    size_t total = 0;
+    for (const auto& [name, list_config] : config_lists(config)) {
+        if (list_config.url.has_value() &&
+            (!target_lists || target_lists->count(name) > 0)) {
+            ++total;
+        }
+    }
+    return total;
+}
+
+void report_progress(const RemoteListRefreshControl& control,
+                     size_t completed,
+                     size_t total,
+                     const std::string& list_name,
+                     RemoteListRefreshProgressStatus status) noexcept {
+    if (!control.progress) {
+        return;
+    }
+    try {
+        control.progress(RemoteListRefreshProgress{
+            completed, total, list_name, status});
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Remote list refresh progress callback failed: {}",
+            error.what());
+    } catch (...) {
+        Logger::instance().warn(
+            "Remote list refresh progress callback failed with an unknown error");
+    }
 }
 } // namespace
 
@@ -178,8 +224,9 @@ std::map<std::string, api::ListRefreshStateValue> build_list_refresh_state_map(
 }
 
 ListService::ListService(const std::filesystem::path& cache_dir,
-                         size_t max_file_size_bytes)
-    : cache_manager_(cache_dir, max_file_size_bytes) {}
+                         size_t max_file_size_bytes,
+                         std::shared_ptr<HttpTransport> transport)
+    : cache_manager_(cache_dir, max_file_size_bytes, std::move(transport)) {}
 
 void ListService::ensure_dir() {
     KPBR_LOCK_GUARD(mutex_);
@@ -194,18 +241,22 @@ RemoteListsRefreshResult ListService::download_uncached(
     const Config& config,
     const OutboundMarkMap& outbound_marks,
     const std::set<std::string>* relevant_lists,
-    const std::set<std::string>* dns_relevant_lists) {
+    const std::set<std::string>* dns_relevant_lists,
+    const RemoteListRefreshControl& control) {
     return download_remote_lists(
-        config, outbound_marks, true, relevant_lists, nullptr, dns_relevant_lists);
+        config, outbound_marks, true, relevant_lists, nullptr,
+        dns_relevant_lists, control);
 }
 
 RemoteListsRefreshResult ListService::refresh_remote_lists(const Config& config,
                                                            const OutboundMarkMap& outbound_marks,
                                                            const std::set<std::string>* relevant_lists,
                                                            const std::set<std::string>* target_lists,
-                                                           const std::set<std::string>* dns_relevant_lists) {
+                                                           const std::set<std::string>* dns_relevant_lists,
+                                                           const RemoteListRefreshControl& control) {
     return download_remote_lists(
-        config, outbound_marks, false, relevant_lists, target_lists, dns_relevant_lists);
+        config, outbound_marks, false, relevant_lists, target_lists,
+        dns_relevant_lists, control);
 }
 
 RemoteListsRefreshResult ListService::download_remote_lists(const Config& config,
@@ -213,19 +264,32 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                                                             bool only_uncached,
                                                             const std::set<std::string>* relevant_lists,
                                                             const std::set<std::string>* target_lists,
-                                                            const std::set<std::string>* dns_relevant_lists) {
+                                                            const std::set<std::string>* dns_relevant_lists,
+                                                            const RemoteListRefreshControl& control) {
+    throw_if_cancelled(control);
     // All entry points converge here. Matching callers join one flight and
     // receive its result; different scopes wait so deterministic cache temp
     // paths are never shared by API, scheduled, and startup refreshes.
-    const std::string flight_key =
+    std::string flight_key =
         refresh_flight_key(config, outbound_marks, only_uncached, relevant_lists, target_lists,
                            dns_relevant_lists);
+    // A cancellable task owns its flight. Otherwise cancelling an IPC task
+    // would propagate the owner's exception into an unrelated API/startup
+    // caller that happened to request the same scope.
+    if (control.cancellation) {
+        flight_key += "|cancellable";
+    }
     std::shared_ptr<RefreshFlight> flight;
     bool owner = false;
     {
         std::unique_lock<std::mutex> lock(refresh_mutex_);
         while (refresh_flight_ && refresh_flight_->key != flight_key) {
-            refresh_available_.wait(lock);
+            if (control.cancellation) {
+                refresh_available_.wait_for(lock, std::chrono::milliseconds(50));
+                throw_if_cancelled(control);
+            } else {
+                refresh_available_.wait(lock);
+            }
         }
         if (refresh_flight_) {
             flight = refresh_flight_;
@@ -239,12 +303,21 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
 
     if (!owner) {
         std::unique_lock<std::mutex> lock(refresh_mutex_);
-        flight->completed.wait(lock, [&flight] { return flight->done; });
+        while (!flight->done) {
+            if (control.cancellation) {
+                flight->completed.wait_for(lock, std::chrono::milliseconds(50));
+                throw_if_cancelled(control);
+            } else {
+                flight->completed.wait(lock);
+            }
+        }
         if (flight->error)
             std::rethrow_exception(flight->error);
         return flight->result;
     }
     RemoteListsRefreshResult result;
+    const size_t progress_total = remote_list_target_count(config, target_lists);
+    size_t progress_completed = 0;
     try {
         for (const auto& [name, list_cfg] : config_lists(config)) {
             if (!list_cfg.url.has_value()) {
@@ -253,9 +326,12 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
             if (target_lists && target_lists->count(name) == 0) {
                 continue;
             }
+            throw_if_cancelled(control);
             if (only_uncached &&
                 cache_manager_.has_current_cache(name, *list_cfg.url)) {
                 result.cached_lists.push_back(name);
+                report_progress(control, ++progress_completed, progress_total,
+                                name, RemoteListRefreshProgressStatus::Cached);
                 continue;
             }
 
@@ -265,6 +341,7 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
             bool attempted = false;
             for (const auto& detour :
                  list_download_detours(config, list_cfg)) {
+                throw_if_cancelled(control);
                 uint32_t fwmark = 0;
                 if (detour.has_value()) {
                     const auto mark_it = outbound_marks.find(*detour);
@@ -284,10 +361,19 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 download_result = cache_manager_.download(
                     name,
                     *list_cfg.url,
-                    CacheDownloadOptions{fwmark, detour});
+                    CacheDownloadOptions{
+                        fwmark,
+                        detour,
+                        control.cancellation,
+                        control.cache_commit});
+                if (download_result.cancelled()) {
+                    throw RemoteListRefreshCancelled();
+                }
                 if (!download_result.failed()) {
                     break;
                 }
+
+                throw_if_cancelled(control);
 
                 Logger::instance().warn(
                     "List '{}': refresh through {} failed: {}",
@@ -300,8 +386,8 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                     break;
                 }
             }
-
             if (!attempted || download_result.failed()) {
+                throw_if_cancelled(control);
                 const std::string failure_message =
                     !attempted
                         ? std::string(
@@ -327,6 +413,9 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                         name, *list_cfg.url)) {
                     result.cached_lists.push_back(name);
                     result.legacy_cached_lists.push_back(name);
+                    report_progress(
+                        control, ++progress_completed, progress_total, name,
+                        RemoteListRefreshProgressStatus::Cached);
                     continue;
                 }
                 result.failed_lists.push_back(name);
@@ -334,11 +423,18 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                                         name,
                                         *list_cfg.url,
                                         failure_message);
+                report_progress(control, ++progress_completed, progress_total,
+                                name, RemoteListRefreshProgressStatus::Failed);
+                throw_if_cancelled(control);
                 continue;
             }
 
             if (!download_result.updated()) {
                 result.unchanged_lists.push_back(name);
+                report_progress(
+                    control, ++progress_completed, progress_total, name,
+                    RemoteListRefreshProgressStatus::Unchanged);
+                throw_if_cancelled(control);
                 continue;
             }
 
@@ -355,6 +451,12 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
             if (dns_relevant_lists && dns_relevant_lists->count(name) > 0) {
                 result.dns_relevant_changed_lists.push_back(name);
             }
+            report_progress(control, ++progress_completed, progress_total,
+                            name, RemoteListRefreshProgressStatus::Updated);
+            // The cache body and metadata have already been committed. Record
+            // that fact before honoring a cancellation which raced the short
+            // commit window, so the daemon can reconcile the active runtime.
+            throw_if_cancelled(control);
         }
         if (!result.legacy_cached_lists.empty()) {
             Logger::instance().warn(
@@ -362,6 +464,17 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 "same-source cache from an older decoder revision: {}",
                 format_list_names(result.legacy_cached_lists));
         }
+    } catch (const RemoteListRefreshCancelled&) {
+        auto cancellation =
+            std::make_exception_ptr(RemoteListRefreshCancelled(result));
+        std::unique_lock<std::mutex> lock(refresh_mutex_);
+        flight->error = cancellation;
+        flight->done = true;
+        refresh_flight_.reset();
+        lock.unlock();
+        flight->completed.notify_all();
+        refresh_available_.notify_all();
+        std::rethrow_exception(cancellation);
     } catch (...) {
         std::unique_lock<std::mutex> lock(refresh_mutex_);
         flight->error = std::current_exception();

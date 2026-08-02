@@ -443,18 +443,16 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         const std::set<std::string> dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
         const std::set<std::string> target_lists(target_selection.list_names.begin(),
                                                  target_selection.list_names.end());
-        RemoteListsRefreshResult refresh_result;
-        {
-            KPBR_SHARED_UNIQUE_LOCK(
-                cache_write,
-                resolver_cache_snapshot_mutex_);
-            refresh_result = list_service_.refresh_remote_lists(
+        RemoteListRefreshControl control;
+        control.cache_commit = make_guarded_cache_commit_callback();
+        const RemoteListsRefreshResult refresh_result =
+            list_service_.refresh_remote_lists(
                 config_snapshot,
                 marks_snapshot,
                 &relevant_lists,
                 requested_name ? &target_lists : nullptr,
-                &dns_relevant_lists);
-        }
+                &dns_relevant_lists,
+                control);
 
         if (!refresh_result.changed_lists.empty()) {
             Logger::instance().info("Lists refresh (api): updated list(s): {}",

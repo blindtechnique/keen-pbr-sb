@@ -1788,6 +1788,12 @@ void Daemon::schedule_startup_firewall_retry(
 }
 
 void Daemon::schedule_lists_autoupdate() {
+    // This method is also called after a post-apply refresh completes. Replace
+    // the previous one-shot instead of accumulating duplicate timers.
+    if (lists_autoupdate_task_id_ >= 0) {
+        scheduler_->cancel(lists_autoupdate_task_id_);
+        lists_autoupdate_task_id_ = -1;
+    }
     if (!config_.lists_autoupdate) return;
     if (!config_.lists_autoupdate->enabled.value_or(false)) return;
     const auto& expr = config_.lists_autoupdate->cron.value_or("");
@@ -1804,114 +1810,211 @@ void Daemon::schedule_lists_autoupdate() {
     Logger::instance().info("Lists autoupdate scheduled (next: ~{}s)", delay.count());
 }
 
-ListsRefreshExecutionResult Daemon::execute_remote_list_refresh(
-    const std::set<std::string>* target_lists,
-    std::string_view source) {
-    auto& log = Logger::instance();
-    ListsRefreshExecutionResult result;
-    const auto relevant_lists = collect_relevant_list_names(config_);
-    const auto dns_relevant_lists = collect_dns_relevant_list_names(config_);
-    {
+CacheCommitCallback Daemon::make_guarded_cache_commit_callback() {
+    return [this](const std::function<void()>& commit) {
         KPBR_SHARED_UNIQUE_LOCK(
-            cache_write,
+            cache_commit,
             resolver_cache_snapshot_mutex_);
-        result.refresh_result =
-            list_service_.refresh_remote_lists(
-                config_,
-                outbound_marks_,
-                &relevant_lists,
-                target_lists,
-                &dns_relevant_lists);
-    }
-
-    if (!result.refresh_result.changed_lists.empty()) {
-        log.info("Lists refresh ({}): updated list(s): {}", source,
-                 format_list_names(result.refresh_result.changed_lists));
-    } else if (!result.refresh_result.failed_lists.empty()) {
-        log.warn("Lists refresh ({}): failed list(s): {}", source,
-                 format_list_names(result.refresh_result.failed_lists));
-    } else {
-        log.info("Lists refresh ({}): all checked list(s) are up-to-date.", source);
-    }
-
-    if (should_reload_runtime_after_list_refresh(routing_runtime_active_, result.refresh_result)) {
-        log.info("Lists refresh ({}): relevant list(s) changed ({}), reloading runtime",
-                 source,
-                 format_list_names(result.refresh_result.relevant_changed_lists));
-        bool rolled_back = false;
-        apply_config_with_rollback(config_, rolled_back, false);
-        result.reloaded = true;
-        return result;
-    }
-
-    if (result.refresh_result.any_relevant_changed()) {
-        log.info("Lists refresh: relevant list(s) changed ({}), but runtime is stopped",
-                 format_list_names(result.refresh_result.relevant_changed_lists));
-    } else if (result.refresh_result.any_changed()) {
-        log.info("Lists refresh: updated list(s) did not affect runtime config: {}",
-                 format_list_names(result.refresh_result.changed_lists));
-    } else if (result.refresh_result.any_failed()) {
-        log.warn("Lists refresh: failed to refresh list(s): {}",
-                 format_list_names(result.refresh_result.failed_lists));
-    } else {
-        log.info("Lists refresh: no list updates");
-    }
-
-    return result;
+        commit();
+    };
 }
 
-void Daemon::refresh_lists_and_maybe_reload() {
-    auto& log = Logger::instance();
-    log.info("Lists autoupdate: checking for updated lists");
-
-    try {
-        const auto result = execute_remote_list_refresh(nullptr, "autoupdate");
-        if (!result.reloaded) {
-            schedule_lists_autoupdate();
-        }
-    } catch (const std::exception& e) {
-        log.error("Lists autoupdate failed: {}", e.what());
-        schedule_lists_autoupdate();
-    }
-}
-
-void Daemon::commit_lists_refresh_async_result(
+void Daemon::commit_remote_list_refresh_task_result(
+    std::string task_id,
+    ListRefreshCancellationToken cancellation,
     Config config_snapshot,
     bool runtime_active_snapshot,
     std::uint64_t generation,
+    bool reload,
     std::optional<RemoteListsRefreshResult> refresh_result,
     std::string error,
     std::string source,
     TraceId trace_id) {
-    post_control_task(
+    const bool reschedule = source == "autoupdate" || source == "post-apply";
+    const std::string fallback_task_id = task_id;
+    const ListRefreshCancellationToken fallback_cancellation = cancellation;
+    auto completion_result =
+        std::make_shared<std::optional<RemoteListsRefreshResult>>(
+            std::move(refresh_result));
+    const bool posted = post_control_task(
         [this,
+         task_id = std::move(task_id),
+         cancellation = std::move(cancellation),
          config_snapshot = std::move(config_snapshot),
          runtime_active_snapshot,
          generation,
-         refresh_result = std::move(refresh_result),
+         reload,
+         completion_result,
          error = std::move(error),
          source = std::move(source),
-         trace_id]() mutable {
+         trace_id,
+         reschedule]() mutable {
             ScopedTraceContext trace_scope_inner(trace_id);
-            remote_list_refresh_inflight_.store(false, std::memory_order_release);
+            auto& refresh_result = *completion_result;
+
+            const auto schedule_next = [this, reschedule]() {
+                if (reschedule) schedule_lists_autoupdate();
+            };
+            const auto finish_cancelled = [&]() {
+                (void)list_refresh_tasks_.finish_cancelled(
+                    task_id,
+                    "list refresh cancelled",
+                    refresh_result.value_or(RemoteListsRefreshResult{}));
+                schedule_next();
+            };
+            const auto finish_failed = [&](std::string message) {
+                (void)list_refresh_tasks_.fail(
+                    task_id,
+                    std::move(message),
+                    refresh_result.value_or(RemoteListsRefreshResult{}));
+                schedule_next();
+            };
+            const auto reconcile_committed_cache = [this, reload, &source](
+                RemoteListsRefreshResult& committed,
+                bool& reloaded) -> std::optional<std::string> {
+                if (!reload || !routing_runtime_active_ ||
+                    !committed.any_changed()) {
+                    return std::nullopt;
+                }
+                try {
+                    // Cache writes are already durable enough for the next
+                    // startup and cannot be undone here. Re-apply the current
+                    // configuration (never the worker's stale snapshot) so a
+                    // subsequent HTTP 304 cannot leave live routing/DNS on
+                    // the previous list contents.
+                    const Config current_config = config_;
+                    bool rolled_back = false;
+                    apply_config_with_rollback(
+                        current_config, rolled_back, false);
+                    reloaded = true;
+                    Logger::instance().info(
+                        "Lists refresh ({}): reconciled committed cache "
+                        "against the current runtime generation",
+                        source);
+                    return std::nullopt;
+                } catch (const std::exception& reconcile_error) {
+                    return std::string(
+                               "failed to reconcile committed list cache: ") +
+                           reconcile_error.what();
+                }
+            };
+
+            // A callback admitted immediately before shutdown may still be in
+            // the final control-loop drain. Cache files are already safe for
+            // the next startup, but mutating DNS/firewall/runtime here would
+            // race teardown and could enqueue fresh network work.
+            if (finish_list_refresh_if_shutting_down(
+                    accept_posted_control_tasks_.load(
+                        std::memory_order_acquire),
+                    list_refresh_tasks_,
+                    task_id,
+                    refresh_result)) {
+                return;
+            }
 
             if (generation != runtime_generation_.load(std::memory_order_acquire)) {
                 Logger::instance().trace("lists_refresh_skip",
                                          "source={} generation={} reason=stale_runtime",
                                          source,
                                          generation);
-                schedule_lists_autoupdate();
+                if (!refresh_result || !refresh_result->any_changed()) {
+                    if (cancellation.cancellation_requested()) {
+                        finish_cancelled();
+                    } else {
+                        finish_failed(
+                            "runtime changed while lists were being refreshed");
+                    }
+                    return;
+                }
+
+                RemoteListsRefreshResult committed =
+                    std::move(*refresh_result);
+                refresh_result.reset();
+                bool reloaded = false;
+                if (const auto reconcile_error =
+                        reconcile_committed_cache(committed, reloaded)) {
+                    (void)list_refresh_tasks_.fail(
+                        task_id,
+                        *reconcile_error,
+                        std::move(committed),
+                        reloaded);
+                } else if (cancellation.cancellation_requested()) {
+                    (void)list_refresh_tasks_.finish_cancelled(
+                        task_id,
+                        "list refresh cancelled after committing completed lists",
+                        std::move(committed),
+                        reloaded);
+                } else if (!error.empty() || committed.any_failed()) {
+                    const std::string message = !error.empty()
+                        ? error
+                        : "failed to refresh list(s): " +
+                              format_list_names(committed.failed_lists);
+                    (void)list_refresh_tasks_.fail(
+                        task_id,
+                        message,
+                        std::move(committed),
+                        reloaded);
+                } else {
+                    (void)list_refresh_tasks_.succeed(
+                        task_id, std::move(committed), reloaded);
+                }
+                schedule_next();
                 return;
             }
 
-            if (!error.empty()) {
-                Logger::instance().error("Lists refresh ({}) failed: {}", source, error);
-                schedule_lists_autoupdate();
+            if (cancellation.cancellation_requested() &&
+                (!refresh_result || !refresh_result->any_changed())) {
+                finish_cancelled();
+                return;
+            }
+
+            if (!refresh_result) {
+                if (cancellation.cancellation_requested()) {
+                    finish_cancelled();
+                    return;
+                }
+                const std::string message = error.empty()
+                    ? "list refresh completed without a result"
+                    : error;
+                Logger::instance().error(
+                    "Lists refresh ({}) failed: {}", source, message);
+                finish_failed(message);
+                return;
+            }
+            if (!error.empty() &&
+                !cancellation.cancellation_requested()) {
+                Logger::instance().error(
+                    "Lists refresh ({}) failed: {}", source, error);
+                finish_failed(error);
+                return;
+            }
+
+            if (cancellation.cancellation_requested()) {
+                RemoteListsRefreshResult committed =
+                    std::move(*refresh_result);
+                refresh_result.reset();
+                bool reloaded = false;
+                if (const auto reconcile_error =
+                        reconcile_committed_cache(committed, reloaded)) {
+                    (void)list_refresh_tasks_.fail(
+                        task_id,
+                        *reconcile_error,
+                        std::move(committed),
+                        reloaded);
+                } else {
+                    (void)list_refresh_tasks_.finish_cancelled(
+                        task_id,
+                        "list refresh cancelled after committing completed lists",
+                        std::move(committed),
+                        reloaded);
+                }
+                schedule_next();
                 return;
             }
 
             ListsRefreshExecutionResult result;
             result.refresh_result = std::move(*refresh_result);
+            refresh_result.reset();
 
             if (!result.refresh_result.changed_lists.empty()) {
                 Logger::instance().info("Lists refresh ({}): updated list(s): {}",
@@ -1927,27 +2030,62 @@ void Daemon::commit_lists_refresh_async_result(
                     source);
             }
 
-            if (should_reload_runtime_after_list_refresh(runtime_active_snapshot,
-                                                        result.refresh_result)) {
+            if (reload && should_reload_runtime_after_list_refresh(
+                              runtime_active_snapshot,
+                              result.refresh_result)) {
                 Logger::instance().info(
                     "Lists refresh ({}): relevant list(s) changed ({}), reloading runtime",
                     source,
                     format_list_names(result.refresh_result.relevant_changed_lists));
+                if (!list_refresh_tasks_.mark_applying(task_id)) {
+                    if (cancellation.cancellation_requested()) {
+                        if (const auto reconcile_error =
+                                reconcile_committed_cache(
+                                    result.refresh_result,
+                                    result.reloaded)) {
+                            (void)list_refresh_tasks_.fail(
+                                task_id,
+                                *reconcile_error,
+                                std::move(result.refresh_result),
+                                result.reloaded);
+                        } else {
+                            (void)list_refresh_tasks_.finish_cancelled(
+                                task_id,
+                                "list refresh cancelled after committing completed lists",
+                                std::move(result.refresh_result),
+                                result.reloaded);
+                        }
+                    } else {
+                        (void)list_refresh_tasks_.fail(
+                            task_id,
+                            "list refresh task left the running state before apply",
+                            std::move(result.refresh_result),
+                            result.reloaded);
+                    }
+                    schedule_next();
+                    return;
+                }
                 try {
                     bool rolled_back = false;
-                    apply_config_with_rollback(
-                        config_snapshot, rolled_back, false);
+                    apply_config_with_rollback(config_snapshot, rolled_back, false);
                     result.reloaded = true;
                 } catch (const std::exception& e) {
-                    Logger::instance().error("Lists refresh ({}) reload failed: {}",
-                                             source,
-                                             e.what());
-                    schedule_lists_autoupdate();
+                    const std::string message = e.what();
+                    Logger::instance().error(
+                        "Lists refresh ({}) reload failed: {}", source, message);
+                    (void)list_refresh_tasks_.fail(
+                        task_id,
+                        message,
+                        std::move(result.refresh_result),
+                        result.reloaded);
+                    schedule_next();
                     return;
                 }
             } else if (result.refresh_result.any_relevant_changed()) {
                 Logger::instance().info(
-                    "Lists refresh: relevant list(s) changed ({}), but runtime is stopped",
+                    reload
+                        ? "Lists refresh: relevant list(s) changed ({}), but runtime is stopped"
+                        : "Lists refresh: relevant list(s) changed ({}); runtime reload was not requested",
                     format_list_names(result.refresh_result.relevant_changed_lists));
             } else if (result.refresh_result.any_changed()) {
                 Logger::instance().info(
@@ -1960,28 +2098,73 @@ void Daemon::commit_lists_refresh_async_result(
                 Logger::instance().info("Lists refresh: no list updates");
             }
 
-            if (!result.reloaded) {
-                schedule_lists_autoupdate();
+            if (cancellation.cancellation_requested()) {
+                (void)list_refresh_tasks_.finish_cancelled(
+                    task_id,
+                    "list refresh cancelled after committing completed lists",
+                    std::move(result.refresh_result),
+                    result.reloaded);
+            } else if (result.refresh_result.any_failed()) {
+                const std::string message =
+                    "failed to refresh list(s): " +
+                    format_list_names(result.refresh_result.failed_lists);
+                (void)list_refresh_tasks_.fail(
+                    task_id,
+                    message,
+                    std::move(result.refresh_result),
+                    result.reloaded);
+            } else {
+                (void)list_refresh_tasks_.succeed(
+                    task_id,
+                    std::move(result.refresh_result),
+                    result.reloaded);
             }
+            schedule_next();
         },
         "lists-refresh-commit");
+
+    if (!posted) {
+        const auto partial =
+            completion_result->value_or(RemoteListsRefreshResult{});
+        if (fallback_cancellation.cancellation_requested()) {
+            (void)list_refresh_tasks_.finish_cancelled(
+                fallback_task_id, "daemon is shutting down", partial);
+        } else {
+            (void)list_refresh_tasks_.fail(
+                fallback_task_id,
+                "list refresh result could not be committed",
+                partial);
+        }
+    }
 }
 
-void Daemon::refresh_lists_and_maybe_reload_async(std::string source) {
+RemoteListRefreshTaskStartResult Daemon::start_remote_list_refresh_task(
+    bool reload,
+    std::string source) {
     auto& log = Logger::instance();
-    log.info("Lists refresh ({}): checking for updates", source);
 
-    bool expected = false;
-    if (!remote_list_refresh_inflight_.compare_exchange_strong(expected,
-                                                               true,
-                                                               std::memory_order_acq_rel)) {
-        Logger::instance().trace("lists_refresh_skip",
-                                 "source={} reason=inflight",
-                                 source);
-        return;
+    if (!accept_posted_control_tasks_.load(std::memory_order_acquire)) {
+        return {false, {}, "daemon is shutting down"};
     }
 
     const Config config_snapshot = config_;
+    const auto target_selection =
+        select_remote_list_targets(config_snapshot, std::nullopt);
+    if (!target_selection.ok()) {
+        return {false, {}, "failed to select remote lists"};
+    }
+
+    auto started = list_refresh_tasks_.begin(target_selection.list_names.size());
+    if (!started.accepted) {
+        Logger::instance().trace("lists_refresh_skip",
+                                 "source={} reason=inflight",
+                                 source);
+        return {false, std::move(started.task), "busy"};
+    }
+
+    log.info("Lists refresh ({}): checking for updates", source);
+    const std::string task_id = started.task.id;
+    const ListRefreshCancellationToken cancellation = started.cancellation;
     const OutboundMarkMap marks_snapshot = outbound_marks_;
     const bool runtime_active_snapshot = routing_runtime_active_;
     const auto relevant_lists = collect_relevant_list_names(config_snapshot);
@@ -1993,53 +2176,90 @@ void Daemon::refresh_lists_and_maybe_reload_async(std::string source) {
     const bool enqueued = blocking_executor_.try_post(
         executor_label,
         [this,
+         task_id,
+         cancellation,
          config_snapshot,
          marks_snapshot,
          runtime_active_snapshot,
          relevant_lists,
          dns_relevant_lists,
          generation,
+         reload,
          source,
          trace_id]() mutable {
             ScopedTraceContext trace_scope(trace_id);
             std::optional<RemoteListsRefreshResult> refresh_result;
             std::string error;
 
+            if (!list_refresh_tasks_.mark_running(task_id)) {
+                return;
+            }
             Logger::instance().trace("lists_refresh_start",
-                                     "source={} generation={}",
+                                     "source={} generation={} task_id={}",
                                      source,
-                                     generation);
+                                     generation,
+                                     task_id);
             try {
-                {
-                    KPBR_SHARED_UNIQUE_LOCK(
-                        cache_write,
-                        resolver_cache_snapshot_mutex_);
-                    refresh_result = list_service_.refresh_remote_lists(
-                        config_snapshot,
-                        marks_snapshot,
-                        &relevant_lists,
-                        nullptr,
-                        &dns_relevant_lists);
-                }
+                RemoteListRefreshControl control;
+                control.cancellation = cancellation.shared_flag();
+                control.progress = [this, task_id](
+                                       const RemoteListRefreshProgress& progress) {
+                    std::optional<std::string> current;
+                    if (!progress.list_name.empty()) {
+                        current = progress.list_name;
+                    }
+                    (void)list_refresh_tasks_.update_progress(
+                        task_id,
+                        progress.completed,
+                        std::move(current));
+                };
+                control.cache_commit =
+                    make_guarded_cache_commit_callback();
+                refresh_result = list_service_.refresh_remote_lists(
+                    config_snapshot,
+                    marks_snapshot,
+                    &relevant_lists,
+                    nullptr,
+                    &dns_relevant_lists,
+                    control);
+            } catch (const RemoteListRefreshCancelled& e) {
+                refresh_result = e.partial_result();
+                error = e.what();
             } catch (const std::exception& e) {
                 error = e.what();
             }
 
-            commit_lists_refresh_async_result(config_snapshot,
-                                              runtime_active_snapshot,
-                                              generation,
-                                              std::move(refresh_result),
-                                              std::move(error),
-                                              std::move(source),
-                                              trace_id);
+            commit_remote_list_refresh_task_result(
+                task_id,
+                cancellation,
+                config_snapshot,
+                runtime_active_snapshot,
+                generation,
+                reload,
+                std::move(refresh_result),
+                std::move(error),
+                std::move(source),
+                trace_id);
         },
         trace_id);
 
     if (!enqueued) {
-        remote_list_refresh_inflight_.store(false, std::memory_order_release);
+        const std::string error = "list refresh executor is unavailable";
+        (void)list_refresh_tasks_.fail(task_id, error);
         Logger::instance().trace("lists_refresh_skip",
                                  "source={} reason=executor_unavailable",
                                  source);
+        const auto failed = list_refresh_tasks_.find(task_id);
+        return {false, failed.value_or(started.task), error};
+    }
+
+    return {true, std::move(started.task), {}};
+}
+
+void Daemon::refresh_lists_and_maybe_reload_async(std::string source) {
+    const bool reschedule = source == "autoupdate" || source == "post-apply";
+    const auto start = start_remote_list_refresh_task(true, source);
+    if (!start.accepted && reschedule) {
         schedule_lists_autoupdate();
     }
 }
@@ -2069,13 +2289,15 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
             snapshot_internal_vpn_service_verified_includes_lkg());
 
     if (list_mode != RemoteListPreparationMode::None) {
-        KPBR_SHARED_UNIQUE_LOCK(
-            cache_write,
-            resolver_cache_snapshot_mutex_);
+        RemoteListRefreshControl control;
+        control.cache_commit = make_guarded_cache_commit_callback();
         if (list_mode == RemoteListPreparationMode::MissingOrInvalid) {
             const auto result = list_service_.download_uncached(
                 prepared.config,
-                prepared.outbound_marks);
+                prepared.outbound_marks,
+                nullptr,
+                nullptr,
+                control);
             std::vector<std::string> unavailable_lists;
             for (const auto& name : result.failed_lists) {
                 if (!prepared.config.lists) {
@@ -2098,7 +2320,11 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
         } else {
             (void)list_service_.refresh_remote_lists(
                 prepared.config,
-                prepared.outbound_marks);
+                prepared.outbound_marks,
+                nullptr,
+                nullptr,
+                nullptr,
+                control);
         }
         prepared.remote_lists_refreshed = true;
     }

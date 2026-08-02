@@ -31,6 +31,7 @@
 #include "../routing/policy_rule.hpp"
 #include "../routing/route_table.hpp"
 #include "../runtime/lifecycle_operation.hpp"
+#include "../runtime/list_refresh_task.hpp"
 #include "../runtime/conntrack_manager.hpp"
 #include "../runtime/idle_stall_detector.hpp"
 #include "../runtime/udp_call_affinity.hpp"
@@ -126,6 +127,12 @@ struct DaemonOptions {
 struct ListsRefreshExecutionResult {
     RemoteListsRefreshResult refresh_result;
     bool reloaded{false};
+};
+
+struct RemoteListRefreshTaskStartResult {
+    bool accepted{false};
+    ListRefreshTaskSnapshot task;
+    std::string error;
 };
 
 enum class InternalVpnRuntimeResolutionState : std::uint8_t {
@@ -564,18 +571,23 @@ private:
     void schedule_catalog_refresh();
     // Runs a probe round immediately, for the manual refresh button.
     void probe_interfaces_now();
-    ListsRefreshExecutionResult execute_remote_list_refresh(
-        const std::set<std::string>* target_lists = nullptr,
-        std::string_view source = "service");
-    void refresh_lists_and_maybe_reload();
-    void refresh_lists_and_maybe_reload_async(std::string source = "autoupdate");
-    void commit_lists_refresh_async_result(Config config_snapshot,
-                                           bool runtime_active_snapshot,
-                                           std::uint64_t generation,
-                                           std::optional<RemoteListsRefreshResult> refresh_result,
-                                           std::string error,
-                                           std::string source,
-                                           TraceId trace_id);
+    CacheCommitCallback make_guarded_cache_commit_callback();
+    void refresh_lists_and_maybe_reload_async(
+        std::string source = "autoupdate");
+    RemoteListRefreshTaskStartResult start_remote_list_refresh_task(
+        bool reload,
+        std::string source);
+    void commit_remote_list_refresh_task_result(
+        std::string task_id,
+        ListRefreshCancellationToken cancellation,
+        Config config_snapshot,
+        bool runtime_active_snapshot,
+        std::uint64_t generation,
+        bool reload,
+        std::optional<RemoteListsRefreshResult> refresh_result,
+        std::string error,
+        std::string source,
+        TraceId trace_id);
 
     // PID file management
     void write_pid_file();
@@ -738,6 +750,7 @@ private:
     RuntimeStateStore runtime_state_store_;
     LifecycleOperationStore lifecycle_operation_store_;
     LifecycleOperationCoordinator lifecycle_operations_{lifecycle_operation_store_};
+    ListRefreshTaskCoordinator list_refresh_tasks_;
     RuntimeStateMachine runtime_state_machine_;
 
     // Event-loop-owned controller state
@@ -799,8 +812,6 @@ private:
     BlockingExecutor resolver_stream_executor_{1, 16};
     BlockingExecutor resolver_io_executor_{1, 32};
     std::atomic<std::uint64_t> runtime_generation_{1};
-    std::atomic<bool> remote_list_refresh_inflight_{false};
-    std::atomic<bool> ipc_mutation_inflight_{false};
     std::atomic<bool> ipc_resolver_hook_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;

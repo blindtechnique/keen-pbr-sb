@@ -213,6 +213,40 @@ std::int64_t steady_duration_ms(std::chrono::steady_clock::time_point started_at
         std::chrono::steady_clock::now() - started_at).count();
 }
 
+nlohmann::json list_refresh_task_json(
+    const ListRefreshTaskSnapshot& task) {
+    nlohmann::json result{
+        {"task_id", task.id},
+        {"state", list_refresh_task_status_name(task.status)},
+        {"created_at", task.created_at},
+        {"updated_at", task.updated_at},
+        {"started_at", task.started_at},
+        {"finished_at", task.finished_at},
+        {"total", task.total},
+        {"completed", task.completed},
+        {"current", task.current},
+        {"cancel_requested", task.cancel_requested},
+        {"revision", task.revision},
+        {"refreshed_lists", nlohmann::json::array()},
+        {"changed_lists", nlohmann::json::array()},
+        {"failed_lists", nlohmann::json::array()},
+        {"reloaded", false},
+        {"error", ""},
+    };
+    if (task.terminal_result) {
+        const auto& terminal = *task.terminal_result;
+        result["refreshed_lists"] =
+            terminal.refresh_result.refreshed_lists;
+        result["changed_lists"] =
+            terminal.refresh_result.changed_lists;
+        result["failed_lists"] =
+            terminal.refresh_result.failed_lists;
+        result["reloaded"] = terminal.reloaded;
+        result["error"] = terminal.error;
+    }
+    return result;
+}
+
 } // namespace
 
 std::string get_outbound_tag(const Outbound& ob) {
@@ -283,6 +317,13 @@ Daemon::Daemon(Config config,
     // after a daemon restart. A single-slot broadcaster turns that harmless
     // overlap into a false "DNS event stream unavailable" result.
     dns_test_broadcaster_ = std::make_unique<SseBroadcaster>(128, 4);
+    list_refresh_tasks_.set_publish_callback(
+        [this](const ListRefreshTaskSnapshot& task) {
+            if (status_stream_) {
+                status_stream_->publish_list_refresh(
+                    list_refresh_task_json(task));
+            }
+        });
 #endif
     // Acquire ownership before touching the shared control-socket path. A
     // second instance must fail without unlinking the live daemon's socket.
@@ -297,6 +338,7 @@ Daemon::~Daemon() {
             accept_posted_control_tasks_.store(
                 false, std::memory_order_release);
         }
+        list_refresh_tasks_.request_cancel_active();
         resolver_hook_executor_.shutdown();
         resolver_stream_executor_.shutdown();
         resolver_io_executor_.shutdown();
@@ -511,10 +553,14 @@ void Daemon::handle_ipc_control_socket() {
                 operation == "status" ||
                 operation == "resolver-config-hash";
             const bool root_peer = peer.uid == 0;
+            const bool list_control_operation =
+                operation == "download" ||
+                operation == "download-status" ||
+                operation == "download-cancel";
             const bool list_update_member =
                 ipc_control_group_id_ != static_cast<gid_t>(-1) &&
                 peer_has_group(peer, ipc_control_group_id_) &&
-                operation == "download";
+                list_control_operation;
             if (!root_peer && !list_update_member) {
                 throw ipc::ControlProtocolError(
                     "control peer is not authorized for this operation");
@@ -524,6 +570,8 @@ void Daemon::handle_ipc_control_socket() {
                 operation == "status" ||
                 operation == "resolver-config-hash" ||
                 operation == "download" ||
+                operation == "download-status" ||
+                operation == "download-cancel" ||
                 operation == "test-routing" ||
                 operation == "generate-resolver-config";
             if (!supported) {
@@ -765,61 +813,146 @@ void Daemon::handle_ipc_control_socket() {
                     }
                 }
             } else if (operation == "download") {
-                bool expected = false;
-                if (!ipc_mutation_inflight_.compare_exchange_strong(
-                        expected,
-                        true,
-                        std::memory_order_acq_rel)) {
+                const bool reload = request.value("reload", false);
+                if (request.value("task_response", false)) {
+                    const auto start = start_remote_list_refresh_task(
+                        reload, "ipc");
+                    if (!start.accepted) {
+                        response = ipc::make_error_response(
+                            request,
+                            start.error == "busy" ? "busy" : "daemon_error",
+                            start.error == "busy"
+                                ? "another list refresh is in progress"
+                                : start.error);
+                    } else {
+                        response = {
+                            {"protocol_version",
+                             ipc::kControlProtocolVersion},
+                            {"request_id", request.at("request_id")},
+                            {"ok", true},
+                            {"result", list_refresh_task_json(start.task)},
+                        };
+                    }
+                } else {
+                    // Protocol-v1 callers need a terminal response, but the
+                    // network operation must not run on the event-loop thread.
+                    // Start the same bounded task and let a second executor
+                    // slot wait for its terminal snapshot before replying in
+                    // the legacy wire shape.
+                    const auto start = start_remote_list_refresh_task(
+                        reload, "ipc-legacy");
+                    if (!start.accepted) {
+                        response = ipc::make_error_response(
+                            request,
+                            start.error == "busy" ? "busy" : "daemon_error",
+                            start.error == "busy"
+                                ? "another list refresh is in progress"
+                                : start.error);
+                    } else {
+                        const auto task_id = start.task.id;
+                        const auto request_id =
+                            request.at("request_id").get<std::string>();
+                        const bool queued = blocking_executor_.try_post(
+                            "ipc-legacy-list-refresh-response",
+                            [this, client, task_id, request_id] {
+                                nlohmann::json terminal_response;
+                                try {
+                                    std::optional<ListRefreshTaskSnapshot> task;
+                                    do {
+                                        std::this_thread::sleep_for(
+                                            std::chrono::milliseconds(50));
+                                        task = list_refresh_tasks_.find(task_id);
+                                    } while (
+                                        task &&
+                                        !list_refresh_task_status_is_terminal(
+                                            task->status));
+
+                                    if (!task || !task->terminal_result) {
+                                        terminal_response =
+                                            ipc::make_error_response(
+                                                {{"request_id", request_id}},
+                                                "daemon_error",
+                                                "list refresh task disappeared");
+                                    } else {
+                                        const auto& terminal =
+                                            *task->terminal_result;
+                                        const auto& refresh =
+                                            terminal.refresh_result;
+                                        const bool ok =
+                                            task->status ==
+                                                ListRefreshTaskStatus::Succeeded &&
+                                            refresh.failed_lists.empty();
+                                        terminal_response = {
+                                            {"protocol_version",
+                                             ipc::kControlProtocolVersion},
+                                            {"request_id", request_id},
+                                            {"ok", ok},
+                                            {"result",
+                                             {{"refreshed_lists",
+                                               refresh.refreshed_lists},
+                                              {"changed_lists",
+                                               refresh.changed_lists},
+                                              {"failed_lists",
+                                               refresh.failed_lists},
+                                              {"reloaded",
+                                               terminal.reloaded}}},
+                                        };
+                                    }
+                                    const auto frame =
+                                        ipc::encode_message(terminal_response);
+                                    send_all(
+                                        client, frame.data(), frame.size());
+                                } catch (const std::exception& error) {
+                                    Logger::instance().warn(
+                                        "legacy list refresh response failed: {}",
+                                        error.what());
+                                }
+                                ::close(client);
+                            });
+                        if (queued) {
+                            stream_dispatched = true;
+                        } else {
+                            (void)list_refresh_tasks_.request_cancel(task_id);
+                            response = ipc::make_error_response(
+                                request,
+                                "daemon_error",
+                                "list refresh response executor is unavailable");
+                        }
+                    }
+                }
+            } else if (operation == "download-status" ||
+                       operation == "download-cancel") {
+                const auto task_id = request.value("task_id", "");
+                if (task_id.empty()) {
+                    throw ipc::ControlProtocolError(
+                        operation + " requires a task_id");
+                }
+                auto task = list_refresh_tasks_.find(task_id);
+                if (!task) {
                     response = ipc::make_error_response(
                         request,
-                        "busy",
-                        "another control mutation is in progress");
+                        "not_found",
+                        "list refresh task was not found");
                 } else {
-                    struct MutationGate {
-                        std::atomic<bool>& flag;
-                        ~MutationGate() {
-                            flag.store(false, std::memory_order_release);
-                        }
-                    } gate{ipc_mutation_inflight_};
-
-                    const bool reload =
-                        request.value("reload", false);
-                    RemoteListsRefreshResult refresh;
-                    bool reloaded = false;
-                    if (reload) {
-                        auto result =
-                            execute_remote_list_refresh(nullptr, "ipc");
-                        refresh = std::move(result.refresh_result);
-                        reloaded = result.reloaded;
-                    } else {
-                        const auto relevant =
-                            collect_relevant_list_names(config_);
-                        const auto dns_relevant =
-                            collect_dns_relevant_list_names(config_);
-                        {
-                            KPBR_SHARED_UNIQUE_LOCK(
-                                cache_write,
-                                resolver_cache_snapshot_mutex_);
-                            refresh = list_service_.refresh_remote_lists(
-                                config_,
-                                outbound_marks_,
-                                &relevant,
-                                nullptr,
-                                &dns_relevant);
-                        }
+                    bool cancel_accepted = false;
+                    if (operation == "download-cancel" &&
+                        !list_refresh_task_status_is_terminal(
+                            task->status)) {
+                        cancel_accepted =
+                            list_refresh_tasks_.request_cancel(task_id);
+                        task = list_refresh_tasks_.find(task_id);
                     }
                     response = {
                         {"protocol_version",
                          ipc::kControlProtocolVersion},
                         {"request_id", request.at("request_id")},
-                        {"ok", refresh.failed_lists.empty()},
-                        {"result",
-                         {{"refreshed_lists",
-                           refresh.refreshed_lists},
-                          {"changed_lists", refresh.changed_lists},
-                          {"failed_lists", refresh.failed_lists},
-                          {"reloaded", reloaded}}},
+                        {"ok", true},
+                        {"result", list_refresh_task_json(*task)},
                     };
+                    if (operation == "download-cancel") {
+                        response["result"]["cancel_accepted"] =
+                            cancel_accepted;
+                    }
                 }
             } else if (operation == "status") {
                 const auto snapshot =
@@ -1966,16 +2099,15 @@ void Daemon::run() {
     log.info("Startup lists: checking local cache; only missing remote lists will be downloaded.");
     const auto relevant_lists = collect_relevant_list_names(config_);
     const auto dns_relevant_lists = collect_dns_relevant_list_names(config_);
-    const RemoteListsRefreshResult refresh_result = [&]() {
-        KPBR_SHARED_UNIQUE_LOCK(
-            cache_write,
-            resolver_cache_snapshot_mutex_);
-        return list_service_.download_uncached(
+    RemoteListRefreshControl refresh_control;
+    refresh_control.cache_commit = make_guarded_cache_commit_callback();
+    const RemoteListsRefreshResult refresh_result =
+        list_service_.download_uncached(
             config_,
             outbound_marks_,
             &relevant_lists,
-            &dns_relevant_lists);
-    }();
+            &dns_relevant_lists,
+            refresh_control);
 
     if (!refresh_result.cached_lists.empty()) {
         log.info("Startup lists: using cached list(s): {}", format_list_names(refresh_result.cached_lists));
@@ -2234,8 +2366,6 @@ void Daemon::run() {
 
     run_event_loop();
 
-    event_loop_active_.store(false, std::memory_order_release);
-    event_loop_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
     // Stop the continuous forwarded-flow observer before closing admission to
     // the control loop or tearing down API/conntrack state.  An in-flight
     // observation is generation-fenced, but disabling it here also prevents a
@@ -2246,6 +2376,14 @@ void Daemon::run() {
         accept_posted_control_tasks_.store(
             false, std::memory_order_release);
     }
+    list_refresh_tasks_.request_cancel_active();
+    // Admission is closed before the final drain, so a worker cannot enqueue a
+    // cache/runtime commit after the event loop has stopped processing tasks.
+    // Drain everything admitted before the gate closed while this thread still
+    // owns the control-loop state.
+    handle_control_commands();
+    event_loop_active_.store(false, std::memory_order_release);
+    event_loop_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
 
     log.info("Shutting down...");
     transition_runtime_or_throw(RuntimeState::shutting_down, "daemon shutdown requested");
@@ -2288,6 +2426,7 @@ void Daemon::run() {
 }
 
 void Daemon::stop() {
+    list_refresh_tasks_.request_cancel_active();
     running_.store(false, std::memory_order_release);
 }
 

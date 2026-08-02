@@ -8,6 +8,7 @@ import {
   subscribeStatusEventKeepAliveLease,
 } from "@/api/status-event-connection"
 import { applyDnsProbeStatusEvent } from "@/api/dns-probe-events"
+import { applyListRefreshStatusEvent } from "@/api/list-refresh-events"
 
 const HIDDEN_DISCONNECT_DELAY_MS = 60_000
 const STATUS_EVENT_NAMES = [
@@ -18,6 +19,7 @@ const STATUS_EVENT_NAMES = [
   "interface_traffic",
   "connections",
   "dns_probe",
+  "list_refresh",
 ] as const
 
 export function StatusEventBridge() {
@@ -38,6 +40,8 @@ export function StatusEventBridge() {
           const data = (event as MessageEvent<string>).data
           if (eventName === "dns_probe") {
             applyDnsProbeStatusEvent(data)
+          } else if (eventName === "list_refresh") {
+            applyListRefreshStatusEvent(data)
           } else {
             applyStatusEvent(queryClient, data)
           }

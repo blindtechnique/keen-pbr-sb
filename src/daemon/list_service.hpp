@@ -4,14 +4,18 @@
 #include "../config/config.hpp"
 #include "../util/traced_mutex.hpp"
 
+#include <atomic>
 #include <condition_variable>
 #include <exception>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -45,6 +49,42 @@ struct RemoteListsRefreshResult {
     bool any_failed() const {
         return !failed_lists.empty();
     }
+};
+
+enum class RemoteListRefreshProgressStatus {
+    Cached,
+    Updated,
+    Unchanged,
+    Failed,
+};
+
+struct RemoteListRefreshProgress {
+    size_t completed{0};
+    size_t total{0};
+    std::string list_name;
+    RemoteListRefreshProgressStatus status{
+        RemoteListRefreshProgressStatus::Unchanged};
+};
+
+struct RemoteListRefreshControl {
+    HttpCancellationToken cancellation;
+    std::function<void(const RemoteListRefreshProgress&)> progress;
+    CacheCommitCallback cache_commit;
+};
+
+class RemoteListRefreshCancelled : public std::runtime_error {
+public:
+    explicit RemoteListRefreshCancelled(
+        RemoteListsRefreshResult partial_result = {})
+        : std::runtime_error("remote list refresh cancelled"),
+          partial_result_(std::move(partial_result)) {}
+
+    const RemoteListsRefreshResult& partial_result() const noexcept {
+        return partial_result_;
+    }
+
+private:
+    RemoteListsRefreshResult partial_result_;
 };
 
 enum class RemoteListTargetSelectionError {
@@ -82,7 +122,9 @@ std::map<std::string, api::ListRefreshStateValue> build_list_refresh_state_map(
 class ListService {
 public:
     ListService(const std::filesystem::path& cache_dir,
-                size_t max_file_size_bytes = kDefaultMaxFileSizeBytes);
+                size_t max_file_size_bytes = kDefaultMaxFileSizeBytes,
+                std::shared_ptr<HttpTransport> transport =
+                    default_http_transport());
 
     void ensure_dir();
     const CacheManager& cache_manager() const;
@@ -91,12 +133,14 @@ public:
     RemoteListsRefreshResult download_uncached(const Config& config,
                                                const OutboundMarkMap& outbound_marks,
                                                const std::set<std::string>* relevant_lists = nullptr,
-                                               const std::set<std::string>* dns_relevant_lists = nullptr);
+                                               const std::set<std::string>* dns_relevant_lists = nullptr,
+                                               const RemoteListRefreshControl& control = {});
     RemoteListsRefreshResult refresh_remote_lists(const Config& config,
                                                   const OutboundMarkMap& outbound_marks,
                                                   const std::set<std::string>* relevant_lists = nullptr,
                                                   const std::set<std::string>* target_lists = nullptr,
-                                                  const std::set<std::string>* dns_relevant_lists = nullptr);
+                                                  const std::set<std::string>* dns_relevant_lists = nullptr,
+                                                  const RemoteListRefreshControl& control = {});
 
 private:
     struct RefreshFlight {
@@ -112,7 +156,8 @@ private:
                                                    bool only_uncached,
                                                    const std::set<std::string>* relevant_lists,
                                                    const std::set<std::string>* target_lists,
-                                                   const std::set<std::string>* dns_relevant_lists);
+                                                   const std::set<std::string>* dns_relevant_lists,
+                                                   const RemoteListRefreshControl& control);
 
     mutable TracedMutex mutex_;
     std::mutex refresh_mutex_;
