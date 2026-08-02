@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://blindtechnique.github.io/keen-pbr-sb/sitemap.xml
