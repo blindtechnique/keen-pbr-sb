@@ -1,9 +1,12 @@
 import { useState } from "react"
 import {
   BugIcon,
+  CheckIcon,
+  ChevronDownIcon,
   LanguagesIcon,
   LoaderCircleIcon,
   LogOutIcon,
+  MoreHorizontalIcon,
   PaletteIcon,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
@@ -35,53 +38,72 @@ const LANGUAGE_OPTIONS = [
 
 const ISSUES_URL = "https://github.com/blindtechnique/keen-pbr-sb/issues"
 
-// Строка шторки: высота и отступ пунктов меню над ней, чтобы список читался
-// как продолжение навигации, а не как приклеенная снизу панель.
-const SYSTEM_CONTROL_ROW_CLASS =
+// Строка списка: высота и отступ пунктов меню, чтобы в шторке она читалась как
+// продолжение навигации, а в меню шапки — как обычный пункт меню.
+const CONTROL_ROW_CLASS =
   "h-12 w-full justify-start gap-3 rounded-none px-6 text-[14px] leading-6 font-normal text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg:not([class*='size-'])]:size-5"
 
 /**
- * Compact theme and language pickers for the system bar, where KeeneticOS keeps
- * its own global controls.
+ * Правая часть системной строки.
+ *
+ * Здесь было шесть иконок подряд, все без подписей. Состояние и уведомления
+ * меняются сами и требуют внимания — им место на виду. Отчёт о проблеме, язык,
+ * тема и выход сами не меняются и нужны редко; четыре постоянных места под них
+ * — плохой размен. Они уехали под «⋯» теми же строками, что и в мобильной
+ * шторке, так что список один и тот же на десктопе и на телефоне.
  */
 export function TopBarControls() {
-  return <SystemControlIcons showNotifications={true} />
-}
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
 
-/**
- * Те же элементы в мобильной шторке, но строками с подписями.
- *
- * Иконки без подписей стояли рядом внизу шторки — прямо под списком разделов,
- * где у каждой строки есть название. Что делает «палитра» и чем «жучок»
- * отличается от «выхода», приходилось угадывать по картинке. Строки той же
- * высоты и с тем же отступом, что и пункты меню над ними, а у языка и темы
- * видно текущее значение: раньше его нужно было открыть, чтобы узнать.
- */
-export function MobileMenuControls() {
   return (
-    <div className="flex w-full flex-col py-1">
-      <SystemControlIcons
-        layout="list"
-        popoverSide="top"
-        showNotifications={false}
-      />
+    <div className="flex items-center">
+      <HeaderHealthIndicator />
+      <NotificationsBell />
+      <Popover onOpenChange={setOpen} open={open}>
+        <PopoverTrigger
+          render={
+            <Button
+              aria-label={t("common.moreControls")}
+              className={TOP_BAR_CONTROL_CLASS}
+              size="icon"
+              title={t("common.moreControls")}
+              variant="ghost"
+            />
+          }
+        >
+          <MoreHorizontalIcon />
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-72 p-0 py-1" side="bottom">
+          <SystemControlRows onAfterAction={() => setOpen(false)} />
+        </PopoverContent>
+      </Popover>
     </div>
   )
 }
 
-function SystemControlIcons({
-  layout = "bar",
-  popoverSide = "bottom",
-  showNotifications,
+/** Те же строки внизу мобильной шторки, без обёртки-меню. */
+export function MobileMenuControls() {
+  return (
+    <div className="flex w-full flex-col py-1">
+      <SystemControlRows />
+    </div>
+  )
+}
+
+function SystemControlRows({
+  onAfterAction,
 }: {
-  layout?: "bar" | "list"
-  popoverSide?: "top" | "bottom"
-  showNotifications: boolean
+  /** Закрыть меню шапки после действия. В шторке закрывать нечего. */
+  onAfterAction?: () => void
 }) {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language, setLanguage } = useLanguage()
-  const [openMenu, setOpenMenu] = useState<"language" | "theme" | null>(null)
+  // Варианты раскрываются прямо в списке, а не вторым всплывающим слоем.
+  // Popover внутри Popover — лишний повод для промаха по «мимо меню», а выбор
+  // из двух-трёх пунктов того не стоит.
+  const [expanded, setExpanded] = useState<"language" | "theme" | null>(null)
   const [signingOut, setSigningOut] = useState(false)
 
   const handleSignOut = async () => {
@@ -98,90 +120,77 @@ function SystemControlIcons({
     }
   }
 
-  const asList = layout === "list"
   const languageLabel =
     LANGUAGE_OPTIONS.find((option) => option.value === language)?.label ??
     language
   const themeOption = THEME_OPTIONS.find((option) => option.value === theme)
 
-  return (
-    <div className={cn(asList ? "flex flex-col" : "flex items-center")}>
-      {showNotifications ? (
-        <>
-          <HeaderHealthIndicator />
-          <NotificationsBell />
-        </>
-      ) : null}
+  const toggle = (section: "language" | "theme") =>
+    setExpanded((current) => (current === section ? null : section))
 
+  return (
+    <div className="flex flex-col">
       <Button
-        aria-label={asList ? undefined : t("common.reportIssue")}
-        className={asList ? SYSTEM_CONTROL_ROW_CLASS : TOP_BAR_CONTROL_CLASS}
+        className={CONTROL_ROW_CLASS}
         render={
           <a href={ISSUES_URL} rel="noopener noreferrer" target="_blank" />
         }
-        size={asList ? "default" : "icon"}
-        title={asList ? undefined : t("common.reportIssue")}
         variant="ghost"
       >
         <BugIcon />
-        {asList ? (
-          <span className="flex-1">{t("common.reportIssue")}</span>
-        ) : null}
+        <span className="flex-1 text-left">{t("common.reportIssue")}</span>
       </Button>
 
-      <IconMenu
-        asList={asList}
+      <ExpandableRow
+        expanded={expanded === "language"}
         icon={<LanguagesIcon />}
         label={t("common.language")}
-        onOpenChange={(open) => setOpenMenu(open ? "language" : null)}
-        open={openMenu === "language"}
-        side={popoverSide}
+        onToggle={() => toggle("language")}
         value={languageLabel}
       >
         {LANGUAGE_OPTIONS.map((option) => (
-          <MenuOption
-            active={language === option.value}
+          <OptionRow
             key={option.value}
             onSelect={() => {
               setLanguage(option.value)
-              setOpenMenu(null)
+              setExpanded(null)
+              onAfterAction?.()
             }}
+            selected={language === option.value}
           >
             {option.label}
-          </MenuOption>
+          </OptionRow>
         ))}
-      </IconMenu>
+      </ExpandableRow>
 
-      <IconMenu
-        asList={asList}
+      <ExpandableRow
+        expanded={expanded === "theme"}
         icon={<PaletteIcon />}
         label={t("common.theme")}
-        onOpenChange={(open) => setOpenMenu(open ? "theme" : null)}
-        open={openMenu === "theme"}
-        side={popoverSide}
+        onToggle={() => toggle("theme")}
         value={themeOption ? t(themeOption.labelKey) : undefined}
       >
         {THEME_OPTIONS.map((option) => (
-          <MenuOption
-            active={theme === option.value}
+          <OptionRow
             key={option.value}
             onSelect={() => {
               setTheme(option.value)
-              setOpenMenu(null)
+              setExpanded(null)
+              onAfterAction?.()
             }}
+            selected={theme === option.value}
           >
             {t(option.labelKey)}
-          </MenuOption>
+          </OptionRow>
         ))}
-      </IconMenu>
+      </ExpandableRow>
+
+      <div aria-hidden="true" className="my-1 h-px bg-border" />
 
       <Button
-        aria-label={asList ? undefined : t("auth.signOut")}
-        className={asList ? SYSTEM_CONTROL_ROW_CLASS : TOP_BAR_CONTROL_CLASS}
+        className={CONTROL_ROW_CLASS}
         disabled={signingOut}
         onClick={() => void handleSignOut()}
-        size={asList ? "default" : "icon"}
-        title={asList ? undefined : t("auth.signOut")}
         variant="ghost"
       >
         {signingOut ? (
@@ -189,87 +198,78 @@ function SystemControlIcons({
         ) : (
           <LogOutIcon />
         )}
-        {asList ? <span className="flex-1">{t("auth.signOut")}</span> : null}
+        <span className="flex-1 text-left">{t("auth.signOut")}</span>
       </Button>
     </div>
   )
 }
 
-function IconMenu({
-  asList = false,
+function ExpandableRow({
+  children,
+  expanded,
   icon,
   label,
-  open,
-  onOpenChange,
-  side,
+  onToggle,
   value,
-  children,
 }: {
-  asList?: boolean
+  children: React.ReactNode
+  expanded: boolean
   icon: React.ReactNode
   label: string
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  side: "top" | "bottom"
-  /** Текущее значение справа в строке: язык и тема иначе не видны до открытия. */
+  onToggle: () => void
+  /** Текущее значение справа: иначе язык и тему видно только после раскрытия. */
   value?: string
-  children: React.ReactNode
 }) {
   return (
-    <Popover onOpenChange={onOpenChange} open={open}>
-      <PopoverTrigger
-        render={
-          <Button
-            aria-label={asList ? undefined : label}
-            className={
-              asList ? SYSTEM_CONTROL_ROW_CLASS : TOP_BAR_CONTROL_CLASS
-            }
-            size={asList ? "default" : "icon"}
-            title={asList ? undefined : label}
-            variant="ghost"
-          />
-        }
+    <>
+      <Button
+        aria-expanded={expanded}
+        className={CONTROL_ROW_CLASS}
+        onClick={onToggle}
+        variant="ghost"
       >
         {icon}
-        {asList ? (
-          <>
-            <span className="flex-1">{label}</span>
-            {value ? (
-              <span className="text-muted-foreground">{value}</span>
-            ) : null}
-          </>
-        ) : null}
-      </PopoverTrigger>
-      <PopoverContent
-        align={asList ? "start" : "end"}
-        className="w-44 p-1"
-        side={side}
-      >
-        {children}
-      </PopoverContent>
-    </Popover>
+        <span className="flex-1 text-left">{label}</span>
+        {value ? <span className="text-muted-foreground">{value}</span> : null}
+        <ChevronDownIcon
+          aria-hidden="true"
+          className={cn(
+            "size-4 text-muted-foreground transition-transform",
+            expanded && "rotate-180"
+          )}
+        />
+      </Button>
+      {expanded ? (
+        <div aria-label={label} role="radiogroup">
+          {children}
+        </div>
+      ) : null}
+    </>
   )
 }
 
-function MenuOption({
-  active,
-  onSelect,
+function OptionRow({
   children,
+  onSelect,
+  selected,
 }: {
-  active: boolean
-  onSelect: () => void
   children: React.ReactNode
+  onSelect: () => void
+  selected: boolean
 }) {
   return (
     <button
+      aria-checked={selected}
       className={cn(
-        "flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent",
-        active && "font-medium text-primary"
+        "flex h-10 w-full items-center gap-3 pr-6 pl-14 text-left text-[14px] leading-6 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+        selected ? "font-medium text-foreground" : "text-muted-foreground"
       )}
       onClick={onSelect}
+      role="radio"
       type="button"
     >
-      {children}
+      <span className="flex-1">{children}</span>
+      {selected ? <CheckIcon className="size-4 text-primary" /> : null}
     </button>
   )
 }

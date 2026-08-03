@@ -157,6 +157,7 @@ export const ruTranslation = {
     help: {
       about: "Об этом разделе",
     },
+    moreControls: "Ещё",
     tableSearch: {
       clear: "Очистить поиск",
       results: "Найдено: {{count}} из {{total}}",

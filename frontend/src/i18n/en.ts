@@ -157,6 +157,7 @@ export const enTranslation = {
     help: {
       about: "About this section",
     },
+    moreControls: "More",
     tableSearch: {
       clear: "Clear search",
       results: "Found {{count}} of {{total}}",
