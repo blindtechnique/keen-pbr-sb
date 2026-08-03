@@ -286,6 +286,22 @@ Daemon::Daemon(Config config,
     , url_tester_()
     , outbound_marks_(allocate_outbound_marks(config_.fwmark.value_or(FwmarkConfig{}),
                                               config_.outbounds.value_or(std::vector<Outbound>{})))
+    , keenetic_dns_refresh_coordinator_(
+          resolver_io_executor_,
+          periodic_task_metrics_,
+          []() {
+              return refresh_keenetic_dns_address_cache(
+                  /*force_refresh=*/true);
+          },
+          [this](std::function<void()> task) {
+              return post_control_task(
+                  std::move(task), "keenetic-dns-refresh-commit");
+          },
+          [this](std::uint64_t generation,
+                 const KeeneticDnsRefreshResult& result) {
+              return commit_keenetic_dns_refresh_result(
+                  generation, result);
+          })
     , hook_command_executor_(std::move(hook_command_executor))
 {
     if (!hook_command_executor_) {
@@ -338,6 +354,7 @@ Daemon::~Daemon() {
             accept_posted_control_tasks_.store(
                 false, std::memory_order_release);
         }
+        keenetic_dns_refresh_coordinator_.stop();
         list_refresh_tasks_.request_cancel_active();
         resolver_hook_executor_.shutdown();
         resolver_stream_executor_.shutdown();
@@ -2320,6 +2337,7 @@ void Daemon::run() {
             accept_posted_control_tasks_.store(
                 false, std::memory_order_release);
         }
+        keenetic_dns_refresh_coordinator_.stop();
         cancel_idle_stall_observer();
         cancel_owned_conntrack_cleanup_retry();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
@@ -2427,6 +2445,7 @@ void Daemon::run() {
         accept_posted_control_tasks_.store(
             false, std::memory_order_release);
     }
+    keenetic_dns_refresh_coordinator_.stop();
     list_refresh_tasks_.request_cancel_active();
     // Admission is closed before the final drain, so a worker cannot enqueue a
     // cache/runtime commit after the event loop has stopped processing tasks.

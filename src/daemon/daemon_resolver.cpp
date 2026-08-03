@@ -36,6 +36,41 @@ bool dns_config_uses_keenetic_server(const std::optional<DnsConfig>& dns_cfg_opt
     return false;
 }
 
+bool log_keenetic_dns_refresh_result(
+    const KeeneticDnsRefreshResult& result) {
+    auto& log = Logger::instance();
+    switch (result.status) {
+    case KeeneticDnsRefreshStatus::UPDATED:
+        if (!result.addresses.empty()) {
+            log.info("Keenetic DNS refreshed: {}",
+                     fmt::join(result.addresses, ", "));
+        }
+        return true;
+    case KeeneticDnsRefreshStatus::UNCHANGED:
+        return false;
+    case KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE: {
+        const std::string value_suffix =
+            result.addresses.size() > 1 ? "s: "
+            : (result.addresses.empty() ? "" : ": ");
+        log.warn("Keenetic DNS refresh failed; reusing cached value{}{}",
+                 value_suffix,
+                 fmt::join(result.addresses, ", "));
+        if (!result.error.empty()) {
+            log.warn("Keenetic DNS refresh error: {}", result.error);
+        }
+        return false;
+    }
+    case KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE:
+        if (!result.error.empty()) {
+            log.warn("Keenetic DNS refresh failed with no cached value: {}",
+                     result.error);
+        }
+        return false;
+    }
+
+    return false;
+}
+
 } // namespace
 
 ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
@@ -185,20 +220,35 @@ void Daemon::schedule_keenetic_dns_refresh() {
         std::chrono::minutes{5},
         [this]() {
             post_control_task([this]() {
-                if (!routing_runtime_active_) {
+                if (!routing_runtime_active_ ||
+                    !dns_config_uses_keenetic_server(config_.dns)) {
                     return;
                 }
-                if (refresh_keenetic_dns_cache(true)) {
-                    const std::int64_t apply_started_ts = unix_timestamp_now_seconds();
-                    apply_started_ts_.store(apply_started_ts, std::memory_order_release);
-                    update_resolver_config_hash();
-                    (void)run_system_resolver_hook_reload();
-                    refresh_resolver_config_hash_actual_async();
-                    publish_runtime_state();
-                }
+                (void)keenetic_dns_refresh_coordinator_.request(
+                    runtime_generation_.load(std::memory_order_acquire));
             }, "keenetic-dns-refresh");
         },
         "keenetic-dns-refresh");
+}
+
+bool Daemon::commit_keenetic_dns_refresh_result(
+    std::uint64_t generation,
+    const KeeneticDnsRefreshResult& result) {
+    if (generation != runtime_generation_.load(std::memory_order_acquire) ||
+        !routing_runtime_active_ ||
+        !dns_config_uses_keenetic_server(config_.dns)) {
+        return false;
+    }
+
+    if (log_keenetic_dns_refresh_result(result)) {
+        apply_started_ts_.store(
+            unix_timestamp_now_seconds(), std::memory_order_release);
+        update_resolver_config_hash();
+        (void)run_system_resolver_hook_reload();
+        refresh_resolver_config_hash_actual_async();
+        publish_runtime_state();
+    }
+    return true;
 }
 
 bool Daemon::refresh_keenetic_dns_cache(bool force_refresh) {
@@ -206,37 +256,8 @@ bool Daemon::refresh_keenetic_dns_cache(bool force_refresh) {
         return false;
     }
 
-    const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(force_refresh);
-    auto& log = Logger::instance();
-
-    switch (result.status) {
-    case KeeneticDnsRefreshStatus::UPDATED:
-        if (!result.addresses.empty()) {
-            log.info("Keenetic DNS refreshed: {}", fmt::join(result.addresses, ", "));
-        }
-        return true;
-    case KeeneticDnsRefreshStatus::UNCHANGED:
-        return false;
-    case KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE: {
-        const std::string value_suffix =
-            result.addresses.size() > 1 ? "s: "
-            : (result.addresses.empty() ? "" : ": ");
-        log.warn("Keenetic DNS refresh failed; reusing cached value{}{}",
-                 value_suffix,
-                 fmt::join(result.addresses, ", "));
-        if (!result.error.empty()) {
-            log.warn("Keenetic DNS refresh error: {}", result.error);
-        }
-        return false;
-    }
-    case KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE:
-        if (!result.error.empty()) {
-            log.warn("Keenetic DNS refresh failed with no cached value: {}", result.error);
-        }
-        return false;
-    }
-
-    return false;
+    return log_keenetic_dns_refresh_result(
+        refresh_keenetic_dns_address_cache(force_refresh));
 }
 
 void Daemon::reset_resolver_actual_state() {

@@ -19,6 +19,7 @@
 #include "../config/config.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
+#include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
 #include "pid_file.hpp"
 #include "../health/url_tester.hpp"
@@ -599,6 +600,9 @@ private:
     void maybe_schedule_resolver_config_hash_actual_refresh();
     void schedule_keenetic_dns_refresh();
     bool refresh_keenetic_dns_cache(bool force_refresh);
+    bool commit_keenetic_dns_refresh_result(
+        std::uint64_t generation,
+        const KeeneticDnsRefreshResult& result);
     void reset_resolver_actual_state();
     void commit_resolver_hash_probe_result(const std::string& resolver_addr,
                                            std::uint64_t generation,
@@ -801,6 +805,7 @@ private:
     PeriodicTaskMetricsRegistry periodic_task_metrics_{
         std::vector<std::string>{
             "resolver-hash-refresh",
+            "keenetic-dns-refresh",
             "owned-snat-health",
             "interface-probe",
             "interface-traffic-sample",
@@ -820,6 +825,7 @@ private:
     BlockingExecutor resolver_stream_executor_{1, 16};
     BlockingExecutor resolver_io_executor_{1, 32};
     std::atomic<std::uint64_t> runtime_generation_{1};
+    KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
     std::atomic<bool> ipc_resolver_hook_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;

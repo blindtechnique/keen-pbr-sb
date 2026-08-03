@@ -14,6 +14,7 @@ add_executable(keen-pbr-tests
   test_dns_server.cpp
   test_test_routing.cpp
   test_keenetic_dns.cpp
+  test_keenetic_dns_refresh_coordinator.cpp
   test_ndms_interface_inventory.cpp
   test_internal_vpn_server_resolver.cpp
   test_ndms_vpn_server_service.cpp
@@ -98,6 +99,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_core.cpp
   ../src/daemon/daemon_runtime.cpp
   ../src/daemon/daemon_resolver.cpp
+  ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/daemon_api.cpp
   ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp
@@ -227,6 +229,39 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
   target_link_libraries(keen-pbr-rescue-tests PRIVATE stdc++fs)
 endif()
 add_test(NAME keen-pbr-rescue-tests COMMAND keen-pbr-rescue-tests)
+
+# Keep the asynchronous Keenetic DNS coordinator independently buildable.
+# This exercises its concurrency and generation-fence contract without
+# relinking the large daemon test binary on a Windows bind mount.
+add_executable(keen-pbr-keenetic-dns-refresh-tests
+  test_main.cpp
+  test_keenetic_dns_refresh_coordinator.cpp
+  ../src/daemon/keenetic_dns_refresh_coordinator.cpp
+  ../src/runtime/periodic_task_metrics.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/traced_mutex.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(keen-pbr-keenetic-dns-refresh-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-keenetic-dns-refresh-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-keenetic-dns-refresh-tests PRIVATE
+  fmt::fmt-header-only
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-keenetic-dns-refresh-tests)
+add_test(
+  NAME keen-pbr-keenetic-dns-refresh-tests
+  COMMAND keen-pbr-keenetic-dns-refresh-tests
+)
 
 # Keep the restore journal independently buildable. It deliberately has no
 # API, lifecycle, or startup dependencies, so crash-boundary tests remain

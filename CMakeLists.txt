@@ -314,6 +314,7 @@ set(SOURCES
   src/daemon/daemon_core.cpp
   src/daemon/daemon_runtime.cpp
   src/daemon/daemon_resolver.cpp
+  src/daemon/keenetic_dns_refresh_coordinator.cpp
   src/daemon/daemon_api.cpp
   src/daemon/daemon_dns_probe.cpp
   src/daemon/list_service.cpp
