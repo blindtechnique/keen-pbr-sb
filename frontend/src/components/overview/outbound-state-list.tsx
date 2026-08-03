@@ -128,14 +128,20 @@ export function OutboundStateList({
 
         return (
           <div className="pt-1.5" key={outbound.tag}>
-            <div className="flex min-w-0 items-center gap-2">
-              <HealthDot status={runtime?.status} />
-              <span
-                className="truncate text-sm font-medium"
-                title={getOutboundReferenceLabel(outbound)}
-              >
-                {getOutboundDisplayName(outbound)}
-              </span>
+            {/* The name owns the first line on a phone. In one row the badges
+                and the latency are all shrink-0, so the name was the only
+                flexible child and collapsed to a single letter: "AWG bound"
+                rendered as "A". Desktop keeps the original single row. */}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:flex-1">
+                <HealthDot status={runtime?.status} />
+                <span
+                  className="min-w-0 truncate text-sm font-medium"
+                  title={getOutboundReferenceLabel(outbound)}
+                >
+                  {getOutboundDisplayName(outbound)}
+                </span>
+              </div>
               {protocol ? (
                 <Badge
                   className="shrink-0 font-mono text-[10px]"
@@ -152,7 +158,9 @@ export function OutboundStateList({
               ) : null}
               {outbound.type === "urltest" && activeMemberName ? (
                 <Badge
-                  className="max-w-48 shrink truncate"
+                  // A phone gives this its own line, so capping it at 12rem
+                  // there turned "Активен: sddvpn mooo AWG" into "dvpn".
+                  className="max-w-full shrink truncate sm:max-w-48"
                   size="xs"
                   title={activeMemberName}
                   variant="success"

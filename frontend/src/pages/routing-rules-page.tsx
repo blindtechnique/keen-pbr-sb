@@ -350,16 +350,17 @@ function RoutingRulesEditor({
                       disabled={configMutationPending}
                       onCheckedChange={() => ruleSelection.toggleOne(row.id)}
                     />
+                    {/* The rule name and the route shared one line and truncated
+                        equally, so a long route squeezed a short name down to
+                        nothing: "#3" rendered as "#.". The name owns the line
+                        now and the route sits underneath. */}
                     <span
-                      className="truncate text-sm font-medium"
+                      className="min-w-0 flex-1 truncate text-sm font-medium"
                       title={row.technicalId}
                     >
                       {row.displayName}
                     </span>
-                    <span className="truncate text-sm text-muted-foreground">
-                      → {row.outbound}
-                    </span>
-                    <span className="ml-auto flex items-center gap-1">
+                    <span className="ml-auto flex shrink-0 items-center gap-1">
                       <Switch
                         aria-label={t(
                           row.enabled
@@ -392,7 +393,13 @@ function RoutingRulesEditor({
                       </Button>
                     </span>
                   </div>
-                  <div className="flex flex-wrap gap-1">
+                  <div
+                    className="truncate pl-6 text-sm text-muted-foreground"
+                    title={row.outbound}
+                  >
+                    → {row.outbound}
+                  </div>
+                  <div className="flex flex-wrap gap-1 pl-6">
                     {row.conditions.map((condition) => (
                       <span
                         className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
