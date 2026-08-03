@@ -1622,6 +1622,7 @@ export const enTranslation = {
       title: "Routing rules",
       description:
         "Rules that decide which route handles matching traffic. Evaluated top to bottom.",
+      unnamed: "Unnamed",
       actions: {
         reorder: "Drag to reorder",
         addRule: "Add routing rule",

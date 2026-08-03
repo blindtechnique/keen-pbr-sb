@@ -33,12 +33,14 @@ import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import { formatListReferenceLabels } from "@/lib/list-display"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { getRuleEditHref } from "@/lib/rule-route"
+import { cn } from "@/lib/utils"
 import {
   areRouteRulesSemanticallyEqual,
   getApiErrorMessage,
   getRouteRulesSemanticKey,
   getRouteRuleDisplayName,
   getRoutingRuleRowId,
+  isRouteRuleNameGenerated,
   reorderRules,
   setRouteRuleEnabled,
 } from "@/pages/routing-rules-utils"
@@ -355,10 +357,16 @@ function RoutingRulesEditor({
                         nothing: "#3" rendered as "#.". The name owns the line
                         now and the route sits underneath. */}
                     <span
-                      className="min-w-0 flex-1 truncate text-sm font-medium"
+                      className={cn(
+                        "min-w-0 flex-1 truncate text-sm font-medium",
+                        row.nameIsGenerated &&
+                          "font-normal text-muted-foreground italic"
+                      )}
                       title={row.technicalId}
                     >
-                      {row.displayName}
+                      {row.nameIsGenerated
+                        ? t("pages.routingRules.unnamed")
+                        : row.displayName}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1">
                       <Switch
@@ -474,8 +482,16 @@ function RoutingRulesEditor({
                   key={`${row.id}-name`}
                   title={row.technicalId}
                 >
-                  <span className="block truncate font-medium">
-                    {row.displayName}
+                  <span
+                    className={cn(
+                      "block truncate font-medium",
+                      row.nameIsGenerated &&
+                        "font-normal text-muted-foreground italic"
+                    )}
+                  >
+                    {row.nameIsGenerated
+                      ? t("pages.routingRules.unnamed")
+                      : row.displayName}
                   </span>
                 </div>,
                 <ul
@@ -593,6 +609,7 @@ function getRouteRuleRow(
     id: getRoutingRuleRowId(rule, index),
     technicalId: rule.id ?? "",
     displayName: getRouteRuleDisplayName(rule, index),
+    nameIsGenerated: isRouteRuleNameGenerated(rule),
     enabled: rule.enabled ?? true,
     index,
     order: index + 1,

@@ -75,6 +75,18 @@ export function getRouteRuleDisplayName(rule: RouteRule, index: number) {
   return rule.display_name?.trim() || `#${index + 1}`
 }
 
+/**
+ * У правила без имени `getRouteRuleDisplayName` отдаёт `#N`. Как идентификатор
+ * в ссылках, зависимостях и aria-подписях это правильно, но в колонке
+ * «Название» оно дублирует соседнюю колонку «№» и выглядит как имя, которого
+ * пользователь не давал. Списки уже показаны в «Условии», а маршрут — в
+ * «Маршруте», поэтому вместо третьего повтора там уместен приглушённый
+ * «Без названия».
+ */
+export function isRouteRuleNameGenerated(rule: RouteRule): boolean {
+  return !rule.display_name?.trim()
+}
+
 export function getRuleDetails(rule: RouteRule) {
   const pieces = [
     `src_addr: ${rule.src_addr || "-"}`,
