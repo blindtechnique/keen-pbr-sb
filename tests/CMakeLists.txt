@@ -237,6 +237,7 @@ add_executable(keen-pbr-keenetic-dns-refresh-tests
   test_main.cpp
   test_config_reload_coordinator.cpp
   test_keenetic_dns_refresh_coordinator.cpp
+  test_keenetic_dns_refresh_transaction.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/runtime/periodic_task_metrics.cpp
   ../src/util/blocking_executor.cpp

@@ -1,5 +1,7 @@
 #include "resolver_sync_state_machine.hpp"
 
+#include <utility>
+
 namespace keen_pbr3 {
 
 namespace {
@@ -241,6 +243,19 @@ void ResolverSyncStateMachine::restore(
     actual_ts_ = checkpoint.actual_ts;
     last_probe_ts_ = checkpoint.last_probe_ts;
     apply_started_ts_ = checkpoint.apply_started_ts;
+    probe_status_ = checkpoint.probe_status;
+    consecutive_probe_failures_ = checkpoint.consecutive_probe_failures;
+    runtime_active_ = checkpoint.runtime_active;
+    resolver_configured_ = checkpoint.resolver_configured;
+}
+
+void ResolverSyncStateMachine::restore(
+    ResolverSyncCheckpoint&& checkpoint) noexcept {
+    expected_hash_ = std::move(checkpoint.expected_hash);
+    actual_hash_ = std::move(checkpoint.actual_hash);
+    actual_ts_ = std::move(checkpoint.actual_ts);
+    last_probe_ts_ = std::move(checkpoint.last_probe_ts);
+    apply_started_ts_ = std::move(checkpoint.apply_started_ts);
     probe_status_ = checkpoint.probe_status;
     consecutive_probe_failures_ = checkpoint.consecutive_probe_failures;
     runtime_active_ = checkpoint.runtime_active;

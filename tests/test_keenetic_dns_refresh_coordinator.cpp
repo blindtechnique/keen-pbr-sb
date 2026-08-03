@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "daemon/keenetic_dns_refresh_coordinator.hpp"
+#include "daemon/keenetic_dns_refresh_transaction.hpp"
 #include "runtime/periodic_task_metrics.hpp"
 #include "util/blocking_executor.hpp"
 
@@ -518,6 +519,66 @@ TEST_CASE("Keenetic DNS refresh stop waits for callback and suppresses commit") 
     const auto snapshot = only_metrics(metrics);
     CHECK(snapshot.runs == 1);
     CHECK(snapshot.abandoned == 1);
+    CHECK(snapshot.in_flight == 0);
+    executor.shutdown();
+}
+
+TEST_CASE("Keenetic DNS refresh releases single-flight after transactional commit rollback") {
+    BlockingExecutor executor(1, 4);
+    PeriodicTaskMetricsRegistry metrics(
+        {KeeneticDnsRefreshCoordinator::metric_label()});
+    ManualControlQueue control;
+    std::size_t commit_calls{0};
+    int active_generation{1};
+
+    KeeneticDnsRefreshCoordinator coordinator(
+        executor,
+        metrics,
+        []() { return updated_result(); },
+        [&](std::function<void()> task) {
+            return control.post(std::move(task));
+        },
+        [&](std::uint64_t,
+            const KeeneticDnsRefreshResult&) {
+            ++commit_calls;
+            const bool fail_this_commit = commit_calls == 1;
+            const auto transaction =
+                run_keenetic_dns_refresh_transaction(
+                    /*firewall_needed=*/false,
+                    [&]() noexcept { active_generation = 2; },
+                    []() {},
+                    [&](bool& resolver_stream_attempted) {
+                        resolver_stream_attempted = true;
+                        if (fail_this_commit) {
+                            throw std::runtime_error(
+                                "resolver stream failed");
+                        }
+                    },
+                    [&]() noexcept { active_generation = 1; },
+                    []() {},
+                    []() {});
+            if (transaction.primary_failure) {
+                std::rethrow_exception(transaction.primary_failure);
+            }
+            return transaction.committed;
+        });
+
+    REQUIRE(coordinator.request(31) ==
+            KeeneticDnsRefreshCoordinator::RequestResult::started);
+    REQUIRE(control.wait_for_size(1));
+    control.run_one();
+    CHECK(active_generation == 1);
+
+    REQUIRE(coordinator.request(32) ==
+            KeeneticDnsRefreshCoordinator::RequestResult::started);
+    REQUIRE(control.wait_for_size(1));
+    control.run_one();
+    CHECK(active_generation == 2);
+
+    const auto snapshot = only_metrics(metrics);
+    CHECK(snapshot.runs == 2);
+    CHECK(snapshot.failure == 1);
+    CHECK(snapshot.success == 1);
     CHECK(snapshot.in_flight == 0);
     executor.shutdown();
 }

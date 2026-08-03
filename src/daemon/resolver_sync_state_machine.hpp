@@ -54,6 +54,7 @@ public:
     ResolverSyncSnapshot snapshot(std::int64_t now_ts) const;
     ResolverSyncCheckpoint checkpoint() const;
     void restore(const ResolverSyncCheckpoint& checkpoint);
+    void restore(ResolverSyncCheckpoint&& checkpoint) noexcept;
 
     // How many probes in a row have failed. The caller uses this to decide
     // whether a failure is worth telling the user about: one is noise, several
