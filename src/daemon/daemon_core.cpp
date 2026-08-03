@@ -1896,6 +1896,19 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         const bool resolver_access_policy_changed =
             current_resolver_access_policy !=
             next_resolver_access_policy;
+        // A firewall-only repair must stay on the list generation already
+        // committed to dnsmasq. If no committed generation exists, promote
+        // this pass to a paired firewall/resolver transaction on one newly
+        // captured generation.
+        const bool resolver_generation_missing =
+            !resolver_generation_snapshot_ ||
+            !resolver_generation_snapshot_->list_cache_snapshot;
+        const bool resolver_refresh_required =
+            resolver_access_policy_changed || resolver_generation_missing;
+        const auto list_cache_snapshot =
+            resolver_refresh_required
+                ? capture_relevant_list_cache_generation(config_)
+                : resolver_generation_snapshot_->list_cache_snapshot;
         InternalVpnRuntimeGenerationTransaction
             internal_vpn_generation(
                 resolved_internal_vpn_servers_,
@@ -1920,7 +1933,9 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             runtime_firewall_retry_.retain_recovery(
                 std::move(snat_recovery));
         reconcile_static_routing(RouteReconcileMode::DeferredRepair);
-        apply_firewall(FirewallApplyMode::PreserveSets);
+        apply_firewall(
+            FirewallApplyMode::PreserveSets,
+            list_cache_snapshot);
         const OwnedSnatState inspected_snat_after =
             snat_recovery.requested
                 ? firewall_->inspect_owned_snat_state()
@@ -1959,20 +1974,28 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         const bool resolver_waits_for_firewall =
             resolver_after_firewall_gate_.waiting_for(
                 current_runtime_generation);
-        if (resolver_access_policy_changed &&
-            !resolver_waits_for_firewall) {
+        if (resolver_refresh_required) {
+            // Firewall B is now authoritative. Publish the matching prepared
+            // resolver generation even while the recovery gate is closed;
+            // the gate delays only the external dnsmasq stream. Its eventual
+            // release will therefore retry B rather than the previous A.
+            apply_started_ts_.store(
+                unix_timestamp_now_seconds(), std::memory_order_release);
+            commit_resolver_generation_snapshot(
+                make_resolver_generation_snapshot(
+                    list_cache_snapshot));
+        }
+        if (resolver_refresh_required && !resolver_waits_for_firewall) {
             // A live NDMS catalog refresh can add, remove or rename a dynamic
             // SSTP/IKE/L2TP/OpenConnect ingress without changing config.json.
             // Firewall and the in-memory inventory have already committed, so
             // publish the matching dnsmasq interface ACL as the same runtime
             // generation. A resolver failure must not roll back working
             // forwarding; the bounded resolver reconciler will converge it.
-            apply_started_ts_.store(
-                unix_timestamp_now_seconds(), std::memory_order_release);
             cancel_resolver_reload_retry();
             try {
-                update_resolver_config_hash();
-                if (run_system_resolver_hook_reload()) {
+                if (run_system_resolver_hook_stream_prepared(
+                        "reload", /*rebuild_snapshot=*/false)) {
                     refresh_resolver_config_hash_actual_async();
                 } else {
                     log.info(
@@ -2573,6 +2596,11 @@ void Daemon::run() {
                  format_list_names(refresh_result.failed_lists));
     }
 
+    // From this point through the initial firewall retries and resolver
+    // stream, both consumers must observe the exact same remote-list bodies.
+    auto startup_list_cache_snapshot =
+        capture_relevant_list_cache_generation(config_);
+
     // Applying rules must never abort startup. At boot the firmware holds the
     // xtables lock while it brings interfaces up, so this can legitimately fail;
     // coming up without rules and retrying beats leaving the router with no
@@ -2580,11 +2608,13 @@ void Daemon::run() {
     bool startup_firewall_generation_committed = false;
     try {
         retry_hot_apply_firewall(
-            [this]() {
+            [this, &startup_list_cache_snapshot]() {
                 // A previous daemon generation may still own working chains
                 // after a crash or package replacement. Keep them live until
                 // this generation reaches an atomic COMMIT.
-                apply_firewall(FirewallApplyMode::PreserveSets);
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    startup_list_cache_snapshot);
             },
             [](std::chrono::milliseconds delay) {
                 std::this_thread::sleep_for(delay);
@@ -2614,7 +2644,8 @@ void Daemon::run() {
         // only if bounded recovery is exhausted.
         log.info("Firewall rules are not ready at startup: {}. "
                  "The service continues and will retry shortly.", e.what());
-        schedule_startup_firewall_retry();
+        schedule_startup_firewall_retry(
+            1, std::nullopt, startup_list_cache_snapshot);
     } catch (const std::exception& e) {
         internal_vpn_generation.reset();
         internal_vpn_service_generation.reset();
@@ -2625,7 +2656,8 @@ void Daemon::run() {
         // bounded recovery rather than stranding the candidate indefinitely.
         log.error("Firewall apply failed permanently at startup: {}", e.what());
         if (config_has_native_vpn_catalog_policy(config_)) {
-            schedule_startup_firewall_retry();
+            schedule_startup_firewall_retry(
+                1, std::nullopt, startup_list_cache_snapshot);
         }
     }
 
@@ -2651,11 +2683,17 @@ void Daemon::run() {
     // Always reload once more from the live daemon; otherwise a cache-complete
     // startup can remain on fallback DNS indefinitely.
     apply_started_ts_.store(unix_timestamp_now_seconds(), std::memory_order_release);
-    update_resolver_config_hash();
-    if (!run_system_resolver_hook_reload()) {
+    commit_resolver_generation_snapshot(
+        make_resolver_generation_snapshot(
+            startup_list_cache_snapshot));
+    if (!run_system_resolver_hook_stream_prepared(
+            "reload", /*rebuild_snapshot=*/false)) {
         throw DaemonError(
             "system resolver reload did not complete its configuration stream");
     }
+    // resolver_generation_snapshot_ now owns the active lease. Do not keep an
+    // extra startup reference alive for the complete daemon event loop.
+    startup_list_cache_snapshot.reset();
     // Publish a verified include-only LKG only after the initial route and
     // firewall transaction has actually committed. A transient startup
     // firewall failure is recovered by refresh_iproute_and_firewall_runtime(),

@@ -589,7 +589,9 @@ private:
     // Re-applies rules after a failed startup attempt, backing off each time.
     void schedule_startup_firewall_retry(
         int attempt = 1,
-        std::optional<std::uint64_t> runtime_generation = std::nullopt);
+        std::optional<std::uint64_t> runtime_generation = std::nullopt,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot = nullptr);
     // Periodic HTTP probe of every interface outbound.
     void schedule_interface_probe();
     // Weekly refresh of the ready-made list catalogue.

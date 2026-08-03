@@ -805,9 +805,16 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
             "generation change");
     }
     if (before == OwnedSnatState::missing) {
+        const auto list_cache_snapshot =
+            resolver_generation_snapshot_ &&
+                    resolver_generation_snapshot_->list_cache_snapshot
+                ? resolver_generation_snapshot_->list_cache_snapshot
+                : capture_relevant_list_cache_generation(config_);
         retry_hot_apply_firewall(
-            [this]() {
-                apply_firewall(FirewallApplyMode::PreserveSets);
+            [this, &list_cache_snapshot]() {
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    list_cache_snapshot);
             },
             [](std::chrono::milliseconds delay) {
                 std::this_thread::sleep_for(delay);
@@ -948,9 +955,19 @@ void Daemon::start_routing_runtime() {
         normalize_urltest_selections();
         setup_static_routing();
         register_urltest_outbounds();
+        // A URLTest switch changes only the selected route. Keep the firewall
+        // on the list generation already committed to dnsmasq; a separate
+        // list-refresh transaction owns advancing both consumers together.
+        const auto list_cache_snapshot =
+            resolver_generation_snapshot_ &&
+                    resolver_generation_snapshot_->list_cache_snapshot
+                ? resolver_generation_snapshot_->list_cache_snapshot
+                : capture_relevant_list_cache_generation(config_);
         retry_hot_apply_firewall(
-            [this]() {
-                apply_firewall(FirewallApplyMode::PreserveSets);
+            [this, &list_cache_snapshot]() {
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    list_cache_snapshot);
             },
             [](std::chrono::milliseconds delay) {
                 std::this_thread::sleep_for(delay);
@@ -977,9 +994,11 @@ void Daemon::start_routing_runtime() {
 
         apply_started_ts_.store(
             unix_timestamp_now_seconds(), std::memory_order_release);
-        update_resolver_config_hash();
-        if (!run_system_resolver_hook_stream(
-                runtime_start_resolver_action())) {
+        commit_resolver_generation_snapshot(
+            make_resolver_generation_snapshot(list_cache_snapshot));
+        if (!run_system_resolver_hook_stream_prepared(
+                runtime_start_resolver_action(),
+                /*rebuild_snapshot=*/false)) {
             throw DaemonError("System resolver activation hook failed");
         }
 
@@ -1090,6 +1109,8 @@ void Daemon::restart_routing_runtime() {
             internal_vpn_service_generation(
                 resolved_internal_vpn_service_targets_,
                 internal_vpn_service_resolution.effective_targets);
+        const auto list_cache_snapshot =
+            capture_relevant_list_cache_generation(config_);
 
         apply_runtime_replacement(
             [this]() {
@@ -1097,11 +1118,13 @@ void Daemon::restart_routing_runtime() {
                 // entries only after their replacements exist.
                 reconcile_static_routing(RouteReconcileMode::Strict);
             },
-            [this]() {
+            [this, &list_cache_snapshot]() {
                 // PreserveSets keeps the currently committed firewall
                 // generation forwarding until the replacement transaction
                 // itself has reached COMMIT.
-                apply_firewall(FirewallApplyMode::PreserveSets);
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    list_cache_snapshot);
             },
             [](std::chrono::milliseconds delay) {
                 std::this_thread::sleep_for(delay);
@@ -1122,6 +1145,7 @@ void Daemon::restart_routing_runtime() {
              &internal_vpn_service_generation,
              &internal_vpn_resolution,
              &internal_vpn_service_resolution,
+             &list_cache_snapshot,
              &kernel_generation_committed]() {
                 // apply_runtime_replacement invokes this callback only after
                 // the firewall transaction reached COMMIT. Publish the
@@ -1137,8 +1161,11 @@ void Daemon::restart_routing_runtime() {
                 apply_started_ts_.store(
                     unix_timestamp_now_seconds(),
                     std::memory_order_release);
-                update_resolver_config_hash();
-                if (run_system_resolver_hook_reload()) {
+                commit_resolver_generation_snapshot(
+                    make_resolver_generation_snapshot(
+                        list_cache_snapshot));
+                if (run_system_resolver_hook_stream_prepared(
+                        "reload", /*rebuild_snapshot=*/false)) {
                     return;
                 }
 
@@ -1149,7 +1176,8 @@ void Daemon::restart_routing_runtime() {
                     "Resolver reload did not converge during runtime restart; "
                     "retrying once without tearing down routing.");
                 std::this_thread::sleep_for(std::chrono::milliseconds{250});
-                if (!run_system_resolver_hook_reload()) {
+                if (!run_system_resolver_hook_stream_prepared(
+                        "reload", /*rebuild_snapshot=*/false)) {
                     throw DaemonError(
                         "System resolver reload hook failed during runtime "
                         "restart");
@@ -1468,12 +1496,16 @@ void Daemon::handle_urltest_selection_change(
             }
         }
 
+        const auto list_cache_snapshot =
+            capture_relevant_list_cache_generation(config_);
         firewall_state_.set_urltest_selection(
             change.urltest_tag, change.new_child_tag);
         bool runtime_rebuilt = false;
         try {
             reconcile_static_routing(RouteReconcileMode::Strict);
-            apply_firewall(FirewallApplyMode::PreserveSets);
+            apply_firewall(
+                FirewallApplyMode::PreserveSets,
+                list_cache_snapshot);
             runtime_rebuilt = true;
             urltest_apply_incidents_.reset(change.urltest_tag);
             log.info("Routing and firewall rebuilt after urltest change.");
@@ -1500,7 +1532,9 @@ void Daemon::handle_urltest_selection_change(
 
             try {
                 reconcile_static_routing(RouteReconcileMode::Strict);
-                apply_firewall(FirewallApplyMode::PreserveSets);
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    list_cache_snapshot);
                 log.info(
                     "Urltest '{}' switch to '{}' was rolled back; the next "
                     "probe may retry it",
@@ -1811,17 +1845,24 @@ void Daemon::schedule_interface_probe() {
 
 void Daemon::schedule_startup_firewall_retry(
     int attempt,
-    std::optional<std::uint64_t> expected_generation) {
+    std::optional<std::uint64_t> expected_generation,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
     // Backing off matters here: the contention that caused the failure is the
     // firmware settling after boot, and it clears on its own within seconds.
     constexpr int kMaxAttempts = 6;
     const auto delay = std::chrono::seconds{5 * attempt};
     const auto generation = expected_generation.value_or(
         runtime_generation_.load(std::memory_order_acquire));
+    if (!list_cache_snapshot) {
+        list_cache_snapshot =
+            capture_relevant_list_cache_generation(config_);
+    }
 
     scheduler_->schedule_oneshot(
         delay,
-        [this, attempt, generation]() {
+        [this, attempt, generation,
+         list_cache_snapshot = std::move(list_cache_snapshot)]() {
             auto& log = Logger::instance();
             if (!runtime_recovery_is_current(
                     routing_runtime_active_,
@@ -1847,7 +1888,9 @@ void Daemon::schedule_startup_firewall_retry(
                 schedule_internal_vpn_catalog_refresh_if_needed(
                     internal_vpn_resolution.state,
                     internal_vpn_service_resolution.state);
-                apply_firewall(FirewallApplyMode::PreserveSets);
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    list_cache_snapshot);
                 cleanup_owned_conntrack_marks(
                     "after delayed startup firewall activation");
                 internal_vpn_generation.commit();
@@ -1864,7 +1907,8 @@ void Daemon::schedule_startup_firewall_retry(
                     return;
                 }
                 log.info("Firewall retry {} failed: {}. Trying again.", attempt, e.what());
-                schedule_startup_firewall_retry(attempt + 1, generation);
+                schedule_startup_firewall_retry(
+                    attempt + 1, generation, list_cache_snapshot);
             } catch (const std::exception& e) {
                 if (config_has_native_vpn_catalog_policy(config_) &&
                     attempt < kMaxAttempts) {
@@ -1874,7 +1918,7 @@ void Daemon::schedule_startup_firewall_retry(
                         attempt,
                         e.what());
                     schedule_startup_firewall_retry(
-                        attempt + 1, generation);
+                        attempt + 1, generation, list_cache_snapshot);
                 } else {
                     log.error(
                         "Firewall recovery stopped after a permanent failure: {}",
@@ -3065,8 +3109,14 @@ void Daemon::schedule_resolver_reload_retry(
                 RESOLVER_RELOAD_RETRY_DELAYS.size(),
                 [this, attempt]() {
                     try {
-                        update_resolver_config_hash();
-                        return run_system_resolver_hook_reload();
+                        if (!resolver_generation_snapshot_ ||
+                            !resolver_generation_snapshot_
+                                 ->list_cache_snapshot) {
+                            throw DaemonError(
+                                "Committed resolver generation is unavailable");
+                        }
+                        return run_system_resolver_hook_stream_prepared(
+                            "reload", /*rebuild_snapshot=*/false);
                     } catch (const std::exception& error) {
                         Logger::instance().info(
                             "Resolver reload recovery attempt {} failed: {}",
@@ -4846,12 +4896,16 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     // every configuration save and makes failover briefly lose its path.
     reconcile_static_routing(RouteReconcileMode::Strict);
     register_urltest_outbounds();
+    const auto list_cache_snapshot =
+        capture_relevant_list_cache_generation(config_);
     retry_hot_apply_firewall(
-        [this]() {
+        [this, &list_cache_snapshot]() {
             // apply_firewall rebuilds the complete pending transaction on
             // every call. A retry therefore never reuses the one-shot backend
             // state from the failed attempt.
-            apply_firewall(FirewallApplyMode::PreserveSets);
+            apply_firewall(
+                FirewallApplyMode::PreserveSets,
+                list_cache_snapshot);
         },
         [](std::chrono::milliseconds delay) {
             std::this_thread::sleep_for(delay);
@@ -4868,14 +4922,16 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         });
     schedule_keenetic_dns_refresh();
     schedule_lists_autoupdate();
-    update_resolver_config_hash();
+    commit_resolver_generation_snapshot(
+        make_resolver_generation_snapshot(list_cache_snapshot));
     setup_dns_probe();
     const auto resolver_snapshot =
         resolver_sync_.snapshot(unix_timestamp_now_seconds());
     if (resolver_reload_required(resolver_snapshot.expected_hash,
                                  resolver_snapshot.actual_hash,
                                  resolver_snapshot.live_status)) {
-        if (!run_system_resolver_hook_reload()) {
+        if (!run_system_resolver_hook_stream_prepared(
+                "reload", /*rebuild_snapshot=*/false)) {
             throw DaemonError(
                 "system resolver reload did not complete its configuration stream");
         }
