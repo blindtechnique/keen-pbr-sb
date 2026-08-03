@@ -2,12 +2,10 @@
 
 #include <algorithm>
 #include <array>
-#include <fstream>
 #include <future>
 #include <iterator>
 #include <map>
 #include <set>
-#include <sstream>
 #include <thread>
 
 #include "../config/routing_state.hpp"
@@ -5053,20 +5051,6 @@ void Daemon::apply_config_with_rollback(const Config& next_config,
         }
         throw;
     }
-}
-
-void Daemon::reload_from_disk() {
-    std::ifstream ifs(config_path_);
-    if (!ifs.is_open()) {
-        throw DaemonError("Cannot open config file: " + config_path_);
-    }
-
-    std::ostringstream ss;
-    ss << ifs.rdbuf();
-    Config next_config = parse_config(ss.str());
-    validate_config(next_config);
-    bool rolled_back = false;
-    apply_config_with_rollback(next_config, rolled_back);
 }
 
 } // namespace keen_pbr3

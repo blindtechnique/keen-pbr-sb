@@ -235,6 +235,7 @@ add_test(NAME keen-pbr-rescue-tests COMMAND keen-pbr-rescue-tests)
 # relinking the large daemon test binary on a Windows bind mount.
 add_executable(keen-pbr-keenetic-dns-refresh-tests
   test_main.cpp
+  test_config_reload_coordinator.cpp
   test_keenetic_dns_refresh_coordinator.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
   ../src/runtime/periodic_task_metrics.cpp

@@ -20,6 +20,7 @@
 #include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
+#include "config_reload_coordinator.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
 #include "../health/interface_probe.hpp"
 #include "pid_file.hpp"
@@ -421,6 +422,9 @@ private:
     void cancel_owned_snat_health_check();
     void check_owned_snat_health();
     void handle_sighup();
+    void complete_sighup_reload(ConfigReloadClaim claim,
+                                bool config_operation_started,
+                                bool allow_coalesced_rerun) noexcept;
     void handle_interface_monitor_events(uint32_t events);
     void reconnect_interface_monitor();
     void register_interface_monitor_fd();
@@ -544,7 +548,6 @@ private:
     void apply_config_with_rollback(const Config& next_config,
                                     bool& rolled_back,
                                     bool refresh_remote_lists = true);
-    void reload_from_disk();
     void start_routing_runtime();
     void stop_routing_runtime();
     void restart_routing_runtime();
@@ -854,6 +857,7 @@ private:
     KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
     std::atomic<bool> ipc_resolver_hook_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
+    ConfigReloadCoordinator sighup_reload_coordinator_;
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
     int internal_vpn_catalog_refresh_retry_task_id_{-1};
     std::size_t internal_vpn_catalog_refresh_retry_attempt_{0};

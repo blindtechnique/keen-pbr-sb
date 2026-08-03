@@ -15,6 +15,7 @@
 #include <ostream>
 #include <signal.h>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <streambuf>
 #include <sys/eventfd.h>
@@ -349,6 +350,7 @@ Daemon::Daemon(Config config,
 
 Daemon::~Daemon() {
     try {
+        sighup_reload_coordinator_.stop();
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
             accept_posted_control_tasks_.store(
@@ -1438,10 +1440,21 @@ void Daemon::schedule_netfilter_runtime_refresh(
 
 void Daemon::handle_sighup() {
     auto& log = Logger::instance();
-    log.info("SIGHUP: full reload starting...");
-#ifdef WITH_API
+    const auto request = sighup_reload_coordinator_.request();
+    if (request.status == ConfigReloadRequestStatus::coalesced) {
+        log.info(
+            "SIGHUP: reload preparation is already in progress; "
+            "coalescing one trailing reload");
+        return;
+    }
+    if (request.status == ConfigReloadRequestStatus::stopped) {
+        log.verbose(
+            "SIGHUP: reload ignored because the daemon is shutting down");
+        return;
+    }
+    const ConfigReloadClaim claim = request.claim;
+
     bool operation_started = false;
-#endif
     try {
 #ifdef WITH_API
         // SIGHUP is another configuration writer. Serialize it with API
@@ -1454,28 +1467,362 @@ void Daemon::handle_sighup() {
             false,
             false);
         operation_started = true;
+#endif
+
+        // A disk reload must not make an in-memory draft disappear or apply a
+        // different generation behind it. Check before admitting any worker
+        // work, while the API config-operation gate is held when available.
         if (config_store_.config_is_draft()) {
             log.warn(
-                "SIGHUP: reload deferred because a configuration draft is "
-                "staged; save or discard the draft first.");
-            finish_config_operation();
-            operation_started = false;
+                "SIGHUP: reload rejected because a configuration draft is "
+                "staged; save or discard the draft first");
+            (void)sighup_reload_coordinator_.cancel(claim);
+            complete_sighup_reload(
+                claim,
+                operation_started,
+                /*allow_coalesced_rerun=*/false);
             return;
         }
-#endif
-        reload_from_disk();
-#ifdef WITH_API
-        finish_config_operation();
-        operation_started = false;
-#endif
-        log.info("SIGHUP: full reload complete.");
-    } catch (const std::exception& e) {
-#ifdef WITH_API
-        if (operation_started) {
-            finish_config_operation();
+
+        const std::string config_path = config_path_;
+        const Config rollback_config = config_store_.active_config();
+        const std::uint64_t expected_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const TraceId trace_id = ensure_trace_id();
+        log.info("SIGHUP: scheduling full reload preparation...");
+        const bool enqueued = blocking_executor_.try_post(
+            "sighup-reload-prepare",
+            [this,
+             config_path,
+             rollback_config,
+             claim,
+             operation_started,
+             expected_runtime_generation,
+             trace_id]() mutable {
+                bool posted = false;
+                try {
+                    // Keep the outermost worker boundary ahead of every
+                    // allocation and trace-context installation. If any of
+                    // those operations throws, the worker still releases the
+                    // prepare claim and the API config-operation gate below.
+                    ScopedTraceContext trace_scope(trace_id);
+                    auto prepared =
+                        std::make_shared<PreparedRuntimeInputs>();
+                    auto rollback_prepared =
+                        std::make_shared<PreparedRuntimeInputs>();
+                    std::string preparation_error;
+
+                    try {
+                        std::ifstream input(config_path);
+                        if (!input.is_open()) {
+                            throw DaemonError(
+                                "Cannot open config file: " + config_path);
+                        }
+
+                        std::ostringstream serialized;
+                        serialized << input.rdbuf();
+                        if (input.bad()) {
+                            throw DaemonError(
+                                "Cannot read config file: " + config_path);
+                        }
+
+                        Config next_config = parse_config(serialized.str());
+                        validate_config(next_config);
+                        *prepared = prepare_runtime_inputs(
+                            next_config,
+                            RemoteListPreparationMode::RefreshAll);
+                        *rollback_prepared = prepare_runtime_inputs(
+                            rollback_config,
+                            RemoteListPreparationMode::None);
+                    } catch (const std::exception& error) {
+                        preparation_error = error.what();
+                    } catch (...) {
+                        preparation_error =
+                            "unknown disk reload preparation error";
+                    }
+
+                    posted = post_control_task(
+                        [this,
+                         prepared,
+                         rollback_prepared,
+                         claim,
+                         operation_started,
+                         expected_runtime_generation,
+                         preparation_error =
+                             std::move(preparation_error)]() mutable {
+                            const auto commit_claim =
+                                sighup_reload_coordinator_.claim_commit(
+                                    claim);
+                            if (commit_claim ==
+                                ConfigReloadCommitStatus::lost) {
+                                return;
+                            }
+                            bool allow_coalesced_rerun =
+                                commit_claim !=
+                                ConfigReloadCommitStatus::stopped;
+                            try {
+                                // This is the callback's outermost boundary
+                                // after commit ownership is claimed. Every
+                                // allocation, copy and log operation stays
+                                // inside it, and the single completion below
+                                // releases both coordinator and API gate.
+                                auto& commit_log = Logger::instance();
+                                if (commit_claim ==
+                                    ConfigReloadCommitStatus::superseded) {
+                                    commit_log.info(
+                                        "SIGHUP: prepared reload was "
+                                        "superseded; reading the latest file "
+                                        "generation");
+                                } else if (
+                                    commit_claim ==
+                                    ConfigReloadCommitStatus::stopped) {
+                                    commit_log.verbose(
+                                        "SIGHUP: prepared reload discarded "
+                                        "because the daemon is shutting "
+                                        "down");
+                                } else if (
+                                    runtime_generation_.load(
+                                        std::memory_order_acquire) !=
+                                        expected_runtime_generation) {
+                                    // A runtime/list commit advanced while the
+                                    // worker was blocked. Re-prepare all
+                                    // derived inputs and the exact rollback
+                                    // snapshot from that committed generation.
+                                    (void)sighup_reload_coordinator_.request();
+                                    commit_log.info(
+                                        "SIGHUP: prepared reload is stale "
+                                        "after an active runtime generation "
+                                        "change; scheduling "
+                                        "a fresh preparation");
+                                } else if (!preparation_error.empty()) {
+                                    commit_log.error(
+                                        "SIGHUP: reload preparation failed: "
+                                        "{}",
+                                        preparation_error);
+                                } else {
+                                    // The shared Keenetic DNS cache may have
+                                    // advanced while the worker was preparing
+                                    // either candidate. Rollback must restore
+                                    // the exact event-loop-owned committed
+                                    // snapshot, not that newer observational
+                                    // cache value.
+                                    rollback_prepared->keenetic_dns =
+                                        active_keenetic_dns_;
+                                    if (prepared->keenetic_dns.snapshot &&
+                                        active_keenetic_dns_.generation >
+                                            prepared->keenetic_dns.generation) {
+                                        // A periodic observation can advance
+                                        // while SIGHUP performs remote I/O.
+                                        // Its immutable view is safe to splice
+                                        // into a candidate that still uses
+                                        // Keenetic DNS. Do not re-run all
+                                        // RefreshAll work, and do not attach it
+                                        // to a candidate switching away from
+                                        // Keenetic DNS (no snapshot).
+                                        prepared->keenetic_dns =
+                                            active_keenetic_dns_;
+                                    }
+                                    try {
+                                        apply_prepared_runtime_inputs(
+                                            std::move(*prepared));
+                                        commit_log.info(
+                                            "SIGHUP: full reload complete");
+                                    } catch (
+                                        const std::exception& apply_error) {
+                                        try {
+                                            apply_prepared_runtime_inputs(
+                                                std::move(
+                                                    *rollback_prepared));
+                                            commit_log.warn(
+                                                "SIGHUP: reload failed; "
+                                                "previous runtime was "
+                                                "restored: {}",
+                                                apply_error.what());
+                                        } catch (
+                                            const std::exception&
+                                                rollback_error) {
+                                            commit_log.error(
+                                                "SIGHUP: reload failed and "
+                                                "rollback could not restore "
+                                                "the previous runtime: {}; "
+                                                "rollback error: {}",
+                                                apply_error.what(),
+                                                rollback_error.what());
+                                        } catch (...) {
+                                            commit_log.error(
+                                                "SIGHUP: reload failed and "
+                                                "rollback could not restore "
+                                                "the previous runtime: {}; "
+                                                "rollback error: unknown",
+                                                apply_error.what());
+                                        }
+                                    } catch (...) {
+                                        try {
+                                            apply_prepared_runtime_inputs(
+                                                std::move(
+                                                    *rollback_prepared));
+                                            commit_log.warn(
+                                                "SIGHUP: reload failed with "
+                                                "an unknown error; previous "
+                                                "runtime was restored");
+                                        } catch (
+                                            const std::exception&
+                                                rollback_error) {
+                                            commit_log.error(
+                                                "SIGHUP: reload failed with "
+                                                "an unknown error and "
+                                                "rollback could not restore "
+                                                "the previous runtime: {}",
+                                                rollback_error.what());
+                                        } catch (...) {
+                                            commit_log.error(
+                                                "SIGHUP: reload failed with "
+                                                "an unknown error and "
+                                                "rollback also failed with "
+                                                "an unknown error");
+                                        }
+                                    }
+                                }
+                            } catch (const std::exception& commit_error) {
+                                try {
+                                    Logger::instance().error(
+                                        "SIGHUP: reload commit callback "
+                                        "failed: {}",
+                                        commit_error.what());
+                                } catch (...) {
+                                }
+                            } catch (...) {
+                                try {
+                                    Logger::instance().error(
+                                        "SIGHUP: reload commit callback "
+                                        "failed with an unknown error");
+                                } catch (...) {
+                                }
+                            }
+
+                            complete_sighup_reload(
+                                claim,
+                                operation_started,
+                                allow_coalesced_rerun);
+                        },
+                        "sighup-reload-commit");
+                } catch (const std::exception& worker_error) {
+                    try {
+                        Logger::instance().error(
+                            "SIGHUP: reload worker failed before handing off "
+                            "to the control loop: {}",
+                            worker_error.what());
+                    } catch (...) {
+                    }
+                } catch (...) {
+                    try {
+                        Logger::instance().error(
+                            "SIGHUP: reload worker failed before handing off "
+                            "to the control loop: unknown error");
+                    } catch (...) {
+                    }
+                }
+
+                if (!posted) {
+                    // Shutdown closes control-task admission before draining
+                    // the blocking executor. post_control_task() can also
+                    // throw after queueing, so release only when this worker
+                    // atomically cancels the prepare claim before a queued
+                    // callback claims commit.
+                    if (sighup_reload_coordinator_.cancel(claim)) {
+                        complete_sighup_reload(
+                            claim,
+                            operation_started,
+                            /*allow_coalesced_rerun=*/false);
+                    }
+                }
+            },
+            trace_id);
+        if (!enqueued) {
+            log.error(
+                "SIGHUP: reload rejected because the blocking executor is "
+                "unavailable");
+            if (sighup_reload_coordinator_.cancel(claim)) {
+                complete_sighup_reload(
+                    claim,
+                    operation_started,
+                    /*allow_coalesced_rerun=*/false);
+            }
         }
+    } catch (const std::exception& e) {
+        if (sighup_reload_coordinator_.cancel(claim)) {
+            complete_sighup_reload(
+                claim,
+                operation_started,
+                /*allow_coalesced_rerun=*/false);
+        }
+        log.error("SIGHUP: reload rejected: {}", e.what());
+    } catch (...) {
+        if (sighup_reload_coordinator_.cancel(claim)) {
+            complete_sighup_reload(
+                claim,
+                operation_started,
+                /*allow_coalesced_rerun=*/false);
+        }
+        log.error("SIGHUP: reload rejected: unknown error");
+    }
+}
+
+void Daemon::complete_sighup_reload(
+    ConfigReloadClaim claim,
+    bool config_operation_started,
+    bool allow_coalesced_rerun) noexcept {
+    const auto completion =
+        sighup_reload_coordinator_.complete(claim);
+    if (!completion.owned) {
+        return;
+    }
+#ifdef WITH_API
+    if (config_operation_started) {
+        try {
+            finish_config_operation();
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().error(
+                    "SIGHUP: failed to release the config-operation gate: {}",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+            try {
+                Logger::instance().error(
+                    "SIGHUP: failed to release the config-operation gate");
+            } catch (...) {
+            }
+        }
+    }
+#else
+    (void)config_operation_started;
 #endif
-        log.error("SIGHUP: reload failed: {}", e.what());
+
+    if (!completion.rerun_requested || !allow_coalesced_rerun ||
+        !accept_posted_control_tasks_.load(std::memory_order_acquire) ||
+        !running_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    try {
+        Logger::instance().info(
+            "SIGHUP: starting the coalesced trailing reload");
+        handle_sighup();
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().error(
+                "SIGHUP: coalesced reload could not start: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            Logger::instance().error(
+                "SIGHUP: coalesced reload could not start: unknown error");
+        } catch (...) {
+        }
     }
 }
 
@@ -2352,6 +2699,7 @@ void Daemon::run() {
         // event loop starts must therefore unwind every owned subsystem; the
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
+        sighup_reload_coordinator_.stop();
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
             accept_posted_control_tasks_.store(
@@ -2460,6 +2808,7 @@ void Daemon::run() {
     // observation is generation-fenced, but disabling it here also prevents a
     // late exact delete from racing normal shutdown.
     cancel_idle_stall_observer();
+    sighup_reload_coordinator_.stop();
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
         accept_posted_control_tasks_.store(
@@ -2517,6 +2866,7 @@ void Daemon::run() {
 
 void Daemon::stop() {
     list_refresh_tasks_.request_cancel_active();
+    sighup_reload_coordinator_.stop();
     running_.store(false, std::memory_order_release);
 }
 
