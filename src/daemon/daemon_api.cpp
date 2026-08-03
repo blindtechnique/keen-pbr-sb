@@ -400,6 +400,11 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
          refresh_remote_lists_after_apply,
          saved_config_json = std::move(saved_config_json)]() mutable {
             try {
+                // Rollback must restore the exact DNS snapshot that belongs
+                // to the currently committed runtime generation. The shared
+                // prepare cache may have advanced after both candidates were
+                // prepared on the API worker.
+                rollback_prepared->keenetic_dns = active_keenetic_dns_;
                 apply_prepared_runtime_inputs(std::move(*prepared));
                 result->applied = true;
                 result->rolled_back = false;
@@ -604,7 +609,11 @@ void Daemon::setup_api() {
 
             ListStreamer streamer(list_service_.cache_manager());
             const DnsConfig dns_cfg = config.dns.value_or(DnsConfig{});
-            DnsServerRegistry dns_registry(dns_cfg);
+            const auto keenetic_dns = prepare_keenetic_dns_view(
+                config,
+                /*allow_refresh=*/true);
+            DnsServerRegistry dns_registry(
+                dns_cfg, keenetic_dns.snapshot);
             const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
             log_ipv6_support_decision_once(ipv6_decision);
             (void)DnsmasqGenerator::compute_config_hash(

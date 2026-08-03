@@ -132,7 +132,17 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::vector<FirewallSourceEgressSnatSelector>*
         native_vpn_direct_egress_snat_selectors,
     AppliedListContentState* applied_list_content_state,
-    bool udp_call_affinity_ipset_available) {
+    bool udp_call_affinity_ipset_available,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot) {
+    // Resolve and validate the complete DNS registry before preparing the
+    // backend transaction.  In particular, a Keenetic DNS server without a
+    // prepared snapshot must fail before any firewall state is touched.
+    std::optional<DnsServerRegistry> dns_registry;
+    if (config.dns.has_value()) {
+        dns_registry.emplace(
+            config.dns.value_or(DnsConfig{}), keenetic_dns_snapshot);
+    }
+
     ListStreamer list_streamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
@@ -320,7 +330,6 @@ std::vector<RuleState> apply_runtime_firewall(
 
     if (config.dns.has_value()) {
         const auto& dns_servers = config.dns->servers.value_or(std::vector<DnsServer>{});
-        const DnsServerRegistry dns_registry(config.dns.value_or(DnsConfig{}));
         for (const auto& server : dns_servers) {
             if (!server.detour.has_value()) {
                 continue;
@@ -349,7 +358,7 @@ std::vector<RuleState> apply_runtime_firewall(
                 continue;
             }
 
-            const auto resolved_servers = dns_registry.get_servers(server.tag);
+            const auto resolved_servers = dns_registry->get_servers(server.tag);
             if (resolved_servers.empty()) {
                 throw FirewallError("DNS server tag not found during detour setup: " + server.tag);
             }

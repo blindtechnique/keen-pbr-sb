@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../config/config.hpp"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -33,6 +35,16 @@ struct KeeneticDnsSnapshot {
     std::vector<KeeneticDnsUpstreamEntry> upstreams;
     std::vector<KeeneticStaticDnsEntry> static_entries;
 };
+
+// Compare the complete DNS proxy snapshots as one coherent unit.  Callers
+// must not compare only addresses because static entries and upstream
+// metadata belong to the same RCI generation.
+bool keenetic_dns_snapshots_equal(const KeeneticDnsSnapshot& lhs,
+                                  const KeeneticDnsSnapshot& rhs);
+
+// Keep all runtime consumers on one predicate instead of independently
+// scanning the generated DNS config model.
+bool dns_config_uses_keenetic_server(const DnsConfig& dns_config);
 
 enum class KeeneticDnsCacheStatus : uint8_t {
     fresh,
@@ -123,11 +135,14 @@ struct KeeneticDnsRefreshResult {
     KeeneticDnsRefreshStatus status{KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE};
     std::vector<std::string> addresses;
     std::string error;
+    std::optional<KeeneticDnsSnapshot> snapshot;
+    std::uint64_t generation{0};
 };
 
-// Refresh cached built-in DNS server addresses via Keenetic RCI.
-// When a previously cached value exists, fetch failures keep the cache intact
-// and return FETCH_FAILED_USED_CACHE with the cached addresses.
+// Refresh the coherent built-in DNS proxy snapshot via Keenetic RCI.
+// When a previously cached value exists, fetch failures keep that exact
+// snapshot intact.  The returned generation identifies the completed cache
+// observation and lets consumers reject older prepared snapshots.
 KeeneticDnsRefreshResult refresh_keenetic_dns_address_cache(bool force_refresh = false);
 
 // Resolve built-in DNS server addresses via Keenetic RCI.

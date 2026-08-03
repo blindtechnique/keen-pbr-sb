@@ -384,7 +384,12 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
     }
 
     SUBCASE("falls back to cached value when stale refresh fails") {
-        CHECK(resolve_keenetic_dns_addresses() == std::vector<std::string>{"203.0.113.10"});
+        const KeeneticDnsRefreshResult initial =
+            refresh_keenetic_dns_address_cache(false);
+        REQUIRE(initial.snapshot.has_value());
+        CHECK(initial.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        CHECK(initial.generation > 0);
         CHECK(fetch_count == 1);
 
         now += std::chrono::minutes(6);
@@ -396,6 +401,10 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(false);
         CHECK(result.status == KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE);
         CHECK(result.addresses == std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot.has_value());
+        CHECK(result.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        CHECK(result.generation > initial.generation);
         CHECK(fetch_count == 2);
         CHECK(resolve_keenetic_dns_addresses() == std::vector<std::string>{"203.0.113.10"});
     }
@@ -423,7 +432,11 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
     }
 
     SUBCASE("reports updated when forced refresh changes static entries") {
-        CHECK(resolve_keenetic_dns_addresses() == std::vector<std::string>{"203.0.113.10"});
+        const KeeneticDnsRefreshResult initial =
+            refresh_keenetic_dns_address_cache(false);
+        REQUIRE(initial.snapshot.has_value());
+        CHECK(initial.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
         CHECK(fetch_count == 1);
         CHECK(get_keenetic_static_dns_entries().empty());
 
@@ -442,6 +455,16 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(true);
         CHECK(result.status == KeeneticDnsRefreshStatus::UPDATED);
         CHECK(result.addresses == std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot.has_value());
+        CHECK(result.generation > initial.generation);
+        CHECK(result.snapshot->addresses ==
+              std::vector<std::string>{"203.0.113.10"});
+        REQUIRE(result.snapshot->upstreams.size() == 1);
+        CHECK(result.snapshot->upstreams[0].address == "203.0.113.10");
+        CHECK(result.snapshot->upstreams[0].kind == "Plain");
+        REQUIRE(result.snapshot->static_entries.size() == 1);
+        CHECK(result.snapshot->static_entries[0].domain == "host.example");
+        CHECK(result.snapshot->static_entries[0].address == "198.51.100.180");
         REQUIRE(get_keenetic_static_dns_entries().size() == 1);
         CHECK(get_keenetic_static_dns_entries()[0].domain == "host.example");
         CHECK(get_keenetic_static_dns_entries()[0].address == "198.51.100.180");
@@ -455,6 +478,8 @@ TEST_CASE("keenetic dns: cache refresh semantics") {
         const KeeneticDnsRefreshResult result = refresh_keenetic_dns_address_cache(true);
         CHECK(result.status == KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE);
         CHECK(result.addresses.empty());
+        CHECK_FALSE(result.snapshot.has_value());
+        CHECK(result.generation > 0);
         CHECK_THROWS_AS(resolve_keenetic_dns_addresses(true), KeeneticDnsError);
     }
 }

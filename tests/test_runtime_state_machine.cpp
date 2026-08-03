@@ -449,6 +449,22 @@ TEST_CASE("runtime firewall retry releases its slot before a reentrant successor
     CHECK(scheduler.callbacks.size() == 2U);
 }
 
+TEST_CASE(
+    "resolver recovery remains gated after the firewall retry slot is exhausted") {
+    RuntimeFirewallRetryCoordinator firewall_retry;
+    ResolverAfterFirewallRecoveryGate resolver_gate;
+
+    resolver_gate.wait_for(/*runtime_generation=*/17);
+
+    CHECK_FALSE(firewall_retry.retry_pending());
+    CHECK(resolver_gate.waiting_for(17));
+    CHECK_FALSE(resolver_gate.waiting_for(18));
+    CHECK_FALSE(resolver_gate.release(18));
+    CHECK(resolver_gate.waiting_for(17));
+    CHECK(resolver_gate.release(17));
+    CHECK_FALSE(resolver_gate.waiting_for(17));
+}
+
 TEST_CASE("runtime firewall retry exhausts generic work but keeps owned maintenance") {
     RuntimeFirewallRetryCoordinator coordinator;
     FakeRuntimeFirewallRetryScheduler scheduler;

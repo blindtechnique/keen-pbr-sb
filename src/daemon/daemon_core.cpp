@@ -763,7 +763,9 @@ void Daemon::handle_ipc_control_socket() {
                                 output
                                     << "# keen-pbr resolver state: active\n";
                                 ListStreamer streamer(cache);
-                                DnsServerRegistry registry(dns_config);
+                                DnsServerRegistry registry(
+                                    dns_config,
+                                    generation->keenetic_dns.snapshot);
                                 DnsmasqGenerator generator(
                                     registry,
                                     streamer,
@@ -1592,7 +1594,13 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             internal_vpn_resolution);
         update_internal_vpn_service_verified_includes_lkg(
             internal_vpn_service_resolution);
-        if (resolver_access_policy_changed) {
+        const auto current_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const bool resolver_waits_for_firewall =
+            resolver_after_firewall_gate_.waiting_for(
+                current_runtime_generation);
+        if (resolver_access_policy_changed &&
+            !resolver_waits_for_firewall) {
             // A live NDMS catalog refresh can add, remove or rename a dynamic
             // SSTP/IKE/L2TP/OpenConnect ingress without changing config.json.
             // Firewall and the in-memory inventory have already committed, so
@@ -1643,6 +1651,11 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         }
         runtime_firewall_retry_.complete_attempt(
             /*succeeded=*/true, snat_recovery);
+        if (resolver_after_firewall_gate_.release(
+                current_runtime_generation)) {
+            schedule_resolver_reload_retry(
+                0, current_runtime_generation);
+        }
         runtime_firewall_incidents_.clear();
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
@@ -2137,6 +2150,12 @@ void Daemon::run() {
     try {
     // Startup happens before the event loop. It is the one lifecycle point
     // where a bounded shared-cache refresh may safely query loopback NDMS.
+    // Prime Keenetic DNS explicitly before the first route/firewall mutation;
+    // all runtime consumers below are cache-only and share this exact view.
+    active_keenetic_dns_ = prepare_keenetic_dns_view(
+        config_,
+        /*allow_refresh=*/true,
+        /*force_refresh=*/true);
     auto internal_vpn_resolution =
         resolve_internal_vpn_servers_for_runtime(
             config_,
@@ -2294,6 +2313,7 @@ void Daemon::run() {
     routing_runtime_active_ = true;
     reset_idle_stall_observer(/*schedule_if_eligible=*/true);
     schedule_owned_snat_health_check();
+    schedule_keenetic_dns_refresh();
     transition_runtime_or_throw(RuntimeState::running, "startup complete");
     publish_runtime_state();
 

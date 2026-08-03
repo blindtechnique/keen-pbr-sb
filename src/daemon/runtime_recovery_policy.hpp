@@ -810,6 +810,35 @@ private:
     OwnedSnatRecovery pending_owned_snat_recovery_;
 };
 
+// Resolver recovery may depend on a firewall rollback that outlives the
+// bounded retry timer. Keep that dependency as an explicit generation latch:
+// an empty retry slot is not proof that the firewall converged.
+class ResolverAfterFirewallRecoveryGate {
+public:
+    void wait_for(std::uint64_t runtime_generation) noexcept {
+        runtime_generation_ = runtime_generation;
+    }
+
+    bool waiting_for(std::uint64_t runtime_generation) const noexcept {
+        return runtime_generation_ == runtime_generation;
+    }
+
+    bool release(std::uint64_t runtime_generation) noexcept {
+        if (!waiting_for(runtime_generation)) {
+            return false;
+        }
+        runtime_generation_.reset();
+        return true;
+    }
+
+    void reset() noexcept {
+        runtime_generation_.reset();
+    }
+
+private:
+    std::optional<std::uint64_t> runtime_generation_;
+};
+
 // A firmware NAT rebuild may remove keen-pbr's postrouting scaffold while
 // leaving already-classified conntrack entries alive. Evict only our marked
 // flows, and only after observing that a genuinely missing scaffold was

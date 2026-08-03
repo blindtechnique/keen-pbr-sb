@@ -340,14 +340,31 @@ bool Daemon::run_system_resolver_hook_stream(
     // Keep the cache revision stable from hash calculation through the final
     // streamed byte. Remote list downloads use the exclusive side.
     KPBR_SHARED_LOCK(cache_snapshot, resolver_cache_snapshot_mutex_);
-    update_resolver_config_hash();
+    return run_system_resolver_hook_stream_locked(
+        action, /*rebuild_snapshot=*/true);
+}
+
+bool Daemon::run_system_resolver_hook_stream_locked(
+    std::string_view action,
+    bool rebuild_snapshot) {
+    if (build_system_resolver_hook_args(config_, action).empty()) {
+        return true;
+    }
+
+    if (rebuild_snapshot) {
+        update_resolver_config_hash();
+    }
+    if (!resolver_generation_snapshot_) {
+        Logger::instance().error(
+            "Cannot stream a committed resolver generation: snapshot is unavailable");
+        return false;
+    }
     auto generation = std::make_shared<ResolverGenerationSnapshot>(
         *resolver_generation_snapshot_);
     generation->stream_epoch =
         resolver_stream_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
     resolver_generation_snapshot_ = generation;
-    const std::uint64_t expected_epoch =
-        generation->stream_epoch;
+    const std::uint64_t expected_epoch = generation->stream_epoch;
     ResolverIpcGate gate(ipc_resolver_hook_inflight_);
     if (!run_system_resolver_hook(action, false)) {
         return false;
@@ -361,9 +378,11 @@ bool Daemon::run_system_resolver_hook_stream(
         return false;
     }
 
-    // Lists and DNS cache files remain live on disk while streaming. Refresh
-    // the expected hash only after the completed stream boundary.
-    update_resolver_config_hash();
+    if (rebuild_snapshot) {
+        // Local files are not governed by the remote-cache publication lock.
+        // Preserve the existing post-stream verification for those sources.
+        update_resolver_config_hash();
+    }
     return true;
 }
 
@@ -899,6 +918,14 @@ void Daemon::start_routing_runtime() {
         return;
     }
 
+    // A stopped runtime already has a prepared cache from cold start or the
+    // last staged apply. Starting on the event loop must never perform RCI
+    // I/O; fail before kernel mutation if no usable snapshot exists.
+    const KeeneticDnsCacheView prepared_keenetic_dns =
+        prepare_keenetic_dns_view(
+            config_,
+            /*allow_refresh=*/false);
+
     cancel_idle_stall_observer();
     transition_runtime_or_throw(RuntimeState::starting, "runtime start requested");
     publish_runtime_state();
@@ -918,10 +945,10 @@ void Daemon::start_routing_runtime() {
             internal_vpn_service_generation(
                 resolved_internal_vpn_service_targets_,
                 internal_vpn_service_resolution.effective_targets);
+        active_keenetic_dns_ = prepared_keenetic_dns;
         normalize_urltest_selections();
         setup_static_routing();
         register_urltest_outbounds();
-        (void)refresh_keenetic_dns_cache(true);
         retry_hot_apply_firewall(
             [this]() {
                 apply_firewall(FirewallApplyMode::PreserveSets);
@@ -1290,7 +1317,8 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         &runtime_targets,
         &native_vpn_direct_egress_snat_selectors,
         &candidate_list_content_state,
-        opts_.udp_call_affinity_ipset_available);
+        opts_.udp_call_affinity_ipset_available,
+        active_keenetic_dns_.snapshot);
     firewall_state_.set_rules(std::move(candidate_rules));
     applied_list_content_state_ =
         std::move(candidate_list_content_state);
@@ -2343,6 +2371,9 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
     const bool preparing_on_control_loop =
         event_loop_active_.load(std::memory_order_acquire) &&
         is_event_loop_thread();
+    prepared.keenetic_dns = prepare_keenetic_dns_view(
+        config,
+        /*allow_refresh=*/!preparing_on_control_loop);
     prepared.internal_vpn_resolution =
         resolve_internal_vpn_servers_for_runtime(
             config,
@@ -2396,6 +2427,35 @@ PreparedRuntimeInputs Daemon::prepare_runtime_inputs(const Config& config,
     }
 
     return prepared;
+}
+
+KeeneticDnsCacheView Daemon::prepare_keenetic_dns_view(
+    const Config& config,
+    bool allow_refresh,
+    bool force_refresh) const {
+    const DnsConfig dns_config = config.dns.value_or(DnsConfig{});
+    if (!dns_config_uses_keenetic_server(dns_config)) {
+        return {};
+    }
+
+#ifdef USE_KEENETIC_API
+    auto& cache = shared_keenetic_dns_cache();
+    const KeeneticDnsCacheView view = allow_refresh
+        ? (force_refresh ? cache.force_refresh() : cache.get())
+        : cache.peek();
+    if (!view.snapshot.has_value()) {
+        throw KeeneticDnsError(
+            view.error.empty()
+                ? "Keenetic DNS snapshot is unavailable; refresh it before applying the runtime configuration"
+                : view.error);
+    }
+    return view;
+#else
+    (void)allow_refresh;
+    (void)force_refresh;
+    throw KeeneticDnsError(
+        "DNS server type 'keenetic' requires build with USE_KEENETIC_API=ON");
+#endif
 }
 
 InternalVpnRuntimeResolution
@@ -2978,6 +3038,18 @@ void Daemon::schedule_resolver_reload_retry(
         delay,
         [this, attempt, runtime_generation]() {
             resolver_reload_retry_task_id_ = -1;
+            // Resolver bytes must never advance ahead of a failed firewall
+            // rollback. This explicit generation latch remains closed even
+            // after bounded firewall retries are exhausted; the successful
+            // firewall reconciliation schedules a fresh resolver attempt.
+            if (resolver_after_firewall_gate_.waiting_for(
+                    runtime_generation)) {
+                Logger::instance().verbose(
+                    "Holding resolver reload recovery until firewall "
+                    "generation {} has converged.",
+                    runtime_generation);
+                return;
+            }
             const auto outcome = evaluate_resolver_reload_retry(
                 routing_runtime_active_,
                 runtime_generation,
@@ -4718,6 +4790,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     cancel_owned_conntrack_cleanup_retry();
     const auto applying_runtime_generation =
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel) + 1U;
+    resolver_after_firewall_gate_.reset();
     cancel_runtime_firewall_retry();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
@@ -4749,6 +4822,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     resolved_internal_vpn_service_targets_ =
         std::move(
             prepared.internal_vpn_service_resolution.effective_targets);
+    active_keenetic_dns_ = std::move(prepared.keenetic_dns);
     config_ = std::move(prepared.config);
     firewall_state_.set_outbound_marks(outbound_marks_);
     firewall_state_.set_fwmark_mask(fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{})));
@@ -4765,7 +4839,6 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     // every configuration save and makes failover briefly lose its path.
     reconcile_static_routing(RouteReconcileMode::Strict);
     register_urltest_outbounds();
-    (void)refresh_keenetic_dns_cache(true);
     retry_hot_apply_firewall(
         [this]() {
             // apply_firewall rebuilds the complete pending transaction on
@@ -4955,13 +5028,19 @@ void Daemon::apply_config_with_rollback(const Config& next_config,
                                         bool& rolled_back,
                                         bool refresh_remote_lists) {
     Config previous_config = config_;
+    const KeeneticDnsCacheView previous_keenetic_dns =
+        active_keenetic_dns_;
 
     try {
         apply_config(next_config, refresh_remote_lists);
         rolled_back = false;
     } catch (...) {
         try {
-            apply_config(previous_config, false);
+            auto rollback = prepare_runtime_inputs(
+                previous_config,
+                RemoteListPreparationMode::None);
+            rollback.keenetic_dns = previous_keenetic_dns;
+            apply_prepared_runtime_inputs(std::move(rollback));
             rolled_back = true;
             Logger::instance().warn(
                 "Configuration apply failed; previous runtime was restored");

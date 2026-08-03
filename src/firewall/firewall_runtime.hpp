@@ -2,12 +2,14 @@
 
 #include "../cache/cache_manager.hpp"
 #include "../config/config.hpp"
+#include "../dns/keenetic_dns.hpp"
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "firewall.hpp"
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,7 +32,9 @@ std::vector<RuleState> apply_runtime_firewall(
     const std::vector<FirewallSourceEgressSnatSelector>*
         native_vpn_direct_egress_snat_selectors = nullptr,
     AppliedListContentState* applied_list_content_state = nullptr,
-    bool udp_call_affinity_ipset_available = true);
+    bool udp_call_affinity_ipset_available = true,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
+        std::nullopt);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
 // L2TP and IKEv1 servers. Their clients need this on the ordinary WAN path

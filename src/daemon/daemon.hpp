@@ -17,6 +17,7 @@
 #include <sys/types.h>
 
 #include "../config/config.hpp"
+#include "../dns/keenetic_dns.hpp"
 #include "../dns/dns_txt_client.hpp"
 #include "config_store.hpp"
 #include "keenetic_dns_refresh_coordinator.hpp"
@@ -168,6 +169,10 @@ struct InternalVpnServiceRuntimeResolution {
 struct PreparedRuntimeInputs {
     Config config;
     OutboundMarkMap outbound_marks;
+    // Exact immutable Keenetic DNS view prepared before the serialized
+    // runtime commit. Firewall and resolver generation must consume this
+    // value rather than observing the mutable shared RCI cache themselves.
+    KeeneticDnsCacheView keenetic_dns;
     InternalVpnRuntimeResolution internal_vpn_resolution;
     InternalVpnServiceRuntimeResolution internal_vpn_service_resolution;
     bool remote_lists_refreshed{false};
@@ -320,6 +325,7 @@ inline bool internal_vpn_resolution_requires_catalog_refresh(
 
 struct ResolverGenerationSnapshot {
     Config config;
+    KeeneticDnsCacheView keenetic_dns;
     ResolverType resolver_type;
     ResolverIpv6Policy ipv6_policy;
     std::vector<std::string> trusted_dns_interfaces;
@@ -491,6 +497,10 @@ private:
     PreparedRuntimeInputs prepare_runtime_inputs(const Config& config,
                                                   RemoteListPreparationMode list_mode =
                                                       RemoteListPreparationMode::RefreshAll);
+    KeeneticDnsCacheView prepare_keenetic_dns_view(
+        const Config& config,
+        bool allow_refresh,
+        bool force_refresh = false) const;
     InternalVpnRuntimeResolution resolve_internal_vpn_servers_for_runtime(
         const Config& config,
         bool allow_catalog_refresh,
@@ -559,6 +569,12 @@ private:
     bool run_system_resolver_hook(std::string_view action,
                                   bool manage_ipc_gate = true);
     bool run_system_resolver_hook_stream(std::string_view action);
+    // The caller must hold resolver_cache_snapshot_mutex_ in shared mode.
+    // This keeps firewall list consumption, resolver hashing and the streamed
+    // dnsmasq bytes on one immutable cache generation without copying lists.
+    bool run_system_resolver_hook_stream_locked(
+        std::string_view action,
+        bool rebuild_snapshot);
     bool run_system_resolver_hook_reload();
     bool wait_for_resolver_stream_epoch(std::uint64_t expected_epoch,
                                         std::chrono::milliseconds timeout);
@@ -599,7 +615,6 @@ private:
     void refresh_resolver_config_hash_actual_async();
     void maybe_schedule_resolver_config_hash_actual_refresh();
     void schedule_keenetic_dns_refresh();
-    bool refresh_keenetic_dns_cache(bool force_refresh);
     bool commit_keenetic_dns_refresh_result(
         std::uint64_t generation,
         const KeeneticDnsRefreshResult& result);
@@ -654,6 +669,8 @@ private:
 
     // Recompute resolver_config_hash_ from current config/cache state
     void update_resolver_config_hash();
+    void commit_resolver_generation_snapshot(
+        ResolverGenerationSnapshot snapshot);
     ResolverGenerationSnapshot make_resolver_generation_snapshot();
     // Schedule (or reschedule) the periodic refresh of resolver_config_hash_actual_.
     void schedule_resolver_config_hash_actual_refresh();
@@ -690,6 +707,11 @@ private:
     // Separate bounded repair chain for a resolver hook that failed after
     // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq.
     int resolver_reload_retry_task_id_{-1};
+    // A failed Keenetic DNS rollback must restore firewall before resolver
+    // bytes may advance. Unlike retry_pending(), this generation latch remains
+    // set after bounded firewall retries are exhausted and is released only by
+    // a verified successful firewall reconciliation or a new runtime generation.
+    ResolverAfterFirewallRecoveryGate resolver_after_firewall_gate_;
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
     // Bounded one-shot observer for a client reusing a long-idle forwarded
@@ -758,6 +780,10 @@ private:
 
     // Event-loop-owned controller state
     Config config_;
+    // Event-loop-owned DNS snapshot committed with config_. The shared DNS
+    // cache is observational/prepare state only and may advance on a stale
+    // worker; active runtime consumers must never read it directly.
+    KeeneticDnsCacheView active_keenetic_dns_;
     std::string config_path_;
     DaemonOptions opts_;
 

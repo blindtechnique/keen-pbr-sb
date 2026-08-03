@@ -1,6 +1,5 @@
 #include "dnsmasq_gen.hpp"
 #include "dnsmasq_access_policy.hpp"
-#include "keenetic_dns.hpp"
 #include "../crypto/md5.hpp"
 #include "../log/logger.hpp"
 
@@ -26,15 +25,6 @@ static constexpr const char* kNftSetMiddle = ",6#inet#KeenPbrTable#";
 static constexpr size_t kNftSetPrefixLen = sizeof("/4#inet#KeenPbrTable#") - 1;
 static constexpr size_t kNftSetMiddleLen = sizeof(",6#inet#KeenPbrTable#") - 1;
 
-bool dns_config_uses_keenetic_server(const DnsConfig& dns_config) {
-    for (const auto& server : dns_config.servers.value_or(std::vector<DnsServer>{})) {
-        if (server.type.value_or(api::DnsServerType::STATIC) == api::DnsServerType::KEENETIC) {
-            return true;
-        }
-    }
-    return false;
-}
-
 std::string keenetic_static_domain_pattern(const std::string& domain) {
     if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
         return "/" + domain.substr(2);
@@ -58,11 +48,11 @@ DnsmasqGenerator::DnsmasqGenerator(const DnsServerRegistry& dns_registry,
       route_config_(route_config),
       dns_config_(dns_config),
       lists_(lists),
-      keenetic_static_entries_(dns_config_uses_keenetic_server(dns_config)
-                                   ? get_keenetic_static_dns_entries()
+      keenetic_static_entries_(dns_registry.keenetic_snapshot()
+                                   ? dns_registry.keenetic_snapshot()->static_entries
                                    : std::vector<KeeneticStaticDnsEntry>{}),
-      keenetic_dns_upstreams_(dns_config_uses_keenetic_server(dns_config)
-                                  ? get_keenetic_dns_upstreams()
+      keenetic_dns_upstreams_(dns_registry.keenetic_snapshot()
+                                  ? dns_registry.keenetic_snapshot()->upstreams
                                   : std::vector<KeeneticDnsUpstreamEntry>{}),
       resolver_type_(resolver_type),
       hash_version_(std::move(hash_version)),

@@ -2,6 +2,7 @@
 
 #include "../src/firewall/firewall_runtime.hpp"
 #include "../src/config/config.hpp"
+#include "../src/dns/keenetic_dns.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
 
 #include <algorithm>
@@ -21,6 +22,7 @@ public:
         : backend_(backend) {}
 
     std::vector<std::string> events;
+    std::vector<std::string> marked_destinations;
 
     void create_ipset(const std::string&, int, uint32_t) override {}
     void create_udp_peer_set(
@@ -36,6 +38,10 @@ public:
     }
     void create_mark_rule(
         uint32_t, const FirewallRuleCriteria& criteria) override {
+        marked_destinations.insert(
+            marked_destinations.end(),
+            criteria.dst_addr.begin(),
+            criteria.dst_addr.end());
         if (criteria.src_udp_peer_set_name.has_value()) {
             events.push_back(criteria.persist_conntrack_mark
                                  ? "affinity-mark-persistent"
@@ -98,7 +104,86 @@ InternalVpnRuntimeTarget service_target(
     return target;
 }
 
+Config keenetic_detour_config() {
+    return parse_config(R"json({
+      "daemon": {"ipv6_enabled": false},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "dns": {
+        "servers": [
+          {"tag": "keenetic", "type": "keenetic", "detour": "vpn"}
+        ],
+        "fallback": ["keenetic"]
+      }
+    })json");
+}
+
 } // namespace
+
+TEST_CASE("Runtime firewall uses the prepared Keenetic DNS snapshot") {
+    const auto config = keenetic_detour_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    KeeneticDnsSnapshot snapshot;
+    snapshot.addresses = {"9.9.9.9:53", "149.112.112.112:5353"};
+
+#ifdef KEEN_PBR3_TESTING
+    reset_keenetic_dns_test_state();
+    set_keenetic_dns_fetcher_for_tests([]() -> std::string {
+        throw KeeneticDnsError("unexpected implicit Keenetic DNS fetch");
+    });
+#endif
+
+    CHECK_NOTHROW(apply_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        /*udp_call_affinity_ipset_available=*/true,
+        snapshot));
+
+    CHECK(
+        firewall.marked_destinations ==
+        std::vector<std::string>{"9.9.9.9", "149.112.112.112"});
+    CHECK(std::find(
+              firewall.events.begin(),
+              firewall.events.end(),
+              "mark:53") != firewall.events.end());
+    CHECK(std::find(
+              firewall.events.begin(),
+              firewall.events.end(),
+              "mark:5353") != firewall.events.end());
+
+#ifdef KEEN_PBR3_TESTING
+    reset_keenetic_dns_test_state();
+#endif
+}
+
+TEST_CASE(
+    "Runtime firewall rejects Keenetic DNS without a prepared snapshot before mutation") {
+    const auto config = keenetic_detour_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+
+    CHECK_THROWS_WITH(
+        apply_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::PreserveSets),
+        "DNS server 'keenetic' requires a prepared Keenetic DNS snapshot");
+    CHECK(firewall.events.empty());
+    CHECK(firewall.marked_destinations.empty());
+}
 
 TEST_CASE(
     "WhatsApp call overlay remains behind user and generated DNS policy") {

@@ -205,8 +205,8 @@ bool looks_like_ipv6_dns_server_address(const std::string& address) {
     return false;
 }
 
-bool keenetic_dns_snapshots_equal(const KeeneticDnsSnapshot& lhs,
-                                  const KeeneticDnsSnapshot& rhs) {
+bool keenetic_dns_snapshots_equal_impl(const KeeneticDnsSnapshot& lhs,
+                                       const KeeneticDnsSnapshot& rhs) {
     if (lhs.addresses.size() != rhs.addresses.size() ||
         lhs.upstreams.size() != rhs.upstreams.size() ||
         lhs.static_entries.size() != rhs.static_entries.size()) {
@@ -261,6 +261,21 @@ std::vector<ParsedDnsServerLine> collect_selected_keenetic_dns_servers(
 }
 
 } // namespace
+
+bool keenetic_dns_snapshots_equal(const KeeneticDnsSnapshot& lhs,
+                                  const KeeneticDnsSnapshot& rhs) {
+    return keenetic_dns_snapshots_equal_impl(lhs, rhs);
+}
+
+bool dns_config_uses_keenetic_server(const DnsConfig& dns_config) {
+    for (const auto& server : dns_config.servers.value_or(std::vector<DnsServer>{})) {
+        if (server.type.value_or(api::DnsServerType::STATIC) ==
+            api::DnsServerType::KEENETIC) {
+            return true;
+        }
+    }
+    return false;
+}
 
 KeeneticDnsSnapshot extract_keenetic_dns_snapshot_from_rci(const std::string& response_body) {
     using json = nlohmann::json;
@@ -562,6 +577,8 @@ KeeneticDnsRefreshResult refresh_keenetic_dns_address_cache(bool force_refresh) 
             KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE,
             {},
             view.error,
+            std::nullopt,
+            view.generation,
         };
     }
 
@@ -571,13 +588,21 @@ KeeneticDnsRefreshResult refresh_keenetic_dns_address_cache(bool force_refresh) 
     } else if (view.status == KeeneticDnsCacheStatus::stale) {
         status = KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE;
     }
-    return {status, view.snapshot->addresses, view.error};
+    return {
+        status,
+        view.snapshot->addresses,
+        view.error,
+        view.snapshot,
+        view.generation,
+    };
 #else
     (void)force_refresh;
     return {
         KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE,
         {},
-        "DNS server type 'keenetic' requires build with USE_KEENETIC_API=ON"
+        "DNS server type 'keenetic' requires build with USE_KEENETIC_API=ON",
+        std::nullopt,
+        0,
     };
 #endif
 }
