@@ -789,7 +789,8 @@ export const enTranslation = {
         blocked: "Blocked - {{count}}",
       },
       listCount: "{{count}} lists",
-      idle: "Unused: {{names}} - all healthy",
+      idleSummary: "Unused — {{count}}",
+      idleNames: "{{names}} — all healthy",
       hint: {
         table: "Traffic goes straight through the provider, past the tunnels",
         tableTunnel:

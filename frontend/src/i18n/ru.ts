@@ -794,7 +794,8 @@ export const ruTranslation = {
         blocked: "Блокировка — {{count}}",
       },
       listCount: "{{count}} списков",
-      idle: "Не используются: {{names}} — все исправны",
+      idleSummary: "Не используются — {{count}}",
+      idleNames: "{{names}} — все исправны",
       hint: {
         table: "Трафик идёт напрямую через провайдера, мимо туннелей",
         tableTunnel:

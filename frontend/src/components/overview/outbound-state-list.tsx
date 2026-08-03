@@ -1,5 +1,6 @@
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
-import { CircleAlert } from "lucide-react"
+import { ChevronDownIcon, CircleAlert } from "lucide-react"
 import { Link } from "wouter"
 
 import type {
@@ -225,14 +226,9 @@ export function OutboundStateList({
       })}
 
       {idle.length > 0 ? (
-        <p className="border-t pt-2 text-xs text-muted-foreground">
-          {t("overview.outbounds.idle", {
-            count: idle.length,
-            names: idle
-              .map((entry) => getOutboundDisplayName(entry.outbound))
-              .join(", "),
-          })}
-        </p>
+        <IdleOutbounds
+          names={idle.map((entry) => getOutboundDisplayName(entry.outbound))}
+        />
       ) : null}
     </div>
   )
@@ -306,4 +302,37 @@ function activeLatency(members: RuntimeInterfaceState[]): number | undefined {
   const active = members.find((member) => member.status === "active")
   const source = active ?? members[0]
   return typeof source?.latency_ms === "number" ? source.latency_ms : undefined
+}
+
+/**
+ * Свёрнутый счётчик неиспользуемых маршрутов.
+ *
+ * Раньше это был серый абзац из восьми имён в две строки — под блоком, где
+ * важно то, что работает. Перечисление нужно раз в сто заходов, счётчик — всегда.
+ */
+function IdleOutbounds({ names }: { names: string[] }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="border-t pt-2">
+      <button
+        aria-expanded={open}
+        className="-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        {t("overview.outbounds.idleSummary", { count: names.length })}
+        <ChevronDownIcon
+          aria-hidden="true"
+          className={cn("size-3.5 transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t("overview.outbounds.idleNames", { names: names.join(", ") })}
+        </p>
+      ) : null}
+    </div>
+  )
 }
