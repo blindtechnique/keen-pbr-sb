@@ -1,4 +1,4 @@
-import { InfoIcon } from "lucide-react"
+import { CircleHelpIcon } from "lucide-react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -10,15 +10,16 @@ import {
 import { cn } from "@/lib/utils"
 
 /**
- * Пояснение к заголовку — за значком, а не строкой под ним.
+ * Знак вопроса рядом с названием — пояснение к нему.
  *
- * Описание раздела читают один раз, а место оно занимало на каждом экране:
- * две строки и отступ, около двадцатой части высоты окна ноутбука, всегда.
- * KeeneticOS в той же ситуации оставляет у заголовка «ⓘ» — текст никуда не
- * делся, но и не мешает.
+ * Снято с живого конфигуратора: `.ndw-help__question` — иконка 16px цвета
+ * #6e6e6e, при наведении `color: var(--primary-color)`. Ни подложки, ни тени:
+ * меняется только цвет самого значка. И это именно вопрос в кружке, не «i».
  *
- * Popover, а не Tooltip: подсказка по наведению на телефоне не открывается
- * никак, а разделы смотрят и с телефона.
+ * Описание раздела под этим значком не прячут: у KeeneticOS оно так и стоит
+ * текстом под заголовком, а знак вопроса живёт у названий пунктов и полей.
+ *
+ * Popover, а не Tooltip: подсказка по наведению на телефоне не открывается.
  */
 export function HelpHint({
   text,
@@ -37,12 +38,14 @@ export function HelpHint({
       <PopoverTrigger
         aria-label={label ?? t("common.help.about")}
         className={cn(
-          "inline-flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-popup-open:bg-accent data-popup-open:text-foreground",
+          // Область нажатия крупнее самого значка: 16px — это меньше любого
+          // разумного пальца, поэтому кнопка 32px, а видно только иконку.
+          "inline-flex size-8 shrink-0 items-center justify-center rounded-full text-[#6e6e6e] transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-popup-open:text-primary dark:text-muted-foreground",
           className
         )}
         type="button"
       >
-        <InfoIcon className="size-5" />
+        <CircleHelpIcon className="size-4" />
       </PopoverTrigger>
       <PopoverContent
         align="start"
