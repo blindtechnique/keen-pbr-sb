@@ -68,6 +68,15 @@ func TestSharedSingBoxConfigRoutesEachTunOnlyToItsProxy(t *testing.T) {
 	if got := config["route"].(map[string]any)["final"]; got != "direct-out" {
 		t.Fatalf("unexpected shared fallback outbound: %v", got)
 	}
+	resolver := config["route"].(map[string]any)["default_domain_resolver"].(map[string]any)
+	if resolver["server"] != systemLocalDNSTag || resolver["strategy"] != "prefer_ipv4" {
+		t.Fatalf("unexpected shared default domain resolver: %#v", resolver)
+	}
+	servers := config["dns"].(map[string]any)["servers"].([]any)
+	if len(servers) != 1 || servers[0].(map[string]any)["type"] != "local" ||
+		servers[0].(map[string]any)["tag"] != systemLocalDNSTag {
+		t.Fatalf("unexpected shared system resolver: %#v", servers)
+	}
 }
 
 func TestSharedSingBoxConfigKeepsBootstrapDNSPerProxy(t *testing.T) {
@@ -81,10 +90,16 @@ func TestSharedSingBoxConfigKeepsBootstrapDNSPerProxy(t *testing.T) {
 		t.Fatalf("build shared config: %v", err)
 	}
 	servers := config["dns"].(map[string]any)["servers"].([]any)
-	if got := servers[0].(map[string]any)["tag"]; got != "bootstrap-proxy_a-1" {
+	if len(servers) != 3 {
+		t.Fatalf("unexpected shared DNS server count: %#v", servers)
+	}
+	if got := servers[0].(map[string]any)["tag"]; got != systemLocalDNSTag {
+		t.Fatalf("unexpected default DNS tag: %v", got)
+	}
+	if got := servers[1].(map[string]any)["tag"]; got != "bootstrap-proxy_a-1" {
 		t.Fatalf("unexpected first DNS tag: %v", got)
 	}
-	if got := servers[1].(map[string]any)["server_port"]; got != uint16(5353) {
+	if got := servers[2].(map[string]any)["server_port"]; got != uint16(5353) {
 		t.Fatalf("unexpected second DNS port: %#v", got)
 	}
 
@@ -94,6 +109,29 @@ func TestSharedSingBoxConfigKeepsBootstrapDNSPerProxy(t *testing.T) {
 	if firstResolver["server"] != "bootstrap-proxy_a-1" ||
 		secondResolver["server"] != "bootstrap-proxy_b-1" {
 		t.Fatalf("bootstrap DNS leaked between proxies: %#v / %#v", firstResolver, secondResolver)
+	}
+}
+
+func TestSharedSingBoxConfigMixesLocalAndPerProxyResolvers(t *testing.T) {
+	withBootstrap := sharedConfigSpec("proxy_a", "vless1", "a.example")
+	withBootstrap.BootstrapDNS = []string{"1.1.1.1"}
+	withoutBootstrap := sharedConfigSpec("proxy_b", "vless2", "b.example")
+
+	config, err := BuildSharedSingBoxConfig([]TransportSpec{withoutBootstrap, withBootstrap})
+	if err != nil {
+		t.Fatalf("build shared config: %v", err)
+	}
+	servers := config["dns"].(map[string]any)["servers"].([]any)
+	if len(servers) != 2 || servers[0].(map[string]any)["tag"] != systemLocalDNSTag ||
+		servers[1].(map[string]any)["tag"] != "bootstrap-proxy_a-1" {
+		t.Fatalf("unexpected mixed DNS servers: %#v", servers)
+	}
+	outbounds := config["outbounds"].([]any)
+	if got := outbounds[0].(map[string]any)["domain_resolver"].(map[string]any)["server"]; got != "bootstrap-proxy_a-1" {
+		t.Fatalf("explicit bootstrap resolver was not retained: %v", got)
+	}
+	if _, exists := outbounds[1].(map[string]any)["domain_resolver"]; exists {
+		t.Fatal("transport without bootstrap DNS should inherit the route default resolver")
 	}
 }
 

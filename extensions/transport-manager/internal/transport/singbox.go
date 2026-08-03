@@ -767,21 +767,20 @@ func (s *SingBox) buildConfig() (map[string]any, error) {
 		"route":     map[string]any{"auto_detect_interface": true, "final": "proxy-out"},
 	}
 	if len(s.spec.BootstrapDNS) > 0 {
-		servers := make([]any, 0, len(s.spec.BootstrapDNS))
-		for index, address := range s.spec.BootstrapDNS {
-			host, port, err := parseBootstrapDNS(address)
-			if err != nil {
-				return nil, err
-			}
-			servers = append(servers, map[string]any{
-				"type": "udp", "tag": fmt.Sprintf("bootstrap-%d", index+1),
-				"server": host, "server_port": port,
-			})
+		servers, err := buildBootstrapDNSServers(s.spec.BootstrapDNS, isolatedBootstrapDNSTag)
+		if err != nil {
+			return nil, err
 		}
 		config["dns"] = map[string]any{"servers": servers}
-		config["route"].(map[string]any)["default_domain_resolver"] = map[string]any{
-			"server": "bootstrap-1", "strategy": "prefer_ipv4",
-		}
+		config["route"].(map[string]any)["default_domain_resolver"] = domainResolver("bootstrap-1")
+	} else {
+		// sing-box 1.12+ requires every dial path which may receive a domain
+		// to have an explicit resolver. Using the local resolver preserves the
+		// pre-1.12 system-resolution behaviour when the user did not configure
+		// dedicated bootstrap DNS, while avoiding a deprecated compatibility
+		// switch which is removed in sing-box 1.14.
+		config["dns"] = map[string]any{"servers": []any{systemLocalDNSServer()}}
+		config["route"].(map[string]any)["default_domain_resolver"] = domainResolver(systemLocalDNSTag)
 	}
 	return config, nil
 }
@@ -847,4 +846,41 @@ func parseBootstrapDNS(address string) (string, uint16, error) {
 		return "", 0, fmt.Errorf("bootstrap DNS must be an IP address, got %q", address)
 	}
 	return host, port, nil
+}
+
+const systemLocalDNSTag = "system-local"
+
+func systemLocalDNSServer() map[string]any {
+	return map[string]any{
+		"type": "local",
+		"tag":  systemLocalDNSTag,
+	}
+}
+
+func domainResolver(server string) map[string]any {
+	return map[string]any{
+		"server":   server,
+		"strategy": "prefer_ipv4",
+	}
+}
+
+func isolatedBootstrapDNSTag(index int) string {
+	return fmt.Sprintf("bootstrap-%d", index+1)
+}
+
+func buildBootstrapDNSServers(addresses []string, tagForIndex func(int) string) ([]any, error) {
+	servers := make([]any, 0, len(addresses))
+	for index, address := range addresses {
+		host, port, err := parseBootstrapDNS(address)
+		if err != nil {
+			return nil, err
+		}
+		servers = append(servers, map[string]any{
+			"type":        "udp",
+			"tag":         tagForIndex(index),
+			"server":      host,
+			"server_port": port,
+		})
+	}
+	return servers, nil
 }

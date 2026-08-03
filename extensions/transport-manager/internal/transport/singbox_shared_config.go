@@ -33,7 +33,10 @@ func BuildSharedSingBoxConfig(specs []TransportSpec) (map[string]any, error) {
 	inbounds := make([]any, 0, len(managed))
 	outbounds := make([]any, 0, len(managed)+1)
 	rules := make([]any, 0, len(managed))
-	dnsServers := make([]any, 0)
+	// A route-wide local resolver covers imported dial fields and the direct
+	// fallback. Transports with explicit bootstrap DNS override it below, so
+	// their server lookup remains isolated from the router's routed DNS policy.
+	dnsServers := []any{systemLocalDNSServer()}
 
 	for _, spec := range managed {
 		inboundTag := sharedInboundTag(spec.Tag)
@@ -50,24 +53,16 @@ func BuildSharedSingBoxConfig(specs []TransportSpec) (map[string]any, error) {
 		outbound["tag"] = outboundTag
 
 		if len(spec.BootstrapDNS) > 0 {
-			for index, address := range spec.BootstrapDNS {
-				host, port, err := parseBootstrapDNS(address)
-				if err != nil {
-					return nil, fmt.Errorf("transport %q: %w", spec.Tag, err)
-				}
-				dnsServers = append(dnsServers, map[string]any{
-					"type":        "udp",
-					"tag":         sharedBootstrapDNSTag(spec.Tag, index),
-					"server":      host,
-					"server_port": port,
-				})
+			servers, err := buildBootstrapDNSServers(spec.BootstrapDNS, func(index int) string {
+				return sharedBootstrapDNSTag(spec.Tag, index)
+			})
+			if err != nil {
+				return nil, fmt.Errorf("transport %q: %w", spec.Tag, err)
 			}
+			dnsServers = append(dnsServers, servers...)
 			// Per-outbound resolvers keep different proxy server hostnames
 			// isolated even though all proxies share one sing-box process.
-			outbound["domain_resolver"] = map[string]any{
-				"server":   sharedBootstrapDNSTag(spec.Tag, 0),
-				"strategy": "prefer_ipv4",
-			}
+			outbound["domain_resolver"] = domainResolver(sharedBootstrapDNSTag(spec.Tag, 0))
 		}
 
 		inbounds = append(inbounds, tun)
@@ -88,13 +83,12 @@ func BuildSharedSingBoxConfig(specs []TransportSpec) (map[string]any, error) {
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"route": map[string]any{
-			"auto_detect_interface": true,
-			"rules":                 rules,
-			"final":                 "direct-out",
+			"auto_detect_interface":   true,
+			"rules":                   rules,
+			"final":                   "direct-out",
+			"default_domain_resolver": domainResolver(systemLocalDNSTag),
 		},
-	}
-	if len(dnsServers) > 0 {
-		config["dns"] = map[string]any{"servers": dnsServers}
+		"dns": map[string]any{"servers": dnsServers},
 	}
 	return config, nil
 }

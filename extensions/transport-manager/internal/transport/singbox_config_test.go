@@ -65,6 +65,29 @@ func TestSingBoxConfigUsesGVisorForPolicyRoutedTun(t *testing.T) {
 	}
 }
 
+func TestSingBoxConfigAddsLocalDomainResolverWithoutBootstrapDNS(t *testing.T) {
+	s := &SingBox{spec: TransportSpec{
+		Tag:          "proxy",
+		Type:         "sing-box",
+		Interface:    "vless1",
+		OutboundJSON: `{"type":"vless","server":"proxy.example","server_port":443,"uuid":"example"}`,
+	}}
+
+	config, err := s.buildConfig()
+	if err != nil {
+		t.Fatalf("build config: %v", err)
+	}
+	servers := config["dns"].(map[string]any)["servers"].([]any)
+	if len(servers) != 1 || servers[0].(map[string]any)["type"] != "local" ||
+		servers[0].(map[string]any)["tag"] != systemLocalDNSTag {
+		t.Fatalf("unexpected system resolver: %#v", servers)
+	}
+	resolver := config["route"].(map[string]any)["default_domain_resolver"].(map[string]any)
+	if resolver["server"] != systemLocalDNSTag || resolver["strategy"] != "prefer_ipv4" {
+		t.Fatalf("unexpected default domain resolver: %#v", resolver)
+	}
+}
+
 func TestSingBoxConfigAddsBootstrapDNS(t *testing.T) {
 	s := &SingBox{spec: TransportSpec{
 		Tag: "proxy", Type: "sing-box", Interface: "vless1",
