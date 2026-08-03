@@ -262,6 +262,15 @@ function DnsRulesEditor({
         title={t("pages.dnsRules.title")}
       />
       <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending || rulesSession.isDirty}
+            onClick={() => navigate("/dns-rules/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.dnsRules.actions.add")}
+          </Button>
+        }
         leading={
           rules.length > 0 ? (
             <TableSearch
@@ -277,13 +286,6 @@ function DnsRulesEditor({
           ) : null
         }
       >
-        <Button
-          disabled={configMutationPending || rulesSession.isDirty}
-          onClick={() => navigate("/dns-rules/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.dnsRules.actions.add")}
-        </Button>
         {rulesSession.isDirty ? (
           <>
             <Button

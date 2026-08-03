@@ -189,6 +189,15 @@ function DnsServersEditor({
         title={t("pages.dnsServers.title")}
       />
       <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending || fallbackSession.isDirty}
+            onClick={() => navigate("/dns-servers/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.dnsServers.actions.add")}
+          </Button>
+        }
         leading={
           dnsServers.length > 0 ? (
             <TableSearch
@@ -204,13 +213,6 @@ function DnsServersEditor({
           ) : null
         }
       >
-        <Button
-          disabled={configMutationPending || fallbackSession.isDirty}
-          onClick={() => navigate("/dns-servers/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.dnsServers.actions.add")}
-        </Button>
         {fallbackSession.isDirty ? (
           <>
             <Button
@@ -299,8 +301,7 @@ function DnsServersEditor({
                 className="font-medium"
                 key={`${server.tag}-tag`}
                 title={
-                  server.display_name ||
-                  findDnsPresetByAddress(server.address)
+                  server.display_name || findDnsPresetByAddress(server.address)
                     ? server.tag
                     : undefined
                 }
@@ -493,9 +494,7 @@ function formatListValue(
 }
 
 function formatDnsServerNames(config: ConfigObject, tags: string[]) {
-  const displayNames = createDnsServerDisplayNameMap(
-    config.dns?.servers ?? []
-  )
+  const displayNames = createDnsServerDisplayNameMap(config.dns?.servers ?? [])
   return tags.map((tag) => displayNames.get(tag) ?? tag).join(", ")
 }
 

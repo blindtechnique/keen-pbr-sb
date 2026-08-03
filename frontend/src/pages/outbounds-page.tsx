@@ -287,7 +287,17 @@ export function OutboundsPage() {
         description={t("pages.outbounds.description")}
         title={t("pages.outbounds.title")}
       />
-      <PageActionBar>
+      <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending}
+            onClick={() => navigate("/outbounds/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.outbounds.actions.new")}
+          </Button>
+        }
+      >
         <ConfigTransferButtons
           config={loadedConfig}
           disabled={configMutationPending}
@@ -296,13 +306,6 @@ export function OutboundsPage() {
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
-        <Button
-          disabled={configMutationPending}
-          onClick={() => navigate("/outbounds/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.outbounds.actions.new")}
-        </Button>
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />

@@ -743,7 +743,14 @@ export function TransportsPage() {
         description={t("transports.description")}
         title={t("transports.title")}
       />
-      <PageActionBar>
+      <PageActionBar
+        primary={
+          <Button onClick={() => navigate(transportCreateHref)}>
+            <PlusIcon />
+            {t("transports.add")}
+          </Button>
+        }
+      >
         <Button
           disabled={
             transferMutation.isPending ||
@@ -774,10 +781,7 @@ export function TransportsPage() {
           ref={transportImportRef}
           type="file"
         />
-        <Button onClick={() => navigate(transportCreateHref)}>
-          <PlusIcon />
-          {t("transports.add")}
-        </Button>
+
         <Button
           aria-describedby={
             processModeQuery.isError

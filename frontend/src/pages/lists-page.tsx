@@ -68,9 +68,7 @@ import {
   createDnsServerDisplayNameMap,
   getDnsRuleDisplayName,
 } from "@/lib/dns-display"
-import {
-  createOutboundDisplayNameMap,
-} from "@/lib/outbound-display"
+import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import {
   formatListReferenceLabels,
   getListDisplayName,
@@ -358,11 +356,7 @@ export function ListsPage() {
   })
 
   const handleBulkDelete = () => {
-    if (
-      !loadedConfig ||
-      !configRevision ||
-      listSelection.selectedCount === 0
-    ) {
+    if (!loadedConfig || !configRevision || listSelection.selectedCount === 0) {
       return
     }
 
@@ -443,6 +437,15 @@ export function ListsPage() {
         title={t("pages.lists.title")}
       />
       <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending}
+            onClick={() => navigate("/lists/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.lists.actions.new")}
+          </Button>
+        }
         leading={
           tableRows.length > 0 ? (
             <TableSearch
@@ -480,13 +483,6 @@ export function ListsPage() {
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
-        <Button
-          disabled={configMutationPending}
-          onClick={() => navigate("/lists/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.lists.actions.new")}
-        </Button>
       </PageActionBar>
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
@@ -793,9 +789,7 @@ export function ListsPage() {
             <Select
               items={[
                 {
-                  label: t(
-                    "pages.lists.deleteDialog.referencesRemoveOption"
-                  ),
+                  label: t("pages.lists.deleteDialog.referencesRemoveOption"),
                   value: DELETE_REFERENCES,
                 },
                 ...replacementCandidates.map((listId) => ({

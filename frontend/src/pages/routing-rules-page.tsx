@@ -256,6 +256,15 @@ function RoutingRulesEditor({
         title={t("pages.routingRules.title")}
       />
       <PageActionBar
+        primary={
+          <Button
+            disabled={configMutationPending || rulesSession.isDirty}
+            onClick={() => navigate("/routing-rules/create")}
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            {t("pages.routingRules.actions.addRule")}
+          </Button>
+        }
         leading={
           allRows.length > 0 ? (
             <TableSearch
@@ -279,13 +288,7 @@ function RoutingRulesEditor({
             postConfigMutation.mutate({ data: nextConfig })
           }
         />
-        <Button
-          disabled={configMutationPending || rulesSession.isDirty}
-          onClick={() => navigate("/routing-rules/create")}
-        >
-          <Plus className="mr-1 h-4 w-4" />
-          {t("pages.routingRules.actions.addRule")}
-        </Button>
+
         {rulesSession.isDirty ? (
           <>
             <Button
