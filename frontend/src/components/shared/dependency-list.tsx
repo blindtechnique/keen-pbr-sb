@@ -15,10 +15,15 @@ import { Badge } from "@/components/ui/badge"
 export function DependencyList({
   dependencies,
   emptyHint,
+  compact = false,
 }: {
   dependencies: Dependency[]
   /** Что написать, когда связей нет. Молчание тут читается как «не посчитали». */
   emptyHint?: string
+  /** В колонке таблицы заголовок уже сказал «Где используется» — строку
+      «Используется в N местах» здесь повторять незачем, она только тянет
+      строку вниз и делает соседние строки разной высоты. */
+  compact?: boolean
 }) {
   const { t } = useTranslation()
 
@@ -39,10 +44,12 @@ export function DependencyList({
   }
 
   return (
-    <div className="space-y-1.5">
-      <p className="text-xs text-muted-foreground">
-        {t("common.dependencies.title", { count: dependencies.length })}
-      </p>
+    <div className={compact ? "flex flex-wrap gap-x-3 gap-y-1" : "space-y-1.5"}>
+      {compact ? null : (
+        <p className="text-xs text-muted-foreground">
+          {t("common.dependencies.title", { count: dependencies.length })}
+        </p>
+      )}
       {[...byKind.entries()].map(([kind, items]) => (
         <div className="flex flex-wrap items-center gap-1.5" key={kind}>
           <span className="text-xs text-muted-foreground">

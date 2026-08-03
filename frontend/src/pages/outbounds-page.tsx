@@ -1,4 +1,4 @@
-import { ArrowRight, Plus, Trash2 } from "lucide-react"
+import { ArrowRight, Pencil, Plus, RotateCw, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -23,10 +23,17 @@ import {
   useGetRuntimeOutbounds,
 } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
+import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
-import { OutboundCard } from "@/components/outbounds/outbound-card"
+import { DataTable } from "@/components/shared/data-table"
+import { DependencyList } from "@/components/shared/dependency-list"
+import {
+  OutboundName,
+  OutboundPurpose,
+  OutboundStatus,
+} from "@/components/outbounds/outbound-cells"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
 import { useConfigDependencies } from "@/hooks/use-config-dependencies"
@@ -43,10 +50,12 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { useSectionTab } from "@/hooks/use-section-tab"
+import { useTableSort } from "@/hooks/use-table-sort"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { cn } from "@/lib/utils"
 import {
   createDnsServerDisplayNameMap,
   getDnsServerDisplayName,
@@ -62,6 +71,7 @@ import {
 import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildUpdatedConfigForOutboundsDelete,
+  firstLatency,
   getOutboundDeleteImpact,
   type OutboundDeleteImpact,
 } from "@/pages/outbounds-utils"
@@ -70,7 +80,6 @@ type OutboundItem = {
   id: string
   tag: string
   type: Outbound["type"]
-  summary: ReactNode
   outbound: Outbound
   runtimeInterface?: RuntimeInterfaceInventoryEntry
   runtimeState?: RuntimeOutboundState
@@ -123,11 +132,10 @@ export function OutboundsPage() {
         mapOutboundToItem(
           outbound,
           runtimeOutboundByTag.get(outbound.tag),
-          runtimeInterfaceByName.get(outbound.interface ?? ""),
-          t
+          runtimeInterfaceByName.get(outbound.interface ?? "")
         )
       ),
-    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, t]
+    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName]
   )
   const outboundDisplayNames = useMemo(
     () => createOutboundDisplayNameMap(selectOutbounds(loadedConfig)),
@@ -174,8 +182,6 @@ export function OutboundsPage() {
     selectOutbounds(loadedConfig).find((item) => item.tag === tag)?.interface ??
     ""
 
-  const outboundRowIds = outboundItems.map((outbound) => outbound.id)
-  const outboundSelection = useRowSelection(outboundRowIds)
   // Grouped so the page reads as "what carries traffic" first, then failover
   // groups, then the plumbing, instead of one undifferentiated list.
   const outboundGroups: Array<{
@@ -211,6 +217,18 @@ export function OutboundsPage() {
   const activeOutboundGroup =
     outboundGroups.find((group) => group.key === activeGroupKey) ??
     outboundGroups[0]
+  // Сортировка по названию и по задержке. Задержка — единственное число на
+  // странице, и вопрос «какой выход быстрее» без неё решался глазами по
+  // разбросанным карточкам.
+  const { sorted: sortedOutbounds, sort } = useTableSort(
+    activeOutboundGroup.items,
+    [
+      { index: 0, get: (item) => getOutboundDisplayName(item.outbound) },
+      { index: 2, get: (item) => firstLatency(item.runtimeState) },
+    ]
+  )
+  const outboundRowIds = sortedOutbounds.map((item) => item.id)
+  const outboundSelection = useRowSelection(outboundRowIds)
 
   const changeActiveGroup = (nextGroup: OutboundGroupKey) => {
     outboundSelection.clear()
@@ -375,31 +393,84 @@ export function OutboundsPage() {
               title={t(`pages.outbounds.groups.${activeOutboundGroup.key}`)}
             />
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {activeOutboundGroup.items.map((item) => (
-                <OutboundCard
-                  key={item.id}
-                  onEdit={() => navigate(`/outbounds/${item.id}/edit`)}
-                  onToggleSelected={() => outboundSelection.toggleOne(item.id)}
+            <DataTable
+              headers={[
+                t("pages.outbounds.headers.tag"),
+                t("pages.outbounds.headers.purpose"),
+                t("pages.outbounds.headers.runtime"),
+                t("pages.outbounds.headers.usedBy"),
+                t("pages.outbounds.headers.actions"),
+              ]}
+              narrowColumns={[2]}
+              rows={sortedOutbounds.map((item) => [
+                <OutboundName
+                  key={`${item.id}-name`}
                   outbound={item.outbound}
-                  outboundDisplayNames={outboundDisplayNames}
                   protocol={
                     item.outbound.type === "urltest"
                       ? protocolOfGroup(item.outbound, interfaceOfTag)
                       : protocolOf(item.outbound.interface ?? "")
                   }
+                />,
+                <OutboundPurpose
+                  key={`${item.id}-purpose`}
+                  outbound={item.outbound}
+                  outboundDisplayNames={outboundDisplayNames}
                   runtimeState={item.runtimeState}
-                  selectLabel={t("common.selection.selectRow", {
-                    rowLabel: getOutboundDisplayName(item.outbound),
-                  })}
-                  selected={outboundSelection.selectedIds.has(item.id)}
+                />,
+                <OutboundStatus
+                  key={`${item.id}-status`}
+                  runtimeState={item.runtimeState}
+                />,
+                // Связи видно до удаления, а не из диалога, который перечислял
+                // последствия постфактум.
+                <DependencyList
+                  compact
                   dependencies={dependenciesByTag.get(item.id) ?? []}
-                  onRefreshLatency={() => probeMutation.mutate()}
-                  refreshingLatency={probeMutation.isPending}
-                  selectionDisabled={configMutationPending}
-                />
-              ))}
-            </div>
+                  emptyHint={t("pages.outbounds.usage.none")}
+                  key={`${item.id}-usage`}
+                />,
+                <ActionButtons
+                  actions={[
+                    {
+                      // Проверка задержки бьёт по всем выходам разом: у демона
+                      // одна общая проверка, отдельной «проверь только этот»
+                      // не существует.
+                      disabled: probeMutation.isPending,
+                      icon: (
+                        <RotateCw
+                          className={cn(
+                            "h-4 w-4",
+                            probeMutation.isPending && "animate-spin"
+                          )}
+                        />
+                      ),
+                      label: t("transports.latencyRefresh"),
+                      onClick: () => probeMutation.mutate(),
+                    },
+                    {
+                      icon: <Pencil className="h-4 w-4" />,
+                      label: t("common.edit"),
+                      onClick: () => navigate(`/outbounds/${item.id}/edit`),
+                    },
+                  ]}
+                  key={`${item.id}-actions`}
+                />,
+              ])}
+              selection={{
+                rowIds: outboundRowIds,
+                selectedIds: outboundSelection.selectedIds,
+                disabled: configMutationPending,
+                onToggle: outboundSelection.toggleOne,
+                onToggleAll: outboundSelection.setAllVisible,
+                selectAllLabel: t("common.selection.selectAll"),
+                getRowLabel: (rowId) =>
+                  t("common.selection.selectRow", {
+                    rowLabel: outboundDisplayNames.get(rowId) ?? rowId,
+                  }),
+              }}
+              sort={sort}
+            />
           )}
         </div>
       )}
@@ -697,43 +768,14 @@ function formatListValue(
 function mapOutboundToItem(
   outbound: Outbound,
   runtimeState: RuntimeOutboundState | undefined,
-  runtimeInterface: RuntimeInterfaceInventoryEntry | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
+  runtimeInterface: RuntimeInterfaceInventoryEntry | undefined
 ): OutboundItem {
   return {
     id: outbound.tag,
     tag: outbound.tag,
     type: outbound.type,
-    summary: getOutboundSummary(outbound, t),
     outbound,
     runtimeInterface,
     runtimeState,
   }
-}
-
-function getOutboundSummary(
-  outbound: Outbound,
-  t: (key: string, options?: Record<string, unknown>) => string
-): ReactNode {
-  if (outbound.type === "interface") {
-    return t("pages.outbounds.summary.interface", {
-      value: outbound.interface ?? "-",
-    })
-  }
-
-  if (outbound.type === "table") {
-    return t("pages.outbounds.summary.table", {
-      value: outbound.table ?? "-",
-    })
-  }
-
-  if (outbound.type === "urltest") {
-    const allOutbounds =
-      outbound.outbound_groups?.flatMap((group) => group.outbounds) ?? []
-    return t("pages.outbounds.summary.urltest", {
-      value: allOutbounds.join(","),
-    })
-  }
-
-  return t("common.noneShort")
 }

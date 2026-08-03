@@ -1849,6 +1849,8 @@ export const ruTranslation = {
         tag: "Название",
         type: "Тип",
         summary: "Детали",
+        purpose: "Что делает",
+        usedBy: "Где используется",
         runtime: "Состояние",
         actions: "Действия",
       },

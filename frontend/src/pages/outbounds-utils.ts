@@ -2,6 +2,21 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { ListConfig } from "@/api/generated/model/listConfig"
 import type { ListRefreshConfig } from "@/api/generated/model/listRefreshConfig"
 import type { Outbound } from "@/api/generated/model/outbound"
+import type { RuntimeOutboundState } from "@/api/generated/model/runtimeOutboundState"
+
+/**
+ * Задержка активного участника — она же значение для сортировки колонки
+ * «Состояние»: у записи без измерения его нет, и такая строка уезжает в конец
+ * независимо от направления.
+ */
+export function firstLatency(
+  runtimeState?: RuntimeOutboundState
+): number | undefined {
+  const active = runtimeState?.interfaces?.find(
+    (entry) => entry.status === "active"
+  )
+  return typeof active?.latency_ms === "number" ? active.latency_ms : undefined
+}
 
 export type OutboundDeleteImpact = {
   deletedOutboundTags: string[]

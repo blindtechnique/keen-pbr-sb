@@ -1826,6 +1826,8 @@ export const enTranslation = {
         tag: "Name",
         type: "Source",
         summary: "Details",
+        purpose: "What it does",
+        usedBy: "Used by",
         runtime: "Runtime",
         actions: "Actions",
       },

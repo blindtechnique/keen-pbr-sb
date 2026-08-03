@@ -55,7 +55,7 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "Catalog categories are a closed local union.",
   },
   {
-    file: "src/components/outbounds/outbound-card.tsx",
+    file: "src/components/outbounds/outbound-cells.tsx",
     argument: "`overview.outbounds.status.${*}`",
     keys: ["overview.outbounds.status.*"],
     reason: "Outbound runtime status is a finite API enum.",
