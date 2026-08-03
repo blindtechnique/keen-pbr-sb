@@ -308,22 +308,11 @@ bool Daemon::commit_keenetic_dns_refresh_result(
         [this]() {
             // Keenetic DNS addresses participate in OUTPUT/PREROUTING detour
             // marks, so a changed address snapshot must reach firewall before
-            // the matching resolver generation is streamed.
-            retry_hot_apply_firewall(
-                [this]() {
-                    apply_firewall(FirewallApplyMode::PreserveSets);
-                },
-                [](std::chrono::milliseconds delay) {
-                    std::this_thread::sleep_for(delay);
-                },
-                [](std::size_t retry,
-                   std::chrono::milliseconds delay,
-                   const TransientFirewallError& error) {
-                    Logger::instance().info(
-                        "Keenetic DNS firewall refresh deferred after a "
-                        "concurrent firmware change: {}. Retry {} in {}ms.",
-                        error.what(), retry, delay.count());
-                });
+            // the matching resolver generation is streamed. Do not run the
+            // hot-retry sleeps from this control-loop callback: one bounded
+            // attempt establishes the transaction result, while the existing
+            // generation-fenced runtime recovery owns any later retries.
+            apply_firewall(FirewallApplyMode::PreserveSets);
         },
         [this,
          &resolver_hash_changed,
@@ -369,17 +358,10 @@ bool Daemon::commit_keenetic_dns_refresh_result(
             // A list refresh may have published a new immutable cache body
             // immediately before this shared boundary was acquired. Rebuild
             // the previous DNS view over that pinned list generation instead
-            // of claiming an exact historical list rollback.
-            retry_hot_apply_firewall(
-                [this]() {
-                    apply_firewall(FirewallApplyMode::PreserveSets);
-                },
-                [](std::chrono::milliseconds delay) {
-                    std::this_thread::sleep_for(delay);
-                },
-                [](std::size_t,
-                   std::chrono::milliseconds,
-                   const TransientFirewallError&) {});
+            // of claiming an exact historical list rollback. Rollback also
+            // gets one immediate attempt; a failure is handed to the same
+            // generation-fenced recovery chain instead of sleeping here.
+            apply_firewall(FirewallApplyMode::PreserveSets);
         },
         [this,
          &rollback_resolver_sync,
