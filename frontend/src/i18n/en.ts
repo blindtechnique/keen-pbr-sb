@@ -151,6 +151,11 @@ export const enTranslation = {
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
   },
   common: {
+    tableSearch: {
+      clear: "Clear search",
+      results: "Found {{count}} of {{total}}",
+      empty: "Nothing matches. Change the query or clear the search.",
+    },
     retry: "Try again",
     updateStatus: {
       available: "Update available",
@@ -1620,6 +1625,8 @@ export const enTranslation = {
     },
     routingRules: {
       title: "Routing rules",
+      searchPlaceholder: "Search by name, condition or route",
+      reorderPausedBySearch: "Reordering is paused while a search is active; clear the query to drag rules again.",
       description:
         "Rules that decide which route handles matching traffic. Evaluated top to bottom.",
       unnamed: "Unnamed",
@@ -2108,6 +2115,7 @@ export const enTranslation = {
     },
     lists: {
       title: "Lists",
+      searchPlaceholder: "Search by name, source or usage",
       description:
         "Groups of domains and IP addresses you can use in your traffic and DNS rules.",
       actions: {

@@ -37,6 +37,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { TableSearch } from "@/components/shared/table-search"
 import { DependencyList } from "@/components/shared/dependency-list"
 import {
   DeleteImpactDialog,
@@ -48,6 +49,7 @@ import { PageActionBar } from "@/components/shared/page-action-bar"
 import { StatsDisplay } from "@/components/shared/stats-display"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { filterBySearchQuery } from "@/lib/table-search"
 import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -225,7 +227,26 @@ export function ListsPage() {
       ),
     [dependencyAnalysis.dependenciesByTarget, tableRows]
   )
-  const listRowIds = tableRows.map((row) => row.id)
+  const [search, setSearch] = useState("")
+  // Строки ищутся по имени, техническому идентификатору, источнику и по тому,
+  // где список используется: именно так его и вспоминают — «тот, что для
+  // телеграма» или «тот, что с githubusercontent».
+  const visibleRows = useMemo(
+    () =>
+      filterBySearchQuery(tableRows, search, (row) => [
+        row.displayName,
+        row.technicalId,
+        row.id,
+        row.locationLabel,
+        ...(dependenciesByList.get(row.id) ?? []).map(
+          (dependency) => dependency.label
+        ),
+      ]),
+    [tableRows, search, dependenciesByList]
+  )
+  // Выделение живёт по видимым строкам: массовое действие не должно задеть
+  // то, что человек сейчас не видит.
+  const listRowIds = visibleRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)
   const hasRefreshableLists = tableRows.some((row) => row.canRefresh)
   const selectedRefreshableLists = tableRows.filter(
@@ -462,6 +483,22 @@ export function ListsPage() {
         />
       ) : (
         <div className="space-y-3">
+          <TableSearch
+            matchCount={visibleRows.length}
+            onChange={(next) => {
+              setSearch(next)
+              listSelection.clear()
+            }}
+            placeholder={t("pages.lists.searchPlaceholder")}
+            totalCount={tableRows.length}
+            value={search}
+          />
+          {visibleRows.length === 0 ? (
+            <ListPlaceholder
+              description={t("common.tableSearch.empty")}
+              title={t("pages.lists.empty.title")}
+            />
+          ) : null}
           <div className="relative h-0">
             {listSelection.hasSelection ? (
               <BulkSelectionToolbar
@@ -512,7 +549,7 @@ export function ListsPage() {
             ) : null}
           </div>
           <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
-            {tableRows.map((list) => (
+            {visibleRows.map((list) => (
               <div
                 className="flex items-start gap-3 bg-card px-1 py-3"
                 key={list.id}
@@ -601,7 +638,7 @@ export function ListsPage() {
                 t("pages.lists.headers.rules"),
                 t("pages.lists.headers.actions"),
               ]}
-              rows={tableRows.map((list) => [
+              rows={visibleRows.map((list) => [
                 <div className="space-y-1" key={`${list.id}-name`}>
                   <div
                     className="flex items-center gap-2 font-medium"

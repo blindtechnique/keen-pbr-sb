@@ -1,5 +1,5 @@
 import { Pencil, Plus, Save, Trash2 } from "lucide-react"
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
 
@@ -18,6 +18,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { TableSearch } from "@/components/shared/table-search"
 import { SortableCards } from "@/components/shared/sortable-cards"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
@@ -33,6 +34,7 @@ import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import { formatListReferenceLabels } from "@/lib/list-display"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { getRuleEditHref } from "@/lib/rule-route"
+import { filterBySearchQuery, normalizeSearchQuery } from "@/lib/table-search"
 import { cn } from "@/lib/utils"
 import {
   areRouteRulesSemanticallyEqual,
@@ -84,10 +86,15 @@ function RoutingRulesEditor({
     areRouteRulesSemanticallyEqual
   )
   const routeRules = rulesSession.value
-  const ruleRowIds = routeRules.map((rule, index) =>
-    getRoutingRuleRowId(rule, index)
+  const [search, setSearch] = useState("")
+  // Порядок правил — это их смысл, а перетаскивание работает по индексам
+  // полного списка. Пока фильтр активен, индексы отфильтрованной таблицы
+  // полному списку не соответствуют, поэтому перетаскивание выключается,
+  // а не «почти работает».
+  const searchActive = Boolean(normalizeSearchQuery(search))
+  const ruleSelection = useRowSelection(
+    routeRules.map((rule, index) => getRoutingRuleRowId(rule, index))
   )
-  const ruleSelection = useRowSelection(ruleRowIds)
   const runtimeOutboundsQuery = useGetRuntimeOutbounds()
   const runtimeOutbounds = useMemo(
     () =>
@@ -111,7 +118,7 @@ function RoutingRulesEditor({
     [loadedConfig?.outbounds]
   )
 
-  const tableRows = routeRules.map((rule: RouteRule, index: number) => {
+  const allRows = routeRules.map((rule: RouteRule, index: number) => {
     const runtimeState = runtimeOutboundByTag.get(rule.outbound)
     return getRouteRuleRow(
       rule,
@@ -122,6 +129,13 @@ function RoutingRulesEditor({
       outboundDisplayNames
     )
   })
+  const tableRows = filterBySearchQuery(allRows, search, (row) => [
+    row.nameIsGenerated ? "" : row.displayName,
+    row.technicalId,
+    row.outbound,
+    ...row.conditions.map((condition) => condition.value),
+  ])
+  const ruleRowIds = tableRows.map((row) => row.id)
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -241,6 +255,21 @@ function RoutingRulesEditor({
         description={t("pages.routingRules.description")}
         title={t("pages.routingRules.title")}
       />
+      <TableSearch
+        matchCount={tableRows.length}
+        onChange={(next) => {
+          setSearch(next)
+          ruleSelection.clear()
+        }}
+        placeholder={t("pages.routingRules.searchPlaceholder")}
+        totalCount={allRows.length}
+        value={search}
+      />
+      {searchActive ? (
+        <p className="text-xs text-muted-foreground">
+          {t("pages.routingRules.reorderPausedBySearch")}
+        </p>
+      ) : null}
       <PageActionBar>
         <ConfigTransferButtons
           config={loadedConfig}
@@ -336,7 +365,7 @@ function RoutingRulesEditor({
               сортировки у неё тот же pointer-sortable, что у desktop-строк. */}
           <div className="md:hidden">
             <SortableCards
-              disabled={configMutationPending}
+              disabled={configMutationPending || searchActive}
               getKey={(row) => row.id}
               handleLabel={t("pages.routingRules.actions.reorder")}
               items={tableRows}
@@ -443,7 +472,7 @@ function RoutingRulesEditor({
               ]}
               narrowColumns={[0, 1]}
               reorder={{
-                disabled: configMutationPending,
+                disabled: configMutationPending || searchActive,
                 handleLabel: t("pages.routingRules.actions.reorder"),
                 onReorder: handleReorder,
               }}
