@@ -255,22 +255,22 @@ function RoutingRulesEditor({
         description={t("pages.routingRules.description")}
         title={t("pages.routingRules.title")}
       />
-      <TableSearch
-        matchCount={tableRows.length}
-        onChange={(next) => {
-          setSearch(next)
-          ruleSelection.clear()
-        }}
-        placeholder={t("pages.routingRules.searchPlaceholder")}
-        totalCount={allRows.length}
-        value={search}
-      />
-      {searchActive ? (
-        <p className="text-xs text-muted-foreground">
-          {t("pages.routingRules.reorderPausedBySearch")}
-        </p>
-      ) : null}
-      <PageActionBar>
+      <PageActionBar
+        leading={
+          allRows.length > 0 ? (
+            <TableSearch
+              matchCount={tableRows.length}
+              onChange={(next) => {
+                setSearch(next)
+                ruleSelection.clear()
+              }}
+              placeholder={t("pages.routingRules.searchPlaceholder")}
+              totalCount={allRows.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
         <ConfigTransferButtons
           config={loadedConfig}
           disabled={configMutationPending || rulesSession.isDirty}
@@ -315,13 +315,24 @@ function RoutingRulesEditor({
           title={t("common.unableToLoadData")}
           variant="error"
         />
-      ) : tableRows.length === 0 ? (
+      ) : allRows.length === 0 ? (
         <ListPlaceholder
           description={t("pages.routingRules.empty.description")}
           title={t("pages.routingRules.empty.title")}
         />
       ) : (
         <div className="space-y-3">
+          {searchActive ? (
+            <p className="text-xs text-muted-foreground">
+              {t("pages.routingRules.reorderPausedBySearch")}
+            </p>
+          ) : null}
+          {tableRows.length === 0 ? (
+            <ListPlaceholder
+              description={t("common.tableSearch.empty")}
+              title={t("pages.routingRules.empty.title")}
+            />
+          ) : null}
           {/* The toolbar shares a fixed-height slot so selecting a rule does not
               push the whole table down. */}
           <div className="relative h-0">

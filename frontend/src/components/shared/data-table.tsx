@@ -1,8 +1,9 @@
 import type { ReactNode } from "react"
-import { GripVerticalIcon } from "lucide-react"
+import { ArrowDownIcon, ArrowUpIcon, ChevronsUpDownIcon, GripVerticalIcon } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
 import { usePointerSortable } from "@/hooks/use-pointer-sortable"
+import type { TableSortState } from "@/hooks/use-table-sort"
 import { cn } from "@/lib/utils"
 import {
   Table,
@@ -64,6 +65,7 @@ export function DataTable({
   narrowColumns = [],
   selection,
   reorder,
+  sort,
 }: {
   headers?: string[]
   rows: ReactNode[][]
@@ -73,6 +75,9 @@ export function DataTable({
   narrowColumns?: number[]
   selection?: DataTableSelection
   reorder?: DataTableReorder
+  // Сортировку считает страница: DataTable получает уже отрисованные ячейки и
+  // сравнивать их не может. Здесь только заголовок-кнопка и aria-sort.
+  sort?: TableSortState
 }) {
   const hasSelection = Boolean(
     selection && selection.rowIds.length === rows.length
@@ -109,6 +114,18 @@ export function DataTable({
   const allVisibleSelected =
     visibleRowIds.length > 0 &&
     visibleRowIds.every((rowId) => selection!.selectedIds.has(rowId))
+
+  function sortableHeader(headerIndex: number) {
+    return Boolean(
+      sort && sort.sortable.includes(headerIndex - leadingColumns)
+    )
+  }
+
+  function sortDirectionOf(headerIndex: number) {
+    return sort && sort.activeColumn === headerIndex - leadingColumns
+      ? sort.direction
+      : null
+  }
 
   function headClass(headerIndex: number) {
     const columnClassName =
@@ -199,10 +216,34 @@ export function DataTable({
               <TableRow>
                 {headersWithSelection.map((header, headerIndex) => (
                   <TableHead
+                    aria-sort={
+                      sortableHeader(headerIndex)
+                        ? sortDirectionOf(headerIndex) === "asc"
+                          ? "ascending"
+                          : sortDirectionOf(headerIndex) === "desc"
+                            ? "descending"
+                            : "none"
+                        : undefined
+                    }
                     className={headClass(headerIndex)}
                     key={`${header}-${headerIndex}`}
                   >
-                    {hasSelection && headerIndex === leadingColumns - 1 ? (
+                    {sortableHeader(headerIndex) ? (
+                      <button
+                        className="-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-left hover:text-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                        onClick={() => sort!.onToggle(headerIndex - leadingColumns)}
+                        type="button"
+                      >
+                        {header}
+                        {sortDirectionOf(headerIndex) === "asc" ? (
+                          <ArrowUpIcon className="size-3.5" />
+                        ) : sortDirectionOf(headerIndex) === "desc" ? (
+                          <ArrowDownIcon className="size-3.5" />
+                        ) : (
+                          <ChevronsUpDownIcon className="size-3.5 opacity-40" />
+                        )}
+                      </button>
+                    ) : hasSelection && headerIndex === leadingColumns - 1 ? (
                       <div className="flex justify-center">
                         <Checkbox
                           aria-label={

@@ -50,6 +50,7 @@ import { StatsDisplay } from "@/components/shared/stats-display"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
 import { filterBySearchQuery } from "@/lib/table-search"
+import { useTableSort } from "@/hooks/use-table-sort"
 import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -244,9 +245,16 @@ export function ListsPage() {
       ]),
     [tableRows, search, dependenciesByList]
   )
+  // Колонки «Название» и «Источник» сортируются; «Записей» — составное поле
+  // вида «2 / 0 / 0», сравнивать его нечем, а «Где используется» и «Действия»
+  // сортировать бессмысленно.
+  const { sorted: sortedRows, sort } = useTableSort(visibleRows, [
+    { index: 0, get: (row) => row.displayName },
+    { index: 1, get: (row) => row.locationLabel },
+  ])
   // Выделение живёт по видимым строкам: массовое действие не должно задеть
   // то, что человек сейчас не видит.
-  const listRowIds = visibleRows.map((row) => row.id)
+  const listRowIds = sortedRows.map((row) => row.id)
   const listSelection = useRowSelection(listRowIds)
   const hasRefreshableLists = tableRows.some((row) => row.canRefresh)
   const selectedRefreshableLists = tableRows.filter(
@@ -434,7 +442,22 @@ export function ListsPage() {
         description={t("pages.lists.description")}
         title={t("pages.lists.title")}
       />
-      <PageActionBar>
+      <PageActionBar
+        leading={
+          tableRows.length > 0 ? (
+            <TableSearch
+              matchCount={visibleRows.length}
+              onChange={(next) => {
+                setSearch(next)
+                listSelection.clear()
+              }}
+              placeholder={t("pages.lists.searchPlaceholder")}
+              totalCount={tableRows.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
         {hasRefreshableLists ? (
           <Button
             disabled={refreshDisabled}
@@ -483,16 +506,6 @@ export function ListsPage() {
         />
       ) : (
         <div className="space-y-3">
-          <TableSearch
-            matchCount={visibleRows.length}
-            onChange={(next) => {
-              setSearch(next)
-              listSelection.clear()
-            }}
-            placeholder={t("pages.lists.searchPlaceholder")}
-            totalCount={tableRows.length}
-            value={search}
-          />
           {visibleRows.length === 0 ? (
             <ListPlaceholder
               description={t("common.tableSearch.empty")}
@@ -549,7 +562,7 @@ export function ListsPage() {
             ) : null}
           </div>
           <div className="divide-y divide-border/70 border-b border-border/70 md:hidden">
-            {visibleRows.map((list) => (
+            {sortedRows.map((list) => (
               <div
                 className="flex items-start gap-3 bg-card px-1 py-3"
                 key={list.id}
@@ -638,7 +651,7 @@ export function ListsPage() {
                 t("pages.lists.headers.rules"),
                 t("pages.lists.headers.actions"),
               ]}
-              rows={visibleRows.map((list) => [
+              rows={sortedRows.map((list) => [
                 <div className="space-y-1" key={`${list.id}-name`}>
                   <div
                     className="flex items-center gap-2 font-medium"
@@ -720,6 +733,7 @@ export function ListsPage() {
                   key={`${list.id}-actions`}
                 />,
               ])}
+              sort={sort}
               selection={{
                 rowIds: listRowIds,
                 selectedIds: listSelection.selectedIds,
