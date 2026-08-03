@@ -2008,6 +2008,7 @@ export const enTranslation = {
     },
     dnsRules: {
       title: "DNS Rules",
+      searchPlaceholder: "Search by name, list or DNS server",
       description:
         "Control which DNS server is used for domains in your lists.",
       actions: {

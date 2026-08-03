@@ -49,4 +49,18 @@ describe("table search", () => {
     ])
     expect(filterBySearchQuery(rows, "inline", byField)).toEqual([rows[0]])
   })
+
+  test("carries the original index so filtering does not renumber rows", () => {
+    // DNS rules derive their name and their edit link from the row index.
+    // Filtering the array itself would renumber whatever survives, so the
+    // index has to travel with the row.
+    const rules = [{ id: "a" }, { id: "b" }, { id: "c" }]
+    const indexed = rules.map((rule, index) => ({ rule, index }))
+
+    const visible = filterBySearchQuery(indexed, "c", (entry) => [
+      entry.rule.id,
+    ])
+
+    expect(visible).toEqual([{ rule: rules[2], index: 2 }])
+  })
 })

@@ -2036,6 +2036,7 @@ export const ruTranslation = {
     },
     dnsRules: {
       title: "DNS-правила",
+      searchPlaceholder: "Поиск по названию, списку или DNS-серверу",
       description:
         "Определяет, какой DNS-сервер используется для доменов из ваших списков.",
       actions: {

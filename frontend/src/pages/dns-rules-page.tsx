@@ -1,5 +1,5 @@
 import { Pencil, Plus, Save, Trash2 } from "lucide-react"
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -20,11 +20,13 @@ import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { DataTable } from "@/components/shared/data-table"
+import { TableSearch } from "@/components/shared/table-search"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { filterBySearchQuery } from "@/lib/table-search"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -128,8 +130,20 @@ function DnsRulesEditor({
     },
   })
 
-  const ruleRowIds = rules.map((rule, index) =>
-    getDnsRuleTechnicalId(rule, index)
+  const [search, setSearch] = useState("")
+  // Индекс едет вместе со строкой. Имя правила выводится из него
+  // (`DNS ${index + 1}`), и если фильтровать сам массив, оставшиеся правила
+  // перенумеруются: третье покажется первым, а ссылка на редактирование
+  // уведёт не туда.
+  const indexedRules = rules.map((rule, index) => ({ rule, index }))
+  const visibleRules = filterBySearchQuery(indexedRules, search, (entry) => [
+    getDnsRuleDisplayName(entry.rule, entry.index),
+    entry.rule.id,
+    serverNames.get(entry.rule.server) ?? entry.rule.server,
+    formatListReferenceLabels(entry.rule.list, loadedConfig?.lists),
+  ])
+  const ruleRowIds = visibleRules.map((entry) =>
+    getDnsRuleTechnicalId(entry.rule, entry.index)
   )
   const ruleNames = new Map(
     rules.map((rule, index) => [
@@ -247,7 +261,22 @@ function DnsRulesEditor({
         description={t("pages.dnsRules.description")}
         title={t("pages.dnsRules.title")}
       />
-      <PageActionBar>
+      <PageActionBar
+        leading={
+          rules.length > 0 ? (
+            <TableSearch
+              matchCount={visibleRules.length}
+              onChange={(next) => {
+                setSearch(next)
+                ruleSelection.clear()
+              }}
+              placeholder={t("pages.dnsRules.searchPlaceholder")}
+              totalCount={rules.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
         <Button
           disabled={configMutationPending || rulesSession.isDirty}
           onClick={() => navigate("/dns-rules/create")}
@@ -291,6 +320,12 @@ function DnsRulesEditor({
         />
       ) : (
         <div className="space-y-3">
+          {visibleRules.length === 0 ? (
+            <ListPlaceholder
+              description={t("common.tableSearch.empty")}
+              title={t("pages.dnsRules.empty.title")}
+            />
+          ) : null}
           <div className="relative h-0">
             {ruleSelection.hasSelection ? (
               <BulkSelectionToolbar
@@ -338,7 +373,7 @@ function DnsRulesEditor({
               t("pages.dnsRules.headers.actions"),
             ]}
             narrowColumns={[0]}
-            rows={rules.map((rule, index) => [
+            rows={visibleRules.map(({ rule, index }) => [
               <div className="flex items-center" key={`enabled-${index}`}>
                 <Switch
                   aria-label={t(
