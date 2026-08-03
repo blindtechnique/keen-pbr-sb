@@ -47,6 +47,10 @@ enum class CacheDownloadStatus {
 struct CacheDownloadResult {
     CacheDownloadStatus status{CacheDownloadStatus::Failed};
     std::string error_message;
+    // Successful, non-actionable conversion detail which belongs in the journal
+    // but is not a service incident (for example, a safely ignored SRS
+    // condition while all representable destinations were retained).
+    std::string diagnostic_message;
     std::string warning_message;
     std::optional<long> http_status_code;
     bool retryable{false};

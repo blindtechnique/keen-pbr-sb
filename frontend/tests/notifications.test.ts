@@ -80,7 +80,7 @@ describe("notification collector", () => {
     expect(notices[0]?.text).toContain("failed to refresh")
   })
 
-  test("keeps materially lossy SRS conversion visible", () => {
+  test("hides bounded SRS narrowing but keeps materially lossy conversion visible", () => {
     const notices = collectNotices(
       [
         "2026-07-29 12:00:00.000 [W] List 'geosite_category_ai_nocn': SRS import is lossy: mapped 28 exact domain(s) to keen-pbr root-and-subdomain semantics; skipped 1 unsupported condition(s)",
@@ -98,8 +98,6 @@ describe("notification collector", () => {
     expect(notices.map((notice) => notice.text)).toEqual([
       "List 'domains': SRS import is lossy: skipped 4 invalid domain value(s)",
       "List 'rules': SRS import is lossy: skipped 3 rule(s), including 1 inverted rule(s)",
-      "List 'unsupported': SRS import is lossy: skipped 2 unsupported condition(s)",
-      "List 'geosite_category_ai_nocn': SRS import is lossy: mapped 28 exact domain(s) to keen-pbr root-and-subdomain semantics; skipped 1 unsupported condition(s)",
     ])
   })
 

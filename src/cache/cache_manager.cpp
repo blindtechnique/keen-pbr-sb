@@ -512,7 +512,8 @@ std::optional<std::string> decode_srs_native(
     std::istream& input,
     const CacheChunkWriter& write_chunk,
     std::size_t max_output_bytes,
-    std::string& warning_message) {
+    std::string& warning_message,
+    std::string& diagnostic_message) {
     try {
         auto decoded = decode_srs(input, srs_decode_limits(max_output_bytes));
 
@@ -611,7 +612,17 @@ std::optional<std::string> decode_srs_native(
                 }
                 warning << warning_parts[index];
             }
-            warning_message = warning.str();
+            // An unsupported destination alternative can be discarded while
+            // the same rule still contributes safe domains/IP ranges. Keep
+            // that fact in the journal without turning a successful refresh
+            // into a bell incident. Dropping a complete rule or an invalid
+            // domain is materially lossy and remains a warning.
+            if (decoded.skipped_rules == 0U &&
+                invalid_domains_skipped == 0U) {
+                diagnostic_message = warning.str();
+            } else {
+                warning_message = warning.str();
+            }
         }
         return std::nullopt;
     } catch (const SrsDecodeError& error) {
@@ -802,6 +813,7 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     }
 
     std::string conversion_warning;
+    std::string conversion_diagnostic;
     api::CacheGeneration generation;
     try {
         if (srs) {
@@ -816,7 +828,8 @@ CacheDownloadResult CacheManager::download(const std::string& name,
                         compressed,
                         write_chunk,
                         max_file_size_bytes_,
-                        conversion_warning);
+                        conversion_warning,
+                        conversion_diagnostic);
                     if (conversion_error.has_value()) {
                         throw std::runtime_error(*conversion_error);
                     }
@@ -896,6 +909,8 @@ CacheDownloadResult CacheManager::download(const std::string& name,
                 cache_dir_, name, visible_document);
             CacheDownloadResult updated;
             updated.status = CacheDownloadStatus::Updated;
+            updated.diagnostic_message =
+                std::move(conversion_diagnostic);
             updated.warning_message =
                 std::string("cache metadata is visible but its final "
                             "durability check failed: ") +
@@ -933,6 +948,8 @@ CacheDownloadResult CacheManager::download(const std::string& name,
     CacheDownloadResult updated;
     updated.status = CacheDownloadStatus::Updated;
     if (srs) {
+        updated.diagnostic_message =
+            std::move(conversion_diagnostic);
         updated.warning_message = std::move(conversion_warning);
     }
     return updated;

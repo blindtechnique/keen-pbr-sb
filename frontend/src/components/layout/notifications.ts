@@ -34,15 +34,15 @@ const LEGACY_TRANSIENT_FIREWALL_MARKERS = [
   "failed to synchronize live iptables",
 ] as const
 
-const BENIGN_SRS_EXACT_DOMAIN_MAPPING =
-  /^List '[^'\r\n]+': SRS import is lossy: mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics$/
+const SAFE_SRS_CONVERSION =
+  /^List '[^'\r\n]+': SRS import is lossy: (?:mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics|skipped [1-9]\d* unsupported condition\(s\))(?:; (?:mapped [1-9]\d* exact domain\(s\) to keen-pbr root-and-subdomain semantics|skipped [1-9]\d* unsupported condition\(s\)))*$/
 
 function isDiagnosticOnlyMessage(text: string): boolean {
-  // Mapping an exact SRS domain to keen-pbr's root-and-subdomain semantics is
-  // the only expected conversion warning. Keep it in the journal, but do not
-  // treat it as an incident. Any additional clause means that data was skipped
-  // or changed materially and must remain visible in the notification bell.
-  if (BENIGN_SRS_EXACT_DOMAIN_MAPPING.test(text)) {
+  // Exact-domain widening and unsupported destination alternatives are
+  // successful, bounded SRS conversions. New builds log them at info level;
+  // filter historical warning lines as well. Complete skipped rules and
+  // invalid domain values remain visible as actionable incidents.
+  if (SAFE_SRS_CONVERSION.test(text)) {
     return true
   }
 

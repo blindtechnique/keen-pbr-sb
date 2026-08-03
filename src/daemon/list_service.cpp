@@ -438,6 +438,11 @@ RemoteListsRefreshResult ListService::download_remote_lists(const Config& config
                 continue;
             }
 
+            if (!download_result.diagnostic_message.empty()) {
+                Logger::instance().info("List '{}': {}",
+                                        name,
+                                        download_result.diagnostic_message);
+            }
             if (!download_result.warning_message.empty()) {
                 Logger::instance().warn("List '{}': {}",
                                         name,
