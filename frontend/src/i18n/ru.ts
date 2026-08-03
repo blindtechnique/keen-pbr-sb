@@ -1910,8 +1910,8 @@ export const ruTranslation = {
           interface: "Интерфейс",
           table: "Таблица маршрутизации",
           urltest: "Резервирование (автовыбор)",
-          blackhole: "Blackhole",
-          ignore: "Ignore",
+          blackhole: "Блокировка",
+          ignore: "Без изменения маршрута",
         },
       },
       interface: {
@@ -2093,7 +2093,7 @@ export const ruTranslation = {
         name: "Название",
         criteria: "Условие",
         serverTag: "DNS-сервер",
-        allowDomainRebinding: "Разрешение rebind",
+        allowDomainRebinding: "Локальные адреса",
         actions: "Действия",
       },
       criteriaLabels: {

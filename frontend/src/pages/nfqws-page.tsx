@@ -113,9 +113,13 @@ type Status = {
   strategies: Strategy[]
   active_strategy: string
 }
+// «Стратегии» первыми и по умолчанию: на эту страницу приходят выбрать или
+// переключить стратегию, а «Настройки» — редкий и куда более технический
+// экран, туда же уехала строка запуска. Открывать страницу на нём значило
+// встречать человека тем, зачем он почти никогда не приходил.
 const NFQWS_TAB_VALUES = [
-  "settings",
   "strategies",
+  "settings",
   "lists",
   "lua",
   "logs",
@@ -171,7 +175,7 @@ export function NfqwsPage() {
   const [configDirty, setConfigDirty] = useState(false)
   const [strategyDirty, setStrategyDirty] = useState(false)
   const [refreshPending, setRefreshPending] = useState(false)
-  const [tab, setTab] = useState<Tab>("settings")
+  const [tab, setTab] = useState<Tab>("strategies")
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
   const [drafts, setDrafts] = useState<Record<string, DraftFile>>({})
@@ -526,9 +530,7 @@ export function NfqwsPage() {
                       ? t("common.updateStatus.current")
                       : t("common.updateStatus.checking")}
                 </KeeneticStatus>
-                <KeeneticStatus
-                  tone={status.running ? "success" : "neutral"}
-                >
+                <KeeneticStatus tone={status.running ? "success" : "neutral"}>
                   {status.running ? t("nfqws.running") : t("nfqws.stopped")}
                 </KeeneticStatus>
               </div>
@@ -1596,7 +1598,10 @@ function ArgsField({
             >
               {expanded ? t("nfqws.hideArgs") : t("nfqws.showArgs")}
               <ChevronDownIcon
-                className={cn("size-3.5 transition-transform", expanded && "rotate-180")}
+                className={cn(
+                  "size-3.5 transition-transform",
+                  expanded && "rotate-180"
+                )}
               />
             </Button>
             <Button

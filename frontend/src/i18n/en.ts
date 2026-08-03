@@ -2063,7 +2063,7 @@ export const enTranslation = {
         name: "Name",
         criteria: "Match",
         serverTag: "DNS server",
-        allowDomainRebinding: "Domain rebinding",
+        allowDomainRebinding: "Local addresses",
         actions: "Actions",
       },
       criteriaLabels: {
