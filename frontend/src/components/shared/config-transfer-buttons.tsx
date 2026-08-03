@@ -1,4 +1,4 @@
-import { DownloadIcon, UploadIcon } from "lucide-react"
+import { FolderInputIcon, FolderOutputIcon } from "lucide-react"
 import { useRef } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -166,6 +166,13 @@ export function ConfigTransferButtons({
     }
   }
 
+  // Стрелка вверх/вниз читалась наоборот, и по делу: «скачать» и «загрузить» —
+  // это про диск, а «экспорт» и «импорт» — про панель. Два разных начала
+  // отсчёта, и в каком ни находись, второе выглядит перепутанным. Стрелка
+  // внутрь папки и наружу отсчитывается от того же, от чего и слова.
+  // Download/Upload при этом остаются за настоящими файловыми операциями —
+  // резервные копии, логи, обновления, — и не начинают значить в одном месте
+  // одно, а в другом противоположное.
   return (
     <>
       <Button
@@ -173,7 +180,7 @@ export function ConfigTransferButtons({
         onClick={exportData}
         variant="outline"
       >
-        <DownloadIcon />
+        <FolderOutputIcon />
         {t("configTransfer.export")}
       </Button>
       <Button
@@ -181,7 +188,7 @@ export function ConfigTransferButtons({
         onClick={() => inputRef.current?.click()}
         variant="outline"
       >
-        <UploadIcon />
+        <FolderInputIcon />
         {t("configTransfer.import")}
       </Button>
       <input

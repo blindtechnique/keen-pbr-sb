@@ -1,8 +1,8 @@
 export const enTranslation = {
   nfqws: {
-      showArgs: "Show the launch line",
-      hideArgs: "Hide",
-      argsSummary: "{{count}} arguments, {{chars}} characters",
+    showArgs: "Show the launch line",
+    hideArgs: "Hide",
+    argsSummary: "{{count}} arguments, {{chars}} characters",
     repository: "Open the official nfqws2 repository",
     description:
       "Manage nfqws2, strategies, configuration, lists, Lua scripts and logs.",
@@ -678,7 +678,7 @@ export const enTranslation = {
   overview: {
     summary: {
       healthy: {
-        title: "System is operating normally",
+        title: "Everything is fine",
         description:
           "Routing, DNS, tunnels, and proxies are operating normally.",
       },
@@ -1633,7 +1633,8 @@ export const enTranslation = {
     routingRules: {
       title: "Routing rules",
       searchPlaceholder: "Search by name, condition or route",
-      reorderPausedBySearch: "Reordering is paused while a search is active; clear the query to drag rules again.",
+      reorderPausedBySearch:
+        "Reordering is paused while a search is active; clear the query to drag rules again.",
       description:
         "Rules that decide which route handles matching traffic. Evaluated top to bottom.",
       unnamed: "Unnamed",

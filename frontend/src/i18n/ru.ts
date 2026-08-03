@@ -1,8 +1,8 @@
 export const ruTranslation = {
   nfqws: {
-      showArgs: "Показать строку запуска",
-      hideArgs: "Скрыть",
-      argsSummary: "Аргументов: {{count}}, символов: {{chars}}",
+    showArgs: "Показать строку запуска",
+    hideArgs: "Скрыть",
+    argsSummary: "Аргументов: {{count}}, символов: {{chars}}",
     repository: "Открыть официальный репозиторий nfqws2",
     description:
       "Управление nfqws2, стратегиями, конфигурацией, списками, Lua-скриптами и журналами.",
@@ -683,7 +683,7 @@ export const ruTranslation = {
   overview: {
     summary: {
       healthy: {
-        title: "Система работает штатно",
+        title: "Всё в порядке",
         description: "Маршрутизация, DNS, туннели и прокси работают штатно.",
       },
       waiting: {
@@ -1650,7 +1650,8 @@ export const ruTranslation = {
     routingRules: {
       title: "Правила маршрутизации",
       searchPlaceholder: "Поиск по названию, условию или маршруту",
-      reorderPausedBySearch: "Пока активен поиск, порядок правил не меняется: перетаскивание вернётся, когда вы очистите запрос.",
+      reorderPausedBySearch:
+        "Пока активен поиск, порядок правил не меняется: перетаскивание вернётся, когда вы очистите запрос.",
       description:
         "Правила определяют, через какой маршрут уходит подходящий трафик. Проверяются сверху вниз.",
       unnamed: "Без названия",
