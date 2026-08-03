@@ -1,13 +1,14 @@
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#ifdef KEEN_PBR3_TESTING
-#include <functional>
-#include <chrono>
-#endif
 
 namespace keen_pbr3 {
 
@@ -32,6 +33,75 @@ struct KeeneticDnsSnapshot {
     std::vector<KeeneticDnsUpstreamEntry> upstreams;
     std::vector<KeeneticStaticDnsEntry> static_entries;
 };
+
+enum class KeeneticDnsCacheStatus : uint8_t {
+    fresh,
+    stale,
+    unavailable,
+};
+
+struct KeeneticDnsCacheView {
+    std::optional<KeeneticDnsSnapshot> snapshot;
+    KeeneticDnsCacheStatus status{KeeneticDnsCacheStatus::unavailable};
+    // True only when this call observed a successfully accepted refresh.
+    bool refreshed{false};
+    // True only when the accepted refresh changed the cached snapshot.
+    bool changed{false};
+    std::uint64_t generation{0};
+    std::string error;
+};
+
+// Thread-safe single-flight cache for Keenetic's built-in DNS proxy snapshot.
+// Fetching and parsing happen outside mutex_, so cache-only readers never wait
+// for loopback RCI I/O. Failed refreshes preserve the last known-good snapshot.
+class KeeneticDnsCache {
+public:
+    using Clock = std::chrono::steady_clock;
+    using FetchFn = std::function<std::string()>;
+    using NowFn = std::function<Clock::time_point()>;
+
+    explicit KeeneticDnsCache(
+        FetchFn fetch_fn,
+        Clock::duration cache_ttl = std::chrono::minutes(5),
+        Clock::duration failure_retry = std::chrono::seconds(5),
+        NowFn now_fn = {});
+
+    KeeneticDnsCacheView get();
+    KeeneticDnsCacheView force_refresh();
+    KeeneticDnsCacheView peek() const;
+    void invalidate();
+
+#ifdef KEEN_PBR3_TESTING
+    void reset_for_tests();
+#endif
+
+private:
+    KeeneticDnsCacheView get_impl(bool force_refresh);
+    KeeneticDnsCacheView snapshot_locked(bool refreshed = false,
+                                         bool changed = false) const;
+
+    FetchFn fetch_fn_;
+    NowFn now_fn_;
+    Clock::duration cache_ttl_;
+    Clock::duration failure_retry_;
+
+    mutable std::mutex mutex_;
+    std::condition_variable refresh_finished_;
+    std::optional<KeeneticDnsSnapshot> snapshot_;
+    KeeneticDnsCacheStatus status_{KeeneticDnsCacheStatus::unavailable};
+    Clock::time_point refresh_after_{};
+    Clock::time_point forced_refresh_after_{};
+    bool refresh_attempted_{false};
+    bool refresh_in_progress_{false};
+    bool last_refresh_accepted_{false};
+    bool last_refresh_changed_{false};
+    std::uint64_t refresh_generation_{0};
+    std::uint64_t invalidation_epoch_{0};
+    std::uint64_t last_completed_refresh_epoch_{0};
+    std::string last_error_;
+};
+
+KeeneticDnsCache& shared_keenetic_dns_cache();
 
 // RCI endpoint used as source of truth for the built-in DNS proxy:
 // GET http://127.0.0.1:79/rci/show/dns-proxy

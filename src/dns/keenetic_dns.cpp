@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -18,45 +19,50 @@ namespace {
 
 constexpr const char* kRciDnsProxyEndpoint = "http://127.0.0.1:79/rci/show/dns-proxy";
 constexpr auto kKeeneticDnsCacheTtl = std::chrono::minutes(5);
+constexpr auto kKeeneticDnsFailureRetry = std::chrono::seconds(5);
 
-struct KeeneticDnsCacheState {
-    std::optional<KeeneticDnsSnapshot> snapshot;
-    std::chrono::steady_clock::time_point fetched_at{};
-};
-
-KeeneticDnsCacheState& keenetic_dns_cache_state() {
-    static KeeneticDnsCacheState state;
-    return state;
+std::string fetch_keenetic_dns_via_rci() {
+    HttpClient client;
+    client.set_timeout(std::chrono::seconds(3));
+    return client.download(kRciDnsProxyEndpoint);
 }
 
-std::mutex& keenetic_dns_cache_mutex() {
+#ifdef KEEN_PBR3_TESTING
+std::mutex& keenetic_dns_test_hooks_mutex() {
     static std::mutex mutex;
     return mutex;
 }
 
-using FetchFn = std::function<std::string()>;
-using NowFn = std::function<std::chrono::steady_clock::time_point()>;
-
-FetchFn& keenetic_dns_fetch_fn() {
-    static FetchFn fetch_fn = []() {
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(3));
-        return client.download(kRciDnsProxyEndpoint);
-    };
+KeeneticDnsFetchFn& keenetic_dns_test_fetch_fn() {
+    static KeeneticDnsFetchFn fetch_fn = fetch_keenetic_dns_via_rci;
     return fetch_fn;
 }
 
-NowFn& keenetic_dns_now_fn() {
-    static NowFn now_fn = []() {
+KeeneticDnsNowFn& keenetic_dns_test_now_fn() {
+    static KeeneticDnsNowFn now_fn = [] {
         return std::chrono::steady_clock::now();
     };
     return now_fn;
 }
 
-bool is_cache_fresh(const KeeneticDnsCacheState& state,
-                    const std::chrono::steady_clock::time_point now) {
-    return state.snapshot.has_value() && now - state.fetched_at < kKeeneticDnsCacheTtl;
+std::string fetch_keenetic_dns_for_shared_cache() {
+    KeeneticDnsFetchFn fetch_fn;
+    {
+        std::lock_guard<std::mutex> lock(keenetic_dns_test_hooks_mutex());
+        fetch_fn = keenetic_dns_test_fetch_fn();
+    }
+    return fetch_fn();
 }
+
+std::chrono::steady_clock::time_point now_for_shared_keenetic_dns_cache() {
+    KeeneticDnsNowFn now_fn;
+    {
+        std::lock_guard<std::mutex> lock(keenetic_dns_test_hooks_mutex());
+        now_fn = keenetic_dns_test_now_fn();
+    }
+    return now_fn();
+}
+#endif
 
 std::string trim_copy(const std::string& s) {
     size_t begin = 0;
@@ -353,56 +359,219 @@ KeeneticDnsSnapshot extract_keenetic_dns_snapshot_from_rci(const std::string& re
         "RCI response does not contain DNS proxy policy 'System' (endpoint: /rci/show/dns-proxy)");
 }
 
-KeeneticDnsRefreshResult refresh_keenetic_dns_address_cache(bool force_refresh) {
-#ifdef USE_KEENETIC_API
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    KeeneticDnsCacheState& cache = keenetic_dns_cache_state();
-    const auto now = keenetic_dns_now_fn()();
-
-    if (!force_refresh && is_cache_fresh(cache, now)) {
-        return {
-            KeeneticDnsRefreshStatus::UNCHANGED,
-            cache.snapshot->addresses,
-            ""
+KeeneticDnsCache::KeeneticDnsCache(FetchFn fetch_fn,
+                                   Clock::duration cache_ttl,
+                                   Clock::duration failure_retry,
+                                   NowFn now_fn)
+    : fetch_fn_(std::move(fetch_fn)),
+      now_fn_(std::move(now_fn)),
+      cache_ttl_(cache_ttl),
+      failure_retry_(failure_retry) {
+    if (!fetch_fn_) {
+        throw std::invalid_argument("Keenetic DNS fetch function is required");
+    }
+    if (!now_fn_) {
+        now_fn_ = [] {
+            return Clock::now();
         };
     }
+}
 
-    try {
-        const std::string response = keenetic_dns_fetch_fn()();
-        const KeeneticDnsSnapshot snapshot = extract_keenetic_dns_snapshot_from_rci(response);
-        const bool changed =
-            !cache.snapshot.has_value() ||
-            !keenetic_dns_snapshots_equal(*cache.snapshot, snapshot);
-        cache.snapshot = snapshot;
-        cache.fetched_at = now;
-        return {
-            changed ? KeeneticDnsRefreshStatus::UPDATED
-                    : KeeneticDnsRefreshStatus::UNCHANGED,
-            cache.snapshot->addresses,
-            ""
-        };
-    } catch (const HttpError& e) {
-        const std::string error =
-            "Failed to query Keenetic RCI endpoint /rci/show/dns-proxy: " +
-            std::string(e.what());
-        if (cache.snapshot.has_value()) {
-            return {KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE, cache.snapshot->addresses, error};
+KeeneticDnsCacheView KeeneticDnsCache::snapshot_locked(bool refreshed,
+                                                       bool changed) const {
+    auto effective_status = status_;
+    if (snapshot_ &&
+        effective_status == KeeneticDnsCacheStatus::fresh &&
+        now_fn_() >= refresh_after_) {
+        effective_status = KeeneticDnsCacheStatus::stale;
+    }
+    return {
+        snapshot_,
+        snapshot_ ? effective_status : KeeneticDnsCacheStatus::unavailable,
+        refreshed,
+        changed,
+        refresh_generation_,
+        last_error_,
+    };
+}
+
+KeeneticDnsCacheView KeeneticDnsCache::peek() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapshot_locked();
+}
+
+KeeneticDnsCacheView KeeneticDnsCache::get() {
+    return get_impl(false);
+}
+
+KeeneticDnsCacheView KeeneticDnsCache::force_refresh() {
+    return get_impl(true);
+}
+
+void KeeneticDnsCache::invalidate() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++invalidation_epoch_;
+    status_ = snapshot_ ? KeeneticDnsCacheStatus::stale
+                        : KeeneticDnsCacheStatus::unavailable;
+    refresh_after_ = Clock::time_point{};
+    forced_refresh_after_ = Clock::time_point{};
+    last_error_.clear();
+}
+
+KeeneticDnsCacheView KeeneticDnsCache::get_impl(bool force_refresh) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+        const auto now = now_fn_();
+        if (refresh_attempted_ &&
+            ((!force_refresh && now < refresh_after_) ||
+             (force_refresh && now < forced_refresh_after_))) {
+            return snapshot_locked();
         }
-        return {KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE, {}, error};
-    } catch (const KeeneticDnsError& e) {
-        if (cache.snapshot.has_value()) {
-            return {
-                KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE,
-                cache.snapshot->addresses,
-                e.what()
-            };
+
+        if (refresh_in_progress_) {
+            const auto observed_generation = refresh_generation_;
+            refresh_finished_.wait(
+                lock,
+                [this, observed_generation] {
+                    return refresh_generation_ != observed_generation;
+                });
+            // An observer that arrived after invalidation must not accept
+            // completion of a request from the previous topology epoch.
+            if (last_completed_refresh_epoch_ != invalidation_epoch_) {
+                continue;
+            }
+            return snapshot_locked(last_refresh_accepted_,
+                                   last_refresh_changed_);
         }
+
+        refresh_in_progress_ = true;
+        const auto fetch_invalidation_epoch = invalidation_epoch_;
+        lock.unlock();
+
+        std::optional<KeeneticDnsSnapshot> fetched_snapshot;
+        std::string fetch_error;
+        try {
+            // RCI I/O and JSON parsing deliberately happen without mutex_.
+            fetched_snapshot =
+                extract_keenetic_dns_snapshot_from_rci(fetch_fn_());
+        } catch (const HttpError& e) {
+            fetch_error =
+                "Failed to query Keenetic RCI endpoint /rci/show/dns-proxy: " +
+                std::string(e.what());
+        } catch (const KeeneticDnsError& e) {
+            fetch_error = e.what();
+        } catch (const std::exception& e) {
+            fetch_error =
+                "Failed to refresh Keenetic DNS snapshot: " +
+                std::string(e.what());
+        } catch (...) {
+            fetch_error = "Failed to refresh Keenetic DNS snapshot: unknown error";
+        }
+        lock.lock();
+        const auto completed_at = now_fn_();
+        refresh_attempted_ = true;
+        const bool refresh_epoch_is_current =
+            fetch_invalidation_epoch == invalidation_epoch_;
+        const bool refresh_accepted =
+            fetched_snapshot.has_value() && refresh_epoch_is_current;
+        bool refresh_changed = false;
+        if (refresh_accepted) {
+            refresh_changed =
+                !snapshot_ ||
+                !keenetic_dns_snapshots_equal(*snapshot_, *fetched_snapshot);
+            snapshot_ = std::move(*fetched_snapshot);
+            status_ = KeeneticDnsCacheStatus::fresh;
+            refresh_after_ = completed_at + cache_ttl_;
+            last_error_.clear();
+        } else {
+            status_ = snapshot_ ? KeeneticDnsCacheStatus::stale
+                                : KeeneticDnsCacheStatus::unavailable;
+            refresh_after_ = refresh_epoch_is_current
+                ? completed_at + failure_retry_
+                : Clock::time_point{};
+            if (refresh_epoch_is_current) {
+                last_error_ = std::move(fetch_error);
+            }
+        }
+
+        if (!refresh_epoch_is_current) {
+            forced_refresh_after_ = Clock::time_point{};
+        } else if (!fetched_snapshot) {
+            forced_refresh_after_ = completed_at + failure_retry_;
+        } else {
+            // A successful explicit refresh must not suppress a subsequent
+            // explicit observation. Only failures are retry-throttled.
+            forced_refresh_after_ = Clock::time_point{};
+        }
+
+        refresh_in_progress_ = false;
+        last_refresh_accepted_ = refresh_accepted;
+        last_refresh_changed_ = refresh_changed;
+        last_completed_refresh_epoch_ = fetch_invalidation_epoch;
+        ++refresh_generation_;
+        auto result = snapshot_locked(refresh_accepted, refresh_changed);
+        lock.unlock();
+        refresh_finished_.notify_all();
+        return result;
+    }
+}
+
+#ifdef KEEN_PBR3_TESTING
+void KeeneticDnsCache::reset_for_tests() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    refresh_finished_.wait(lock, [this] {
+        return !refresh_in_progress_;
+    });
+    snapshot_.reset();
+    status_ = KeeneticDnsCacheStatus::unavailable;
+    refresh_after_ = Clock::time_point{};
+    forced_refresh_after_ = Clock::time_point{};
+    refresh_attempted_ = false;
+    last_refresh_accepted_ = false;
+    last_refresh_changed_ = false;
+    refresh_generation_ = 0;
+    invalidation_epoch_ = 0;
+    last_completed_refresh_epoch_ = 0;
+    last_error_.clear();
+}
+#endif
+
+KeeneticDnsCache& shared_keenetic_dns_cache() {
+#ifdef KEEN_PBR3_TESTING
+    static KeeneticDnsCache cache(
+        fetch_keenetic_dns_for_shared_cache,
+        kKeeneticDnsCacheTtl,
+        kKeeneticDnsFailureRetry,
+        now_for_shared_keenetic_dns_cache);
+#else
+    static KeeneticDnsCache cache(
+        fetch_keenetic_dns_via_rci,
+        kKeeneticDnsCacheTtl,
+        kKeeneticDnsFailureRetry);
+#endif
+    return cache;
+}
+
+KeeneticDnsRefreshResult refresh_keenetic_dns_address_cache(bool force_refresh) {
+#ifdef USE_KEENETIC_API
+    const auto view = force_refresh
+        ? shared_keenetic_dns_cache().force_refresh()
+        : shared_keenetic_dns_cache().get();
+    if (!view.snapshot) {
         return {
             KeeneticDnsRefreshStatus::FETCH_FAILED_NO_CACHE,
             {},
-            e.what()
+            view.error,
         };
     }
+
+    KeeneticDnsRefreshStatus status = KeeneticDnsRefreshStatus::UNCHANGED;
+    if (view.refreshed && view.changed) {
+        status = KeeneticDnsRefreshStatus::UPDATED;
+    } else if (view.status == KeeneticDnsCacheStatus::stale) {
+        status = KeeneticDnsRefreshStatus::FETCH_FAILED_USED_CACHE;
+    }
+    return {status, view.snapshot->addresses, view.error};
 #else
     (void)force_refresh;
     return {
@@ -422,54 +591,49 @@ std::vector<std::string> resolve_keenetic_dns_addresses(bool force_refresh) {
 }
 
 std::vector<KeeneticStaticDnsEntry> get_keenetic_static_dns_entries() {
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    const KeeneticDnsCacheState& cache = keenetic_dns_cache_state();
-    if (!cache.snapshot.has_value()) {
+    const auto view = shared_keenetic_dns_cache().peek();
+    if (!view.snapshot) {
         return {};
     }
-    return cache.snapshot->static_entries;
+    return view.snapshot->static_entries;
 }
 
 std::vector<std::string> get_keenetic_dns_addresses() {
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    const KeeneticDnsCacheState& cache = keenetic_dns_cache_state();
-    if (!cache.snapshot.has_value()) {
+    const auto view = shared_keenetic_dns_cache().peek();
+    if (!view.snapshot) {
         return {};
     }
-    return cache.snapshot->addresses;
+    return view.snapshot->addresses;
 }
 
 std::vector<KeeneticDnsUpstreamEntry> get_keenetic_dns_upstreams() {
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    const KeeneticDnsCacheState& cache = keenetic_dns_cache_state();
-    if (!cache.snapshot.has_value()) {
+    const auto view = shared_keenetic_dns_cache().peek();
+    if (!view.snapshot) {
         return {};
     }
-    return cache.snapshot->upstreams;
+    return view.snapshot->upstreams;
 }
 
 #ifdef KEEN_PBR3_TESTING
 void set_keenetic_dns_fetcher_for_tests(KeeneticDnsFetchFn fetcher) {
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    keenetic_dns_fetch_fn() = std::move(fetcher);
+    std::lock_guard<std::mutex> lock(keenetic_dns_test_hooks_mutex());
+    keenetic_dns_test_fetch_fn() = std::move(fetcher);
 }
 
 void set_keenetic_dns_now_fn_for_tests(KeeneticDnsNowFn now_fn) {
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    keenetic_dns_now_fn() = std::move(now_fn);
+    std::lock_guard<std::mutex> lock(keenetic_dns_test_hooks_mutex());
+    keenetic_dns_test_now_fn() = std::move(now_fn);
 }
 
 void reset_keenetic_dns_test_state() {
-    std::lock_guard<std::mutex> lock(keenetic_dns_cache_mutex());
-    keenetic_dns_cache_state() = KeeneticDnsCacheState{};
-    keenetic_dns_fetch_fn() = []() {
-        HttpClient client;
-        client.set_timeout(std::chrono::seconds(3));
-        return client.download(kRciDnsProxyEndpoint);
-    };
-    keenetic_dns_now_fn() = []() {
-        return std::chrono::steady_clock::now();
-    };
+    {
+        std::lock_guard<std::mutex> lock(keenetic_dns_test_hooks_mutex());
+        keenetic_dns_test_fetch_fn() = fetch_keenetic_dns_via_rci;
+        keenetic_dns_test_now_fn() = [] {
+            return std::chrono::steady_clock::now();
+        };
+    }
+    shared_keenetic_dns_cache().reset_for_tests();
 }
 #endif
 
