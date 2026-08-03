@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils"
 
 const TONE_STYLES: Record<HeaderHealthTone, string> = {
   healthy: "text-success",
-  attention: "text-warning",
+  attention: "text-warning-foreground",
   failed: "text-destructive",
 }
 

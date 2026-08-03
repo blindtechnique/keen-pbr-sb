@@ -160,7 +160,7 @@ function RemoteAccessCardInner(
       <CardContent className="space-y-4">
         {!loginRequired ? (
           <Alert className="border-warning/40 bg-warning/10">
-            <AlertTriangleIcon className="size-4 text-warning" />
+            <AlertTriangleIcon className="size-4 text-warning-foreground" />
             <AlertDescription>
               {t("pages.settings.remoteAccess.loginDisabled")}
             </AlertDescription>
@@ -169,7 +169,7 @@ function RemoteAccessCardInner(
 
         {!listenReachable ? (
           <Alert className="border-warning/40 bg-warning/10">
-            <AlertTriangleIcon className="size-4 text-warning" />
+            <AlertTriangleIcon className="size-4 text-warning-foreground" />
             <AlertDescription>
               {t("pages.settings.remoteAccess.listenLoopback", {
                 listen: query.data?.listen ?? "",

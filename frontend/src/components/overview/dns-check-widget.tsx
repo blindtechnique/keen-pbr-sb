@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next"
 import { type DnsCheckStatus, useDnsCheck } from "@/hooks/use-dns-check"
 import { SectionCard } from "@/components/shared/section-card"
 import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 import { DnsCheckModal } from "./dns-check-modal"
 
@@ -47,9 +48,14 @@ export function DnsCheckWidget({
     }
 
     switch (status) {
+      // Красным — только «проверили, и не сходится».
       case "browser-fail":
-      case "sse-fail":
         return "border-destructive/40 bg-destructive/5"
+      // А это «проверить не удалось»: поток событий не подключился, и о самом
+      // DNS мы не узнали ничего. Красная карточка на дашборде читается как
+      // «у тебя сломан DNS» — и человек идёт чинить то, что работает.
+      case "sse-fail":
+        return "border-warning/40 bg-warning/5"
       default:
         return undefined
     }
@@ -164,9 +170,9 @@ function DnsStatusSummary({
     case "sse-fail":
       return (
         <DnsStatusMessage
-          icon={<AlertCircle className="h-5 w-5 text-destructive" />}
+          icon={<AlertCircle className="h-5 w-5 text-warning-foreground" />}
           text={t("overview.dnsCheck.status.sseUnavailable")}
-          tone="error"
+          tone="warning"
         />
       )
     case "idle":
@@ -186,17 +192,21 @@ function DnsStatusMessage({
 }: {
   icon: React.ReactNode
   text: string
-  tone: "success" | "error" | "muted"
+  tone: "success" | "error" | "warning" | "muted"
 }) {
   return (
     <div
-      className={
-        tone === "success"
-          ? "flex w-full items-center gap-2 text-emerald-700 dark:text-emerald-300"
-          : tone === "error"
-            ? "flex w-full items-center gap-2 text-destructive"
-            : "flex w-full items-center gap-2 text-muted-foreground"
-      }
+      className={cn(
+        "flex w-full items-center gap-2",
+        tone === "success" && "text-emerald-700 dark:text-emerald-300",
+        tone === "error" && "text-destructive",
+        // Не `text-warning`: в светлой теме это #e5952d, 2.42:1 на белом —
+        // ниже порога 4.5:1. `--warning-foreground` = #9b5608, это 5.63:1; в
+        // тёмной теме токен равен #ffbb57 и даёт 9.27:1, отдельного `dark:`
+        // не нужно.
+        tone === "warning" && "text-warning-foreground",
+        tone === "muted" && "text-muted-foreground"
+      )}
     >
       {icon}
       <span>{text}</span>

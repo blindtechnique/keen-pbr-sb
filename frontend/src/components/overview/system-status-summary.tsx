@@ -205,7 +205,10 @@ function StatusIcon({ tone }: { tone: SummaryTone }) {
     )
   }
   return (
-    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-warning/10 text-warning">
+    // Не `text-warning`: на собственной подложке `bg-warning/10` это 2.22:1 —
+    // ниже порога 3:1 для значащей графики. `--warning-foreground` там же
+    // даёт 6.22:1.
+    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-warning/10 text-warning-foreground">
       <LoaderCircle className="size-5 animate-spin" />
     </span>
   )
