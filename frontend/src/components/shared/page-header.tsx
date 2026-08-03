@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 
+import { HelpHint } from "@/components/shared/help-hint"
 import { useDocumentTitle } from "@/hooks/use-document-title"
 
 export function PageHeader({
@@ -20,18 +21,18 @@ export function PageHeader({
 
   return (
     <header className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div className="min-w-0">
+      {/* Описание раздела ушло под «ⓘ» рядом с заголовком: его читают один раз,
+          а вертикаль оно занимало всегда и на каждой странице. */}
+      <div className="flex min-w-0 items-start gap-1">
         <h1
-          className="text-[28px] leading-[36px] font-bold text-balance text-foreground"
+          className="min-w-0 text-[28px] leading-[36px] font-bold text-balance text-foreground"
           id="page-title"
         >
           {title}
         </h1>
-        <p className="mt-2 max-w-[110ch] text-[14px] leading-[22px] text-pretty text-foreground">
-          {description}
-        </p>
+        <HelpHint text={description} />
       </div>
-      {actions ? <div className="md:mt-2 md:shrink-0">{actions}</div> : null}
+      {actions ? <div className="md:shrink-0">{actions}</div> : null}
     </header>
   )
 }

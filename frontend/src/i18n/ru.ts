@@ -154,6 +154,9 @@ export const ruTranslation = {
       "Используйте способ входа, выбранный в настройках keen-pbr-sb. При проверке через Keenetic вводятся данные его веб-конфигуратора.",
   },
   common: {
+    help: {
+      about: "Об этом разделе",
+    },
     tableSearch: {
       clear: "Очистить поиск",
       results: "Найдено: {{count}} из {{total}}",

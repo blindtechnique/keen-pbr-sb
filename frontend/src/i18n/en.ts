@@ -154,6 +154,9 @@ export const enTranslation = {
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
   },
   common: {
+    help: {
+      about: "About this section",
+    },
     tableSearch: {
       clear: "Clear search",
       results: "Found {{count}} of {{total}}",
