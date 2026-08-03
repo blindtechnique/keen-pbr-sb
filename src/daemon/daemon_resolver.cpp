@@ -288,6 +288,20 @@ bool Daemon::commit_keenetic_dns_refresh_result(
         return true;
     }
 
+    if (resolver_stream_coordinator_.in_flight()) {
+        // A recovery hook is still streaming its pinned resolver generation.
+        // Do not start a second synchronous stream after mutating firewall:
+        // that would fail the IPC gate and force a pointless double rollback.
+        // Keep only one pending observation. Re-requesting the DNS
+        // coordinator from its own commit callback would create an immediate
+        // fetch/commit loop for the full lifetime of the resolver stream.
+        keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
+        Logger::instance().verbose(
+            "Deferring changed Keenetic DNS state until the active resolver "
+            "recovery stream completes");
+        return false;
+    }
+
     // Capture once from the single-writer CacheManager. The immutable lease
     // keeps every selected body alive while candidate apply, dnsmasq stream
     // and rollback run, without blocking an unrelated list publication for

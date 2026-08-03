@@ -50,6 +50,7 @@
 #include "runtime_recovery_policy.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
+#include "resolver_stream_coordinator.hpp"
 #include "system_resolver_hook.hpp"
 
 namespace keen_pbr3 {
@@ -450,6 +451,14 @@ private:
     void cancel_runtime_firewall_retry();
     void schedule_resolver_reload_retry(std::size_t attempt,
                                         std::uint64_t runtime_generation);
+    void start_resolver_reload_retry_attempt(
+        std::size_t attempt,
+        std::uint64_t runtime_generation);
+    void complete_resolver_reload_retry_attempt(
+        const ResolverStreamOperation& operation,
+        const ResolverStreamResult& result) noexcept;
+    void resume_deferred_keenetic_dns_refresh() noexcept;
+    void quiesce_resolver_stream_recovery() noexcept;
     void cancel_resolver_reload_retry();
     void dispatch_event_fd(int fd, uint32_t events);
     void run_event_loop();
@@ -577,7 +586,8 @@ private:
     void cancel_owned_conntrack_cleanup_retry();
     void complete_pending_snat_recovery_before_generation_change();
     bool run_system_resolver_hook(std::string_view action,
-                                  bool manage_ipc_gate = true);
+                                  bool manage_ipc_gate = true,
+                                  std::string_view attempt_id = {});
     bool run_system_resolver_hook_stream(std::string_view action);
     // Stream the already prepared resolver generation. Its list-cache lease
     // pins every remote body until the worker and post-stream verification
@@ -862,7 +872,16 @@ private:
     std::atomic<std::uint64_t> runtime_generation_{1};
     KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
     std::atomic<bool> ipc_resolver_hook_inflight_{false};
+    TracedMutex resolver_stream_attempt_mutex_;
+    std::string active_resolver_stream_attempt_id_
+        GUARDED_BY(resolver_stream_attempt_mutex_);
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        active_resolver_stream_generation_
+            GUARDED_BY(resolver_stream_attempt_mutex_);
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
+    // Control-loop-owned coalescing bit. A changed periodic Keenetic DNS
+    // observation is retried once after an active resolver stream retires.
+    bool keenetic_dns_refresh_deferred_by_resolver_stream_{false};
     // One authority admits every externally requested runtime mutation. API
     // requests own move-only leases; asynchronous SIGHUP shares one lease
     // until the reload coordinator chooses its single completion owner.
@@ -906,6 +925,9 @@ private:
 
     std::unique_ptr<DnsProbeServer> dns_probe_server_;
     HookCommandExecutor hook_command_executor_;
+    // Declared after every field captured by its worker callbacks so reverse
+    // member destruction stops the coordinator before those dependencies.
+    ResolverStreamCoordinator resolver_stream_coordinator_;
     bool routing_runtime_active_{true};
 };
 

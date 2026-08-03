@@ -304,6 +304,16 @@ Daemon::Daemon(Config config,
                   generation, result);
           })
     , hook_command_executor_(std::move(hook_command_executor))
+    , resolver_stream_coordinator_(
+          resolver_hook_executor_,
+          [this](std::function<void()> task) {
+              return post_control_task(
+                  std::move(task), "resolver-stream-recovery-commit");
+          },
+          [this](const ResolverStreamOperation& operation,
+                 const ResolverStreamResult& result) {
+              complete_resolver_reload_retry_attempt(operation, result);
+          })
 {
     if (!hook_command_executor_) {
         hook_command_executor_ = default_hook_command_executor;
@@ -349,43 +359,107 @@ Daemon::Daemon(Config config,
 }
 
 Daemon::~Daemon() {
-    try {
+    const auto cleanup_step = [](
+                                  std::string_view label,
+                                  auto&& step) noexcept {
+        try {
+            step();
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().error(
+                    "Daemon destruction step '{}' failed: {}",
+                    label,
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+            try {
+                Logger::instance().error(
+                    "Daemon destruction step '{}' failed: unknown error",
+                    label);
+            } catch (...) {
+            }
+        }
+    };
+
+    // Cleanup is deliberately stepwise. A failed scheduler cancellation or
+    // diagnostic close must never skip the coordinator drain and executor
+    // shutdown that protect callbacks from observing partially destroyed
+    // Daemon members.
+    cleanup_step("close runtime mutation admission", [this] {
         runtime_mutation_admission_.shutdown();
+    });
+    cleanup_step("stop SIGHUP reload coordinator", [this] {
         sighup_reload_coordinator_.stop();
+    });
+    cleanup_step("cancel resolver reload retry", [this] {
+        cancel_resolver_reload_retry();
+    });
+    cleanup_step("stop resolver stream coordinator", [this] {
+        resolver_stream_coordinator_.request_stop();
+    });
+    cleanup_step("stop Keenetic DNS refresh coordinator", [this] {
+        keenetic_dns_refresh_coordinator_.stop();
+    });
+    cleanup_step("cancel active list refresh", [this] {
+        list_refresh_tasks_.request_cancel_active();
+    });
+    cleanup_step("drain resolver stream recovery", [this] {
+        quiesce_resolver_stream_recovery();
+    });
+    cleanup_step("drain runtime mutations", [this] {
+        quiesce_runtime_mutations();
+    });
+    cleanup_step("close posted control task gate", [this] {
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
             accept_posted_control_tasks_.store(
                 false, std::memory_order_release);
         }
-        keenetic_dns_refresh_coordinator_.stop();
-        list_refresh_tasks_.request_cancel_active();
+    });
+    cleanup_step("drain posted control tasks", [this] {
+        if (control_fd_ >= 0) {
+            handle_control_commands();
+        }
+    });
+    cleanup_step("stop resolver hook executor", [this] {
         resolver_hook_executor_.shutdown();
+    });
+    cleanup_step("stop resolver stream executor", [this] {
         resolver_stream_executor_.shutdown();
+    });
+    cleanup_step("stop resolver I/O executor", [this] {
         resolver_io_executor_.shutdown();
+    });
+    cleanup_step("stop blocking executor", [this] {
         blocking_executor_.shutdown();
-
+    });
+    cleanup_step("close control channel", [this] {
         if (control_fd_ >= 0) {
             epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, control_fd_, nullptr);
             close(control_fd_);
             control_fd_ = -1;
         }
+    });
+    cleanup_step("remove IPC control socket", [this] {
         remove_ipc_control_socket();
+    });
+    cleanup_step("close signal channel", [this] {
         if (signal_fd_ >= 0) {
             epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, signal_fd_, nullptr);
             close(signal_fd_);
             signal_fd_ = -1;
         }
+    });
+    cleanup_step("close epoll", [this] {
         if (epoll_fd_ >= 0) {
             close(epoll_fd_);
             epoll_fd_ = -1;
         }
-
+    });
+    cleanup_step("restore signal mask", [] {
         unblock_daemon_signals_for_current_thread();
-    } catch (const std::exception& e) {
-        Logger::instance().error("Daemon destruction cleanup failed: {}", e.what());
-    } catch (...) {
-        Logger::instance().error("Daemon destruction cleanup failed: unknown error");
-    }
+    });
 }
 
 void Daemon::setup_control_channel() {
@@ -653,16 +727,55 @@ void Daemon::handle_ipc_control_socket() {
                         request,
                         resolver_runtime_reason(runtime_snapshot),
                         "resolver runtime is not active");
-                } else if (!resolver_generation_snapshot_) {
-                    response = ipc::make_error_response(
-                        request,
-                        "resolver_generation_unavailable",
-                        "resolver generation is not available");
                 } else {
-                    // Capture the exact candidate generation that requested
-                    // the reload. The committed ConfigStore can still contain
-                    // the previous generation until transactional apply ends.
-                    const auto generation = resolver_generation_snapshot_;
+                    const std::string resolver_attempt_id =
+                        request.value("resolver_attempt_id", "");
+                    std::shared_ptr<const ResolverGenerationSnapshot>
+                        generation;
+                    bool correlated_attempt = false;
+                    std::string selection_error;
+                    if (!resolver_attempt_id.empty() &&
+                        !is_valid_resolver_attempt_id(
+                            resolver_attempt_id)) {
+                        selection_error = "resolver_attempt_invalid";
+                    } else {
+                        KPBR_LOCK_GUARD(
+                            resolver_stream_attempt_mutex_);
+                        if (!active_resolver_stream_attempt_id_.empty()) {
+                            if (resolver_attempt_id.empty()) {
+                                selection_error =
+                                    "resolver_stream_busy";
+                            } else if (
+                                resolver_attempt_id !=
+                                active_resolver_stream_attempt_id_) {
+                                selection_error =
+                                    "resolver_attempt_mismatch";
+                            } else {
+                                generation =
+                                    active_resolver_stream_generation_;
+                                correlated_attempt = true;
+                            }
+                        } else {
+                            // A valid token left in tmpfs by an older helper
+                            // is an ordinary manual stream after the matching
+                            // attempt has ended. It may read the current
+                            // generation, but cannot acknowledge any hook.
+                            generation = resolver_generation_snapshot_;
+                        }
+                    }
+                    if (!selection_error.empty()) {
+                        response = ipc::make_error_response(
+                            request,
+                            selection_error,
+                            selection_error == "resolver_stream_busy"
+                                ? "a resolver stream is already in progress"
+                                : "resolver attempt does not match the active stream");
+                    } else if (!generation) {
+                        response = ipc::make_error_response(
+                            request,
+                            "resolver_generation_unavailable",
+                            "resolver generation is not available");
+                    } else {
                     const Config& active_config = generation->config;
                     const auto dns_config =
                         active_config.dns.value_or(DnsConfig{});
@@ -688,7 +801,9 @@ void Daemon::handle_ipc_control_socket() {
                          dns_config,
                          cache_dir,
                          type,
-                         request_id] {
+                         request_id,
+                         resolver_attempt_id,
+                         correlated_attempt] {
                             bool stream_started = false;
                             bool stream_completed = false;
                             try {
@@ -832,10 +947,26 @@ void Daemon::handle_ipc_control_socket() {
                                 }
                             }
                             ::close(client);
-                            if (stream_completed) {
-                                resolver_stream_completed_epoch_.store(
-                                    generation->stream_epoch,
-                                    std::memory_order_release);
+                            if (stream_completed && correlated_attempt) {
+                                bool still_exact = false;
+                                {
+                                    KPBR_LOCK_GUARD(
+                                        resolver_stream_attempt_mutex_);
+                                    still_exact =
+                                        active_resolver_stream_attempt_id_ ==
+                                            resolver_attempt_id &&
+                                        active_resolver_stream_generation_ ==
+                                            generation;
+                                }
+                                if (still_exact) {
+                                    resolver_stream_completed_epoch_.store(
+                                        generation->stream_epoch,
+                                        std::memory_order_release);
+                                    resolver_stream_coordinator_
+                                        .notify_stream_completed(
+                                            resolver_attempt_id,
+                                            generation->stream_epoch);
+                                }
                             }
                         });
                     if (queued) {
@@ -845,6 +976,7 @@ void Daemon::handle_ipc_control_socket() {
                             request,
                             "daemon_error",
                             "resolver stream executor is unavailable");
+                    }
                     }
                 }
             } else if (operation == "download") {
@@ -1071,26 +1203,30 @@ void Daemon::quiesce_runtime_mutations() noexcept {
         std::chrono::seconds{5};
     while (!runtime_mutation_admission_.wait_for_idle_for(
         std::chrono::milliseconds{10})) {
-        if (event_loop_active_.load(std::memory_order_acquire)) {
-            try {
-                // An admitted API request may be synchronously waiting for a
-                // control task. Keep servicing those tasks after the main
-                // epoll loop exits until the exact mutation lease is returned.
+        try {
+            // An admitted resolver hook may still be waiting for dnsmasq's
+            // config-script IPC request, while an API/SIGHUP writer may be
+            // waiting for its terminal control callback. Keep both channels
+            // alive until the exact mutation lease is returned, including
+            // startup rollback where event_loop_active_ was never set.
+            if (ipc_control_fd_ >= 0) {
+                handle_ipc_control_socket();
+            }
+            if (control_fd_ >= 0) {
                 handle_control_commands();
-            } catch (const std::exception& error) {
-                try {
-                    Logger::instance().error(
-                        "Runtime mutation shutdown drain failed: {}",
-                        error.what());
-                } catch (...) {
-                }
+            }
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().error(
+                    "Runtime mutation shutdown drain failed: {}",
+                    error.what());
             } catch (...) {
-                try {
-                    Logger::instance().error(
-                        "Runtime mutation shutdown drain failed: unknown "
-                        "error");
-                } catch (...) {
-                }
+            }
+        } catch (...) {
+            try {
+                Logger::instance().error(
+                    "Runtime mutation shutdown drain failed: unknown error");
+            } catch (...) {
             }
         }
 
@@ -1103,6 +1239,41 @@ void Daemon::quiesce_runtime_mutations() noexcept {
                     active.has_value()
                         ? active->label
                         : std::string{"unknown"});
+            } catch (...) {
+            }
+            next_warning = now + std::chrono::seconds{5};
+        }
+    }
+}
+
+void Daemon::quiesce_resolver_stream_recovery() noexcept {
+    auto next_warning = std::chrono::steady_clock::now() +
+        std::chrono::seconds{5};
+    while (!resolver_stream_coordinator_.wait_for_idle_for(
+        std::chrono::milliseconds{10})) {
+        try {
+            if (ipc_control_fd_ >= 0) {
+                handle_ipc_control_socket();
+            }
+            if (control_fd_ >= 0) {
+                handle_control_commands();
+            }
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().error(
+                    "Resolver recovery shutdown drain failed: {}",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_warning) {
+            try {
+                Logger::instance().warn(
+                    "Waiting for the accepted resolver recovery hook to "
+                    "finish");
             } catch (...) {
             }
             next_warning = now + std::chrono::seconds{5};
@@ -1255,7 +1426,20 @@ bool Daemon::post_control_task(std::function<void()> task, const std::string& la
     Logger::instance().trace("control_task_enqueue",
                              "label={} wait=false mode=post",
                              effective_label);
-    wake_control_loop();
+    try {
+        wake_control_loop();
+    } catch (const std::exception& error) {
+        // Ownership has already moved into control_tasks_. Returning false or
+        // throwing here would let an asynchronous producer release its
+        // lifetime while the queued callback still captures it. Keep the
+        // enqueue authoritative; another epoll event or shutdown drain will
+        // service the callback.
+        Logger::instance().error(
+            "Posted control task '{}' was queued but the control-loop wake "
+            "failed: {}",
+            effective_label,
+            error.what());
+    }
     return true;
 }
 
@@ -1280,7 +1464,21 @@ void Daemon::handle_control_commands() {
     }
 
     for (auto& command : commands) {
-        command.callback();
+        try {
+            command.callback();
+        } catch (const std::exception& error) {
+            // One failed deferred callback must not discard the remaining
+            // batch. Resolver and lifecycle completions may own single-flight
+            // leases which are returned only by their callback.
+            Logger::instance().error(
+                "Control task '{}' failed: {}",
+                command.label.empty() ? "control-task" : command.label,
+                error.what());
+        } catch (...) {
+            Logger::instance().error(
+                "Control task '{}' failed: unknown error",
+                command.label.empty() ? "control-task" : command.label);
+        }
     }
 }
 
@@ -2106,26 +2304,38 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             // generation. A resolver failure must not roll back working
             // forwarding; the bounded resolver reconciler will converge it.
             cancel_resolver_reload_retry();
-            try {
-                if (run_system_resolver_hook_stream_prepared(
-                        "reload", /*rebuild_snapshot=*/false)) {
-                    refresh_resolver_config_hash_actual_async();
-                } else {
+            if (resolver_stream_coordinator_.in_flight()) {
+                log.verbose(
+                    "Native VPN DNS access policy committed while a resolver "
+                    "recovery stream was active; scheduling one trailing "
+                    "resolver convergence pass");
+                schedule_resolver_reload_retry(
+                    0, current_runtime_generation);
+            } else {
+                try {
+                    if (run_system_resolver_hook_stream_prepared(
+                            "reload", /*rebuild_snapshot=*/false)) {
+                        refresh_resolver_config_hash_actual_async();
+                    } else {
+                        log.info(
+                            "Native VPN DNS access policy did not converge "
+                            "during runtime refresh; scheduling a bounded "
+                            "resolver retry.");
+                        schedule_resolver_reload_retry(
+                            0,
+                            runtime_generation_.load(
+                                std::memory_order_acquire));
+                    }
+                } catch (const std::exception& error) {
                     log.info(
-                        "Native VPN DNS access policy did not converge during "
-                        "runtime refresh; scheduling a bounded resolver retry.");
+                        "Native VPN DNS access policy refresh was deferred: "
+                        "{}",
+                        error.what());
                     schedule_resolver_reload_retry(
                         0,
                         runtime_generation_.load(
                             std::memory_order_acquire));
                 }
-            } catch (const std::exception& error) {
-                log.info(
-                    "Native VPN DNS access policy refresh was deferred: {}",
-                    error.what());
-                schedule_resolver_reload_retry(
-                    0,
-                    runtime_generation_.load(std::memory_order_acquire));
             }
         }
         if (should_cleanup_conntrack_after_snat_repair(
@@ -2865,16 +3075,24 @@ void Daemon::run() {
         log.error("Daemon startup failed; rolling back partial runtime state.");
         runtime_mutation_admission_.shutdown();
         sighup_reload_coordinator_.stop();
+        cancel_resolver_reload_retry();
+        resolver_stream_coordinator_.request_stop();
+        keenetic_dns_refresh_coordinator_.stop();
+        cancel_idle_stall_observer();
+        cancel_owned_conntrack_cleanup_retry();
+        list_refresh_tasks_.request_cancel_active();
+        runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
+        scheduler_->cancel_all();
+        quiesce_resolver_stream_recovery();
+        quiesce_runtime_mutations();
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
             accept_posted_control_tasks_.store(
                 false, std::memory_order_release);
         }
-        keenetic_dns_refresh_coordinator_.stop();
-        cancel_idle_stall_observer();
-        cancel_owned_conntrack_cleanup_retry();
-        runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
-        scheduler_->cancel_all();
+        if (control_fd_ >= 0) {
+            handle_control_commands();
+        }
 #ifdef WITH_API
         if (status_stream_) {
             status_stream_->close_all();
@@ -2885,7 +3103,6 @@ void Daemon::run() {
         if (api_server_) {
             api_server_->stop();
         }
-        quiesce_runtime_mutations();
         try {
             teardown_conntrack_events();
         } catch (const std::exception& cleanup_error) {
@@ -2976,17 +3193,20 @@ void Daemon::run() {
     cancel_idle_stall_observer();
     runtime_mutation_admission_.shutdown();
     sighup_reload_coordinator_.stop();
-    {
-        KPBR_LOCK_GUARD(control_tasks_mutex_);
-        accept_posted_control_tasks_.store(
-            false, std::memory_order_release);
-    }
+    cancel_resolver_reload_retry();
+    resolver_stream_coordinator_.request_stop();
     keenetic_dns_refresh_coordinator_.stop();
     list_refresh_tasks_.request_cancel_active();
     // Admission is closed before quiescence, so new HTTP/SIGHUP writers are
     // rejected. Existing owners keep their token and may finish through the
     // control queue while this thread still owns the event-loop state.
+    quiesce_resolver_stream_recovery();
     quiesce_runtime_mutations();
+    {
+        KPBR_LOCK_GUARD(control_tasks_mutex_);
+        accept_posted_control_tasks_.store(
+            false, std::memory_order_release);
+    }
     handle_control_commands();
     event_loop_active_.store(false, std::memory_order_release);
     event_loop_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
@@ -3035,6 +3255,7 @@ void Daemon::stop() {
     list_refresh_tasks_.request_cancel_active();
     runtime_mutation_admission_.shutdown();
     sighup_reload_coordinator_.stop();
+    resolver_stream_coordinator_.request_stop();
     running_.store(false, std::memory_order_release);
     if (control_fd_ >= 0) {
         try {

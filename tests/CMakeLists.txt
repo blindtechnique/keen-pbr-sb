@@ -15,6 +15,7 @@ add_executable(keen-pbr-tests
   test_test_routing.cpp
   test_keenetic_dns.cpp
   test_keenetic_dns_refresh_coordinator.cpp
+  test_resolver_stream_coordinator.cpp
   test_ndms_interface_inventory.cpp
   test_internal_vpn_server_resolver.cpp
   test_ndms_vpn_server_service.cpp
@@ -100,6 +101,7 @@ add_executable(keen-pbr-tests
   ../src/daemon/daemon_runtime.cpp
   ../src/daemon/daemon_resolver.cpp
   ../src/daemon/keenetic_dns_refresh_coordinator.cpp
+  ../src/daemon/resolver_stream_coordinator.cpp
   ../src/daemon/daemon_api.cpp
   ../src/daemon/daemon_dns_probe.cpp
   ../src/setup/catalog_setup_planner.cpp
@@ -335,6 +337,57 @@ keen_pbr_apply_project_options(keen-pbr-keenetic-dns-refresh-tests)
 add_test(
   NAME keen-pbr-keenetic-dns-refresh-tests
   COMMAND keen-pbr-keenetic-dns-refresh-tests
+)
+
+# Keep the resolver hook handoff independently buildable. These tests cover
+# exact attempt/epoch correlation and terminal ownership without relinking the
+# daemon-wide suite on the Windows bind mount.
+add_executable(keen-pbr-resolver-stream-tests
+  test_main.cpp
+  test_resolver_stream_coordinator.cpp
+  ../src/daemon/resolver_stream_coordinator.cpp
+  ../src/util/blocking_executor.cpp
+  ../src/util/traced_mutex.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(keen-pbr-resolver-stream-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-resolver-stream-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-resolver-stream-tests PRIVATE
+  fmt::fmt-header-only
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-resolver-stream-tests)
+add_test(
+  NAME keen-pbr-resolver-stream-tests
+  COMMAND keen-pbr-resolver-stream-tests
+)
+
+add_test(
+  NAME keen-pbr-dnsmasq-attempt-receipt-debian-test
+  COMMAND /bin/sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_dnsmasq_attempt_receipt.sh
+          ${CMAKE_SOURCE_DIR}/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh
+)
+add_test(
+  NAME keen-pbr-dnsmasq-attempt-receipt-keenetic-test
+  COMMAND /bin/sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_dnsmasq_attempt_receipt.sh
+          ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh
+)
+add_test(
+  NAME keen-pbr-dnsmasq-attempt-receipt-openwrt-test
+  COMMAND /bin/sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_dnsmasq_attempt_receipt.sh
+          ${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh
 )
 
 # Keep the restore journal independently buildable. It deliberately has no

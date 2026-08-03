@@ -367,14 +367,22 @@ int main(int argc, char* argv[]) {
                        "daemon backend\n";
             }
             try {
+                nlohmann::json request{
+                    {"protocol_version",
+                     keen_pbr3::ipc::kControlProtocolVersion},
+                    {"request_id", "cli-generate-resolver-config"},
+                    {"operation", "generate-resolver-config"},
+                    {"resolver", opts.resolver_type},
+                };
+                if (const char* attempt_id =
+                        std::getenv("KEEN_PBR_RESOLVER_ATTEMPT_ID");
+                    attempt_id != nullptr &&
+                    keen_pbr3::is_valid_resolver_attempt_id(attempt_id)) {
+                    request["resolver_attempt_id"] = attempt_id;
+                }
                 keen_pbr3::ipc::stream_control(
                     KEEN_PBR_CONTROL_SOCKET,
-                    {{"protocol_version",
-                      keen_pbr3::ipc::kControlProtocolVersion},
-                     {"request_id",
-                      "cli-generate-resolver-config"},
-                     {"operation", "generate-resolver-config"},
-                     {"resolver", opts.resolver_type}},
+                    request,
                     std::cout,
                     15000);
                 return 0;

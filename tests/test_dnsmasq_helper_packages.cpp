@@ -67,6 +67,14 @@ TEST_CASE("packaged dnsmasq helpers delegate backend selection to the daemon") {
         CHECK(helper.find("last complete") != std::string::npos);
         CHECK(helper.find("mv -f \"$MANAGED_CONFIG_TMP\"") !=
               std::string::npos);
+        CHECK(helper.find("ATTEMPT_ACCEPTED_FILE") != std::string::npos);
+        CHECK(helper.find("accept_resolver_attempt") != std::string::npos);
+        CHECK(helper.find("wait_for_resolver_attempt_acceptance") !=
+              std::string::npos);
+        CHECK(helper.find("[ -n \"$attempt_id\" ] || return 0") !=
+              std::string::npos);
+        CHECK(helper.find("rm -f \"$ATTEMPT_ACCEPTED_FILE\"") !=
+              std::string::npos);
     }
 }
 

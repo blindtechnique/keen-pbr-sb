@@ -20,6 +20,32 @@ TEST_CASE("build_system_resolver_reload_args: returns hook and reload as separat
     CHECK(args[1] == "reload");
 }
 
+TEST_CASE("resolver hook carries an opaque exact attempt id as a separate argument") {
+    Config cfg;
+    cfg.dns = DnsConfig{};
+    cfg.dns->system_resolver = api::SystemResolver{};
+    const std::string attempt_id = "0123456789abcdef0123456789abcdef";
+
+    const auto args = build_system_resolver_reload_args(cfg, attempt_id);
+
+    REQUIRE(args.size() == 3);
+    CHECK(args[0] == system_resolver_hook_path());
+    CHECK(args[1] == "reload");
+    CHECK(args[2] == attempt_id);
+}
+
+TEST_CASE("resolver attempt ids are strict lowercase 128-bit hex values") {
+    CHECK(is_valid_resolver_attempt_id(
+        "0123456789abcdef0123456789abcdef"));
+    CHECK_FALSE(is_valid_resolver_attempt_id(""));
+    CHECK_FALSE(is_valid_resolver_attempt_id(
+        "0123456789ABCDEF0123456789ABCDEF"));
+    CHECK_FALSE(is_valid_resolver_attempt_id(
+        "0123456789abcdef0123456789abcdeg"));
+    CHECK_FALSE(is_valid_resolver_attempt_id(
+        "0123456789abcdef0123456789abcde"));
+}
+
 TEST_CASE("runtime stop followed by start reactivates the resolver helper") {
     Config cfg;
     cfg.dns = DnsConfig{};

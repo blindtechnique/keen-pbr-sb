@@ -218,6 +218,39 @@ private:
     std::atomic<bool>& flag_;
 };
 
+class ResolverStreamAttemptLifetime {
+public:
+    ResolverStreamAttemptLifetime(
+        std::atomic<bool>& ipc_gate,
+        std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
+        std::shared_ptr<const ResolverGenerationSnapshot> generation,
+        std::function<void()> clear_active)
+        : ipc_gate_(ipc_gate),
+          mutation_lease_(std::move(mutation_lease)),
+          generation_(std::move(generation)),
+          clear_active_(std::move(clear_active)) {}
+
+    ~ResolverStreamAttemptLifetime() noexcept {
+        try {
+            if (clear_active_) {
+                clear_active_();
+            }
+        } catch (...) {
+        }
+    }
+
+    ResolverStreamAttemptLifetime(
+        const ResolverStreamAttemptLifetime&) = delete;
+    ResolverStreamAttemptLifetime& operator=(
+        const ResolverStreamAttemptLifetime&) = delete;
+
+private:
+    ResolverIpcGate ipc_gate_;
+    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease_;
+    std::shared_ptr<const ResolverGenerationSnapshot> generation_;
+    std::function<void()> clear_active_;
+};
+
 bool urltest_contains_child(const Outbound& urltest,
                             const std::string& child_tag) {
     for (const auto& group :
@@ -278,10 +311,12 @@ bool same_internal_vpn_runtime_targets(
 } // namespace
 
 bool Daemon::run_system_resolver_hook(std::string_view action,
-                                      bool manage_ipc_gate) {
+                                      bool manage_ipc_gate,
+                                      std::string_view attempt_id) {
     auto& log = Logger::instance();
 
-    const auto args = build_system_resolver_hook_args(config_, action);
+    const auto args =
+        build_system_resolver_hook_args(config_, action, attempt_id);
     if (args.empty()) {
         return true;
     }
@@ -289,7 +324,7 @@ bool Daemon::run_system_resolver_hook(std::string_view action,
     std::string command;
     for (std::size_t index = 0; index < args.size(); ++index) {
         if (index != 0) command += ' ';
-        command += args[index];
+        command += index == 2 ? "<resolver-attempt>" : args[index];
     }
 
     auto execute_hook = [this, args] {
@@ -358,10 +393,26 @@ bool Daemon::run_system_resolver_hook_stream_prepared(
         *resolver_generation_snapshot_);
     generation->stream_epoch =
         resolver_stream_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
-    resolver_generation_snapshot_ = generation;
     const std::uint64_t expected_epoch = generation->stream_epoch;
-    ResolverIpcGate gate(ipc_resolver_hook_inflight_);
-    if (!run_system_resolver_hook(action, false)) {
+    const std::string attempt_id = generate_resolver_attempt_id();
+    auto lifetime = std::make_shared<ResolverStreamAttemptLifetime>(
+        ipc_resolver_hook_inflight_,
+        nullptr,
+        generation,
+        [this, attempt_id]() noexcept {
+            KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+            if (active_resolver_stream_attempt_id_ == attempt_id) {
+                active_resolver_stream_attempt_id_.clear();
+                active_resolver_stream_generation_.reset();
+            }
+        });
+    resolver_generation_snapshot_ = generation;
+    {
+        KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+        active_resolver_stream_attempt_id_ = attempt_id;
+        active_resolver_stream_generation_ = generation;
+    }
+    if (!run_system_resolver_hook(action, false, attempt_id)) {
         return false;
     }
     if (!wait_for_resolver_stream_epoch(
@@ -3101,63 +3152,265 @@ void Daemon::schedule_resolver_reload_retry(
                     runtime_generation);
                 return;
             }
-            const auto outcome = evaluate_resolver_reload_retry(
-                routing_runtime_active_,
-                runtime_generation,
-                runtime_generation_.load(std::memory_order_acquire),
-                attempt,
-                RESOLVER_RELOAD_RETRY_DELAYS.size(),
-                [this, attempt]() {
-                    try {
-                        if (!resolver_generation_snapshot_ ||
-                            !resolver_generation_snapshot_
-                                 ->list_cache_snapshot) {
-                            throw DaemonError(
-                                "Committed resolver generation is unavailable");
-                        }
-                        return run_system_resolver_hook_stream_prepared(
-                            "reload", /*rebuild_snapshot=*/false);
-                    } catch (const std::exception& error) {
-                        Logger::instance().info(
-                            "Resolver reload recovery attempt {} failed: {}",
-                            attempt + 1,
-                            error.what());
-                        return false;
-                    }
-                });
-
-            if (outcome ==
-                ResolverReloadRetryOutcome::stale_generation) {
-                Logger::instance().verbose(
-                    "Discarding stale resolver reload recovery retry.");
-                return;
-            }
-            if (outcome == ResolverReloadRetryOutcome::recovered) {
-                refresh_resolver_config_hash_actual_async();
-                publish_runtime_state();
-                Logger::instance().info(
-                    "Resolver reload recovered after committed runtime "
-                    "replacement.");
-                return;
-            }
-            if (outcome == ResolverReloadRetryOutcome::retry) {
-                schedule_resolver_reload_retry(
-                    attempt + 1, runtime_generation);
-                return;
-            }
-
-            Logger::instance().error(
-                "Resolver reload did not recover after {} bounded "
-                "attempts; routing remains active but DNS needs attention.",
-                RESOLVER_RELOAD_RETRY_DELAYS.size());
-            refresh_resolver_config_hash_actual_async();
-            publish_runtime_state();
+            start_resolver_reload_retry_attempt(
+                attempt, runtime_generation);
         },
         "resolver-reload-recovery");
     Logger::instance().info(
         "Resolver reload recovery attempt {} scheduled in {}s.",
         attempt + 1,
         delay.count());
+}
+
+void Daemon::start_resolver_reload_retry_attempt(
+    std::size_t attempt,
+    std::uint64_t runtime_generation) {
+    if (!routing_runtime_active_ ||
+        runtime_generation !=
+            runtime_generation_.load(std::memory_order_acquire)) {
+        Logger::instance().verbose(
+            "Discarding stale resolver reload recovery retry.");
+        return;
+    }
+
+    if (resolver_stream_coordinator_.in_flight()) {
+        Logger::instance().verbose(
+            "Resolver reload recovery is already in progress; deferring "
+            "attempt {} without consuming retry budget.",
+            attempt + 1);
+        schedule_resolver_reload_retry(attempt, runtime_generation);
+        return;
+    }
+
+    auto admitted = runtime_mutation_admission_.try_acquire(
+        "resolver-reload-recovery");
+    if (!admitted.has_value()) {
+        const auto active = runtime_mutation_admission_.active();
+        Logger::instance().verbose(
+            "Resolver reload recovery deferred behind runtime mutation '{}'.",
+            active.has_value() ? active->label : std::string{"unknown"});
+        schedule_resolver_reload_retry(attempt, runtime_generation);
+        return;
+    }
+
+    auto mutation_lease =
+        std::make_shared<RuntimeMutationAdmission::Lease>(
+            std::move(*admitted));
+    try {
+        if (!resolver_generation_snapshot_ ||
+            !resolver_generation_snapshot_->list_cache_snapshot) {
+            throw DaemonError(
+                "Committed resolver generation is unavailable");
+        }
+
+        auto generation = std::make_shared<ResolverGenerationSnapshot>(
+            *resolver_generation_snapshot_);
+        generation->stream_epoch =
+            resolver_stream_epoch_.fetch_add(
+                1, std::memory_order_acq_rel) + 1;
+        const std::string attempt_id = generate_resolver_attempt_id();
+        const auto args = build_system_resolver_hook_args(
+            generation->config, "reload", attempt_id);
+        if (args.empty()) {
+            ResolverStreamOperation operation;
+            operation.runtime_generation = runtime_generation;
+            operation.retry_attempt = attempt;
+            // No hook means no stream was published. Treat the no-op as an
+            // immediate recovery without fencing it against an unpublished
+            // epoch, otherwise completion would continuously reschedule it.
+            operation.stream_epoch = 0;
+            operation.attempt_id = attempt_id;
+            complete_resolver_reload_retry_attempt(
+                operation,
+                ResolverStreamResult{true, 0, {}});
+            return;
+        }
+
+        auto lifetime = std::make_shared<ResolverStreamAttemptLifetime>(
+            ipc_resolver_hook_inflight_,
+            mutation_lease,
+            generation,
+            [this, attempt_id]() noexcept {
+                KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+                if (active_resolver_stream_attempt_id_ == attempt_id) {
+                    active_resolver_stream_attempt_id_.clear();
+                    active_resolver_stream_generation_.reset();
+                }
+            });
+        resolver_generation_snapshot_ = generation;
+        {
+            KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+            active_resolver_stream_attempt_id_ = attempt_id;
+            active_resolver_stream_generation_ = generation;
+        }
+
+        ResolverStreamOperation operation;
+        operation.runtime_generation = runtime_generation;
+        operation.retry_attempt = attempt;
+        operation.stream_epoch = generation->stream_epoch;
+        operation.attempt_id = attempt_id;
+        operation.timeout = std::chrono::seconds{15};
+        operation.lifetime = std::move(lifetime);
+        operation.invoke_hook = [this, args]() {
+            KPBR_LOCK_GUARD(system_resolver_hook_mutex_);
+            return hook_command_executor_(args);
+        };
+
+        const auto request =
+            resolver_stream_coordinator_.request(std::move(operation));
+        if (request == ResolverStreamCoordinator::RequestResult::busy) {
+            Logger::instance().verbose(
+                "Resolver reload recovery handoff was busy; deferring "
+                "attempt {} without consuming retry budget.",
+                attempt + 1);
+            schedule_resolver_reload_retry(attempt, runtime_generation);
+        } else if (
+            request == ResolverStreamCoordinator::RequestResult::rejected) {
+            Logger::instance().info(
+                "Resolver reload recovery attempt {} was rejected by the "
+                "worker coordinator",
+                attempt + 1);
+            ResolverStreamOperation rejected_operation;
+            rejected_operation.runtime_generation = runtime_generation;
+            rejected_operation.retry_attempt = attempt;
+            rejected_operation.stream_epoch = generation->stream_epoch;
+            complete_resolver_reload_retry_attempt(
+                rejected_operation,
+                ResolverStreamResult{
+                    false,
+                    -1,
+                    "resolver stream worker rejected the operation"});
+        }
+    } catch (const std::exception& error) {
+        Logger::instance().info(
+            "Resolver reload recovery attempt {} could not start: {}",
+            attempt + 1,
+            error.what());
+        ResolverStreamOperation operation;
+        operation.runtime_generation = runtime_generation;
+        operation.retry_attempt = attempt;
+        complete_resolver_reload_retry_attempt(
+            operation,
+            ResolverStreamResult{false, -1, error.what()});
+    }
+}
+
+void Daemon::complete_resolver_reload_retry_attempt(
+    const ResolverStreamOperation& operation,
+    const ResolverStreamResult& result) noexcept {
+    try {
+        const auto current_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        if (operation.runtime_generation != current_generation ||
+            !routing_runtime_active_) {
+            Logger::instance().verbose(
+                "Discarding stale resolver reload recovery completion.");
+            keenetic_dns_refresh_deferred_by_resolver_stream_ = false;
+            return;
+        }
+
+        if (operation.stream_epoch != 0 &&
+            (!resolver_generation_snapshot_ ||
+             resolver_generation_snapshot_->stream_epoch !=
+                 operation.stream_epoch)) {
+            Logger::instance().verbose(
+                "Resolver generation changed during recovery; scheduling "
+                "the latest committed generation.");
+            schedule_resolver_reload_retry(0, current_generation);
+            return;
+        }
+
+        if (!result.completed && !result.error.empty()) {
+            Logger::instance().info(
+                "Resolver reload recovery attempt {} failed: {}",
+                operation.retry_attempt + 1,
+                result.error);
+        }
+        const auto outcome = evaluate_resolver_reload_retry(
+            routing_runtime_active_,
+            operation.runtime_generation,
+            current_generation,
+            operation.retry_attempt,
+            RESOLVER_RELOAD_RETRY_DELAYS.size(),
+            [&result]() { return result.completed; });
+
+        if (outcome == ResolverReloadRetryOutcome::stale_generation) {
+            return;
+        }
+        if (outcome == ResolverReloadRetryOutcome::recovered) {
+            refresh_resolver_config_hash_actual_async();
+            publish_runtime_state();
+            Logger::instance().info(
+                "Resolver reload recovered after committed runtime "
+                "replacement.");
+            resume_deferred_keenetic_dns_refresh();
+            return;
+        }
+        if (outcome == ResolverReloadRetryOutcome::retry) {
+            schedule_resolver_reload_retry(
+                operation.retry_attempt + 1,
+                operation.runtime_generation);
+            return;
+        }
+
+        Logger::instance().error(
+            "Resolver reload did not recover after {} bounded attempts; "
+            "routing remains active but DNS needs attention.",
+            RESOLVER_RELOAD_RETRY_DELAYS.size());
+        refresh_resolver_config_hash_actual_async();
+        publish_runtime_state();
+        resume_deferred_keenetic_dns_refresh();
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().error(
+                "Resolver reload recovery completion failed: {}",
+                error.what());
+        } catch (...) {
+        }
+        resume_deferred_keenetic_dns_refresh();
+    } catch (...) {
+        resume_deferred_keenetic_dns_refresh();
+    }
+}
+
+void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {
+    if (!keenetic_dns_refresh_deferred_by_resolver_stream_) {
+        return;
+    }
+    keenetic_dns_refresh_deferred_by_resolver_stream_ = false;
+
+    try {
+        const bool queued = post_control_task(
+            [this]() {
+                // This callback runs in the next control-loop batch, after
+                // ResolverStreamCoordinator has retired its claim and
+                // released the IPC/admission lifetime.
+                if (resolver_stream_coordinator_.in_flight()) {
+                    keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
+                    return;
+                }
+                if (!routing_runtime_active_ || !config_.dns.has_value() ||
+                    !dns_config_uses_keenetic_server(*config_.dns)) {
+                    return;
+                }
+                (void)keenetic_dns_refresh_coordinator_.request(
+                    runtime_generation_.load(std::memory_order_acquire));
+            },
+            "keenetic-dns-refresh-after-resolver-recovery");
+        if (!queued && routing_runtime_active_) {
+            keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
+        }
+    } catch (const std::exception& error) {
+        keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
+        try {
+            Logger::instance().error(
+                "Could not queue deferred Keenetic DNS refresh: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        keenetic_dns_refresh_deferred_by_resolver_stream_ = true;
+    }
 }
 
 void Daemon::cancel_idle_stall_observer() noexcept {
