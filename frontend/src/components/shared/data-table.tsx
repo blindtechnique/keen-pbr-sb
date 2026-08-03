@@ -189,8 +189,13 @@ export function DataTable({
         )}
       >
         <Table className={cn("w-full text-sm", fixedLayout && "table-fixed")}>
+          {/* KeeneticOS column headers: 14px bold in sentence case on the muted
+              band, not small caps. --muted is #fafafa light / #2f3745 dark and
+              --foreground #202020 / #c2c2c2 — the same pair the firmware uses,
+              which also lifts contrast from 2.82:1 to 15.6:1 (light) and from
+              4.25:1 to 6.72:1 (dark). */}
           {headersWithSelection && (
-            <TableHeader className="bg-muted/70 text-xs tracking-wide text-muted-foreground uppercase">
+            <TableHeader className="bg-muted text-sm text-foreground">
               <TableRow>
                 {headersWithSelection.map((header, headerIndex) => (
                   <TableHead

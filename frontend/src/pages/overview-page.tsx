@@ -34,6 +34,7 @@ import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { SystemStatusSummary } from "@/components/overview/system-status-summary"
 import { ActiveInterfaceTraffic } from "@/components/overview/active-interface-traffic"
 import { dashboardSectionIds } from "@/components/overview/system-status-summary-model"
+import { useDocumentTitle } from "@/hooks/use-document-title"
 import { getApiErrorMessage } from "@/lib/api-errors"
 
 export function OverviewPage() {
@@ -106,6 +107,10 @@ export function OverviewPage() {
   const routingHealthErrorMessage = routingHealthQuery.isError
     ? getRoutingHealthErrorMessage(routingHealthQuery.error, t)
     : null
+
+  // The dashboard has no PageHeader — its heading is the status line — so the
+  // browser tab is named here instead.
+  useDocumentTitle(t("nav.items.systemMonitor"))
 
   return (
     <div className="space-y-3">

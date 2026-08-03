@@ -45,7 +45,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             {/* No max-width: NDMS lets its panels use the whole window, and a
                 centred column left wide screens half empty. The bottom padding
-                leaves room for the fixed save bar. */}
+                leaves room for the fixed save bar and, when rows are selected,
+                for the bulk action bar stacked above it. */}
             <div
               className={cn(
                 "min-w-0 px-4 pt-4 sm:px-6",
@@ -53,7 +54,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               )}
               style={{
                 paddingBottom:
-                  "calc(var(--warning-banner-height, 0px) + 1.25rem)",
+                  "calc(var(--warning-banner-height, 0px) + var(--bulk-toolbar-height, 0px) + 1.25rem)",
               }}
             >
               {children}

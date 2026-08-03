@@ -467,6 +467,8 @@ export function NfqwsPage() {
           </div>
         }
         description={t("nfqws.description")}
+        // The heading is a link, so the tab text is given explicitly.
+        documentTitle="nfqws2"
         title={
           <a
             aria-label={t("nfqws.repository")}
