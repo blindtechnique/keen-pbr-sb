@@ -7,6 +7,7 @@ import {
 import {
   createTransportFormValue,
   inferTransportAliasSuggestion,
+  isTransportGeoSelectionInvalid,
   normalizeTransportFormComparable,
   normalizeTransportFormValue,
 } from "../src/components/transports/transport-config-dialog"
@@ -158,5 +159,39 @@ describe("transport form semantics", () => {
     expect(submission.spec.mtu).toBeUndefined()
     expect(submission.spec.bootstrap_dns).toBeUndefined()
     expect(submission.spec.tun_address).toBeUndefined()
+  })
+})
+
+describe("transport geo selection", () => {
+  test("manual geo without a country cannot be saved", () => {
+    // The native <select required> used to block this; the styled Select has
+    // no browser validation, so the rule has to live in code.
+    expect(
+      isTransportGeoSelectionInvalid({ geo_mode: "manual", country_code: "" })
+    ).toBe(true)
+    expect(
+      isTransportGeoSelectionInvalid({ geo_mode: "manual", country_code: "  " })
+    ).toBe(true)
+    expect(
+      isTransportGeoSelectionInvalid({
+        geo_mode: "manual",
+        country_code: undefined,
+      })
+    ).toBe(true)
+  })
+
+  test("a picked country, or any other mode, is fine", () => {
+    expect(
+      isTransportGeoSelectionInvalid({ geo_mode: "manual", country_code: "NL" })
+    ).toBe(false)
+    expect(
+      isTransportGeoSelectionInvalid({ geo_mode: "auto", country_code: "" })
+    ).toBe(false)
+    expect(
+      isTransportGeoSelectionInvalid({
+        geo_mode: "disabled",
+        country_code: undefined,
+      })
+    ).toBe(false)
   })
 })

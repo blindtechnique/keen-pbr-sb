@@ -14,6 +14,14 @@ import type { UpsertPagePresentation } from "@/components/shared/upsert-page"
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -61,6 +69,20 @@ export type TransportFormValue = {
 export type TransportFormSubmission = {
   spec: TransportSpec
   options: { createOutbound: boolean }
+}
+
+/**
+ * Ручной режим геолокации без выбранной страны — сохранять нельзя.
+ *
+ * Раньше это держалось на `required` нативного `<select>` и всплывающей
+ * подсказке браузера. У своего поля такой проверки нет, поэтому условие
+ * переехало на кнопку сохранения: заодно видно заранее, а не по нажатию.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isTransportGeoSelectionInvalid(
+  spec: Pick<TransportSpec, "geo_mode" | "country_code">
+): boolean {
+  return spec.geo_mode === "manual" && !spec.country_code?.trim()
 }
 
 // Exported for focused form tests. Suggestions never mutate the form by
@@ -263,6 +285,54 @@ export function TransportConfigForm({
     spec.type === TransportSpecType.native &&
     !initial &&
     (!selectedNativeCandidate || !selectedNativeCandidate.selectable)
+  // Списки для выпадающих полей считаем здесь: `Select` показывает выбранное
+  // значение по этому же списку, поэтому он должен быть один и тот же для
+  // кнопки и для меню.
+  const typeOptions = [
+    ...(initial?.type === TransportSpecType.native ||
+    nativeCandidates.length > 0
+      ? [
+          {
+            value: TransportSpecType.native as TransportSpec["type"],
+            label: t("transports.form.native"),
+          },
+        ]
+      : []),
+    {
+      value: TransportSpecType["sing-box"] as TransportSpec["type"],
+      label: t("transports.form.singBox"),
+    },
+    ...(spec.type === TransportSpecType["sing-box-vless-reality"]
+      ? [
+          {
+            value: TransportSpecType[
+              "sing-box-vless-reality"
+            ] as TransportSpec["type"],
+            label: t("transports.form.singBoxLegacy"),
+          },
+        ]
+      : []),
+  ]
+  const nativeInterfaceOptions = [
+    // Интерфейс сохранённого транспорта мог исчезнуть из системы: без этой
+    // строки поле показало бы пустоту вместо того, что там записано.
+    ...(initial?.type === TransportSpecType.native && !selectedNativeCandidate
+      ? [{ value: spec.interface, label: spec.interface, disabled: false }]
+      : []),
+    ...nativeCandidates.map((candidate) => ({
+      value: candidate.interfaceName ?? `unresolved:${candidate.id}`,
+      label: formatNativeTransportCandidate(candidate, {
+        hidden: t("transports.form.nativeInterfaceHidden"),
+        unavailable: t("transports.form.nativeInterfaceUnavailable"),
+      }),
+      disabled: !candidate.selectable,
+    })),
+  ]
+  const countryItems = countries.map((country) => ({
+    value: country.code,
+    label: `${country.flag} ${country.name} (${country.code})`,
+  }))
+  const geoSelectionInvalid = isTransportGeoSelectionInvalid(spec)
   const formValue: TransportFormValue = {
     spec,
     sourceMode,
@@ -369,11 +439,11 @@ export function TransportConfigForm({
           ) : null}
         </Field>
         <Field label={t("transports.form.type")}>
-          <select
-            className="h-9 rounded-md border bg-background px-3"
+          <Select
             disabled={Boolean(initial)}
-            onChange={(event) => {
-              const nextType = event.target.value as TransportSpec["type"]
+            items={typeOptions}
+            onValueChange={(value) => {
+              const nextType = (value ?? spec.type) as TransportSpec["type"]
               const firstNative = nativeCandidates.find(
                 (candidate) => candidate.selectable
               )
@@ -390,57 +460,49 @@ export function TransportConfigForm({
             }}
             value={spec.type}
           >
-            {initial?.type === TransportSpecType.native ||
-            nativeCandidates.length > 0 ? (
-              <option value={TransportSpecType.native}>
-                {t("transports.form.native")}
-              </option>
-            ) : null}
-            <option value={TransportSpecType["sing-box"]}>
-              {t("transports.form.singBox")}
-            </option>
-            {spec.type === TransportSpecType["sing-box-vless-reality"] ? (
-              <option value={TransportSpecType["sing-box-vless-reality"]}>
-                {t("transports.form.singBoxLegacy")}
-              </option>
-            ) : null}
-          </select>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {typeOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </Field>
         {spec.type === TransportSpecType.native ? (
           <Field label={t("transports.form.nativeInterface")}>
-            <select
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            <Select
               disabled={Boolean(initial)}
-              onChange={(event) =>
-                setSpec({ ...spec, interface: event.target.value })
+              items={nativeInterfaceOptions}
+              onValueChange={(value) =>
+                setSpec({ ...spec, interface: String(value ?? "") })
               }
-              required
               value={spec.interface}
             >
-              <option disabled value="">
-                {t("transports.form.nativeInterfacePlaceholder")}
-              </option>
-              {initial?.type === TransportSpecType.native &&
-              !selectedNativeCandidate ? (
-                <option value={spec.interface}>{spec.interface}</option>
-              ) : null}
-              {nativeCandidates.map((candidate) => (
-                <option
-                  disabled={!candidate.selectable}
-                  key={candidate.id}
-                  value={
-                    candidate.interfaceName ?? `unresolved:${candidate.id}`
-                  }
-                >
-                  {formatNativeTransportCandidate(candidate, {
-                    hidden: t("transports.form.nativeInterfaceHidden"),
-                    unavailable: t(
-                      "transports.form.nativeInterfaceUnavailable"
-                    ),
-                  })}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger>
+                <SelectValue
+                  placeholder={t("transports.form.nativeInterfacePlaceholder")}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {nativeInterfaceOptions.map((option) => (
+                    <SelectItem
+                      disabled={option.disabled}
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             <p className="text-xs text-muted-foreground">
               {t("transports.form.nativeInterfaceHint")}
             </p>
@@ -536,11 +598,11 @@ export function TransportConfigForm({
                 </label>
               ))}
               {spec.geo_mode === "manual" ? (
-                <select
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                  onChange={(event) => {
+                <Select
+                  items={countryItems}
+                  onValueChange={(value) => {
                     const selected = countries.find(
-                      (country) => country.code === event.target.value
+                      (country) => country.code === value
                     )
                     setSpec({
                       ...spec,
@@ -548,18 +610,23 @@ export function TransportConfigForm({
                       country: selected?.name,
                     })
                   }}
-                  required
                   value={spec.country_code?.toUpperCase() ?? ""}
                 >
-                  <option disabled value="">
-                    {t("transports.form.geo.countryPlaceholder")}
-                  </option>
-                  {countries.map((country) => (
-                    <option key={country.code} value={country.code}>
-                      {country.flag} {country.name} ({country.code})
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger>
+                    <SelectValue
+                      placeholder={t("transports.form.geo.countryPlaceholder")}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {countryItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               ) : null}
             </div>
           </Field>
@@ -726,7 +793,8 @@ export function TransportConfigForm({
             isPending ||
             !isDirty ||
             Boolean(displayNameError) ||
-            nativeSelectionInvalid
+            nativeSelectionInvalid ||
+            geoSelectionInvalid
           }
           size="xl"
           type="submit"
