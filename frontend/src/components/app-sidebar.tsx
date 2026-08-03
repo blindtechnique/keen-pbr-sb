@@ -107,7 +107,9 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
       {/* The footer is the button: padding here would leave a pale margin
           around the hover fill instead of letting it reach the edges. */}
       {isMobile ? (
-        <SidebarFooter className="keen-sidebar-toggle h-16 shrink-0 bg-sidebar p-0">
+        // Высоту не фиксируем: строки с подписями занимают четыре ряда, а не
+        // один ряд иконок.
+        <SidebarFooter className="keen-sidebar-toggle shrink-0 bg-sidebar p-0">
           <MobileMenuControls />
         </SidebarFooter>
       ) : (

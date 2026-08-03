@@ -37,6 +37,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "Theme options are a local readonly tuple.",
   },
   {
+    file: "src/components/layout/top-bar-controls.tsx",
+    argument: "themeOption.labelKey",
+    keys: ["theme.*"],
+    reason:
+      "The drawer row shows the active theme name, looked up in the same tuple.",
+  },
+  {
     file: "src/components/layout/warning-banner.tsx",
     argument: "getWarningBannerTitleKey(*)",
     keys: ["warning.compact.*", "lifecycle.*"],

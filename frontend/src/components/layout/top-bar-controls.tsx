@@ -35,6 +35,11 @@ const LANGUAGE_OPTIONS = [
 
 const ISSUES_URL = "https://github.com/blindtechnique/keen-pbr-sb/issues"
 
+// Строка шторки: высота и отступ пунктов меню над ней, чтобы список читался
+// как продолжение навигации, а не как приклеенная снизу панель.
+const SYSTEM_CONTROL_ROW_CLASS =
+  "h-12 w-full justify-start gap-3 rounded-none px-6 text-[14px] leading-6 font-normal text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg:not([class*='size-'])]:size-5"
+
 /**
  * Compact theme and language pickers for the system bar, where KeeneticOS keeps
  * its own global controls.
@@ -43,18 +48,33 @@ export function TopBarControls() {
   return <SystemControlIcons showNotifications={true} />
 }
 
+/**
+ * Те же элементы в мобильной шторке, но строками с подписями.
+ *
+ * Иконки без подписей стояли рядом внизу шторки — прямо под списком разделов,
+ * где у каждой строки есть название. Что делает «палитра» и чем «жучок»
+ * отличается от «выхода», приходилось угадывать по картинке. Строки той же
+ * высоты и с тем же отступом, что и пункты меню над ними, а у языка и темы
+ * видно текущее значение: раньше его нужно было открыть, чтобы узнать.
+ */
 export function MobileMenuControls() {
   return (
-    <div className="flex h-16 w-full items-center justify-end gap-1 px-4">
-      <SystemControlIcons popoverSide="top" showNotifications={false} />
+    <div className="flex w-full flex-col py-1">
+      <SystemControlIcons
+        layout="list"
+        popoverSide="top"
+        showNotifications={false}
+      />
     </div>
   )
 }
 
 function SystemControlIcons({
+  layout = "bar",
   popoverSide = "bottom",
   showNotifications,
 }: {
+  layout?: "bar" | "list"
   popoverSide?: "top" | "bottom"
   showNotifications: boolean
 }) {
@@ -78,8 +98,14 @@ function SystemControlIcons({
     }
   }
 
+  const asList = layout === "list"
+  const languageLabel =
+    LANGUAGE_OPTIONS.find((option) => option.value === language)?.label ??
+    language
+  const themeOption = THEME_OPTIONS.find((option) => option.value === theme)
+
   return (
-    <div className="flex items-center">
+    <div className={cn(asList ? "flex flex-col" : "flex items-center")}>
       {showNotifications ? (
         <>
           <HeaderHealthIndicator />
@@ -88,28 +114,29 @@ function SystemControlIcons({
       ) : null}
 
       <Button
-        aria-label={t("common.reportIssue")}
-        className={TOP_BAR_CONTROL_CLASS}
+        aria-label={asList ? undefined : t("common.reportIssue")}
+        className={asList ? SYSTEM_CONTROL_ROW_CLASS : TOP_BAR_CONTROL_CLASS}
         render={
-          <a
-            href={ISSUES_URL}
-            rel="noopener noreferrer"
-            target="_blank"
-          />
+          <a href={ISSUES_URL} rel="noopener noreferrer" target="_blank" />
         }
-        size="icon"
-        title={t("common.reportIssue")}
+        size={asList ? "default" : "icon"}
+        title={asList ? undefined : t("common.reportIssue")}
         variant="ghost"
       >
         <BugIcon />
+        {asList ? (
+          <span className="flex-1">{t("common.reportIssue")}</span>
+        ) : null}
       </Button>
 
       <IconMenu
+        asList={asList}
         icon={<LanguagesIcon />}
         label={t("common.language")}
         onOpenChange={(open) => setOpenMenu(open ? "language" : null)}
         open={openMenu === "language"}
         side={popoverSide}
+        value={languageLabel}
       >
         {LANGUAGE_OPTIONS.map((option) => (
           <MenuOption
@@ -126,11 +153,13 @@ function SystemControlIcons({
       </IconMenu>
 
       <IconMenu
+        asList={asList}
         icon={<PaletteIcon />}
         label={t("common.theme")}
         onOpenChange={(open) => setOpenMenu(open ? "theme" : null)}
         open={openMenu === "theme"}
         side={popoverSide}
+        value={themeOption ? t(themeOption.labelKey) : undefined}
       >
         {THEME_OPTIONS.map((option) => (
           <MenuOption
@@ -147,12 +176,12 @@ function SystemControlIcons({
       </IconMenu>
 
       <Button
-        aria-label={t("auth.signOut")}
-        className={TOP_BAR_CONTROL_CLASS}
+        aria-label={asList ? undefined : t("auth.signOut")}
+        className={asList ? SYSTEM_CONTROL_ROW_CLASS : TOP_BAR_CONTROL_CLASS}
         disabled={signingOut}
         onClick={() => void handleSignOut()}
-        size="icon"
-        title={t("auth.signOut")}
+        size={asList ? "default" : "icon"}
+        title={asList ? undefined : t("auth.signOut")}
         variant="ghost"
       >
         {signingOut ? (
@@ -160,24 +189,30 @@ function SystemControlIcons({
         ) : (
           <LogOutIcon />
         )}
+        {asList ? <span className="flex-1">{t("auth.signOut")}</span> : null}
       </Button>
     </div>
   )
 }
 
 function IconMenu({
+  asList = false,
   icon,
   label,
   open,
   onOpenChange,
   side,
+  value,
   children,
 }: {
+  asList?: boolean
   icon: React.ReactNode
   label: string
   open: boolean
   onOpenChange: (open: boolean) => void
   side: "top" | "bottom"
+  /** Текущее значение справа в строке: язык и тема иначе не видны до открытия. */
+  value?: string
   children: React.ReactNode
 }) {
   return (
@@ -185,17 +220,31 @@ function IconMenu({
       <PopoverTrigger
         render={
           <Button
-            aria-label={label}
-            className={TOP_BAR_CONTROL_CLASS}
-            size="icon"
-            title={label}
+            aria-label={asList ? undefined : label}
+            className={
+              asList ? SYSTEM_CONTROL_ROW_CLASS : TOP_BAR_CONTROL_CLASS
+            }
+            size={asList ? "default" : "icon"}
+            title={asList ? undefined : label}
             variant="ghost"
           />
         }
       >
         {icon}
+        {asList ? (
+          <>
+            <span className="flex-1">{label}</span>
+            {value ? (
+              <span className="text-muted-foreground">{value}</span>
+            ) : null}
+          </>
+        ) : null}
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-44 p-1" side={side}>
+      <PopoverContent
+        align={asList ? "start" : "end"}
+        className="w-44 p-1"
+        side={side}
+      >
         {children}
       </PopoverContent>
     </Popover>
