@@ -2,6 +2,7 @@
 
 #include "../src/routing/route_table.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <functional>
