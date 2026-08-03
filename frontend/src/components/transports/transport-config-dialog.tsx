@@ -8,6 +8,7 @@ import {
 import { useTranslation } from "react-i18next"
 
 import { TransportSpecType, type TransportSpec } from "@/api/generated/model"
+import { SegmentedControl } from "@/components/shared/segmented-control"
 import { Button } from "@/components/ui/button"
 import type { UpsertPagePresentation } from "@/components/shared/upsert-page"
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
@@ -595,24 +596,15 @@ export function TransportConfigForm({
                 </AlertDescription>
               </Alert>
             ) : null}
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <Button
-                className="h-auto min-h-9 py-2 text-center leading-tight whitespace-normal"
-                type="button"
-                variant={sourceMode === "link" ? "default" : "outline"}
-                onClick={() => selectSourceMode("link")}
-              >
-                {t("transports.form.shareLink")}
-              </Button>
-              <Button
-                className="h-auto min-h-9 py-2 text-center leading-tight whitespace-normal"
-                type="button"
-                variant={sourceMode === "json" ? "default" : "outline"}
-                onClick={() => selectSourceMode("json")}
-              >
-                {t("transports.form.outboundJson")}
-              </Button>
-            </div>
+            <SegmentedControl
+              ariaLabel={t("transports.form.sourceMode")}
+              onChange={selectSourceMode}
+              options={[
+                { value: "link", label: t("transports.form.shareLink") },
+                { value: "json", label: t("transports.form.outboundJson") },
+              ]}
+              value={sourceMode}
+            />
             {sourceMode === "link" ? (
               <Field label={t("transports.form.shareLink")}>
                 <Textarea

@@ -528,6 +528,7 @@ export const ruTranslation = {
       tag: "Тег",
       tagHint:
         "От 1 до 24 символов: сначала строчная латинская буква, затем только a–z, 0–9 и подчёркивание. Например: my_tunnel.",
+      sourceMode: "Способ добавления",
       displayName: "Понятное название",
       displayNamePlaceholder: "Например, Нидерланды - основной",
       displayNameHint:

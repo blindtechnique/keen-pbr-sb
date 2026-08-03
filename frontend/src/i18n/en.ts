@@ -526,6 +526,7 @@ export const enTranslation = {
       tag: "Tag",
       tagHint:
         "1–24 characters: start with a lowercase Latin letter, then use only a–z, 0–9 and underscore. Example: my_tunnel.",
+      sourceMode: "How to add",
       displayName: "Friendly name",
       displayNamePlaceholder: "For example, Netherlands - primary",
       displayNameHint:
