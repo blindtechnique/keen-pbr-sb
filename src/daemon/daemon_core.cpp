@@ -350,6 +350,7 @@ Daemon::Daemon(Config config,
 
 Daemon::~Daemon() {
     try {
+        runtime_mutation_admission_.shutdown();
         sighup_reload_coordinator_.stop();
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
@@ -1065,6 +1066,50 @@ void Daemon::wake_control_loop() {
     }
 }
 
+void Daemon::quiesce_runtime_mutations() noexcept {
+    auto next_warning = std::chrono::steady_clock::now() +
+        std::chrono::seconds{5};
+    while (!runtime_mutation_admission_.wait_for_idle_for(
+        std::chrono::milliseconds{10})) {
+        if (event_loop_active_.load(std::memory_order_acquire)) {
+            try {
+                // An admitted API request may be synchronously waiting for a
+                // control task. Keep servicing those tasks after the main
+                // epoll loop exits until the exact mutation lease is returned.
+                handle_control_commands();
+            } catch (const std::exception& error) {
+                try {
+                    Logger::instance().error(
+                        "Runtime mutation shutdown drain failed: {}",
+                        error.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    Logger::instance().error(
+                        "Runtime mutation shutdown drain failed: unknown "
+                        "error");
+                } catch (...) {
+                }
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_warning) {
+            try {
+                const auto active = runtime_mutation_admission_.active();
+                Logger::instance().warn(
+                    "Waiting for admitted runtime mutation '{}' to finish",
+                    active.has_value()
+                        ? active->label
+                        : std::string{"unknown"});
+            } catch (...) {
+            }
+            next_warning = now + std::chrono::seconds{5};
+        }
+    }
+}
+
 bool Daemon::is_event_loop_thread() const {
     return event_loop_thread_id_.load(std::memory_order_relaxed) == std::this_thread::get_id();
 }
@@ -1467,24 +1512,30 @@ void Daemon::handle_sighup() {
     }
     const ConfigReloadClaim claim = request.claim;
 
-    bool operation_started = false;
+    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease;
     try {
-#ifdef WITH_API
         // SIGHUP is another configuration writer. Serialize it with API
         // staging and transactional commits so a disk reload cannot replace
         // the active ConfigStore snapshot after a catalogue preview has been
         // revalidated but before that candidate is committed.
-        begin_config_operation_or_throw(
-            ConfigOperationState::Reloading,
-            "sighup-reload",
-            false,
-            false);
-        operation_started = true;
-#endif
+        auto admitted = runtime_mutation_admission_.try_acquire(
+            "sighup-reload");
+        if (!admitted.has_value()) {
+            const auto active = runtime_mutation_admission_.active();
+            log.warn(
+                "SIGHUP: reload deferred because runtime mutation '{}' is "
+                "already in progress",
+                active.has_value() ? active->label : std::string{"unknown"});
+            defer_sighup_reload(claim);
+            return;
+        }
+        mutation_lease =
+            std::make_shared<RuntimeMutationAdmission::Lease>(
+                std::move(*admitted));
 
         // A disk reload must not make an in-memory draft disappear or apply a
         // different generation behind it. Check before admitting any worker
-        // work, while the API config-operation gate is held when available.
+        // work, while the runtime mutation lease is held.
         if (config_store_.config_is_draft()) {
             log.warn(
                 "SIGHUP: reload rejected because a configuration draft is "
@@ -1492,7 +1543,7 @@ void Daemon::handle_sighup() {
             (void)sighup_reload_coordinator_.cancel(claim);
             complete_sighup_reload(
                 claim,
-                operation_started,
+                mutation_lease,
                 /*allow_coalesced_rerun=*/false);
             return;
         }
@@ -1509,7 +1560,7 @@ void Daemon::handle_sighup() {
              config_path,
              rollback_config,
              claim,
-             operation_started,
+             mutation_lease,
              expected_runtime_generation,
              trace_id]() mutable {
                 bool posted = false;
@@ -1559,7 +1610,7 @@ void Daemon::handle_sighup() {
                          prepared,
                          rollback_prepared,
                          claim,
-                         operation_started,
+                         mutation_lease,
                          expected_runtime_generation,
                          preparation_error =
                              std::move(preparation_error)]() mutable {
@@ -1715,7 +1766,7 @@ void Daemon::handle_sighup() {
 
                             complete_sighup_reload(
                                 claim,
-                                operation_started,
+                                mutation_lease,
                                 allow_coalesced_rerun);
                         },
                         "sighup-reload-commit");
@@ -1745,7 +1796,7 @@ void Daemon::handle_sighup() {
                     if (sighup_reload_coordinator_.cancel(claim)) {
                         complete_sighup_reload(
                             claim,
-                            operation_started,
+                            mutation_lease,
                             /*allow_coalesced_rerun=*/false);
                     }
                 }
@@ -1758,7 +1809,7 @@ void Daemon::handle_sighup() {
             if (sighup_reload_coordinator_.cancel(claim)) {
                 complete_sighup_reload(
                     claim,
-                    operation_started,
+                    mutation_lease,
                     /*allow_coalesced_rerun=*/false);
             }
         }
@@ -1766,7 +1817,7 @@ void Daemon::handle_sighup() {
         if (sighup_reload_coordinator_.cancel(claim)) {
             complete_sighup_reload(
                 claim,
-                operation_started,
+                mutation_lease,
                 /*allow_coalesced_rerun=*/false);
         }
         log.error("SIGHUP: reload rejected: {}", e.what());
@@ -1774,44 +1825,106 @@ void Daemon::handle_sighup() {
         if (sighup_reload_coordinator_.cancel(claim)) {
             complete_sighup_reload(
                 claim,
-                operation_started,
+                mutation_lease,
                 /*allow_coalesced_rerun=*/false);
         }
         log.error("SIGHUP: reload rejected: unknown error");
     }
 }
 
+void Daemon::defer_sighup_reload(ConfigReloadClaim claim) {
+    auto abandon = [this, claim]() noexcept {
+        if (sighup_reload_coordinator_.cancel(claim)) {
+            (void)sighup_reload_coordinator_.complete(claim);
+        }
+    };
+
+    const bool queued = blocking_executor_.try_post(
+        "sighup-runtime-mutation-wait",
+        [this, claim, abandon]() mutable {
+            if (!runtime_mutation_admission_.wait_until_idle()) {
+                abandon();
+                return;
+            }
+
+            bool posted = false;
+            try {
+                posted = post_control_task(
+                    [this, claim]() {
+                        if (!sighup_reload_coordinator_.cancel(claim)) {
+                            return;
+                        }
+                        const auto completion =
+                            sighup_reload_coordinator_.complete(claim);
+                        if (completion.owned) {
+                            // The original request, plus any SIGHUP coalesced
+                            // while it waited, is represented by this one
+                            // fresh generation. If another mutation won the
+                            // race after the idle observation, handle_sighup()
+                            // defers again.
+                            handle_sighup();
+                        }
+                    },
+                    "sighup-runtime-mutation-resume");
+            } catch (const std::exception& error) {
+                try {
+                    Logger::instance().error(
+                        "SIGHUP: cannot post deferred runtime mutation: {}",
+                        error.what());
+                } catch (...) {
+                }
+            } catch (...) {
+                try {
+                    Logger::instance().error(
+                        "SIGHUP: cannot post deferred runtime mutation: "
+                        "unknown error");
+                } catch (...) {
+                }
+            }
+            if (!posted) {
+                // post_control_task() may throw after queueing. The worker and
+                // callback therefore race through the same coordinator claim;
+                // exactly one side can cancel it and own completion.
+                abandon();
+            }
+        });
+    if (queued) {
+        return;
+    }
+
+    if (!accept_posted_control_tasks_.load(std::memory_order_acquire)) {
+        abandon();
+        return;
+    }
+
+    try {
+        scheduler_->schedule_oneshot(
+            std::chrono::milliseconds{100},
+            [this, claim]() { defer_sighup_reload(claim); },
+            "sighup-runtime-mutation-wait-retry");
+    } catch (const std::exception& error) {
+        Logger::instance().error(
+            "SIGHUP: cannot schedule runtime mutation wait: {}",
+            error.what());
+        abandon();
+    }
+}
+
 void Daemon::complete_sighup_reload(
     ConfigReloadClaim claim,
-    bool config_operation_started,
+    std::shared_ptr<RuntimeMutationAdmission::Lease> mutation_lease,
     bool allow_coalesced_rerun) noexcept {
     const auto completion =
         sighup_reload_coordinator_.complete(claim);
     if (!completion.owned) {
         return;
     }
-#ifdef WITH_API
-    if (config_operation_started) {
-        try {
-            finish_config_operation();
-        } catch (const std::exception& error) {
-            try {
-                Logger::instance().error(
-                    "SIGHUP: failed to release the config-operation gate: {}",
-                    error.what());
-            } catch (...) {
-            }
-        } catch (...) {
-            try {
-                Logger::instance().error(
-                    "SIGHUP: failed to release the config-operation gate");
-            } catch (...) {
-            }
-        }
+    // Release before starting a coalesced reload. All shared references point
+    // to this same move-only lease, and release() is token-checked and
+    // idempotent for the single completion owner selected above.
+    if (mutation_lease) {
+        mutation_lease->release();
     }
-#else
-    (void)config_operation_started;
-#endif
 
     if (!completion.rerun_requested || !allow_coalesced_rerun ||
         !accept_posted_control_tasks_.load(std::memory_order_acquire) ||
@@ -2750,6 +2863,7 @@ void Daemon::run() {
         // event loop starts must therefore unwind every owned subsystem; the
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
+        runtime_mutation_admission_.shutdown();
         sighup_reload_coordinator_.stop();
         {
             KPBR_LOCK_GUARD(control_tasks_mutex_);
@@ -2771,6 +2885,7 @@ void Daemon::run() {
         if (api_server_) {
             api_server_->stop();
         }
+        quiesce_runtime_mutations();
         try {
             teardown_conntrack_events();
         } catch (const std::exception& cleanup_error) {
@@ -2859,6 +2974,7 @@ void Daemon::run() {
     // observation is generation-fenced, but disabling it here also prevents a
     // late exact delete from racing normal shutdown.
     cancel_idle_stall_observer();
+    runtime_mutation_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
@@ -2867,10 +2983,10 @@ void Daemon::run() {
     }
     keenetic_dns_refresh_coordinator_.stop();
     list_refresh_tasks_.request_cancel_active();
-    // Admission is closed before the final drain, so a worker cannot enqueue a
-    // cache/runtime commit after the event loop has stopped processing tasks.
-    // Drain everything admitted before the gate closed while this thread still
-    // owns the control-loop state.
+    // Admission is closed before quiescence, so new HTTP/SIGHUP writers are
+    // rejected. Existing owners keep their token and may finish through the
+    // control queue while this thread still owns the event-loop state.
+    quiesce_runtime_mutations();
     handle_control_commands();
     event_loop_active_.store(false, std::memory_order_release);
     event_loop_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
@@ -2917,8 +3033,17 @@ void Daemon::run() {
 
 void Daemon::stop() {
     list_refresh_tasks_.request_cancel_active();
+    runtime_mutation_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     running_.store(false, std::memory_order_release);
+    if (control_fd_ >= 0) {
+        try {
+            wake_control_loop();
+        } catch (...) {
+            // stop() is a best-effort wake path and must remain noexcept to
+            // callers. Closing the fd during teardown already wakes epoll.
+        }
+    }
 }
 
 bool Daemon::running() const {

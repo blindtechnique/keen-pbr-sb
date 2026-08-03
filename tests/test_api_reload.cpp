@@ -8,6 +8,7 @@
 #include "api/handler_reload.hpp"
 #include "api/sse_broadcaster.hpp"
 #include "runtime/lifecycle_operation.hpp"
+#include "runtime/runtime_mutation_admission.hpp"
 
 #include <memory>
 #include <stdexcept>
@@ -143,6 +144,41 @@ TEST_CASE("service lifecycle rejects overlap before invoking runtime") {
     CHECK(body["active_operation_id"] == active.id);
 
     fixture.coordinator.finish(active.id);
+}
+
+TEST_CASE("runtime mutation admission rejects before lifecycle projection") {
+    std::size_t start_calls = 0;
+    ReloadApiFixture fixture(test_support::isolated_api_port(4));
+    RuntimeMutationAdmission admission;
+    fixture.context.acquire_runtime_mutation_fn =
+        [&admission](std::string label, bool, bool) {
+            auto lease = admission.try_acquire(std::move(label));
+            if (!lease.has_value()) {
+                throw ApiError("runtime mutation busy", 409);
+            }
+            return std::move(*lease);
+        };
+    fixture.context.start_runtime_fn = [&] { ++start_calls; };
+
+    auto blocker = admission.try_acquire("sighup-reload");
+    REQUIRE(blocker.has_value());
+
+    const auto rejected = fixture.client->Post(
+        "/api/service/start", "", "application/json");
+    REQUIRE(rejected != nullptr);
+    CHECK(rejected->status == 409);
+    CHECK(start_calls == 0);
+    CHECK_FALSE(fixture.store.snapshot().has_value());
+
+    blocker->release();
+    const auto accepted = fixture.client->Post(
+        "/api/service/start", "", "application/json");
+    REQUIRE(accepted != nullptr);
+    CHECK(accepted->status == 200);
+    CHECK(start_calls == 1);
+    const auto lifecycle = fixture.store.snapshot();
+    REQUIRE(lifecycle.has_value());
+    CHECK(lifecycle->result == LifecycleOperationResult::Succeeded);
 }
 
 } // namespace keen_pbr3

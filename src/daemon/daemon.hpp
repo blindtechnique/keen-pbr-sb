@@ -41,6 +41,7 @@
 #include "../runtime/udp_call_affinity.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
 #include "../runtime/runtime_state_machine.hpp"
+#include "../runtime/runtime_mutation_admission.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
 #include "../util/ipv6_support.hpp"
@@ -65,7 +66,6 @@ struct NdmsVpnServerServiceSnapshot;
 enum class ResolverType;
 
 #ifdef WITH_API
-enum class ConfigOperationState : uint8_t;
 class ApiServer;
 struct ApiContext;
 class SseBroadcaster;
@@ -422,9 +422,12 @@ private:
     void schedule_owned_snat_health_check();
     void cancel_owned_snat_health_check();
     void check_owned_snat_health();
+    void quiesce_runtime_mutations() noexcept;
     void handle_sighup();
+    void defer_sighup_reload(ConfigReloadClaim claim);
     void complete_sighup_reload(ConfigReloadClaim claim,
-                                bool config_operation_started,
+                                std::shared_ptr<RuntimeMutationAdmission::Lease>
+                                    mutation_lease,
                                 bool allow_coalesced_rerun) noexcept;
     void handle_interface_monitor_events(uint32_t events);
     void reconnect_interface_monitor();
@@ -639,11 +642,10 @@ private:
 #ifdef WITH_API
     // API integration
     void setup_api();
-    void finish_config_operation();
-    void begin_config_operation_or_throw(ConfigOperationState state,
-                                         const char* reason,
-                                         bool require_runtime_running,
-                                         bool require_runtime_stopped);
+    RuntimeMutationAdmission::Lease acquire_runtime_mutation_or_throw(
+        std::string label,
+        bool require_runtime_running,
+        bool require_runtime_stopped);
     ConfigApplyResult apply_validated_config_via_control_task(
         Config config,
         std::string saved_config_json);
@@ -776,12 +778,6 @@ private:
     TracedMutex control_tasks_mutex_;
     std::vector<ControlTask> control_tasks_ GUARDED_BY(control_tasks_mutex_);
 
-#ifdef WITH_API
-    TracedMutex config_op_mutex_;
-    std::condition_variable_any config_op_cv_;
-    std::atomic<ConfigOperationState> config_op_state_{static_cast<ConfigOperationState>(0)};
-#endif
-
     // Snapshot stores
     ConfigStore config_store_;
     ListService list_service_;
@@ -867,6 +863,10 @@ private:
     KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
     std::atomic<bool> ipc_resolver_hook_inflight_{false};
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
+    // One authority admits every externally requested runtime mutation. API
+    // requests own move-only leases; asynchronous SIGHUP shares one lease
+    // until the reload coordinator chooses its single completion owner.
+    RuntimeMutationAdmission runtime_mutation_admission_;
     ConfigReloadCoordinator sighup_reload_coordinator_;
     CoalescedSingleFlightGate internal_vpn_catalog_refresh_gate_;
     int internal_vpn_catalog_refresh_retry_task_id_{-1};

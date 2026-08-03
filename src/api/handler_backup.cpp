@@ -1306,15 +1306,10 @@ static void register_backup_handler_impl(
         nlohmann::json backup;
         try { backup = nlohmann::json::parse(body); }
         catch (...) { throw ApiError("invalid backup JSON", 400); }
-        ctx.begin_save_operation();
-        try {
-            restore_with_rollback(ctx, backup, kRollbackPath);
-            ctx.finish_config_operation();
-            return R"({"ok":true})";
-        } catch (...) {
-            ctx.finish_config_operation();
-            throw;
-        }
+        ApiRuntimeMutationGuard mutation(
+            ctx, "restore-backup");
+        restore_with_rollback(ctx, backup, kRollbackPath);
+        return R"({"ok":true})";
     });
     server.get("/api/backup/rollback", []() -> std::string {
         return nlohmann::json{
@@ -1322,26 +1317,21 @@ static void register_backup_handler_impl(
         }.dump();
     });
     server.post("/api/backup/rollback", [&ctx]() -> std::string {
-        ctx.begin_save_operation();
-        try {
-            const auto rollback =
-                read_rollback_document_at(kRollbackPath);
-            if (rollback.is_object() &&
-                rollback.value("format", std::string{}) ==
-                    kRollbackFormat) {
-                restore_persistent_rollback(ctx, rollback);
-            } else {
-                // One-release compatibility path for rollback artifacts
-                // produced before the exact snapshot format existed.
-                validate_bundle(rollback);
-                restore_bundle(ctx, rollback);
-            }
-            ctx.finish_config_operation();
-            return R"({"ok":true})";
-        } catch (...) {
-            ctx.finish_config_operation();
-            throw;
+        ApiRuntimeMutationGuard mutation(
+            ctx, "rollback-backup");
+        const auto rollback =
+            read_rollback_document_at(kRollbackPath);
+        if (rollback.is_object() &&
+            rollback.value("format", std::string{}) ==
+                kRollbackFormat) {
+            restore_persistent_rollback(ctx, rollback);
+        } else {
+            // One-release compatibility path for rollback artifacts
+            // produced before the exact snapshot format existed.
+            validate_bundle(rollback);
+            restore_bundle(ctx, rollback);
         }
+        return R"({"ok":true})";
     });
 }
 

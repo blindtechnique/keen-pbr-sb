@@ -246,6 +246,30 @@ add_test(
   COMMAND keen-pbr-cache-generation-tests
 )
 
+# Keep runtime mutation admission independently buildable. The contract is
+# intentionally header-only and does not need the daemon or kernel backends.
+add_executable(keen-pbr-runtime-mutation-admission-tests
+  test_main.cpp
+  test_runtime_mutation_admission.cpp
+)
+set_target_properties(keen-pbr-runtime-mutation-admission-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_include_directories(keen-pbr-runtime-mutation-admission-tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-runtime-mutation-admission-tests PRIVATE
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-runtime-mutation-admission-tests)
+add_test(
+  NAME keen-pbr-runtime-mutation-admission-tests
+  COMMAND keen-pbr-runtime-mutation-admission-tests
+)
+
 # Keep the package-rescue suite independently buildable. It intentionally has
 # no daemon/API dependencies, so recovery invariants remain testable even when
 # an unrelated in-progress backend change temporarily breaks the monolithic

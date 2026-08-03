@@ -364,41 +364,6 @@ std::string serialize_config_pretty(const Config& config) {
     return json.dump(1, '\t') + "\n";
 }
 
-class ConfigOperationGuard final {
-public:
-    explicit ConfigOperationGuard(ApiContext& context)
-        : context_(context) {
-        context_.begin_save_operation();
-        active_ = true;
-    }
-
-    ~ConfigOperationGuard() noexcept {
-        if (!active_) return;
-        try {
-            context_.finish_config_operation();
-        } catch (const std::exception& error) {
-            Logger::instance().error(
-                "Cannot release config save operation: {}", error.what());
-        } catch (...) {
-            Logger::instance().error(
-                "Cannot release config save operation: unknown error");
-        }
-    }
-
-    ConfigOperationGuard(const ConfigOperationGuard&) = delete;
-    ConfigOperationGuard& operator=(const ConfigOperationGuard&) = delete;
-
-    void finish() {
-        if (!active_) return;
-        context_.finish_config_operation();
-        active_ = false;
-    }
-
-private:
-    ApiContext& context_;
-    bool active_{false};
-};
-
 } // namespace
 
 std::string serialize_config_for_persistence(
@@ -420,7 +385,8 @@ std::string commit_prepared_config_impl(
         auto maintenance =
             ctx.acquire_maintenance_lease(
                 std::move(maintenance_operation));
-        ConfigOperationGuard config_operation(ctx);
+        ApiRuntimeMutationGuard config_operation(
+            ctx, "save-config");
         auto prepared = prepare();
 
         LifecycleOperationSnapshot lifecycle;
@@ -1072,7 +1038,8 @@ static void register_config_handler_impl(
             const std::string& body) -> std::string {
         Config staged = parse_validated_candidate(body);
         std::string formatted_config = serialize_config_pretty(staged);
-        ConfigOperationGuard config_operation(ctx);
+        ApiRuntimeMutationGuard config_operation(
+            ctx, "stage-config");
         ctx.stage_config(std::move(staged), std::move(formatted_config));
         config_operation.finish();
 
@@ -1141,7 +1108,8 @@ static void register_config_handler_impl(
 
             std::string formatted_config =
                 serialize_config_pretty(staged);
-            ConfigOperationGuard config_operation(ctx);
+            ApiRuntimeMutationGuard config_operation(
+                ctx, "stage-recommended-list");
             const std::string requested_base_revision =
                 request.at("base_revision").get<std::string>();
             if (!ctx.stage_config_if_visible_revision(
@@ -1285,7 +1253,8 @@ static void register_config_handler_impl(
 
             std::string formatted_config =
                 serialize_config_pretty(plan.config);
-            ConfigOperationGuard config_operation(ctx);
+            ApiRuntimeMutationGuard config_operation(
+                ctx, "stage-delete-lists");
             if (!ctx.stage_config_if_visible_revision(
                     request.base_revision,
                     std::move(plan.config),

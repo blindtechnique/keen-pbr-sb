@@ -8,7 +8,9 @@
 #include "../config/config.hpp"
 #include "../daemon/config_store.hpp"
 #include "../health/routing_health.hpp"
+#include "../log/logger.hpp"
 #include "../runtime/lifecycle_operation.hpp"
+#include "../runtime/runtime_mutation_admission.hpp"
 #include "../update/maintenance_lock.hpp"
 #include "sse_broadcaster.hpp"
 #include "status_stream.hpp"
@@ -25,12 +27,6 @@
 #include <vector>
 
 namespace keen_pbr3 {
-
-enum class ConfigOperationState : uint8_t {
-    Idle = 0,
-    Saving,
-    Reloading,
-};
 
 struct ConfigApplyResult {
     bool applied{false};
@@ -131,12 +127,20 @@ struct ApiContext {
     // Tests shorten this bounded poll without weakening production defaults.
     std::size_t transport_runtime_ready_wait_attempts{60U};
     std::uint32_t transport_runtime_ready_wait_interval_ms{250U};
-    // Keep this callback absolutely last: many tests and embedders use
-    // positional aggregate initialization. Periodic metrics are pull-only and
-    // intentionally do not participate in HealthResponse, RuntimeInventory,
-    // or StatusStream reconciliation.
+    // Tail callbacks preserve positional aggregate initializers used by tests
+    // and embedders. Periodic metrics are pull-only and intentionally do not
+    // participate in HealthResponse, RuntimeInventory, or StatusStream
+    // reconciliation.
     std::function<api::PeriodicTaskMetricsResponse()>
         get_diagnostic_tasks_fn;
+    // Production uses a move-only runtime mutation lease.  Keeping this tail
+    // callback optional preserves aggregate initializers used by tests and
+    // embedders while ensuring that an individual request, rather than the
+    // daemon, owns the exact claim it must release.
+    std::function<RuntimeMutationAdmission::Lease(
+        std::string,
+        bool,
+        bool)> acquire_runtime_mutation_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -316,6 +320,75 @@ struct ApiContext {
         response.tracked = 0;
         return response;
     }
+};
+
+// Request-scoped compatibility wrapper.  Production owns an unforgeable
+// mutation lease; older tests/embedders retain the paired callbacks until
+// their aggregate contexts are migrated.  The fallback is never selected by
+// the daemon wiring.
+class ApiRuntimeMutationGuard final {
+public:
+    ApiRuntimeMutationGuard(ApiContext& context,
+                            std::string label,
+                            bool require_runtime_running = false,
+                            bool require_runtime_stopped = false)
+        : context_(context) {
+        if (context_.acquire_runtime_mutation_fn) {
+            lease_.emplace(
+                context_.acquire_runtime_mutation_fn(
+                    std::move(label),
+                    require_runtime_running,
+                    require_runtime_stopped));
+            if (!static_cast<bool>(*lease_)) {
+                throw std::runtime_error(
+                    "Runtime mutation admission returned an empty lease");
+            }
+            return;
+        }
+
+        context_.begin_save_operation();
+        legacy_active_ = true;
+    }
+
+    ~ApiRuntimeMutationGuard() noexcept {
+        if (!active()) {
+            return;
+        }
+        try {
+            finish();
+        } catch (const std::exception& error) {
+            Logger::instance().error(
+                "Cannot release runtime mutation operation: {}",
+                error.what());
+        } catch (...) {
+            Logger::instance().error(
+                "Cannot release runtime mutation operation: unknown error");
+        }
+    }
+
+    ApiRuntimeMutationGuard(const ApiRuntimeMutationGuard&) = delete;
+    ApiRuntimeMutationGuard& operator=(const ApiRuntimeMutationGuard&) = delete;
+
+    void finish() {
+        if (lease_.has_value()) {
+            lease_->release();
+            lease_.reset();
+            return;
+        }
+        if (legacy_active_) {
+            context_.finish_config_operation();
+            legacy_active_ = false;
+        }
+    }
+
+private:
+    bool active() const noexcept {
+        return lease_.has_value() || legacy_active_;
+    }
+
+    ApiContext& context_;
+    std::optional<RuntimeMutationAdmission::Lease> lease_;
+    bool legacy_active_{false};
 };
 
 // Register all API endpoint handlers on the given ApiServer.

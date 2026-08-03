@@ -54,18 +54,6 @@ std::int64_t interface_traffic_api_integer(std::uint64_t value) {
     return static_cast<std::int64_t>(std::min(value, maximum));
 }
 
-const char* config_operation_state_name(ConfigOperationState state) {
-    switch (state) {
-    case ConfigOperationState::Idle:
-        return "idle";
-    case ConfigOperationState::Saving:
-        return "saving";
-    case ConfigOperationState::Reloading:
-        return "reloading";
-    }
-    return "unknown";
-}
-
 } // namespace
 
 void Daemon::sample_interface_traffic_now() {
@@ -302,22 +290,20 @@ void Daemon::teardown_conntrack_events() {
     conntrack_event_monitor_.reset();
 }
 
-void Daemon::finish_config_operation() {
-    KPBR_LOCK_GUARD(config_op_mutex_);
-    config_op_state_.store(ConfigOperationState::Idle, std::memory_order_release);
-    Logger::instance().trace("config_operation_state",
-                             "state={} reason=finish",
-                             config_operation_state_name(ConfigOperationState::Idle));
-    config_op_cv_.notify_all();
-}
-
-void Daemon::begin_config_operation_or_throw(ConfigOperationState state,
-                                             const char* reason,
-                                             bool require_runtime_running,
-                                             bool require_runtime_stopped) {
-    KPBR_UNIQUE_LOCK(lock, config_op_mutex_);
-    if (config_op_state_.load(std::memory_order_acquire) != ConfigOperationState::Idle) {
-        throw ApiError("Another config operation is already in progress", 409);
+RuntimeMutationAdmission::Lease
+Daemon::acquire_runtime_mutation_or_throw(
+    std::string label,
+    bool require_runtime_running,
+    bool require_runtime_stopped) {
+    auto lease = runtime_mutation_admission_.try_acquire(label);
+    if (!lease.has_value()) {
+        const auto active = runtime_mutation_admission_.active();
+        const std::string detail = active.has_value() && !active->label.empty()
+            ? ": " + active->label
+            : std::string{};
+        throw ApiError(
+            "Another runtime mutation is already in progress" + detail,
+            409);
     }
 
     const auto runtime_snapshot = runtime_state_store_.snapshot();
@@ -333,34 +319,28 @@ void Daemon::begin_config_operation_or_throw(ConfigOperationState state,
         throw ApiError("Routing runtime is already started", 409);
     }
 
-    config_op_state_.store(state, std::memory_order_release);
-    Logger::instance().trace("config_operation_state",
-                             "state={} reason={}",
-                             config_operation_state_name(state),
-                             reason);
+    Logger::instance().trace(
+        "runtime_mutation_admitted",
+        "token={} label={}",
+        lease->token(),
+        label);
+    return std::move(*lease);
 }
 
 void Daemon::run_runtime_control_operation_or_throw(const std::string& label,
                                                     const char* operation_name,
                                                     std::function<void()> task) {
-    try {
-        enqueue_control_task(
-            [task = std::move(task), operation_name]() {
-                try {
-                    task();
-                } catch (const std::exception& e) {
-                    Logger::instance().error("{} task failed: {}", operation_name, e.what());
-                    throw;
-                }
-            },
-            true,
-            label);
-    } catch (...) {
-        finish_config_operation();
-        throw;
-    }
-
-    finish_config_operation();
+    enqueue_control_task(
+        [task = std::move(task), operation_name]() {
+            try {
+                task();
+            } catch (const std::exception& e) {
+                Logger::instance().error("{} task failed: {}", operation_name, e.what());
+                throw;
+            }
+        },
+        true,
+        label);
 }
 
 ConfigApplyResult Daemon::apply_validated_config_via_control_task(
@@ -436,12 +416,9 @@ ConfigApplyResult Daemon::apply_validated_config_via_control_task(
 }
 
 ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::string> requested_name) {
-    begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                    "refresh-lists",
-                                    false,
-                                    false);
+    auto mutation = acquire_runtime_mutation_or_throw(
+        "refresh-lists", false, false);
     if (config_store_.config_is_draft()) {
-        finish_config_operation();
         throw ApiError("List refresh is unavailable while a draft config is staged", 409);
     }
 
@@ -452,7 +429,6 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
     const bool runtime_active_snapshot = runtime_state_store_.snapshot().routing_runtime_active;
     const auto target_selection = select_remote_list_targets(config_snapshot, requested_name);
     if (!target_selection.ok()) {
-        finish_config_operation();
         switch (target_selection.error) {
         case RemoteListTargetSelectionError::NotFound:
             throw ApiError("Requested list was not found", 404);
@@ -463,7 +439,7 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         }
     }
 
-    try {
+    {
         const std::set<std::string> relevant_lists = collect_relevant_list_names(config_snapshot);
         const std::set<std::string> dns_relevant_lists = collect_dns_relevant_list_names(config_snapshot);
         const std::set<std::string> target_lists(target_selection.list_names.begin(),
@@ -526,8 +502,6 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         operation_result.failed_lists = std::move(refresh_result.failed_lists);
         operation_result.reloaded = reloaded;
 
-        finish_config_operation();
-
         if (!target_selection.ok()) {
             return operation_result;
         }
@@ -550,9 +524,6 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
         }
 
         return operation_result;
-    } catch (...) {
-        finish_config_operation();
-        throw;
     }
 }
 
@@ -707,42 +678,26 @@ void Daemon::setup_api() {
             const Config visible_config = config_store_.visible_config();
             return compute_test_routing(visible_config, list_service_.cache_manager(), target);
         },
-        [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Saving,
-                                            "begin-save",
-                                            false,
-                                            false);
+        []() {
+            throw std::logic_error(
+                "Legacy config-operation admission reached production wiring");
         },
-        [this]() {
-            finish_config_operation();
-        },
+        []() {},
         [this](Config config, std::string saved_config_json) -> ConfigApplyResult {
             return apply_validated_config_via_control_task(std::move(config),
                                                            std::move(saved_config_json));
         },
         [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                            "start-runtime",
-                                            false,
-                                            true);
             run_runtime_control_operation_or_throw("api-start-runtime",
                                                    "Start routing runtime",
                                                    [this]() { start_routing_runtime(); });
         },
         [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                            "stop-runtime",
-                                            true,
-                                            false);
             run_runtime_control_operation_or_throw("api-stop-runtime",
                                                    "Stop routing runtime",
                                                    [this]() { stop_routing_runtime(); });
         },
         [this]() {
-            begin_config_operation_or_throw(ConfigOperationState::Reloading,
-                                            "restart-runtime",
-                                            true,
-                                            false);
             run_runtime_control_operation_or_throw("api-restart-runtime",
                                                    "Restart routing runtime",
                                                    [this]() { restart_routing_runtime(); });
@@ -756,15 +711,25 @@ void Daemon::setup_api() {
     api_ctx_->get_diagnostic_tasks_fn = [this]() {
         return build_diagnostic_tasks_response(periodic_task_metrics_);
     };
+    api_ctx_->acquire_runtime_mutation_fn =
+        [this](std::string label,
+               bool require_runtime_running,
+               bool require_runtime_stopped) {
+            return acquire_runtime_mutation_or_throw(
+                std::move(label),
+                require_runtime_running,
+                require_runtime_stopped);
+        };
     status_stream_ = std::make_unique<StatusStream>([this]() {
         return build_runtime_inventory(*api_ctx_);
     });
     api_ctx_->status_stream = status_stream_.get();
     api_ctx_->emergency_quiesce_runtime_fn =
         [this]() {
-            // The config-save handler already owns ConfigOperationState::Saving.
-            // Do not call the public stop callback here: it would try to acquire
-            // Reloading and reject the fail-closed stop as self-conflicting.
+            // The config-save handler already owns the runtime mutation lease.
+            // Do not call the public stop callback here: it would try to
+            // acquire a second lease and reject the fail-closed stop as
+            // self-conflicting.
             enqueue_control_task(
                 [this]() { stop_routing_runtime(); },
                 true,
