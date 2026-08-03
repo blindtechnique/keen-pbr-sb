@@ -17,6 +17,14 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -514,18 +522,31 @@ export function CatalogPage() {
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[13px]">{t("pages.catalog.downloadVia")}</span>
-          <select
-            className="h-8 rounded-md border border-input bg-card px-2 text-[13px]"
-            onChange={(event) => setSourceDetour(event.target.value)}
+          <Select
+            items={[
+              { value: "", label: t("pages.catalog.directly") },
+              ...outboundTags.map((tag) => ({
+                value: tag,
+                label: outboundDisplayNames.get(tag) ?? tag,
+              })),
+            ]}
+            onValueChange={(value) => setSourceDetour(String(value ?? ""))}
             value={effectiveSourceDetour}
           >
-            <option value="">{t("pages.catalog.directly")}</option>
-            {outboundTags.map((tag) => (
-              <option key={tag} value={tag}>
-                {outboundDisplayNames.get(tag) ?? tag}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto min-w-56" size="sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="">{t("pages.catalog.directly")}</SelectItem>
+                {outboundTags.map((tag) => (
+                  <SelectItem key={tag} value={tag}>
+                    {outboundDisplayNames.get(tag) ?? tag}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           <Button
             disabled={refreshMutation.isPending}
             onClick={() => refreshMutation.mutate()}
@@ -762,18 +783,35 @@ export function CatalogPage() {
           ) : (
             <>
               <span className="text-[13px]">{t("pages.catalog.routeTo")}</span>
-              <select
-                className="h-9 rounded-md border border-input bg-card px-2 text-[13px]"
-                onChange={(event) => setDestination(event.target.value)}
+              <Select
+                items={[
+                  ...outboundTags.map((tag) => ({
+                    value: tag,
+                    label: outboundDisplayNames.get(tag) ?? tag,
+                  })),
+                  { value: DIRECT, label: t("pages.catalog.directly") },
+                ]}
+                onValueChange={(value) =>
+                  setDestination(String(value ?? DIRECT))
+                }
                 value={effectiveDestination}
               >
-                {outboundTags.map((tag) => (
-                  <option key={tag} value={tag}>
-                    {outboundDisplayNames.get(tag) ?? tag}
-                  </option>
-                ))}
-                <option value={DIRECT}>{t("pages.catalog.directly")}</option>
-              </select>
+                <SelectTrigger className="w-auto min-w-56" size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {outboundTags.map((tag) => (
+                      <SelectItem key={tag} value={tag}>
+                        {outboundDisplayNames.get(tag) ?? tag}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value={DIRECT}>
+                      {t("pages.catalog.directly")}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </>
           )}
           {selectedMode === "mixed" ? (
