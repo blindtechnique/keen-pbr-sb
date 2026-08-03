@@ -6,9 +6,14 @@
 #include "../src/lists/list_entry_visitor.hpp"
 
 #include <algorithm>
+#include <deque>
+#include <filesystem>
+#include <functional>
 #include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -23,8 +28,15 @@ public:
 
     std::vector<std::string> events;
     std::vector<std::string> marked_destinations;
+    std::vector<std::string> loaded_entries;
+    std::function<void()> before_first_ipset;
 
-    void create_ipset(const std::string&, int, uint32_t) override {}
+    void create_ipset(const std::string&, int, uint32_t) override {
+        if (before_first_ipset) {
+            auto callback = std::move(before_first_ipset);
+            callback();
+        }
+    }
     void create_udp_peer_set(
         const std::string&, int, uint32_t) override {
         events.push_back("affinity-set");
@@ -78,7 +90,11 @@ public:
     std::unique_ptr<ListEntryVisitor> create_batch_loader(
         const std::string&) override {
         return std::make_unique<FunctionalVisitor>(
-            [](EntryType, std::string_view) {});
+            [this](EntryType type, std::string_view entry) {
+                if (type != EntryType::Domain) {
+                    loaded_entries.emplace_back(entry);
+                }
+            });
     }
     void apply(FirewallApplyMode) override { events.push_back("apply"); }
     void cleanup() override {}
@@ -88,6 +104,45 @@ public:
 
 private:
     FirewallBackend backend_;
+};
+
+class FirewallTempDirectory final {
+public:
+    FirewallTempDirectory() {
+        char pattern[] = "/tmp/keen-pbr-firewall-runtime-XXXXXX";
+        const char* value = ::mkdtemp(pattern);
+        if (!value) throw std::runtime_error("mkdtemp failed");
+        path_ = value;
+    }
+
+    ~FirewallTempDirectory() { std::filesystem::remove_all(path_); }
+
+    const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+class FirewallSequenceHttpTransport final : public HttpTransport {
+public:
+    void enqueue(std::string body) {
+        HttpTransportResponse response;
+        response.status_code = 200;
+        response.body = std::move(body);
+        responses_.push_back(std::move(response));
+    }
+
+    HttpTransportResponse perform(const HttpTransportRequest&) override {
+        if (responses_.empty()) {
+            throw std::runtime_error("no queued HTTP response");
+        }
+        auto response = std::move(responses_.front());
+        responses_.pop_front();
+        return response;
+    }
+
+private:
+    std::deque<HttpTransportResponse> responses_;
 };
 
 InternalVpnRuntimeTarget service_target(
@@ -120,6 +175,61 @@ Config keenetic_detour_config() {
 }
 
 } // namespace
+
+TEST_CASE("Runtime firewall consumes one pinned remote-list generation") {
+    constexpr const char* url = "https://example.test/remote.txt";
+    const auto config = parse_config(R"json({
+      "daemon": {"ipv6_enabled": false},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "remote": {"url": "https://example.test/remote.txt"}
+      },
+      "route": {
+        "rules": [
+          {"list": ["remote"], "outbound": "vpn"}
+        ]
+      }
+    })json");
+    FirewallTempDirectory temporary;
+    auto transport = std::make_shared<FirewallSequenceHttpTransport>();
+    CacheManager cache(temporary.path(), 1024, transport);
+    cache.ensure_dir();
+    transport->enqueue("192.0.2.1/32\n");
+    REQUIRE(cache.download("remote", url).updated());
+    const auto snapshot = cache.capture_generation({"remote"});
+
+    RecordingFirewall firewall;
+    firewall.before_first_ipset = [&]() {
+        transport->enqueue("192.0.2.2/32\n");
+        REQUIRE(cache.download("remote", url).updated());
+        transport->enqueue("192.0.2.3/32\n");
+        REQUIRE(cache.download("remote", url).updated());
+    };
+    AppliedListContentState applied;
+
+    CHECK_NOTHROW(apply_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets,
+        nullptr,
+        nullptr,
+        nullptr,
+        &applied,
+        /*udp_call_affinity_ipset_available=*/true,
+        std::nullopt,
+        snapshot));
+
+    CHECK(firewall.loaded_entries ==
+          std::vector<std::string>{"192.0.2.1/32"});
+    REQUIRE(applied.static_destinations.count("remote") == 1U);
+    CHECK(applied.static_destinations.at("remote") ==
+          std::vector<std::string>{"192.0.2.1/32"});
+}
 
 TEST_CASE("Runtime firewall uses the prepared Keenetic DNS snapshot") {
     const auto config = keenetic_detour_config();

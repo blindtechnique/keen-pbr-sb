@@ -34,7 +34,9 @@ std::vector<RuleState> apply_runtime_firewall(
     AppliedListContentState* applied_list_content_state = nullptr,
     bool udp_call_affinity_ipset_available = true,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
-        std::nullopt);
+        std::nullopt,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot = nullptr);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
 // L2TP and IKEv1 servers. Their clients need this on the ordinary WAN path

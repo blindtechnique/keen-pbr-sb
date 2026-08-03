@@ -327,6 +327,7 @@ inline bool internal_vpn_resolution_requires_catalog_refresh(
 struct ResolverGenerationSnapshot {
     Config config;
     KeeneticDnsCacheView keenetic_dns;
+    std::shared_ptr<const ListCacheGenerationSnapshot> list_cache_snapshot;
     ResolverType resolver_type;
     ResolverIpv6Policy ipv6_policy;
     std::vector<std::string> trusted_dns_interfaces;
@@ -455,7 +456,10 @@ private:
     void reconcile_static_routing(RouteReconcileMode mode);
     // Runtime callers must deliberately choose preserving or destructive
     // semantics; an omitted mode is a compile-time error.
-    void apply_firewall(FirewallApplyMode mode);
+    void apply_firewall(
+        FirewallApplyMode mode,
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot = nullptr);
     void normalize_urltest_selections();
     void register_urltest_outbounds();
     void handle_urltest_selection_change(
@@ -572,10 +576,10 @@ private:
     bool run_system_resolver_hook(std::string_view action,
                                   bool manage_ipc_gate = true);
     bool run_system_resolver_hook_stream(std::string_view action);
-    // The caller must hold resolver_cache_snapshot_mutex_ in shared mode.
-    // This keeps firewall list consumption, resolver hashing and the streamed
-    // dnsmasq bytes on one immutable cache generation without copying lists.
-    bool run_system_resolver_hook_stream_locked(
+    // Stream the already prepared resolver generation. Its list-cache lease
+    // pins every remote body until the worker and post-stream verification
+    // have completed, without holding a daemon lock across the IPC wait.
+    bool run_system_resolver_hook_stream_prepared(
         std::string_view action,
         bool rebuild_snapshot);
     bool run_system_resolver_hook_reload();
@@ -674,7 +678,11 @@ private:
     void update_resolver_config_hash();
     void commit_resolver_generation_snapshot(
         ResolverGenerationSnapshot snapshot);
-    ResolverGenerationSnapshot make_resolver_generation_snapshot();
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+    capture_relevant_list_cache_generation(const Config& config) const;
+    ResolverGenerationSnapshot make_resolver_generation_snapshot(
+        std::shared_ptr<const ListCacheGenerationSnapshot>
+            list_cache_snapshot = nullptr);
     // Schedule (or reschedule) the periodic refresh of resolver_config_hash_actual_.
     void schedule_resolver_config_hash_actual_refresh();
     void schedule_resolver_config_hash_actual_after(
@@ -864,9 +872,9 @@ private:
     std::atomic<std::uint64_t> resolver_stream_epoch_{0};
     std::atomic<std::uint64_t> resolver_stream_completed_epoch_{0};
     TracedMutex system_resolver_hook_mutex_;
-    // A resolver generation hashes and streams the same immutable view of
-    // list-cache files. Remote refreshes take the exclusive side; the reload
-    // coordinator and its stream worker share the read side.
+    // Legacy cache-publication serialization. Resolver/firewall consumers no
+    // longer hold the shared side while dnsmasq performs its IPC stream: each
+    // transaction owns an immutable CacheManager generation lease instead.
     TracedSharedMutex resolver_cache_snapshot_mutex_;
     // One immutable generation is shared with the stream worker. This avoids
     // copying the full configuration (including large inline lists) once in

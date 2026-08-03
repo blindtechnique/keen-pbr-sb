@@ -335,14 +335,11 @@ bool Daemon::run_system_resolver_hook_stream(
         return true;
     }
 
-    // Keep the cache revision stable from hash calculation through the final
-    // streamed byte. Remote list downloads use the exclusive side.
-    KPBR_SHARED_LOCK(cache_snapshot, resolver_cache_snapshot_mutex_);
-    return run_system_resolver_hook_stream_locked(
+    return run_system_resolver_hook_stream_prepared(
         action, /*rebuild_snapshot=*/true);
 }
 
-bool Daemon::run_system_resolver_hook_stream_locked(
+bool Daemon::run_system_resolver_hook_stream_prepared(
     std::string_view action,
     bool rebuild_snapshot) {
     if (build_system_resolver_hook_args(config_, action).empty()) {
@@ -377,9 +374,13 @@ bool Daemon::run_system_resolver_hook_stream_locked(
     }
 
     if (rebuild_snapshot) {
-        // Local files are not governed by the remote-cache publication lock.
-        // Preserve the existing post-stream verification for those sources.
-        update_resolver_config_hash();
+        // Local files and inline configuration are not generation files. Read
+        // them again after the stream, but keep the exact same pinned remote
+        // bodies so a concurrent list refresh cannot masquerade as a local
+        // source change or move expected_hash ahead of what dnsmasq consumed.
+        commit_resolver_generation_snapshot(
+            make_resolver_generation_snapshot(
+                generation->list_cache_snapshot));
     }
     return true;
 }
@@ -1273,7 +1274,10 @@ void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
         mode);
 }
 
-void Daemon::apply_firewall(FirewallApplyMode mode) {
+void Daemon::apply_firewall(
+    FirewallApplyMode mode,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
     // Every backend apply may flush the runtime-only pair sets. Invalidate the
     // observer epoch before touching live chains so an outstanding worker can
     // never acknowledge an old pair after a URLTest or recovery rebuild.
@@ -1303,6 +1307,10 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
     const auto native_vpn_direct_egress_snat_selectors =
         select_native_vpn_direct_egress_snat_selectors(
             runtime_targets);
+    if (!list_cache_snapshot) {
+        list_cache_snapshot =
+            capture_relevant_list_cache_generation(config_);
+    }
     AppliedListContentState candidate_list_content_state;
     auto candidate_rules = apply_runtime_firewall(
         config_,
@@ -1316,7 +1324,8 @@ void Daemon::apply_firewall(FirewallApplyMode mode) {
         &native_vpn_direct_egress_snat_selectors,
         &candidate_list_content_state,
         opts_.udp_call_affinity_ipset_available,
-        active_keenetic_dns_.snapshot);
+        active_keenetic_dns_.snapshot,
+        std::move(list_cache_snapshot));
     firewall_state_.set_rules(std::move(candidate_rules));
     applied_list_content_state_ =
         std::move(candidate_list_content_state);

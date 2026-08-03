@@ -68,10 +68,25 @@ bool log_keenetic_dns_refresh_result(
 
 } // namespace
 
-ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
+std::shared_ptr<const ListCacheGenerationSnapshot>
+Daemon::capture_relevant_list_cache_generation(const Config& config) const {
+    const auto relevant_lists = collect_relevant_list_names(config);
+    return list_service_.cache_manager().capture_generation(
+        std::vector<std::string>(
+            relevant_lists.begin(), relevant_lists.end()));
+}
+
+ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot(
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
     ResolverGenerationSnapshot snapshot;
     snapshot.config = config_;
     snapshot.keenetic_dns = active_keenetic_dns_;
+    if (!list_cache_snapshot) {
+        list_cache_snapshot =
+            capture_relevant_list_cache_generation(snapshot.config);
+    }
+    snapshot.list_cache_snapshot = std::move(list_cache_snapshot);
     snapshot.resolver_type =
         firewall_->backend() == FirewallBackend::nftables
             ? ResolverType::DNSMASQ_NFTSET
@@ -87,7 +102,8 @@ ResolverGenerationSnapshot Daemon::make_resolver_generation_snapshot() {
             resolved_internal_vpn_service_targets_);
     snapshot.generation =
         runtime_generation_.load(std::memory_order_acquire);
-    ListStreamer streamer(list_service_.cache_manager());
+    ListStreamer streamer(
+        list_service_.cache_manager(), snapshot.list_cache_snapshot);
     DnsServerRegistry dns_registry(
         dns_cfg, snapshot.keenetic_dns.snapshot);
     // DnsmasqGenerator retains references while computing the hash. Keep
@@ -272,10 +288,12 @@ bool Daemon::commit_keenetic_dns_refresh_result(
         return true;
     }
 
-    // Pin the complete remote-list generation across firewall consumption,
-    // resolver hashing/streaming and any rollback. Cache publications take
-    // the exclusive side, so neither consumer can observe a split generation.
-    KPBR_SHARED_LOCK(cache_snapshot, resolver_cache_snapshot_mutex_);
+    // Capture once from the single-writer CacheManager. The immutable lease
+    // keeps every selected body alive while candidate apply, dnsmasq stream
+    // and rollback run, without blocking an unrelated list publication for
+    // the complete resolver IPC wait.
+    const auto list_cache_snapshot =
+        capture_relevant_list_cache_generation(config_);
 
     KeeneticDnsCacheView previous = active_keenetic_dns_;
     auto previous_resolver_generation =
@@ -305,20 +323,23 @@ bool Daemon::commit_keenetic_dns_refresh_result(
             using std::swap;
             swap(active_keenetic_dns_, candidate_view);
         },
-        [this]() {
+        [this, &list_cache_snapshot]() {
             // Keenetic DNS addresses participate in OUTPUT/PREROUTING detour
             // marks, so a changed address snapshot must reach firewall before
             // the matching resolver generation is streamed. Do not run the
             // hot-retry sleeps from this control-loop callback: one bounded
             // attempt establishes the transaction result, while the existing
             // generation-fenced runtime recovery owns any later retries.
-            apply_firewall(FirewallApplyMode::PreserveSets);
+            apply_firewall(
+                FirewallApplyMode::PreserveSets,
+                list_cache_snapshot);
         },
         [this,
+         &list_cache_snapshot,
          &resolver_hash_changed,
          &previous_resolver_hash](bool& resolver_stream_attempted) {
             auto resolver_generation =
-                make_resolver_generation_snapshot();
+                make_resolver_generation_snapshot(list_cache_snapshot);
             resolver_hash_changed =
                 resolver_generation.expected_hash != previous_resolver_hash;
             if (resolver_hash_changed) {
@@ -330,7 +351,7 @@ bool Daemon::commit_keenetic_dns_refresh_result(
                 std::move(resolver_generation));
             if (resolver_hash_changed) {
                 resolver_stream_attempted = true;
-                if (!run_system_resolver_hook_stream_locked(
+                if (!run_system_resolver_hook_stream_prepared(
                         "reload", /*rebuild_snapshot=*/false)) {
                     throw DaemonError(
                         "Keenetic DNS resolver reload did not complete its configuration stream");
@@ -354,16 +375,19 @@ bool Daemon::commit_keenetic_dns_refresh_result(
                 previous_apply_started_ts,
                 std::memory_order_release);
         },
-        [this]() {
+        [this, &list_cache_snapshot]() {
             // A list refresh may have published a new immutable cache body
-            // immediately before this shared boundary was acquired. Rebuild
+            // immediately before this transaction captured its lease. Rebuild
             // the previous DNS view over that pinned list generation instead
             // of claiming an exact historical list rollback. Rollback also
             // gets one immediate attempt; a failure is handed to the same
             // generation-fenced recovery chain instead of sleeping here.
-            apply_firewall(FirewallApplyMode::PreserveSets);
+            apply_firewall(
+                FirewallApplyMode::PreserveSets,
+                list_cache_snapshot);
         },
         [this,
+         &list_cache_snapshot,
          &rollback_resolver_sync,
          &rollback_resolver_hash_changed,
          &previous_resolver_hash,
@@ -390,7 +414,8 @@ bool Daemon::commit_keenetic_dns_refresh_result(
             };
             try {
                 auto rollback_generation =
-                    make_resolver_generation_snapshot();
+                    make_resolver_generation_snapshot(
+                        list_cache_snapshot);
                 rollback_resolver_hash_changed =
                     rollback_generation.expected_hash !=
                     previous_resolver_hash;
@@ -400,7 +425,7 @@ bool Daemon::commit_keenetic_dns_refresh_result(
                 }
                 commit_resolver_generation_snapshot(
                     std::move(rollback_generation));
-                if (!run_system_resolver_hook_stream_locked(
+                if (!run_system_resolver_hook_stream_prepared(
                         "reload", /*rebuild_snapshot=*/false)) {
                     throw DaemonError(
                         "Previous Keenetic DNS resolver generation did not complete its configuration stream");

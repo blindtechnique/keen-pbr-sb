@@ -718,6 +718,10 @@ void Daemon::handle_ipc_control_socket() {
                                     dns_config.rules.has_value()
                                         ? *dns_config.rules
                                         : empty_dns_rules;
+                                if (!generation->list_cache_snapshot) {
+                                    throw ipc::ControlProtocolError(
+                                        "resolver_generation_cache_unavailable");
+                                }
                                 std::set<std::string> referenced_lists;
                                 for (const auto& rule : route_rules) {
                                     if (!route_rule_enabled(rule)) continue;
@@ -737,10 +741,17 @@ void Daemon::handle_ipc_control_socket() {
                                     const auto list =
                                         lists.find(list_name);
                                     if (list == lists.end()) continue;
-                                    if (list->second.url.has_value() &&
-                                        !cache.has_cache(list_name)) {
-                                        throw ipc::ControlProtocolError(
-                                            "list_cache_missing");
+                                    if (list->second.url.has_value()) {
+                                        if (!generation->list_cache_snapshot
+                                                 ->contains(list_name)) {
+                                            throw ipc::ControlProtocolError(
+                                                "active_list_cache_mismatch");
+                                        }
+                                        if (generation->list_cache_snapshot
+                                                ->find(list_name) == nullptr) {
+                                            throw ipc::ControlProtocolError(
+                                                "list_cache_missing");
+                                        }
                                     }
                                     if (list->second.file.has_value() &&
                                         !std::filesystem::is_regular_file(
@@ -764,7 +775,9 @@ void Daemon::handle_ipc_control_socket() {
                                 std::ostream output(&buffer);
                                 output
                                     << "# keen-pbr resolver state: active\n";
-                                ListStreamer streamer(cache);
+                                ListStreamer streamer(
+                                    cache,
+                                    generation->list_cache_snapshot);
                                 DnsServerRegistry registry(
                                     dns_config,
                                     generation->keenetic_dns.snapshot);

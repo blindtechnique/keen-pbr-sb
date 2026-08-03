@@ -133,7 +133,9 @@ std::vector<RuleState> apply_runtime_firewall(
         native_vpn_direct_egress_snat_selectors,
     AppliedListContentState* applied_list_content_state,
     bool udp_call_affinity_ipset_available,
-    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot) {
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
     // Resolve and validate the complete DNS registry before preparing the
     // backend transaction.  In particular, a Keenetic DNS server without a
     // prepared snapshot must fail before any firewall state is touched.
@@ -143,7 +145,9 @@ std::vector<RuleState> apply_runtime_firewall(
             config.dns.value_or(DnsConfig{}), keenetic_dns_snapshot);
     }
 
-    ListStreamer list_streamer(cache_manager);
+    ListStreamer list_streamer = list_cache_snapshot
+        ? ListStreamer(cache_manager, std::move(list_cache_snapshot))
+        : ListStreamer(cache_manager);
     auto rule_states = build_fw_rule_states(config, outbound_marks, &urltest_selections);
     const RouteConfig route_config = config.route.value_or(RouteConfig{});
     const Ipv6SupportDecision ipv6_decision = resolve_ipv6_support(config);
