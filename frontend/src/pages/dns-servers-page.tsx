@@ -19,6 +19,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { FallbackServersField } from "@/components/dns/fallback-servers-field"
 import { DataTable } from "@/components/shared/data-table"
+import { TableSearch } from "@/components/shared/table-search"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
@@ -28,6 +29,8 @@ import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { useRowSelection } from "@/hooks/use-row-selection"
+import { useTableSort } from "@/hooks/use-table-sort"
+import { filterBySearchQuery } from "@/lib/table-search"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
 import { formatListReferenceLabels } from "@/lib/list-display"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
@@ -120,7 +123,22 @@ function DnsServersEditor({
     () => createOutboundDisplayNameMap(config?.outbounds ?? []),
     [config?.outbounds]
   )
-  const serverRowIds = dnsServers.map((server) => server.tag)
+  const [search, setSearch] = useState("")
+  const visibleServers = filterBySearchQuery(dnsServers, search, (server) => [
+    server.tag,
+    server.address,
+    findDnsPresetByAddress(server.address)?.name,
+    server.detour,
+  ])
+  const { sorted: sortedServers, sort } = useTableSort(visibleServers, [
+    {
+      index: 0,
+      get: (server) =>
+        findDnsPresetByAddress(server.address)?.name ?? server.tag,
+    },
+    { index: 1, get: (server) => server.address },
+  ])
+  const serverRowIds = sortedServers.map((server) => server.tag)
   const serverSelection = useRowSelection(serverRowIds)
 
   const deleteServersBulk = () => {
@@ -170,7 +188,22 @@ function DnsServersEditor({
         description={t("pages.dnsServers.description")}
         title={t("pages.dnsServers.title")}
       />
-      <PageActionBar>
+      <PageActionBar
+        leading={
+          dnsServers.length > 0 ? (
+            <TableSearch
+              matchCount={visibleServers.length}
+              onChange={(next) => {
+                setSearch(next)
+                serverSelection.clear()
+              }}
+              placeholder={t("pages.dnsServers.searchPlaceholder")}
+              totalCount={dnsServers.length}
+              value={search}
+            />
+          ) : null
+        }
+      >
         <Button
           disabled={configMutationPending || fallbackSession.isDirty}
           onClick={() => navigate("/dns-servers/create")}
@@ -261,7 +294,7 @@ function DnsServersEditor({
               t("pages.dnsServers.headers.outbound"),
               t("pages.dnsServers.headers.actions"),
             ]}
-            rows={dnsServers.map((server) => [
+            rows={sortedServers.map((server) => [
               <div
                 className="font-medium"
                 key={`${server.tag}-tag`}
@@ -307,6 +340,7 @@ function DnsServersEditor({
                 key={`${server.tag}-actions`}
               />,
             ])}
+            sort={sort}
             selection={{
               rowIds: serverRowIds,
               selectedIds: serverSelection.selectedIds,

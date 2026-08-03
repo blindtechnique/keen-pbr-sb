@@ -32,7 +32,7 @@ export function TableSearch({
   const active = Boolean(normalizeSearchQuery(value))
 
   return (
-    <div className={cn("flex flex-col gap-1", className)}>
+    <div className={cn("flex w-full flex-col gap-1", className)}>
       <div className="relative sm:max-w-md">
         <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input

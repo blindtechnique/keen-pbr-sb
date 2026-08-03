@@ -21,7 +21,7 @@ export function PageActionBar({
     >
       <div className="flex min-h-12 min-w-0 flex-1 flex-wrap items-center justify-end gap-2 border-y border-border py-2">
         {leading ? (
-          <div className="mr-auto min-w-0 basis-full sm:basis-auto">
+          <div className="mr-auto min-w-0 basis-full sm:min-w-72 sm:flex-1 sm:basis-auto">
             {leading}
           </div>
         ) : null}

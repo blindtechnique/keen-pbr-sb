@@ -1506,6 +1506,7 @@ export const ruTranslation = {
     },
     dnsServers: {
       title: "DNS-серверы",
+      searchPlaceholder: "Поиск по названию, адресу или маршруту",
       description: "Upstream DNS-серверы для разрешения доменных имён.",
       fallbackSaved: "Порядок fallback DNS сохранён в черновик",
       keeneticAddress: "Встроенный DNS Keenetic",
@@ -2148,7 +2149,7 @@ export const ruTranslation = {
     },
     lists: {
       title: "Списки",
-      searchPlaceholder: "Поиск по названию, источнику или использованию",
+      searchPlaceholder: "Поиск по названию, источнику или правилу",
       description:
         "Группы доменов и IP-адресов для использования в правилах трафика и DNS.",
       actions: {

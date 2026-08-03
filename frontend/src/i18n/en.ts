@@ -1489,6 +1489,7 @@ export const enTranslation = {
     },
     dnsServers: {
       title: "DNS Servers",
+      searchPlaceholder: "Search by name, address or route",
       description: "Upstream DNS servers used for domain name resolution.",
       fallbackSaved: "Fallback DNS order saved to the draft",
       keeneticAddress: "Keenetic built-in DNS",
@@ -2115,7 +2116,7 @@ export const enTranslation = {
     },
     lists: {
       title: "Lists",
-      searchPlaceholder: "Search by name, source or usage",
+      searchPlaceholder: "Search by name, source or rule",
       description:
         "Groups of domains and IP addresses you can use in your traffic and DNS rules.",
       actions: {
