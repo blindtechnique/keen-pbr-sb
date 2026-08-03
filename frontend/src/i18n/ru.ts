@@ -1,5 +1,8 @@
 export const ruTranslation = {
   nfqws: {
+      showArgs: "Показать строку запуска",
+      hideArgs: "Скрыть",
+      argsSummary: "Аргументов: {{count}}, символов: {{chars}}",
     repository: "Открыть официальный репозиторий nfqws2",
     description:
       "Управление nfqws2, стратегиями, конфигурацией, списками, Lua-скриптами и журналами.",

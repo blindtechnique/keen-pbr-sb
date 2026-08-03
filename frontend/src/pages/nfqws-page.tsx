@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
+  ChevronDownIcon,
   DownloadIcon,
   ExternalLinkIcon,
   FilePlusIcon,
@@ -87,6 +88,7 @@ import {
   type NfqwsActionResult,
   type NfqwsUpdateStatus,
 } from "@/api/nfqws"
+import { copyText } from "@/lib/clipboard"
 import { cn } from "@/lib/utils"
 
 type NfqwsFile = {
@@ -1076,17 +1078,17 @@ function SettingsEditor({
       title={t("nfqws.settingsTitle")}
     >
       <div className="space-y-4">
-        {textFields.map((key) => (
-          <div className="grid gap-1.5" key={key}>
-            <Label>{key}</Label>
-            {key.includes("ARGS") ? (
-              <CodeEditor
-                className="min-h-24"
-                onChange={(next) => setForm({ ...form, [key]: next })}
-                syntax="nfqws"
-                value={String(form[key])}
-              />
-            ) : (
+        {textFields.map((key) =>
+          key.includes("ARGS") ? (
+            <ArgsField
+              key={key}
+              label={key}
+              onChange={(next) => setForm({ ...form, [key]: next })}
+              value={String(form[key])}
+            />
+          ) : (
+            <div className="grid gap-1.5" key={key}>
+              <Label>{key}</Label>
               <Input
                 className="font-mono"
                 onChange={(event) =>
@@ -1094,9 +1096,9 @@ function SettingsEditor({
                 }
                 value={String(form[key])}
               />
-            )}
-          </div>
-        ))}
+            </div>
+          )
+        )}
         <div className="grid gap-1.5">
           <Label>NFQWS_EXTRA_ARGS</Label>
           <Select
@@ -1554,5 +1556,85 @@ function NfqwsSection({
       </div>
       {children}
     </section>
+  )
+}
+
+/** Порог, после которого строка запуска сворачивается. Восемь строк сплошного
+ *  цветного текста прочитать невозможно, а короткую — можно и нужно. */
+const ARGS_COLLAPSE_THRESHOLD = 240
+
+function ArgsField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: string
+  onChange: (next: string) => void
+}) {
+  const { t } = useTranslation()
+  const [expanded, setExpanded] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const collapsible = value.length > ARGS_COLLAPSE_THRESHOLD
+  const open = expanded || !collapsible
+  const argumentCount = value
+    .split(/\s+/)
+    .filter((token) => token.startsWith("--")).length
+
+  return (
+    <div className="grid gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Label>{label}</Label>
+        {collapsible ? (
+          <>
+            <Button
+              className="h-7 px-2 text-xs"
+              onClick={() => setExpanded((current) => !current)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              {expanded ? t("nfqws.hideArgs") : t("nfqws.showArgs")}
+              <ChevronDownIcon
+                className={cn("size-3.5 transition-transform", expanded && "rotate-180")}
+              />
+            </Button>
+            <Button
+              className="h-7 px-2 text-xs"
+              onClick={() => {
+                void copyText(value).then((ok) => {
+                  setCopied(ok)
+                  window.setTimeout(() => setCopied(false), 1500)
+                })
+              }}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              {copied ? t("common.copied") : t("common.copy")}
+            </Button>
+          </>
+        ) : null}
+      </div>
+      {open ? (
+        <CodeEditor
+          className="min-h-24"
+          onChange={onChange}
+          syntax="nfqws"
+          value={value}
+        />
+      ) : (
+        <button
+          className="rounded-[4px] border border-input bg-muted px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setExpanded(true)}
+          type="button"
+        >
+          {t("nfqws.argsSummary", {
+            count: argumentCount,
+            chars: value.length,
+          })}
+        </button>
+      )}
+    </div>
   )
 }

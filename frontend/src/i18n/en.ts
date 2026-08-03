@@ -1,5 +1,8 @@
 export const enTranslation = {
   nfqws: {
+      showArgs: "Show the launch line",
+      hideArgs: "Hide",
+      argsSummary: "{{count}} arguments, {{chars}} characters",
     repository: "Open the official nfqws2 repository",
     description:
       "Manage nfqws2, strategies, configuration, lists, Lua scripts and logs.",
