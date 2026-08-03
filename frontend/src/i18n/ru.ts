@@ -532,8 +532,7 @@ export const ruTranslation = {
       displayNamePlaceholder: "Например, Нидерланды - основной",
       displayNameHint:
         "Показывается в интерфейсе вместо технического тега. Тег не меняется, поэтому маршруты и резервирование продолжат работать.",
-      displayNameInvalid:
-        "Название должно содержать от 1 до 80 символов Unicode и не содержать управляющих знаков.",
+      displayNameInvalid: "Введите название — от 1 до 80 символов.",
       useAliasSuggestion: "Использовать «{{name}}»",
       advancedSettings: "Расширенные настройки",
       simpleSettings: "Простые настройки",

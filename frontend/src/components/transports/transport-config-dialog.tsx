@@ -237,6 +237,7 @@ export function TransportConfigForm({
     structuredClone(baseline.spec)
   )
   const [sourceMode, setSourceMode] = useState<SourceMode>(baseline.sourceMode)
+  const [displayNameTouched, setDisplayNameTouched] = useState(false)
   const showAdvanced = presentation === "page"
   const [technicalIdentityAutomatic, setTechnicalIdentityAutomatic] =
     useState(!initial)
@@ -306,6 +307,14 @@ export function TransportConfigForm({
     )
   }
 
+  // Ошибка имени не показывается на открытии: окно встречало пользователя
+  // красным полем и строкой о том, что он уже ошибся, — до того как он
+  // что-либо напечатал. Показываем, когда поле тронули либо когда в форме уже
+  // есть изменения: в этот момент «Сохранить» заблокирована именно из-за
+  // имени, и это надо объяснить.
+  const showDisplayNameError =
+    Boolean(displayNameError) && (displayNameTouched || isDirty)
+
   useEffect(() => {
     onDirtyChange(isDirty)
   }, [isDirty, onDirtyChange])
@@ -321,13 +330,15 @@ export function TransportConfigForm({
       <div className="grid content-start gap-4">
         <Field label={t("transports.form.displayName")}>
           <Input
-            aria-invalid={Boolean(displayNameError)}
-            onChange={(event) =>
+            aria-invalid={showDisplayNameError}
+            onBlur={() => setDisplayNameTouched(true)}
+            onChange={(event) => {
+              setDisplayNameTouched(true)
               setSpec({
                 ...spec,
                 display_name: event.target.value || undefined,
               })
-            }
+            }}
             placeholder={t("transports.form.displayNamePlaceholder")}
             required
             value={spec.display_name ?? ""}
@@ -335,7 +346,7 @@ export function TransportConfigForm({
           <p className="text-xs text-muted-foreground">
             {t("transports.form.displayNameHint")}
           </p>
-          {displayNameError ? (
+          {showDisplayNameError ? (
             <p className="text-xs text-destructive">
               {t("transports.form.displayNameInvalid")}
             </p>

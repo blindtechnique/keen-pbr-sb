@@ -530,8 +530,7 @@ export const enTranslation = {
       displayNamePlaceholder: "For example, Netherlands - primary",
       displayNameHint:
         "Shown in the interface instead of the technical tag. The tag stays unchanged, so routes and failover keep working.",
-      displayNameInvalid:
-        "Use 1 to 80 Unicode code points and no control characters.",
+      displayNameInvalid: "Enter a name — 1 to 80 characters.",
       useAliasSuggestion: "Use “{{name}}”",
       advancedSettings: "Advanced settings",
       simpleSettings: "Simple settings",
