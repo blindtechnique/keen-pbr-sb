@@ -252,6 +252,7 @@ add_test(
 # intentionally header-only and does not need the daemon or kernel backends.
 add_executable(keen-pbr-runtime-mutation-admission-tests
   test_main.cpp
+  test_owned_conntrack_cleanup_operation.cpp
   test_runtime_mutation_admission.cpp
 )
 set_target_properties(keen-pbr-runtime-mutation-admission-tests PROPERTIES
@@ -261,6 +262,7 @@ set_target_properties(keen-pbr-runtime-mutation-admission-tests PROPERTIES
 )
 target_include_directories(keen-pbr-runtime-mutation-admission-tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/third_party/doctest
 )
 target_link_libraries(keen-pbr-runtime-mutation-admission-tests PRIVATE

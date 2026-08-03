@@ -62,6 +62,7 @@ struct UrltestSelectionChange;
 class DnsProbeServer;
 struct DnsProbeEvent;
 class ConntrackEventMonitor;
+class OwnedConntrackCleanupOperation;
 struct NdmsCatalogSnapshot;
 struct NdmsVpnServerServiceSnapshot;
 enum class ResolverType;
@@ -582,7 +583,14 @@ private:
         const OwnedConntrackCleanupSnapshot& snapshot,
         std::vector<std::uint32_t> remaining_marks,
         std::size_t no_progress_attempt = 0);
+    void arm_owned_conntrack_cleanup_retry_timer();
+    void arm_owned_conntrack_cleanup_completion_watchdog(
+        const std::shared_ptr<OwnedConntrackCleanupOperation>& operation);
     void run_owned_conntrack_cleanup_retry();
+    void complete_owned_conntrack_cleanup_operation(
+        const std::shared_ptr<OwnedConntrackCleanupOperation>& operation);
+    std::optional<OwnedConntrackCleanupRetry>
+    take_active_owned_conntrack_cleanup_retry();
     void cancel_owned_conntrack_cleanup_retry();
     void complete_pending_snat_recovery_before_generation_change();
     bool run_system_resolver_hook(std::string_view action,
@@ -729,6 +737,8 @@ private:
     int owned_conntrack_cleanup_retry_task_id_{-1};
     std::optional<OwnedConntrackCleanupRetry>
         pending_owned_conntrack_cleanup_retry_;
+    std::shared_ptr<OwnedConntrackCleanupOperation>
+        active_owned_conntrack_cleanup_operation_;
     // Separate bounded repair chain for a resolver hook that failed after
     // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq.
     int resolver_reload_retry_task_id_{-1};
