@@ -21,6 +21,27 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+
+const MODE_OPTIONS = ["MODE_AUTO", "MODE_LIST", "MODE_ALL"] as const
+
+function strategyOptionLabel(
+  item: { name: string; builtin?: boolean },
+  activeStrategy: string | undefined,
+  t: (key: string) => string
+) {
+  const builtin = item.builtin ? ` (${t("nfqws.builtin")})` : ""
+  const active =
+    item.name === activeStrategy ? ` — ${t("nfqws.activeStrategy")}` : ""
+  return `${item.name}${builtin}${active}`
+}
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -1078,21 +1099,30 @@ function SettingsEditor({
         ))}
         <div className="grid gap-1.5">
           <Label>NFQWS_EXTRA_ARGS</Label>
-          <select
-            className="h-9 rounded-md border bg-background px-3"
-            onChange={(event) =>
+          <Select
+            items={MODE_OPTIONS.map((mode) => ({ value: mode, label: mode }))}
+            onValueChange={(value) =>
               setForm({
                 ...form,
-                NFQWS_EXTRA_ARGS: event.target
-                  .value as NfqwsConfigForm["NFQWS_EXTRA_ARGS"],
+                NFQWS_EXTRA_ARGS: (value ??
+                  form.NFQWS_EXTRA_ARGS) as NfqwsConfigForm["NFQWS_EXTRA_ARGS"],
               })
             }
             value={form.NFQWS_EXTRA_ARGS}
           >
-            <option value="MODE_AUTO">MODE_AUTO</option>
-            <option value="MODE_LIST">MODE_LIST</option>
-            <option value="MODE_ALL">MODE_ALL</option>
-          </select>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {MODE_OPTIONS.map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {mode}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
         {(["IPV6_ENABLED", "POLICY_EXCLUDE", "LOG_LEVEL"] as const).map(
           (key) => (
@@ -1208,21 +1238,29 @@ function StrategiesEditor({
     >
       <div className="space-y-4">
         <div className="flex flex-wrap gap-2">
-          <select
-            className="h-9 min-w-60 rounded-md border bg-background px-3"
-            onChange={(event) => setSelected(event.target.value)}
+          <Select
+            items={status.strategies.map((item) => ({
+              value: item.name,
+              label: strategyOptionLabel(item, status.active_strategy, t),
+            }))}
+            onValueChange={(value) =>
+              setSelected(String(value ?? effectiveSelected))
+            }
             value={effectiveSelected}
           >
-            {status.strategies.map((item) => (
-              <option key={item.name} value={item.name}>
-                {item.name}
-                {item.builtin ? ` (${t("nfqws.builtin")})` : ""}
-                {item.name === status.active_strategy
-                  ? ` — ${t("nfqws.activeStrategy")}`
-                  : ""}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto min-w-60">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {status.strategies.map((item) => (
+                  <SelectItem key={item.name} value={item.name}>
+                    {strategyOptionLabel(item, status.active_strategy, t)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           <Button onClick={add} variant="outline">
             <FilePlusIcon />
             {t("nfqws.addStrategy")}
@@ -1361,15 +1399,29 @@ function FilesEditor({
     >
       <div className="space-y-4">
         <div className="flex flex-wrap gap-2">
-          <select
-            className="h-9 min-w-60 rounded-md border bg-background px-3"
-            onChange={(event) => setSelected(event.target.value)}
+          <Select
+            items={available.map((file) => ({
+              value: file.name,
+              label: file.name,
+            }))}
+            onValueChange={(value) =>
+              setSelected(String(value ?? current?.name ?? ""))
+            }
             value={current?.name ?? ""}
           >
-            {available.map((file) => (
-              <option key={file.name}>{file.name}</option>
-            ))}
-          </select>
+            <SelectTrigger className="w-auto min-w-60">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {available.map((file) => (
+                  <SelectItem key={file.name} value={file.name}>
+                    {file.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
           {!readonly ? (
             <>
               <Button onClick={() => void create()} variant="outline">
