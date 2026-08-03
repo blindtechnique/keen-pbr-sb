@@ -154,6 +154,96 @@ TEST_CASE("cache metadata commits immutable current and previous generations") {
     CHECK(std::filesystem::exists(foreign_lookalike));
 }
 
+TEST_CASE("cache snapshot pins an obsolete generation until its last lease is released") {
+    TemporaryDirectory temporary;
+    auto transport = std::make_shared<SequenceHttpTransport>();
+    CacheManager cache(temporary.path(), kDefaultMaxFileSizeBytes, transport);
+    cache.ensure_dir();
+
+    transport->enqueue("one.example\n", "one");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    auto snapshot = cache.capture_generation({"remote"});
+    const auto* pinned = snapshot->find("remote");
+    REQUIRE(pinned != nullptr);
+    const auto pinned_path = pinned->path();
+    CHECK(read_file(pinned_path) == "one.example\n");
+
+    transport->enqueue("two.example\n", "two");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    transport->enqueue("three.example\n", "three");
+    REQUIRE(cache.download("remote", kUrl).updated());
+
+    // Ordinarily the first generation is outside current/previous now. Its
+    // lease keeps the immutable body readable across the GC pass.
+    REQUIRE(std::filesystem::exists(pinned_path));
+    CHECK(read_file(pinned_path) == "one.example\n");
+
+    snapshot.reset();
+    CHECK_FALSE(std::filesystem::exists(pinned_path));
+}
+
+TEST_CASE("cache generation waits for every concurrent snapshot lease") {
+    TemporaryDirectory temporary;
+    auto transport = std::make_shared<SequenceHttpTransport>();
+    CacheManager cache(temporary.path(), kDefaultMaxFileSizeBytes, transport);
+    cache.ensure_dir();
+
+    transport->enqueue("one.example\n", "one");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    auto first_snapshot = cache.capture_generation({"remote"});
+    auto second_snapshot = cache.capture_generation({"remote"});
+    const auto* pinned = first_snapshot->find("remote");
+    REQUIRE(pinned != nullptr);
+    const auto pinned_path = pinned->path();
+    REQUIRE(second_snapshot->find("remote") != nullptr);
+    CHECK(second_snapshot->find("remote")->path() == pinned_path);
+
+    transport->enqueue("two.example\n", "two");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    transport->enqueue("three.example\n", "three");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    REQUIRE(std::filesystem::exists(pinned_path));
+
+    first_snapshot.reset();
+    CHECK(std::filesystem::exists(pinned_path));
+    second_snapshot.reset();
+    CHECK_FALSE(std::filesystem::exists(pinned_path));
+}
+
+TEST_CASE("cache lease release preserves a generation restored in metadata") {
+    TemporaryDirectory temporary;
+    auto transport = std::make_shared<SequenceHttpTransport>();
+    CacheManager cache(temporary.path(), kDefaultMaxFileSizeBytes, transport);
+    cache.ensure_dir();
+
+    transport->enqueue("one.example\n", "one");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    auto snapshot = cache.capture_generation({"remote"});
+    const auto* pinned = snapshot->find("remote");
+    REQUIRE(pinned != nullptr);
+    const auto pinned_path = pinned->path();
+    const auto pinned_generation = pinned->generation();
+
+    transport->enqueue("two.example\n", "two");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    transport->enqueue("three.example\n", "three");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    REQUIRE(std::filesystem::exists(pinned_path));
+
+    // Simulate a transactional rollback which makes the retired body the
+    // verified previous generation again before the old snapshot is released.
+    auto restored = cache.load_metadata("remote");
+    restored.previous = pinned_generation;
+    cache.save_metadata("remote", restored);
+    snapshot.reset();
+    CHECK(std::filesystem::exists(pinned_path));
+
+    // A later normal commit advances current/previous and GC can reclaim it.
+    transport->enqueue("four.example\n", "four");
+    REQUIRE(cache.download("remote", kUrl).updated());
+    CHECK_FALSE(std::filesystem::exists(pinned_path));
+}
+
 TEST_CASE("cache precommit failure preserves the committed generation") {
     TemporaryDirectory temporary;
     auto transport = std::make_shared<SequenceHttpTransport>();

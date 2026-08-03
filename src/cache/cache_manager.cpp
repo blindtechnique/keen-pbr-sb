@@ -14,15 +14,32 @@
 #include <fstream>
 #include <fcntl.h>
 #include <limits>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string_view>
 #include <sys/stat.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <unistd.h>
 #include <utility>
 
 namespace keen_pbr3 {
+
+struct CacheGenerationPinState final {
+    explicit CacheGenerationPinState(std::filesystem::path directory)
+        : cache_dir(std::move(directory)) {}
+
+    void release(const std::string& name,
+                 const std::string& filename,
+                 const std::filesystem::path& path) noexcept;
+
+    std::filesystem::path cache_dir;
+    std::mutex mutex;
+    std::unordered_map<std::string, std::size_t> pin_counts;
+    std::unordered_set<std::string> retired;
+};
 
 namespace {
 
@@ -43,6 +60,28 @@ struct ResolvedCacheBody {
 struct CacheMetadataDocument {
     CacheMetadata metadata;
     bool parsed{false};
+};
+
+class CacheGenerationLease final {
+public:
+    CacheGenerationLease(std::shared_ptr<CacheGenerationPinState> state,
+                         std::string name,
+                         std::string filename,
+                         std::filesystem::path path)
+        : state_(std::move(state))
+        , name_(std::move(name))
+        , filename_(std::move(filename))
+        , path_(std::move(path)) {}
+
+    ~CacheGenerationLease() {
+        state_->release(name_, filename_, path_);
+    }
+
+private:
+    std::shared_ptr<CacheGenerationPinState> state_;
+    std::string name_;
+    std::string filename_;
+    std::filesystem::path path_;
 };
 
 class StringViewInputBuffer final : public std::streambuf {
@@ -389,32 +428,58 @@ api::CacheGeneration write_cache_generation(
 void garbage_collect_generations(
     const std::filesystem::path& cache_dir,
     const std::string& name,
-    const CacheMetadataDocument& document) noexcept {
-    if (!document.parsed) return;
+    const std::shared_ptr<CacheGenerationPinState>& pin_state) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(pin_state->mutex);
+        const CacheMetadataDocument document = read_metadata_document(
+            cache_dir / (name + ".meta.json"));
+        if (!document.parsed) return;
 
-    std::set<std::string> keep;
-    if (document.metadata.current.has_value() &&
-        generation_filename_is_safe(
-            name, document.metadata.current->filename, true)) {
-        keep.insert(document.metadata.current->filename);
-    }
-    if (document.metadata.previous.has_value() &&
-        generation_filename_is_safe(
-            name, document.metadata.previous->filename, true)) {
-        keep.insert(document.metadata.previous->filename);
-    }
-
-    std::error_code error;
-    std::filesystem::directory_iterator iterator(cache_dir, error);
-    if (error) return;
-    for (const auto& entry : iterator) {
-        const std::string filename = entry.path().filename().string();
-        if (keep.count(filename) != 0U ||
-            !generation_filename_is_safe(name, filename, false)) {
-            continue;
+        std::set<std::string> keep;
+        if (document.metadata.current.has_value() &&
+            generation_filename_is_safe(
+                name, document.metadata.current->filename, true)) {
+            keep.insert(document.metadata.current->filename);
         }
-        std::filesystem::remove(entry.path(), error);
-        error.clear();
+        if (document.metadata.previous.has_value() &&
+            generation_filename_is_safe(
+                name, document.metadata.previous->filename, true)) {
+            keep.insert(document.metadata.previous->filename);
+        }
+
+        // Capture and collection share this mutex. A generation is therefore
+        // either pinned before GC considers it or removed before a later
+        // capture can resolve it; there is no check-then-unlink race.
+        for (const auto& filename : keep) {
+            // A restored/rolled-back generation is live again and must no
+            // longer be removed when an older lease is released.
+            pin_state->retired.erase(filename);
+        }
+
+        std::error_code error;
+        std::filesystem::directory_iterator iterator(cache_dir, error);
+        if (error) return;
+        for (const auto& entry : iterator) {
+            const std::string filename = entry.path().filename().string();
+            if (keep.count(filename) != 0U ||
+                !generation_filename_is_safe(name, filename, false)) {
+                continue;
+            }
+            const auto pinned = pin_state->pin_counts.find(filename);
+            if (pinned != pin_state->pin_counts.end() &&
+                pinned->second != 0U) {
+                pin_state->retired.insert(filename);
+                continue;
+            }
+            std::filesystem::remove(entry.path(), error);
+            if (!error) {
+                pin_state->retired.erase(filename);
+            }
+            error.clear();
+        }
+    } catch (...) {
+        // GC is best effort. In particular, allocation failure while recording
+        // a deferred deletion must retain data rather than affect refresh.
     }
 }
 
@@ -638,12 +703,82 @@ std::optional<std::string> decode_srs_native(
 
 } // namespace
 
+void CacheGenerationPinState::release(
+    const std::string& name,
+    const std::string& filename,
+    const std::filesystem::path& path) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto pinned = pin_counts.find(filename);
+        if (pinned == pin_counts.end()) return;
+        if (pinned->second > 1U) {
+            --pinned->second;
+            return;
+        }
+        pin_counts.erase(pinned);
+        if (retired.count(filename) == 0U ||
+            path.parent_path() != cache_dir) {
+            return;
+        }
+
+        // Metadata publication uses this mutex too. Revalidate before unlink
+        // so a generation restored as current/previous after an earlier GC
+        // decision cannot be removed by the last old lease.
+        const auto document = read_metadata_document(
+            cache_dir / (name + ".meta.json"));
+        if (!document.parsed) return;
+        const auto references_filename = [&](const auto& generation) {
+            return generation.has_value() &&
+                   generation_filename_is_safe(
+                       name, generation->filename, true) &&
+                   generation->filename == filename;
+        };
+        if (references_filename(document.metadata.current) ||
+            references_filename(document.metadata.previous)) {
+            retired.erase(filename);
+            return;
+        }
+
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        if (!error) {
+            retired.erase(filename);
+        }
+    } catch (...) {
+        // A lease destructor must never terminate the daemon. A failed
+        // deferred removal is harmless and a later GC pass can retry it.
+    }
+}
+
+CacheGenerationHandle::CacheGenerationHandle(
+    std::filesystem::path path,
+    api::CacheGeneration generation,
+    std::shared_ptr<const void> lease)
+    : path_(std::move(path))
+    , generation_(std::move(generation))
+    , lease_(std::move(lease)) {}
+
+bool ListCacheGenerationSnapshot::contains(const std::string& name) const {
+    return entries_.find(name) != entries_.end();
+}
+
+const CacheGenerationHandle* ListCacheGenerationSnapshot::find(
+    const std::string& name) const {
+    const auto entry = entries_.find(name);
+    if (entry == entries_.end() || !entry->second.has_value()) {
+        return nullptr;
+    }
+    return &*entry->second;
+}
+
 CacheManager::CacheManager(const std::filesystem::path& cache_dir,
                            size_t max_file_size_bytes,
                            std::shared_ptr<HttpTransport> transport)
     : cache_dir_(cache_dir)
     , max_file_size_bytes_(max_file_size_bytes)
-    , http_client_(std::move(transport)) {
+    , http_client_(std::move(transport))
+    , generation_pin_state_(
+          std::make_shared<CacheGenerationPinState>(cache_dir)) {
     http_client_.set_max_response_size(max_file_size_bytes);
 }
 
@@ -713,6 +848,8 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         existing_body->kind != CacheBodyKind::Previous;
     const auto save_download_metadata =
         [this, &name, &options](const CacheMetadata& metadata) {
+            std::lock_guard<std::mutex> lock(
+                generation_pin_state_->mutex);
             write_cache_metadata_file(
                 meta_path(name),
                 metadata
@@ -845,7 +982,7 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         }
     } catch (const std::exception& error) {
         garbage_collect_generations(
-            cache_dir_, name, existing_document);
+            cache_dir_, name, generation_pin_state_);
         return failed_attempt(error.what());
     }
 
@@ -906,7 +1043,7 @@ CacheDownloadResult CacheManager::download(const std::string& name,
             // readers already consume the new generation. Continue as an
             // update and surface the weaker durability guarantee explicitly.
             garbage_collect_generations(
-                cache_dir_, name, visible_document);
+                cache_dir_, name, generation_pin_state_);
             CacheDownloadResult updated;
             updated.status = CacheDownloadStatus::Updated;
             updated.diagnostic_message =
@@ -938,12 +1075,16 @@ CacheDownloadResult CacheManager::download(const std::string& name,
         }
         auto failed = failed_attempt(std::move(failure_message));
         garbage_collect_generations(
-            cache_dir_, name, read_metadata_document(meta_path(name)));
+            cache_dir_,
+            name,
+            generation_pin_state_);
         return failed;
     }
 
     garbage_collect_generations(
-        cache_dir_, name, read_metadata_document(meta_path(name)));
+        cache_dir_,
+        name,
+        generation_pin_state_);
 
     CacheDownloadResult updated;
     updated.status = CacheDownloadStatus::Updated;
@@ -1004,6 +1145,86 @@ std::filesystem::path CacheManager::cache_path(const std::string& name) const {
     return cache_dir_ / (name + ".txt");
 }
 
+std::shared_ptr<const ListCacheGenerationSnapshot>
+CacheManager::capture_generation(
+    const std::vector<std::string>& names) const {
+    auto snapshot = std::make_shared<ListCacheGenerationSnapshot>();
+    struct Reservation {
+        std::string name;
+        ResolvedCacheBody body;
+        bool pin_owned{false};
+    };
+    std::vector<Reservation> reservations;
+    reservations.reserve(names.size());
+
+    try {
+        {
+            // Metadata publication and GC use the same mutex. Hold it for the
+            // complete name set so no refresh can split the snapshot between
+            // two generations. Each verified body is reserved before unlock.
+            std::lock_guard<std::mutex> lock(generation_pin_state_->mutex);
+            for (const auto& name : names) {
+                auto [entry, inserted] = snapshot->entries_.try_emplace(
+                    name, std::nullopt);
+                if (!inserted) continue;
+
+                const auto document = read_metadata_document(meta_path(name));
+                auto body = resolve_cache_body(
+                    cache_dir_, name, max_file_size_bytes_, document);
+                if (!body.has_value()) {
+                    // Keep the explicit null entry: this name must remain
+                    // cache-missing for the lifetime of the snapshot.
+                    continue;
+                }
+
+                reservations.push_back(
+                    Reservation{name, std::move(*body), false});
+                auto& reservation = reservations.back();
+                ++generation_pin_state_->pin_counts[
+                    reservation.body.generation.filename];
+                reservation.pin_owned = true;
+            }
+        }
+
+        for (auto& reservation : reservations) {
+            std::shared_ptr<CacheGenerationLease> lease;
+            try {
+                lease = std::make_shared<CacheGenerationLease>(
+                    generation_pin_state_,
+                    reservation.name,
+                    reservation.body.generation.filename,
+                    reservation.body.path);
+            } catch (...) {
+                generation_pin_state_->release(
+                    reservation.name,
+                    reservation.body.generation.filename,
+                    reservation.body.path);
+                reservation.pin_owned = false;
+                throw;
+            }
+            // Ownership transfers to the lease before constructing the public
+            // handle. Any later exception releases through the lease itself.
+            reservation.pin_owned = false;
+            CacheGenerationHandle handle(
+                std::move(reservation.body.path),
+                std::move(reservation.body.generation),
+                std::move(lease));
+            snapshot->entries_.at(reservation.name).emplace(
+                std::move(handle));
+        }
+    } catch (...) {
+        for (const auto& reservation : reservations) {
+            if (!reservation.pin_owned) continue;
+            generation_pin_state_->release(
+                reservation.name,
+                reservation.body.generation.filename,
+                reservation.body.path);
+        }
+        throw;
+    }
+    return snapshot;
+}
+
 std::filesystem::path CacheManager::meta_path(const std::string& name) const {
     return cache_dir_ / (name + ".meta.json");
 }
@@ -1013,6 +1234,7 @@ CacheMetadata CacheManager::load_metadata(const std::string& name) const {
 }
 
 void CacheManager::save_metadata(const std::string& name, const CacheMetadata& meta) {
+    std::lock_guard<std::mutex> lock(generation_pin_state_->mutex);
     write_cache_metadata_file(meta_path(name), meta);
 }
 

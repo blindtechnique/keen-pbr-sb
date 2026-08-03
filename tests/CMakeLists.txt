@@ -198,6 +198,54 @@ add_executable(keen-pbr-tests
   ../src/routing/target.cpp
 )
 
+# Keep immutable cache-generation and ListStreamer snapshot invariants in a
+# small target. It avoids relinking the daemon/API test binary for focused
+# cache lifetime and GC race checks.
+add_executable(keen-pbr-cache-generation-tests
+  test_main.cpp
+  test_cache_manager_durability.cpp
+  test_list_streamer.cpp
+  ../src/cache/cache_manager.cpp
+  ../src/config/config_writer.cpp
+  ../src/config/list_parser.cpp
+  ../src/http/http_client.cpp
+  ../src/http/http_transport.cpp
+  ../src/http/curl_runtime.cpp
+  ../src/lists/list_streamer.cpp
+  ../src/lists/srs_decoder.cpp
+  ../src/log/logger.cpp
+  ../src/log/trace.cpp
+)
+set_target_properties(keen-pbr-cache-generation-tests PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+target_compile_definitions(
+  keen-pbr-cache-generation-tests PRIVATE KEEN_PBR3_TESTING
+)
+target_include_directories(keen-pbr-cache-generation-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/third_party/doctest
+)
+target_link_libraries(keen-pbr-cache-generation-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
+  ${KEEN_PBR_CURL_TARGET}
+  PkgConfig::ZLIB
+  Threads::Threads
+)
+keen_pbr_apply_project_options(keen-pbr-cache-generation-tests)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(keen-pbr-cache-generation-tests PRIVATE stdc++fs)
+endif()
+add_test(
+  NAME keen-pbr-cache-generation-tests
+  COMMAND keen-pbr-cache-generation-tests
+)
+
 # Keep the package-rescue suite independently buildable. It intentionally has
 # no daemon/API dependencies, so recovery invariants remain testable even when
 # an unrelated in-progress backend change temporarily breaks the monolithic

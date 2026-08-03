@@ -7,8 +7,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -72,6 +75,47 @@ struct CacheDownloadResult {
     }
 };
 
+// An immutable, verified cache body together with an opaque lease that keeps
+// the named generation alive against GC by the CacheManager which captured it.
+// The handle is cheap to copy: bodies are never copied and copies share one
+// lease.
+class CacheGenerationHandle {
+public:
+    CacheGenerationHandle() = default;
+
+    const std::filesystem::path& path() const noexcept { return path_; }
+    const api::CacheGeneration& generation() const noexcept {
+        return generation_;
+    }
+
+private:
+    CacheGenerationHandle(std::filesystem::path path,
+                          api::CacheGeneration generation,
+                          std::shared_ptr<const void> lease);
+
+    std::filesystem::path path_;
+    api::CacheGeneration generation_;
+    std::shared_ptr<const void> lease_;
+
+    friend class CacheManager;
+};
+
+// A point-in-time view of the URL-cache generations for a set of configured
+// lists. Missing bodies are recorded explicitly, so a cache created after the
+// snapshot cannot appear halfway through the same resolver transaction.
+class ListCacheGenerationSnapshot {
+public:
+    bool contains(const std::string& name) const;
+    const CacheGenerationHandle* find(const std::string& name) const;
+
+private:
+    std::map<std::string, std::optional<CacheGenerationHandle>> entries_;
+
+    friend class CacheManager;
+};
+
+struct CacheGenerationPinState;
+
 class CacheManager {
 public:
     explicit CacheManager(const std::filesystem::path& cache_dir,
@@ -121,6 +165,16 @@ public:
     // cache only when generation pointers have not been introduced yet.
     std::filesystem::path cache_path(const std::string& name) const;
 
+    // Capture verified immutable bodies for the supplied list names and pin
+    // them until the returned snapshot and all of its copies are released.
+    // The lease coordinates only with this CacheManager instance. The daemon
+    // must capture through the single-writer ListService CacheManager rather
+    // than create another manager for the same directory. The immutable
+    // snapshot can then cross asynchronous resolver phases without carrying a
+    // daemon lock between threads.
+    std::shared_ptr<const ListCacheGenerationSnapshot> capture_generation(
+        const std::vector<std::string>& names) const;
+
     // Path to the metadata file: <cache_dir>/<name>.meta.json
     std::filesystem::path meta_path(const std::string& name) const;
 
@@ -134,6 +188,7 @@ private:
     std::filesystem::path cache_dir_;
     size_t max_file_size_bytes_;
     HttpClient http_client_;
+    std::shared_ptr<CacheGenerationPinState> generation_pin_state_;
 };
 
 } // namespace keen_pbr3

@@ -15,11 +15,25 @@ ListStreamer::ListStreamer(const CacheManager& cache)
     : cache_(cache)
     , max_file_size_bytes_(cache.max_file_size()) {}
 
+ListStreamer::ListStreamer(
+    const CacheManager& cache,
+    std::shared_ptr<const ListCacheGenerationSnapshot> cache_snapshot)
+    : cache_(cache)
+    , max_file_size_bytes_(cache.max_file_size())
+    , cache_snapshot_(std::move(cache_snapshot)) {
+    if (!cache_snapshot_) {
+        throw std::invalid_argument("cache snapshot must not be null");
+    }
+}
+
 void ListStreamer::stream_list(const std::string& name, const ListConfig& config, ListEntryVisitor& visitor) {
     // The cached URL file is used only while the list still declares a URL
     // source; a stale cache for a removed URL is ignored here.
-    const bool include_cache = config.url.has_value() && cache_.has_cache(name);
-    stream_all_sources(name, config, visitor, include_cache);
+    const auto operation_snapshot = operation_cache_snapshot(name);
+    const auto cached = config.url.has_value()
+                            ? cache_source_path(name, operation_snapshot)
+                            : std::nullopt;
+    stream_all_sources(name, config, visitor, cached);
 }
 
 void ListStreamer::stream_list_preferring_cache(const std::string& name,
@@ -28,16 +42,22 @@ void ListStreamer::stream_list_preferring_cache(const std::string& name,
     // Use the cached file whenever it exists, even if the URL source was
     // removed from the config. The local file and inline entries are always
     // streamed too — they must not be dropped just because a cache exists.
-    stream_all_sources(name, config, visitor, cache_.has_cache(name));
+    const auto operation_snapshot = operation_cache_snapshot(name);
+    stream_all_sources(
+        name,
+        config,
+        visitor,
+        cache_source_path(name, operation_snapshot));
 }
 
 void ListStreamer::stream_all_sources(const std::string& name,
                                       const ListConfig& config,
                                       ListEntryVisitor& visitor,
-                                      bool include_cache) {
+                                      const std::optional<std::filesystem::path>&
+                                          cache_path) {
     // 1. Cached URL file
-    if (include_cache) {
-        stream_file(cache_.cache_path(name), visitor, false);
+    if (cache_path.has_value()) {
+        stream_file(*cache_path, visitor, false);
     }
 
     // 2. Local file (if configured)
@@ -65,9 +85,37 @@ void ListStreamer::stream_all_sources(const std::string& name,
 }
 
 void ListStreamer::stream_cache(const std::string& name, ListEntryVisitor& visitor) {
-    if (cache_.has_cache(name)) {
-        stream_file(cache_.cache_path(name), visitor, false);
+    const auto operation_snapshot = operation_cache_snapshot(name);
+    if (const auto cached = cache_source_path(name, operation_snapshot)) {
+        stream_file(*cached, visitor, false);
     }
+}
+
+std::shared_ptr<const ListCacheGenerationSnapshot>
+ListStreamer::operation_cache_snapshot(const std::string& name) const {
+    if (cache_snapshot_) {
+        if (!cache_snapshot_->contains(name)) {
+            throw std::invalid_argument(
+                "cache snapshot does not contain list '" + name + "'");
+        }
+        return cache_snapshot_;
+    }
+    return cache_.capture_generation({name});
+}
+
+std::optional<std::filesystem::path> ListStreamer::cache_source_path(
+    const std::string& name,
+    const std::shared_ptr<const ListCacheGenerationSnapshot>& snapshot) {
+    if (!snapshot) {
+        throw std::invalid_argument("cache snapshot must not be null");
+    }
+    if (!snapshot->contains(name)) {
+        throw std::invalid_argument(
+            "cache snapshot does not contain list '" + name + "'");
+    }
+    const auto* generation = snapshot->find(name);
+    if (generation == nullptr) return std::nullopt;
+    return generation->path();
 }
 
 void ListStreamer::stream_file(const std::filesystem::path& path,
