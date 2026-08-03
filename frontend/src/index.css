@@ -36,6 +36,14 @@
   /* Measured on the current KeeneticOS primary action and switch thumb. */
   --primary: #0086cb;
   --primary-foreground: #ffffff;
+
+  /* Кнопки KeeneticOS, снятые с живого конфигуратора (--outline-button-* и
+     --primary-button-*). Вторичная кнопка там не серая: белый фон, бледно-синяя
+     рамка и синий текст; при наведении обе заливаются тёмно-синим с белым
+     текстом. Тени у кнопок нет. */
+  --button-outline-border: #c1dded;
+  --button-hover: #1c6c9a;
+  --button-active: #aed6fa;
   --secondary: #f5fafc;
   --secondary-foreground: #202020;
   --muted: #fafafa;
@@ -121,6 +129,9 @@
   --popover-foreground: #c2c2c2;
   --primary: #0086cb;
   --primary-foreground: #ffffff;
+  /* В тёмной теме рамка вторичной кнопки у KeeneticOS не бледная, а полного
+     тона — фон и так тёмный, бледная на нём не читается. */
+  --button-outline-border: #0086cb;
   --secondary: #2e3d57;
   --secondary-foreground: #cacdcf;
   --muted: #2f3745;
@@ -200,6 +211,9 @@
   --color-success-foreground: var(--success-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
+  --color-button-outline-border: var(--button-outline-border);
+  --color-button-hover: var(--button-hover);
+  --color-button-active: var(--button-active);
   --color-ring: var(--ring);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);

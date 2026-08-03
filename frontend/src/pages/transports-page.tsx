@@ -2,14 +2,14 @@ import {
   ChevronDownIcon,
   PencilIcon,
   PlusIcon,
-  DownloadIcon,
+  FolderInputIcon,
+  FolderOutputIcon,
   EyeIcon,
   EyeOffIcon,
   RefreshCwIcon,
   Settings2Icon,
   ShieldCheckIcon,
   TrashIcon,
-  UploadIcon,
   WorkflowIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -760,7 +760,7 @@ export function TransportsPage() {
           onClick={() => void exportTransports()}
           variant="outline"
         >
-          <DownloadIcon />
+          <FolderOutputIcon />
           {t("configTransfer.export")}
         </Button>
         <Button
@@ -768,7 +768,7 @@ export function TransportsPage() {
           onClick={() => transportImportRef.current?.click()}
           variant="outline"
         >
-          <UploadIcon />
+          <FolderInputIcon />
           {t("configTransfer.import")}
         </Button>
         <input
