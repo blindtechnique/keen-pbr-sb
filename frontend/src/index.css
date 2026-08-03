@@ -360,6 +360,10 @@
 
   .keen-canvas-overview [data-slot="card"] {
     border-color: transparent;
+    /* `.dashboard-card` в KeeneticOS — радиус 8px, без рамки и без тени.
+       У нас общий --radius равен 6px, и он верен для кнопок и полей; отличается
+       только карточка дашборда, поэтому правка здесь, а не в токене. */
+    border-radius: 8px;
   }
 
   /* KeeneticOS labels the panels on its dashboard in small caps, which reads

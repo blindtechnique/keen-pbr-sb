@@ -52,9 +52,12 @@ export function AppShell({ children }: { children: ReactNode }) {
               <div
                 className={cn(
                   "min-w-0 px-4 pt-4 sm:px-6",
-                  isOverview
-                    ? "lg:px-8 lg:pt-5"
-                    : "lg:pt-[33px] lg:pr-8 lg:pl-8"
+                  // Дашборд KeeneticOS, снято с живого конфигуратора: контейнер
+                  // начинается ровно от правого края меню и от низа шапки, а
+                  // отступ до карточек — 24px слева, справа и сверху
+                  // (`.dashboard { padding: 0 24px }` + `.ndw-drag-panel
+                  // { padding: 24px 0 0 }`). У нас было 32px по бокам и 20 сверху.
+                  isOverview ? "sm:pt-6" : "lg:pt-[33px] lg:pr-8 lg:pl-8"
                 )}
                 style={{
                   paddingBottom:

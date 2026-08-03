@@ -127,7 +127,7 @@ export function OverviewPage() {
         <RouterInfoPanel />
       </SystemStatusSummary>
 
-      <div className="grid gap-3 xl:grid-cols-5">
+      <div className="grid gap-x-3 gap-y-6 xl:grid-cols-5">
         <SectionCard
           className="h-full scroll-mt-24 xl:col-span-3"
           id={dashboardSectionIds.outbounds}
@@ -187,7 +187,7 @@ export function OverviewPage() {
         outbounds={loadedConfig?.outbounds}
       />
 
-      <div className="grid gap-3 xl:grid-cols-3">
+      <div className="grid gap-x-3 gap-y-6 xl:grid-cols-3">
         <div className="scroll-mt-24" id={dashboardSectionIds.dns}>
           <DnsCheckWidget
             dnsProbeEnabled={Boolean(loadedConfig?.dns?.dns_test_server)}
