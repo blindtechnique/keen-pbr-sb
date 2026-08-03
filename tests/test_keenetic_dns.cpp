@@ -7,6 +7,7 @@
 #include <future>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 
 using namespace keen_pbr3;
 
@@ -29,6 +30,40 @@ std::string keenetic_dns_response(const std::string& address) {
 }
 
 } // namespace
+
+TEST_CASE("keenetic dns: cache view swap is a noexcept transaction primitive") {
+    static_assert(std::is_nothrow_swappable_v<KeeneticDnsCacheView>);
+
+    KeeneticDnsCacheView left{
+        KeeneticDnsSnapshot{{"192.0.2.1"}, {}, {}},
+        KeeneticDnsCacheStatus::fresh,
+        true,
+        true,
+        7,
+        {}};
+    KeeneticDnsCacheView right{
+        std::nullopt,
+        KeeneticDnsCacheStatus::stale,
+        false,
+        false,
+        3,
+        "stale"};
+
+    using std::swap;
+    swap(left, right);
+
+    CHECK_FALSE(left.snapshot.has_value());
+    CHECK(left.status == KeeneticDnsCacheStatus::stale);
+    CHECK(left.generation == 3);
+    CHECK(left.error == "stale");
+    REQUIRE(right.snapshot.has_value());
+    CHECK(right.snapshot->addresses ==
+          std::vector<std::string>{"192.0.2.1"});
+    CHECK(right.status == KeeneticDnsCacheStatus::fresh);
+    CHECK(right.refreshed);
+    CHECK(right.changed);
+    CHECK(right.generation == 7);
+}
 
 TEST_CASE("keenetic dns: parse address from RCI System policy") {
     SUBCASE("ignores domain-scoped entries in real System payload shape") {

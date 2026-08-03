@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -35,6 +36,14 @@ struct KeeneticDnsSnapshot {
     std::vector<KeeneticDnsUpstreamEntry> upstreams;
     std::vector<KeeneticStaticDnsEntry> static_entries;
 };
+
+inline void swap(KeeneticDnsSnapshot& lhs,
+                 KeeneticDnsSnapshot& rhs) noexcept {
+    using std::swap;
+    swap(lhs.addresses, rhs.addresses);
+    swap(lhs.upstreams, rhs.upstreams);
+    swap(lhs.static_entries, rhs.static_entries);
+}
 
 // Compare the complete DNS proxy snapshots as one coherent unit.  Callers
 // must not compare only addresses because static entries and upstream
@@ -62,6 +71,21 @@ struct KeeneticDnsCacheView {
     std::uint64_t generation{0};
     std::string error;
 };
+
+// GCC 8's libstdc++ does not infer the noexcept guarantee through
+// optional<KeeneticDnsSnapshot> consistently. Keep an explicit ADL swap so
+// the DNS refresh transaction has the same non-throwing rollback contract on
+// the Keenetic toolchain as it does on current host compilers.
+inline void swap(KeeneticDnsCacheView& lhs,
+                 KeeneticDnsCacheView& rhs) noexcept {
+    using std::swap;
+    swap(lhs.snapshot, rhs.snapshot);
+    swap(lhs.status, rhs.status);
+    swap(lhs.refreshed, rhs.refreshed);
+    swap(lhs.changed, rhs.changed);
+    swap(lhs.generation, rhs.generation);
+    swap(lhs.error, rhs.error);
+}
 
 // Thread-safe single-flight cache for Keenetic's built-in DNS proxy snapshot.
 // Fetching and parsing happen outside mutex_, so cache-only readers never wait
