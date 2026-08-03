@@ -48,12 +48,20 @@ export function DnsCheckWidget({
     }
 
     switch (status) {
-      // Красным — только «проверили, и не сходится».
+      // Ни один из этих двух исходов не доказывает, что DNS сломан.
+      //
+      // `sse-fail` — поток событий не подключился, проверка вообще не
+      // запустилась, о самом DNS мы не узнали ничего.
+      //
+      // `browser-fail` — проверка прошла, но отрицательный результат у неё
+      // неотличим от совершенно нормальных вещей: адрес уже лежал в кэше
+      // браузера и нового запроса не было, или браузер ходит в свой DoH мимо
+      // роутера. Отличить это отсюда нечем.
+      //
+      // Красная карточка на дашборде читается как «у тебя сломан DNS» — и
+      // человек идёт чинить то, что работает. Доказательная проверка здесь
+      // одна — команда с компьютера, на неё и указываем.
       case "browser-fail":
-        return "border-destructive/40 bg-destructive/5"
-      // А это «проверить не удалось»: поток событий не подключился, и о самом
-      // DNS мы не узнали ничего. Красная карточка на дашборде читается как
-      // «у тебя сломан DNS» — и человек идёт чинить то, что работает.
       case "sse-fail":
         return "border-warning/40 bg-warning/5"
       default:
@@ -162,9 +170,9 @@ function DnsStatusSummary({
     case "browser-fail":
       return (
         <DnsStatusMessage
-          icon={<AlertCircle className="h-5 w-5 text-destructive" />}
+          icon={<AlertCircle className="h-5 w-5 text-warning-foreground" />}
           text={t("overview.dnsCheck.status.browserProbeFail")}
-          tone="error"
+          tone="warning"
         />
       )
     case "sse-fail":
@@ -197,7 +205,9 @@ function DnsStatusMessage({
   return (
     <div
       className={cn(
-        "flex w-full items-center gap-2",
+        // По верху, а не по центру: объяснение занимает три-четыре строки, и
+        // значок, повисший в середине абзаца, теряет связь с его началом.
+        "flex w-full items-start gap-2 [&>svg]:mt-0.5 [&>svg]:shrink-0",
         tone === "success" && "text-emerald-700 dark:text-emerald-300",
         tone === "error" && "text-destructive",
         // Не `text-warning`: в светлой теме это #e5952d, 2.42:1 на белом —

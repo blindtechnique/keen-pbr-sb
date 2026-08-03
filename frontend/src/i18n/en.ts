@@ -942,7 +942,7 @@ export const enTranslation = {
         browserSuccess: "DNS request from the browser reached dnsmasq.",
         manualProbeSuccess: "DNS request from the device reached dnsmasq.",
         browserProbeFail:
-          "Browser request completed, but the DNS probe did not see the lookup.",
+          "The browser went out, but the probe saw no lookup. That also happens when everything is fine: the address was already cached, or the browser resolves through its own DNS past the router. Check from a computer to be sure.",
         sseUnavailable:
           "The live DNS event stream is unavailable, so the check could not start.",
         browserFail:
