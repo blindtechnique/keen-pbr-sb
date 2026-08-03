@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import { useLocation } from "wouter"
 
 import { AppSidebar } from "@/components/app-sidebar"
+import { AppBrandHeader } from "@/components/layout/app-brand-header"
 import { MobileAppHeader } from "@/components/layout/mobile-app-header"
 import { useWarningBannerState } from "@/components/layout/warning-banner-state"
 import { WarningBanner } from "@/components/layout/warning-banner"
@@ -24,7 +25,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           there is no page-level scrollbar at all. */}
       <div
         className={cn(
-          "flex h-screen max-h-screen w-full max-w-full overflow-hidden",
+          "flex h-screen max-h-screen w-full max-w-full flex-col overflow-hidden",
           isOverview ? "keen-canvas-overview" : "keen-canvas-page"
         )}
       >
@@ -34,34 +35,38 @@ export function AppShell({ children }: { children: ReactNode }) {
         >
           Skip to content
         </a>
-        <AppSidebar />
-        <SidebarInset className="relative flex h-screen max-h-screen max-w-full min-w-0 flex-col overflow-hidden bg-transparent">
-          <MobileSidebarHeader />
-          <DesktopSystemBar />
-          <main
-            aria-labelledby="page-title"
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]"
-            id="main-content"
-          >
-            {/* No max-width: NDMS lets its panels use the whole window, and a
+        <DesktopSystemBar />
+        <div className="flex min-h-0 w-full max-w-full flex-1 overflow-hidden">
+          <AppSidebar />
+          <SidebarInset className="relative flex min-h-0 max-w-full min-w-0 flex-col overflow-hidden bg-transparent">
+            <MobileSidebarHeader />
+            <main
+              aria-labelledby="page-title"
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]"
+              id="main-content"
+            >
+              {/* No max-width: NDMS lets its panels use the whole window, and a
                 centred column left wide screens half empty. The bottom padding
                 leaves room for the fixed save bar and, when rows are selected,
                 for the bulk action bar stacked above it. */}
-            <div
-              className={cn(
-                "min-w-0 px-4 pt-4 sm:px-6",
-                isOverview ? "lg:px-8 lg:pt-5" : "lg:pt-[33px] lg:pr-8 lg:pl-8"
-              )}
-              style={{
-                paddingBottom:
-                  "calc(var(--warning-banner-height, 0px) + var(--bulk-toolbar-height, 0px) + 1.25rem)",
-              }}
-            >
-              {children}
-            </div>
-          </main>
-          <WarningBanner state={warningBannerState} />
-        </SidebarInset>
+              <div
+                className={cn(
+                  "min-w-0 px-4 pt-4 sm:px-6",
+                  isOverview
+                    ? "lg:px-8 lg:pt-5"
+                    : "lg:pt-[33px] lg:pr-8 lg:pl-8"
+                )}
+                style={{
+                  paddingBottom:
+                    "calc(var(--warning-banner-height, 0px) + var(--bulk-toolbar-height, 0px) + 1.25rem)",
+                }}
+              >
+                {children}
+              </div>
+            </main>
+            <WarningBanner state={warningBannerState} />
+          </SidebarInset>
+        </div>
       </div>
     </SidebarProvider>
   )
@@ -69,12 +74,12 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function DesktopSystemBar() {
   return (
-    // NDMS: .header { height: 64px; padding: 0 32px } with the shadow cast by
-    // a sibling, clipped to show only underneath.
-    <div className="keen-header-shadow relative z-30 hidden h-16 shrink-0 items-center justify-between bg-card px-8 md:flex">
-      {/* The brand lives once, at the top of the left column above the menu.
-          The bar itself carries only the controls on the right. */}
-      <span />
+    // KeeneticOS: .layout__header — 0..ширина окна, высота 64px, padding 0 32px,
+    // белый фон, тень отбрасывается соседом и подрезана снизу. Логотип стоит в
+    // ней слева на x=32, а колонка меню начинается уже под шапкой; раньше
+    // логотип жил над меню, и шапка начиналась после колонки.
+    <div className="keen-header-shadow relative z-30 hidden h-16 w-full shrink-0 items-center justify-between bg-card px-8 md:flex">
+      <AppBrandHeader className="min-w-0" />
       <TopBarControls />
     </div>
   )

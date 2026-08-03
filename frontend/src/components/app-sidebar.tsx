@@ -4,16 +4,10 @@ import type { ComponentProps } from "react"
 import { LayoutGridIcon, ShieldIcon, WaypointsIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
-import { AppBrandHeader } from "@/components/layout/app-brand-header"
 import { SidebarToggleButton } from "@/components/layout/sidebar-toggle-button"
 import { MobileMenuControls } from "@/components/layout/top-bar-controls"
 import { NavMain } from "@/components/nav-main"
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarHeader,
-} from "@/components/ui/sidebar"
+import { Sidebar, SidebarContent, SidebarFooter } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar-context"
 
 export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
@@ -93,11 +87,9 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
 
   return (
     <Sidebar className="keen-app-sidebar z-40" collapsible="icon" {...props}>
-      {!isMobile ? (
-        <SidebarHeader className="keen-sidebar-brand relative z-20 h-16 w-[264px] min-w-[264px] justify-center bg-card py-0 pr-4 pl-8">
-          <AppBrandHeader />
-        </SidebarHeader>
-      ) : null}
+      {/* Логотип на десктопе живёт в шапке, а не над колонкой меню: в
+          KeeneticOS шапка идёт во всю ширину окна, логотип стоит в ней слева
+          на x=32, а меню начинается уже под шапкой. */}
       {/* No horizontal padding: in KeeneticOS the selected row runs from the
           screen edge all the way to the hairline, and any padding here leaves
           it floating in the middle of the column. */}
