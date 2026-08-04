@@ -1794,6 +1794,7 @@ export const ruTranslation = {
         blackhole: "Соединения не выпускаются наружу",
         ignore: "Трафик проходит без изменения маршрута",
       },
+      interfaceSubline: "интерфейс {{name}}",
       usage: {
         none: "Никем не используется",
         some: "Сюда направлено списков: {{lists}}, правил: {{rules}}",
@@ -1856,6 +1857,7 @@ export const ruTranslation = {
         type: "Тип",
         summary: "Детали",
         purpose: "Что делает",
+        memberChain: "Порядок обхода",
         usedBy: "Где используется",
         runtime: "Состояние",
         actions: "Действия",

@@ -1771,6 +1771,7 @@ export const enTranslation = {
         blackhole: "Connections are not let out",
         ignore: "Traffic passes without changing its route",
       },
+      interfaceSubline: "interface {{name}}",
       usage: {
         none: "Nothing uses this",
         some: "Lists sent here: {{lists}}, rules: {{rules}}",
@@ -1833,6 +1834,7 @@ export const enTranslation = {
         type: "Source",
         summary: "Details",
         purpose: "What it does",
+        memberChain: "Failover order",
         usedBy: "Used by",
         runtime: "Runtime",
         actions: "Actions",

@@ -30,6 +30,7 @@ import { ConfigTransferButtons } from "@/components/shared/config-transfer-butto
 import { DataTable } from "@/components/shared/data-table"
 import { DependencyList } from "@/components/shared/dependency-list"
 import {
+  OutboundMemberChain,
   OutboundName,
   OutboundPurpose,
   OutboundStatus,
@@ -220,11 +221,23 @@ export function OutboundsPage() {
   // Сортировка по названию и по задержке. Задержка — единственное число на
   // странице, и вопрос «какой выход быстрее» без неё решался глазами по
   // разбросанным карточкам.
+  // Колонки у вкладок разные, поэтому и индекс колонки «Состояние» разный:
+  // у туннелей она вторая, у резервирования третья, у системных маршрутов её
+  // нет вовсе — там нечего измерять.
+  const latencyColumnIndex =
+    activeGroupKey === "interfaces" ? 1 : activeGroupKey === "failover" ? 2 : -1
   const { sorted: sortedOutbounds, sort } = useTableSort(
     activeOutboundGroup.items,
     [
       { index: 0, get: (item) => getOutboundDisplayName(item.outbound) },
-      { index: 2, get: (item) => firstLatency(item.runtimeState) },
+      ...(latencyColumnIndex >= 0
+        ? [
+            {
+              index: latencyColumnIndex,
+              get: (item: OutboundItem) => firstLatency(item.runtimeState),
+            },
+          ]
+        : []),
     ]
   )
   const outboundRowIds = sortedOutbounds.map((item) => item.id)
@@ -396,12 +409,18 @@ export function OutboundsPage() {
             <DataTable
               headers={[
                 t("pages.outbounds.headers.tag"),
-                t("pages.outbounds.headers.purpose"),
-                t("pages.outbounds.headers.runtime"),
+                ...(activeGroupKey === "failover"
+                  ? [t("pages.outbounds.headers.memberChain")]
+                  : []),
+                ...(activeGroupKey === "system"
+                  ? [t("pages.outbounds.headers.purpose")]
+                  : [t("pages.outbounds.headers.runtime")]),
                 t("pages.outbounds.headers.usedBy"),
                 t("pages.outbounds.headers.actions"),
               ]}
-              narrowColumns={[2]}
+              narrowColumns={
+                latencyColumnIndex >= 0 ? [latencyColumnIndex] : []
+              }
               rows={sortedOutbounds.map((item) => [
                 <OutboundName
                   key={`${item.id}-name`}
@@ -411,17 +430,28 @@ export function OutboundsPage() {
                       ? protocolOfGroup(item.outbound, interfaceOfTag)
                       : protocolOf(item.outbound.interface ?? "")
                   }
+                  withInterface={activeGroupKey === "interfaces"}
                 />,
-                <OutboundPurpose
-                  key={`${item.id}-purpose`}
-                  outbound={item.outbound}
-                  outboundDisplayNames={outboundDisplayNames}
-                  runtimeState={item.runtimeState}
-                />,
-                <OutboundStatus
-                  key={`${item.id}-status`}
-                  runtimeState={item.runtimeState}
-                />,
+                ...(activeGroupKey === "failover"
+                  ? [
+                      <OutboundMemberChain
+                        key={`${item.id}-chain`}
+                        outboundDisplayNames={outboundDisplayNames}
+                        runtimeState={item.runtimeState}
+                      />,
+                    ]
+                  : []),
+                activeGroupKey === "system" ? (
+                  <OutboundPurpose
+                    key={`${item.id}-purpose`}
+                    outbound={item.outbound}
+                  />
+                ) : (
+                  <OutboundStatus
+                    key={`${item.id}-status`}
+                    runtimeState={item.runtimeState}
+                  />
+                ),
                 // Связи видно до удаления, а не из диалога, который перечислял
                 // последствия постфактум.
                 <DependencyList

@@ -36,53 +36,86 @@ import { firstLatency } from "@/pages/outbounds-utils"
 export function OutboundName({
   outbound,
   protocol,
+  withInterface = false,
 }: {
   outbound: Outbound
   protocol?: string
+  /**
+   * Подписать интерфейс под именем — но только если он от имени отличается.
+   * У большинства туннелей имя и есть имя интерфейса, и строчка «интерфейс
+   * sddvpn mooo AWG» под заголовком «sddvpn mooo AWG» не сообщает ничего.
+   */
+  withInterface?: boolean
 }) {
+  const { t } = useTranslation()
+  const { labelFor } = useInterfaceDisplayNames()
+  const name = getOutboundDisplayName(outbound)
+  const interfaceLabel = withInterface ? labelFor(outbound.interface ?? "") : ""
+  const showInterface =
+    Boolean(interfaceLabel) &&
+    interfaceLabel.trim().toLocaleLowerCase() !==
+      name.trim().toLocaleLowerCase()
+
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-      <span
-        className="min-w-0 truncate font-medium"
-        title={getOutboundReferenceLabel(outbound)}
-      >
-        {getOutboundDisplayName(outbound)}
-      </span>
-      {protocol ? (
-        <Badge className="font-mono text-[10px]" size="xs" variant="outline">
-          {protocol}
-        </Badge>
+    <div className="min-w-0">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          className="min-w-0 truncate font-medium"
+          title={getOutboundReferenceLabel(outbound)}
+        >
+          {name}
+        </span>
+        {protocol ? (
+          <Badge className="font-mono text-[10px]" size="xs" variant="outline">
+            {protocol}
+          </Badge>
+        ) : null}
+      </div>
+      {showInterface ? (
+        <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+          {t("pages.outbounds.interfaceSubline", { name: interfaceLabel })}
+        </span>
       ) : null}
     </div>
   )
 }
 
-/** Одной фразой: что эта запись делает; для резервирования — порядок обхода. */
-export function OutboundPurpose({
-  outbound,
-  runtimeState,
-  outboundDisplayNames,
-}: {
-  outbound: Outbound
-  runtimeState?: RuntimeOutboundState
-  outboundDisplayNames?: ReadonlyMap<string, string>
-}) {
+/**
+ * Одной фразой: что эта запись делает.
+ *
+ * Осталась только у системных маршрутов. У туннеля эта фраза была одинаковой во
+ * всех девяти строках и дословно повторяла соседнюю колонку; у группы
+ * резервирования — вводным предложением перед единственно ценным, цепочкой.
+ * А у системного маршрута другого описания нет, и строк там две.
+ */
+export function OutboundPurpose({ outbound }: { outbound: Outbound }) {
   const { t } = useTranslation()
   const { labelFor } = useInterfaceDisplayNames()
 
   return (
-    <div className="space-y-1.5">
-      <p className="text-sm text-foreground">
-        {describeOutbound(outbound, labelFor, t)}
-      </p>
-      {outbound.type === "urltest" ? (
-        <MemberChain
-          displayNames={outboundDisplayNames}
-          members={runtimeState?.interfaces ?? []}
-          t={t}
-        />
-      ) : null}
-    </div>
+    <p className="text-sm text-foreground">
+      {describeOutbound(outbound, labelFor, t)}
+    </p>
+  )
+}
+
+/** Порядок обхода группы резервирования — своя колонка, а не хвост фразы. */
+export function OutboundMemberChain({
+  runtimeState,
+  outboundDisplayNames,
+}: {
+  runtimeState?: RuntimeOutboundState
+  outboundDisplayNames?: ReadonlyMap<string, string>
+}) {
+  const { t } = useTranslation()
+  const members = runtimeState?.interfaces ?? []
+
+  if (members.length === 0) {
+    return <span className="text-xs text-muted-foreground">—</span>
+  }
+
+  return (
+    <MemberChain displayNames={outboundDisplayNames} members={members} t={t} />
   )
 }
 
