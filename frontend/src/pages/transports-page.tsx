@@ -69,13 +69,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
   useServerLocations,
@@ -944,7 +938,7 @@ export function TransportsPage() {
               key={item.tag}
               size="sm"
             >
-              <CardHeader className="min-w-0 gap-x-4 max-sm:grid-cols-1 sm:grid-cols-[minmax(0,18rem)_8rem_minmax(0,1fr)_auto]! sm:items-center">
+              <CardHeader className="min-w-0 gap-x-4 max-sm:grid-cols-1 sm:grid-cols-[minmax(0,16rem)_minmax(0,11rem)_minmax(0,1fr)_auto] sm:items-center">
                 <div className="min-w-0">
                   <CardTitle
                     className="leading-5 tracking-normal break-words"
@@ -1004,7 +998,9 @@ export function TransportsPage() {
                     </span>
                   )}
                 </div>
-                <CardAction className="flex items-center gap-1 max-sm:col-start-1 max-sm:row-start-auto max-sm:w-full max-sm:justify-self-stretch">
+                {/* Не CardAction: он жёстко прибит к `col-start-2` и занимал
+                    колонку задержки, отчего порядок ехал. */}
+                <div className="flex items-center gap-1 max-sm:col-start-1 max-sm:row-start-auto max-sm:w-full max-sm:justify-self-stretch sm:justify-self-end">
                   <KeeneticStatus
                     tone={item.state === "up" ? "success" : "neutral"}
                   >
@@ -1075,7 +1071,7 @@ export function TransportsPage() {
                       )}
                     />
                   </Button>
-                </CardAction>
+                </div>
               </CardHeader>
               {/* Задержка на телефоне остаётся отдельной строкой: в ряд с
                   именем и переключателем она там не помещается. */}
