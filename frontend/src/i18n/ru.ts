@@ -605,6 +605,8 @@ export const ruTranslation = {
       bindOutbound: "Создать маршрут",
       alreadyBound: "Уже связано с «{{tag}}»",
       openOutbound: "Открыть маршрут",
+      noTraffic:
+        "В этот маршрут ничего не направлено — трафик через транспорт не пойдёт.",
     },
     usedBy: "Используется:",
     usedByNone: "Не привязан к маршруту",

@@ -66,6 +66,7 @@ import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
 import { formatTransportPath } from "@/components/transports/transport-path"
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { DependencyList } from "@/components/shared/dependency-list"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
@@ -80,6 +81,7 @@ import { cn } from "@/lib/utils"
 import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
 import { queryKeys } from "@/api/query-keys"
 import { countryFlag } from "@/data/countries"
+import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import {
   buildTransportEditHref,
@@ -434,6 +436,30 @@ export function TransportsPage() {
       )
       .map((outbound) => [outbound.interface!, outbound])
   )
+  // Что реально ходит через этот транспорт. Транспорт создаёт интерфейс, на
+  // интерфейс смотрит маршрут, а за маршрут держатся правила, списки и DNS —
+  // ту же цепочку показывает страница маршрутов, здесь её просто не было.
+  const transportDependencyTargets = useMemo(
+    () =>
+      [
+        ...new Set(
+          (keenConfig?.outbounds ?? [])
+            .filter(
+              (outbound) =>
+                outbound.type === "interface" &&
+                typeof outbound.interface === "string" &&
+                outbound.interface.length > 0
+            )
+            .map((outbound) => outbound.tag)
+        ),
+      ].map((tag) => ({ kind: "outbound" as const, id: tag })),
+    [keenConfig]
+  )
+  const transportDependencies = useConfigDependencies(
+    keenConfig,
+    transportDependencyTargets
+  )
+
   const preferredOutboundTagByInterface = new Map(
     [...interfaceOutboundByInterface].map(([interfaceName, outbound]) => [
       interfaceName,
@@ -1156,6 +1182,20 @@ export function TransportsPage() {
                         runtimeInterfaceByName.get(item.interface)?.traffic
                       }
                     />
+
+                    {boundOutbound ? (
+                      <>
+                        <div className="my-1 border-t" />
+                        <DependencyList
+                          dependencies={
+                            transportDependencies.dependenciesByTarget.get(
+                              `outbound:${boundOutbound.tag}`
+                            ) ?? []
+                          }
+                          emptyHint={t("transports.routing.noTraffic")}
+                        />
+                      </>
+                    ) : null}
 
                     <div className="my-1 border-t" />
                     <TransportField
