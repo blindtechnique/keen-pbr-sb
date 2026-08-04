@@ -60,6 +60,15 @@ describe("DNS presets", () => {
     expect(getDnsPreset("google")?.secondaryAddress).toBe("8.8.4.4")
   })
 
+  test("pins the canonical Yandex DNS endpoints", () => {
+    expect(getDnsPreset("yandex")).toEqual({
+      id: "yandex",
+      name: "Yandex DNS",
+      primaryAddress: "77.88.8.8",
+      secondaryAddress: "77.88.8.1",
+    })
+  })
+
   test("keeps a saved template selected after templates are reordered", () => {
     const office = {
       name: "Office DNS",
