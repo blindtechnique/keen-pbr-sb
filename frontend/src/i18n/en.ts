@@ -602,6 +602,7 @@ export const enTranslation = {
       createFailover: "Create failover",
       bindOutbound: "Create route",
       alreadyBound: "Already linked to “{{tag}}”",
+      openOutbound: "Open the route",
     },
     usedBy: "Used by:",
     usedByNone: "Not bound to a route",

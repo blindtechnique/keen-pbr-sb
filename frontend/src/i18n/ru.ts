@@ -604,6 +604,7 @@ export const ruTranslation = {
       createFailover: "Создать резервирование",
       bindOutbound: "Создать маршрут",
       alreadyBound: "Уже связано с «{{tag}}»",
+      openOutbound: "Открыть маршрут",
     },
     usedBy: "Используется:",
     usedByNone: "Не привязан к маршруту",

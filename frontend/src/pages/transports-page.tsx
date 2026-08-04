@@ -1094,10 +1094,6 @@ export function TransportsPage() {
                 {expanded ? (
                   <>
                     <TransportField
-                      label={t("transports.interface")}
-                      value={item.interface}
-                    />
-                    <TransportField
                       label={t("transports.server")}
                       value={
                         item.server
@@ -1152,7 +1148,10 @@ export function TransportsPage() {
                         chart: t("transports.traffic.chart"),
                       }}
                       locale={i18n.resolvedLanguage ?? i18n.language}
-                      showChart={false}
+                      // График был написан целиком — с подсказкой, маркерами и
+                      // клавиатурой — и выключен флагом, хотя демон отдаёт по
+                      // 120 точек на каждый транспортный интерфейс.
+                      showChart
                       traffic={
                         runtimeInterfaceByName.get(item.interface)?.traffic
                       }
@@ -1183,29 +1182,26 @@ export function TransportsPage() {
                           {t("transports.loopProtection.action")}
                         </Button>
                       ) : null}
+                      {/* Раньше здесь стояла мёртвая кнопка «Уже привязан к X» —
+                          она повторяла то, что теперь написано в строке, и
+                          ничего не делала. Если привязка есть, кнопка ведёт к
+                          этому маршруту. */}
                       <Button
                         className="h-auto max-w-full text-left whitespace-normal"
-                        disabled={!keenConfig || Boolean(boundOutbound)}
+                        disabled={!keenConfig}
                         onClick={() =>
                           navigate(
-                            `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
+                            boundOutbound
+                              ? `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit`
+                              : `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
                           )
                         }
                         size="sm"
-                        title={
-                          boundOutbound
-                            ? t("transports.routing.alreadyBound", {
-                                tag: boundOutbound.tag,
-                              })
-                            : t("transports.routing.bindOutbound")
-                        }
                         variant="outline"
                       >
                         <WorkflowIcon />
                         {boundOutbound
-                          ? t("transports.routing.alreadyBound", {
-                              tag: boundOutbound.tag,
-                            })
+                          ? t("transports.routing.openOutbound")
                           : t("transports.routing.bindOutbound")}
                       </Button>
                       {item.type !== "native" ? (
