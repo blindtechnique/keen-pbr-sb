@@ -323,9 +323,9 @@ read_fastnat_value() {
         "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"; do
         [ -r "$path" ] || continue
         value=""
-        # Keenetic sysctl pseudo-files may omit the trailing newline. BusyBox
-        # read still assigns the value in that case, but returns failure at
-        # EOF, so accept a non-empty value before validating it below.
+        # On Keenetic, BusyBox read may return failure for a sysctl pseudo-file
+        # even after assigning its complete value. Accept that assigned value
+        # and keep the strict 0/1 validation below.
         if ! IFS= read -r value < "$path"; then
             [ -n "$value" ] || continue
         fi
@@ -745,15 +745,23 @@ case "$1" in
         stop_service_for_action stop yes
         exit $?
         ;;
+    stop-for-upgrade)
+        # Keep FastNAT disabled between the retiring daemon and the incoming
+        # package. The new postinst will start the replacement and retain the
+        # original snapshot for the next real, graceful stop.
+        stop_service_for_action stop no
+        exit $?
+        ;;
     kill)
         stop_service_for_action kill yes
         exit $?
         ;;
 esac
 
+FASTNAT_DISPATCH_ACTION="$1"
 . /opt/etc/init.d/rc.func
 status=$?
-if [ "$status" -ne 0 ]; then
+if [ "$FASTNAT_DISPATCH_ACTION" = start ] && [ "$status" -ne 0 ]; then
     # Once rc.func has attempted to spawn the daemon, a non-zero status does
     # not prove that no routing/firewall state reached the kernel (OOM and a
     # forced death during startup are indistinguishable here). Leave FastNAT

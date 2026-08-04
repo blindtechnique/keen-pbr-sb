@@ -509,6 +509,7 @@ add_test(
   COMMAND /bin/sh
     ${CMAKE_SOURCE_DIR}/tests/package_it/run-keenetic-fastnat-lifecycle.sh
     ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/prerm
 )
 
 set_target_properties(keen-pbr-tests PROPERTIES

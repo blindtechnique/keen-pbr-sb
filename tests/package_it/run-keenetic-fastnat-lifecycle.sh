@@ -3,8 +3,13 @@
 set -eu
 
 init_script=${1:-}
+prerm_script=${2:-}
 [ -f "$init_script" ] || {
-    echo "usage: $0 <S80keen-pbr>" >&2
+    echo "usage: $0 <S80keen-pbr> <prerm>" >&2
+    exit 2
+}
+[ -f "$prerm_script" ] || {
+    echo "usage: $0 <S80keen-pbr> <prerm>" >&2
     exit 2
 }
 
@@ -333,12 +338,24 @@ stop_service_for_action stop yes
 stop:stop
 restore" ]
 
-# After the dispatcher has attempted to spawn the daemon, failure is no
-# longer provably clean. The production tail must mark the stop unsafe and
-# must not restore FastNAT in that post-spawn branch.
+# Package replacement must not briefly restore FastNAT between the old and new
+# daemon. A real final stop keeps the existing restore behavior.
+upgrade_case=$(sed -n '/^[[:space:]]*stop-for-upgrade)/,/^[[:space:]]*;;/p' \
+    "$init_script")
+printf '%s\n' "$upgrade_case" |
+    grep -Fq 'stop_service_for_action stop no'
+if printf '%s\n' "$upgrade_case" | grep -Fq 'restore_hwnat_if_safe'; then
+    echo "upgrade stop restores FastNAT between package versions" >&2
+    exit 1
+fi
+
+# Only an attempted daemon start can make a failed rc.func result unsafe.
+# Read-only actions such as status/check must never mutate lifecycle state.
 dispatcher_tail=$(sed -n '/^\. \/opt\/etc\/init.d\/rc.func/,$p' "$init_script")
 printf '%s\n' "$dispatcher_tail" |
     grep -Fq ': > "$FASTNAT_UNSAFE_STOP_FILE"'
+printf '%s\n' "$dispatcher_tail" |
+    grep -Fq '[ "$FASTNAT_DISPATCH_ACTION" = start ]'
 if printf '%s\n' "$dispatcher_tail" |
     grep -Fq 'restore_fastnat_after_failed_start'; then
     echo "post-dispatch startup failure restores FastNAT unsafely" >&2
@@ -347,6 +364,66 @@ fi
 
 grep -Fq 'reapply_netfilter_runtime SIGUSR1' "$init_script"
 grep -Fq 'reapply_netfilter_runtime SIGUSR2' "$init_script"
+
+# prerm may continue after cleanup failed only when the daemon is proven dead.
+# This prevents an old lifecycle bug from stranding a half-removed package,
+# while still refusing to replace a binary which is actually executing.
+prerm_root="$work/prerm"
+mkdir -p "$prerm_root/init.d" "$prerm_root/bin"
+sed "s#/opt/etc/init.d#$prerm_root/init.d#g" "$prerm_script" > \
+    "$prerm_root/prerm"
+cat > "$prerm_root/init.d/S80keen-pbr" <<'EOF'
+#!/bin/sh
+printf 'keen-pbr:%s\n' "$1" >> "$PRERM_TEST_LOG"
+exit "${PRERM_TEST_STOP_STATUS:-0}"
+EOF
+cat > "$prerm_root/init.d/S79transport-manager" <<'EOF'
+#!/bin/sh
+printf 'transport:%s\n' "$1" >> "$PRERM_TEST_LOG"
+exit 0
+EOF
+cat > "$prerm_root/bin/pidof" <<'EOF'
+#!/bin/sh
+[ "${PRERM_TEST_PID_ALIVE:-no}" = yes ] || exit 1
+printf '%s\n' 4242
+EOF
+chmod +x "$prerm_root/prerm" "$prerm_root/init.d/"* "$prerm_root/bin/pidof"
+
+prerm_log="$prerm_root/actions"
+: > "$prerm_log"
+PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
+    PKG_UPGRADE=1 /bin/sh "$prerm_root/prerm"
+[ "$(sed -n '1p' "$prerm_log")" = 'keen-pbr:stop-for-upgrade' ]
+[ "$(sed -n '2p' "$prerm_log")" = 'transport:stop' ]
+
+: > "$prerm_log"
+PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
+    /bin/sh "$prerm_root/prerm"
+[ "$(sed -n '1p' "$prerm_log")" = 'keen-pbr:stop' ]
+
+: > "$prerm_log"
+PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
+    PKG_UPGRADE=1 PRERM_TEST_STOP_STATUS=1 PRERM_TEST_PID_ALIVE=no \
+    /bin/sh "$prerm_root/prerm"
+[ "$(sed -n '2p' "$prerm_log")" = 'transport:stop' ]
+
+: > "$prerm_log"
+if PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
+    PKG_UPGRADE=1 PRERM_TEST_STOP_STATUS=1 PRERM_TEST_PID_ALIVE=yes \
+    /bin/sh "$prerm_root/prerm"; then
+    echo "prerm replaced a running keen-pbr binary" >&2
+    exit 1
+fi
+[ "$(wc -l < "$prerm_log" | tr -d ' ')" = 1 ]
+
+: > "$prerm_log"
+if PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
+    PRERM_TEST_STOP_STATUS=1 PRERM_TEST_PID_ALIVE=no \
+    /bin/sh "$prerm_root/prerm"; then
+    echo "final uninstall ignored failed lifecycle cleanup" >&2
+    exit 1
+fi
+[ "$(wc -l < "$prerm_log" | tr -d ' ')" = 1 ]
 
 # Keenetic's firmware /bin/sh accepts scripts but does not expose the optional
 # POSIX -n parser mode. Keep the syntax assertion where the shell supports it,
