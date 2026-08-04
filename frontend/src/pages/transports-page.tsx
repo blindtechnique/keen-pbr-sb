@@ -921,7 +921,12 @@ export function TransportsPage() {
         </div>
       ) : null}
 
-      <div className="grid items-start gap-4 lg:grid-cols-2">
+      {/* Один столбец, а не два. Карточки здесь и так одной высоты, рваных
+          рядов не было — но семь карточек по 120px это 840px вертикали на имя,
+          протокол, флаг, статус и задержку. И главное: в двух колонках задержки
+          стоят в разных местах, и «какой туннель быстрее» решается
+          перечитыванием. В строку они встают друг под друга. */}
+      <div className="grid items-start gap-2">
         {visibleItems.map((item) => {
           const boundOutbound = interfaceOutboundByInterface.get(item.interface)
           const configuredSpec = configuredByTag.get(item.tag)
@@ -939,7 +944,7 @@ export function TransportsPage() {
               key={item.tag}
               size="sm"
             >
-              <CardHeader className="min-w-0 max-sm:grid-cols-1">
+              <CardHeader className="min-w-0 gap-x-4 max-sm:grid-cols-1 sm:grid-cols-[minmax(0,18rem)_8rem_minmax(0,1fr)_auto]! sm:items-center">
                 <div className="min-w-0">
                   <CardTitle
                     className="leading-5 tracking-normal break-words"
@@ -954,6 +959,50 @@ export function TransportsPage() {
                     )}
                     protocol={item.protocol || item.type}
                   />
+                  {/* Интерфейс подписью — только когда он отличается от имени.
+                      У транспортов прошивки имя и интерфейс расходятся всегда,
+                      у sing-box обычно совпадают. */}
+                  {item.interface &&
+                  item.interface.trim().toLocaleLowerCase() !==
+                    displayName.trim().toLocaleLowerCase() ? (
+                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                      {t("pages.outbounds.interfaceSubline", {
+                        name: item.interface,
+                      })}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="min-w-0 max-sm:hidden">
+                  <TransportLatencyPill
+                    onRefresh={() => refreshLatency(item.interface)}
+                    probe={probeByInterface.get(item.interface)}
+                    refreshing={latencyRefreshPending(item.interface)}
+                    runtimeMilliseconds={transportLatencyByInterface.get(
+                      item.interface
+                    )}
+                  />
+                </div>
+                {/* Кто на этом транспорте держится. Тот же вопрос «можно ли это
+                    удалить», который на маршрутах оказался самой полезной
+                    колонкой; здесь его не было вовсе. */}
+                <div className="min-w-0 text-xs max-sm:hidden">
+                  {boundOutbound ? (
+                    <span className="inline-flex min-w-0 items-center gap-1.5">
+                      <span className="text-muted-foreground">
+                        {t("transports.usedBy")}
+                      </span>
+                      <Badge className="min-w-0" size="xs" variant="outline">
+                        <span className="truncate">
+                          {boundOutbound.display_name?.trim() ||
+                            boundOutbound.tag}
+                        </span>
+                      </Badge>
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      {t("transports.usedByNone")}
+                    </span>
+                  )}
                 </div>
                 <CardAction className="flex items-center gap-1 max-sm:col-start-1 max-sm:row-start-auto max-sm:w-full max-sm:justify-self-stretch">
                   <KeeneticStatus
@@ -1028,18 +1077,18 @@ export function TransportsPage() {
                   </Button>
                 </CardAction>
               </CardHeader>
-              {item.state === "up" ? (
-                <div className="flex min-h-7 items-center px-3">
-                  <TransportLatencyPill
-                    onRefresh={() => refreshLatency(item.interface)}
-                    probe={probeByInterface.get(item.interface)}
-                    refreshing={latencyRefreshPending(item.interface)}
-                    runtimeMilliseconds={transportLatencyByInterface.get(
-                      item.interface
-                    )}
-                  />
-                </div>
-              ) : null}
+              {/* Задержка на телефоне остаётся отдельной строкой: в ряд с
+                  именем и переключателем она там не помещается. */}
+              <div className="flex min-h-7 items-center px-3 sm:hidden">
+                <TransportLatencyPill
+                  onRefresh={() => refreshLatency(item.interface)}
+                  probe={probeByInterface.get(item.interface)}
+                  refreshing={latencyRefreshPending(item.interface)}
+                  runtimeMilliseconds={transportLatencyByInterface.get(
+                    item.interface
+                  )}
+                />
+              </div>
               <CardContent
                 className={cn(
                   "flex min-w-0 flex-1 flex-col gap-1.5 text-sm",

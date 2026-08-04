@@ -603,8 +603,10 @@ export const enTranslation = {
       bindOutbound: "Create route",
       alreadyBound: "Already linked to “{{tag}}”",
     },
+    usedBy: "Used by:",
+    usedByNone: "Not bound to a route",
     states: {
-      connected: "Connected",
+      connected: "Running",
       down: "Down",
       starting: "Starting",
       up: "Up",
