@@ -76,7 +76,10 @@ assert_no_calls() {
     }
 }
 
-printf '%s\n' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+# Real Keenetic sysctl pseudo-files can expose a valid value without a final
+# newline. BusyBox read returns failure at EOF in that case even though it has
+# assigned the value; startup must still snapshot and disable FastNAT.
+printf '%s' 1 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
 : > "$calls"
 original_umask=$(umask)
 disable_hwnat
@@ -103,7 +106,7 @@ assert_calls_contain 'net.ipv4.netfilter.ip_conntrack_fastnat=0'
 assert_calls_contain 'net.netfilter.nf_conntrack_fastnat=0'
 
 # Healthy steady state is a true no-op: no repeated sysctl writes or logs.
-printf '%s\n' 0 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
+printf '%s' 0 > "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat"
 : > "$calls"
 ensure_fastnat_disabled
 assert_no_calls
@@ -345,4 +348,9 @@ fi
 grep -Fq 'reapply_netfilter_runtime SIGUSR1' "$init_script"
 grep -Fq 'reapply_netfilter_runtime SIGUSR2' "$init_script"
 
-/bin/sh -n "$init_script"
+# Keenetic's firmware /bin/sh accepts scripts but does not expose the optional
+# POSIX -n parser mode. Keep the syntax assertion where the shell supports it,
+# while still allowing this lifecycle test to run on the actual target shell.
+if /bin/sh -n -c ':' >/dev/null 2>&1; then
+    /bin/sh -n "$init_script"
+fi

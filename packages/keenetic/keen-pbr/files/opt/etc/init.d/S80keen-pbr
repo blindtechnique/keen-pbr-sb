@@ -322,7 +322,13 @@ read_fastnat_value() {
         "$FASTNAT_PROC_ROOT/net/netfilter/nf_conntrack_fastnat" \
         "$FASTNAT_PROC_ROOT/net/ipv4/netfilter/ip_conntrack_fastnat"; do
         [ -r "$path" ] || continue
-        read -r value < "$path" || continue
+        value=""
+        # Keenetic sysctl pseudo-files may omit the trailing newline. BusyBox
+        # read still assigns the value in that case, but returns failure at
+        # EOF, so accept a non-empty value before validating it below.
+        if ! IFS= read -r value < "$path"; then
+            [ -n "$value" ] || continue
+        fi
         case "$value" in
             0) found=yes ;;
             1) found=yes; enabled=yes ;;
