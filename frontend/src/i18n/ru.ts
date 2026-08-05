@@ -1990,7 +1990,7 @@ export const ruTranslation = {
           "Добавьте правило, чтобы направить подходящий трафик в нужный маршрут.",
       },
       headers: {
-        enabled: "Включено",
+        enabled: "Вкл",
         order: "Порядок",
         orderShort: "№",
         name: "Название",
@@ -2427,7 +2427,7 @@ export const ruTranslation = {
           "Правил пока нет - добавьте правило, чтобы направлять DNS-запросы по спискам через выбранный сервер.",
       },
       headers: {
-        enabled: "Включено",
+        enabled: "Вкл",
         name: "Название",
         criteria: "Условие",
         serverTag: "DNS-сервер",

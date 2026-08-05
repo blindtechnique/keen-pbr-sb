@@ -354,7 +354,14 @@ export function DataTable({
                           }}
                         />
                       </div>
-                    ) : headerIndex < leadingColumns ? (
+                    ) : headerIndex < leadingColumns ||
+                      headerIndex === lastColumnIndex ? (
+                      // Колонка действий заголовка не показывает — в
+                      // конфигураторе он там пустой. Слово «Действия» ничего не
+                      // добавляло: под ним и так стоят понятные значки, а
+                      // колонка узкая, и подпись в ней шире содержимого.
+                      // Скринридеру заголовок при этом остаётся: без него
+                      // ячейка в таблице теряет имя.
                       <span className="sr-only">{header}</span>
                     ) : (
                       header

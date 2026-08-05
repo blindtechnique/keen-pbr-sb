@@ -7,7 +7,6 @@ import {
   ExternalLinkIcon,
   FilePlusIcon,
   LoaderCircleIcon,
-  PencilIcon,
   PlayIcon,
   RefreshCwIcon,
   RotateCcwIcon,
@@ -19,6 +18,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
@@ -1420,7 +1420,9 @@ function StrategiesEditor({
       {customConfig ? (
         <Alert>
           <AlertTitle>{t("nfqws.customConfigTitle")}</AlertTitle>
-          <AlertDescription>{t("nfqws.customConfigDescription")}</AlertDescription>
+          <AlertDescription>
+            {t("nfqws.customConfigDescription")}
+          </AlertDescription>
         </Alert>
       ) : null}
 
@@ -1522,7 +1524,7 @@ function StrategiesEditor({
                   title={t("nfqws.editStrategy")}
                   variant="ghost"
                 >
-                  <PencilIcon className="size-4" />
+                  <KeenPencilIcon className="size-4" />
                 </Button>
                 <Button
                   aria-label={t("common.delete")}
@@ -1793,7 +1795,7 @@ function FilesEditor({
                   title={t("nfqws.openFile")}
                   variant="ghost"
                 >
-                  <PencilIcon className="size-4" />
+                  <KeenPencilIcon className="size-4" />
                 </Button>
                 {category === "log" ? (
                   <Button

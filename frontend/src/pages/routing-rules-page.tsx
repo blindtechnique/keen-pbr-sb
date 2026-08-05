@@ -1,4 +1,4 @@
-import { Pencil, Plus, Save, SparklesIcon, Trash2 } from "lucide-react"
+import { Plus, Save, SparklesIcon, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
@@ -13,6 +13,7 @@ import {
 import type { RuntimeOutboundState } from "@/api/generated/model"
 import { useGetConfig, useGetRuntimeOutbounds } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -453,7 +454,7 @@ function RoutingRulesEditor({
                         size="icon"
                         variant="ghost"
                       >
-                        <Pencil className="size-4" />
+                        <KeenPencilIcon className="size-4" />
                       </Button>
                     </span>
                   </div>
@@ -577,7 +578,7 @@ function RoutingRulesEditor({
                   actions={[
                     {
                       disabled: configMutationPending || rulesSession.isDirty,
-                      icon: <Pencil className="h-4 w-4" />,
+                      icon: <KeenPencilIcon className="h-4 w-4" />,
                       label: t("common.edit"),
                       onClick: () =>
                         navigate(

@@ -1,4 +1,4 @@
-import { ArrowRight, Pencil, Plus, RotateCw, Trash2 } from "lucide-react"
+import { ArrowRight, Plus, RotateCw, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -23,6 +23,7 @@ import {
   useGetRuntimeOutbounds,
 } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -396,7 +397,7 @@ export function OutboundsPage({
               onClick: () => probeMutation.mutate(),
             },
             {
-              icon: <Pencil className="h-4 w-4" />,
+              icon: <KeenPencilIcon className="h-4 w-4" />,
               label: t("common.edit"),
               onClick: () => navigate(`/outbounds/${item.id}/edit`),
             },

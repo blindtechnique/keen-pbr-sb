@@ -1194,3 +1194,25 @@ html:not(.dark)
   box-shadow: 0 0 0 1000px var(--card) inset !important;
   transition: background-color 9999s ease-out 0s;
 }
+
+/* Действия строки таблицы появляются под курсором — как в конфигураторе.
+ *
+ * В прошивке ячейка с карандашом стоит `visibility: hidden` и становится
+ * видимой при наведении на строку; переход нулевой, значок просто появляется.
+ * Здесь то же самое, но под media-условием: правило включается только там,
+ * где курсор вообще есть. На телефоне наведения не бывает, и спрятанная
+ * кнопка означала бы недоступное действие, поэтому там она видна всегда.
+ *
+ * `:focus-within` — чтобы кнопка не пропадала при переходе к ней с клавиатуры:
+ * фокус без наведения иначе оказывался бы на невидимом элементе.
+ */
+@media (hover: hover) and (pointer: fine) {
+  [data-slot="table-row"] .keen-row-actions {
+    visibility: hidden;
+  }
+
+  [data-slot="table-row"]:hover .keen-row-actions,
+  [data-slot="table-row"]:focus-within .keen-row-actions {
+    visibility: visible;
+  }
+}

@@ -1967,7 +1967,7 @@ export const enTranslation = {
           "Add a routing rule to direct matching traffic to a route.",
       },
       headers: {
-        enabled: "Enabled",
+        enabled: "On",
         order: "Order",
         orderShort: "#",
         name: "Name",
@@ -2392,7 +2392,7 @@ export const enTranslation = {
           "No rules yet - add a rule to route DNS lookups for specific lists through a chosen server.",
       },
       headers: {
-        enabled: "Enabled",
+        enabled: "On",
         name: "Name",
         criteria: "Match",
         serverTag: "DNS server",

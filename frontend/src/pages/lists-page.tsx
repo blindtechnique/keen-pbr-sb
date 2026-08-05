@@ -1,12 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query"
-import {
-  ArrowRight,
-  ExternalLink,
-  Pencil,
-  Plus,
-  RefreshCw,
-  Trash2,
-} from "lucide-react"
+import { ArrowRight, ExternalLink, Plus, RefreshCw, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -32,6 +25,7 @@ import {
   selectConfigRevision,
   selectListRefreshState,
 } from "@/api/selectors"
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -642,7 +636,7 @@ export function ListsPage() {
                       variant="ghost"
                       aria-label={t("common.edit")}
                     >
-                      <Pencil />
+                      <KeenPencilIcon />
                     </Button>
                   </div>
                 </div>
@@ -748,7 +742,7 @@ export function ListsPage() {
                       : []),
                     {
                       disabled: configMutationPending,
-                      icon: <Pencil className="h-4 w-4" />,
+                      icon: <KeenPencilIcon className="h-4 w-4" />,
                       label: t("common.edit"),
                       onClick: () => navigate(`/lists/${list.id}/edit`),
                     },

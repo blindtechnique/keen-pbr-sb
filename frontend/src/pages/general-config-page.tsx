@@ -489,7 +489,8 @@ function LoadedGeneralConfigPage({
             <FieldGroup>
               <form.Field name={SETTINGS_FIELD_NAMES.strictEnforcement}>
                 {(field) => (
-                  <Field width="short"
+                  <Field
+                    width="short"
                     className={activeTab === "general" ? undefined : "hidden"}
                   >
                     <FieldLabel>

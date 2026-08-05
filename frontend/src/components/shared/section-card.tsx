@@ -34,7 +34,15 @@ export function SectionCard({
     <Card
       id={id}
       className={cn(
-        flat && "gap-4 rounded-none border-0 bg-transparent p-0 shadow-none",
+        // `overflow-visible` здесь не косметика. У карточки в основе стоит
+        // `overflow-hidden` — он обрезает скруглённые углы у картинок и таблиц
+        // внутри. Плоский вариант убирает поля (`p-0`), и граница карточки
+        // совпадает с границей содержимого: обрезаться начинает всё, что поле
+        // рисует за своими пределами. Кольцо фокуса — это `box-shadow` в 3 px,
+        // поэтому у полей внутри такого раздела оно пропадало слева, где
+        // запаса не было, и оставалось справа, где место ещё было.
+        flat &&
+          "gap-4 overflow-visible rounded-none border-0 bg-transparent p-0 shadow-none",
         className
       )}
     >

@@ -1,4 +1,4 @@
-import { ArrowRight, Pencil, Plus, Save, Trash2 } from "lucide-react"
+import { ArrowRight, Plus, Save, Trash2 } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -14,6 +14,7 @@ import {
   usePostConfigMutation,
 } from "@/api/mutations"
 import { useGetConfig } from "@/api/queries"
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -339,7 +340,7 @@ function DnsServersEditor({
                 actions={[
                   {
                     disabled: configMutationPending || fallbackSession.isDirty,
-                    icon: <Pencil className="h-4 w-4" />,
+                    icon: <KeenPencilIcon className="h-4 w-4" />,
                     label: t("common.edit"),
                     onClick: () =>
                       navigate(

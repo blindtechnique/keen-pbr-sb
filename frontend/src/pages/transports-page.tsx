@@ -1,6 +1,5 @@
 import {
   ChevronDownIcon,
-  PencilIcon,
   PlusIcon,
   FolderInputIcon,
   FolderOutputIcon,
@@ -50,6 +49,7 @@ import {
   useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
+import { KeenPencilIcon } from "@/components/shared/keen-icons"
 import { DataTable } from "@/components/shared/data-table"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
@@ -1514,7 +1514,12 @@ function UsedByCell({ tag }: { readonly tag?: string }) {
   }
 
   return (
-    <Badge className="min-w-0 max-w-full" size="xs" title={tag} variant="outline">
+    <Badge
+      className="max-w-full min-w-0"
+      size="xs"
+      title={tag}
+      variant="outline"
+    >
       <span className="truncate">{tag}</span>
     </Badge>
   )
@@ -1552,7 +1557,7 @@ function RowActions({
 }) {
   return (
     <span className="flex items-center justify-end gap-1">
-      <span className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/row:opacity-100 [@media(hover:none)]:opacity-100">
+      <span className="flex items-center gap-1 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
         <Button
           aria-label={editTitle}
           className="size-8"
@@ -1562,11 +1567,14 @@ function RowActions({
           title={editTitle}
           variant="ghost"
         >
-          <PencilIcon className="size-4" />
+          <KeenPencilIcon className="size-4" />
         </Button>
         <Button
           aria-label={deleteTitle}
-          className={cn("size-8", !deleteDisabled && "text-destructive hover:text-destructive")}
+          className={cn(
+            "size-8",
+            !deleteDisabled && "text-destructive hover:text-destructive"
+          )}
           disabled={deleteDisabled}
           onClick={onDelete}
           size="icon"
@@ -1586,7 +1594,10 @@ function RowActions({
         variant="ghost"
       >
         <ChevronDownIcon
-          className={cn("size-4 transition-transform", expanded && "rotate-180")}
+          className={cn(
+            "size-4 transition-transform",
+            expanded && "rotate-180"
+          )}
         />
       </Button>
     </span>
