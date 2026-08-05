@@ -144,7 +144,12 @@ export function InterfacePicker({
         {shouldRenderPopup ? (
           <Autocomplete.Portal>
             <Autocomplete.Positioner className="z-50" sideOffset={4}>
-              <Autocomplete.Popup className="max-h-60 w-[var(--anchor-width)] min-w-72 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md outline-hidden">
+              {/* Тень как у обычного select. Была `shadow-md` — заметно слабее,
+                  и белый список поверх белой формы читался не как слой над
+                  ней: он полностью закрывает соседние «Шлюз (IPv4)» и «Шлюз
+                  (IPv6)», а их подписи торчат снизу, и это выглядит как
+                  обрезанная форма, а не как раскрытый список. */}
+              <Autocomplete.Popup className="max-h-60 w-[var(--anchor-width)] min-w-72 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl outline-hidden">
                 {pickerItems.length > 0 ? (
                   <Autocomplete.List className="max-h-56 overflow-y-auto">
                     {(item: InterfacePickerItem, index) => (
