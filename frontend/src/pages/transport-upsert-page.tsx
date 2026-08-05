@@ -139,8 +139,8 @@ export function TransportUpsertPage({
             {t("transports.form.loadErrorDescription")}
           </AlertDescription>
         </Alert>
-        <div className="mt-4 flex justify-end gap-3">
-          <Button onClick={close} type="button" variant="outline">
+        <div className="mt-4 flex justify-end gap-3" data-upsert-actions>
+          <Button onClick={close} size="xl" type="button" variant="outline">
             {t("transports.form.back")}
           </Button>
           <Button
@@ -151,6 +151,7 @@ export function TransportUpsertPage({
                 environmentQuery.refetch(),
               ])
             }}
+            size="xl"
             type="button"
           >
             {t("common.retry")}
@@ -189,8 +190,8 @@ export function TransportUpsertPage({
         presentation={presentation}
         title={title}
       >
-        <div className="flex justify-end">
-          <Button onClick={close} variant="outline">
+        <div className="flex justify-end" data-upsert-actions>
+          <Button onClick={close} size="xl" variant="outline">
             {t("transports.form.back")}
           </Button>
         </div>

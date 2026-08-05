@@ -36,6 +36,154 @@ export const enTranslation = {
     closeResult: "Close message",
     rollback: "Roll back configuration",
     rollbackCompleted: "The configuration was restored from backup.",
+    customConfigTitle: "A custom configuration is running",
+    customConfigDescription:
+      "The active nfqws2.conf matches none of the strategies in the list - that happens after editing it on the Settings tab or over ssh. Save it as a strategy, or the first Apply will overwrite it for good.",
+    snapshotActive: "Save the current one as a strategy",
+    snapshotActiveDescription:
+      "The whole active nfqws2.conf becomes a new strategy - with every setting, port and argument it currently holds.",
+    applyConfirmTitle: "Apply the strategy?",
+    applyDescription:
+      "The strategy \u201c{{name}}\u201d replaces nfqws2.conf entirely and the service restarts. Along with the bypass arguments this also changes what the Settings tab shows: interface, ports, policy.",
+    applyOverCustomDescription:
+      "The strategy \u201c{{name}}\u201d replaces nfqws2.conf entirely. What is there now is a custom configuration saved in no strategy - once applied, it cannot be brought back. Save it first with \u201cSave the current one as a strategy\u201d.",
+    strategyHeaders: {
+      name: "Strategy",
+      origin: "Origin",
+      state: "State",
+      actions: "Actions",
+    },
+    strategyOrigin: {
+      builtin: "Bundled",
+      custom: "Yours",
+      overridden: "Bundled, edited",
+      draft: "Draft, not saved",
+    },
+    strategyState: {
+      active: "Applied",
+      inactive: "Not applied",
+    },
+    strategiesEmptyTitle: "No strategies yet",
+    strategiesEmpty:
+      "A strategy is a set of bypass parameters. Add your own, or update nfqws2 to get the bundled ones.",
+    strategyEditorTitle: "Editing: {{name}}",
+    strategyEditorDescription:
+      "Each line is a set of nfqws arguments for one kind of traffic. Save writes the strategy to disk; Apply also restarts the service with it.",
+    strategyNameDescription:
+      "The name is only for you - it changes nothing except how the strategy is listed.",
+    strategySaveBeforeApply: "Save the strategy first",
+    editStrategy: "Open for editing",
+    restoreBuiltin: "Restore the bundled one",
+    restoreBuiltinDescription:
+      "Your edits to \u201c{{name}}\u201d will be dropped and the strategy will return to the version shipped with nfqws2.",
+    deleteStrategyTitle: "Delete the strategy?",
+    deleteStrategyDescription:
+      "The strategy \u201c{{name}}\u201d will be deleted. If it is currently applied, the service keeps running with the old parameters until it restarts.",
+    fileHeaders: {
+      name: "File",
+      size: "Size",
+      actions: "Actions",
+    },
+    fileSections: {
+      lists:
+        "Domains and addresses nfqws2 applies the bypass to. One file is one list; strategies reference it by name.",
+      lua: "Lua scripts that extend how nfqws2 parses traffic. Rarely needed, and only if you know what you are doing.",
+      logs: "What the service recorded about its work. Readable, not editable.",
+    },
+    fileEmpty: {
+      lists:
+        "Lists decide which traffic the bypass applies to. Create the first one - a list of domains, for example.",
+      lua: "Scripts are not needed for normal operation. Create one only if a strategy references such a file.",
+      logs: "The service has not written anything yet.",
+    },
+    fileEmptyTitle: "No files yet",
+    fileEditorTitle: "Editing: {{name}}",
+    fileDraftBadge: "unsaved",
+    fileNotRemovable: "nfqws2 needs this file; it cannot be deleted",
+    openFile: "Open",
+    fileNameDescription: {
+      lists: "The .list extension is added for you if you leave it out.",
+      lua: "The .lua extension is added for you if you leave it out.",
+      logs: "",
+    },
+    deleteFileTitle: "Delete the file?",
+    deleteFileDescription:
+      "The file \u201c{{name}}\u201d will be removed from the router. Strategies that reference it will stop finding their list.",
+    clearLogDescription:
+      "The contents of \u201c{{name}}\u201d will be erased. The service keeps writing to the same file.",
+    groups: {
+      scope: "Which traffic to apply to",
+      scopeDescription:
+        "Which interface the traffic goes through, which ports to inspect, and which devices this works for.",
+      bypass: "How to bypass the block",
+      bypassDescription:
+        "nfqws arguments for each kind of traffic. These normally come from a ready-made strategy rather than being typed by hand.",
+      other: "Other",
+      otherDescription: "Settings you need while troubleshooting.",
+    },
+    modes: {
+      MODE_AUTO: "Automatic - by lists, or to all traffic when there are none",
+      MODE_LIST: "By lists only",
+      MODE_ALL: "To all traffic",
+    },
+    fields: {
+      ISP_INTERFACE: {
+        label: "ISP interface",
+        hint: "The interface the router uses to reach the internet. Leave empty and nfqws2 figures it out.",
+      },
+      TCP_PORTS: {
+        label: "TCP ports",
+        hint: "Ports whose traffic to inspect. 80 and 443 are ordinary web; add others only if you know why.",
+      },
+      UDP_PORTS: {
+        label: "UDP ports",
+        hint: "The same for UDP. 443 is QUIC - YouTube and other Google services.",
+      },
+      POLICY_NAME: {
+        label: "KeeneticOS policy",
+        hint: "Name of the Keenetic access policy whose devices the bypass applies to. Empty means everyone.",
+      },
+      POLICY_EXCLUDE: {
+        label: "Invert: exclude this policy",
+        hint: "The bypass works for everyone except the devices of that policy.",
+      },
+      IPV6_ENABLED: {
+        label: "Handle IPv6",
+        hint: "Turn on if your ISP hands out IPv6 and part of the traffic goes over it.",
+      },
+      LOG_LEVEL: {
+        label: "Verbose log",
+        hint: "The service records more detail. Useful while troubleshooting, otherwise it just takes space.",
+      },
+      NFQWS_EXTRA_ARGS: {
+        label: "When to apply the bypass",
+        hint: "By lists means only what the list files name. To all traffic loads the router harder.",
+      },
+      NFQWS_BASE_ARGS: {
+        label: "Base arguments",
+        hint: "Shared by every kind of traffic. Usually set by the strategy, not edited by hand.",
+      },
+      NFQWS_ARGS: {
+        label: "Arguments for TCP",
+        hint: "How to bypass blocking of ordinary web traffic - HTTP and HTTPS.",
+      },
+      NFQWS_ARGS_QUIC: {
+        label: "Arguments for QUIC",
+        hint: "QUIC is UDP on port 443: YouTube and other Google services.",
+      },
+      NFQWS_ARGS_UDP: {
+        label: "Arguments for the rest of UDP",
+        hint: "Everything on UDP other than QUIC: games, voice, some VPNs.",
+      },
+      NFQWS_ARGS_CUSTOM: {
+        label: "Your own arguments",
+        hint: "Appended to the rest. The place for what you worked out yourself.",
+      },
+      NFQWS_ARGS_IPSET: {
+        label: "Arguments for ipset addresses",
+        hint: "Applied to traffic going to IP addresses from an ipset, rather than by domain.",
+      },
+    },
     tabs: {
       ariaLabel: "nfqws2 sections",
       settings: "Settings",
@@ -154,15 +302,28 @@ export const enTranslation = {
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
   },
   common: {
+    // Labels of shared interface primitives. They used to be hardcoded in
+    // English inside components/ui/*, so a Russian user saw "Close" on the
+    // dialog close button.
+    chrome: {
+      sidebar: "Sidebar",
+      toggleSidebar: "Collapse or expand the menu",
+      closeDialog: "Close dialog",
+      closePanel: "Close panel",
+      close: "Close",
+      skipToContent: "Skip to content",
+    },
     help: {
       about: "About this section",
     },
     moreControls: "More",
+    loading: "Loading the page",
     tableSearch: {
       clear: "Clear search",
       results: "Found {{count}} of {{total}}",
       empty: "Nothing matches. Change the query or clear the search.",
     },
+    setupFromCatalog: "Set up from the catalogue",
     retry: "Try again",
     updateStatus: {
       available: "Update available",
@@ -172,6 +333,8 @@ export const enTranslation = {
     },
     dependencies: {
       title: "Depends on this: {{count}}",
+      more: "{{count}} more",
+      collapse: "Collapse",
       none: "Nothing depends on this - deleting it breaks nothing",
       kind: {
         routingRule: "Routing rules:",
@@ -180,6 +343,11 @@ export const enTranslation = {
         failoverGroup: "Failover:",
         list: "Lists:",
         listRefresh: "URL list refresh:",
+      },
+      brokenReference: {
+        missingList: "{{owner}} → list {{target}}",
+        listDetour: "List {{list}} → {{target}}",
+        listRefresh: "URL list updates → {{target}}",
       },
     },
     listRefreshRoute: {
@@ -306,6 +474,8 @@ export const enTranslation = {
       settings: "Settings",
       outbounds: "Routes and failover",
       transports: "Tunnels and proxies",
+      routesAndTunnels: "Routes and tunnels",
+      rules: "Rules",
       connections: "Connections",
       dnsServers: "DNS Servers",
       lists: "Lists",
@@ -331,6 +501,7 @@ export const enTranslation = {
     deviceCount: "{{count}} devices",
     routeDirect: "Direct",
     empty: "No connections",
+    emptyTitle: "No active connections",
     title: "Connections",
     description:
       "Active connections and up to 1,500 recent records. DNS traffic observed by keen-pbr adds the last known domain next to the exact IP. Data refreshes every 3 seconds.",
@@ -386,10 +557,24 @@ export const enTranslation = {
       other: "Other",
       ariaLabel: "Tunnel and proxy types",
     },
+    headers: {
+      name: "Name",
+      state: "State",
+      latency: "Latency",
+      usedBy: "Used by",
+      actions: "Actions",
+    },
+    groups: {
+      managed: "keen-pbr-sb tunnels and proxies",
+      native: "KeeneticOS interfaces",
+      nativeDescription:
+        "Created by the router firmware. keen-pbr-sb only shows them: starting, restarting or deleting such an interface happens in the Keenetic web configurator. Here you can point a route at it.",
+    },
     refresh: "Refresh",
     add: "Add tunnel or proxy",
     unavailable: "Tunnel and proxy manager unavailable",
     empty: "No tunnels or proxies configured.",
+    emptyTitle: "No tunnels or proxies yet",
     processMode: {
       action: "sing-box mode",
       unavailable:
@@ -419,6 +604,7 @@ export const enTranslation = {
     server: "Server",
     connection: "Connection",
     technicalTag: "Technical tag",
+    interfaceName: "Interface name",
     pathConfidence: "Detection source",
     details: {
       show: "Show details",
@@ -451,6 +637,7 @@ export const enTranslation = {
       "This native interface is managed by KeeneticOS or another service.",
     nativeInterface: {
       keeneticOwner: "Managed by KeeneticOS",
+      managedByFirmware: "This interface is managed by KeeneticOS",
       logicalName: "Keenetic interface",
       kernelName: "System interface",
       protocol: "Protocol",
@@ -462,6 +649,7 @@ export const enTranslation = {
       liveUp: "Present and enabled",
       liveDown: "Present but disabled",
       liveUnavailable: "Not found in the kernel inventory",
+      liveUnavailableShort: "No data",
       connectedState: "Connection",
       connected: "Connected",
       disconnected: "Disconnected",
@@ -698,7 +886,7 @@ export const enTranslation = {
         description: "A routing, DNS, or service health check has failed.",
       },
       routing: "Routing",
-      configuration: "{{lists}} lists · {{rules}} rules",
+      configuration: "Lists: {{lists}} · Rules: {{rules}}",
       draft: "Unsaved draft",
       attention: {
         ariaLabel: "Sections requiring attention",
@@ -779,6 +967,21 @@ export const enTranslation = {
         restart: "Restart",
       },
     },
+    routeTraffic: {
+      title: "Where the traffic goes",
+      description:
+        "Share of bytes received and sent per route since its interface came up. This is not a daily total: the panel keeps no persistent accounting.",
+      total: "Total",
+      rest: "Others",
+      idle: "Route interfaces are up, but no traffic has passed through them yet.",
+      unavailable:
+        "Traffic counters are not available for the route interfaces.",
+      loadErrorTitle: "Unable to load traffic counters",
+      loadErrorDescription:
+        "The dashboard could not read the current interface inventory.",
+      idleCounters: "Routes with no traffic yet: {{count}}.",
+      unavailableCounters: "Routes without available counters: {{count}}.",
+    },
     outbounds: {
       liveTraffic: "Traffic through used tunnels and proxies",
       trafficCountersHint:
@@ -793,7 +996,7 @@ export const enTranslation = {
         direct: "Direct - {{count}}",
         blocked: "Blocked - {{count}}",
       },
-      listCount: "{{count}} lists",
+      listCount: "Lists: {{count}}",
       idleSummary: "Unused — {{count}}",
       idleNames: "{{names}} — all healthy",
       hint: {
@@ -810,7 +1013,7 @@ export const enTranslation = {
       activeMember: "Active: {{name}}",
       issue: {
         interfaceUnreachable:
-          "The interface is unreachable from the main routing table",
+          "The tunnel is not up, so the system has nowhere to send traffic through it. Usually that means the transport is stopped or still starting.",
         routeMissing: "No active route is installed",
         selectionMismatch: "The selected route does not match the active route",
         probeTimeout: "The availability check timed out",
@@ -997,15 +1200,30 @@ export const enTranslation = {
     },
   },
   pages: {
+    backup: {
+      title: "Backup",
+      description:
+        "Pick what to include and download a single keen-pbr-sb configuration file.",
+      sectionTitle: "What goes in",
+      sectionDescription: "Choose the sections to save.",
+    },
+    restore: {
+      title: "Restore",
+      description:
+        "Restore selected groups from a file, or roll back the last change.",
+      sectionTitle: "Restore source",
+      sectionDescription:
+        "Choose a saved copy or the last automatically saved state.",
+    },
     catalog: {
-      routeRuleName: "Catalog: {{count}} lists",
+      routeRuleName: "Catalog — lists: {{count}}",
       title: "List catalogue",
       description:
         "Ready-made sets of domains and rules. Pick the ones you want and say where their traffic should go.",
       categoriesAriaLabel: "Catalog categories",
       source: "Source:",
       updatedAt: "updated {{date}}",
-      count: "{{count}} lists",
+      count: "lists: {{count}}",
       downloadVia: "Download via",
       directly: "Directly",
       checkNow: "Check now",
@@ -1014,6 +1232,7 @@ export const enTranslation = {
         "Could not refresh; showing the previous catalogue. Try downloading through a tunnel.",
       searchPlaceholder: "Search by name",
       empty: "Nothing found",
+      emptyTitle: "Nothing matched",
       ruleSet: "rule set",
       domains: "{{count}} domains",
       cidrs: "{{count}} CIDRs",
@@ -1022,6 +1241,7 @@ export const enTranslation = {
       actionBlock: "block",
       alreadyAdded: "already added",
       selected: "Selected: {{count}}",
+      addTunnel: "Add a tunnel",
       routeTo: "Route to",
       blockSelected: "The selected lists will be blocked",
       mixedSelection: "Routing and blocking lists must be added separately.",
@@ -1051,6 +1271,7 @@ export const enTranslation = {
       },
       refreshState: {
         success: "Succeeded: {{date}}",
+        successVia: "Succeeded: {{date}} · via {{detour}}",
         attempt: "Last attempt: {{date}}",
         attemptVia: "Last attempt: {{date}} · via {{detour}}",
         error: "Error: {{message}}",
@@ -1158,6 +1379,46 @@ export const enTranslation = {
           "Create a selective backup or restore keen-pbr-sb settings from a previously saved file.",
         create: "Create backup",
         restore: "Restore from backup",
+        groups: {
+          general: "General settings",
+          transports: "Tunnels and proxies",
+          outbounds: "Routes and failover",
+          dns: "DNS settings",
+          routing: "Lists and routing rules",
+          nfqws_config: "nfqws2 configuration",
+          nfqws_lists: "nfqws2 lists",
+        },
+        dialog: {
+          backupTitle: "Backup",
+          backupDescription:
+            "Pick the data and download a single keen-pbr-sb configuration file.",
+          restoreTitle: "Restore",
+          restoreDescription:
+            "Restore the selected groups from a file, or roll back the last change.",
+        },
+        secretsWarning:
+          "If tunnels and proxies are selected, the file contains their UUIDs, passwords and keys in plain text. Keep the copy somewhere safe and do not pass it on.",
+        validationNote:
+          "The configuration is validated before it is written and applied only after the check passes.",
+        createButton: "Create and download",
+        createPending: "Creating\u2026",
+        created: "Backup created",
+        createFailed: "Could not create the backup",
+        readFailed: "Could not read the backup",
+        restored: "Configuration restored",
+        rolledBack: "Rolled back",
+        actionFailed: "The operation did not complete",
+        confirmRestore: "Restore \u201c{{filename}}\u201d?",
+        confirmRollback: "Roll the configuration back?",
+        restoreHint:
+          "A rollback copy is created automatically before the change.",
+        rollbackHint:
+          "The state from before the last update or restore will be brought back.",
+        cancel: "Cancel",
+        confirm: "Confirm",
+        confirmPending: "Working\u2026",
+        rollbackButton: "One-click rollback",
+        chooseFile: "Choose a backup file",
       },
       remoteAccess: {
         title: "Access from outside",
@@ -1333,8 +1594,8 @@ export const enTranslation = {
         internalVpnServersConfirmationAction: "Confirm VPN server",
         internalVpnServersProcessLabel: "Through keen-pbr-sb",
         internalVpnServersInheritLabel: "Inherit",
-        internalVpnServersStatusUp: "UP",
-        internalVpnServersStatusDown: "DOWN",
+        internalVpnServersStatusUp: "Enabled",
+        internalVpnServersStatusDown: "Disabled",
         internalVpnServersStatusMissing: "Missing",
         internalVpnServersStatusUnknown: "Unknown",
         internalVpnServersMissingHint:
@@ -1370,6 +1631,13 @@ export const enTranslation = {
           "Check keen-pbr-sb access to NDMS. Saved policies are never removed automatically.",
         internalVpnServicesProcessLabel: "Through keen-pbr-sb",
         internalVpnServicesInheritLabel: "Inherit",
+        internalVpnServiceNames: {
+          l2tp: "L2TP/IPsec VPN server",
+          ikev1: "IKEv1/IPsec VPN server",
+          ikev2: "IKEv2/IPsec VPN server",
+          sstp: "SSTP VPN server",
+          openconnect: "OpenConnect VPN server",
+        },
         internalVpnServicesStatusEnabled: "Enabled",
         internalVpnServicesStatusDisabled: "Disabled",
         internalVpnServicesStatusMissing: "Missing",
@@ -1419,6 +1687,18 @@ export const enTranslation = {
           "URL lists currently inheriting this chain: {{count}}.",
       },
       softwareUpdate: {
+        cancel: "Cancel",
+        rollbackConfirmTitle: "Restore the previous keen-pbr-sb version?",
+        rollbackConfirmHint:
+          "The saved IPK and the configuration that came with it will be installed. The current package stays available to roll forward again.",
+        rollbackConfirmAction: "Restore the previous IPK",
+        rollbackButton: "One-click rollback",
+        rollbackUnavailable: "Appears after a successful managed update",
+        rollbackStarting: "Restoring the previous package",
+        rollbackFailed: "Could not start the package rollback",
+        downloadBackupBefore: "Download a backup before installing",
+        progressLabel: "Update progress",
+        inProgress: "Update in progress",
         title: "keen-pbr-sb update",
         description:
           "Checks the latest published Release, verifies SHA256SUMS, and installs the IPK while preserving configuration, tunnel and proxy interfaces, and the web account.",
@@ -1501,6 +1781,13 @@ export const enTranslation = {
       },
     },
     dnsServers: {
+      sections: {
+        servers: {
+          title: "Servers",
+          description:
+            "Who the panel asks for domain addresses. The DNS rules below decide which server is asked about which domain.",
+        },
+      },
       title: "DNS Servers",
       searchPlaceholder: "Search by name, address or route",
       description: "Upstream DNS servers used for domain name resolution.",
@@ -1673,6 +1960,7 @@ export const enTranslation = {
           "Add a routing rule to direct matching traffic to a route.",
       },
       headers: {
+        enabled: "Enabled",
         order: "Order",
         orderShort: "#",
         name: "Name",
@@ -1767,6 +2055,28 @@ export const enTranslation = {
         destinationAddresses: "2001:db8::1 or !203.0.113.0/24",
       },
     },
+    rules: {
+      title: "Rules",
+      description:
+        "Where traffic goes and which DNS servers resolve which domains. A single list usually needs both rules.",
+      tabs: {
+        ariaLabel: "Rule sections",
+        routing: "Routing",
+        dns: "DNS",
+      },
+    },
+    routesAndTunnels: {
+      title: "Routes and tunnels",
+      description:
+        "How traffic leaves the router: tunnels and proxies, router interfaces, failover and system destinations.",
+      tabs: {
+        ariaLabel: "Route and tunnel sections",
+        tunnels: "Tunnels and proxies",
+        interfaces: "Routes",
+        failover: "Failover",
+        system: "System",
+      },
+    },
     outbounds: {
       plain: {
         interface: "Traffic leaves through {{name}}",
@@ -1777,6 +2087,7 @@ export const enTranslation = {
         ignore: "Traffic passes without changing its route",
       },
       interfaceSubline: "interface {{name}}",
+      interfaceMissing: "Interface not found",
       usage: {
         none: "Nothing uses this",
         some: "Lists sent here: {{lists}}, rules: {{rules}}",
@@ -1785,6 +2096,12 @@ export const enTranslation = {
         interfaces: "Tunnels and interfaces",
         failover: "Failover groups",
         system: "System routes",
+      },
+      split: {
+        working: "Working",
+        broken: "Not working: interface not found",
+        brokenDescription:
+          "These routes point at an interface that no longer exists. Traffic will not go through them: the tunnel was deleted or renamed. Open the route and pick an existing interface, or delete the entry.",
       },
       groupsEmpty: {
         interfaces: "No tunnels or interfaces have been added yet.",
@@ -2068,6 +2385,7 @@ export const enTranslation = {
           "No rules yet - add a rule to route DNS lookups for specific lists through a chosen server.",
       },
       headers: {
+        enabled: "Enabled",
         name: "Name",
         criteria: "Match",
         serverTag: "DNS server",
@@ -2219,6 +2537,10 @@ export const enTranslation = {
       technicalId: "Technical ID: {{id}}",
       neverUpdated: "Never updated",
       noStats: "-",
+      statsLoaded: "Downloaded",
+      statsNotLoaded: "Not downloaded",
+      statsNotLoadedFailed:
+        "The last download attempt failed - details are in the line under the list name.",
       source: {
         url: "From a link",
         file: "From a file",

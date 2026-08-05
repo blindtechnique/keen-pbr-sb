@@ -16,17 +16,13 @@ import {
 import { selectConfig } from "@/api/selectors"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty"
-import { Skeleton } from "@/components/ui/skeleton"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
+import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionCard } from "@/components/shared/section-card"
 import { RoutingHealthCard } from "@/components/overview/routing-health-card"
 import { DnsCheckWidget } from "@/components/overview/dns-check-widget"
 import { OutboundStateList } from "@/components/overview/outbound-state-list"
+import { RouteTrafficShareCard } from "@/components/overview/route-traffic-share-card"
 import { ServicesStatusCard } from "@/components/overview/services-status-card"
 import { RouterInfoPanel } from "@/components/overview/router-info-card"
 import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-download-dialog"
@@ -92,6 +88,16 @@ export function OverviewPage() {
       ),
     [runtimeInterfacesQuery.data]
   )
+  const routeTrafficStatus =
+    loadedConfig &&
+    runtimeOutboundsQuery.data?.status === 200 &&
+    runtimeInterfacesQuery.data?.status === 200
+      ? "ready"
+      : configQuery.isError ||
+          runtimeOutboundsQuery.isError ||
+          runtimeInterfacesQuery.isError
+        ? "error"
+        : "loading"
   const configIsDraft =
     configQuery.data?.status === 200 ? configQuery.data.data.is_draft : false
 
@@ -113,7 +119,12 @@ export function OverviewPage() {
   useDocumentTitle(t("nav.items.systemMonitor"))
 
   return (
-    <div className="space-y-3">
+    // 24px между карточками — как в конфигураторе KeeneticOS: там каждая
+    // карточка дашборда лежит в `.ndw-drag-panel__row` с `margin-bottom: 24px`,
+    // а колонки разведены на 12px (`.ndw-drag-panel { gap: normal 12px }`).
+    // Внутри сеток у нас так и было, а между ними стояло 12px, и одинаковые по
+    // сути промежутки читались как разные.
+    <div className="space-y-6">
       <SystemStatusSummary
         configIsDraft={configIsDraft}
         listCount={Object.keys(loadedConfig?.lists ?? {}).length}
@@ -135,7 +146,7 @@ export function OverviewPage() {
         >
           {configQuery.isLoading ? <TableSkeleton /> : null}
           {configQuery.isError || runtimeOutboundsQuery.isError ? (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
+            <Alert variant="destructive">
               <AlertDescription>
                 {t("overview.outbounds.loadError")}
               </AlertDescription>
@@ -143,14 +154,10 @@ export function OverviewPage() {
           ) : null}
           {!configQuery.isLoading &&
           (loadedConfig?.outbounds ?? []).length === 0 ? (
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyTitle>{t("overview.outbounds.emptyTitle")}</EmptyTitle>
-                <EmptyDescription>
-                  {t("overview.outbounds.emptyDescription")}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <ListPlaceholder
+              description={t("overview.outbounds.emptyDescription")}
+              title={t("overview.outbounds.emptyTitle")}
+            />
           ) : null}
           {(loadedConfig?.outbounds ?? []).length > 0 ? (
             <>
@@ -174,11 +181,19 @@ export function OverviewPage() {
           ) : null}
         </SectionCard>
 
-        <div
-          className="scroll-mt-24 xl:col-span-2"
-          id={dashboardSectionIds.service}
-        >
-          <ServicesStatusCard />
+        <div className="space-y-6 xl:col-span-2">
+          <div className="scroll-mt-24" id={dashboardSectionIds.service}>
+            <ServicesStatusCard />
+          </div>
+          {/* Под службами, в той же колонке: «куда уходит трафик» — вопрос,
+              который задают после «работает ли всё». */}
+          <RouteTrafficShareCard
+            outbounds={loadedConfig?.outbounds ?? []}
+            rules={loadedConfig?.route?.rules ?? []}
+            runtimeByTag={runtimeOutboundByTag}
+            runtimeInterfaceByName={runtimeInterfaceByName}
+            status={routeTrafficStatus}
+          />
         </div>
       </div>
 
@@ -214,7 +229,7 @@ export function OverviewPage() {
         >
           {routingHealthQuery.isLoading ? <TableSkeleton /> : null}
           {routingHealthQuery.isError ? (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
+            <Alert variant="destructive">
               <AlertDescription className="whitespace-pre-wrap">
                 {routingHealthErrorMessage}
               </AlertDescription>
@@ -224,14 +239,10 @@ export function OverviewPage() {
           routingHealth.firewall_rules.length === 0 &&
           routingHealth.route_tables.length === 0 &&
           routingHealth.policy_rules.length === 0 ? (
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyTitle>{t("overview.routing.emptyTitle")}</EmptyTitle>
-                <EmptyDescription>
-                  {t("overview.routing.emptyDescription")}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <ListPlaceholder
+              description={t("overview.routing.emptyDescription")}
+              title={t("overview.routing.emptyTitle")}
+            />
           ) : null}
           {routingHealth &&
           (routingHealth.firewall_rules.length > 0 ||
@@ -256,16 +267,6 @@ export function OverviewPage() {
           serviceHealth={serviceHealth}
         />
       ) : null}
-    </div>
-  )
-}
-
-function TableSkeleton() {
-  return (
-    <div className="space-y-2">
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-10 w-full" />
-      <Skeleton className="h-10 w-full" />
     </div>
   )
 }

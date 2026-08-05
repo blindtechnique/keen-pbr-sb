@@ -19,6 +19,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { FallbackServersField } from "@/components/dns/fallback-servers-field"
 import { DataTable } from "@/components/shared/data-table"
+import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSearch } from "@/components/shared/table-search"
 import {
   DeleteImpactDialog,
@@ -234,6 +235,10 @@ function DnsServersEditor({
 
       <ConfigSaveErrorAlert error={postConfigMutation.error} />
 
+      {/* На странице два блока — резервная цепочка и сами серверы, — и ни у
+          одного не было имени. Первый подписан своей меткой поля, у второго не
+          было ничего: таблица начиналась сразу после чужого блока, и понять,
+          где кончается одно и начинается другое, можно было только по рамке. */}
       {!configLoading && !configError ? (
         <div className="mb-4">
           <FallbackServersField
@@ -268,6 +273,10 @@ function DnsServersEditor({
         />
       ) : (
         <div className="space-y-3">
+          <SectionHeading
+            description={t("pages.dnsServers.sections.servers.description")}
+            title={t("pages.dnsServers.sections.servers.title")}
+          />
           <div className="relative h-0">
             {serverSelection.hasSelection ? (
               <BulkSelectionToolbar

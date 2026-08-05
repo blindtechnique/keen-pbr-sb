@@ -27,14 +27,18 @@ import { useSidebar } from "@/components/ui/sidebar-context"
 import { matchesNavHref } from "@/lib/nav-active"
 import { cn } from "@/lib/utils"
 
+type NavSubItem = {
+  title: string
+  url: string
+  /** Адреса редакторов, оставшиеся от прежних отдельных страниц. */
+  aliases?: string[]
+}
+
 type NavItem = {
   title: string
   url: string
   icon?: LucideIcon
-  items?: {
-    title: string
-    url: string
-  }[]
+  items?: NavSubItem[]
 }
 
 export function NavMain({ items }: { items: NavItem[] }) {
@@ -196,7 +200,11 @@ function ExpandedNavigation({
                 {hasChildren ? (
                   <SidebarMenuSub className="mx-0 translate-x-0 border-l-0 px-0">
                     {item.items?.map((subItem) => {
-                      const navActive = matchesNavHref(location, subItem.url)
+                      const navActive = matchesNavHref(
+                        location,
+                        subItem.url,
+                        subItem.aliases
+                      )
 
                       return (
                         <SidebarMenuSubItem key={subItem.title}>
@@ -266,7 +274,11 @@ function OverlayNavigationGroup({
       {selected ? (
         <ul aria-label={item.title}>
           {item.items?.map((subItem) => {
-            const navActive = matchesNavHref(location, subItem.url)
+            const navActive = matchesNavHref(
+              location,
+              subItem.url,
+              subItem.aliases
+            )
             return (
               <li key={subItem.title}>
                 <button
@@ -291,6 +303,8 @@ function OverlayNavigationGroup({
 
 function isGroupActive(item: NavItem, location: string) {
   return Boolean(
-    item.items?.some((subItem) => matchesNavHref(location, subItem.url))
+    item.items?.some((subItem) =>
+      matchesNavHref(location, subItem.url, subItem.aliases)
+    )
   )
 }

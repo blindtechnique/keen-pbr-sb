@@ -1,20 +1,27 @@
+import { CheckCircle2Icon, CircleIcon, type LucideIcon } from "lucide-react"
 import { useRef } from "react"
 
+import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
 export type SegmentedControlOption<T extends string> = {
   value: T
   label: string
+  icon?: LucideIcon
 }
 
 /**
- * Переключатель режима из нескольких равнозначных вариантов.
+ * Выбор одного варианта из нескольких равнозначных — ndw-picker KeeneticOS.
  *
- * Раньше это были две обычные кнопки, из которых активная имела вид первичной —
- * синяя заливка. Читалось как «нажми синюю, чтобы отправить», а на телефоне,
- * где они складываются друг под друга, окончательно превращалось в
- * «Сохранить / Отмена». Здесь оба сегмента одного веса, а выбранный отличается
- * подложкой, а не цветом действия.
+ * Скопирован с «Анализатора трафика приложений» вместе с поведением: наведение
+ * меняет только цвет рамки, нажатие не меняет ничего, а рамка выбранного
+ * выглядит одинаково в любой позиции за счёт наезда кнопок друг на друга и
+ * z-index. Иконки — наше дополнение: в прошивке подписи короткие и понятные
+ * сами по себе, у нас «Ссылка подключения» и «Outbound JSON» иконкой читаются
+ * быстрее.
+ *
+ * Цвета и размеры живут в .keen-picker в index.css, чтобы тем же переключателем
+ * пользовались и списки, и туннели.
  */
 export function SegmentedControl<T extends string>({
   value,
@@ -30,6 +37,7 @@ export function SegmentedControl<T extends string>({
   className?: string
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const isMobile = useIsMobile()
 
   // Стрелки переключают вариант, как того ждут от группы радиокнопок:
   // Tab заводит в группу, стрелки двигают внутри неё.
@@ -47,7 +55,8 @@ export function SegmentedControl<T extends string>({
     <div
       aria-label={ariaLabel}
       className={cn(
-        "grid grid-cols-1 gap-1 rounded-[4px] border border-input bg-muted p-1 sm:grid-cols-2",
+        "keen-picker",
+        isMobile && "keen-picker--vertical",
         className
       )}
       ref={containerRef}
@@ -55,14 +64,14 @@ export function SegmentedControl<T extends string>({
     >
       {options.map((option, index) => {
         const selected = option.value === value
+        const Icon = option.icon
+
         return (
           <button
             aria-checked={selected}
             className={cn(
-              "min-h-9 rounded-[3px] px-3 py-2 text-center text-sm leading-tight whitespace-normal transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
-              selected
-                ? "bg-card font-medium text-foreground shadow-xs"
-                : "text-muted-foreground hover:text-foreground"
+              "keen-picker__button",
+              selected && "keen-picker__button--active"
             )}
             data-segment
             key={option.value}
@@ -83,7 +92,15 @@ export function SegmentedControl<T extends string>({
             tabIndex={selected ? 0 : -1}
             type="button"
           >
-            {option.label}
+            {isMobile ? (
+              selected ? (
+                <CheckCircle2Icon className="size-4 shrink-0 text-primary" />
+              ) : (
+                <CircleIcon className="size-4 shrink-0 text-muted-foreground" />
+              )
+            ) : null}
+            {Icon ? <Icon className="size-4 shrink-0" /> : null}
+            <span className="truncate">{option.label}</span>
           </button>
         )
       })}

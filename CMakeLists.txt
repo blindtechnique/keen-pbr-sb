@@ -219,6 +219,75 @@ if(WITH_API)
 endif()
 
 add_library(keen_pbr_project_options INTERFACE)
+
+# Roadmap: "P0. Добавить политику предупреждений и native sanitizer job.
+# Сначала включить `-Wall -Wextra` без `-Werror`, зафиксировать baseline и
+# устранить реальные дефекты. Затем применять `-Werror` только к современной
+# native GCC/Clang CI-сборке. Entware GCC 8.4 и cross-build не блокировать
+# отличающимся набором предупреждений."
+#
+# Флаги висят на keen_pbr_project_options, а он применяется только к нашим
+# целям: third_party собирается своими правилами, и чужие предупреждения в наш
+# baseline не попадают.
+option(KEEN_PBR_EXTRA_WARNINGS "Build project targets with -Wall -Wextra" ON)
+option(KEEN_PBR_WERROR "Treat project warnings as errors (native CI only)" OFF)
+
+if(KEEN_PBR_EXTRA_WARNINGS)
+  target_compile_options(keen_pbr_project_options INTERFACE
+    -Wall
+    -Wextra
+    # Единственное отключение, и оно осознанное. В C++ пропущенные члены
+    # агрегата инициализируются значением, а не остаются мусором, поэтому
+    # записи вида `{spec, {}}` в этом коде безопасны и намеренны. Все 28
+    # срабатываний на дереве были ровно такими: оставить их значило бы утопить
+    # настоящие находки в шуме и не включить `-Werror` никогда. Логическое
+    # «забыл заполнить поле» ловит clang-analyzer, а не это предупреждение.
+    -Wno-missing-field-initializers
+  )
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+     CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+    # Известный ложноположительный класс GCC 12+: при -O2/-O3 анализ границ
+    # массива проходит сквозь инлайн nlohmann::json в libstdc++ и сообщает о
+    # выходе за пределы внутри _Rb_tree. На дереве это 492 предупреждения из
+    # 499, и ни одно не указывает на файл из src/ — все приходят из
+    # third_party и системных заголовков через цепочку инлайна, поэтому
+    # пометка их SYSTEM не помогает. Ограничено GCC 12+: у Clang и целевого
+    # Entware GCC 8 этот класс не подтверждён, поэтому полезную диагностику на
+    # старом компиляторе не заглушаем.
+    target_compile_options(keen_pbr_project_options INTERFACE -Wno-array-bounds)
+  endif()
+endif()
+
+if(KEEN_PBR_WERROR)
+  target_compile_options(keen_pbr_project_options INTERFACE -Werror)
+endif()
+
+# Roadmap: «Отдельно запускать `keen-pbr-tests` и firewall IT с ASan+UBSan;
+# санитайзеры никогда не входят в router/IPK binary.»
+#
+# Поэтому это отдельная опция, выключенная по умолчанию, и отдельный каталог
+# сборки: включить её в той же сборке, из которой собирается пакет, нельзя.
+option(KEEN_PBR_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+if(KEEN_PBR_SANITIZE)
+  if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(WARNING
+      "KEEN_PBR_SANITIZE with CMAKE_BUILD_TYPE=Release hides frames; prefer Debug or RelWithDebInfo.")
+  endif()
+  # -fno-sanitize-recover: первая же UB останавливает прогон. Это нарочно —
+  # неопределённое поведение не бывает «частично допустимым», а без остановки
+  # его легко пролистать в шуме логов.
+  target_compile_options(keen_pbr_project_options INTERFACE
+    -fsanitize=address,undefined
+    -fno-sanitize-recover=undefined
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(keen_pbr_project_options INTERFACE
+    -fsanitize=address,undefined
+  )
+endif()
+
 if(ENABLE_THREAD_SAFETY_ANALYSIS)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(keen_pbr_project_options INTERFACE

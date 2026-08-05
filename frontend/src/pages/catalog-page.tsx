@@ -1,9 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { TFunction } from "i18next"
 import { useMemo, useRef, useState } from "react"
-import { AlertTriangleIcon, RefreshCw, ShieldCheckIcon } from "lucide-react"
+import {
+  AlertTriangleIcon,
+  PlusIcon,
+  RefreshCw,
+  ShieldCheckIcon,
+} from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
 import type { ListRefreshState } from "@/api/generated/model/listRefreshState"
@@ -12,7 +18,9 @@ import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig, selectListRefreshState } from "@/api/selectors"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
+import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -115,19 +123,33 @@ function CatalogListRefreshSummary({
     t("pages.catalog.refreshState.neverAttempted")
   )
 
+  // Когда последняя попытка и есть последнее успешное обновление, второй
+  // строкой повторялась та же дата — на телефоне это две строки из четырёх,
+  // не сообщающие ничего нового. Маршрут загрузки при этом нужен, поэтому он
+  // переезжает в строку успеха.
+  const attemptSaysSomethingNew =
+    Boolean(state?.last_error) || state?.last_attempt !== state?.last_updated
+
   return (
     <span className="mt-1 block space-y-0.5 text-xs">
       <span className="block text-muted-foreground">
-        {t("pages.catalog.refreshState.success", { date: successfulAt })}
-      </span>
-      <span className="block text-muted-foreground">
         {t(
-          detour
-            ? "pages.catalog.refreshState.attemptVia"
-            : "pages.catalog.refreshState.attempt",
-          { date: attemptedAt, detour }
+          detour && !attemptSaysSomethingNew
+            ? "pages.catalog.refreshState.successVia"
+            : "pages.catalog.refreshState.success",
+          { date: successfulAt, detour }
         )}
       </span>
+      {attemptSaysSomethingNew ? (
+        <span className="block text-muted-foreground">
+          {t(
+            detour
+              ? "pages.catalog.refreshState.attemptVia"
+              : "pages.catalog.refreshState.attempt",
+            { date: attemptedAt, detour }
+          )}
+        </span>
+      ) : null}
       {state?.last_error ? (
         <span className="block break-words text-destructive">
           {t("pages.catalog.refreshState.error", {
@@ -173,6 +195,7 @@ function catalogWarningMessage(warning: CatalogWarning, t: TFunction): string {
 
 export function CatalogPage() {
   const { i18n, t } = useTranslation()
+  const [, navigate] = useLocation()
   const queryClient = useQueryClient()
 
   const configQuery = useGetConfig()
@@ -318,15 +341,30 @@ export function CatalogPage() {
     () => presets.filter((preset) => !preset.hidden),
     [presets]
   )
-  const selectedMode = getCatalogSelectionMode(presets, selected)
-  const installStateByPresetId = resolveCatalogInstallStates(
-    presets,
-    configuredLists
+  const selectedMode = useMemo(
+    () => getCatalogSelectionMode(presets, selected),
+    [presets, selected]
   )
-  const selectedAncestorByPresetId = resolveCatalogAncestorMap(
-    presets,
-    selected
+  // Обход графа пресетов считался в теле рендера — 1,6–2,0 мс на каждое
+  // нажатие в поиске, причём дешёвая фильтрация была мемоизирована, а дорогая
+  // работа нет. Обход зависит от каталога и от выбранного, а не от строки
+  // поиска, и пересчитывать его на каждую букву незачем.
+  // Правило preserve-manual-memoization здесь ошибается: оно не может
+  // доказать, что `selected` и `config.lists` не меняются на месте. Не
+  // меняются: applyCatalogSelectionToggle возвращает новый Set (catalog-model
+  // 209-223), а конфиг приходит из кэша запроса и только заменяется целиком.
+  // Компилятор React в сборке не включён, так что без этих useMemo обход графа
+  // считается на каждый рендер — замерено 1,6–2,0 мс на нажатие в поиске.
+  /* eslint-disable react-hooks/preserve-manual-memoization */
+  const installStateByPresetId = useMemo(
+    () => resolveCatalogInstallStates(presets, configuredLists),
+    [presets, configuredLists]
   )
+  const selectedAncestorByPresetId = useMemo(
+    () => resolveCatalogAncestorMap(presets, selected),
+    [presets, selected]
+  )
+  /* eslint-enable react-hooks/preserve-manual-memoization */
   const selectedCatalogWarnings = useMemo(
     () =>
       presets.flatMap((preset) => {
@@ -577,24 +615,23 @@ export function CatalogPage() {
         value={search}
       />
 
-      {catalogQuery.isLoading ? (
-        <div className="space-y-2">
-          {[0, 1, 2, 3, 4].map((index) => (
-            <Skeleton className="h-10 w-full" key={index} />
-          ))}
-        </div>
-      ) : null}
+      {catalogQuery.isLoading ? <TableSkeleton /> : null}
 
       {!catalogQuery.isLoading && visible.length === 0 ? (
-        <p className="py-8 text-center text-sm text-muted-foreground">
-          {t("pages.catalog.empty")}
-        </p>
+        <ListPlaceholder
+          description={t("pages.catalog.empty")}
+          title={t("pages.catalog.emptyTitle")}
+        />
       ) : null}
 
       {/* Каталог прокручивается внутри себя: восемьдесят семь заготовок
           уводили нижнюю панель с выбором маршрута далеко за экран, и
-          чтобы нажать «Добавить», приходилось листать обратно. */}
-      <div className="max-h-[55vh] divide-y overflow-y-auto border-y">
+          чтобы нажать «Добавить», приходилось листать обратно.
+
+          На телефоне — нет: там это была прокрутка внутри прокрутки, полстраницы
+          высотой, и заготовка обрывалась на полуслове. Панель с «Добавить» и
+          так прибита к низу экрана, листать обратно не нужно. */}
+      <div className="divide-y border-y sm:max-h-[55vh] sm:overflow-y-auto">
         {visible.map((preset) => {
           const sourceSummary = getCatalogPresetSourceSummary(preset)
           const companionSummaries = getCatalogRoutingCompanionSourceSummaries(
@@ -627,7 +664,10 @@ export function CatalogPage() {
           return (
             <label
               className={cn(
-                "flex items-center gap-3 px-3 py-2.5 text-sm",
+                // По верхнему краю, а не по центру: у заготовки с описанием и
+                // временем обновления строка вырастает в блок, и галочка
+                // уезжала на его середину — глазом её приходилось искать.
+                "flex items-start gap-3 px-3 py-2.5 text-sm",
                 selectionUnavailable
                   ? "cursor-not-allowed"
                   : "cursor-pointer hover:bg-secondary"
@@ -636,115 +676,129 @@ export function CatalogPage() {
             >
               <input
                 checked={selected.has(preset.id)}
-                className="size-4 accent-[var(--primary)]"
+                className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
                 disabled={selectionUnavailable}
                 onChange={() => toggle(preset.id)}
                 type="checkbox"
               />
-              <span className="min-w-0 flex-1">
-                <span className="flex min-w-0 items-center gap-2">
-                  <span className="truncate">{preset.name}</span>
-                  {exactlyInstalled ? (
-                    <span className="shrink-0 text-xs font-medium text-success">
-                      {t("pages.catalog.installed")}
+              {/* На телефоне заготовка — это карточка: сначала название во всю
+                  ширину, под ним описание, и только потом мелким шрифтом «что
+                  внутри» и «куда пойдёт». Раньше все три части стояли в один
+                  ряд, и на «Все AI сервисы» оставалось полтора слова. На
+                  широком экране ряд остаётся прежним. */}
+              <span className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-3">
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="min-w-0 break-words sm:truncate">
+                      {preset.name}
                     </span>
-                  ) : installState?.kind === "partial" ? (
-                    <span className="shrink-0 text-xs font-medium text-warning-foreground">
-                      {t("pages.catalog.partial")}
-                    </span>
-                  ) : installState?.kind === "covered" &&
-                    installState.coveredBy ? (
-                    <span className="shrink-0 text-xs font-medium text-primary">
-                      {t("pages.catalog.coveredByInstalled", {
-                        name: installState.coveredBy.name,
-                      })}
-                    </span>
-                  ) : selectedAncestor ? (
-                    <span className="shrink-0 text-xs font-medium text-primary">
-                      {t("pages.catalog.coveredBySelection", {
-                        name: selectedAncestor.name,
-                      })}
+                    {exactlyInstalled ? (
+                      <span className="shrink-0 text-xs font-medium text-success">
+                        {t("pages.catalog.installed")}
+                      </span>
+                    ) : installState?.kind === "partial" ? (
+                      <span className="shrink-0 text-xs font-medium text-warning-foreground">
+                        {t("pages.catalog.partial")}
+                      </span>
+                    ) : installState?.kind === "covered" &&
+                      installState.coveredBy ? (
+                      <span className="shrink-0 text-xs font-medium text-primary">
+                        {t("pages.catalog.coveredByInstalled", {
+                          name: installState.coveredBy.name,
+                        })}
+                      </span>
+                    ) : selectedAncestor ? (
+                      <span className="shrink-0 text-xs font-medium text-primary">
+                        {t("pages.catalog.coveredBySelection", {
+                          name: selectedAncestor.name,
+                        })}
+                      </span>
+                    ) : null}
+                  </span>
+                  {preset.notice ? (
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {preset.notice}
                     </span>
                   ) : null}
-                </span>
-                {preset.notice ? (
-                  <span className="mt-1 block text-xs text-muted-foreground">
-                    {preset.notice}
-                  </span>
-                ) : null}
-                {companionSummaries.length > 0 ? (
-                  <span className="mt-1 block space-y-0.5 text-xs font-medium text-primary">
-                    {companionSummaries.map((companion) => (
-                      <span className="block" key={companion.id}>
-                        {companion.cidrCount > 0
-                          ? t("pages.catalog.ipCompanionInline", {
-                              name: companion.name,
-                              count: companion.cidrCount,
-                            })
-                          : companion.urlBacked
-                            ? t("pages.catalog.ipCompanionRemote", {
+                  {companionSummaries.length > 0 ? (
+                    <span className="mt-1 block space-y-0.5 text-xs font-medium text-primary">
+                      {companionSummaries.map((companion) => (
+                        <span className="block" key={companion.id}>
+                          {companion.cidrCount > 0
+                            ? t("pages.catalog.ipCompanionInline", {
                                 name: companion.name,
+                                count: companion.cidrCount,
                               })
-                            : t("pages.catalog.ipCompanionGeneric", {
-                                name: companion.name,
-                              })}
-                      </span>
-                    ))}
-                  </span>
-                ) : null}
-                {warningMessages.length > 0 ? (
-                  <span className="mt-1 flex items-start gap-1.5 text-xs text-warning-foreground">
-                    <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-                    <span>{warningMessages.join(" ")}</span>
-                  </span>
-                ) : null}
-                {installedList?.url ? (
-                  <CatalogListRefreshSummary
-                    detour={refreshDetour}
-                    state={refreshState}
-                  />
-                ) : null}
-              </span>
-              <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-                <span>
-                  {sourceSummary.urlBacked
-                    ? t("pages.catalog.ruleSet")
-                    : sourceSummary.domainCount > 0 &&
-                        sourceSummary.cidrCount > 0
-                      ? t("pages.catalog.domainsAndCidrs", {
-                          domains: sourceSummary.domainCount,
-                          cidrs: sourceSummary.cidrCount,
-                        })
-                      : sourceSummary.cidrCount > 0
-                        ? t("pages.catalog.cidrs", {
-                            count: sourceSummary.cidrCount,
-                          })
-                        : t("pages.catalog.domains", {
-                            count: sourceSummary.domainCount,
-                          })}
+                            : companion.urlBacked
+                              ? t("pages.catalog.ipCompanionRemote", {
+                                  name: companion.name,
+                                })
+                              : t("pages.catalog.ipCompanionGeneric", {
+                                  name: companion.name,
+                                })}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                  {warningMessages.length > 0 ? (
+                    <span className="mt-1 flex items-start gap-1.5 text-xs text-warning-foreground">
+                      <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                      <span>{warningMessages.join(" ")}</span>
+                    </span>
+                  ) : null}
+                  {installedList?.url ? (
+                    <CatalogListRefreshSummary
+                      detour={refreshDetour}
+                      state={refreshState}
+                    />
+                  ) : null}
                 </span>
-                {sourceSummary.hasIpCompanion ? (
-                  <span
-                    className="rounded-sm bg-primary/10 px-1.5 py-0.5 font-medium text-primary"
-                    title={t("pages.catalog.ipCompanionHint", {
-                      count: sourceSummary.companionCount,
-                    })}
-                  >
-                    {t("pages.catalog.ipCompanionBadge")}
+                {/* «Что внутри» и «куда пойдёт» — одной строкой на телефоне.
+                    `sm:contents` убирает эту обёртку на широком экране, и обе
+                    подписи снова становятся отдельными колонками ряда. */}
+                <span className="flex flex-wrap items-center gap-1.5 sm:contents">
+                  <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                    <span>
+                      {sourceSummary.urlBacked
+                        ? t("pages.catalog.ruleSet")
+                        : sourceSummary.domainCount > 0 &&
+                            sourceSummary.cidrCount > 0
+                          ? t("pages.catalog.domainsAndCidrs", {
+                              domains: sourceSummary.domainCount,
+                              cidrs: sourceSummary.cidrCount,
+                            })
+                          : sourceSummary.cidrCount > 0
+                            ? t("pages.catalog.cidrs", {
+                                count: sourceSummary.cidrCount,
+                              })
+                            : t("pages.catalog.domains", {
+                                count: sourceSummary.domainCount,
+                              })}
+                    </span>
+                    {sourceSummary.hasIpCompanion ? (
+                      <span
+                        className="rounded-sm bg-primary/10 px-1.5 py-0.5 font-medium text-primary"
+                        title={t("pages.catalog.ipCompanionHint", {
+                          count: sourceSummary.companionCount,
+                        })}
+                      >
+                        {t("pages.catalog.ipCompanionBadge")}
+                      </span>
+                    ) : null}
                   </span>
-                ) : null}
-              </span>
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-2 py-0.5 text-xs",
-                  blocks
-                    ? "bg-destructive/10 text-destructive"
-                    : "bg-success/10 text-success"
-                )}
-              >
-                {blocks
-                  ? t("pages.catalog.actionBlock")
-                  : t("pages.catalog.actionTunnel")}
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full px-2 py-0.5 text-xs",
+                      blocks
+                        ? "bg-destructive/10 text-destructive"
+                        : "bg-success/10 text-success"
+                    )}
+                  >
+                    {blocks
+                      ? t("pages.catalog.actionBlock")
+                      : t("pages.catalog.actionTunnel")}
+                    </span>
+                </span>
               </span>
             </label>
           )
@@ -812,6 +866,19 @@ export function CatalogPage() {
                   </SelectGroup>
                 </SelectContent>
               </Select>
+              {/* Пока туннеля нет, выбирать не из чего: остаётся «напрямую»,
+                  то есть ничего не настроить. Это и есть то место, где новичок
+                  застревает, — отсюда сразу ссылка на создание туннеля. */}
+              {outboundTags.length === 0 ? (
+                <Button
+                  onClick={() => navigate("/transports/create")}
+                  size="sm"
+                  variant="outline"
+                >
+                  <PlusIcon className="mr-1 h-4 w-4" />
+                  {t("pages.catalog.addTunnel")}
+                </Button>
+              ) : null}
             </>
           )}
           {selectedMode === "mixed" ? (

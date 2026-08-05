@@ -35,19 +35,22 @@ export function TableSearch({
     <div className={cn("flex w-full flex-col gap-1", className)}>
       <div className="relative sm:max-w-md">
         <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+        {/* 32px, как у кнопок в этой же строке: поле поиска было на восемь
+            пикселей выше и ломало ряд на каждой странице со списком. */}
         <Input
           className="pr-9 pl-9"
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
+          size="sm"
           type="search"
           value={value}
         />
         {active ? (
           <Button
             aria-label={t("common.tableSearch.clear")}
-            className="absolute top-1/2 right-1 size-7 -translate-y-1/2"
+            className="absolute top-1/2 right-1 -translate-y-1/2"
             onClick={() => onChange("")}
-            size="icon"
+            size="icon-sm"
             variant="ghost"
           >
             <XIcon className="size-4" />

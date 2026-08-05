@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 import { useLocation } from "wouter"
+import { useTranslation } from "react-i18next"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { AppBrandHeader } from "@/components/layout/app-brand-header"
@@ -14,6 +15,7 @@ import { cn } from "@/lib/utils"
 export function AppShell({ children }: { children: ReactNode }) {
   const warningBannerState = useWarningBannerState()
   const [location] = useLocation()
+  const { t } = useTranslation()
   // KeeneticOS tints only the dashboard, where cards sit on a grey canvas.
   // Every other section is a plain white page.
   const isOverview = location === "/"
@@ -25,7 +27,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           there is no page-level scrollbar at all. */}
       <div
         className={cn(
-          "flex h-screen max-h-screen w-full max-w-full flex-col overflow-hidden",
+          // dvh, а не vh. 100vh на телефоне — это высота с убранной адресной
+          // строкой: пока она видна, оболочка выше экрана, и документ под ней
+          // прокручивается сам. Отсюда исчезающая шапка — резкий свайп уводил
+          // её вверх вместе со страницей, и вернуть можно было только свайпом
+          // вниз. dvh следит за реальной видимой высотой.
+          "flex h-dvh max-h-dvh w-full max-w-full flex-col overflow-hidden",
           isOverview ? "keen-canvas-overview" : "keen-canvas-page"
         )}
       >
@@ -33,7 +40,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           className="sr-only z-50 rounded-md bg-background px-3 py-2 text-sm font-medium shadow focus:not-sr-only focus:fixed focus:top-3 focus:left-3"
           href="#main-content"
         >
-          Skip to content
+          {t("common.chrome.skipToContent")}
         </a>
         <DesktopSystemBar />
         <div className="flex min-h-0 w-full max-w-full flex-1 overflow-hidden">
@@ -42,7 +49,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <MobileSidebarHeader />
             <main
               aria-labelledby="page-title"
-              className="min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]"
+              // overscroll-contain: без него резкий флик, докрутивший до края,
+              // передаёт остаток прокрутки документу — и шапку опять уносит.
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
               id="main-content"
             >
               {/* No max-width: NDMS lets its panels use the whole window, and a

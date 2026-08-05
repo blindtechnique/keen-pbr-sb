@@ -138,7 +138,7 @@ export function SectionTabs<T extends string>({
           <button
             aria-selected={value === tab.value}
             className={cn(
-              "relative flex h-11 shrink-0 items-center border-b-2 border-border px-3 py-2 text-[16px] leading-6 font-normal transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/25 focus-visible:ring-inset",
+              "relative flex h-10 shrink-0 items-center border-b-2 border-border px-3 py-2 text-[14px] leading-[22px] font-normal transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/25 focus-visible:ring-inset",
               value === tab.value
                 ? "text-black dark:text-foreground"
                 : "text-[#6e6e6e] hover:text-black dark:text-muted-foreground dark:hover:text-foreground"
@@ -155,7 +155,11 @@ export function SectionTabs<T extends string>({
           >
             <span>{tab.label}</span>
             {typeof tab.count === "number" ? (
-              <span className="ml-1.5 text-xs font-normal text-muted-foreground tabular-nums">
+              // Ширина под счётчик занята постоянно: без неё «3» превращалось
+              // в «11» — вкладка становилась шире, соседние уезжали вправо, и
+              // подчёркивание догоняло их отдельной анимацией. 24px хватает на
+              // три цифры, больше вкладок с таким счётчиком не бывает.
+              <span className="ml-1.5 inline-block min-w-6 text-center text-xs font-normal text-muted-foreground tabular-nums">
                 {tab.count}
               </span>
             ) : null}
@@ -163,7 +167,7 @@ export function SectionTabs<T extends string>({
         ))}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute bottom-0 left-0 z-10 h-0.5 w-0 bg-primary transition-[left,width,background-color] duration-100 ease-in-out"
+          className="keen-tab-indicator pointer-events-none absolute bottom-0 left-0 z-10 h-0.5 w-0 bg-primary"
           ref={indicatorRef}
         />
       </div>
@@ -218,7 +222,7 @@ function MobileSectionTabs<T extends string>({
     <div
       aria-label={ariaLabel}
       className={cn(
-        "relative flex h-11 min-w-0 border-b-2 border-border sm:hidden",
+        "relative flex h-10 min-w-0 border-b-2 border-border sm:hidden",
         className
       )}
       ref={listRef}
@@ -228,7 +232,7 @@ function MobileSectionTabs<T extends string>({
         <button
           aria-selected={value === tab.value}
           className={cn(
-            "min-w-0 flex-1 truncate px-2 py-2 text-[16px] leading-6 font-normal transition-colors outline-none focus-visible:bg-accent",
+            "min-w-0 flex-1 truncate px-2 py-2 text-[14px] leading-[22px] font-normal transition-colors outline-none focus-visible:bg-accent",
             value === tab.value
               ? "text-black dark:text-foreground"
               : "text-[#6e6e6e] dark:text-muted-foreground"
@@ -253,7 +257,7 @@ function MobileSectionTabs<T extends string>({
             render={
               <button
                 aria-label={`${ariaLabel}: ${overflow.length}`}
-                className="flex h-[42px] shrink-0 items-center gap-1 px-2 text-[#6e6e6e] outline-none hover:text-foreground focus-visible:bg-accent dark:text-muted-foreground"
+                className="flex h-[38px] shrink-0 items-center gap-1 px-2 text-[#6e6e6e] outline-none hover:text-foreground focus-visible:bg-accent dark:text-muted-foreground"
                 type="button"
               />
             }
@@ -277,7 +281,7 @@ function MobileSectionTabs<T extends string>({
           >
             {overflow.map((tab) => (
               <button
-                className="flex h-11 w-full min-w-0 items-center justify-between gap-3 px-3 text-left text-[16px] text-[#6e6e6e] outline-none hover:bg-accent hover:text-foreground focus-visible:bg-accent dark:text-muted-foreground"
+                className="flex h-10 w-full min-w-0 items-center justify-between gap-3 px-3 text-left text-[14px] text-[#6e6e6e] outline-none hover:bg-accent hover:text-foreground focus-visible:bg-accent dark:text-muted-foreground"
                 key={tab.value}
                 onClick={() => {
                   onValueChange(tab.value)
@@ -300,7 +304,7 @@ function MobileSectionTabs<T extends string>({
 
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute bottom-[-2px] left-0 z-10 h-0.5 w-0 bg-primary transition-[left,width] duration-100 ease-out"
+        className="keen-tab-indicator pointer-events-none absolute bottom-[-2px] left-0 z-10 h-0.5 w-0 bg-primary"
         ref={indicatorRef}
       />
     </div>

@@ -46,6 +46,7 @@ import {
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import { PageHeader } from "@/components/shared/page-header"
+import { SectionHeading } from "@/components/shared/section-heading"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
@@ -72,6 +73,7 @@ import {
 import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildUpdatedConfigForOutboundsDelete,
+  filterDeletableOutboundTags,
   firstLatency,
   getOutboundDeleteImpact,
   type OutboundDeleteImpact,
@@ -88,7 +90,20 @@ type OutboundItem = {
 
 type OutboundGroupKey = "interfaces" | "failover" | "system"
 
-export function OutboundsPage() {
+export function OutboundsPage({
+  embedded = false,
+  group,
+}: {
+  embedded?: boolean
+  /**
+   * Показать только одну группу и не рисовать свои вкладки.
+   *
+   * Страница целиком живёт внутри «Маршрутов и туннелей»: вкладками там
+   * управляет родитель, а две полосы вкладок друг под другом читались бы как
+   * два разных раздела на одном экране.
+   */
+  group?: OutboundGroupKey
+} = {}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [, navigate] = useLocation()
@@ -166,8 +181,16 @@ export function OutboundsPage() {
     [dependencyAnalysis.dependenciesByTarget, outboundItems]
   )
   const brokenReferences = useMemo(
-    () => findBrokenReferences(loadedConfig),
-    [loadedConfig]
+    () =>
+      findBrokenReferences(loadedConfig, {
+        missingList: (values) =>
+          t("common.dependencies.brokenReference.missingList", values),
+        listDetour: (values) =>
+          t("common.dependencies.brokenReference.listDetour", values),
+        listRefresh: (values) =>
+          t("common.dependencies.brokenReference.listRefresh", values),
+      }),
+    [loadedConfig, t]
   )
   // Сколько правил ведёт в это направление и сколько списков через них
   // проходит. Это единственное, чего в прежней таблице не было совсем, а
@@ -211,10 +234,12 @@ export function OutboundsPage() {
       count: group.items.length,
     })
   )
-  const [activeGroupKey, setActiveGroupKey] = useSectionTab<OutboundGroupKey>(
+  const [hashGroupKey, setHashGroupKey] = useSectionTab<OutboundGroupKey>(
     ["interfaces", "failover", "system"],
     "interfaces"
   )
+  const activeGroupKey = group ?? hashGroupKey
+  const setActiveGroupKey = setHashGroupKey
   const activeOutboundGroup =
     outboundGroups.find((group) => group.key === activeGroupKey) ??
     outboundGroups[0]
@@ -240,8 +265,167 @@ export function OutboundsPage() {
         : []),
     ]
   )
-  const outboundRowIds = sortedOutbounds.map((item) => item.id)
+  // Судить об отсутствии интерфейса можно только когда список интерфейсов
+  // действительно приехал: пока запрос не ответил, карта пуста, и без этой
+  // проверки «интерфейс не найден» показалось бы у всех сразу.
+  const runtimeInterfacesKnown =
+    runtimeInterfacesQuery.data?.status === 200 &&
+    runtimeInterfaceByName.size > 0
+  const isInterfaceMissing = (item: OutboundItem) =>
+    runtimeInterfacesKnown &&
+    item.outbound.type === "interface" &&
+    typeof item.outbound.interface === "string" &&
+    item.outbound.interface.length > 0 &&
+    !runtimeInterfaceByName.has(item.outbound.interface)
+
+  // Маршрут, чей интерфейс из системы исчез, — не «ещё один в списке», а
+  // единственная причина, по которой в таблице два «sddvpn mooo VLESS».
+  // Демон по обоим отдаёт healthy: он проверяет свою табличную часть, а не
+  // наличие интерфейса. Значит, различать их должна страница.
+  const brokenOutbounds = sortedOutbounds.filter((item) =>
+    isInterfaceMissing(item)
+  )
+  const workingOutbounds = sortedOutbounds.filter(
+    (item) => !isInterfaceMissing(item)
+  )
+  // Порядок строк один, таблица одна: две таблицы считали бы ширину колонок
+  // каждая по своему содержимому, и «Название» вверху оказывалось заметно уже,
+  // чем внизу.
+  const orderedOutbounds =
+    brokenOutbounds.length > 0
+      ? [...workingOutbounds, ...brokenOutbounds]
+      : sortedOutbounds
+  const outboundGroupHeadings =
+    brokenOutbounds.length > 0
+      ? {
+          0: (
+            <SectionHeading
+              size="compact"
+              title={t("pages.outbounds.split.working")}
+            />
+          ),
+          [workingOutbounds.length]: (
+            <SectionHeading
+              description={t("pages.outbounds.split.brokenDescription")}
+              size="compact"
+              title={t("pages.outbounds.split.broken")}
+              tone="destructive"
+            />
+          ),
+        }
+      : undefined
+
+  const systemGroupActive = activeGroupKey === "system"
+  const outboundRowIds = orderedOutbounds.map((item) => item.id)
   const outboundSelection = useRowSelection(outboundRowIds)
+  // Одна таблица, но с подзаголовком перед мёртвыми маршрутами. Разделять
+  // именно так, а не сортировкой: два маршрута с одинаковым названием стоят
+  // рядом и отличаются только красной точкой, а под разными заголовками
+  // путать их уже нечем.
+  const renderOutboundTable = (items: OutboundItem[]) => (
+    <DataTable
+      groupHeadings={outboundGroupHeadings}
+      headers={[
+        t("pages.outbounds.headers.tag"),
+        ...(activeGroupKey === "failover"
+          ? [t("pages.outbounds.headers.memberChain")]
+          : []),
+        ...(activeGroupKey === "system"
+          ? [t("pages.outbounds.headers.purpose")]
+          : [t("pages.outbounds.headers.runtime")]),
+        t("pages.outbounds.headers.usedBy"),
+        t("pages.outbounds.headers.actions"),
+      ]}
+      narrowColumns={latencyColumnIndex >= 0 ? [latencyColumnIndex] : []}
+      rows={items.map((item) => [
+        <OutboundName
+          key={`${item.id}-name`}
+          outbound={item.outbound}
+          protocol={
+            item.outbound.type === "urltest"
+              ? protocolOfGroup(item.outbound, interfaceOfTag)
+              : protocolOf(item.outbound.interface ?? "")
+          }
+          withInterface={activeGroupKey === "interfaces"}
+        />,
+        ...(activeGroupKey === "failover"
+          ? [
+              <OutboundMemberChain
+                key={`${item.id}-chain`}
+                outboundDisplayNames={outboundDisplayNames}
+                runtimeState={item.runtimeState}
+              />,
+            ]
+          : []),
+        activeGroupKey === "system" ? (
+          <OutboundPurpose
+            key={`${item.id}-purpose`}
+            outbound={item.outbound}
+          />
+        ) : (
+          <OutboundStatus
+            interfaceMissing={isInterfaceMissing(item)}
+            key={`${item.id}-status`}
+            runtimeState={item.runtimeState}
+          />
+        ),
+        // Связи видно до удаления, а не из диалога, который перечислял
+        // последствия постфактум.
+        <DependencyList
+          compact
+          dependencies={dependenciesByTag.get(item.id) ?? []}
+          emptyHint={t("pages.outbounds.usage.none")}
+          key={`${item.id}-usage`}
+        />,
+        <ActionButtons
+          actions={[
+            {
+              // Проверка задержки бьёт по всем выходам разом: у демона
+              // одна общая проверка, отдельной «проверь только этот»
+              // не существует.
+              disabled: probeMutation.isPending,
+              icon: (
+                <RotateCw
+                  className={cn(
+                    "h-4 w-4",
+                    probeMutation.isPending && "animate-spin"
+                  )}
+                />
+              ),
+              label: t("transports.latencyRefresh"),
+              onClick: () => probeMutation.mutate(),
+            },
+            {
+              icon: <Pencil className="h-4 w-4" />,
+              label: t("common.edit"),
+              onClick: () => navigate(`/outbounds/${item.id}/edit`),
+            },
+          ]}
+          key={`${item.id}-actions`}
+        />,
+      ])}
+      // Системные маршруты выбирать нечем: удаление здесь — единственная
+      // операция над выделением, а удалять их нельзя. Отключённые галочки
+      // выглядели бы как «пока нельзя», хотя нельзя всегда.
+      selection={
+        systemGroupActive
+          ? undefined
+          : {
+              rowIds: items.map((entry) => entry.id),
+              selectedIds: outboundSelection.selectedIds,
+              disabled: configMutationPending,
+              onToggle: outboundSelection.toggleOne,
+              onToggleAll: outboundSelection.setAllVisible,
+              selectAllLabel: t("common.selection.selectAll"),
+              getRowLabel: (rowId) =>
+                t("common.selection.selectRow", {
+                  rowLabel: outboundDisplayNames.get(rowId) ?? rowId,
+                }),
+            }
+      }
+      sort={sort}
+    />
+  )
 
   const changeActiveGroup = (nextGroup: OutboundGroupKey) => {
     outboundSelection.clear()
@@ -278,7 +462,13 @@ export function OutboundsPage() {
       return
     }
 
-    const tags = [...outboundSelection.selectedIds]
+    const tags = filterDeletableOutboundTags(
+      loadedConfig,
+      outboundSelection.selectedIds
+    )
+    if (tags.length === 0) {
+      return
+    }
     const request = {
       tags,
       impact: getOutboundDeleteImpact(loadedConfig, tags),
@@ -314,10 +504,12 @@ export function OutboundsPage() {
 
   return (
     <div className="space-y-3">
-      <PageHeader
-        description={t("pages.outbounds.description")}
-        title={t("pages.outbounds.title")}
-      />
+      {embedded ? null : (
+        <PageHeader
+          description={t("pages.outbounds.description")}
+          title={t("pages.outbounds.title")}
+        />
+      )}
       <PageActionBar
         primary={
           <Button
@@ -373,12 +565,14 @@ export function OutboundsPage() {
         />
       ) : (
         <div className="space-y-3">
-          <SectionTabs
-            ariaLabel={t("pages.outbounds.tabs.ariaLabel")}
-            onValueChange={changeActiveGroup}
-            tabs={outboundTabs}
-            value={activeGroupKey}
-          />
+          {group ? null : (
+            <SectionTabs
+              ariaLabel={t("pages.outbounds.tabs.ariaLabel")}
+              onValueChange={changeActiveGroup}
+              tabs={outboundTabs}
+              value={activeGroupKey}
+            />
+          )}
           <div className="relative h-0">
             {outboundSelection.hasSelection ? (
               <BulkSelectionToolbar
@@ -406,101 +600,7 @@ export function OutboundsPage() {
               title={t(`pages.outbounds.groups.${activeOutboundGroup.key}`)}
             />
           ) : (
-            <DataTable
-              headers={[
-                t("pages.outbounds.headers.tag"),
-                ...(activeGroupKey === "failover"
-                  ? [t("pages.outbounds.headers.memberChain")]
-                  : []),
-                ...(activeGroupKey === "system"
-                  ? [t("pages.outbounds.headers.purpose")]
-                  : [t("pages.outbounds.headers.runtime")]),
-                t("pages.outbounds.headers.usedBy"),
-                t("pages.outbounds.headers.actions"),
-              ]}
-              narrowColumns={
-                latencyColumnIndex >= 0 ? [latencyColumnIndex] : []
-              }
-              rows={sortedOutbounds.map((item) => [
-                <OutboundName
-                  key={`${item.id}-name`}
-                  outbound={item.outbound}
-                  protocol={
-                    item.outbound.type === "urltest"
-                      ? protocolOfGroup(item.outbound, interfaceOfTag)
-                      : protocolOf(item.outbound.interface ?? "")
-                  }
-                  withInterface={activeGroupKey === "interfaces"}
-                />,
-                ...(activeGroupKey === "failover"
-                  ? [
-                      <OutboundMemberChain
-                        key={`${item.id}-chain`}
-                        outboundDisplayNames={outboundDisplayNames}
-                        runtimeState={item.runtimeState}
-                      />,
-                    ]
-                  : []),
-                activeGroupKey === "system" ? (
-                  <OutboundPurpose
-                    key={`${item.id}-purpose`}
-                    outbound={item.outbound}
-                  />
-                ) : (
-                  <OutboundStatus
-                    key={`${item.id}-status`}
-                    runtimeState={item.runtimeState}
-                  />
-                ),
-                // Связи видно до удаления, а не из диалога, который перечислял
-                // последствия постфактум.
-                <DependencyList
-                  compact
-                  dependencies={dependenciesByTag.get(item.id) ?? []}
-                  emptyHint={t("pages.outbounds.usage.none")}
-                  key={`${item.id}-usage`}
-                />,
-                <ActionButtons
-                  actions={[
-                    {
-                      // Проверка задержки бьёт по всем выходам разом: у демона
-                      // одна общая проверка, отдельной «проверь только этот»
-                      // не существует.
-                      disabled: probeMutation.isPending,
-                      icon: (
-                        <RotateCw
-                          className={cn(
-                            "h-4 w-4",
-                            probeMutation.isPending && "animate-spin"
-                          )}
-                        />
-                      ),
-                      label: t("transports.latencyRefresh"),
-                      onClick: () => probeMutation.mutate(),
-                    },
-                    {
-                      icon: <Pencil className="h-4 w-4" />,
-                      label: t("common.edit"),
-                      onClick: () => navigate(`/outbounds/${item.id}/edit`),
-                    },
-                  ]}
-                  key={`${item.id}-actions`}
-                />,
-              ])}
-              selection={{
-                rowIds: outboundRowIds,
-                selectedIds: outboundSelection.selectedIds,
-                disabled: configMutationPending,
-                onToggle: outboundSelection.toggleOne,
-                onToggleAll: outboundSelection.setAllVisible,
-                selectAllLabel: t("common.selection.selectAll"),
-                getRowLabel: (rowId) =>
-                  t("common.selection.selectRow", {
-                    rowLabel: outboundDisplayNames.get(rowId) ?? rowId,
-                  }),
-              }}
-              sort={sort}
-            />
+            renderOutboundTable(orderedOutbounds)
           )}
         </div>
       )}

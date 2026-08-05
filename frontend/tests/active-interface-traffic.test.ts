@@ -142,6 +142,25 @@ describe("dashboard active interface traffic", () => {
     ).toEqual([{ interfaceName: "tun0", label: "VPN", status: "active" }])
   })
 
+  test("disabled routing rules do not contribute traffic paths", () => {
+    const outbounds: Outbound[] = [
+      {
+        tag: "vpn",
+        display_name: "VPN",
+        type: "interface",
+        interface: "tun0",
+      },
+    ]
+
+    expect(
+      collectActiveTrafficPaths(
+        outbounds,
+        [{ outbound: "vpn", enabled: false }],
+        new Map()
+      )
+    ).toEqual([])
+  })
+
   test("recursively expands nested selectors and survives cycles", () => {
     const outbounds: Outbound[] = [
       {

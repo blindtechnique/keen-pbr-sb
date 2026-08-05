@@ -3,6 +3,7 @@ import * as React from "react"
 
 import i18n, {
   DEFAULT_LANGUAGE,
+  ensureLanguageBundle,
   isLanguage,
   LANGUAGE_STORAGE_KEY,
   type Language,
@@ -35,10 +36,7 @@ export function LanguageProvider({
   ...props
 }: LanguageProviderProps) {
   const [language, setLanguageState] = React.useState<Language>(() => {
-    const storedLanguage = safeStorageGet(
-      () => window.localStorage,
-      storageKey
-    )
+    const storedLanguage = safeStorageGet(() => window.localStorage, storageKey)
     if (isLanguage(storedLanguage)) {
       return storedLanguage
     }
@@ -64,7 +62,11 @@ export function LanguageProvider({
       return
     }
 
-    void i18n.changeLanguage(language)
+    // Словарь второго языка приезжает отдельным чанком — сначала он, потом
+    // переключение, иначе на кадр покажутся ключи.
+    void ensureLanguageBundle(language).then(() =>
+      i18n.changeLanguage(language)
+    )
   }, [language])
 
   React.useEffect(() => {
@@ -86,12 +88,7 @@ export function LanguageProvider({
 
   React.useEffect(() => {
     const handleStorageChange = (event: StorageEvent) => {
-      if (
-        !safeStorageMatches(
-          () => window.localStorage,
-          event.storageArea
-        )
-      ) {
+      if (!safeStorageMatches(() => window.localStorage, event.storageArea)) {
         return
       }
 

@@ -1,5 +1,5 @@
-import type { NdmsVpnServerService } from "@/api/generated/model/ndmsVpnServerService"
 import type { InternalVpnServerInventoryState } from "@/components/settings/internal-vpn-servers-field"
+import type { NdmsVpnServerService } from "@/api/generated/model/ndmsVpnServerService"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -27,6 +27,8 @@ export interface InternalVpnServicesFieldCopy {
   readonly loadErrorDescription: string
   readonly processLabel: string
   readonly inheritLabel: string
+  /** Имя службы по её виду: подпись обязана меняться вместе с языком панели. */
+  readonly serviceName: (kind: NdmsVpnServerService["kind"]) => string
   readonly statusEnabled: string
   readonly statusDisabled: string
   readonly statusMissing: string
@@ -151,14 +153,17 @@ export function InternalVpnServicesField({
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="truncate text-sm font-medium text-foreground">
-                      {service.label}
+                    {/* Имя вместо внутреннего идентификатора прошивки:
+                        `VPNL2TPServer` и `VirtualIPServerIKE2` не говорят ни
+                        что это VPN-сервер, ни какой именно. Пилюля с типом
+                        протокола после этого не нужна — он уже в названии.
+                        Исходное имя осталось в подсказке. */}
+                    <span
+                      className="truncate text-sm font-medium text-foreground"
+                      title={service.label}
+                    >
+                      {service.kind ? copy.serviceName(service.kind) : service.label}
                     </span>
-                    {service.kind ? (
-                      <Badge size="xs" variant="outline">
-                        {formatVpnServiceKind(service.kind)}
-                      </Badge>
-                    ) : null}
                     <Badge
                       size="xs"
                       variant={
@@ -241,19 +246,4 @@ export function InternalVpnServicesField({
       )}
     </section>
   )
-}
-
-function formatVpnServiceKind(kind: NdmsVpnServerService["kind"]): string {
-  switch (kind) {
-    case "l2tp":
-      return "L2TP"
-    case "ikev1":
-      return "IKEv1"
-    case "ikev2":
-      return "IKEv2"
-    case "sstp":
-      return "SSTP"
-    case "openconnect":
-      return "OpenConnect"
-  }
 }

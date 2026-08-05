@@ -77,6 +77,24 @@
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
+  /* Переключатель равнозначных вариантов — ndw-picker KeeneticOS, снятый с
+     «Анализатора трафика приложений». Значения взяты из его переменных как
+     есть, включая то, что наведение меняет только рамку, а нажатие не меняет
+     ничего. */
+  --picker-background: #ffffff;
+  --picker-stroke: #bdb7b7;
+  --picker-text: #6e6e6e;
+  --picker-hover-border: #cacdcf;
+  --picker-focus-border: #0086cb;
+  --picker-active-background: #ecf5fa;
+  --picker-active-border: #0086cb;
+  --picker-active-focus-border: #1c6c9a;
+  --picker-disabled-border: #bdb7b7;
+  --picker-disabled-background: #fafafa;
+  --picker-disabled-text: #d6d8d9;
+  --picker-active-disabled-border: rgba(0, 134, 203, 0.5);
+  --picker-active-disabled-background: rgba(236, 245, 250, 0.5);
+  --picker-active-disabled-text: rgba(0, 134, 203, 0.4);
   --sidebar: #fafafa;
   --sidebar-foreground: #000000;
   --sidebar-primary: #0086cb;
@@ -112,6 +130,10 @@
     0 1px 4.5px 0px hsl(213.75 37.5% 25.098% / 0.14),
     0 8px 10px -1px hsl(213.75 37.5% 25.098% / 0.14);
   --shadow-2xl: 0 1px 4.5px 0px hsl(213.75 37.5% 25.098% / 0.35);
+
+  /* `--box-shadow-1` из KeeneticOS, снят с живого конфигуратора. Одна и та же
+     тень там и под шапкой, и под карточкой дашборда при наведении. */
+  --keen-shadow-1: 0 5px 20px rgb(0 0 0 / 5%);
 }
 
 /* Taken from the `.dark` block of the real NDMS stylesheet rather than guessed.
@@ -165,6 +187,20 @@
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
+  --picker-background: #1b2434;
+  --picker-stroke: #4d545f;
+  --picker-text: #c2c2c2;
+  --picker-hover-border: #6f737b;
+  --picker-focus-border: #0086cb;
+  --picker-active-background: #2e3d57;
+  --picker-active-border: #0086cb;
+  --picker-active-focus-border: #1c6c9a;
+  --picker-disabled-border: rgba(77, 84, 95, 0.6);
+  --picker-disabled-background: #1b2434;
+  --picker-disabled-text: rgba(194, 194, 194, 0.4);
+  --picker-active-disabled-border: #2e3d57;
+  --picker-active-disabled-background: #243146;
+  --picker-active-disabled-text: #3b4757;
   --sidebar: #161c27;
   --sidebar-foreground: #c2c2c2;
   --sidebar-primary: #0086cb;
@@ -186,6 +222,10 @@
   --shadow-xl:
     0 1px 4.5px 0px hsl(0 0% 0% / 0.14), 0 8px 10px -1px hsl(0 0% 0% / 0.14);
   --shadow-2xl: 0 1px 4.5px 0px hsl(0 0% 0% / 0.35);
+
+  /* Тёмное значение того же токена прошивки: не полупрозрачная чернота, а
+     плотный тёмно-синий — на тёмном холсте прозрачная тень не видна вовсе. */
+  --keen-shadow-1: 0 0 18px 0 #06080b;
 }
 
 @theme inline {
@@ -366,6 +406,19 @@
     border-radius: 8px;
   }
 
+  /* Тень под курсором. В прошивке это
+     `.dashboard-card--focus, .dashboard-card:hover { box-shadow: var(--box-shadow-1) }`,
+     и тот же самый токен там отбрасывает шапка — поэтому здесь ровно тот же
+     `--keen-shadow-1`. Перехода нет и в прошивке: у карточки нулевая
+     `transition-duration`, тень появляется сразу.
+
+     `:focus-within` — это их `.dashboard-card--focus`: с клавиатуры карточку
+     выделяет та же тень, что и мышью, иначе подсказка достаётся одному курсору. */
+  .keen-canvas-overview [data-slot="card"]:hover,
+  .keen-canvas-overview [data-slot="card"]:focus-within {
+    box-shadow: var(--keen-shadow-1);
+  }
+
   /* KeeneticOS labels the panels on its dashboard in small caps, which reads
      as a section marker rather than as another heading competing with the
      page title. */
@@ -380,11 +433,15 @@
     border-radius: 8px;
   }
 
-  /* Header strip on its own tone with a hairline under it: on white the
-     column titles simply dissolved into the page. */
+  /* Полоса заголовка своим тоном и с волосяной линией под ней: на белом
+     названия колонок просто растворялись.
+
+     Цвет и вес здесь больше не задаются. Они были заданы — и молча отменяли
+     починку из table.tsx, где заголовкам вернули цвет основного текста: серый
+     на #fafafa давал 2.7:1 при норме 4.5. Утилита font-semibold вес
+     перебивала, а цвет перебить было нечем, и правило пережило собственное
+     исправление. У прошивки здесь #000 при 20.1:1. */
   [data-slot="table"] thead th {
-    font-weight: 400;
-    color: var(--muted-foreground);
     background: #fafafa;
     border-bottom: 1px solid #ebebeb;
   }
@@ -425,8 +482,8 @@
   }
 
   .keen-header-shadow {
-    /* Exact KeeneticOS .header-shadow profile. */
-    box-shadow: 0 5px 20px rgb(0 0 0 / 5%);
+    /* Тот же `--box-shadow-1` прошивки, что и у карточки под курсором. */
+    box-shadow: var(--keen-shadow-1);
     clip-path: inset(0 0 -24px 0);
   }
 
@@ -435,35 +492,7 @@
     background: var(--background);
   }
 
-  .dark .keen-header-shadow {
-    box-shadow: 0 0 18px 0 #06080b;
-  }
-
   /* NDMS type scale, verbatim. */
-  .keen-text-body-small {
-    font-size: 12px;
-    line-height: 20px;
-  }
-  .keen-text-body {
-    font-size: 14px;
-    line-height: 22px;
-  }
-  .keen-text-card-heading {
-    font-size: 16px;
-    line-height: 24px;
-  }
-  .keen-text-h3 {
-    font-size: 20px;
-    line-height: 28px;
-  }
-  .keen-text-h2 {
-    font-size: 24px;
-    line-height: 32px;
-  }
-  .keen-text-h1 {
-    font-size: 28px;
-    line-height: 36px;
-  }
 
   /* NDMS scrollbars: thumb #d6d8d9 on a #f0f0f0 track. */
   * {
@@ -475,17 +504,14 @@
     scrollbar-color: #3d5073 #2e3d57;
   }
 
-  /* Dark KeeneticOS draws a 2px hairline around every card and no shadow at
-     all. The shadow is a hover affordance: it appears under the pointer and
-     the line stays put underneath it. */
+  /* Dark KeeneticOS draws a hairline around every card and no shadow at all.
+     Тень при наведении — не общее свойство карточки: во всей таблице стилей
+     прошивки `--box-shadow-1` встречается ровно трижды — шапка, всплывающий
+     блок аккаунта и `.dashboard-card:hover`. Поэтому она живёт рядом с
+     остальными правилами холста дашборда, а не здесь. */
   .dark [data-slot="card"] {
     border: 1px solid #4d545f;
     box-shadow: none;
-    transition: box-shadow 0.15s ease;
-  }
-
-  .dark [data-slot="card"]:hover {
-    box-shadow: 0 0 18px 0 #06080b;
   }
 
   [data-slot="input"],
@@ -603,35 +629,6 @@
   .settings-sections > [data-slot="card"]:last-of-type {
     border-bottom: 0 !important;
   }
-
-  .keen-service-state {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-height: 2.25rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.35rem 0.75rem;
-    font-size: 0.8125rem;
-    font-weight: 600;
-  }
-
-  .keen-service-state svg {
-    width: 1.35rem;
-    height: 1.35rem;
-  }
-
-  .keen-service-state--online {
-    border-color: color-mix(in srgb, var(--success) 45%, var(--border));
-    background: color-mix(in srgb, var(--success) 12%, var(--card));
-    color: var(--success);
-  }
-
-  .keen-service-state--offline {
-    border-color: color-mix(in srgb, var(--destructive) 35%, var(--border));
-    background: color-mix(in srgb, var(--destructive) 10%, var(--card));
-    color: var(--destructive);
-  }
 }
 
 /* Deliberately outside every @layer.
@@ -646,10 +643,32 @@
  * against --menu-active-item - so the shared `--sidebar-accent` token cannot
  * express both.
  */
+/* Текст пункта меню в светлой теме — всегда #000. Наведение и выбор меняют
+ * только подложку. Раньше при наведении цвет уезжал в #202020: на подложке
+ * #f0f0f0 надпись выцветала — чем ближе курсор, тем бледнее название. */
+html:not(.dark)
+  :is([data-slot="sidebar-menu-button"], [data-slot="sidebar-menu-sub-button"]),
+html:not(.dark)
+  :is(
+    [data-slot="sidebar-menu-button"],
+    [data-slot="sidebar-menu-sub-button"]
+  ):hover,
+html:not(.dark)
+  :is(
+    [data-slot="sidebar-menu-button"],
+    [data-slot="sidebar-menu-sub-button"]
+  )[data-active],
+html:not(.dark)
+  :is(
+    [data-slot="sidebar-menu-button"],
+    [data-slot="sidebar-menu-sub-button"]
+  )[aria-current="page"] {
+  color: #000;
+}
+
 [data-slot="sidebar-menu-button"]:hover,
 [data-slot="sidebar-menu-sub-button"]:hover {
   background: #f0f0f0;
-  color: #202020;
 }
 
 .dark [data-slot="sidebar-menu-button"],
@@ -661,6 +680,189 @@
 .dark [data-slot="sidebar-menu-sub-button"]:hover {
   background: #1b2434;
   color: #c2c2c2;
+}
+
+/* Индикатор активной вкладки скользит, как в конфигураторе.
+ *
+ * Раньше переход был задан утилитой `transition-[left,width,background-color]`.
+ * Класс с запятыми внутри произвольного значения Tailwind генерирует, а браузер
+ * такой селектор не разбирает и правило отбрасывает целиком: на живой панели у
+ * индикатора `transition-property: none`, и он не ехал, а прыгал. Здесь то же
+ * самое обычным CSS, отбрасывать нечего. */
+.keen-tab-indicator {
+  transition:
+    left 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    width 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Индикатор загрузки страницы — тот же, что в конфигураторе.
+ *
+ * Восемь лучей с нарастающей прозрачностью и вращение шагами по 45°: рисунок
+ * при этом сдвигается ровно на один луч, поэтому движение читается как
+ * непрерывное. Размер по умолчанию 64px — половина снятого со скриншота,
+ * потому что снят он на экране с двойной плотностью пикселей. */
+.keen-spinner {
+  display: inline-flex;
+  width: var(--keen-spinner-size, 64px);
+  height: var(--keen-spinner-size, 64px);
+  color: var(--primary);
+}
+
+.keen-spinner svg {
+  width: 100%;
+  height: 100%;
+  animation: keen-spinner-rotate 800ms steps(8, end) infinite;
+  fill: currentColor;
+}
+
+@keyframes keen-spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Кому вращение мешает — остаётся медленное дыхание прозрачностью: ответ
+   «страница жива, а не зависла» всё ещё нужен, движение по кругу — нет. */
+@media (prefers-reduced-motion: reduce) {
+  .keen-spinner svg {
+    animation: keen-spinner-fade 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes keen-spinner-fade {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Переключатель равнозначных вариантов, скопированный с ndw-picker KeeneticOS.
+ *
+ * Вне слоёв нарочно, как и правила меню: цвета здесь не должны проигрывать
+ * утилитам Tailwind, если кто-нибудь допишет классы поверх.
+ *
+ * Из оригинала перенесено и то, что легко потерять: кнопки наезжают друг на
+ * друга на 1px, а какая рамка окажется сверху, решает z-index — выбранная (2)
+ * поверх наведённой (1), фокус (3) поверх обеих. Поэтому рамка выглядит
+ * одинаково толстой в любой позиции. Наведение меняет только цвет рамки,
+ * нажатие не меняет ничего: выбранный вариант при нажатии остаётся собой.
+ */
+.keen-picker {
+  display: inline-flex;
+  width: 100%;
+  min-height: 32px;
+}
+
+.keen-picker__button {
+  position: relative;
+  display: inline-flex;
+  flex-grow: 1;
+  min-width: 64px;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-left: -1px;
+  padding: 1px 6px;
+  border: 1px solid var(--picker-stroke);
+  border-radius: 0;
+  background-color: var(--picker-background);
+  color: var(--picker-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    border-color 120ms linear,
+    background-color 120ms linear,
+    color 120ms linear;
+}
+
+.keen-picker__button:first-child {
+  margin-left: 0;
+  border-radius: 4px 0 0 4px;
+}
+
+.keen-picker__button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.keen-picker__button:only-child {
+  border-radius: 4px;
+}
+
+.keen-picker__button:hover {
+  z-index: 1;
+  border-color: var(--picker-hover-border);
+}
+
+.keen-picker__button:focus-visible {
+  z-index: 3;
+  border-color: var(--picker-focus-border);
+  outline: none;
+}
+
+.keen-picker__button:focus-visible:hover {
+  border-color: var(--picker-focus-border);
+}
+
+.keen-picker__button--active {
+  z-index: 2;
+  border-color: var(--picker-active-border);
+  background-color: var(--picker-active-background);
+  color: var(--primary);
+}
+
+.keen-picker__button--active:hover {
+  border-color: var(--picker-active-border);
+}
+
+.keen-picker__button--active:focus-visible,
+.keen-picker__button--active:focus-visible:hover {
+  border-color: var(--picker-active-focus-border);
+}
+
+.keen-picker__button:disabled {
+  border-color: var(--picker-disabled-border);
+  background-color: var(--picker-disabled-background);
+  color: var(--picker-disabled-text);
+  cursor: default;
+}
+
+.keen-picker__button--active:disabled {
+  border-color: var(--picker-active-disabled-border);
+  background-color: var(--picker-active-disabled-background);
+  color: var(--picker-active-disabled-text);
+}
+
+/* Столбиком на телефоне: у прошивки такого варианта нет — там подписи короче,
+ * а у нас «Ссылка подключения» и «Outbound JSON» в строку не помещаются. */
+.keen-picker--vertical {
+  flex-direction: column;
+}
+
+.keen-picker--vertical .keen-picker__button {
+  justify-content: flex-start;
+  min-height: 44px;
+  margin-top: -1px;
+  margin-left: 0;
+  padding: 6px 12px;
+  border-radius: 0;
+}
+
+.keen-picker--vertical .keen-picker__button:first-child {
+  margin-top: 0;
+  border-radius: 4px 4px 0 0;
+}
+
+.keen-picker--vertical .keen-picker__button:last-child {
+  border-radius: 0 0 4px 4px;
+}
+
+.keen-picker--vertical .keen-picker__button:only-child {
+  border-radius: 4px;
 }
 
 /* The Keenetic rail is a real 72 px wide. A conventional border reduces the

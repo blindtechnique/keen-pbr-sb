@@ -129,10 +129,15 @@ void reject_nul_path(const std::string& value,
     }
 }
 
+#ifdef KEEN_PBR3_TESTING
+// Обёртка нужна только тестовому входу `validate_confined_restore_target_for_test`
+// ниже, и объявлена под тем же условием: в production-сборке она никем не
+// вызывается и была единственным `-Wunused-function` в этом файле.
 void validate_confined_restore_target(const fs::path& root,
                                       const fs::path& target) {
     persistent::validate_confined_target(root, target);
 }
+#endif
 
 std::string exception_message(std::exception_ptr error) {
     if (!error) return "unknown restore failure";
@@ -492,12 +497,6 @@ nlohmann::json make_backup(const ApiContext& ctx, const nlohmann::json& groups) 
     if (backup.dump().size() > kMaxBackupBytes)
         throw ApiError("backup exceeds the aggregate limit", 413);
     return backup;
-}
-
-nlohmann::json all_groups() {
-    return {{"general", true}, {"transports", true}, {"outbounds", true},
-            {"dns", true}, {"routing", true}, {"nfqws_config", true},
-            {"nfqws_lists", true}};
 }
 
 void validate_bundle(const nlohmann::json& backup) {

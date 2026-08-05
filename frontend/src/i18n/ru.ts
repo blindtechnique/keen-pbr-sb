@@ -36,6 +36,154 @@ export const ruTranslation = {
     closeResult: "Закрыть сообщение",
     rollback: "Откатить конфигурацию",
     rollbackCompleted: "Конфигурация восстановлена из резервной копии.",
+    customConfigTitle: "Сейчас работает своя конфигурация",
+    customConfigDescription:
+      "Активный nfqws2.conf не совпадает ни с одной стратегией из списка — так бывает после правки на вкладке «Настройки» или по ssh. Сохраните его стратегией, иначе первое же «Применить» перезапишет его без возврата.",
+    snapshotActive: "Сохранить текущую как стратегию",
+    snapshotActiveDescription:
+      "Активный nfqws2.conf целиком станет новой стратегией — со всеми настройками, портами и аргументами, какие в нём сейчас.",
+    applyConfirmTitle: "Применить стратегию?",
+    applyDescription:
+      "Стратегия «{{name}}» заменит nfqws2.conf целиком и служба перезапустится. Вместе с аргументами обхода поменяются и значения на вкладке «Настройки»: интерфейс, порты, политика.",
+    applyOverCustomDescription:
+      "Стратегия «{{name}}» заменит nfqws2.conf целиком. Сейчас там своя конфигурация, не сохранённая ни в одной стратегии, — после применения её не восстановить. Сначала сохраните её кнопкой «Сохранить текущую как стратегию».",
+    strategyHeaders: {
+      name: "Стратегия",
+      origin: "Происхождение",
+      state: "Состояние",
+      actions: "Действия",
+    },
+    strategyOrigin: {
+      builtin: "Встроенная",
+      custom: "Своя",
+      overridden: "Встроенная, изменена",
+      draft: "Черновик, не сохранена",
+    },
+    strategyState: {
+      active: "Применена",
+      inactive: "Не применена",
+    },
+    strategiesEmptyTitle: "Стратегий пока нет",
+    strategiesEmpty:
+      "Стратегия — это набор параметров обхода блокировок. Добавьте свою или обновите nfqws2, чтобы получить встроенные.",
+    strategyEditorTitle: "Правка: {{name}}",
+    strategyEditorDescription:
+      "Каждая строка — аргументы nfqws для своей группы трафика. «Сохранить» записывает стратегию на диск, «Применить» ещё и перезапускает службу с ней.",
+    strategyNameDescription:
+      "Имя увидите только вы — оно ни на что не влияет, кроме того, как стратегия называется в списке.",
+    strategySaveBeforeApply: "Сначала сохраните стратегию",
+    editStrategy: "Открыть для правки",
+    restoreBuiltin: "Вернуть встроенную",
+    restoreBuiltinDescription:
+      "Ваши изменения в «{{name}}» будут отброшены, и стратегия вернётся к версии из поставки nfqws2.",
+    deleteStrategyTitle: "Удалить стратегию?",
+    deleteStrategyDescription:
+      "Стратегия «{{name}}» будет удалена. Если она сейчас применена, служба продолжит работать со старыми параметрами до перезапуска.",
+    fileHeaders: {
+      name: "Файл",
+      size: "Размер",
+      actions: "Действия",
+    },
+    fileSections: {
+      lists:
+        "Домены и адреса, к которым nfqws2 применяет обход. Файл — один список; в стратегии на него ссылаются по имени.",
+      lua: "Скрипты на Lua, которыми nfqws2 расширяет разбор трафика. Нужны редко и только если вы знаете, что делаете.",
+      logs: "Что служба записала о своей работе. Читать можно, править — нет.",
+    },
+    fileEmpty: {
+      lists:
+        "Списки задают, к какому трафику применять обход. Создайте первый — например, со списком доменов.",
+      lua: "Скрипты не нужны для обычной работы. Создавайте, только если стратегия ссылается на такой файл.",
+      logs: "Служба ещё ничего не записала.",
+    },
+    fileEmptyTitle: "Файлов пока нет",
+    fileEditorTitle: "Правка: {{name}}",
+    fileDraftBadge: "не сохранён",
+    fileNotRemovable: "Этот файл нужен nfqws2, удалить его нельзя",
+    openFile: "Открыть",
+    fileNameDescription: {
+      lists: "Расширение .list добавится само, если не указать его.",
+      lua: "Расширение .lua добавится само, если не указать его.",
+      logs: "",
+    },
+    deleteFileTitle: "Удалить файл?",
+    deleteFileDescription:
+      "Файл «{{name}}» будет удалён с роутера. Стратегии, которые на него ссылаются, перестанут находить свой список.",
+    clearLogDescription:
+      "Записи в «{{name}}» будут стёрты. Служба продолжит писать в тот же файл дальше.",
+    groups: {
+      scope: "К какому трафику применять",
+      scopeDescription:
+        "Через какой интерфейс идёт трафик, какие порты разбирать и для каких устройств это работает.",
+      bypass: "Как обходить блокировку",
+      bypassDescription:
+        "Аргументы nfqws для каждого вида трафика. Их обычно берут из готовой стратегии, а не пишут руками.",
+      other: "Прочее",
+      otherDescription: "Настройки, которые нужны при разборе проблем.",
+    },
+    modes: {
+      MODE_AUTO: "Автоматически — по спискам, а если их нет, ко всему трафику",
+      MODE_LIST: "Только по спискам",
+      MODE_ALL: "Ко всему трафику",
+    },
+    fields: {
+      ISP_INTERFACE: {
+        label: "Интерфейс провайдера",
+        hint: "Интерфейс, через который роутер выходит в интернет. Пусто — nfqws2 определит сам.",
+      },
+      TCP_PORTS: {
+        label: "Порты TCP",
+        hint: "Порты, трафик которых разбирать. 80 и 443 — обычный веб; остальное добавляют, если знают зачем.",
+      },
+      UDP_PORTS: {
+        label: "Порты UDP",
+        hint: "То же самое для UDP. 443 — это QUIC, то есть YouTube и другие сервисы Google.",
+      },
+      POLICY_NAME: {
+        label: "Политика KeeneticOS",
+        hint: "Имя политики доступа Keenetic, к устройствам которой применять обход. Пусто — ко всем.",
+      },
+      POLICY_EXCLUDE: {
+        label: "Наоборот: исключить эту политику",
+        hint: "Обход будет работать у всех, кроме устройств указанной политики.",
+      },
+      IPV6_ENABLED: {
+        label: "Обрабатывать IPv6",
+        hint: "Включайте, если провайдер выдаёт IPv6 и часть трафика идёт по нему.",
+      },
+      LOG_LEVEL: {
+        label: "Подробный журнал",
+        hint: "Служба будет записывать больше подробностей. Нужно при разборе проблем, в обычной работе только занимает место.",
+      },
+      NFQWS_EXTRA_ARGS: {
+        label: "Когда применять обход",
+        hint: "«По спискам» — только к тому, что перечислено в файлах списков. «Ко всему трафику» нагружает роутер сильнее.",
+      },
+      NFQWS_BASE_ARGS: {
+        label: "Базовые аргументы",
+        hint: "Общие для всех видов трафика. Обычно задаются стратегией и руками не правятся.",
+      },
+      NFQWS_ARGS: {
+        label: "Аргументы для TCP",
+        hint: "Как обходить блокировку обычного веба — HTTP и HTTPS.",
+      },
+      NFQWS_ARGS_QUIC: {
+        label: "Аргументы для QUIC",
+        hint: "QUIC — это UDP на порту 443: YouTube и другие сервисы Google.",
+      },
+      NFQWS_ARGS_UDP: {
+        label: "Аргументы для остального UDP",
+        hint: "Всё, что идёт по UDP мимо QUIC: игры, голос, часть VPN.",
+      },
+      NFQWS_ARGS_CUSTOM: {
+        label: "Свои аргументы",
+        hint: "Дописываются к остальным. Место для того, что вы подобрали сами.",
+      },
+      NFQWS_ARGS_IPSET: {
+        label: "Аргументы для адресов из ipset",
+        hint: "Применяются к трафику на IP-адреса из набора ipset, а не по доменам.",
+      },
+    },
     tabs: {
       ariaLabel: "Разделы nfqws2",
       settings: "Настройки",
@@ -154,15 +302,28 @@ export const ruTranslation = {
       "Используйте способ входа, выбранный в настройках keen-pbr-sb. При проверке через Keenetic вводятся данные его веб-конфигуратора.",
   },
   common: {
+    // Подписи общих примитивов интерфейса. Раньше они были зашиты
+    // по-английски прямо в components/ui/*, и русский пользователь видел
+    // «Close» на кнопке закрытия диалога.
+    chrome: {
+      sidebar: "Боковое меню",
+      toggleSidebar: "Свернуть или развернуть меню",
+      closeDialog: "Закрыть диалог",
+      closePanel: "Закрыть панель",
+      close: "Закрыть",
+      skipToContent: "Перейти к содержимому",
+    },
     help: {
       about: "Об этом разделе",
     },
     moreControls: "Ещё",
+    loading: "Загрузка страницы",
     tableSearch: {
       clear: "Очистить поиск",
       results: "Найдено: {{count}} из {{total}}",
       empty: "Ничего не найдено. Измените запрос или очистите поиск.",
     },
+    setupFromCatalog: "Настроить из каталога",
     retry: "Повторить",
     updateStatus: {
       available: "Есть обновление",
@@ -172,6 +333,8 @@ export const ruTranslation = {
     },
     dependencies: {
       title: "От этого зависит: {{count}}",
+      more: "Ещё {{count}}",
+      collapse: "Свернуть",
       none: "Ничего от этого не зависит — удаление ничего не сломает",
       kind: {
         routingRule: "Правила маршрутизации:",
@@ -180,6 +343,11 @@ export const ruTranslation = {
         failoverGroup: "Резервирование:",
         list: "Списки:",
         listRefresh: "Обновление URL-списков:",
+      },
+      brokenReference: {
+        missingList: "{{owner}} → список {{target}}",
+        listDetour: "Список {{list}} → {{target}}",
+        listRefresh: "Обновление URL-списков → {{target}}",
       },
     },
     listRefreshRoute: {
@@ -307,6 +475,8 @@ export const ruTranslation = {
       settings: "Настройки",
       outbounds: "Маршруты и резервирование",
       transports: "Туннели и прокси",
+      routesAndTunnels: "Маршруты и туннели",
+      rules: "Правила",
       connections: "Соединения",
       dnsServers: "DNS-серверы",
       lists: "Списки",
@@ -332,6 +502,7 @@ export const ruTranslation = {
     deviceCount: "Устройств: {{count}}",
     routeDirect: "Напрямую",
     empty: "Соединений нет",
+    emptyTitle: "Активных соединений нет",
     title: "Соединения",
     description:
       "Активные соединения и до 1500 последних записей. Для DNS-запросов через keen-pbr рядом с точным IP показывается последний известный домен. Данные обновляются каждые 3 секунды.",
@@ -387,10 +558,24 @@ export const ruTranslation = {
       other: "Другие",
       ariaLabel: "Типы туннелей и прокси",
     },
+    headers: {
+      name: "Название",
+      state: "Состояние",
+      latency: "Задержка",
+      usedBy: "Где используется",
+      actions: "Действия",
+    },
+    groups: {
+      managed: "Туннели и прокси keen-pbr-sb",
+      native: "Интерфейсы KeeneticOS",
+      nativeDescription:
+        "Созданы прошивкой роутера. keen-pbr-sb их только показывает: включить, перезапустить или удалить такой интерфейс можно в веб-конфигураторе Keenetic. Здесь на него можно направить маршрут.",
+    },
     refresh: "Обновить",
     add: "Добавить туннель или прокси",
     unavailable: "Менеджер туннелей и прокси недоступен",
     empty: "Туннели и прокси пока не настроены.",
+    emptyTitle: "Туннелей и прокси пока нет",
     processMode: {
       action: "Режим sing-box",
       unavailable:
@@ -420,6 +605,7 @@ export const ruTranslation = {
     server: "Сервер",
     connection: "Соединение",
     technicalTag: "Технический тег",
+    interfaceName: "Имя интерфейса",
     pathConfidence: "Источник определения",
     details: {
       show: "Показать подробности",
@@ -452,6 +638,7 @@ export const ruTranslation = {
       "Этот нативный интерфейс управляется KeeneticOS или другим сервисом.",
     nativeInterface: {
       keeneticOwner: "Управляется KeeneticOS",
+      managedByFirmware: "Этим интерфейсом управляет KeeneticOS",
       logicalName: "Интерфейс Keenetic",
       kernelName: "Системный интерфейс",
       protocol: "Протокол",
@@ -463,6 +650,10 @@ export const ruTranslation = {
       liveUp: "Присутствует и включён",
       liveDown: "Присутствует, но выключен",
       liveUnavailable: "Не найден в списке интерфейсов ядра",
+      // Та же мысль в две колонки таблицы: полная формулировка живёт в
+      // подсказке и в раскрытых подробностях, а в плашке состояния она
+      // растягивала колонку вдвое и сдвигала всю таблицу.
+      liveUnavailableShort: "Нет данных",
       connectedState: "Подключение",
       connected: "Подключено",
       disconnected: "Отключено",
@@ -705,7 +896,7 @@ export const ruTranslation = {
           "Одна из проверок маршрутизации, DNS или службы завершилась ошибкой.",
       },
       routing: "Маршрутизация",
-      configuration: "{{lists}} списков · {{rules}} правил",
+      configuration: "Списков: {{lists}} · Правил: {{rules}}",
       draft: "Есть несохранённый черновик",
       attention: {
         ariaLabel: "Разделы, требующие внимания",
@@ -786,6 +977,20 @@ export const ruTranslation = {
         restart: "Перезапустить",
       },
     },
+    routeTraffic: {
+      title: "Куда уходит трафик",
+      description:
+        "Доли принятого и отправленного по каждому маршруту с момента, когда его интерфейс поднялся. Это не «за сутки»: постоянного учёта у панели нет.",
+      total: "Всего",
+      rest: "Остальные",
+      idle: "Интерфейсы маршрутов подняты, но трафик через них пока не проходил.",
+      unavailable: "Счётчики трафика интерфейсов маршрутов недоступны.",
+      loadErrorTitle: "Не удалось загрузить счётчики трафика",
+      loadErrorDescription:
+        "Дашборд не смог получить актуальный список интерфейсов.",
+      idleCounters: "Маршрутов без трафика: {{count}}.",
+      unavailableCounters: "Маршрутов без доступных счётчиков: {{count}}.",
+    },
     outbounds: {
       liveTraffic: "Трафик используемых туннелей и прокси",
       trafficCountersHint:
@@ -800,7 +1005,7 @@ export const ruTranslation = {
         direct: "Напрямую — {{count}}",
         blocked: "Блокировка — {{count}}",
       },
-      listCount: "{{count}} списков",
+      listCount: "Списков: {{count}}",
       idleSummary: "Не используются — {{count}}",
       idleNames: "{{names}} — все исправны",
       hint: {
@@ -816,7 +1021,8 @@ export const ruTranslation = {
       },
       activeMember: "Активен: {{name}}",
       issue: {
-        interfaceUnreachable: "Интерфейс недоступен из основной таблицы",
+        interfaceUnreachable:
+          "Туннель не поднят — системе некуда через него отправлять трафик. Обычно это значит, что транспорт остановлен или ещё запускается.",
         routeMissing: "Активный маршрут не установлен",
         selectionMismatch: "Выбранный выход не совпадает с активным маршрутом",
         probeTimeout: "Проверка доступности превысила время ожидания",
@@ -1009,15 +1215,30 @@ export const ruTranslation = {
     },
   },
   pages: {
+    backup: {
+      title: "Резервная копия",
+      description:
+        "Выберите данные и скачайте единый файл конфигурации keen-pbr-sb.",
+      sectionTitle: "Состав копии",
+      sectionDescription: "Выберите разделы, которые нужно сохранить.",
+    },
+    restore: {
+      title: "Восстановление",
+      description:
+        "Восстановите выбранные группы из файла или откатите последнее изменение.",
+      sectionTitle: "Источник восстановления",
+      sectionDescription:
+        "Выберите сохранённую копию или последнее автоматически сохранённое состояние.",
+    },
     catalog: {
-      routeRuleName: "Каталог: {{count}} списков",
+      routeRuleName: "Каталог — списков: {{count}}",
       title: "Каталог списков",
       description:
         "Готовые наборы доменов и правил. Выберите нужные и укажите, куда направлять их трафик.",
       categoriesAriaLabel: "Категории каталога",
       source: "Источник:",
       updatedAt: "обновлён {{date}}",
-      count: "{{count}} списков",
+      count: "списков: {{count}}",
       downloadVia: "Скачивать через",
       directly: "Напрямую",
       checkNow: "Проверить сейчас",
@@ -1026,6 +1247,7 @@ export const ruTranslation = {
         "Обновить не удалось, показан прежний каталог. Попробуйте скачать через туннель.",
       searchPlaceholder: "Поиск по названию",
       empty: "Ничего не найдено",
+      emptyTitle: "Ничего не подошло",
       ruleSet: "готовый набор",
       domains: "{{count}} доменов",
       cidrs: "{{count}} CIDR",
@@ -1034,6 +1256,7 @@ export const ruTranslation = {
       actionBlock: "блокировать",
       alreadyAdded: "уже добавлен",
       selected: "Выбрано: {{count}}",
+      addTunnel: "Добавить туннель",
       routeTo: "Направить в",
       blockSelected: "Выбранные списки будут заблокированы",
       mixedSelection:
@@ -1067,6 +1290,7 @@ export const ruTranslation = {
       },
       refreshState: {
         success: "Успешно: {{date}}",
+        successVia: "Успешно: {{date}} · через {{detour}}",
         attempt: "Последняя попытка: {{date}}",
         attemptVia: "Последняя попытка: {{date}} · через {{detour}}",
         error: "Ошибка: {{message}}",
@@ -1175,6 +1399,46 @@ export const ruTranslation = {
           "Создайте выборочную резервную копию или восстановите настройки keen-pbr-sb из ранее сохранённого файла.",
         create: "Создать резервную копию",
         restore: "Восстановить из копии",
+        groups: {
+          general: "Конфигурация общих настроек",
+          transports: "Туннели и прокси",
+          outbounds: "Маршруты и резервирование",
+          dns: "Настройки DNS",
+          routing: "Списки и правила маршрутизации",
+          nfqws_config: "Конфигурация nfqws2",
+          nfqws_lists: "Списки nfqws2",
+        },
+        dialog: {
+          backupTitle: "Резервная копия",
+          backupDescription:
+            "Выберите данные и скачайте единый файл конфигурации keen-pbr-sb.",
+          restoreTitle: "Восстановление",
+          restoreDescription:
+            "Восстановите выбранные группы из файла или откатите последнее изменение.",
+        },
+        secretsWarning:
+          "Если выбраны туннели и прокси, файл содержит их UUID, пароли и ключи в открытом виде. Храните копию в безопасном месте и не пересылайте её посторонним.",
+        validationNote:
+          "Конфигурация проверяется до записи и применяется только после успешной валидации.",
+        createButton: "Создать и скачать",
+        createPending: "Создание…",
+        created: "Резервная копия создана",
+        createFailed: "Не удалось создать копию",
+        readFailed: "Не удалось прочитать копию",
+        restored: "Конфигурация восстановлена",
+        rolledBack: "Откат выполнен",
+        actionFailed: "Операция не выполнена",
+        confirmRestore: "Восстановить «{{filename}}»?",
+        confirmRollback: "Выполнить откат конфигурации?",
+        restoreHint:
+          "Перед изменением автоматически будет создана rollback-копия.",
+        rollbackHint:
+          "Будет восстановлено состояние перед последним обновлением или восстановлением.",
+        cancel: "Отмена",
+        confirm: "Подтвердить",
+        confirmPending: "Выполнение…",
+        rollbackButton: "Откат в один клик",
+        chooseFile: "Выбрать файл копии",
       },
       remoteAccess: {
         title: "Доступ снаружи",
@@ -1352,8 +1616,8 @@ export const ruTranslation = {
         internalVpnServersConfirmationAction: "Подтвердить VPN-сервер",
         internalVpnServersProcessLabel: "Через keen-pbr-sb",
         internalVpnServersInheritLabel: "Наследовать",
-        internalVpnServersStatusUp: "UP",
-        internalVpnServersStatusDown: "DOWN",
+        internalVpnServersStatusUp: "Включён",
+        internalVpnServersStatusDown: "Выключен",
         internalVpnServersStatusMissing: "Отсутствует",
         internalVpnServersStatusUnknown: "Неизвестно",
         internalVpnServersMissingHint:
@@ -1388,6 +1652,13 @@ export const ruTranslation = {
           "Проверьте доступ keen-pbr-sb к NDMS. Сохранённые правила не удаляются автоматически.",
         internalVpnServicesProcessLabel: "Через keen-pbr-sb",
         internalVpnServicesInheritLabel: "Наследовать",
+        internalVpnServiceNames: {
+          l2tp: "VPN-сервер L2TP/IPsec",
+          ikev1: "VPN-сервер IKEv1/IPsec",
+          ikev2: "VPN-сервер IKEv2/IPsec",
+          sstp: "VPN-сервер SSTP",
+          openconnect: "OpenConnect VPN-сервер",
+        },
         internalVpnServicesStatusEnabled: "Включён",
         internalVpnServicesStatusDisabled: "Отключён",
         internalVpnServicesStatusMissing: "Отсутствует",
@@ -1439,6 +1710,18 @@ export const ruTranslation = {
       },
       softwareUpdate: {
         title: "Обновление keen-pbr-sb",
+        cancel: "Отмена",
+        rollbackConfirmTitle: "Восстановить предыдущую версию keen-pbr-sb?",
+        rollbackConfirmHint:
+          "Будут установлены сохранённый IPK и соответствующая ему конфигурация. Текущий пакет останется доступен для обратного отката.",
+        rollbackConfirmAction: "Восстановить предыдущий IPK",
+        rollbackButton: "Откат в один клик",
+        rollbackUnavailable: "Появится после успешного управляемого обновления",
+        rollbackStarting: "Восстанавливаю предыдущий пакет",
+        rollbackFailed: "Не удалось запустить откат пакета",
+        downloadBackupBefore: "Скачать бэкап перед установкой",
+        progressLabel: "Прогресс обновления",
+        inProgress: "Выполняется обновление",
         description:
           "Проверяет последний опубликованный Release, сверяет SHA256SUMS и устанавливает IPK, сохраняя конфигурацию, интерфейсы туннелей и прокси и учётную запись веб-интерфейса.",
         current: "Установлено",
@@ -1521,6 +1804,13 @@ export const ruTranslation = {
     },
     dnsServers: {
       title: "DNS-серверы",
+      sections: {
+        servers: {
+          title: "Серверы",
+          description:
+            "К кому панель обращается за адресами доменов. Правила DNS ниже выбирают, какой сервер спросить о каком домене.",
+        },
+      },
       searchPlaceholder: "Поиск по названию, адресу или маршруту",
       description: "Upstream DNS-серверы для разрешения доменных имён.",
       fallbackSaved: "Порядок fallback DNS сохранён в черновик",
@@ -1693,6 +1983,7 @@ export const ruTranslation = {
           "Добавьте правило, чтобы направить подходящий трафик в нужный маршрут.",
       },
       headers: {
+        enabled: "Включено",
         order: "Порядок",
         orderShort: "№",
         name: "Название",
@@ -1792,6 +2083,28 @@ export const ruTranslation = {
         destinationAddresses: "2001:db8::1 или !203.0.113.0/24",
       },
     },
+    rules: {
+      title: "Правила",
+      description:
+        "Куда направлять трафик и через какие DNS-серверы разрешать домены. Обычно на один список нужны оба правила.",
+      tabs: {
+        ariaLabel: "Разделы правил",
+        routing: "Маршрутизация",
+        dns: "DNS",
+      },
+    },
+    routesAndTunnels: {
+      title: "Маршруты и туннели",
+      description:
+        "Через что уходит трафик: туннели и прокси, интерфейсы роутера, резервирование и системные направления.",
+      tabs: {
+        ariaLabel: "Разделы маршрутов и туннелей",
+        tunnels: "Туннели и прокси",
+        interfaces: "Маршруты",
+        failover: "Резервирование",
+        system: "Системные",
+      },
+    },
     outbounds: {
       plain: {
         interface: "Трафик уходит в туннель или интерфейс {{name}}",
@@ -1802,6 +2115,7 @@ export const ruTranslation = {
         ignore: "Трафик проходит без изменения маршрута",
       },
       interfaceSubline: "интерфейс {{name}}",
+      interfaceMissing: "Интерфейс не найден",
       usage: {
         none: "Никем не используется",
         some: "Сюда направлено списков: {{lists}}, правил: {{rules}}",
@@ -1810,6 +2124,12 @@ export const ruTranslation = {
         interfaces: "Туннели и интерфейсы",
         failover: "Резервирование",
         system: "Системные маршруты",
+      },
+      split: {
+        working: "Работают",
+        broken: "Не работают: интерфейс не найден",
+        brokenDescription:
+          "Эти маршруты ссылаются на интерфейс, которого сейчас нет в системе. Трафик через них не пойдёт: туннель удалён или переименован. Откройте маршрут и выберите существующий интерфейс — или удалите запись.",
       },
       groupsEmpty: {
         interfaces: "Туннели и интерфейсы пока не добавлены.",
@@ -2100,6 +2420,7 @@ export const ruTranslation = {
           "Правил пока нет - добавьте правило, чтобы направлять DNS-запросы по спискам через выбранный сервер.",
       },
       headers: {
+        enabled: "Включено",
         name: "Название",
         criteria: "Условие",
         serverTag: "DNS-сервер",
@@ -2256,6 +2577,10 @@ export const ruTranslation = {
       technicalId: "Технический ID: {{id}}",
       neverUpdated: "Ещё не обновлялся",
       noStats: "-",
+      statsLoaded: "Загружен",
+      statsNotLoaded: "Не загружен",
+      statsNotLoadedFailed:
+        "Последняя попытка загрузки закончилась ошибкой — подробности в строке под названием списка.",
       source: {
         url: "По ссылке",
         file: "Из файла",

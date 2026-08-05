@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 import "./fonts.css"
 import "./index.css"
-import "./i18n"
+import { initI18n } from "./i18n"
 import { LanguageProvider } from "@/components/language-provider"
 import App from "./App.tsx"
 import { ThemeProvider } from "@/components/theme-provider.tsx"
@@ -38,6 +38,10 @@ const queryClient = new QueryClient({
 
 const toasterBottomOffset =
   "calc(var(--warning-banner-height, 0px) + env(safe-area-inset-bottom, 0px) + 1rem)"
+
+// Словарь нужен до первого рендера, иначе интерфейс на мгновение покажет
+// ключи вместо надписей.
+await initI18n()
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

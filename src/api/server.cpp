@@ -303,18 +303,6 @@ bool resolve_static_file_under_root(const std::filesystem::path& root,
     return true;
 }
 
-bool is_regular_file_or_gzip(const std::filesystem::path& path) {
-    std::error_code ec;
-    if (std::filesystem::is_regular_file(path, ec)) {
-        return true;
-    }
-
-    ec.clear();
-    auto gzip_path = path;
-    gzip_path += ".gz";
-    return std::filesystem::is_regular_file(gzip_path, ec);
-}
-
 struct WebAuthConfig {
     bool enabled{false};
     bool misconfigured{false};

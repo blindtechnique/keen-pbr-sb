@@ -87,18 +87,6 @@ export function isRouteRuleNameGenerated(rule: RouteRule): boolean {
   return !rule.display_name?.trim()
 }
 
-export function getRuleDetails(rule: RouteRule) {
-  const pieces = [
-    `src_addr: ${rule.src_addr || "-"}`,
-    `dest_addr: ${rule.dest_addr || "-"}`,
-    `dscp: ${rule.dscp ?? "-"}`,
-    `src_port: ${rule.src_port || "-"}`,
-    `dest_port: ${rule.dest_port || "-"}`,
-  ]
-
-  return pieces.join(" · ")
-}
-
 export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
   return {
     id: rule.id ?? "",

@@ -1,4 +1,4 @@
-import { Pencil, Plus, Save, Trash2 } from "lucide-react"
+import { Pencil, Plus, Save, SparklesIcon, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -60,7 +60,9 @@ function areDnsRulesSemanticallyEqual(
   return getDnsRulesSemanticKey(left) === getDnsRulesSemanticKey(right)
 }
 
-export function DnsRulesPage() {
+export function DnsRulesPage({
+  embedded = false,
+}: { embedded?: boolean } = {}) {
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
   const baselineRules = loadedConfig?.dns?.rules ?? []
@@ -74,6 +76,7 @@ export function DnsRulesPage() {
     <DnsRulesEditor
       configError={configQuery.isError}
       configLoading={configQuery.isLoading}
+      embedded={embedded}
       key={editorKey}
       loadedConfig={loadedConfig}
     />
@@ -84,10 +87,12 @@ function DnsRulesEditor({
   loadedConfig,
   configLoading,
   configError,
+  embedded,
 }: {
   loadedConfig?: ConfigObject
   configLoading: boolean
   configError: boolean
+  embedded: boolean
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -257,10 +262,12 @@ function DnsRulesEditor({
 
   return (
     <div className="space-y-3">
-      <PageHeader
-        description={t("pages.dnsRules.description")}
-        title={t("pages.dnsRules.title")}
-      />
+      {embedded ? null : (
+        <PageHeader
+          description={t("pages.dnsRules.description")}
+          title={t("pages.dnsRules.title")}
+        />
+      )}
       <PageActionBar
         primary={
           <Button
@@ -317,6 +324,12 @@ function DnsRulesEditor({
         />
       ) : rules.length === 0 ? (
         <ListPlaceholder
+          action={
+            <Button onClick={() => navigate("/catalog")} variant="outline">
+              <SparklesIcon className="mr-1 h-4 w-4" />
+              {t("common.setupFromCatalog")}
+            </Button>
+          }
           description={t("pages.dnsRules.empty.description")}
           title={t("pages.dnsRules.empty.title")}
         />
@@ -367,7 +380,7 @@ function DnsRulesEditor({
           </div>
           <DataTable
             headers={[
-              "",
+              t("pages.dnsRules.headers.enabled"),
               t("pages.dnsRules.headers.name"),
               t("pages.dnsRules.headers.criteria"),
               t("pages.dnsRules.headers.serverTag"),
@@ -375,6 +388,7 @@ function DnsRulesEditor({
               t("pages.dnsRules.headers.actions"),
             ]}
             narrowColumns={[0]}
+            mobileLayout={{ titleColumn: 1, controlColumns: [0] }}
             rows={visibleRules.map(({ rule, index }) => [
               <div className="flex items-center" key={`enabled-${index}`}>
                 <Switch

@@ -122,12 +122,31 @@ export function OutboundMemberChain({
 /** Точка состояния и задержка активного участника. */
 export function OutboundStatus({
   runtimeState,
+  interfaceMissing = false,
 }: {
   runtimeState?: RuntimeOutboundState
+  /**
+   * Интерфейса, на который ссылается маршрут, в системе нет.
+   *
+   * Демон в этом случае всё равно отдаёт `healthy` — он проверяет свою
+   * табличную часть, а не наличие интерфейса. Отсюда и берутся два одинаково
+   * названных «исправных» маршрута, из которых работает один: у второго
+   * туннель давно снят, а панель об этом молчала.
+   */
+  interfaceMissing?: boolean
 }) {
   const { t } = useTranslation()
   const latency = firstLatency(runtimeState)
-  const tone = statusTone(runtimeState?.status)
+  const tone = interfaceMissing ? "down" : statusTone(runtimeState?.status)
+
+  if (interfaceMissing) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-sm whitespace-nowrap text-destructive">
+        <span className="size-2 shrink-0 rounded-full bg-destructive" />
+        <span>{t("pages.outbounds.interfaceMissing")}</span>
+      </span>
+    )
+  }
 
   return (
     <span className="inline-flex items-center gap-1.5 text-sm whitespace-nowrap text-muted-foreground">

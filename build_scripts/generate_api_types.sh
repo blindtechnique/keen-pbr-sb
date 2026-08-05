@@ -103,6 +103,26 @@ content = content.replace(
   '#include <cstdint>\n#include <map>\n#include <optional>'
 );
 
+// Значения по умолчанию для скалярных полей.
+//
+// quicktype объявляет их как \`bool flag;\` и \`int64_t value;\`. Это
+// default-initialization: при \`T x;\` значение неопределённо, и первое же
+// чтение — неопределённое поведение. UBSan поймал ровно это: «load of value 49,
+// which is not a valid value for type 'bool'» при копировании
+// InternalVpnServerElement. Инициализатор в объявлении делает весь класс ошибки
+// невозможным независимо от того, как объект создан.
+//
+// Перечисления намеренно не трогаем: \`= {}\` дало бы им первый по порядку
+// элемент, а это выбор значения по смыслу, а не защита от мусора.
+content = content.replace(
+  /^(\s+)bool ([a-z_][a-z0-9_]*);\$/gm,
+  '\$1bool \$2 = false;'
+);
+content = content.replace(
+  /^(\s+)(int64_t|double) ([a-z_][a-z0-9_]*);\$/gm,
+  '\$1\$2 \$3 = 0;'
+);
+
 // Add generation comment at the top
 const header = '// Generated from docs/openapi.yaml via build_scripts/generate_api_types.sh\n' +
                '// Run \"make generate\" to regenerate (requires Node.js).\n\n';

@@ -1,3 +1,4 @@
+import { BracesIcon, LinkIcon } from "lucide-react"
 import {
   useEffect,
   useMemo,
@@ -667,8 +668,16 @@ export function TransportConfigForm({
               ariaLabel={t("transports.form.sourceMode")}
               onChange={selectSourceMode}
               options={[
-                { value: "link", label: t("transports.form.shareLink") },
-                { value: "json", label: t("transports.form.outboundJson") },
+                {
+                  value: "link",
+                  label: t("transports.form.shareLink"),
+                  icon: LinkIcon,
+                },
+                {
+                  value: "json",
+                  label: t("transports.form.outboundJson"),
+                  icon: BracesIcon,
+                },
               ]}
               value={sourceMode}
             />

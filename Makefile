@@ -5,6 +5,7 @@ KEEN_PBR_RELEASE := $(shell bash $(VERSION_RESOLVER) release "$(CURDIR)")
 GCC_BUILD_DIR := cmake-build-gcc
 CLANG_BUILD_DIR := cmake-build-clang
 BUILD_JOBS ?= $(shell nproc)
+TEST_CMAKE_FLAGS ?=
 DIST_DIR := build/dist
 TRANSPORT_MANAGER_DIR := extensions/transport-manager
 TRANSPORT_MANAGER_DIST_DIR := $(DIST_DIR)/transport-manager
@@ -25,8 +26,10 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         transport-manager-test transport-manager-build \
         test \
         firewall-it-images firewall-it \
-        clang-build clang-check clang-tidy \
+        clang-build clang-check clang-tidy clang-tidy-curated \
         generate generate-check \
+        check-warnings check-shell check-openapi-parity check-nfqws-assets \
+        sanitize fuzz \
         cross-setup cross-build cross-deploy \
         help
 
@@ -75,12 +78,58 @@ generate: ## Regenerate src/api/generated/api_types.hpp from docs/openapi.yaml (
 generate-check: ## Verify backend API types match docs/openapi.yaml without modifying tracked files
 	bash build_scripts/generate_api_types.sh --check
 
+# Roadmap: «-Werror только к современной native GCC/Clang CI-сборке. Entware
+# GCC 8.4 и cross-build не блокировать отличающимся набором предупреждений.»
+# Базовая линия пуста, см. build_scripts/warnings-baseline.md.
+check-warnings: ## Build with -Wall -Wextra -Werror (native compilers only)
+	cmake -S . -B build/cmake-werror -G Ninja -DCMAKE_BUILD_TYPE=Release \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON \
+		-DKEEN_PBR_EXTRA_WARNINGS=ON -DKEEN_PBR_WERROR=ON
+	cmake --build build/cmake-werror --parallel $(BUILD_JOBS) --target keen-pbr
+
+check-shell: ## Parse every shipped shell script with the target BusyBox and scan for bashisms
+	bash build_scripts/check-shell-busybox.sh
+
+check-openapi-parity: ## Fail when a registered API route is missing from docs/openapi.yaml
+	python3 build_scripts/check-openapi-parity.py
+
+check-nfqws-assets: ## Verify nfqws2 preset and blob invariants (uniqueness, manifest, --new, port coverage)
+	python3 build_scripts/check-nfqws-assets.py
+
+# Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
+sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer
+	cmake -S . -B build/cmake-sanitize -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON -DKEEN_PBR_SANITIZE=ON
+	cmake --build build/cmake-sanitize --parallel $(BUILD_JOBS) --target keen-pbr-tests
+	ASAN_OPTIONS=detect_leaks=1:print_stacktrace=1 \
+	UBSAN_OPTIONS=print_stacktrace=1 \
+		build/cmake-sanitize/tests/keen-pbr-tests
+
+# Узкие цели существуют ровно затем, чтобы инварианты оставались проверяемыми,
+# когда монолитная цель временно сломана чужой правкой. Но собирать их надо
+# всегда: пока их не собирал никто, две из них молча перестали компилироваться,
+# и 35 сценариев с 888 assertions не выполнялись.
+NARROW_TEST_TARGETS := \
+	keen-pbr-cache-generation-tests \
+	keen-pbr-runtime-mutation-admission-tests \
+	keen-pbr-rescue-tests \
+	keen-pbr-keenetic-dns-refresh-tests \
+	keen-pbr-resolver-stream-tests \
+	keen-pbr-backup-restore-journal-tests \
+	keen-pbr-maintenance-lock-tests \
+	keen-pbr-update-lock-protocol-tests
+
 test: ## Build and run unit tests (doctest)
 	sh -n install.sh
-	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON
-	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-tests crash-diagnostics-smoke
+	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
 	$(GCC_BUILD_DIR)/tests/keen-pbr-tests
 	$(GCC_BUILD_DIR)/tests/crash-diagnostics-smoke
+	@for target in $(NARROW_TEST_TARGETS); do \
+		echo "== $$target =="; \
+		$(GCC_BUILD_DIR)/tests/$$target || exit 1; \
+	done
 
 firewall-it-images: ## Build the Docker images for firewall integration tests (also compiles the harness inside Docker)
 	docker build -t keen-pbr-firewall-it:iptables -f tests/firewall_it/docker/Dockerfile.iptables .
@@ -103,8 +152,46 @@ clang-tidy: ## Run clangd-tidy against project-owned sources using the Clang com
 	cmake -S . -B $(CLANG_BUILD_DIR) $(CLANG_CMAKE_FLAGS) $(CLANG_FEATURE_CMAKE_FLAGS) -DBUILD_TESTS=ON -DENABLE_THREAD_SAFETY_ANALYSIS=ON
 	bash build_scripts/run-clangd-tidy.sh "$(abspath $(CLANG_BUILD_DIR))" $(CLANGD_TIDY_ARGS)
 
+# Короткий бюджет для PR. Длинный nightly-прогон с сохраняемым corpus — отдельно:
+# FUZZ_TIME=3600 make fuzz, а выросший corpus складывать вне репозитория.
+FUZZ_TIME ?= 120
+fuzz: ## Build and run the libFuzzer targets (requires Clang)
+	cmake -S . -B build/cmake-fuzz -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
+		-DKEEN_PBR_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+	cmake --build build/cmake-fuzz --parallel $(BUILD_JOBS) --target \
+		keen-pbr-fuzz-srs keen-pbr-fuzz-config keen-pbr-fuzz-list \
+		keen-pbr-fuzz-iptables keen-pbr-fuzz-conntrack
+	python3 tests/fuzz/make-srs-corpus.py
+	python3 tests/fuzz/make-config-corpus.py
+	python3 tests/fuzz/make-list-corpus.py
+	python3 tests/fuzz/make-iptables-corpus.py
+	python3 tests/fuzz/make-conntrack-corpus.py
+	build/cmake-fuzz/tests/keen-pbr-fuzz-srs \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/srs
+	build/cmake-fuzz/tests/keen-pbr-fuzz-config \
+		-max_total_time=$(FUZZ_TIME) -max_len=262144 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/config
+	build/cmake-fuzz/tests/keen-pbr-fuzz-list \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/list
+	build/cmake-fuzz/tests/keen-pbr-fuzz-iptables \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/iptables
+	build/cmake-fuzz/tests/keen-pbr-fuzz-conntrack \
+		-max_total_time=$(FUZZ_TIME) -max_len=65536 -rss_limit_mb=2048 \
+		tests/fuzz/corpus/conntrack
+
+CLANG_TIDY_BUILD_DIR := build/cmake-clang-tidy
+clang-tidy-curated: ## Run clang-tidy over the highest-risk directories (see build_scripts/clang-tidy-baseline.md)
+	cmake -S . -B $(CLANG_TIDY_BUILD_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+		-DWITH_API=ON -DUSE_KEENETIC_API=ON -DBUILD_TESTS=ON \
+		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+	bash build_scripts/run-clang-tidy-curated.sh "$(abspath $(CLANG_TIDY_BUILD_DIR))"
+
 clean: ## Remove compiled artifacts
-	rm -rf $(GCC_BUILD_DIR) $(CLANG_BUILD_DIR) build/cmake-aarch64 build/cross-toolchain build/dist \
+	rm -rf $(GCC_BUILD_DIR) $(CLANG_BUILD_DIR) build/cmake-aarch64 build/cmake-sanitize build/cmake-fuzz build/cmake-clang-tidy build/cmake-werror build/cross-toolchain build/dist \
 	       build/debian-src-full build/debian-src-headless build/packages
 
 distclean: ## Remove all build artifacts including downloaded SDKs

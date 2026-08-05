@@ -190,19 +190,21 @@ export function GeneralConfigPage() {
   const loadedConfig = selectConfig(configQuery.data)
 
   return (
-    <div>
+    // Единственная страница без ритма в корне: был голый <div>, а расстояние
+    // между заголовком и содержимым подпиралось `mt-3` вручную.
+    <div className="space-y-3">
       <PageHeader
         description={t("pages.settings.description")}
         title={t("pages.settings.title")}
       />
 
-      <div className="mt-3">
+      <div>
         {configQuery.isLoading ? (
           <GeneralConfigPageSkeleton />
         ) : configQuery.isError || !loadedConfig ? (
           <ListPlaceholder
-            description="We can't load settings right now. Try refreshing the page."
-            title="Unable to load data"
+            description={t("common.loadErrorDescription")}
+            title={t("common.unableToLoadData")}
             variant="error"
           />
         ) : (
@@ -998,6 +1000,14 @@ function LoadedGeneralConfigPage({
                                 inheritLabel: t(
                                   "pages.settings.general.internalVpnServicesInheritLabel"
                                 ),
+                                // Имя собирается из вида службы: NDMS отдаёт
+                                // свои идентификаторы вроде `VirtualIPServerIKE2`,
+                                // по которым не понять ни что это VPN-сервер,
+                                // ни какой именно.
+                                serviceName: (kind) =>
+                                  t(
+                                    `pages.settings.general.internalVpnServiceNames.${kind}`
+                                  ),
                                 statusEnabled: t(
                                   "pages.settings.general.internalVpnServicesStatusEnabled"
                                 ),
@@ -1649,8 +1659,8 @@ function GeneralConfigPageSkeleton() {
       </Card>
 
       <div className="flex justify-end gap-2">
-        <Skeleton className="h-11 w-24" />
-        <Skeleton className="h-11 w-24" />
+        <Skeleton className="h-10 w-24" />
+        <Skeleton className="h-10 w-24" />
       </div>
     </>
   )

@@ -78,6 +78,7 @@ import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildListDeleteTargets,
   getListDeleteImpact,
+  getListStatsState,
   type ListDeleteImpact,
 } from "@/pages/lists-utils"
 
@@ -674,19 +675,35 @@ export function ListsPage() {
                 <Badge key={`${list.id}-type`} variant="outline">
                   {getListSourceLabel(list.draft, t)}
                 </Badge>,
-                list.stats ? (
+                // «0» и «не загружен» выглядели одинаково — прочерком. Свои
+                // записи панель считает сама, а что лежит в скачанном файле,
+                // она не знает: демон количество не отдаёт. Поэтому здесь не
+                // выдуманное число, а честное состояние загрузки.
+                getListStatsState(list) === "counted" && list.stats ? (
                   <StatsDisplay
                     ipv4Subnets={list.stats.ipv4Subnets}
                     ipv6Subnets={list.stats.ipv6Subnets}
                     key={`${list.id}-stats`}
                     totalHosts={list.stats.totalHosts}
                   />
-                ) : (
+                ) : getListStatsState(list) === "loaded" ? (
                   <span
                     className="text-sm text-muted-foreground"
-                    key={`${list.id}-stats-empty`}
+                    key={`${list.id}-stats-loaded`}
                   >
-                    {t("pages.lists.noStats")}
+                    {t("pages.lists.statsLoaded")}
+                  </span>
+                ) : (
+                  <span
+                    className="text-sm text-warning-foreground"
+                    key={`${list.id}-stats-empty`}
+                    title={
+                      list.lastError
+                        ? t("pages.lists.statsNotLoadedFailed")
+                        : undefined
+                    }
+                  >
+                    {t("pages.lists.statsNotLoaded")}
                   </span>
                 ),
                 <DependencyList

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next"
 
 import { queryConnections } from "@/api/generated/keen-api"
 import type { ConnectionRecord } from "@/api/generated/model/connectionRecord"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -31,11 +32,7 @@ export function ConnectionsPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const query = useInfiniteQuery({
-    queryKey: [
-      "connections",
-      activeOnly ? "active" : "all",
-      deferredFilter,
-    ],
+    queryKey: ["connections", activeOnly ? "active" : "all", deferredFilter],
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
       const response = await queryConnections({
@@ -87,7 +84,9 @@ export function ConnectionsPage() {
     return [...byDevice.values()]
       .map((group) => ({
         ...group,
-        connections: group.connections.sort((a, b) => b.last_seen - a.last_seen),
+        connections: group.connections.sort(
+          (a, b) => b.last_seen - a.last_seen
+        ),
       }))
       .sort((a, b) => b.connections.length - a.connections.length)
   }, [connections])
@@ -181,10 +180,11 @@ export function ConnectionsPage() {
           )
         })}
 
-        {groups.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            {t("connections.empty")}
-          </p>
+        {groups.length === 0 && !query.isLoading ? (
+          <ListPlaceholder
+            description={t("connections.empty")}
+            title={t("connections.emptyTitle")}
+          />
         ) : null}
       </div>
 
@@ -221,9 +221,7 @@ function SessionRow({
   return (
     <div className="connection-session-row grid grid-cols-1 gap-x-3 gap-y-0.5 py-1 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
-        {primaryDomain ? (
-          <div className="truncate">{primaryDomain}</div>
-        ) : null}
+        {primaryDomain ? <div className="truncate">{primaryDomain}</div> : null}
         <div className="truncate font-mono text-xs text-muted-foreground">
           {item.destination}:{item.destination_port}
         </div>
@@ -238,7 +236,7 @@ function SessionRow({
       </div>
       <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
         <span
-          className="text-xs tabular-nums text-muted-foreground"
+          className="text-xs text-muted-foreground tabular-nums"
           title={new Date(item.last_seen * 1000).toLocaleString()}
         >
           {item.active

@@ -48,7 +48,6 @@ import {
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { ButtonGroup } from "@/components/ui/button-group"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   Card,
@@ -799,41 +798,43 @@ function ListForm({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <ButtonGroup
-            className="w-full data-[orientation=vertical]:h-fit [&>[data-slot=button]]:flex-1 data-[orientation=vertical]:[&>[data-slot=button]]:w-full data-[orientation=vertical]:[&>[data-slot=button]]:justify-start data-[orientation=vertical]:[&>[data-slot=button]]:px-3"
-            orientation={isMobile ? "vertical" : "horizontal"}
+          {/* Тот же переключатель, что и при добавлении туннеля: ndw-picker
+              KeeneticOS. Здесь он с множественным выбором — источников можно
+              указать сразу несколько, — поэтому кнопки, а не радиогруппа. */}
+          <div
+            className={cn("keen-picker", isMobile && "keen-picker--vertical")}
+            role="group"
           >
             {LIST_SOURCE_GROUPS.map((group) => {
               const Icon = LIST_SOURCE_GROUP_ICONS[group]
               const active = activeSourceGroups.includes(group)
 
               return (
-                <Button
+                <button
                   aria-pressed={active}
                   className={cn(
-                    isMobile && "h-auto min-h-11 py-2.5",
-                    active &&
-                      "z-10 border-primary bg-primary/[0.12] text-foreground ring-1 ring-primary/40 ring-inset hover:bg-primary/[0.18]"
+                    "keen-picker__button",
+                    active && "keen-picker__button--active"
                   )}
                   key={group}
                   onClick={() => handleSourceGroupSelect(group)}
-                  size={isMobile ? "default" : "sm"}
                   type="button"
-                  variant="outline"
                 >
                   {isMobile ? (
                     active ? (
-                      <CheckCircle2Icon className="size-4 text-primary" />
+                      <CheckCircle2Icon className="size-4 shrink-0 text-primary" />
                     ) : (
-                      <CircleIcon className="size-4 text-muted-foreground" />
+                      <CircleIcon className="size-4 shrink-0 text-muted-foreground" />
                     )
                   ) : null}
-                  <Icon className="size-4" />
-                  {t(`pages.listUpsert.sourceGroups.${group}.button`)}
-                </Button>
+                  <Icon className="size-4 shrink-0" />
+                  <span className="truncate">
+                    {t(`pages.listUpsert.sourceGroups.${group}.button`)}
+                  </span>
+                </button>
               )
             })}
-          </ButtonGroup>
+          </div>
         </CardContent>
       </Card>
 

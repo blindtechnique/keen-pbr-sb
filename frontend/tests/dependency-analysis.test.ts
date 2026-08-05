@@ -169,20 +169,29 @@ describe("backend dependency mapping", () => {
   })
 
   test("finds broken per-list and global fallback routes", () => {
-    const broken = findBrokenReferences({
-      outbounds: [{ type: "interface", tag: "vpn" }],
-      lists: {
-        ai: {
-          refresh_detour_mode: "override",
+    const broken = findBrokenReferences(
+      {
+        outbounds: [{ type: "interface", tag: "vpn" }],
+        lists: {
+          ai: {
+            refresh_detour_mode: "override",
+            detour: "vpn",
+            fallback_detours: ["missing_list_backup"],
+          },
+        },
+        list_refresh: {
           detour: "vpn",
-          fallback_detours: ["missing_list_backup"],
+          fallback_detours: ["missing_global_backup"],
         },
       },
-      list_refresh: {
-        detour: "vpn",
-        fallback_detours: ["missing_global_backup"],
-      },
-    })
+      {
+        missingList: (values) =>
+          `missingList:${Object.values(values).join(":")}`,
+        listDetour: (values) => `listDetour:${Object.values(values).join(":")}`,
+        listRefresh: (values) =>
+          `listRefresh:${Object.values(values).join(":")}`,
+      }
+    )
 
     expect(broken.map((item) => item.id)).toEqual([
       "list:ai:fallback:0:missing_list_backup",

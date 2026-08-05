@@ -233,16 +233,6 @@ void mark_config_save_unknown_best_effort(
     }
 }
 
-bool restore_exact_config_snapshot(
-    const ConfigSaveRuntimeOptions& options,
-    const backup::PersistentLayout& persistent_layout,
-    std::string& failure) noexcept {
-    return restore_exact_config_snapshot(
-        options,
-        persistent_layout,
-        {},
-        failure);
-}
 
 bool stop_routing_best_effort(ApiContext& ctx) noexcept {
     try {

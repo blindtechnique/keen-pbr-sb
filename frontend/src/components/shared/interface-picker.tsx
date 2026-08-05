@@ -524,43 +524,6 @@ function InterfaceStatusBadge({
   )
 }
 
-export function InterfaceAddressDetails({
-  interfaceEntry,
-  compact = false,
-}: {
-  interfaceEntry: RuntimeInterfaceInventoryEntry
-  compact?: boolean
-}) {
-  const addresses = getInterfaceAddresses(interfaceEntry)
-
-  if (!addresses.length) {
-    return null
-  }
-
-  return (
-    <div
-      className={cn(
-        "flex flex-wrap gap-1",
-        compact
-          ? "text-xs"
-          : "rounded-lg border border-border bg-muted/30 p-2 text-xs"
-      )}
-    >
-      {addresses.map((address) => (
-        <code
-          className={cn(
-            "rounded-md px-1.5 py-0.5 text-muted-foreground",
-            compact ? "bg-muted" : "bg-background"
-          )}
-          key={address}
-        >
-          {address}
-        </code>
-      ))}
-    </div>
-  )
-}
-
 function AddressTooltipContent({ addresses }: { addresses: string[] }) {
   return (
     <div className="flex flex-col items-start gap-1">

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type ReactNode } from "react"
+import { useLayoutEffect, useRef, type ReactNode, useMemo } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -29,6 +29,11 @@ export function CodeEditor({
   "value" | "onChange" | "className" | "readOnly"
 >) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // Подсветка считалась в теле рендера. Замерено: 41 мс на тысяче строк лога и
+  // 80 мс на пяти тысячах строк списка — при бюджете кадра в 16 мс, и это на
+  // десктопе. В редакторе списка это происходило на каждое нажатие клавиши.
+  const highlighted = useMemo(() => highlight(value, syntax), [value, syntax])
+
   const highlightRef = useRef<HTMLPreElement>(null)
 
   // The two layers must scroll together or the colours drift away from the text.
@@ -58,17 +63,20 @@ export function CodeEditor({
     >
       <pre
         aria-hidden="true"
-        className={cn(shared, "pointer-events-none h-full overflow-auto px-3 py-2")}
+        className={cn(
+          shared,
+          "pointer-events-none h-full overflow-auto px-3 py-2"
+        )}
         ref={highlightRef}
       >
-        {highlight(value, syntax)}
+        {highlighted}
         {/* Trailing newline keeps the last line visible while typing. */}
         {"\n"}
       </pre>
       <textarea
         className={cn(
           shared,
-          "absolute inset-0 resize-none touch-pan-y overflow-auto overscroll-contain bg-transparent px-3 py-2 text-transparent caret-foreground outline-none"
+          "absolute inset-0 touch-pan-y resize-none overflow-auto overscroll-contain bg-transparent px-3 py-2 text-transparent caret-foreground outline-none"
         )}
         onChange={(event) => onChange?.(event.target.value)}
         readOnly={readOnly}

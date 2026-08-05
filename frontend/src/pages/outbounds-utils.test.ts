@@ -4,7 +4,9 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 
 import {
   buildUpdatedConfigForOutboundsDelete,
+  filterDeletableOutboundTags,
   getOutboundDeleteImpact,
+  isSystemOutboundType,
 } from "./outbounds-utils"
 
 describe("global list refresh route outbound cleanup", () => {
@@ -21,11 +23,12 @@ describe("global list refresh route outbound cleanup", () => {
       },
     }
 
-    expect(getOutboundDeleteImpact(config, ["backup_a"]).globalListRefreshRoute)
-      .toEqual({
-        before: ["primary", "backup_a", "backup_b"],
-        after: ["primary", "backup_b"],
-      })
+    expect(
+      getOutboundDeleteImpact(config, ["backup_a"]).globalListRefreshRoute
+    ).toEqual({
+      before: ["primary", "backup_a", "backup_b"],
+      after: ["primary", "backup_b"],
+    })
     expect(
       buildUpdatedConfigForOutboundsDelete(config, ["backup_a"]).list_refresh
     ).toEqual({
@@ -46,11 +49,12 @@ describe("global list refresh route outbound cleanup", () => {
       },
     }
 
-    expect(getOutboundDeleteImpact(config, ["primary"]).globalListRefreshRoute)
-      .toEqual({
-        before: ["primary", "backup"],
-        after: [],
-      })
+    expect(
+      getOutboundDeleteImpact(config, ["primary"]).globalListRefreshRoute
+    ).toEqual({
+      before: ["primary", "backup"],
+      after: [],
+    })
     expect(
       buildUpdatedConfigForOutboundsDelete(config, ["primary"]).list_refresh
     ).toEqual({})
@@ -97,5 +101,50 @@ describe("per-list refresh route outbound cleanup", () => {
     ).toEqual({
       url: "https://example.test/list.txt",
     })
+  })
+})
+
+describe("системные маршруты не удаляются", () => {
+  const config = {
+    outbounds: [
+      { tag: "wan", type: "table" as const },
+      { tag: "block", type: "blackhole" as const },
+      { tag: "bypass", type: "ignore" as const },
+      { tag: "vpn", type: "interface" as const, interface: "nwg1" },
+      {
+        tag: "group",
+        type: "urltest" as const,
+        outbound_groups: [{ outbounds: ["vpn"] }],
+      },
+    ],
+  }
+
+  test("отсекает всё, что не туннель и не группа", () => {
+    expect(
+      filterDeletableOutboundTags(config, ["wan", "block", "bypass", "vpn"])
+    ).toEqual(["vpn"])
+  })
+
+  test("группу резервирования удалять можно", () => {
+    expect(filterDeletableOutboundTags(config, ["group"])).toEqual(["group"])
+  })
+
+  test("расчёт последствий тоже их игнорирует", () => {
+    const impact = getOutboundDeleteImpact(config, ["wan", "block"])
+    expect(impact.deletedOutboundTags).toEqual([])
+  })
+
+  test("правка конфигурации системный маршрут не трогает", () => {
+    const next = buildUpdatedConfigForOutboundsDelete(config, ["wan", "vpn"])
+    expect(next.outbounds?.map((item) => item.tag)).toContain("wan")
+    expect(next.outbounds?.map((item) => item.tag)).not.toContain("vpn")
+  })
+
+  test("тип решает, а не имя", () => {
+    expect(isSystemOutboundType("table")).toBe(true)
+    expect(isSystemOutboundType("blackhole")).toBe(true)
+    expect(isSystemOutboundType("ignore")).toBe(true)
+    expect(isSystemOutboundType("interface")).toBe(false)
+    expect(isSystemOutboundType("urltest")).toBe(false)
   })
 })

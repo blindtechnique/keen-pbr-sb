@@ -132,6 +132,7 @@ export function collectActiveTrafficPaths(
   const paths = new Map<string, ActiveTrafficPath>()
 
   for (const rule of rules) {
+    if (rule.enabled === false) continue
     collectPhysicalPaths({
       tag: rule.outbound,
       inheritedStatus: "active",

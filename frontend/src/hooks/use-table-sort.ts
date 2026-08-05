@@ -78,6 +78,30 @@ export function sortTableItems<T>(
     .map((entry) => entry.item)
 }
 
+/**
+ * Следующее состояние сортировки по нажатию на заголовок.
+ *
+ * Два состояния, а не три. В конфигураторе выбранная колонка остаётся
+ * выбранной до перезагрузки страницы, а повторное нажатие только переворачивает
+ * порядок. Третий клик, снимавший сортировку, читался как сбой: значок вдруг
+ * пропадал, а строки прыгали в порядок, которого никто не просил.
+ *
+ * Вынесено из хука отдельной функцией, чтобы правило проверялось тестом:
+ * при слиянии веток оно один раз уже чуть не вернулось к трём состояниям.
+ */
+export function nextTableSortState(
+  current: { activeColumn: number | null; direction: TableSortDirection },
+  columnIndex: number
+): { activeColumn: number; direction: TableSortDirection } {
+  if (columnIndex === current.activeColumn) {
+    return {
+      activeColumn: columnIndex,
+      direction: current.direction === "asc" ? "desc" : "asc",
+    }
+  }
+  return { activeColumn: columnIndex, direction: "asc" }
+}
+
 export function useTableSort<T>(items: T[], columns: TableSortColumn<T>[]) {
   const [activeColumn, setActiveColumn] = useState<number | null>(null)
   const [direction, setDirection] = useState<TableSortDirection>("asc")
@@ -93,19 +117,9 @@ export function useTableSort<T>(items: T[], columns: TableSortColumn<T>[]) {
     direction,
     sortable: columns.map((entry) => entry.index),
     onToggle: (columnIndex) => {
-      if (columnIndex === activeColumn) {
-        // Третий клик снимает сортировку и возвращает исходный порядок —
-        // он тоже осмысленный, в него человек и хочет вернуться.
-        if (direction === "desc") {
-          setActiveColumn(null)
-          setDirection("asc")
-          return
-        }
-        setDirection("desc")
-        return
-      }
-      setActiveColumn(columnIndex)
-      setDirection("asc")
+      const next = nextTableSortState({ activeColumn, direction }, columnIndex)
+      setActiveColumn(next.activeColumn)
+      setDirection(next.direction)
     },
   }
 

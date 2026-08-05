@@ -567,9 +567,12 @@ std::optional<ParsedExactConntrackFlow> parse_exact_conntrack_flow(
         ++tuple_field_index;
     }
 
-    if (tuple_field_index != tuple_fields.size() * 2U ||
-        !mark.has_value() || assured && unreplied ||
-        explicit_seen_reply && unreplied) {
+    // Скобки расставлены явно; группировка не менялась — `&&` и так связывает
+    // сильнее `||`. В этой строке решается, считать ли запись подтверждённо
+    // зависшей, и читателю важно видеть три независимых причины отказа сразу,
+    // а не вычислять приоритеты операторов.
+    if (tuple_field_index != tuple_fields.size() * 2U || !mark.has_value() ||
+        (assured && unreplied) || (explicit_seen_reply && unreplied)) {
         return std::nullopt;
     }
     const auto expected_address_family =

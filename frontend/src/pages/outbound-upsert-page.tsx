@@ -13,7 +13,11 @@ import type { Outbound } from "@/api/generated/model/outbound"
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model/runtimeInterfaceInventoryEntry"
 import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
-import { useGetConfig, useGetRuntimeInterfaces } from "@/api/queries"
+import {
+  useGetConfig,
+  useGetNdmsInterfaceInventory,
+  useGetRuntimeInterfaces,
+} from "@/api/queries"
 import {
   findOutboundByTag,
   selectConfig,
@@ -53,6 +57,7 @@ import { getOutboundDisplayName } from "@/lib/outbound-display"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { makeTechnicalId } from "@/lib/technical-id"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
+import { excludeIngressServerInterfaces } from "@/lib/native-interfaces"
 import {
   createDefaultOutboundDraft,
   mapOutboundToDraft,
@@ -284,10 +289,18 @@ function OutboundForm({
   const [technicalIdManuallyEdited, setTechnicalIdManuallyEdited] =
     useState(false)
   const runtimeInterfacesQuery = useGetRuntimeInterfaces()
-  const runtimeInterfaces =
+  const ndmsInventoryQuery = useGetNdmsInterfaceInventory()
+  // Входящие VPN-серверы прошивки из выбора убраны: направить исходящий
+  // трафик в интерфейс, который принимает чужие подключения, нельзя.
+  const runtimeInterfaces = excludeIngressServerInterfaces(
     runtimeInterfacesQuery.data?.status === 200
       ? runtimeInterfacesQuery.data.data.interfaces
+      : [],
+    ndmsInventoryQuery.data?.status === 200 &&
+      ndmsInventoryQuery.data.data.available
+      ? ndmsInventoryQuery.data.data.interfaces
       : []
+  )
   const { protocolOf } = useInterfaceProtocols()
   const runtimeInterfaceByName = new Map(
     runtimeInterfaces.map((runtimeInterface) => [

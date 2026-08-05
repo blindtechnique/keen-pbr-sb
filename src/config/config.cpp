@@ -957,7 +957,14 @@ Config parse_config(const std::string& json_str) {
 
     try {
         parsed_json = json::parse(json_str, nullptr, true, true);
-    } catch (const json::parse_error& e) {
+    } catch (const json::exception& e) {
+        // Ловим весь `json::exception`, а не только `parse_error`. Числовой
+        // литерал вроде 7777777777777777e777777777777777777777 синтаксически
+        // корректен, и nlohmann бросает на нём `out_of_range` (406), а не
+        // `parse_error`. Мимо узкого catch такое исключение уходило наружу и
+        // роняло демон вместо понятной ошибки валидации: конфигурация из чужой
+        // резервной копии или правленная руками — обычный вход, а не выдумка.
+        // Найдено фаззингом `keen-pbr-fuzz-config`.
         throw ConfigValidationError(std::vector<ConfigValidationIssue>{
             {"$", std::string("Invalid JSON: ") + e.what()}
         });

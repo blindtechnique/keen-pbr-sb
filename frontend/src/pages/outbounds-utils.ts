@@ -42,11 +42,38 @@ export type OutboundDeleteImpact = {
   }>
 }
 
+/**
+ * Системный маршрут — всё, что не туннель и не группа резервирования.
+ *
+ * Это `wan`, `block` и прочая обвязка: на них держится сам разбор трафика, и
+ * удаление одного из них ломает конфигурацию целиком, обычно молча. Правки
+ * ради — пожалуйста, удаление — нет.
+ */
+export function isSystemOutboundType(type: Outbound["type"]): boolean {
+  return type !== "interface" && type !== "urltest"
+}
+
+/** Теги, которые вообще разрешено удалять. Системные сюда не попадают. */
+export function filterDeletableOutboundTags(
+  config: ConfigObject,
+  tags: Iterable<string>
+): string[] {
+  const systemTags = new Set(
+    (config.outbounds ?? [])
+      .filter((outbound) => isSystemOutboundType(outbound.type))
+      .map((outbound) => outbound.tag)
+  )
+
+  return [...new Set(tags)].filter((tag) => !systemTags.has(tag))
+}
+
 export function getOutboundDeleteImpact(
   config: ConfigObject,
   initialTags: Iterable<string>
 ): OutboundDeleteImpact {
-  const deletedTags = new Set(initialTags)
+  // Отсечь системные здесь, а не только в интерфейсе: расчёт последствий и
+  // сама правка конфигурации ходят разными путями, и защита нужна на общем.
+  const deletedTags = new Set(filterDeletableOutboundTags(config, initialTags))
   let changed = true
 
   while (changed) {

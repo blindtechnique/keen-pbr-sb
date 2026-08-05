@@ -53,7 +53,8 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     file: "src/components/layout/warning-banner.tsx",
     argument: "getWarningBannerDescriptionKey(*)",
     keys: ["warning.compact.*", "lifecycle.*"],
-    reason: "The helper exhaustively maps WarningBannerMode to description keys.",
+    reason:
+      "The helper exhaustively maps WarningBannerMode to description keys.",
   },
   {
     file: "src/components/lists/template-picker.tsx",
@@ -95,7 +96,8 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     file: "src/components/overview/services-status-card.tsx",
     argument: "dnsmasqBadge.labelKey",
     keys: ["overview.runtime.dnsmasq*"],
-    reason: "Dnsmasq badge keys are a literal union returned by its state helper.",
+    reason:
+      "Dnsmasq badge keys are a literal union returned by its state helper.",
   },
   {
     file: "src/components/overview/system-status-summary.tsx",
@@ -143,12 +145,6 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "Outbound runtime status is generated as a finite API enum.",
   },
   {
-    file: "src/components/shared/runtime-outbound-state.tsx",
-    argument: "`runtime.interfaceStatus.${*}`",
-    keys: ["runtime.interfaceStatus.*"],
-    reason: "Interface runtime status is generated as a finite API enum.",
-  },
-  {
     file: "src/components/shared/schedule-picker.tsx",
     argument: "`pages.settings.autoupdate.schedule.${*}`",
     keys: [
@@ -167,13 +163,49 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "Weekday keys are a closed local tuple.",
   },
   {
-    file: "src/components/theme-selector.tsx",
-    argument: "option.labelKey",
-    keys: ["theme.*"],
-    reason: "Theme options are a local readonly tuple.",
+    file: "src/pages/general-config-page.tsx",
+    argument: "`pages.settings.general.internalVpnServiceNames.${*}`",
+    keys: ["pages.settings.general.internalVpnServiceNames.*"],
+    reason: "NdmsVpnServerKind is a closed backend enum of five values.",
   },
   {
-    file: "src/components/transports/native-interface-card.tsx",
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.modes.${*}`",
+    keys: ["nfqws.modes.*"],
+    reason: "MODE_AUTO / MODE_LIST / MODE_ALL is a closed local tuple.",
+  },
+  {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.fields.${*}.label`",
+    keys: ["nfqws.fields.*.label"],
+    reason: "The nfqws2.conf variables are a closed local tuple.",
+  },
+  {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.fields.${*}.hint`",
+    keys: ["nfqws.fields.*.hint"],
+    reason: "The nfqws2.conf variables are a closed local tuple.",
+  },
+  {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.fileSections.${*}`",
+    keys: ["nfqws.fileSections.*"],
+    reason: "The three file categories are a closed local tuple.",
+  },
+  {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.fileEmpty.${*}`",
+    keys: ["nfqws.fileEmpty.*"],
+    reason: "The three file categories are a closed local tuple.",
+  },
+  {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.fileNameDescription.${*}`",
+    keys: ["nfqws.fileNameDescription.*"],
+    reason: "The three file categories are a closed local tuple.",
+  },
+  {
+    file: "src/components/transports/native-interface-details.tsx",
     argument: "`transports.nativeInterface.managementBlockers.${*}`",
     keys: ["transports.nativeInterface.managementBlockers.*"],
     reason: "Management blockers are a finite backend enum.",
@@ -306,5 +338,11 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     argument: "`transports.states.${*}`",
     keys: ["transports.states.*"],
     reason: "Transport state is a finite API enum.",
+  },
+  {
+    file: "src/components/settings/backup-dialogs.tsx",
+    argument: "groupLabelKey(group)",
+    keys: ["pages.settings.backup.groups.*"],
+    reason: "Backup groups are a finite API enum (BackupGroup).",
   },
 ] as const

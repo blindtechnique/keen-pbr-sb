@@ -2,18 +2,14 @@ import { type ReactNode, useMemo, useState } from "react"
 import { CheckCircle2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
+
 import type {
   RouteTableCheck,
   RoutingHealthResponse,
 } from "@/api/generated/model"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty"
 
 type StatusTone = "healthy" | "warning" | "degraded"
 
@@ -84,14 +80,11 @@ export function RoutingHealthCard({
       ) : null}
 
       {!hasVisibleEntries && showHealthyEntries ? (
-        <Empty className="min-h-0 flex-1 px-4 py-5">
-          <EmptyHeader>
-            <EmptyTitle>{t("overview.routing.noChecksTitle")}</EmptyTitle>
-            <EmptyDescription>
-              {t("overview.routing.noChecksDescription")}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <ListPlaceholder
+          className="min-h-0 flex-1 px-4 py-5"
+          description={t("overview.routing.noChecksDescription")}
+          title={t("overview.routing.noChecksTitle")}
+        />
       ) : null}
 
       {firewallRules.length > 0 ? (

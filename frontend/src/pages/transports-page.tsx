@@ -12,7 +12,7 @@ import {
   TrashIcon,
   WorkflowIcon,
 } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -50,12 +50,16 @@ import {
   useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
+import { DataTable } from "@/components/shared/data-table"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { PageActionBar } from "@/components/shared/page-action-bar"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
+import { SectionHeading } from "@/components/shared/section-heading"
+import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
-import { NativeInterfaceCard } from "@/components/transports/native-interface-card"
+import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
 import {
@@ -63,14 +67,16 @@ import {
   collectRuntimeLatencyByInterface,
 } from "@/components/transports/transport-latency-model"
 import { TransportProtocolIcon } from "@/components/transports/protocol-icon"
-import { formatTransportPath } from "@/components/transports/transport-path"
+import {
+  describeTransportWire,
+  formatTransportPath,
+} from "@/components/transports/transport-path"
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DependencyList } from "@/components/shared/dependency-list"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import {
   useServerLocations,
@@ -175,7 +181,9 @@ function groupTransports(
   return [...groups.values()]
 }
 
-export function TransportsPage() {
+export function TransportsPage({
+  embedded = false,
+}: { embedded?: boolean } = {}) {
   const queryClient = useQueryClient()
   const { t, i18n } = useTranslation()
   const [, navigate] = useLocation()
@@ -757,12 +765,411 @@ export function TransportsPage() {
     })
   }
 
+  // Список туннелей — таблица, а не карточки. Строка отвечает на «что это,
+  // работает ли и кто на нём держится», подробности раскрываются под строкой.
+  // Карточками та же запись занимала около 120px, и семь туннелей не влезали
+  // на экран целиком — при том что сравнивают их постоянно: задержки, состояния
+  // и привязку удобно читать столбцом, а не перечитывая семь карточек.
+  const transportTableHeaders = [
+    // Колонка управления идёт без названия — как в таблицах прошивки. На
+    // телефоне DataTable по этому и понимает, что переключатель нужно поднять
+    // в строку кнопок, а не показывать отдельным блоком.
+    "",
+    t("transports.headers.name"),
+    t("transports.headers.state"),
+    t("transports.headers.latency"),
+    t("transports.headers.usedBy"),
+    t("transports.headers.actions"),
+  ]
+
+  const managedRows = visibleItems.map((item) => {
+    const boundOutbound = interfaceOutboundByInterface.get(item.interface)
+    const configuredSpec = configuredByTag.get(item.tag)
+    const displayName =
+      item.display_name?.trim() ||
+      configuredSpec?.display_name?.trim() ||
+      item.tag
+    const expandedId = `managed:${item.tag}`
+    const expanded = expandedTransportIds.has(expandedId)
+    const transportPath = formatTransportPath(item)
+    const isNative = item.type === "native"
+
+    const cells: ReactNode[] = [
+      <span className="flex items-center gap-1" key="power">
+        <Switch
+          aria-label={
+            item.desired_up ? t("transports.stop") : t("transports.start")
+          }
+          checked={isNative ? true : item.desired_up}
+          disabled={isNative || actionMutation.isPending}
+          onCheckedChange={(checked) =>
+            actionMutation.mutate({
+              data: {
+                tag: item.tag,
+                action: checked
+                  ? TransportActionRequestAction.up
+                  : TransportActionRequestAction.down,
+              },
+            })
+          }
+          title={
+            isNative
+              ? t("transports.nativeInterface.managedByFirmware")
+              : undefined
+          }
+        />
+        <Button
+          aria-label={t("transports.restart")}
+          className="size-7"
+          disabled={isNative || actionMutation.isPending}
+          onClick={() =>
+            actionMutation.mutate({
+              data: {
+                tag: item.tag,
+                action: TransportActionRequestAction.restart,
+              },
+            })
+          }
+          size="icon"
+          title={
+            isNative
+              ? t("transports.nativeInterface.managedByFirmware")
+              : t("transports.restart")
+          }
+          variant="ghost"
+        >
+          <RefreshCwIcon className="size-4" />
+        </Button>
+      </span>,
+      <TransportName
+        key="name"
+        location={transportLocation(configuredSpec, locationOf(item.server))}
+        name={displayName}
+        protocol={item.protocol || item.type}
+        technicalTag={item.tag}
+        wire={describeTransportWire(item)}
+      />,
+      <KeeneticStatus
+        key="state"
+        tone={item.state === "up" ? "success" : "neutral"}
+      >
+        {t(`transports.states.${item.state}`)}
+      </KeeneticStatus>,
+      <TransportLatencyPill
+        key="latency"
+        onRefresh={() => refreshLatency(item.interface)}
+        probe={probeByInterface.get(item.interface)}
+        refreshing={latencyRefreshPending(item.interface)}
+        runtimeMilliseconds={transportLatencyByInterface.get(item.interface)}
+      />,
+      <UsedByCell
+        key="usedBy"
+        tag={boundOutbound?.display_name?.trim() || boundOutbound?.tag}
+      />,
+      <RowActions
+        deleteDisabled={isNative}
+        deleteTitle={
+          isNative
+            ? t("transports.nativeInterface.managedByFirmware")
+            : t("common.delete")
+        }
+        editDisabled={isNative}
+        editTitle={
+          isNative
+            ? t("transports.nativeInterface.managedByFirmware")
+            : t("common.edit")
+        }
+        expanded={expanded}
+        key="actions"
+        onDelete={() =>
+          setDeleting(configured.find((entry) => entry.tag === item.tag))
+        }
+        onEdit={() => navigate(buildTransportEditHref(item.tag))}
+        onToggleExpanded={() => setTransportExpanded(expandedId, !expanded)}
+        toggleTitle={
+          expanded ? t("transports.details.hide") : t("transports.details.show")
+        }
+      />,
+    ]
+
+    const details = expanded ? (
+      <div className="space-y-3 text-sm">
+        <div className="grid min-w-0 gap-x-8 gap-y-1.5 sm:grid-cols-2">
+          <TransportField
+            label={t("transports.server")}
+            value={
+              item.server
+                ? item.server_port
+                  ? `${item.server}:${item.server_port}`
+                  : item.server
+                : "—"
+            }
+          />
+          {/* Техническое имя интерфейса живёт здесь, а не в строке: оно выдано
+              ядром и нужно, только когда человек лезет в подробности. */}
+          <TransportField
+            label={t("transports.interfaceName")}
+            value={item.interface || "—"}
+          />
+          <TransportField
+            label={t("transports.connection")}
+            value={describeConnection(item, transportPath?.text) || "—"}
+          />
+        </div>
+
+        {dnsServersByInterface.has(item.interface) ||
+        (!isNative && !item.desired_up) ||
+        item.retry_count ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            {dnsServersByInterface.has(item.interface) ? (
+              <Badge size="xs" variant="outline">
+                {t("transports.dnsDetour")}:{" "}
+                {(dnsServersByInterface.get(item.interface) ?? []).join(", ")}
+              </Badge>
+            ) : null}
+            {!isNative && !item.desired_up ? (
+              <Badge size="xs" variant="secondary">
+                {t("transports.paused")}
+              </Badge>
+            ) : null}
+            {item.retry_count ? (
+              <Badge size="xs" variant="warning">
+                {t("transports.retryCount")}: {item.retry_count}
+              </Badge>
+            ) : null}
+          </div>
+        ) : null}
+
+        {item.error ? (
+          <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive">
+            {item.error}
+          </p>
+        ) : null}
+
+        <InterfaceTraffic
+          labels={{
+            receive: t("transports.traffic.receive"),
+            transmit: t("transports.traffic.transmit"),
+            received: t("transports.traffic.received"),
+            transmitted: t("transports.traffic.transmitted"),
+            chart: t("transports.traffic.chart"),
+          }}
+          locale={i18n.resolvedLanguage ?? i18n.language}
+          // График живёт только на дашборде: рядом с цепочкой зависимостей он
+          // раздувал раскрытую часть на пол-экрана, а для сравнения туннелей
+          // между собой в таблице уже есть колонка задержки.
+          showChart={false}
+          traffic={runtimeInterfaceByName.get(item.interface)?.traffic}
+        />
+
+        {boundOutbound ? (
+          <DependencyList
+            dependencies={
+              transportDependencies.dependenciesByTarget.get(
+                `outbound:${boundOutbound.tag}`
+              ) ?? []
+            }
+            emptyHint={t("transports.routing.noTraffic")}
+          />
+        ) : null}
+
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {item.server ? (
+            <Button
+              disabled={bypassMutation.isPending || !keenConfig}
+              onClick={() => addLoopProtection(item.server!)}
+              variant="outline"
+            >
+              <ShieldCheckIcon />
+              {t("transports.loopProtection.action")}
+            </Button>
+          ) : null}
+          {/* Раньше здесь стояла мёртвая кнопка «Уже привязан к X» — она
+              повторяла то, что теперь написано в колонке, и ничего не делала.
+              Если привязка есть, кнопка ведёт к этому маршруту. */}
+          <Button
+            disabled={!keenConfig}
+            onClick={() =>
+              navigate(
+                boundOutbound
+                  ? `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit`
+                  : `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
+              )
+            }
+            variant="outline"
+          >
+            <WorkflowIcon />
+            {boundOutbound
+              ? t("transports.routing.openOutbound")
+              : t("transports.routing.bindOutbound")}
+          </Button>
+        </div>
+
+        {isNative ? (
+          <p className="text-xs text-muted-foreground">
+            {t("transports.nativeManagedExternally")}
+          </p>
+        ) : null}
+      </div>
+    ) : undefined
+
+    return { cells, details }
+  })
+
+  const nativeRows = visibleNativeInterfaces.map((nativeInterface) => {
+    const boundOutbound = nativeInterface.kernelName
+      ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
+      : undefined
+    const expandedId = `native:${nativeInterface.id}`
+    const expanded = expandedTransportIds.has(expandedId)
+    const latencyMs = nativeInterface.kernelName
+      ? transportLatencyByInterface.get(nativeInterface.kernelName)
+      : undefined
+    const showLatency =
+      nativeInterface.live &&
+      (typeof latencyMs === "number" || Boolean(boundOutbound))
+    const firmwareTitle = t("transports.nativeInterface.managedByFirmware")
+
+    const cells: ReactNode[] = [
+      // Выключателем и перезапуском этими интерфейсами управляет прошивка,
+      // поэтому кнопки неактивны — но место занято, иначе колонки разъезжаются.
+      <span className="flex items-center gap-1" key="power">
+        <Switch
+          aria-label={firmwareTitle}
+          checked={nativeInterface.live}
+          disabled
+          title={firmwareTitle}
+        />
+        <Button
+          aria-label={t("transports.restart")}
+          className="size-7"
+          disabled
+          size="icon"
+          title={firmwareTitle}
+          variant="ghost"
+        >
+          <RefreshCwIcon className="size-4" />
+        </Button>
+      </span>,
+      <span className="flex min-w-0 items-center gap-2" key="name">
+        <TransportProtocolIcon protocol={nativeInterface.protocol.label} />
+        <span className="truncate">{nativeInterface.label}</span>
+        <Badge className="shrink-0" size="xs" variant="secondary">
+          {t("transports.nativeInterface.keeneticOwner")}
+        </Badge>
+      </span>,
+      <KeeneticStatus
+        key="state"
+        title={
+          nativeInterface.runtime
+            ? undefined
+            : t("transports.nativeInterface.liveUnavailable")
+        }
+        tone={nativeInterface.live ? "success" : "neutral"}
+      >
+        {nativeInterface.runtime
+          ? nativeInterface.live
+            ? t("transports.nativeInterface.connected")
+            : t("transports.nativeInterface.disconnected")
+          : t("transports.nativeInterface.liveUnavailableShort")}
+      </KeeneticStatus>,
+      showLatency ? (
+        <TransportLatencyPill
+          key="latency"
+          onRefresh={
+            nativeInterface.kernelName && boundOutbound
+              ? () => refreshLatency(nativeInterface.kernelName!)
+              : undefined
+          }
+          probe={
+            nativeInterface.kernelName
+              ? probeByInterface.get(nativeInterface.kernelName)
+              : undefined
+          }
+          refreshing={
+            nativeInterface.kernelName
+              ? latencyRefreshPending(nativeInterface.kernelName)
+              : false
+          }
+          runtimeMilliseconds={
+            typeof latencyMs === "number" &&
+            Number.isFinite(latencyMs) &&
+            latencyMs >= 0
+              ? latencyMs
+              : undefined
+          }
+        />
+      ) : null,
+      <UsedByCell key="usedBy" tag={boundOutbound?.tag} />,
+      <RowActions
+        deleteDisabled
+        deleteTitle={firmwareTitle}
+        editDisabled
+        editTitle={firmwareTitle}
+        expanded={expanded}
+        key="actions"
+        onDelete={() => undefined}
+        onEdit={() => undefined}
+        onToggleExpanded={() => setTransportExpanded(expandedId, !expanded)}
+        toggleTitle={
+          expanded ? t("transports.details.hide") : t("transports.details.show")
+        }
+      />,
+    ]
+
+    const details = expanded ? (
+      <NativeInterfaceDetails
+        boundOutboundTag={boundOutbound?.tag}
+        hasConfig={Boolean(keenConfig)}
+        hidden={hiddenNativeIds.has(nativeInterface.id)}
+        nativeInterface={nativeInterface}
+        onCreateRoute={(interfaceName) =>
+          navigate(
+            `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
+          )
+        }
+        onHiddenChange={(hidden) => setNativeHidden(nativeInterface.id, hidden)}
+      />
+    ) : undefined
+
+    return { cells, details }
+  })
+
+  const transportRows = [...managedRows, ...nativeRows]
+  const transportRowDetails: Record<number, ReactNode> = {}
+  for (const [index, row] of transportRows.entries()) {
+    if (row.details) transportRowDetails[index] = row.details
+  }
+  // Подзаголовки нужны только когда в таблице оба вида строк: свои туннели
+  // включаются и удаляются, интерфейсы прошивки — нет, и без подписи это
+  // выглядит как случайно неактивные кнопки.
+  const transportGroupHeadings =
+    managedRows.length > 0 && nativeRows.length > 0
+      ? {
+          0: (
+            <SectionHeading
+              size="compact"
+              title={t("transports.groups.managed")}
+            />
+          ),
+          [managedRows.length]: (
+            <SectionHeading
+              description={t("transports.groups.nativeDescription")}
+              size="compact"
+              title={t("transports.groups.native")}
+            />
+          ),
+        }
+      : undefined
+
   return (
     <div className="space-y-3">
-      <PageHeader
-        description={t("transports.description")}
-        title={t("transports.title")}
-      />
+      {embedded ? null : (
+        <PageHeader
+          description={t("transports.description")}
+          title={t("transports.title")}
+        />
+      )}
       <PageActionBar
         primary={
           <Button onClick={() => navigate(transportCreateHref)}>
@@ -909,11 +1316,20 @@ export function TransportsPage() {
       !error &&
       managedItems.length === 0 &&
       nativeInterfaces.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
-            {t("transports.empty")}
-          </CardContent>
-        </Card>
+        <ListPlaceholder
+          action={
+            <Button onClick={() => navigate(transportCreateHref)}>
+              <PlusIcon className="mr-1 h-4 w-4" />
+              {t("transports.add")}
+            </Button>
+          }
+          description={t("transports.empty")}
+          title={t("transports.emptyTitle")}
+        />
+      ) : null}
+
+      {query.isLoading || ndmsInventoryQuery.isLoading ? (
+        <TableSkeleton />
       ) : null}
 
       {transportTabs.length > 1 ? (
@@ -924,8 +1340,12 @@ export function TransportsPage() {
           value={activeTransportTab}
         />
       ) : null}
+      {/* Слева, а не справа: прижатая вправо кнопка висела в пустой строке и
+          отодвигала первую карточку вниз ни за чем. Отрицательный отступ
+          сверху убирает лишний ритм над ней; снизу его быть не должно —
+          кнопка наезжала на первую карточку. */}
       {hiddenNativeCount > 0 ? (
-        <div className="flex justify-end">
+        <div className="-mt-1 flex justify-start">
           <Button
             onClick={() => setShowHiddenNative((current) => !current)}
             size="sm"
@@ -941,397 +1361,47 @@ export function TransportsPage() {
         </div>
       ) : null}
 
-      {/* Один столбец, а не два. Карточки здесь и так одной высоты, рваных
-          рядов не было — но семь карточек по 120px это 840px вертикали на имя,
-          протокол, флаг, статус и задержку. И главное: в двух колонках задержки
-          стоят в разных местах, и «какой туннель быстрее» решается
-          перечитыванием. В строку они встают друг под друга. */}
-      <div className="grid items-start gap-2">
-        {visibleItems.map((item) => {
-          const boundOutbound = interfaceOutboundByInterface.get(item.interface)
-          const configuredSpec = configuredByTag.get(item.tag)
-          const displayName =
-            item.display_name?.trim() ||
-            configuredSpec?.display_name?.trim() ||
-            item.tag
-          const expandedId = `managed:${item.tag}`
-          const expanded = expandedTransportIds.has(expandedId)
-          const transportPath = formatTransportPath(item)
-
-          return (
-            <Card
-              className="flex min-w-0 flex-col overflow-hidden"
-              key={item.tag}
-              size="sm"
-            >
-              <CardHeader className="min-w-0 gap-x-4 max-sm:grid-cols-1 sm:grid-cols-[minmax(0,16rem)_minmax(0,11rem)_minmax(0,1fr)_auto] sm:items-center">
-                <div className="min-w-0">
-                  <CardTitle
-                    className="leading-5 tracking-normal break-words"
-                    title={item.tag}
-                  >
-                    {displayName}
-                  </CardTitle>
-                  <TransportIdentity
-                    location={transportLocation(
-                      configuredSpec,
-                      locationOf(item.server)
-                    )}
-                    protocol={item.protocol || item.type}
-                  />
-                  {/* Интерфейс подписью — только когда он отличается от имени.
-                      У транспортов прошивки имя и интерфейс расходятся всегда,
-                      у sing-box обычно совпадают. */}
-                  {item.interface &&
-                  item.interface.trim().toLocaleLowerCase() !==
-                    displayName.trim().toLocaleLowerCase() ? (
-                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                      {t("pages.outbounds.interfaceSubline", {
-                        name: item.interface,
-                      })}
-                    </span>
-                  ) : null}
-                </div>
-                <div className="min-w-0 max-sm:hidden">
-                  <TransportLatencyPill
-                    onRefresh={() => refreshLatency(item.interface)}
-                    probe={probeByInterface.get(item.interface)}
-                    refreshing={latencyRefreshPending(item.interface)}
-                    runtimeMilliseconds={transportLatencyByInterface.get(
-                      item.interface
-                    )}
-                  />
-                </div>
-                {/* Кто на этом транспорте держится. Тот же вопрос «можно ли это
-                    удалить», который на маршрутах оказался самой полезной
-                    колонкой; здесь его не было вовсе. */}
-                <div className="min-w-0 text-xs max-sm:hidden">
-                  {boundOutbound ? (
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
-                      <span className="text-muted-foreground">
-                        {t("transports.usedBy")}
-                      </span>
-                      <Badge className="min-w-0" size="xs" variant="outline">
-                        <span className="truncate">
-                          {boundOutbound.display_name?.trim() ||
-                            boundOutbound.tag}
-                        </span>
-                      </Badge>
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">
-                      {t("transports.usedByNone")}
-                    </span>
-                  )}
-                </div>
-                {/* Не CardAction: он жёстко прибит к `col-start-2` и занимал
-                    колонку задержки, отчего порядок ехал. */}
-                <div className="flex items-center gap-1 max-sm:col-start-1 max-sm:row-start-auto max-sm:w-full max-sm:justify-self-stretch sm:justify-self-end">
-                  <KeeneticStatus
-                    tone={item.state === "up" ? "success" : "neutral"}
-                  >
-                    {t(`transports.states.${item.state}`)}
-                  </KeeneticStatus>
-                  {item.type !== "native" ? (
-                    <Button
-                      aria-label={t("transports.restart")}
-                      className="size-7"
-                      disabled={actionMutation.isPending}
-                      onClick={() =>
-                        actionMutation.mutate({
-                          data: {
-                            tag: item.tag,
-                            action: TransportActionRequestAction.restart,
-                          },
-                        })
-                      }
-                      size="icon"
-                      title={t("transports.restart")}
-                      variant="ghost"
-                    >
-                      <RefreshCwIcon className="size-4" />
-                    </Button>
-                  ) : null}
-                  {item.type !== "native" ? (
-                    <Switch
-                      aria-label={
-                        item.desired_up
-                          ? t("transports.stop")
-                          : t("transports.start")
-                      }
-                      checked={item.desired_up}
-                      disabled={actionMutation.isPending}
-                      onCheckedChange={(checked) =>
-                        actionMutation.mutate({
-                          data: {
-                            tag: item.tag,
-                            action: checked
-                              ? TransportActionRequestAction.up
-                              : TransportActionRequestAction.down,
-                          },
-                        })
-                      }
-                    />
-                  ) : null}
-                  <Button
-                    aria-expanded={expanded}
-                    aria-label={
-                      expanded
-                        ? t("transports.details.hide")
-                        : t("transports.details.show")
-                    }
-                    className="size-7 max-sm:ml-auto"
-                    onClick={() => setTransportExpanded(expandedId, !expanded)}
-                    size="icon"
-                    title={
-                      expanded
-                        ? t("transports.details.hide")
-                        : t("transports.details.show")
-                    }
-                    variant="ghost"
-                  >
-                    <ChevronDownIcon
-                      className={cn(
-                        "size-4 transition-transform",
-                        expanded && "rotate-180"
-                      )}
-                    />
-                  </Button>
-                </div>
-              </CardHeader>
-              {/* Задержка на телефоне остаётся отдельной строкой: в ряд с
-                  именем и переключателем она там не помещается. */}
-              <div className="flex min-h-7 items-center px-3 sm:hidden">
-                <TransportLatencyPill
-                  onRefresh={() => refreshLatency(item.interface)}
-                  probe={probeByInterface.get(item.interface)}
-                  refreshing={latencyRefreshPending(item.interface)}
-                  runtimeMilliseconds={transportLatencyByInterface.get(
-                    item.interface
-                  )}
-                />
-              </div>
-              <CardContent
-                className={cn(
-                  "flex min-w-0 flex-1 flex-col gap-1.5 text-sm",
-                  !expanded && "hidden"
-                )}
-              >
-                {expanded ? (
-                  <>
-                    <TransportField
-                      label={t("transports.server")}
-                      value={
-                        item.server
-                          ? item.server_port
-                            ? `${item.server}:${item.server_port}`
-                            : item.server
-                          : "—"
-                      }
-                    />
-                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-                      {transportPath ? (
-                        <Badge
-                          size="xs"
-                          title={`${t("transports.pathConfidence")}: ${transportPath.confidence}`}
-                          variant="outline"
-                        >
-                          {transportPath.text}
-                        </Badge>
-                      ) : null}
-                      {dnsServersByInterface.has(item.interface) ? (
-                        <Badge size="xs" variant="outline">
-                          {t("transports.dnsDetour")}:{" "}
-                          {(
-                            dnsServersByInterface.get(item.interface) ?? []
-                          ).join(", ")}
-                        </Badge>
-                      ) : null}
-                      {item.type !== "native" && !item.desired_up ? (
-                        <Badge size="xs" variant="secondary">
-                          {t("transports.paused")}
-                        </Badge>
-                      ) : null}
-                      {item.retry_count ? (
-                        <Badge size="xs" variant="warning">
-                          {t("transports.retryCount")}: {item.retry_count}
-                        </Badge>
-                      ) : null}
-                    </div>
-
-                    {item.error ? (
-                      <p className="mt-1 rounded-md bg-destructive/10 p-2 text-xs text-destructive">
-                        {item.error}
-                      </p>
-                    ) : null}
-
-                    <InterfaceTraffic
-                      labels={{
-                        receive: t("transports.traffic.receive"),
-                        transmit: t("transports.traffic.transmit"),
-                        received: t("transports.traffic.received"),
-                        transmitted: t("transports.traffic.transmitted"),
-                        chart: t("transports.traffic.chart"),
-                      }}
-                      locale={i18n.resolvedLanguage ?? i18n.language}
-                      // График был написан целиком — с подсказкой, маркерами и
-                      // клавиатурой — и выключен флагом, хотя демон отдаёт по
-                      // 120 точек на каждый транспортный интерфейс.
-                      showChart
-                      traffic={
-                        runtimeInterfaceByName.get(item.interface)?.traffic
-                      }
-                    />
-
-                    {boundOutbound ? (
-                      <>
-                        <div className="my-1 border-t" />
-                        <DependencyList
-                          dependencies={
-                            transportDependencies.dependenciesByTarget.get(
-                              `outbound:${boundOutbound.tag}`
-                            ) ?? []
-                          }
-                          emptyHint={t("transports.routing.noTraffic")}
-                        />
-                      </>
-                    ) : null}
-
-                    <div className="my-1 border-t" />
-                    <TransportField
-                      label={t("transports.connection")}
-                      value={
-                        describeConnection(item, transportPath?.text) || "—"
-                      }
-                    />
-                    {item.type === "native" ? (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {t("transports.nativeManagedExternally")}
-                      </p>
-                    ) : null}
-                    <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 border-t pt-3">
-                      {item.server ? (
-                        <Button
-                          className="h-auto max-w-full text-left whitespace-normal"
-                          disabled={bypassMutation.isPending || !keenConfig}
-                          onClick={() => addLoopProtection(item.server!)}
-                          size="sm"
-                          variant="outline"
-                        >
-                          <ShieldCheckIcon />
-                          {t("transports.loopProtection.action")}
-                        </Button>
-                      ) : null}
-                      {/* Раньше здесь стояла мёртвая кнопка «Уже привязан к X» —
-                          она повторяла то, что теперь написано в строке, и
-                          ничего не делала. Если привязка есть, кнопка ведёт к
-                          этому маршруту. */}
-                      <Button
-                        className="h-auto max-w-full text-left whitespace-normal"
-                        disabled={!keenConfig}
-                        onClick={() =>
-                          navigate(
-                            boundOutbound
-                              ? `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit`
-                              : `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
-                          )
-                        }
-                        size="sm"
-                        variant="outline"
-                      >
-                        <WorkflowIcon />
-                        {boundOutbound
-                          ? t("transports.routing.openOutbound")
-                          : t("transports.routing.bindOutbound")}
-                      </Button>
-                      {item.type !== "native" ? (
-                        <span className="ml-auto flex shrink-0 items-center gap-1">
-                          <Button
-                            aria-label={t("common.edit")}
-                            className="size-8"
-                            onClick={() =>
-                              navigate(buildTransportEditHref(item.tag))
-                            }
-                            size="icon"
-                            title={t("common.edit")}
-                            variant="ghost"
-                          >
-                            <PencilIcon className="size-4" />
-                          </Button>
-                          <Button
-                            aria-label={t("common.delete")}
-                            className="size-8 text-destructive hover:text-destructive"
-                            onClick={() =>
-                              setDeleting(
-                                configured.find(
-                                  (entry) => entry.tag === item.tag
-                                )
-                              )
-                            }
-                            size="icon"
-                            title={t("common.delete")}
-                            variant="ghost"
-                          >
-                            <TrashIcon className="size-4" />
-                          </Button>
-                        </span>
-                      ) : null}
-                    </div>
-                  </>
-                ) : null}
-              </CardContent>
-            </Card>
-          )
-        })}
-        {visibleNativeInterfaces.map((nativeInterface) => {
-          const boundOutbound = nativeInterface.kernelName
-            ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
-            : undefined
-          const expandedId = `native:${nativeInterface.id}`
-
-          return (
-            <NativeInterfaceCard
-              boundOutboundTag={boundOutbound?.tag}
-              expanded={expandedTransportIds.has(expandedId)}
-              hasConfig={Boolean(keenConfig)}
-              hidden={hiddenNativeIds.has(nativeInterface.id)}
-              key={`keenetic:${nativeInterface.id}`}
-              latencyMs={
-                nativeInterface.kernelName
-                  ? transportLatencyByInterface.get(nativeInterface.kernelName)
-                  : undefined
-              }
-              latencyProbe={
-                nativeInterface.kernelName
-                  ? probeByInterface.get(nativeInterface.kernelName)
-                  : undefined
-              }
-              nativeInterface={nativeInterface}
-              onExpandedChange={(expanded) =>
-                setTransportExpanded(expandedId, expanded)
-              }
-              onCreateRoute={(interfaceName) =>
-                navigate(
-                  `/outbounds/create?type=interface&interface=${encodeURIComponent(interfaceName)}`
-                )
-              }
-              onHiddenChange={(hidden) =>
-                setNativeHidden(nativeInterface.id, hidden)
-              }
-              onRefreshLatency={
-                nativeInterface.kernelName && boundOutbound
-                  ? () => refreshLatency(nativeInterface.kernelName!)
-                  : undefined
-              }
-              refreshingLatency={
-                nativeInterface.kernelName
-                  ? latencyRefreshPending(nativeInterface.kernelName)
-                  : false
-              }
-            />
-          )
-        })}
-      </div>
+      {transportRows.length > 0 ? (
+        <DataTable
+          // Строка прошивки — ровно 48px. Обычная ячейка укладывается в них с
+          // отступом 12px: содержимое там не выше 24px. В колонках управления
+          // стоят кнопки в 32px, и те же 12px растягивали строку до 56px —
+          // поэтому у них отступ 8px, и ряд снова 48px.
+          columnClassNames={[
+            "py-2",
+            // Колонка имени забирает весь остаток ширины и сжимается первой,
+            // когда его не хватает. `w-full` — «этой колонке отдать остаток»,
+            // `max-width: 0` — «не требовать ширину по самому длинному имени»:
+            // без второго ячейка распирала таблицу, и вместо многоточия
+            // появлялась горизонтальная прокрутка. Только на ячейках: то же
+            // правило на заголовке схлопывает колонку до слова «Название».
+            "w-full [&:where(td)]:max-w-0",
+            // Состояние и задержка — колонки фиксированной ширины. Задержка
+            // приезжает каждые три секунды, и «38 мс · 6 с назад» превращалось
+            // в «112 мс · 12 с назад»: колонка становилась шире, и вся таблица
+            // дёргалась сама по себе. Ширина взята по самому длинному
+            // содержимому («Есть проблема», «1234 мс · 999 с назад»), поэтому
+            // расти ей больше не с чего.
+            "min-w-[11rem]",
+            "min-w-[11rem]",
+            // «Где используется» тоже фиксировано: «Не привязан к маршруту» —
+            // 137px, а короткая плашка с названием маршрута — 63px, и таблица
+            // разъезжалась, когда в списке появлялась хоть одна непривязанная
+            // строка. Плашка длиннее колонки обрезается, полное имя — в
+            // подсказке.
+            "min-w-[11rem]",
+            "py-2",
+          ]}
+          groupHeadings={transportGroupHeadings}
+          headers={transportTableHeaders}
+          // Все колонки, кроме имени, имеют постоянную ширину, а имя забирает
+          // остаток. Только так таблица не шевелится: данные в ней обновляются
+          // каждые три секунды.
+          narrowColumns={[0, 2, 3, 4]}
+          rowDetails={transportRowDetails}
+          rows={transportRows.map((row) => row.cells)}
+        />
+      ) : null}
       {processModeQuery.data ? (
         <SingBoxProcessModeDialog
           currentMode={processModeQuery.data.sing_box_process_mode}
@@ -1366,29 +1436,160 @@ export function TransportsPage() {
   )
 }
 
-function TransportIdentity({
+/**
+ * Имя туннеля в строке таблицы: тип, страна, название, транспорт.
+ *
+ * Всё в одну строку — иначе запись занимает две и ряд перестаёт быть 48px, как
+ * в прошивке. Порядок оставлен прежним: сначала «что это» (VLESS, AWG), потом
+ * «где» (флаг), потом название, и в конце — «как идёт по проводу». Техническое
+ * имя интерфейса сюда не входит: оно выдано ядром и живёт в подробностях.
+ */
+function TransportName({
+  name,
   protocol,
   location,
+  wire,
+  technicalTag,
 }: {
+  readonly name: string
   readonly protocol: string
   readonly location?: ServerLocation
+  /** «UDP · QUIC», «TCP · Reality» — чем этот туннель отличается от соседнего. */
+  readonly wire?: string | null
+  readonly technicalTag?: string
 }) {
   const flag = countryMark(location)
 
   return (
-    <div className="mt-1 flex h-6 min-w-0 items-center gap-1.5">
+    // Перенос только на телефоне: там это заголовок карточки во всю ширину, и
+    // пилюля транспорта может уехать на вторую строку, лишь бы имя осталось
+    // читаемым. В таблице переносить нельзя — строка перестанет быть 48px.
+    <span className="flex min-w-0 items-center gap-x-2 gap-y-1 max-sm:flex-wrap">
       <TransportProtocolIcon protocol={protocol} />
       {flag ? (
         <span
           aria-label={location?.country ?? location?.country_code ?? ""}
-          className="text-base leading-none"
+          className="shrink-0 text-base leading-none"
           role="img"
           title={location?.country ?? location?.country_code ?? ""}
         >
           {flag}
         </span>
       ) : null}
-    </div>
+      <span
+        className="truncate max-sm:min-w-[8rem]"
+        title={technicalTag ?? name}
+      >
+        {name}
+      </span>
+      {wire ? (
+        <Badge
+          className="shrink-0 font-mono text-[10px]"
+          size="xs"
+          variant="outline"
+        >
+          {wire}
+        </Badge>
+      ) : null}
+    </span>
+  )
+}
+
+/** «Где используется» — тот же вопрос «можно ли это удалить», что и в маршрутах. */
+function UsedByCell({ tag }: { readonly tag?: string }) {
+  const { t } = useTranslation()
+
+  if (!tag) {
+    return (
+      // `truncate`, а не перенос: строка в прошивке ровно 48px, а «Не привязан
+      // к маршруту» в узкой колонке разъезжалось на две строки и делало ряд
+      // выше соседних.
+      <span
+        className="block truncate text-xs text-muted-foreground"
+        title={t("transports.usedByNone")}
+      >
+        {t("transports.usedByNone")}
+      </span>
+    )
+  }
+
+  return (
+    <Badge className="min-w-0 max-w-full" size="xs" title={tag} variant="outline">
+      <span className="truncate">{tag}</span>
+    </Badge>
+  )
+}
+
+/**
+ * Карандаш, корзинка и раскрытие в конце строки.
+ *
+ * Карандаш с корзинкой появляются по наведению — так это сделано в таблицах
+ * KeeneticOS (`.ndw-table__row-group:hover .ndw-table__cell-pencil`). Прозрачность,
+ * а не `visibility`: скрытая кнопка выпадает из обхода по Tab, и до удаления
+ * нельзя было бы добраться с клавиатуры. Там, где наведения не бывает
+ * (сенсорный экран), кнопки видны всегда.
+ */
+function RowActions({
+  expanded,
+  toggleTitle,
+  onToggleExpanded,
+  onEdit,
+  onDelete,
+  editDisabled,
+  deleteDisabled,
+  editTitle,
+  deleteTitle,
+}: {
+  readonly expanded: boolean
+  readonly toggleTitle: string
+  readonly onToggleExpanded: () => void
+  readonly onEdit: () => void
+  readonly onDelete: () => void
+  readonly editDisabled?: boolean
+  readonly deleteDisabled?: boolean
+  readonly editTitle: string
+  readonly deleteTitle: string
+}) {
+  return (
+    <span className="flex items-center justify-end gap-1">
+      <span className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/row:opacity-100 [@media(hover:none)]:opacity-100">
+        <Button
+          aria-label={editTitle}
+          className="size-8"
+          disabled={editDisabled}
+          onClick={onEdit}
+          size="icon"
+          title={editTitle}
+          variant="ghost"
+        >
+          <PencilIcon className="size-4" />
+        </Button>
+        <Button
+          aria-label={deleteTitle}
+          className={cn("size-8", !deleteDisabled && "text-destructive hover:text-destructive")}
+          disabled={deleteDisabled}
+          onClick={onDelete}
+          size="icon"
+          title={deleteTitle}
+          variant="ghost"
+        >
+          <TrashIcon className="size-4" />
+        </Button>
+      </span>
+      <Button
+        aria-expanded={expanded}
+        aria-label={toggleTitle}
+        className="size-8"
+        onClick={onToggleExpanded}
+        size="icon"
+        title={toggleTitle}
+        variant="ghost"
+      >
+        <ChevronDownIcon
+          className={cn("size-4 transition-transform", expanded && "rotate-180")}
+        />
+      </Button>
+    </span>
   )
 }
 
@@ -1442,16 +1643,15 @@ function describeConnection(
 
 function TransportField({ label, value }: { label: string; value: string }) {
   return (
-    // Подпись занимает столько, сколько ей нужно, значение — весь остаток.
-    // При равных долях длинное значение переносилось на вторую строку, хотя
-    // место рядом пустовало, и соседние карточки переставали совпадать
-    // строками. Однострочная высота задана здесь же, чтобы ряды двух карточек
-    // стояли вровень независимо от длины значения.
-    <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-4">
-      <span className="min-w-0 whitespace-nowrap text-muted-foreground">
+    // Подпись в колонке фиксированной ширины, значение сразу за ней и по левому
+    // краю. В карточке значение прижималось вправо и это читалось — там строка
+    // была узкая. Под таблицей во всю ширину между подписью и значением
+    // оставалось полэкрана пустоты, и глазу приходилось их сводить.
+    <div className="grid min-w-0 grid-cols-[minmax(0,9rem)_minmax(0,1fr)] items-baseline gap-3">
+      <span className="min-w-0 truncate text-muted-foreground" title={label}>
         {label}
       </span>
-      <span className="min-w-0 truncate text-right font-mono" title={value}>
+      <span className="min-w-0 truncate font-mono" title={value}>
         {value}
       </span>
     </div>

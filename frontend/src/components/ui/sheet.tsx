@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { useTranslation } from "react-i18next"
 import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
 
 import { IconButtonWithTooltip } from "@/components/shared/icon-button-with-tooltip"
@@ -48,6 +49,8 @@ function SheetContent({
   showCloseButton?: boolean
   overlayClassName?: string
 }) {
+  const { t } = useTranslation()
+
   return (
     <SheetPortal>
       <SheetOverlay className={overlayClassName} />
@@ -67,7 +70,7 @@ function SheetContent({
             render={
               <IconButtonWithTooltip
                 className="absolute top-3 right-3"
-                label="Close panel"
+                label={t("common.chrome.closePanel")}
                 size="icon-sm"
                 variant="ghost"
               />

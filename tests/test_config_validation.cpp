@@ -2832,3 +2832,15 @@ TEST_CASE("interface outbound: empty interface name is rejected") {
     REQUIRE(issues.size() == 1);
     CHECK(issues[0].path == "outbounds.wan.interface");
 }
+
+// Найдено фаззингом `keen-pbr-fuzz-config`: числовой литерал с огромной
+// экспонентой синтаксически корректен, и nlohmann бросает на нём `out_of_range`
+// (406), а не `parse_error`. Мимо узкого catch исключение уходило наружу и
+// роняло демон вместо понятной ошибки валидации.
+TEST_CASE("parse_config rejects numeric overflow as a validation error") {
+    const std::string document =
+        R"({"outbounds":[],"lists":{},"x":7777777777777777e777777777777777777777})";
+
+    CHECK_THROWS_AS(keen_pbr3::parse_config(document),
+                    keen_pbr3::ConfigValidationError);
+}

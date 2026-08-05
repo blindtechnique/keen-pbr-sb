@@ -96,7 +96,7 @@ TEST_CASE(
     l2tp.ndms_id = "L2TP0";
     l2tp.process_clients = false;
 
-    InternalVpnServer wireguard;
+    InternalVpnServer wireguard{};
     wireguard.interface = "nwg0";
     wireguard.ndms_id = "Wireguard0";
 

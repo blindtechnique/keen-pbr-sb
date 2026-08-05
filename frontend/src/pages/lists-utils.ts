@@ -176,3 +176,20 @@ export function buildUpdatedConfigForListDelete(
     },
   }
 }
+
+/**
+ * Что показать в колонке «Записей».
+ *
+ * `counted` — список хранится прямо в конфигурации, панель считает его сама,
+ * включая ноль записей. `loaded` и `notLoaded` — список приезжает по ссылке
+ * или из файла: сколько в нём строк, панель не знает, демон это не отдаёт.
+ * Раньше оба последних случая показывались прочерком, и «пустой список» было
+ * не отличить от «ни разу не скачался».
+ */
+export function getListStatsState(list: {
+  stats?: unknown
+  lastUpdated?: string
+}): "counted" | "loaded" | "notLoaded" {
+  if (list.stats) return "counted"
+  return list.lastUpdated ? "loaded" : "notLoaded"
+}

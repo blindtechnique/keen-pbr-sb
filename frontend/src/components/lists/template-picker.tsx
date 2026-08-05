@@ -77,7 +77,7 @@ export function TemplatePicker({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-h-[85vh] overflow-hidden sm:max-w-2xl">
+      <DialogContent className="max-h-[85vh] overflow-hidden sm:max-w-[640px]">
         <DialogHeader>
           <DialogTitle>{t("pages.listUpsert.templates.title")}</DialogTitle>
           <DialogDescription>

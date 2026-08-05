@@ -8,6 +8,7 @@ Makefile text eol=lf
 *.yaml text eol=lf
 
 /packages/**/files/** text eol=lf
+/packages/debian/*/debian/* text eol=lf
 
 # Preserve the vendored RapidXML snapshot byte-for-byte.
 third_party/rapidxml/** -whitespace

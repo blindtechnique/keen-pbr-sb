@@ -1128,3 +1128,23 @@ TEST_CASE("safe_exec_capture: nonzero exit code is preserved") {
     CHECK_FALSE(result.truncated);
     CHECK(result.exit_code == 1);
 }
+
+// Found by `keen-pbr-fuzz-iptables`: an unknown port token in a foreign rule
+// must neither abort the complete table inspection nor turn that rule into a
+// less restrictive rule that could satisfy one of our expectations.
+TEST_CASE("parse_iptables_s survives an unparsable port token") {
+    const std::string output =
+        "-N KeenPbrTable\n"
+        "-A PREROUTING -j KeenPbrTable\n"
+        "-A KeenPbrTable -p tcp -m multiport --dports 80,443j -j RETURN\n"
+        "-A KeenPbrTable -p tcp -m tcp --dport\n"
+        "-A KeenPbrTable -p udp -m udp --dport 443 -j RETURN\n";
+
+    keen_pbr3::ParsedIptablesState state;
+    CHECK_NOTHROW(state = keen_pbr3::parse_iptables_s(output));
+    CHECK(state.has_keen_pbr_chain);
+    CHECK(state.has_prerouting_jump);
+    REQUIRE(state.rules.size() == 1);
+    CHECK(state.rules.front().criteria.proto == keen_pbr3::L4Proto::Udp);
+    CHECK(state.rules.front().criteria.dst_port.to_iptables_string() == "443");
+}

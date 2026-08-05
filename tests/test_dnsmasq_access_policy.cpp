@@ -12,7 +12,7 @@ TEST_CASE("dnsmasq access policy stays implicit without verified VPN servers") {
 }
 
 TEST_CASE("dnsmasq access policy covers verified native and pooled VPN ingress") {
-    InternalVpnServer wireguard;
+    InternalVpnServer wireguard{};
     wireguard.interface = "nwg0";
 
     InternalVpnRuntimeTarget ikev2;
@@ -202,9 +202,13 @@ TEST_CASE("dnsmasq access policy resolves bridged SSTP at its L3 ingress") {
 }
 
 TEST_CASE("dnsmasq access policy ignores unsafe interface text") {
-    InternalVpnServer unsafe;
+    // `{}` здесь по привычке, а не по необходимости: с тех пор генератор
+    // API-типов сам инициализирует скалярные поля. До этого `InternalVpnServer x;`
+    // оставлял `process_clients` неопределённым, и UBSan ловил на копировании
+    // «load of value 49, which is not a valid value for type bool».
+    InternalVpnServer unsafe{};
     unsafe.interface = "nwg0\ninterface=eth3";
-    InternalVpnServer wildcard;
+    InternalVpnServer wildcard{};
     wildcard.interface = "eth*";
 
     CHECK(

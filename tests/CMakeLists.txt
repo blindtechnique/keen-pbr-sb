@@ -260,12 +260,19 @@ set_target_properties(keen-pbr-runtime-mutation-admission-tests PROPERTIES
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
 )
+# `test_owned_conntrack_cleanup_operation.cpp` тянет через
+# `owned_conntrack_cleanup_operation.hpp` -> `runtime_recovery_policy.hpp` ->
+# `config.hpp` сгенерированный `api_types.hpp`, а тот — <nlohmann/json.hpp>.
+# Без каталога generated и без самой библиотеки цель не собирается вовсе.
 target_include_directories(keen-pbr-runtime-mutation-admission-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/third_party/doctest
 )
 target_link_libraries(keen-pbr-runtime-mutation-admission-tests PRIVATE
+  nlohmann_json::nlohmann_json
+  fmt::fmt-header-only
   Threads::Threads
 )
 keen_pbr_apply_project_options(keen-pbr-runtime-mutation-admission-tests)
@@ -326,12 +333,16 @@ set_target_properties(keen-pbr-keenetic-dns-refresh-tests PROPERTIES
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
 )
+# Как и у admission-цели: `test_config_reload_coordinator.cpp` доходит до
+# `config.hpp` и сгенерированного `api_types.hpp`, которому нужен nlohmann.
 target_include_directories(keen-pbr-keenetic-dns-refresh-tests PRIVATE
+  ${KEEN_PBR_GENERATED_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/third_party/doctest
 )
 target_link_libraries(keen-pbr-keenetic-dns-refresh-tests PRIVATE
+  nlohmann_json::nlohmann_json
   fmt::fmt-header-only
   Threads::Threads
 )
@@ -562,6 +573,7 @@ target_link_libraries(keen-pbr-tests PRIVATE
   keen_pbr_libunwind
   ${LIBRESOLV}
 )
+keen_pbr_apply_project_options(keen-pbr-tests)
 
 add_executable(crash-diagnostics-smoke
   crash_diagnostics_smoke.cpp
@@ -581,6 +593,7 @@ target_link_libraries(crash-diagnostics-smoke PRIVATE
   cpptrace::cpptrace
   keen_pbr_libunwind
 )
+keen_pbr_apply_project_options(crash-diagnostics-smoke)
 
 if(LIBATOMIC)
   target_link_libraries(keen-pbr-tests PRIVATE ${LIBATOMIC})
@@ -768,5 +781,191 @@ endif()
       -P ${THREAD_SAFETY_SMOKE_SCRIPT}
     COMMENT "Checking that thread-safety analysis rejects an unlocked access"
     VERBATIM
+  )
+endif()
+
+# Roadmap: «P1. Добавить fuzzing после санитайзеров. Отдельные libFuzzer targets
+# сначала для `.srs` …»
+#
+# Мишени собираются только по явной опции и только Clang: libFuzzer — часть
+# Clang, а санитайзеры и инструментация покрытия не должны попадать ни в
+# router/IPK binary, ни в обычный тестовый прогон.
+option(KEEN_PBR_FUZZ "Build libFuzzer targets (requires Clang)" OFF)
+
+if(KEEN_PBR_FUZZ)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "KEEN_PBR_FUZZ requires Clang; libFuzzer is not available in GCC.")
+  endif()
+
+  add_executable(keen-pbr-fuzz-srs
+    fuzz/fuzz_srs_decoder.cpp
+    ../src/lists/srs_decoder.cpp
+  )
+  set_target_properties(keen-pbr-fuzz-srs PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  target_include_directories(keen-pbr-fuzz-srs PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+  )
+  target_link_libraries(keen-pbr-fuzz-srs PRIVATE PkgConfig::ZLIB)
+  target_compile_options(keen-pbr-fuzz-srs PRIVATE
+    -fsanitize=fuzzer,address,undefined
+    -fno-sanitize-recover=undefined
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(keen-pbr-fuzz-srs PRIVATE
+    -fsanitize=fuzzer,address,undefined
+  )
+
+  # Вторая мишень: JSON-конфигурация. Пользователь правит её руками,
+  # восстанавливает из резервной копии и переносит между версиями.
+  add_executable(keen-pbr-fuzz-config
+    fuzz/fuzz_config_parser.cpp
+    ../src/config/config.cpp
+    ../src/firewall/port_spec_util.cpp
+    ../src/dns/dns_server.cpp
+    ../src/dns/dns_probe_server.cpp
+    ../src/util/system_info.cpp
+    ../src/http/http_client.cpp
+    ../src/http/http_transport.cpp
+    ../src/http/curl_runtime.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    ../src/util/traced_mutex.cpp
+  )
+  set_target_properties(keen-pbr-fuzz-config PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  target_include_directories(keen-pbr-fuzz-config PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+  )
+  target_link_libraries(keen-pbr-fuzz-config PRIVATE
+    nlohmann_json::nlohmann_json
+    fmt::fmt-header-only
+    ${KEEN_PBR_CURL_TARGET}
+    PkgConfig::ZLIB
+    Threads::Threads
+  )
+  target_compile_options(keen-pbr-fuzz-config PRIVATE
+    -fsanitize=fuzzer,address,undefined
+    -fno-sanitize-recover=undefined
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(keen-pbr-fuzz-config PRIVATE
+    -fsanitize=fuzzer,address,undefined
+  )
+
+  # Третья мишень: текстовый список. Самый внешний вход из всех — скачивается
+  # по URL из чужого каталога, содержимое не контролирует никто из нас.
+  add_executable(keen-pbr-fuzz-list
+    fuzz/fuzz_list_parser.cpp
+    ../src/config/list_parser.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    ../src/util/traced_mutex.cpp
+  )
+  set_target_properties(keen-pbr-fuzz-list PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  target_include_directories(keen-pbr-fuzz-list PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+  )
+  target_link_libraries(keen-pbr-fuzz-list PRIVATE
+    nlohmann_json::nlohmann_json
+    fmt::fmt-header-only
+    Threads::Threads
+  )
+  target_compile_options(keen-pbr-fuzz-list PRIVATE
+    -fsanitize=fuzzer,address,undefined
+    -fno-sanitize-recover=undefined
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(keen-pbr-fuzz-list PRIVATE
+    -fsanitize=fuzzer,address,undefined
+  )
+
+  # Четвёртая мишень: разбор вывода iptables-save. Вход не пользовательский, а
+  # от чужой программы: версия iptables на роутере не наша, а на BusyBox вывод
+  # бывает урезанным.
+  add_executable(keen-pbr-fuzz-iptables
+    fuzz/fuzz_iptables_parser.cpp
+    ../src/firewall/iptables_verifier.cpp
+    ../src/firewall/port_spec_util.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    ../src/util/traced_mutex.cpp
+  )
+  set_target_properties(keen-pbr-fuzz-iptables PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  target_include_directories(keen-pbr-fuzz-iptables PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+  )
+  target_link_libraries(keen-pbr-fuzz-iptables PRIVATE
+    nlohmann_json::nlohmann_json
+    fmt::fmt-header-only
+    Threads::Threads
+  )
+  target_compile_options(keen-pbr-fuzz-iptables PRIVATE
+    -fsanitize=fuzzer,address,undefined
+    -fno-sanitize-recover=undefined
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(keen-pbr-fuzz-iptables PRIVATE
+    -fsanitize=fuzzer,address,undefined
+  )
+
+  # Пятая мишень: снимок conntrack. Разбор достигается через штатный внедряемый
+  # SnapshotReader — тот же, которым пользуются существующие тесты, — поэтому
+  # выносить внутреннюю функцию из анонимного пространства имён не потребовалось.
+  add_executable(keen-pbr-fuzz-conntrack
+    fuzz/fuzz_conntrack_parser.cpp
+    ../src/runtime/conntrack_manager.cpp
+    ../src/log/logger.cpp
+    ../src/log/trace.cpp
+    ../src/util/traced_mutex.cpp
+  )
+  set_target_properties(keen-pbr-fuzz-conntrack PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  target_include_directories(keen-pbr-fuzz-conntrack PRIVATE
+    ${KEEN_PBR_GENERATED_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+  )
+  target_link_libraries(keen-pbr-fuzz-conntrack PRIVATE
+    nlohmann_json::nlohmann_json
+    fmt::fmt-header-only
+    Threads::Threads
+  )
+  target_compile_options(keen-pbr-fuzz-conntrack PRIVATE
+    -fsanitize=fuzzer,address,undefined
+    -fno-sanitize-recover=undefined
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(keen-pbr-fuzz-conntrack PRIVATE
+    -fsanitize=fuzzer,address,undefined
   )
 endif()

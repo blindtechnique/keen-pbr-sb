@@ -20,9 +20,13 @@ public:
 
     // Verify that the expected ip policy rule is present in the kernel for
     // both AF_INET and AF_INET6 (or the family specified in expected.family).
-    // outbound_tag is used to populate the PolicyRuleCheck for reporting.
-    PolicyRuleCheck verify_policy_rule(const RuleSpec& expected,
-                                       const std::string& outbound_tag);
+    //
+    // Здесь был параметр outbound_tag с комментарием «used to populate the
+    // PolicyRuleCheck for reporting». Поля под тег в PolicyRuleCheck нет, и
+    // никуда он не попадал: параметр был мёртв, а комментарий неверен. Если
+    // называть outbound в диагностике всё-таки нужно, это отдельное поле в
+    // openapi.yaml и осознанная правка, а не молчаливый аргумент.
+    PolicyRuleCheck verify_policy_rule(const RuleSpec& expected);
 
     // Non-copyable
     RoutingVerifier(const RoutingVerifier&) = delete;

@@ -288,7 +288,7 @@ export function SoftwareUpdateCard() {
         ? {
             ...previous,
             log: "",
-            message: "Восстанавливаю предыдущий пакет",
+            message: t("pages.settings.softwareUpdate.rollbackStarting"),
             percent: 0,
             phase: "rollback",
             success: null,
@@ -316,7 +316,7 @@ export function SoftwareUpdateCard() {
       setError(
         rollbackError instanceof Error
           ? rollbackError.message
-          : "Не удалось запустить откат пакета"
+          : t("pages.settings.softwareUpdate.rollbackFailed")
       )
     } finally {
       setStarting(false)
@@ -385,7 +385,7 @@ export function SoftwareUpdateCard() {
         open={open}
       >
         <DialogContent
-          className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-3xl"
+          className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]"
           showCloseButton={!status?.running && !starting}
         >
           <DialogHeader>
@@ -434,7 +434,7 @@ export function SoftwareUpdateCard() {
                     onClick={() => setConfirmInstall(false)}
                     variant="outline"
                   >
-                    Отмена
+                    {t("pages.settings.softwareUpdate.cancel")}
                   </Button>
                   <Button onClick={() => void startUpdate()}>
                     {t("pages.settings.softwareUpdate.install")}
@@ -446,12 +446,10 @@ export function SoftwareUpdateCard() {
               <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">
                 <div>
                   <p className="font-medium">
-                    Восстановить предыдущую версию keen-pbr-sb?
+                    {t("pages.settings.softwareUpdate.rollbackConfirmTitle")}
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Будут установлены сохранённый IPK и соответствующая ему
-                    конфигурация. Текущий пакет останется доступен для обратного
-                    отката.
+                    {t("pages.settings.softwareUpdate.rollbackConfirmHint")}
                   </p>
                 </div>
                 <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
@@ -459,13 +457,13 @@ export function SoftwareUpdateCard() {
                     onClick={() => setConfirmRollback(false)}
                     variant="outline"
                   >
-                    Отмена
+                    {t("pages.settings.softwareUpdate.cancel")}
                   </Button>
                   <Button
                     onClick={() => void startPackageRollback()}
                     variant="destructive"
                   >
-                    Восстановить предыдущий IPK
+                    {t("pages.settings.softwareUpdate.rollbackConfirmAction")}
                   </Button>
                 </div>
               </div>
@@ -484,12 +482,12 @@ export function SoftwareUpdateCard() {
               title={
                 status?.package_rollback_available
                   ? undefined
-                  : "Появится после успешного управляемого обновления"
+                  : t("pages.settings.softwareUpdate.rollbackUnavailable")
               }
               variant="destructive"
             >
               <RotateCcwIcon />
-              Откат в один клик
+              {t("pages.settings.softwareUpdate.rollbackButton")}
             </Button>
             <label className="flex cursor-pointer items-center gap-3 rounded-md border bg-card px-3 py-2 text-sm sm:mr-auto">
               <Checkbox
@@ -498,7 +496,7 @@ export function SoftwareUpdateCard() {
                   setDownloadBackupBeforeUpdate(checked === true)
                 }
               />
-              Скачать бэкап перед установкой
+              {t("pages.settings.softwareUpdate.downloadBackupBefore")}
             </label>
             <Button
               disabled={
@@ -583,18 +581,21 @@ function UpdateStateMessage({
 }
 
 function UpdateProgress({ status }: { status: SoftwareUpdateStatus }) {
+  const { t } = useTranslation()
   const percent = Math.min(100, Math.max(0, status.percent ?? 0))
 
   return (
     <div className="space-y-2" aria-live="polite">
       <div className="flex items-center justify-between gap-4 text-sm">
-        <span>{status.message ?? "Выполняется обновление"}</span>
+        <span>
+          {status.message ?? t("pages.settings.softwareUpdate.inProgress")}
+        </span>
         <span className="shrink-0 text-muted-foreground tabular-nums">
           {percent}%
         </span>
       </div>
       <div
-        aria-label="Прогресс обновления"
+        aria-label={t("pages.settings.softwareUpdate.progressLabel")}
         aria-valuemax={100}
         aria-valuemin={0}
         aria-valuenow={percent}

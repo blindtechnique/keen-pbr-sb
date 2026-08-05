@@ -6,12 +6,7 @@ import { usePostRoutingTestMutation } from "@/api/mutations"
 import type { ConfigObject } from "@/api/generated/model"
 import { SectionCard } from "@/components/shared/section-card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import {
   InputGroup,
   InputGroupAddon,
@@ -128,14 +123,10 @@ export function RoutingTestPanel({
       routingDiagnostics &&
       routingDiagnostics.results.length === 0 &&
       routingDiagnostics.rule_diagnostics.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyTitle>{t("overview.routingTest.emptyTitle")}</EmptyTitle>
-            <EmptyDescription>
-              {t("overview.routingTest.emptyDescription")}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <ListPlaceholder
+          description={t("overview.routingTest.emptyDescription")}
+          title={t("overview.routingTest.emptyTitle")}
+        />
       ) : null}
 
       {routingDiagnostics ? (

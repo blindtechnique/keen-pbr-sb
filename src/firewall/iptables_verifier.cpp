@@ -9,6 +9,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <stdexcept>
+#include <string_view>
 
 namespace keen_pbr3 {
 
@@ -63,11 +65,6 @@ std::vector<L4Proto> expand_l4_protos_for_iptables(
         return {L4Proto::Tcp, L4Proto::Udp};
     }
     return {criteria.proto};
-}
-
-std::string normalize_iptables_port_spec(const std::string& spec) {
-    if (spec.empty()) return {};
-    return parse_port_spec(spec).to_iptables_string();
 }
 
 std::string normalize_addr_value(const std::string& addr) {
@@ -277,6 +274,22 @@ bool rule_matches(const ParsedIptablesRule& actual,
            criteria_equal(actual.criteria, expected.criteria);
 }
 
+// `PortSpec::operator=` throws `std::invalid_argument` for an unknown token,
+// while this parser consumes output that may also contain rules owned by other
+// packages. A malformed foreign rule must not abort inspection of the whole
+// table, but it must not be allowed to match an expected rule after silently
+// losing its port criteria either.
+//
+// Найдено фаззингом `keen-pbr-fuzz-iptables` на токене '80,443j'.
+bool assign_port_spec(PortSpec& target, std::string_view token) {
+    try {
+        target = token;
+        return true;
+    } catch (const std::invalid_argument&) {
+        return false;
+    }
+}
+
 ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
                                                 bool ipv6,
                                                 const std::string& chain_name) {
@@ -315,6 +328,7 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
 
         const auto tokens = split_ws(line);
         bool negate_next = false;
+        bool valid_rule = true;
 
         for (size_t i = 0; i < tokens.size(); ++i) {
             const auto& tok = tokens[i];
@@ -353,16 +367,30 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
                 negate_next = false;
                 continue;
             }
-            if ((tok == "--sport" || tok == "--sports") && i + 1 < tokens.size()) {
-                rule.criteria.src_port = tokens[i + 1];
-                rule.criteria.negate_src_port = negate_next;
+            if (tok == "--sport" || tok == "--sports") {
+                if (i + 1 >= tokens.size()) {
+                    valid_rule = false;
+                    break;
+                }
+                if (assign_port_spec(rule.criteria.src_port, tokens[i + 1])) {
+                    rule.criteria.negate_src_port = negate_next;
+                } else {
+                    valid_rule = false;
+                }
                 ++i;
                 negate_next = false;
                 continue;
             }
-            if ((tok == "--dport" || tok == "--dports") && i + 1 < tokens.size()) {
-                rule.criteria.dst_port = tokens[i + 1];
-                rule.criteria.negate_dst_port = negate_next;
+            if (tok == "--dport" || tok == "--dports") {
+                if (i + 1 >= tokens.size()) {
+                    valid_rule = false;
+                    break;
+                }
+                if (assign_port_spec(rule.criteria.dst_port, tokens[i + 1])) {
+                    rule.criteria.negate_dst_port = negate_next;
+                } else {
+                    valid_rule = false;
+                }
                 ++i;
                 negate_next = false;
                 continue;
@@ -407,7 +435,7 @@ ParsedIptablesState parse_iptables_s_for_family(const std::string& output,
             negate_next = false;
         }
 
-        if (!rule.is_mark && !rule.is_drop && !rule.is_pass) {
+        if (!valid_rule || (!rule.is_mark && !rule.is_drop && !rule.is_pass)) {
             continue;
         }
         if (rule.set_name.empty() && rule.criteria.empty()) {

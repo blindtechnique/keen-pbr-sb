@@ -208,3 +208,46 @@ function normalizeLegacyToken(value: string | null | undefined) {
     .toLowerCase()
     .replaceAll(/[\s_./-]+/g, "")
 }
+
+/**
+ * Короткая пилюля «как это идёт по проводу»: UDP · QUIC, TCP · Reality.
+ *
+ * В шапке карточки раньше стояло техническое имя интерфейса — hy1, nwg3,
+ * kpbr85f462c5. Человеку оно не говорит ничего: имя выдаёт ядро, а вопрос у
+ * него другой — что это за туннель и переживёт ли он блокировку. Тип шифрования
+ * на этот вопрос отвечает, техническое имя нет; оно уехало в раскрытую часть,
+ * где ему и место.
+ *
+ * TLS показывается только там, где он что-то добавляет. У QUIC он всегда, и
+ * писать его — шум; Reality пишем всегда, потому что это и есть ответ.
+ */
+export function describeTransportWire(
+  status: Pick<TransportStatus, "network" | "path" | "protocol" | "security">
+): string | null {
+  const path = formatTransportPath(status)
+  if (!path) {
+    return null
+  }
+
+  const parts = [path.wireTransport, path.framing].filter(
+    (part): part is string => Boolean(part)
+  )
+  const security = securityLabel(status.security, path.framing)
+  if (security) {
+    parts.push(security)
+  }
+
+  return parts.length > 0 ? parts.join(" · ") : null
+}
+
+function securityLabel(
+  security: TransportStatus["security"],
+  framing: string | null
+): string | null {
+  if (security === "reality") return "Reality"
+  // QUIC без TLS не бывает, WireGuard шифруется сам — подпись «TLS» рядом с
+  // ними ничего не уточняет.
+  if (framing === "QUIC" || framing === "WireGuard") return null
+  if (security === "tls") return "TLS"
+  return null
+}

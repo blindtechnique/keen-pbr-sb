@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
+  ArchiveIcon,
   ChevronDownIcon,
   DownloadIcon,
+  EraserIcon,
   ExternalLinkIcon,
   FilePlusIcon,
   LoaderCircleIcon,
+  PencilIcon,
   PlayIcon,
   RefreshCwIcon,
   RotateCcwIcon,
@@ -16,7 +19,13 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
+import { DataTable } from "@/components/shared/data-table"
+import { ListPlaceholder } from "@/components/shared/list-placeholder"
+import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
+import { SectionHeading } from "@/components/shared/section-heading"
+import { TableSkeleton } from "@/components/shared/table-skeleton"
+import { Skeleton } from "@/components/ui/skeleton"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -33,16 +42,6 @@ import {
 
 const MODE_OPTIONS = ["MODE_AUTO", "MODE_LIST", "MODE_ALL"] as const
 
-function strategyOptionLabel(
-  item: { name: string; builtin?: boolean },
-  activeStrategy: string | undefined,
-  t: (key: string) => string
-) {
-  const builtin = item.builtin ? ` (${t("nfqws.builtin")})` : ""
-  const active =
-    item.name === activeStrategy ? ` — ${t("nfqws.activeStrategy")}` : ""
-  return `${item.name}${builtin}${active}`
-}
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -457,42 +456,11 @@ export function NfqwsPage() {
 
   return (
     <div className="space-y-3">
+      {/* Действия страницы уехали в раздел «Служба»: это единственная страница,
+          где кнопки жили в заголовке, и «Резервные копии» с «Обновить»
+          относятся к службе, а не к таблице под вкладками. Заголовок теперь
+          такой же, как у всех остальных страниц. */}
       <PageHeader
-        actions={
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={!status?.installed || backupPending !== null}
-              onClick={() => setBackupOpen(true)}
-              variant="outline"
-            >
-              <DownloadIcon />
-              {t("nfqws.backup.button")}
-            </Button>
-            <input
-              accept="application/json,.json"
-              className="hidden"
-              onChange={(event) => void restoreBackup(event.target.files?.[0])}
-              ref={backupImportRef}
-              type="file"
-            />
-            <Button
-              disabled={
-                query.isFetching || updateQuery.isFetching || refreshPending
-              }
-              onClick={() => void refreshAll()}
-              variant="outline"
-            >
-              <RefreshCwIcon
-                className={
-                  query.isFetching || updateQuery.isFetching || refreshPending
-                    ? "animate-spin"
-                    : ""
-                }
-              />
-              {t("nfqws.refresh")}
-            </Button>
-          </div>
-        }
         description={t("nfqws.description")}
         // The heading is a link, so the tab text is given explicitly.
         documentTitle="nfqws2"
@@ -509,6 +477,15 @@ export function NfqwsPage() {
           </a>
         }
       />
+      <input
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(event) => void restoreBackup(event.target.files?.[0])}
+        ref={backupImportRef}
+        type="file"
+      />
+
+      {query.isLoading ? <TableSkeleton /> : null}
 
       {!status?.installed && !query.isLoading ? <NotInstalled /> : null}
 
@@ -536,7 +513,7 @@ export function NfqwsPage() {
               </div>
             }
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-2">
               <label className="flex cursor-pointer items-center gap-2">
                 <Switch
                   aria-label={
@@ -557,7 +534,11 @@ export function NfqwsPage() {
                   {status.running ? t("nfqws.stop") : t("nfqws.start")}
                 </span>
               </label>
-              <div className="flex flex-wrap items-center gap-2">
+              {/* На телефоне — сетка в две равные колонки, как в панели действий
+                  на остальных страницах. В обычном `flex-wrap` каждая кнопка
+                  занимала ширину своей подписи, и пять кнопок вставали лесенкой
+                  2 + 2 + 1 разной длины. */}
+              <div className="grid grid-cols-2 items-center gap-2 *:w-full sm:flex sm:flex-wrap sm:*:w-auto">
                 <Button
                   disabled={operation.pending}
                   onClick={() =>
@@ -597,6 +578,32 @@ export function NfqwsPage() {
                 >
                   <DownloadIcon />
                   {t("nfqws.upgrade")}
+                </Button>
+                <Button
+                  disabled={!status?.installed || backupPending !== null}
+                  onClick={() => setBackupOpen(true)}
+                  variant="outline"
+                >
+                  <ArchiveIcon />
+                  {t("nfqws.backup.button")}
+                </Button>
+                <Button
+                  disabled={
+                    query.isFetching || updateQuery.isFetching || refreshPending
+                  }
+                  onClick={() => void refreshAll()}
+                  variant="outline"
+                >
+                  <RefreshCwIcon
+                    className={
+                      query.isFetching ||
+                      updateQuery.isFetching ||
+                      refreshPending
+                        ? "animate-spin"
+                        : ""
+                    }
+                  />
+                  {t("nfqws.refresh")}
                 </Button>
               </div>
             </div>
@@ -740,7 +747,7 @@ function NfqwsOperationDialog({
       open={operation.open}
     >
       <DialogContent
-        className="overflow-hidden sm:max-w-2xl"
+        className="overflow-hidden sm:max-w-xl"
         showCloseButton={false}
       >
         <DialogHeader>
@@ -842,7 +849,7 @@ function NfqwsBackupDialog({
       open={open}
     >
       <DialogContent
-        className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-2xl"
+        className="overflow-hidden max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[calc(100dvh-0.75rem)] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 sm:max-w-[640px]"
         showCloseButton={!busy}
       >
         <DialogHeader>
@@ -1056,63 +1063,93 @@ function SettingsEditor({
     toast.success(t("nfqws.saved"))
     refresh()
   }
-  if (!file || !form)
+  // Форма ещё грузится — это не «файла нет». Раньше обе ситуации показывали
+  // одну и ту же красную мысль «nfqws2.conf не найден», и она мигала при
+  // каждом нормальном открытии вкладки.
+  if (file && !form) return <TableSkeleton />
+  if (!file)
     return (
       <Alert>
         <AlertDescription>{t("nfqws.configMissing")}</AlertDescription>
       </Alert>
     )
-  const textFields: (keyof NfqwsConfigForm)[] = [
-    "ISP_INTERFACE",
-    "NFQWS_BASE_ARGS",
-    "NFQWS_ARGS",
-    "NFQWS_ARGS_QUIC",
-    "NFQWS_ARGS_UDP",
-    "NFQWS_ARGS_CUSTOM",
-    "NFQWS_ARGS_IPSET",
-    "TCP_PORTS",
-    "UDP_PORTS",
-    "POLICY_NAME",
-  ]
-  return (
-    <NfqwsSection
-      description={t("nfqws.settingsDescription")}
-      title={t("nfqws.settingsTitle")}
+
+  const settingsForm: NfqwsConfigForm = form as NfqwsConfigForm
+  const field = (key: keyof NfqwsConfigForm) => (
+    <NfqwsField
+      key={key}
+      onChange={(next) => setForm({ ...settingsForm, [key]: next })}
+      variable={key}
+      value={String(settingsForm[key])}
+    />
+  )
+  const toggle = (key: "IPV6_ENABLED" | "POLICY_EXCLUDE" | "LOG_LEVEL") => (
+    <label
+      className="flex min-h-10 cursor-pointer items-start gap-3 py-1"
+      key={key}
     >
+      <Checkbox
+        checked={settingsForm[key]}
+        className="mt-0.5"
+        onCheckedChange={(checked) =>
+          setForm({ ...settingsForm, [key]: checked === true })
+        }
+      />
+      <span className="min-w-0">
+        <span className="block text-sm">{t(`nfqws.fields.${key}.label`)}</span>
+        <span className="block text-xs text-muted-foreground">
+          {t(`nfqws.fields.${key}.hint`)}
+        </span>
+      </span>
+    </label>
+  )
+
+  return (
+    <div className="space-y-6">
+      <SectionHeading
+        description={t("nfqws.settingsDescription")}
+        title={t("nfqws.settingsTitle")}
+      />
+
+      {/* Настройки разложены по смыслу, а не в порядке строк в файле: сначала
+          «где применять», потом «как обходить», потом «прочее». Подписи — по-
+          человечески; имя переменной осталось мелкой моноширинной пометкой,
+          чтобы тот, кто пришёл из nfqws2.conf, нашёл знакомое. */}
       <div className="space-y-4">
-        {textFields.map((key) =>
-          key.includes("ARGS") ? (
-            <ArgsField
-              key={key}
-              label={key}
-              onChange={(next) => setForm({ ...form, [key]: next })}
-              value={String(form[key])}
-            />
-          ) : (
-            <div className="grid gap-1.5" key={key}>
-              <Label>{key}</Label>
-              <Input
-                className="font-mono"
-                onChange={(event) =>
-                  setForm({ ...form, [key]: event.target.value })
-                }
-                value={String(form[key])}
-              />
-            </div>
-          )
-        )}
+        <SectionHeading
+          description={t("nfqws.groups.scopeDescription")}
+          size="compact"
+          title={t("nfqws.groups.scope")}
+        />
+        {field("ISP_INTERFACE")}
+        {field("TCP_PORTS")}
+        {field("UDP_PORTS")}
+        {field("POLICY_NAME")}
+        {toggle("POLICY_EXCLUDE")}
+        {toggle("IPV6_ENABLED")}
+      </div>
+
+      <div className="space-y-4">
+        <SectionHeading
+          description={t("nfqws.groups.bypassDescription")}
+          size="compact"
+          title={t("nfqws.groups.bypass")}
+        />
         <div className="grid gap-1.5">
-          <Label>NFQWS_EXTRA_ARGS</Label>
+          <Label>{t("nfqws.fields.NFQWS_EXTRA_ARGS.label")}</Label>
           <Select
-            items={MODE_OPTIONS.map((mode) => ({ value: mode, label: mode }))}
+            items={MODE_OPTIONS.map((mode) => ({
+              value: mode,
+              label: t(`nfqws.modes.${mode}`),
+            }))}
             onValueChange={(value) =>
               setForm({
-                ...form,
+                ...settingsForm,
                 NFQWS_EXTRA_ARGS: (value ??
-                  form.NFQWS_EXTRA_ARGS) as NfqwsConfigForm["NFQWS_EXTRA_ARGS"],
+                  settingsForm.NFQWS_EXTRA_ARGS) as NfqwsConfigForm["NFQWS_EXTRA_ARGS"],
               })
             }
-            value={form.NFQWS_EXTRA_ARGS}
+            value={settingsForm.NFQWS_EXTRA_ARGS}
           >
             <SelectTrigger>
               <SelectValue />
@@ -1121,37 +1158,91 @@ function SettingsEditor({
               <SelectGroup>
                 {MODE_OPTIONS.map((mode) => (
                   <SelectItem key={mode} value={mode}>
-                    {mode}
+                    {t(`nfqws.modes.${mode}`)}
                   </SelectItem>
                 ))}
               </SelectGroup>
             </SelectContent>
           </Select>
+          <p className="text-xs text-muted-foreground">
+            {t("nfqws.fields.NFQWS_EXTRA_ARGS.hint")}
+          </p>
         </div>
-        {(["IPV6_ENABLED", "POLICY_EXCLUDE", "LOG_LEVEL"] as const).map(
-          (key) => (
-            <label
-              className="flex min-h-10 cursor-pointer items-center gap-3 py-1"
-              key={key}
-            >
-              <Checkbox
-                checked={form[key]}
-                onCheckedChange={(checked) =>
-                  setForm({ ...form, [key]: checked === true })
-                }
-              />
-              <span className="text-sm">{key}</span>
-            </label>
-          )
-        )}
-        <div className="flex justify-end">
-          <Button onClick={() => void save()}>
-            <SaveIcon />
-            {t("nfqws.save")}
-          </Button>
-        </div>
+        {field("NFQWS_BASE_ARGS")}
+        {field("NFQWS_ARGS")}
+        {field("NFQWS_ARGS_QUIC")}
+        {field("NFQWS_ARGS_UDP")}
+        {field("NFQWS_ARGS_CUSTOM")}
+        {field("NFQWS_ARGS_IPSET")}
       </div>
-    </NfqwsSection>
+
+      <div className="space-y-4">
+        <SectionHeading
+          description={t("nfqws.groups.otherDescription")}
+          size="compact"
+          title={t("nfqws.groups.other")}
+        />
+        {toggle("LOG_LEVEL")}
+      </div>
+
+      <div className="flex justify-end">
+        <Button onClick={() => void save()}>
+          <SaveIcon />
+          {t("nfqws.save")}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Одно поле настроек nfqws2.
+ *
+ * Подпись человеческая, под ней объяснение, а исходное имя переменной стоит
+ * рядом мелким моноширинным шрифтом. Раньше подписью было само имя —
+ * `NFQWS_ARGS_QUIC`, — и человеку, который открыл эту страницу впервые,
+ * оставалось гадать, что туда писать.
+ */
+function NfqwsField({
+  onChange,
+  value,
+  variable,
+}: {
+  onChange: (next: string) => void
+  value: string
+  variable: keyof NfqwsConfigForm
+}) {
+  const { t } = useTranslation()
+
+  if (String(variable).includes("ARGS")) {
+    return (
+      <ArgsField
+        hint={t(`nfqws.fields.${variable}.hint`)}
+        label={t(`nfqws.fields.${variable}.label`)}
+        onChange={onChange}
+        value={value}
+        variable={variable}
+      />
+    )
+  }
+
+  return (
+    <div className="grid gap-1.5">
+      <Label className="flex flex-wrap items-baseline gap-2">
+        {t(`nfqws.fields.${variable}.label`)}
+        <span className="font-mono text-[11px] font-normal text-muted-foreground">
+          {variable}
+        </span>
+      </Label>
+      <Input
+        className="font-mono"
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      />
+      <p className="text-xs text-muted-foreground">
+        {t(`nfqws.fields.${variable}.hint`)}
+      </p>
+    </div>
   )
 }
 
@@ -1167,6 +1258,7 @@ function StrategiesEditor({
   status: Status
 }) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const preferredStrategy =
     status.active_strategy || status.strategies[0]?.name || ""
   const [selected, setSelected] = useState(preferredStrategy)
@@ -1193,38 +1285,80 @@ function StrategiesEditor({
     (item) => item.name === effectiveSelected
   )
   const content = draftContent[effectiveSelected] ?? strategy?.content ?? ""
-  const add = () => {
-    const name = window.prompt(t("nfqws.strategyName"))
-    if (name) {
-      setSelected(name)
-      setDraftContent((current) => ({ ...current, [name]: "" }))
+  const [creating, setCreating] = useState(false)
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [applying, setApplying] = useState<string | null>(null)
+  const [snapshotting, setSnapshotting] = useState(false)
+  const deletingIsOverride = Boolean(
+    status.strategies.find((item) => item.name === deleting)?.overridden
+  )
+  // Пустой active_strategy означает, что nfqws2.conf не совпадает побайтово ни
+  // с одной стратегией. Так бывает ровно в одном случае: конфигурацию правили
+  // руками — на вкладке «Настройки» или по ssh. Раньше об этом сообщала плашка
+  // над списком; со списком стратегий она пропала, и таблица показывала четыре
+  // «не применена», ничего не объясняя.
+  const customConfig = !status.active_strategy
+  // Текущий nfqws2.conf держим под рукой, чтобы его можно было сохранить
+  // стратегией до того, как «Применить» его перезапишет.
+  const activeConfigQuery = useQuery({
+    queryKey: ["nfqws", "file", "config", "nfqws2.conf"],
+    queryFn: () =>
+      nfqwsAction<{ content: string }>({
+        action: "read_file",
+        category: "config",
+        name: "nfqws2.conf",
+      }),
+  })
+  const saveActiveAsStrategy = async (name: string) => {
+    const activeContent = activeConfigQuery.data?.content
+    if (activeContent === undefined) return
+    try {
+      await nfqwsAction({
+        action: "save_strategy",
+        name,
+        content: activeContent,
+      })
+      toast.success(t("nfqws.saved"))
+      refresh()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error(message, { richColors: true })
     }
   }
-  const run = async (action: string) => {
+  const contentOf = (name: string) =>
+    draftContent[name] ??
+    status.strategies.find((item) => item.name === name)?.content ??
+    ""
+  const run = async (action: string, name: string) => {
     if (action === "apply_strategy") {
       const completed = await runOperation(
         t("nfqws.applyStrategy"),
         () =>
           nfqwsAction({
             action,
-            name: effectiveSelected,
-            content,
+            name,
+            content: contentOf(name),
           }),
         t("nfqws.strategyAppliedAndRestarted")
       )
-      if (completed) refresh()
+      if (completed) {
+        // nfqws2.conf теперь другой — снимок для «Сохранить текущую» должен
+        // приехать заново, иначе кнопка сохранит то, что уже перезаписано.
+        await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
+        refresh()
+      }
       return
     }
     try {
       await nfqwsAction<{ ok: boolean; output?: string }>({
         action,
-        name: effectiveSelected,
-        content,
+        name,
+        content: contentOf(name),
       })
       if (action === "save_strategy" || action === "delete_strategy") {
         setDraftContent((current) => {
           const next = { ...current }
-          delete next[effectiveSelected]
+          delete next[name]
           return next
         })
       }
@@ -1235,97 +1369,265 @@ function StrategiesEditor({
       toast.error(message, { richColors: true })
     }
   }
+  const names = [
+    ...new Set([
+      ...status.strategies.map((item) => item.name),
+      ...Object.keys(draftContent),
+    ]),
+  ]
+
   return (
-    <NfqwsSection
-      description={t("nfqws.strategiesDescription")}
-      title={t("nfqws.strategiesTitle")}
-    >
-      <div className="space-y-4">
-        <div className="flex flex-wrap gap-2">
-          <Select
-            items={status.strategies.map((item) => ({
-              value: item.name,
-              label: strategyOptionLabel(item, status.active_strategy, t),
-            }))}
-            onValueChange={(value) =>
-              setSelected(String(value ?? effectiveSelected))
-            }
-            value={effectiveSelected}
-          >
-            <SelectTrigger className="w-auto min-w-60">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {status.strategies.map((item) => (
-                  <SelectItem key={item.name} value={item.name}>
-                    {strategyOptionLabel(item, status.active_strategy, t)}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <Button onClick={add} variant="outline">
+    <div className="space-y-3">
+      <SectionHeading
+        description={t("nfqws.strategiesDescription")}
+        title={t("nfqws.strategiesTitle")}
+      />
+      <PageActionBar
+        primary={
+          <Button onClick={() => setCreating(true)}>
             <FilePlusIcon />
             {t("nfqws.addStrategy")}
           </Button>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-muted-foreground">
-            {t("nfqws.activeStrategyLabel")}
-          </span>
-          {status.active_strategy ? (
-            <Badge>{status.active_strategy}</Badge>
-          ) : (
-            <Badge variant="secondary">{t("nfqws.activeStrategyCustom")}</Badge>
-          )}
-          {effectiveSelected && effectiveSelected !== status.active_strategy ? (
-            <span className="text-muted-foreground">
-              {t("nfqws.selectedForEditing", { name: effectiveSelected })}
-            </span>
-          ) : null}
-        </div>
-        <CodeEditor
-          className="h-[60vh] max-h-[40rem] min-h-[20rem]"
-          onChange={(next) =>
-            setDraftContent((current) => ({
-              ...current,
-              [effectiveSelected]: next,
-            }))
-          }
-          syntax={effectiveSelected.endsWith(".list") ? "list" : "nfqws"}
-          value={content}
-        />
-        <div className="flex flex-wrap justify-end gap-2">
+        }
+      >
+        {/* Подпись длиннее половины экрана, а кнопки в панели действий на
+            телефоне встают по две в ряд — текст вылезал за рамку. Этой отдаём
+            строку целиком, как главному действию. */}
+        <div className="col-span-2 *:w-full sm:col-auto sm:*:w-auto">
           <Button
-            disabled={!effectiveSelected}
-            onClick={() => void run("apply_strategy")}
-          >
-            <PlayIcon />
-            {t("nfqws.applyStrategy")}
-          </Button>
-          <Button
-            disabled={!effectiveSelected}
-            onClick={() => void run("save_strategy")}
+            disabled={activeConfigQuery.data === undefined}
+            onClick={() => setSnapshotting(true)}
             variant="outline"
           >
             <SaveIcon />
-            {t("nfqws.saveStrategy")}
-          </Button>
-          <Button
-            disabled={!effectiveSelected}
-            onClick={() => {
-              if (window.confirm(t("nfqws.confirmDelete")))
-                void run("delete_strategy")
-            }}
-            variant="destructive"
-          >
-            <TrashIcon />
-            {t("common.delete")}
+            {t("nfqws.snapshotActive")}
           </Button>
         </div>
-      </div>
-    </NfqwsSection>
+      </PageActionBar>
+
+      {/* Своя конфигурация — не ошибка, но и не то, что человек предполагает,
+          глядя на четыре «не применена». Заодно это единственный случай, когда
+          «Применить» уничтожает то, чего больше нигде нет. */}
+      {customConfig ? (
+        <Alert>
+          <AlertTitle>{t("nfqws.customConfigTitle")}</AlertTitle>
+          <AlertDescription>{t("nfqws.customConfigDescription")}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {/* Стратегии — список, а не выпадающее меню. В свёрнутом списке не видно
+          ни какая из них работает сейчас, ни какие вообще есть: чтобы
+          сравнить две, приходилось открывать их по очереди. Теперь это обычная
+          таблица панели — с состоянием, происхождением и действиями в строке. */}
+      {names.length === 0 ? (
+        <ListPlaceholder
+          action={
+            <Button onClick={() => setCreating(true)}>
+              <FilePlusIcon />
+              {t("nfqws.addStrategy")}
+            </Button>
+          }
+          description={t("nfqws.strategiesEmpty")}
+          title={t("nfqws.strategiesEmptyTitle")}
+        />
+      ) : (
+        <DataTable
+          columnClassNames={[
+            "w-full [&:where(td)]:max-w-0",
+            "min-w-[10rem]",
+            "min-w-[10rem]",
+            undefined,
+          ]}
+          headers={[
+            t("nfqws.strategyHeaders.name"),
+            t("nfqws.strategyHeaders.origin"),
+            t("nfqws.strategyHeaders.state"),
+            t("nfqws.strategyHeaders.actions"),
+          ]}
+          narrowColumns={[1, 2]}
+          rows={names.map((name) => {
+            const item = status.strategies.find(
+              (candidate) => candidate.name === name
+            )
+            const isActive = name === status.active_strategy
+            const isDraft = item === undefined
+            const isEditing = name === effectiveSelected
+
+            return [
+              <button
+                className={cn(
+                  "flex w-full min-w-0 cursor-pointer items-center gap-2 text-left font-mono",
+                  isEditing && "font-bold"
+                )}
+                key="name"
+                onClick={() => setSelected(name)}
+                type="button"
+              >
+                <span className="truncate">{name}</span>
+              </button>,
+              <span className="text-xs text-muted-foreground" key="origin">
+                {isDraft
+                  ? t("nfqws.strategyOrigin.draft")
+                  : item.builtin && item.overridden
+                    ? t("nfqws.strategyOrigin.overridden")
+                    : item.builtin
+                      ? t("nfqws.strategyOrigin.builtin")
+                      : t("nfqws.strategyOrigin.custom")}
+              </span>,
+              isActive ? (
+                <KeeneticStatus key="state" tone="success">
+                  {t("nfqws.strategyState.active")}
+                </KeeneticStatus>
+              ) : (
+                <span className="text-xs text-muted-foreground" key="state">
+                  {t("nfqws.strategyState.inactive")}
+                </span>
+              ),
+              <span
+                className="flex items-center justify-end gap-1"
+                key="actions"
+              >
+                <Button
+                  aria-label={t("nfqws.applyStrategy")}
+                  disabled={isDraft}
+                  onClick={() => {
+                    setSelected(name)
+                    setApplying(name)
+                  }}
+                  size="sm"
+                  title={
+                    isDraft
+                      ? t("nfqws.strategySaveBeforeApply")
+                      : t("nfqws.applyStrategy")
+                  }
+                  variant="outline"
+                >
+                  <PlayIcon />
+                  {t("nfqws.applyStrategy")}
+                </Button>
+                <Button
+                  aria-label={t("nfqws.editStrategy")}
+                  className="size-8"
+                  onClick={() => setSelected(name)}
+                  size="icon"
+                  title={t("nfqws.editStrategy")}
+                  variant="ghost"
+                >
+                  <PencilIcon className="size-4" />
+                </Button>
+                <Button
+                  aria-label={t("common.delete")}
+                  className="size-8 text-destructive hover:text-destructive"
+                  onClick={() => setDeleting(name)}
+                  size="icon"
+                  title={
+                    item?.builtin && item.overridden
+                      ? t("nfqws.restoreBuiltin")
+                      : t("common.delete")
+                  }
+                  variant="ghost"
+                >
+                  <TrashIcon className="size-4" />
+                </Button>
+              </span>,
+            ]
+          })}
+        />
+      )}
+
+      {effectiveSelected ? (
+        <div className="space-y-3">
+          <SectionHeading
+            description={t("nfqws.strategyEditorDescription")}
+            size="compact"
+            title={t("nfqws.strategyEditorTitle", { name: effectiveSelected })}
+          />
+          <CodeEditor
+            className="h-[50vh] max-h-[40rem] min-h-[18rem]"
+            onChange={(next) =>
+              setDraftContent((current) => ({
+                ...current,
+                [effectiveSelected]: next,
+              }))
+            }
+            syntax={effectiveSelected.endsWith(".list") ? "list" : "nfqws"}
+            value={content}
+          />
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              onClick={() => void run("save_strategy", effectiveSelected)}
+              variant="outline"
+            >
+              <SaveIcon />
+              {t("nfqws.saveStrategy")}
+            </Button>
+            <Button onClick={() => setApplying(effectiveSelected)}>
+              <PlayIcon />
+              {t("nfqws.applyStrategy")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <NfqwsNameDialog
+        confirmLabel={t("nfqws.addStrategy")}
+        description={t("nfqws.strategyNameDescription")}
+        label={t("nfqws.strategyName")}
+        onOpenChange={setCreating}
+        onSubmit={(name) => {
+          setSelected(name)
+          setDraftContent((current) => ({ ...current, [name]: "" }))
+        }}
+        open={creating}
+        placeholder="my-strategy"
+        title={t("nfqws.addStrategy")}
+      />
+      <NfqwsNameDialog
+        confirmLabel={t("nfqws.snapshotActive")}
+        description={t("nfqws.snapshotActiveDescription")}
+        label={t("nfqws.strategyName")}
+        onOpenChange={setSnapshotting}
+        onSubmit={(name) => void saveActiveAsStrategy(name)}
+        open={snapshotting}
+        placeholder="my-current-config"
+        title={t("nfqws.snapshotActive")}
+      />
+      <NfqwsConfirmDialog
+        confirmLabel={t("nfqws.applyStrategy")}
+        description={
+          customConfig
+            ? t("nfqws.applyOverCustomDescription", { name: applying })
+            : t("nfqws.applyDescription", { name: applying })
+        }
+        destructive={customConfig}
+        onConfirm={() => {
+          if (applying) void run("apply_strategy", applying)
+          setApplying(null)
+        }}
+        onOpenChange={(open) => !open && setApplying(null)}
+        open={applying !== null}
+        title={t("nfqws.applyConfirmTitle")}
+      />
+      <NfqwsConfirmDialog
+        confirmLabel={t("common.delete")}
+        description={
+          deletingIsOverride
+            ? t("nfqws.restoreBuiltinDescription", { name: deleting })
+            : t("nfqws.deleteStrategyDescription", { name: deleting })
+        }
+        onConfirm={() => {
+          if (deleting) void run("delete_strategy", deleting)
+          setDeleting(null)
+        }}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        open={deleting !== null}
+        title={
+          deletingIsOverride
+            ? t("nfqws.restoreBuiltin")
+            : t("nfqws.deleteStrategyTitle")
+        }
+      />
+    </div>
   )
 }
 
@@ -1372,117 +1674,363 @@ function FilesEditor({
   const content = drafts[currentKey]?.content ?? fileQuery.data?.content ?? ""
   const editableCategory = category === "list" || category === "lua"
   const draftCount = Object.keys(drafts).length
-  const create = async () => {
-    const stem = window.prompt(t("nfqws.fileName"))
-    if (!stem) return
+  const [creating, setCreating] = useState(false)
+  const [deleting, setDeleting] = useState<NfqwsFile | null>(null)
+  const [clearing, setClearing] = useState<NfqwsFile | null>(null)
+  const create = async (stem: string) => {
     const extension = category === "lua" ? ".lua" : ".list"
     const name = stem.endsWith(extension) ? stem : stem + extension
     await nfqwsAction({ action: "create_file", category, name, content: "" })
     setSelected(name)
     refresh()
   }
-  const remove = async () => {
-    if (!current || !window.confirm(t("nfqws.confirmDelete"))) return
-    await nfqwsAction({ action: "delete_file", category, name: current.name })
-    if (editableCategory) onDraftRemove(category, current.name)
+  const remove = async (file: NfqwsFile) => {
+    await nfqwsAction({ action: "delete_file", category, name: file.name })
+    if (editableCategory) onDraftRemove(category, file.name)
     setSelected("")
     refresh()
   }
-  const clearLog = async () => {
-    if (!current || !window.confirm(t("nfqws.confirmClearLog"))) return
-    await nfqwsAction({ action: "clear_log", name: current.name })
+  const clearLog = async (file: NfqwsFile) => {
+    await nfqwsAction({ action: "clear_log", name: file.name })
     await queryClient.invalidateQueries({ queryKey: ["nfqws", "file"] })
     toast.success(t("nfqws.logCleared"))
     refresh()
   }
+  const tabKey =
+    category === "list" ? "lists" : category === "lua" ? "lua" : "logs"
+
   return (
-    <NfqwsSection
-      title={t(
-        `nfqws.tabs.${category === "list" ? "lists" : category === "lua" ? "lua" : "logs"}`
-      )}
-    >
-      <div className="space-y-4">
-        <div className="flex flex-wrap gap-2">
-          <Select
-            items={available.map((file) => ({
-              value: file.name,
-              label: file.name,
-            }))}
-            onValueChange={(value) =>
-              setSelected(String(value ?? current?.name ?? ""))
-            }
-            value={current?.name ?? ""}
-          >
-            <SelectTrigger className="w-auto min-w-60">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {available.map((file) => (
-                  <SelectItem key={file.name} value={file.name}>
-                    {file.name}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          {!readonly ? (
-            <>
-              <Button onClick={() => void create()} variant="outline">
+    <div className="space-y-3">
+      <SectionHeading
+        description={t(`nfqws.fileSections.${tabKey}`)}
+        title={t(`nfqws.tabs.${tabKey}`)}
+      />
+      {!readonly ? (
+        <PageActionBar
+          primary={
+            <Button onClick={() => setCreating(true)}>
+              <FilePlusIcon />
+              {t("nfqws.newFile")}
+            </Button>
+          }
+        />
+      ) : null}
+
+      {/* Файлы списком, а не выпадающим меню: имя файла ничего не говорит о
+          том, что внутри и когда его правили в последний раз, а из свёрнутого
+          меню не видно даже сколько их. */}
+      {available.length === 0 ? (
+        <ListPlaceholder
+          action={
+            readonly ? undefined : (
+              <Button onClick={() => setCreating(true)}>
                 <FilePlusIcon />
                 {t("nfqws.newFile")}
               </Button>
-              {current?.removable ? (
-                <Button onClick={() => void remove()} variant="destructive">
-                  <TrashIcon />
-                  {t("common.delete")}
+            )
+          }
+          description={t(`nfqws.fileEmpty.${tabKey}`)}
+          title={t("nfqws.fileEmptyTitle")}
+        />
+      ) : (
+        <DataTable
+          columnClassNames={[
+            "w-full [&:where(td)]:max-w-0",
+            "min-w-[8rem]",
+            undefined,
+          ]}
+          headers={[
+            t("nfqws.fileHeaders.name"),
+            t("nfqws.fileHeaders.size"),
+            t("nfqws.fileHeaders.actions"),
+          ]}
+          narrowColumns={[1]}
+          rows={available.map((file) => {
+            const isEditing = file.name === current?.name
+            const hasDraft = Object.hasOwn(
+              drafts,
+              `${file.category}/${file.name}`
+            )
+
+            return [
+              <button
+                className={cn(
+                  "flex w-full min-w-0 cursor-pointer items-center gap-2 text-left font-mono",
+                  isEditing && "font-bold"
+                )}
+                key="name"
+                onClick={() => setSelected(file.name)}
+                type="button"
+              >
+                <span className="truncate">{file.name}</span>
+                {hasDraft ? (
+                  <Badge size="xs" variant="warning">
+                    {t("nfqws.fileDraftBadge")}
+                  </Badge>
+                ) : null}
+              </button>,
+              <span
+                className="text-xs text-muted-foreground tabular-nums"
+                key="size"
+              >
+                {formatFileSize(file.size)}
+              </span>,
+              <span className="flex items-center justify-end gap-1" key="acts">
+                <Button
+                  aria-label={t("nfqws.openFile")}
+                  className="size-8"
+                  onClick={() => setSelected(file.name)}
+                  size="icon"
+                  title={t("nfqws.openFile")}
+                  variant="ghost"
+                >
+                  <PencilIcon className="size-4" />
                 </Button>
+                {category === "log" ? (
+                  <Button
+                    aria-label={t("nfqws.clearLog")}
+                    className="size-8"
+                    onClick={() => setClearing(file)}
+                    size="icon"
+                    title={t("nfqws.clearLog")}
+                    variant="ghost"
+                  >
+                    <EraserIcon className="size-4" />
+                  </Button>
+                ) : null}
+                <Button
+                  aria-label={t("common.delete")}
+                  className="size-8 text-destructive hover:text-destructive"
+                  disabled={!file.removable}
+                  onClick={() => setDeleting(file)}
+                  size="icon"
+                  title={
+                    file.removable
+                      ? t("common.delete")
+                      : t("nfqws.fileNotRemovable")
+                  }
+                  variant="ghost"
+                >
+                  <TrashIcon className="size-4" />
+                </Button>
+              </span>,
+            ]
+          })}
+        />
+      )}
+
+      {current ? (
+        <div className="space-y-3">
+          <SectionHeading
+            size="compact"
+            title={t("nfqws.fileEditorTitle", { name: current.name })}
+          />
+          {fileQuery.isLoading ? (
+            <Skeleton className="h-[40vh] max-h-[36rem] min-h-[16rem] w-full" />
+          ) : (
+            <CodeEditor
+              className="h-[50vh] max-h-[40rem] min-h-[18rem]"
+              onChange={(next) => {
+                if (category === "list" || category === "lua")
+                  onDraftChange({ category, name: current.name, content: next })
+              }}
+              readOnly={readonly}
+              syntax={readonly ? "log" : "nfqws"}
+              value={content}
+            />
+          )}
+          {!readonly ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {draftCount > 0 ? (
+                <span className="mr-auto text-sm text-muted-foreground">
+                  {t("nfqws.draftCount", { count: draftCount })}
+                </span>
               ) : null}
-            </>
-          ) : null}
-          {category === "log" ? (
-            <Button onClick={() => void clearLog()} variant="outline">
-              <TrashIcon />
-              {t("nfqws.clearLog")}
-            </Button>
+              <Button
+                disabled={draftCount === 0}
+                onClick={() => void onSaveDrafts(false)}
+                variant="outline"
+              >
+                <SaveIcon />
+                {t("nfqws.saveDrafts")}
+              </Button>
+              <Button
+                disabled={draftCount === 0}
+                onClick={() => void onSaveDrafts(true)}
+              >
+                <RefreshCwIcon />
+                {t("nfqws.saveAndRestart")}
+              </Button>
+            </div>
           ) : null}
         </div>
-        <CodeEditor
-          className="h-[60vh] max-h-[40rem] min-h-[20rem]"
-          onChange={(next) => {
-            if (current && (category === "list" || category === "lua"))
-              onDraftChange({ category, name: current.name, content: next })
-          }}
-          readOnly={readonly}
-          syntax={readonly ? "log" : "nfqws"}
-          value={content}
-        />
-        {!readonly ? (
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {draftCount > 0 ? (
-              <span className="mr-auto text-sm text-muted-foreground">
-                {t("nfqws.draftCount", { count: draftCount })}
-              </span>
-            ) : null}
-            <Button
-              disabled={draftCount === 0}
-              onClick={() => void onSaveDrafts(false)}
-              variant="outline"
-            >
-              <SaveIcon />
-              {t("nfqws.saveDrafts")}
-            </Button>
-            <Button
-              disabled={draftCount === 0}
-              onClick={() => void onSaveDrafts(true)}
-            >
-              <RefreshCwIcon />
-              {t("nfqws.saveAndRestart")}
-            </Button>
-          </div>
-        ) : null}
-      </div>
-    </NfqwsSection>
+      ) : null}
+
+      <NfqwsNameDialog
+        confirmLabel={t("nfqws.newFile")}
+        description={t(`nfqws.fileNameDescription.${tabKey}`)}
+        label={t("nfqws.fileName")}
+        onOpenChange={setCreating}
+        onSubmit={(name) => void create(name)}
+        open={creating}
+        placeholder={category === "lua" ? "my-script.lua" : "my-list.list"}
+        title={t("nfqws.newFile")}
+      />
+      <NfqwsConfirmDialog
+        confirmLabel={t("common.delete")}
+        description={t("nfqws.deleteFileDescription", {
+          name: deleting?.name ?? "",
+        })}
+        onConfirm={() => {
+          if (deleting) void remove(deleting)
+          setDeleting(null)
+        }}
+        onOpenChange={(open) => !open && setDeleting(null)}
+        open={deleting !== null}
+        title={t("nfqws.deleteFileTitle")}
+      />
+      <NfqwsConfirmDialog
+        confirmLabel={t("nfqws.clearLog")}
+        description={t("nfqws.clearLogDescription", {
+          name: clearing?.name ?? "",
+        })}
+        onConfirm={() => {
+          if (clearing) void clearLog(clearing)
+          setClearing(null)
+        }}
+        onOpenChange={(open) => !open && setClearing(null)}
+        open={clearing !== null}
+        title={t("nfqws.clearLog")}
+      />
+    </div>
+  )
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—"
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Имя новой стратегии или файла — вместо window.prompt, который выглядит как
+ *  системное окно браузера и не умеет ни подсказки, ни примера. */
+function NfqwsNameDialog({
+  confirmLabel,
+  description,
+  label,
+  onOpenChange,
+  onSubmit,
+  open,
+  placeholder,
+  title,
+}: {
+  confirmLabel: string
+  description?: string
+  label: string
+  onOpenChange: (open: boolean) => void
+  onSubmit: (name: string) => void
+  open: boolean
+  placeholder?: string
+  title: string
+}) {
+  const { t } = useTranslation()
+  const [name, setName] = useState("")
+  // Чистим поле при закрытии, а не при открытии: через onOpenChange проходят и
+  // Esc, и клик мимо окна, и «Отмена», так что в следующий раз окно открывается
+  // пустым без эффекта, гоняющего лишний рендер.
+  const changeOpen = (next: boolean) => {
+    if (!next) setName("")
+    onOpenChange(next)
+  }
+
+  const submit = () => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    onSubmit(trimmed)
+    changeOpen(false)
+  }
+
+  return (
+    <Dialog onOpenChange={changeOpen} open={open}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          {description ? (
+            <DialogDescription>{description}</DialogDescription>
+          ) : null}
+        </DialogHeader>
+        <div className="grid gap-1.5">
+          <Label htmlFor="nfqws-name-dialog">{label}</Label>
+          <Input
+            autoFocus
+            id="nfqws-name-dialog"
+            onChange={(event) => setName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault()
+                submit()
+              }
+            }}
+            placeholder={placeholder}
+            value={name}
+          />
+        </div>
+        <DialogFooter>
+          <Button onClick={() => changeOpen(false)} variant="outline">
+            {t("common.cancel")}
+          </Button>
+          <Button disabled={!name.trim()} onClick={submit}>
+            {confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Подтверждение удаления — вместо window.confirm: тот показывает адрес
+ *  роутера вместо названия панели и не говорит, что именно будет удалено. */
+function NfqwsConfirmDialog({
+  confirmLabel,
+  description,
+  destructive = true,
+  onConfirm,
+  onOpenChange,
+  open,
+  title,
+}: {
+  confirmLabel: string
+  description: string
+  /** Красная кнопка — только там, где действие правда необратимо. */
+  destructive?: boolean
+  onConfirm: () => void
+  onOpenChange: (open: boolean) => void
+  open: boolean
+  title: string
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button onClick={() => onOpenChange(false)} variant="outline">
+            {t("common.cancel")}
+          </Button>
+          <Button
+            onClick={onConfirm}
+            variant={destructive ? "destructive" : "default"}
+          >
+            {confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1503,8 +2051,12 @@ function UrlCheck() {
       title={t("nfqws.checkTitle")}
     >
       <div className="space-y-4">
-        <div className="flex gap-2">
-          <Input onChange={(event) => setUrl(event.target.value)} value={url} />
+        <div className="flex items-center gap-2">
+          <Input
+            onChange={(event) => setUrl(event.target.value)}
+            size="sm"
+            value={url}
+          />
           <Button onClick={() => void check()}>{t("nfqws.check")}</Button>
         </div>
         {result !== null ? (
@@ -1543,18 +2095,13 @@ function NfqwsSection({
 }) {
   return (
     <section className={cn("space-y-4 py-2", className)}>
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="text-[20px] leading-7 font-bold text-foreground">
-            {title}
-          </h2>
-          {description ? (
-            <div className="mt-1 text-sm leading-[22px] text-muted-foreground">
-              {description}
-            </div>
-          ) : null}
-        </div>
-        {action ? <div className="shrink-0">{action}</div> : null}
+      {/* На телефоне заголовок и плашки состояния идут друг под другом. Пока
+          они стояли в один ряд, плашки были `shrink-0` и забирали почти всю
+          ширину — заголовку оставалось столько, что «Служба nfqws2» и
+          «Установленная версия: 1.2.4» ломались посреди слова. */}
+      <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
+        <SectionHeading description={description} title={title} />
+        {action ? <div className="sm:shrink-0">{action}</div> : null}
       </div>
       {children}
     </section>
@@ -1566,12 +2113,16 @@ function NfqwsSection({
 const ARGS_COLLAPSE_THRESHOLD = 240
 
 function ArgsField({
+  hint,
   label,
   value,
+  variable,
   onChange,
 }: {
+  hint?: string
   label: string
   value: string
+  variable?: string
   onChange: (next: string) => void
 }) {
   const { t } = useTranslation()
@@ -1586,11 +2137,19 @@ function ArgsField({
   return (
     <div className="grid gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <Label>{label}</Label>
+        <Label className="flex flex-wrap items-baseline gap-2">
+          {label}
+          {variable ? (
+            <span className="font-mono text-[11px] font-normal text-muted-foreground">
+              {variable}
+            </span>
+          ) : null}
+        </Label>
         {collapsible ? (
           <>
+            {/* Кнопки в размер остальных кнопок панели: здесь стояли 28px —
+                единственные во всём интерфейсе. */}
             <Button
-              className="h-7 px-2 text-xs"
               onClick={() => setExpanded((current) => !current)}
               size="sm"
               type="button"
@@ -1605,7 +2164,6 @@ function ArgsField({
               />
             </Button>
             <Button
-              className="h-7 px-2 text-xs"
               onClick={() => {
                 void copyText(value).then((ok) => {
                   setCopied(ok)
@@ -1629,17 +2187,19 @@ function ArgsField({
           value={value}
         />
       ) : (
-        <button
-          className="rounded-[4px] border border-input bg-muted px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+        <Button
+          className="h-auto w-full justify-start px-3 py-2 text-left text-xs font-normal whitespace-normal text-muted-foreground"
           onClick={() => setExpanded(true)}
           type="button"
+          variant="outline"
         >
           {t("nfqws.argsSummary", {
             count: argumentCount,
             chars: value.length,
           })}
-        </button>
+        </Button>
       )}
+      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
     </div>
   )
 }

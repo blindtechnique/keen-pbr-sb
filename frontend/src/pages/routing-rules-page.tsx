@@ -1,4 +1,4 @@
-import { Pencil, Plus, Save, Trash2 } from "lucide-react"
+import { Pencil, Plus, Save, SparklesIcon, Trash2 } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
@@ -47,7 +47,9 @@ import {
   setRouteRuleEnabled,
 } from "@/pages/routing-rules-utils"
 
-export function RoutingRulesPage() {
+export function RoutingRulesPage({
+  embedded = false,
+}: { embedded?: boolean } = {}) {
   const configQuery = useGetConfig()
   const loadedConfig = selectConfig(configQuery.data)
   const baselineRules = loadedConfig?.route?.rules ?? []
@@ -61,6 +63,7 @@ export function RoutingRulesPage() {
     <RoutingRulesEditor
       configError={configQuery.isError}
       configLoading={configQuery.isLoading}
+      embedded={embedded}
       key={editorKey}
       loadedConfig={loadedConfig}
     />
@@ -71,10 +74,12 @@ function RoutingRulesEditor({
   loadedConfig,
   configLoading,
   configError,
+  embedded,
 }: {
   loadedConfig?: ConfigObject
   configLoading: boolean
   configError: boolean
+  embedded: boolean
 }) {
   const { t } = useTranslation()
   const [, navigate] = useLocation()
@@ -251,10 +256,12 @@ function RoutingRulesEditor({
 
   return (
     <div className="space-y-3">
-      <PageHeader
-        description={t("pages.routingRules.description")}
-        title={t("pages.routingRules.title")}
-      />
+      {embedded ? null : (
+        <PageHeader
+          description={t("pages.routingRules.description")}
+          title={t("pages.routingRules.title")}
+        />
+      )}
       <PageActionBar
         primary={
           <Button
@@ -320,6 +327,12 @@ function RoutingRulesEditor({
         />
       ) : allRows.length === 0 ? (
         <ListPlaceholder
+          action={
+            <Button onClick={() => navigate("/catalog")} variant="outline">
+              <SparklesIcon className="mr-1 h-4 w-4" />
+              {t("common.setupFromCatalog")}
+            </Button>
+          }
           description={t("pages.routingRules.empty.description")}
           title={t("pages.routingRules.empty.title")}
         />
@@ -477,7 +490,7 @@ function RoutingRulesEditor({
               ]}
               fixedLayout
               headers={[
-                "",
+                t("pages.routingRules.headers.enabled"),
                 t("pages.routingRules.headers.orderShort"),
                 t("pages.routingRules.headers.name"),
                 t("pages.routingRules.headers.criteria"),

@@ -1,4 +1,5 @@
 import * as React from "react"
+import { useTranslation } from "react-i18next"
 import { mergeProps } from "@base-ui/react/merge-props"
 import { useRender } from "@base-ui/react/use-render"
 import { cva, type VariantProps } from "class-variance-authority"
@@ -136,7 +137,10 @@ function SidebarProvider({
           } as React.CSSProperties
         }
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+          // dvh, не svh: внутренняя оболочка тоже dvh, и при svh обёртка
+          // оказывалась ниже неё — оставались десятки пикселей, которые
+          // документ мог прокрутить, унося шапку.
+          "group/sidebar-wrapper flex min-h-dvh w-full has-data-[variant=inset]:bg-sidebar",
           className
         )}
         {...props}
@@ -161,6 +165,7 @@ function Sidebar({
   collapsible?: "offcanvas" | "icon" | "none"
 }) {
   const { isMobile, state, openMobile } = useSidebar()
+  const { t } = useTranslation()
 
   if (collapsible === "none") {
     return (
@@ -182,7 +187,7 @@ function Sidebar({
 
     return (
       <div
-        aria-label="Sidebar"
+        aria-label={t("common.chrome.sidebar")}
         className={cn(
           "keen-mobile-sidebar w-(--sidebar-width) gap-0 bg-sidebar p-0 text-sidebar-foreground",
           className
@@ -263,13 +268,14 @@ function SidebarTrigger({
   "children" | "label"
 >) {
   const { toggleSidebar } = useSidebar()
+  const { t } = useTranslation()
 
   return (
     <IconButtonWithTooltip
       data-sidebar="trigger"
       data-slot="sidebar-trigger"
       className={cn(className)}
-      label="Toggle sidebar"
+      label={t("common.chrome.toggleSidebar")}
       onClick={(event) => {
         onClick?.(event)
         toggleSidebar()
@@ -285,15 +291,16 @@ function SidebarTrigger({
 
 function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
   const { toggleSidebar } = useSidebar()
+  const { t } = useTranslation()
 
   return (
     <button
       data-sidebar="rail"
       data-slot="sidebar-rail"
-      aria-label="Toggle Sidebar"
+      aria-label={t("common.chrome.toggleSidebar")}
       tabIndex={-1}
       onClick={toggleSidebar}
-      title="Toggle Sidebar"
+      title={t("common.chrome.toggleSidebar")}
       className={cn(
         "absolute inset-y-0 z-20 hidden w-4 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:start-1/2 after:w-[2px] hover:after:bg-sidebar-border sm:flex ltr:-translate-x-1/2 rtl:-translate-x-1/2",
         "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",

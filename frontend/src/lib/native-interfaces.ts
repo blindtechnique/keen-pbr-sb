@@ -234,3 +234,33 @@ function nonEmpty(value: string | null | undefined): string | undefined {
   const normalized = value?.trim()
   return normalized ? normalized : undefined
 }
+
+/**
+ * Интерфейсы, на которые имеет смысл направлять трафик.
+ *
+ * В выборе интерфейса для маршрута прошивка показывала всё подряд, включая
+ * свои входящие VPN-серверы: направить исходящий трафик в интерфейс, который
+ * принимает чужие подключения, нельзя — маршрут молча не заработает.
+ *
+ * Отсекаем ровно то, про что прошивка сама сказала «это сервер». Всё
+ * остальное остаётся: свои туннели sing-box в инвентаре прошивки не значатся
+ * вовсе, и фильтр по принципу «показывать только знакомое» убрал бы как раз
+ * их. Если инвентарь недоступен, не убираем ничего — пустой список хуже
+ * лишних строк.
+ */
+export function excludeIngressServerInterfaces<T extends { name: string }>(
+  interfaces: T[],
+  ndmsInterfaces: readonly {
+    kernel_name?: string | null
+    role?: string
+  }[]
+): T[] {
+  const ingress = new Set(
+    ndmsInterfaces
+      .filter((item) => item.role === "server")
+      .map((item) => item.kernel_name?.trim())
+      .filter((name): name is string => Boolean(name))
+  )
+  if (ingress.size === 0) return interfaces
+  return interfaces.filter((item) => !ingress.has(item.name))
+}

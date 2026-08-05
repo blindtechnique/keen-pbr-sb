@@ -1,10 +1,11 @@
 import { Suspense, lazy } from "react"
+import { useTranslation } from "react-i18next"
 import { Redirect, Route, Switch, useSearch } from "wouter"
 
 import { AppShell } from "@/components/layout/app-shell"
 import { AuthGate } from "@/components/auth-gate"
 import { ScrollToTopOnRouteChange } from "@/components/layout/scroll-route"
-import { Skeleton } from "@/components/ui/skeleton"
+import { KeenSpinner } from "@/components/shared/keen-spinner"
 import { OverviewPage } from "@/pages/overview-page"
 
 /**
@@ -28,8 +29,13 @@ const DnsRuleUpsertPage = lazy(() =>
     default: m.DnsRuleUpsertPage,
   }))
 )
-const DnsRulesPage = lazy(() =>
-  import("@/pages/dns-rules-page").then((m) => ({ default: m.DnsRulesPage }))
+const RulesPage = lazy(() =>
+  import("@/pages/rules-page").then((m) => ({ default: m.RulesPage }))
+)
+const RoutesAndTunnelsPage = lazy(() =>
+  import("@/pages/routes-and-tunnels-page").then((m) => ({
+    default: m.RoutesAndTunnelsPage,
+  }))
 )
 const DnsServerUpsertPage = lazy(() =>
   import("@/pages/dns-servers-upsert-page").then((m) => ({
@@ -68,21 +74,10 @@ const OutboundUpsertPage = lazy(() =>
     default: m.OutboundUpsertPage,
   }))
 )
-const OutboundsPage = lazy(() =>
-  import("@/pages/outbounds-page").then((m) => ({ default: m.OutboundsPage }))
-)
 const RoutingRuleUpsertPage = lazy(() =>
   import("@/pages/routing-rule-upsert-page").then((m) => ({
     default: m.RoutingRuleUpsertPage,
   }))
-)
-const RoutingRulesPage = lazy(() =>
-  import("@/pages/routing-rules-page").then((m) => ({
-    default: m.RoutingRulesPage,
-  }))
-)
-const TransportsPage = lazy(() =>
-  import("@/pages/transports-page").then((m) => ({ default: m.TransportsPage }))
 )
 const TransportUpsertPage = lazy(() =>
   import("@/pages/transport-upsert-page").then((m) => ({
@@ -90,13 +85,21 @@ const TransportUpsertPage = lazy(() =>
   }))
 )
 
-/** Shown while a page chunk arrives; on a LAN this is a single frame. */
+/**
+ * Пока приезжает код страницы.
+ *
+ * Здесь стоял скелетон из трёх серых полос. Он отвечает на вопрос «что тут
+ * будет», а при переходе между страницами вопрос другой — «оно грузится или
+ * зависло». Конфигуратор на этот вопрос отвечает вращающимся индикатором,
+ * и это правильный ответ: полосы, которые просто лежат, от зависшей страницы
+ * не отличить.
+ */
 function PageFallback() {
+  const { t } = useTranslation()
+
   return (
-    <div className="space-y-3">
-      <Skeleton className="h-9 w-64" />
-      <Skeleton className="h-5 w-full max-w-xl" />
-      <Skeleton className="h-64 w-full" />
+    <div className="flex min-h-[50vh] flex-1 items-center justify-center">
+      <KeenSpinner label={t("common.loading")} />
     </div>
   )
 }
@@ -175,7 +178,7 @@ function RoutingRuleEditorRoute({
 
   return (
     <>
-      <RoutingRulesPage />
+      <RulesPage />
       <RoutingRuleUpsertPage
         mode={mode}
         presentation="dialog"
@@ -200,7 +203,7 @@ function DnsRuleEditorRoute({
 
   return (
     <>
-      <DnsRulesPage />
+      <RulesPage initialTab="dns" />
       <DnsRuleUpsertPage mode={mode} presentation="dialog" ruleId={ruleId} />
     </>
   )
@@ -227,7 +230,7 @@ function OutboundEditorRoute({
 
   return (
     <>
-      <OutboundsPage />
+      <RoutesAndTunnelsPage initialTab="interfaces" />
       <OutboundUpsertPage
         mode={mode}
         outboundId={outboundId}
@@ -258,7 +261,7 @@ function TransportEditorRoute({
 
   return (
     <>
-      <TransportsPage />
+      <RoutesAndTunnelsPage />
       <TransportUpsertPage
         mode={mode}
         presentation="dialog"
@@ -300,7 +303,9 @@ function App() {
                 />
               )}
             </Route>
-            <Route component={OutboundsPage} path="/outbounds" />
+            <Route path="/outbounds">
+              <RoutesAndTunnelsPage initialTab="interfaces" />
+            </Route>
             <Route path="/transports/create">
               <TransportEditorRoute mode="create" />
             </Route>
@@ -312,7 +317,9 @@ function App() {
                 />
               )}
             </Route>
-            <Route component={TransportsPage} path="/transports" />
+            <Route path="/transports">
+              <RoutesAndTunnelsPage />
+            </Route>
             <Route component={ConnectionsPage} path="/connections" />
             <Route component={NfqwsPage} path="/nfqws" />
             <Route path="/dns-servers/create">
@@ -338,7 +345,9 @@ function App() {
                 />
               )}
             </Route>
-            <Route component={DnsRulesPage} path="/dns-rules" />
+            <Route path="/dns-rules">
+              <RulesPage initialTab="dns" />
+            </Route>
             <Route path="/routing-rules/create">
               <RoutingRuleEditorRoute mode="create" />
             </Route>
@@ -350,7 +359,12 @@ function App() {
                 />
               )}
             </Route>
-            <Route component={RoutingRulesPage} path="/routing-rules" />
+            <Route path="/routing-rules">
+              <RulesPage />
+            </Route>
+            <Route path="/rules">
+              <RulesPage />
+            </Route>
             <Route>
               <Redirect to="/" />
             </Route>

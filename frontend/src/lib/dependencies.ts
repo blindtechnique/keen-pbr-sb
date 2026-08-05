@@ -30,9 +30,22 @@ export type BrokenReference = {
   href: string
 }
 
+export type BrokenReferenceTranslationKey =
+  | "missingList"
+  | "listDetour"
+  | "listRefresh"
+
+export type BrokenReferenceTranslator = Readonly<
+  Record<
+    BrokenReferenceTranslationKey,
+    (values: Readonly<Record<string, string>>) => string
+  >
+>
+
 /** Finds references that can be left behind by a manual edit or import. */
 export function findBrokenReferences(
-  config: ConfigObject | undefined
+  config: ConfigObject | undefined,
+  translate: BrokenReferenceTranslator
 ): BrokenReference[] {
   if (!config) return []
   const found = new Map<string, BrokenReference>()
@@ -58,7 +71,10 @@ export function findBrokenReferences(
       if (!lists.has(list)) {
         add({
           id: `route:${index}:list:${list}`,
-          label: `${getRouteRuleDisplayName(rule, index)} → список ${getListReferenceLabel(list, config.lists)}`,
+          label: translate.missingList({
+            owner: getRouteRuleDisplayName(rule, index),
+            target: getListReferenceLabel(list, config.lists),
+          }),
           href: getRuleEditHref("routing-rules", rule, index),
         })
       }
@@ -76,7 +92,10 @@ export function findBrokenReferences(
       if (!lists.has(list)) {
         add({
           id: `dns:${index}:list:${list}`,
-          label: `${getDnsRuleDisplayName(rule, index)} → список ${getListReferenceLabel(list, config.lists)}`,
+          label: translate.missingList({
+            owner: getDnsRuleDisplayName(rule, index),
+            target: getListReferenceLabel(list, config.lists),
+          }),
           href: getRuleEditHref("dns-rules", rule, index),
         })
       }
@@ -101,9 +120,10 @@ export function findBrokenReferences(
     if (list.detour && !outbounds.has(list.detour)) {
       add({
         id: `list:${name}:detour:${list.detour}`,
-        label: `Список ${getListReferenceLabel(name, config.lists)} → ${
-          outboundDisplayNames.get(list.detour) ?? list.detour
-        }`,
+        label: translate.listDetour({
+          list: getListReferenceLabel(name, config.lists),
+          target: outboundDisplayNames.get(list.detour) ?? list.detour,
+        }),
         href: `/lists/${name}/edit`,
       })
     }
@@ -111,9 +131,10 @@ export function findBrokenReferences(
       if (outbounds.has(fallback)) continue
       add({
         id: `list:${name}:fallback:${index}:${fallback}`,
-        label: `Список ${getListReferenceLabel(name, config.lists)} → ${
-          outboundDisplayNames.get(fallback) ?? fallback
-        }`,
+        label: translate.listDetour({
+          list: getListReferenceLabel(name, config.lists),
+          target: outboundDisplayNames.get(fallback) ?? fallback,
+        }),
         href: `/lists/${name}/edit`,
       })
     }
@@ -122,10 +143,11 @@ export function findBrokenReferences(
   if (globalListRefresh?.detour && !outbounds.has(globalListRefresh.detour)) {
     add({
       id: `list-refresh:detour:${globalListRefresh.detour}`,
-      label: `Обновление URL-списков → ${
-        outboundDisplayNames.get(globalListRefresh.detour) ??
-        globalListRefresh.detour
-      }`,
+      label: translate.listRefresh({
+        target:
+          outboundDisplayNames.get(globalListRefresh.detour) ??
+          globalListRefresh.detour,
+      }),
       href: "/general?tab=general",
     })
   }
@@ -135,24 +157,59 @@ export function findBrokenReferences(
     if (outbounds.has(fallback)) continue
     add({
       id: `list-refresh:fallback:${index}:${fallback}`,
-      label: `Обновление URL-списков → ${
-        outboundDisplayNames.get(fallback) ?? fallback
-      }`,
+      label: translate.listRefresh({
+        target: outboundDisplayNames.get(fallback) ?? fallback,
+      }),
       href: "/general?tab=general",
     })
   }
   return [...found.values()]
 }
 
-/** Списки, которые перестанут куда-либо направляться вместе с соединением. */
-export function listsRoutedThrough(
-  config: ConfigObject | undefined,
-  tag: string
-): string[] {
-  const names = new Set<string>()
-  for (const rule of config?.route?.rules ?? []) {
-    if (rule.outbound !== tag) continue
-    for (const name of rule.list ?? []) names.add(name)
+/** Сколько видов связей показывать до того, как список начнёт складываться. */
+export const VISIBLE_DEPENDENCY_KINDS = 3
+
+/**
+ * Сколько связей одного вида помещается в строку.
+ *
+ * Ограничения по видам мало: «Списки:» с одиннадцатью именами — формально одна
+ * строка, а на экране пять.
+ */
+export const VISIBLE_DEPENDENCIES_PER_KIND = 3
+
+export type DependencyRow = {
+  kind: string
+  items: Dependency[]
+}
+
+/**
+ * Свёрнутый вид «Где используется»: строка на вид связи, не больше трёх строк
+ * и не больше трёх имён в строке. Остальное прячется за «Ещё N».
+ *
+ * Считается именно N связей, а не N видов: «Ещё 11» — это одиннадцать списков,
+ * которые сломаются, а «Ещё 2» звучит как две мелочи.
+ */
+export function planDependencyRows(
+  dependencies: Dependency[],
+  expanded: boolean
+): { rows: DependencyRow[]; hiddenCount: number } {
+  const byKind = new Map<string, Dependency[]>()
+  for (const dependency of dependencies) {
+    byKind.set(dependency.kind, [
+      ...(byKind.get(dependency.kind) ?? []),
+      dependency,
+    ])
   }
-  return [...names]
+
+  const kinds = [...byKind.entries()]
+  const visibleKinds = expanded
+    ? kinds
+    : kinds.slice(0, VISIBLE_DEPENDENCY_KINDS)
+  const rows = visibleKinds.map(([kind, items]) => ({
+    kind,
+    items: expanded ? items : items.slice(0, VISIBLE_DEPENDENCIES_PER_KIND),
+  }))
+  const shown = rows.reduce((total, row) => total + row.items.length, 0)
+
+  return { rows, hiddenCount: dependencies.length - shown }
 }

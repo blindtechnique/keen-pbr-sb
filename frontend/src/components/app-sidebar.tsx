@@ -38,12 +38,11 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
         icon: WaypointsIcon,
         items: [
           {
-            title: t("nav.items.outbounds"),
-            url: "/outbounds",
-          },
-          {
-            title: t("nav.items.transports"),
+            title: t("nav.items.routesAndTunnels"),
             url: "/transports",
+            // Редакторы остались по прежним адресам, и без этого пункт меню
+            // гас, как только человек открывал маршрут или туннель.
+            aliases: ["/outbounds"],
           },
           {
             title: "nfqws2",
@@ -73,12 +72,9 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
             url: "/lists",
           },
           {
-            title: t("nav.items.routingRules"),
-            url: "/routing-rules",
-          },
-          {
-            title: t("nav.items.dnsRules"),
-            url: "/dns-rules",
+            title: t("nav.items.rules"),
+            url: "/rules",
+            aliases: ["/routing-rules", "/dns-rules"],
           },
         ],
       },

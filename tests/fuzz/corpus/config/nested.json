@@ -1,0 +1,1 @@
+{"outbounds": [{"tag": "g", "type": "urltest", "outbound_groups": [{"outbounds": ["wan"]}]}, {"tag": "wan", "type": "interface", "interface": "eth3"}], "lists": {}}

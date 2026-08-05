@@ -30,7 +30,7 @@ export function PageHeader({
         {/* Ритм страницы KeeneticOS, снятый с живого конфигуратора: блок
             заголовка, 8px, описание, 24px, вкладки. Здесь `mb-3` плюс `space-y-3`
             страницы и дают эти 24px. */}
-        <p className="mt-2 mb-3 max-w-[110ch] text-[14px] leading-[22px] text-pretty text-foreground">
+        <p className="mt-2 mb-3 max-w-[110ch] text-[14px] leading-[24px] text-pretty text-foreground">
           {description}
         </p>
       </div>

@@ -98,7 +98,7 @@ namespace api {
     struct CacheGeneration {
         std::string filename;
         std::string sha256;
-        int64_t size;
+        int64_t size = 0;
     };
 
     struct CacheMetadata {
@@ -139,7 +139,7 @@ namespace api {
     };
 
     struct CatalogSetupApplyRequest {
-        bool accept_warnings;
+        bool accept_warnings = false;
         std::string base_revision;
         std::string candidate_revision;
         Intent intent;
@@ -147,44 +147,44 @@ namespace api {
     };
 
     struct CatalogSetupApplyResponse {
-        bool applied;
+        bool applied = false;
         std::optional<int64_t> apply_started_ts;
         std::string config_revision;
         std::string message;
-        bool rolled_back;
-        bool saved;
+        bool rolled_back = false;
+        bool saved = false;
         std::string status;
     };
 
     struct CatalogSetupBlackholeSummary {
-        bool created;
+        bool created = false;
         std::string tag;
     };
 
     struct CatalogSetupDnsRuleSummary {
         std::string display_name;
-        int64_t insertion_index;
+        int64_t insertion_index = 0;
         std::string server;
         std::string technical_id;
     };
 
     struct CatalogSetupDnsServerSummary {
         std::string address;
-        bool created;
+        bool created = false;
         std::string detour;
         std::string display_name;
         std::string technical_id;
     };
 
     struct CatalogSetupListSummary {
-        bool already_installed;
+        bool already_installed = false;
         std::string display_name;
-        bool has_inline_cidrs;
-        bool has_inline_domains;
+        bool has_inline_cidrs = false;
+        bool has_inline_domains = false;
         std::string preset_id;
         std::optional<std::string> source_detour;
         std::string technical_id;
-        bool url_backed;
+        bool url_backed = false;
     };
 
     struct CatalogSetupPreviewRequest {
@@ -192,9 +192,9 @@ namespace api {
     };
 
     struct RouteRule {
-        bool blocking;
+        bool blocking = false;
         std::string display_name;
-        int64_t insertion_index;
+        int64_t insertion_index = 0;
         std::string outbound;
         std::string technical_id;
     };
@@ -222,7 +222,7 @@ namespace api {
         std::string base_revision;
         std::string candidate_revision;
         std::string preview_token;
-        bool requires_warning_acceptance;
+        bool requires_warning_acceptance = false;
         CatalogSetupSummaryClass summary;
         std::vector<CatalogSetupWarningElement> warnings;
     };
@@ -367,11 +367,11 @@ namespace api {
     struct InternalVpnServerElement {
         std::string interface;
         std::optional<std::string> ndms_id;
-        bool process_clients;
+        bool process_clients = false;
     };
 
     struct InternalVpnServiceElement {
-        bool process_clients;
+        bool process_clients = false;
         std::string service_id;
     };
 
@@ -430,7 +430,7 @@ namespace api {
 
     struct ConfigStateResponse {
         ConfigObject config;
-        bool is_draft;
+        bool is_draft = false;
         std::optional<std::map<std::string, ListRefreshStateValue>> list_refresh_state;
         std::string revision;
     };
@@ -444,33 +444,33 @@ namespace api {
     };
 
     struct ConnectionEventState {
-        bool available;
-        int64_t changed_at;
-        int64_t revision;
+        bool available = false;
+        int64_t changed_at = 0;
+        int64_t revision = 0;
     };
 
     struct ConnectionRecord {
-        bool active;
+        bool active = false;
         std::string destination;
         std::vector<std::string> destination_domains;
-        int64_t destination_port;
+        int64_t destination_port = 0;
         std::string device;
-        int64_t first_seen;
+        int64_t first_seen = 0;
         std::string id;
-        int64_t last_seen;
-        int64_t mark;
+        int64_t last_seen = 0;
+        int64_t mark = 0;
         std::string protocol;
         std::string route;
         std::string source;
-        int64_t source_port;
+        int64_t source_port = 0;
         std::string state;
     };
 
     struct ConnectionPage {
         std::vector<ConnectionRecord> items;
         std::optional<std::string> next_cursor;
-        int64_t snapshot_at;
-        int64_t total;
+        int64_t snapshot_at = 0;
+        int64_t total = 0;
     };
 
     enum class SortOrder : int { ASC, DESC };
@@ -508,7 +508,7 @@ namespace api {
     enum class DependencyRelation : int { CONTAINS_MEMBER, DETOURS_VIA, FALLBACK_TO, ROUTES_TO, USES_DNS_SERVER, USES_LIST };
 
     struct DependencyTarget {
-        bool cascaded;
+        bool cascaded = false;
         std::string id;
         DependencyEntityKind kind;
     };
@@ -525,7 +525,7 @@ namespace api {
 
     struct DependencyAnalysisResponse {
         std::vector<DependencyReference> references;
-        bool safe_to_delete;
+        bool safe_to_delete = false;
         std::vector<DependencyTarget> targets;
     };
 
@@ -540,9 +540,9 @@ namespace api {
     };
 
     struct FirewallChain {
-        bool chain_present;
+        bool chain_present = false;
         std::optional<std::string> detail;
-        bool prerouting_hook_present;
+        bool prerouting_hook_present = false;
     };
 
     struct FirewallRuleCheck {
@@ -572,7 +572,7 @@ namespace api {
         std::optional<int64_t> finished_at;
         std::string id;
         std::vector<LifecycleOperationStageElement> stages;
-        int64_t started_at;
+        int64_t started_at = 0;
         LifecycleOperationStatus status;
         LifecycleOperationType type;
     };
@@ -591,7 +591,7 @@ namespace api {
         std::optional<int64_t> apply_started_ts;
         std::string build;
         std::string build_variant;
-        bool config_is_draft;
+        bool config_is_draft = false;
         std::optional<LifecycleOperation> lifecycle_operation;
         std::string os_type;
         std::string os_version;
@@ -620,16 +620,16 @@ namespace api {
 
     struct ListDeleteStageSummaryClass {
         std::vector<std::string> deleted_lists;
-        int64_t rebound_references;
-        int64_t removed_dns_rules;
-        int64_t removed_route_rules;
-        int64_t updated_dns_rules;
-        int64_t updated_route_rules;
+        int64_t rebound_references = 0;
+        int64_t removed_dns_rules = 0;
+        int64_t removed_route_rules = 0;
+        int64_t updated_dns_rules = 0;
+        int64_t updated_route_rules = 0;
     };
 
     struct ListDeleteStageResponse {
         std::string message;
-        bool staged;
+        bool staged = false;
         ListDeleteStageSummaryClass summary;
     };
 
@@ -642,17 +642,17 @@ namespace api {
         std::vector<std::string> failed_lists;
         std::string message;
         std::vector<std::string> refreshed_lists;
-        bool reloaded;
+        bool reloaded = false;
         ConfigUpdateResponseStatus status;
     };
 
     enum class NdmsCatalogStatus : int { FRESH, STALE, UNAVAILABLE };
 
     struct NdmsInterfaceCapabilities {
-        bool backup_required;
-        bool can_delete;
-        bool can_edit;
-        bool can_hide;
+        bool backup_required = false;
+        bool can_delete = false;
+        bool can_edit = false;
+        bool can_hide = false;
     };
 
     enum class Kind : int { AMNEZIA_WIREGUARD, HTTPS_PROXY, HTTP_PROXY, IKE, L2_TP, OPENCONNECT, OPENVPN, SOCKS5_PROXY, SSTP, WIREGUARD };
@@ -661,9 +661,9 @@ namespace api {
 
     struct NdmsInterfaceManagementReadiness {
         std::vector<NdmsManagementBlockerElement> blockers;
-        bool candidate;
-        bool configuration_snapshot_available;
-        bool identity_stable;
+        bool candidate = false;
+        bool configuration_snapshot_available = false;
+        bool identity_stable = false;
         std::string observed_revision;
     };
 
@@ -677,8 +677,8 @@ namespace api {
         std::string firmware_interface_name;
         std::string firmware_type;
         std::string id;
-        bool internal_vpn_server_candidate;
-        bool internal_vpn_server_role_confirmation_required;
+        bool internal_vpn_server_candidate = false;
+        bool internal_vpn_server_role_confirmation_required = false;
         std::optional<std::string> kernel_name;
         Kind kind;
         std::string label;
@@ -693,11 +693,11 @@ namespace api {
     enum class RequiredGuard : int { AUTOMATIC_BACKUP, OPTIMISTIC_REVISION, OWNERSHIP_CHECK, TYPED_RCI };
 
     struct NdmsInterfaceInventoryResponse {
-        bool available;
+        bool available = false;
         NdmsCatalogStatus catalog_status;
         std::vector<NdmsTunnelInterfaceElement> interfaces;
         MutationMode mutation_mode;
-        bool read_only;
+        bool read_only = false;
         std::vector<RequiredGuard> required_guards;
     };
 
@@ -705,7 +705,7 @@ namespace api {
 
     struct NdmsVpnServerService {
         std::optional<std::string> bound_interface_id;
-        bool enabled;
+        bool enabled = false;
         std::string id;
         std::string inventory_revision;
         NdmsVpnServerKind kind;
@@ -714,18 +714,18 @@ namespace api {
     };
 
     struct NdmsVpnServerServiceInventoryResponse {
-        bool available;
+        bool available = false;
         NdmsCatalogStatus catalog_status;
-        bool read_only;
+        bool read_only = false;
         std::vector<NdmsVpnServerService> services;
     };
 
     enum class LastOutcome : int { ABANDONED, FAILURE, NOOP, SKIPPED, SUCCESS };
 
     struct PeriodicTaskMetricsEntry {
-        int64_t abandoned;
-        int64_t failure;
-        int64_t in_flight;
+        int64_t abandoned = 0;
+        int64_t failure = 0;
+        int64_t in_flight = 0;
         std::string label;
         std::optional<int64_t> last_duration_ms;
         std::optional<std::string> last_error;
@@ -733,28 +733,28 @@ namespace api {
         std::optional<int64_t> last_finished_at_unix_ms;
         std::optional<LastOutcome> last_outcome;
         std::optional<int64_t> last_started_at_unix_ms;
-        int64_t max_duration_ms;
-        int64_t noop;
-        int64_t runs;
-        int64_t skipped;
-        int64_t success;
-        int64_t total_duration_ms;
+        int64_t max_duration_ms = 0;
+        int64_t noop = 0;
+        int64_t runs = 0;
+        int64_t skipped = 0;
+        int64_t success = 0;
+        int64_t total_duration_ms = 0;
     };
 
     struct PeriodicTaskMetricsResponse {
-        int64_t capacity;
+        int64_t capacity = 0;
         std::vector<PeriodicTaskMetricsEntry> tasks;
-        int64_t tracked;
+        int64_t tracked = 0;
     };
 
     struct PolicyRuleCheck {
         std::optional<std::string> detail;
-        int64_t expected_table;
+        int64_t expected_table = 0;
         std::string fwmark;
         std::string fwmask;
-        int64_t priority;
-        bool rule_present_v4;
-        bool rule_present_v6;
+        int64_t priority = 0;
+        bool rule_present_v4 = false;
+        bool rule_present_v6 = false;
         CheckStatus status;
     };
 
@@ -770,19 +770,19 @@ namespace api {
     };
 
     struct RouteTableCheck {
-        bool default_route_present;
+        bool default_route_present = false;
         std::optional<std::string> detail;
         std::optional<std::string> expected_destination;
         std::optional<std::string> expected_gateway;
         std::optional<std::string> expected_interface;
         std::optional<int64_t> expected_metric;
         std::optional<std::string> expected_route_type;
-        bool gateway_matches;
-        bool interface_matches;
+        bool gateway_matches = false;
+        bool interface_matches = false;
         std::string outbound_tag;
         CheckStatus status;
-        bool table_exists;
-        int64_t table_id;
+        bool table_exists = false;
+        int64_t table_id = 0;
     };
 
     enum class RoutingHealthErrorResponseOverall : int { ERROR };
@@ -815,7 +815,7 @@ namespace api {
         std::string expected_outbound;
         std::string ip;
         std::optional<ListMatch> list_match;
-        bool ok;
+        bool ok = false;
     };
 
     struct RoutingTestRequest {
@@ -832,15 +832,15 @@ namespace api {
         std::vector<RoutingTestRuleIpDiagnosticElement> ip_rows;
         std::string outbound;
         RouteRuleElement rule;
-        int64_t rule_index;
-        bool target_in_lists;
+        int64_t rule_index = 0;
+        bool target_in_lists = false;
         std::optional<ListMatch> target_match;
     };
 
     struct RoutingTestResponse {
         std::optional<std::string> dns_error;
-        bool is_domain;
-        bool no_matching_rule;
+        bool is_domain = false;
+        bool no_matching_rule = false;
         std::vector<std::string> resolved_ips;
         std::vector<RoutingTestEntry> results;
         std::vector<RoutingTestRuleDiagnosticElement> rule_diagnostics;
@@ -851,18 +851,18 @@ namespace api {
     enum class RuntimeInterfaceInventoryStatusEnum : int { DOWN, UP };
 
     struct RuntimeInterfaceTrafficPointElement {
-        int64_t age_ms;
-        int64_t rx_bits_per_second;
-        int64_t tx_bits_per_second;
+        int64_t age_ms = 0;
+        int64_t rx_bits_per_second = 0;
+        int64_t tx_bits_per_second = 0;
     };
 
     struct Traffic {
         std::vector<RuntimeInterfaceTrafficPointElement> history;
         std::optional<int64_t> rx_bits_per_second;
-        int64_t rx_bytes;
+        int64_t rx_bytes = 0;
         std::optional<int64_t> sampled_at_unix_ms;
         std::optional<int64_t> tx_bits_per_second;
-        int64_t tx_bytes;
+        int64_t tx_bytes = 0;
     };
 
     struct RuntimeInterfaceInventoryEntry {
@@ -891,9 +891,9 @@ namespace api {
     };
 
     struct RuntimeInterfaceTrafficSample {
-        bool available;
+        bool available = false;
         std::string name;
-        bool reset;
+        bool reset = false;
         std::optional<int64_t> rx_bits_per_second;
         std::optional<int64_t> rx_bytes;
         std::optional<int64_t> tx_bits_per_second;
@@ -902,7 +902,7 @@ namespace api {
 
     struct RuntimeInterfaceTrafficUpdate {
         std::vector<RuntimeInterfaceTrafficSample> interfaces;
-        int64_t sampled_at_unix_ms;
+        int64_t sampled_at_unix_ms = 0;
     };
 
     struct RuntimeOutboundStateElement {
@@ -1000,7 +1000,7 @@ namespace api {
         std::string public_key;
         std::string server;
         std::string server_name;
-        int64_t server_port;
+        int64_t server_port = 0;
         std::optional<std::string> short_id;
         std::optional<std::string> uuid;
     };
@@ -1076,7 +1076,7 @@ namespace api {
     enum class State : int { DEGRADED, DOWN, STARTING, UP };
 
     struct TransportStatus {
-        bool desired_up;
+        bool desired_up = false;
         std::optional<std::string> display_name;
         std::optional<std::string> error;
         std::string interface;

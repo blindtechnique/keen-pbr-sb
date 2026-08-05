@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import { useState, type MouseEvent } from "react"
+import { useState, type MouseEvent, useMemo } from "react"
 import { BellIcon, CheckCheckIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -77,13 +77,28 @@ export function NotificationsBell() {
 
   const nfqwsUpdateQuery = useQuery(nfqwsUpdateQueryOptions())
 
-  const notices = collectNotices(
-    logsQuery.data?.lines ?? [],
-    updateQuery.data,
-    nfqwsUpdateQuery.data,
-    dismissedUntil,
-    dismissedIds,
-    t
+  // Колокольчик смонтирован дважды всегда: десктопная и мобильная шапки
+  // скрыты через CSS, а не размонтированы. Разбор двухсот строк лога
+  // регулярками в теле рендера умножался на два и повторялся на каждый
+  // рендер оболочки.
+  const notices = useMemo(
+    () =>
+      collectNotices(
+        logsQuery.data?.lines ?? [],
+        updateQuery.data,
+        nfqwsUpdateQuery.data,
+        dismissedUntil,
+        dismissedIds,
+        t
+      ),
+    [
+      logsQuery.data,
+      updateQuery.data,
+      nfqwsUpdateQuery.data,
+      dismissedUntil,
+      dismissedIds,
+      t,
+    ]
   )
 
   const dismissAll = (event: MouseEvent<HTMLButtonElement>) => {
