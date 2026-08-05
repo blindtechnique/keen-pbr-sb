@@ -28,6 +28,7 @@ import {
   FieldSeparator,
 } from "@/components/shared/field"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
+import { HelpHint } from "@/components/shared/help-hint"
 import { ListRefreshRouteFields } from "@/components/lists/list-refresh-route-fields"
 import { InterfaceMultiSelectList } from "@/components/shared/interface-picker"
 import { ListIdentityLabel } from "@/components/shared/list-identity-label"
@@ -493,6 +494,12 @@ function LoadedGeneralConfigPage({
                   >
                     <FieldLabel>
                       {t("pages.settings.general.strictEnforcementLabel")}
+                      {/* Подсказка под полем говорит, что делает выбранный
+                          вариант; знак вопроса — что такое kill-switch вообще.
+                          Это разные сведения, поэтому дублирования нет. */}
+                      <HelpHint
+                        text={t("pages.settings.general.strictEnforcementHelp")}
+                      />
                     </FieldLabel>
                     <FieldContent>
                       <Select
@@ -575,12 +582,17 @@ function LoadedGeneralConfigPage({
                         >
                           {t("pages.settings.general.skipMarkedPacketsLabel")}
                         </FieldLabel>
+                        {/* Пояснение переехало под знак вопроса целиком.
+                            Прежняя строка под флажком повторяла то же самое
+                            через fwmark и policy routing — для того, кто эти
+                            слова знает, она была не нужна, а остальным не
+                            помогала. */}
+                        <HelpHint
+                          text={t(
+                            "pages.settings.general.skipMarkedPacketsHelp"
+                          )}
+                        />
                       </div>
-                      <FieldHint
-                        description={t(
-                          "pages.settings.general.skipMarkedPacketsHint"
-                        )}
-                      />
                     </FieldContent>
                   </Field>
                 )}

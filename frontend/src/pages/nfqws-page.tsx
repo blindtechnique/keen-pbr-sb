@@ -23,6 +23,7 @@ import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
+import { HelpHint } from "@/components/shared/help-hint"
 import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -1217,6 +1218,14 @@ function NfqwsField({
   if (String(variable).includes("ARGS")) {
     return (
       <ArgsField
+        // Ключ подсказки записан буквально, а не собран из имени переменной:
+        // пояснение есть пока только у базовых аргументов, а шаблонная строка
+        // потребовала бы объявлять целое семейство ключей ради одного.
+        help={
+          variable === "NFQWS_BASE_ARGS"
+            ? t("nfqws.fields.NFQWS_BASE_ARGS.help")
+            : undefined
+        }
         hint={t(`nfqws.fields.${variable}.hint`)}
         label={t(`nfqws.fields.${variable}.label`)}
         onChange={onChange}
@@ -2113,12 +2122,15 @@ function NfqwsSection({
 const ARGS_COLLAPSE_THRESHOLD = 240
 
 function ArgsField({
+  help,
   hint,
   label,
   value,
   variable,
   onChange,
 }: {
+  /** Что это за аргументы вообще — под знаком вопроса, а не строкой под полем. */
+  help?: string
   hint?: string
   label: string
   value: string
@@ -2137,13 +2149,14 @@ function ArgsField({
   return (
     <div className="grid gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <Label className="flex flex-wrap items-baseline gap-2">
+        <Label className="flex flex-wrap items-center gap-2">
           {label}
           {variable ? (
             <span className="font-mono text-[11px] font-normal text-muted-foreground">
               {variable}
             </span>
           ) : null}
+          {help ? <HelpHint text={help} /> : null}
         </Label>
         {collapsible ? (
           <>

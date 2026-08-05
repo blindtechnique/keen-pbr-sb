@@ -161,7 +161,8 @@ export const enTranslation = {
       },
       NFQWS_BASE_ARGS: {
         label: "Base arguments",
-        hint: "Shared by every kind of traffic. Usually set by the strategy, not edited by hand.",
+        hint: "Shared by every kind of traffic. Usually set by the strategy and left alone.",
+        help: "nfqws2 applies these arguments to all traffic, whatever bypass method is chosen further down. The selected strategy fills them in. A wrong option here breaks the bypass entirely rather than one kind of traffic: both sites and video stop loading. Edit them only if you know what each option does — and remember what was there before.",
       },
       NFQWS_ARGS: {
         label: "Arguments for TCP",
@@ -1528,6 +1529,8 @@ export const enTranslation = {
           "Block traffic when a route drops (kill-switch)",
         strictEnforcementHint:
           "If a VPN or interface goes offline, traffic matching its rules is blocked instead of falling back to the main routing table. Can be overridden per route.",
+        strictEnforcementHelp:
+          "A kill switch protects against leaks. Normally, when a tunnel goes down, the traffic that was routed through it quietly falls back to the ordinary internet and the site sees your real address — with no sign that anything changed. With the kill switch on, that traffic goes nowhere until the tunnel is back: pages stop loading, but nothing escapes past the tunnel. Individual routes can override this setting.",
         strictEnforcementOptions: {
           automatic: "Automatic (recommended)",
           enabled: "Always block",
@@ -1542,8 +1545,8 @@ export const enTranslation = {
             "Global blocking is disabled. Traffic may fall back to the main routing table unless the route overrides this setting.",
         },
         skipMarkedPacketsLabel: "Skip packets that are already marked",
-        skipMarkedPacketsHint:
-          "Ignore packets that already have a fwmark set by other firewall rules so policy routing does not process them again.",
+        skipMarkedPacketsHelp:
+          "Other programs on the router mark packets too — that is how they flag traffic they have already routed themselves. With this setting on, keen-pbr leaves those packets alone instead of routing them a second time. Turn it off only if you are sure nothing else on the router marks packets: otherwise one packet ends up under two rules at once, and where it goes is anyone's guess.",
         clearDynamicSetsOnApplyLabel:
           "Clear learned domain addresses on full apply",
         clearDynamicSetsOnApplyHint:
