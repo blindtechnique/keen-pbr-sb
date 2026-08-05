@@ -11,14 +11,16 @@ import {
   RefreshCwIcon,
   RotateCcwIcon,
   SaveIcon,
-  TrashIcon,
   UploadIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
-import { KeenPencilIcon } from "@/components/shared/keen-icons"
+import {
+  KeenPencilIcon,
+  KeenTrashIcon,
+} from "@/components/shared/keen-icons"
 import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
@@ -1516,30 +1518,35 @@ function StrategiesEditor({
                   <PlayIcon />
                   {t("nfqws.applyStrategy")}
                 </Button>
-                <Button
-                  aria-label={t("nfqws.editStrategy")}
-                  className="size-8"
-                  onClick={() => setSelected(name)}
-                  size="icon"
-                  title={t("nfqws.editStrategy")}
-                  variant="ghost"
-                >
-                  <KeenPencilIcon className="size-4" />
-                </Button>
-                <Button
-                  aria-label={t("common.delete")}
-                  className="size-8 text-destructive hover:text-destructive"
-                  onClick={() => setDeleting(name)}
-                  size="icon"
-                  title={
-                    item?.builtin && item.overridden
-                      ? t("nfqws.restoreBuiltin")
-                      : t("common.delete")
-                  }
-                  variant="ghost"
-                >
-                  <TrashIcon className="size-4" />
-                </Button>
+                {/* «Применить» остаётся видимой: это подписанное действие
+                    строки, и прятать его до наведения означало бы прятать сам
+                    смысл строки. Значки прячутся — как в таблицах правил. */}
+                <span className="keen-row-actions flex items-center gap-1">
+                  <Button
+                    aria-label={t("nfqws.editStrategy")}
+                    className="keen-row-action size-8 rounded-[4px]"
+                    onClick={() => setSelected(name)}
+                    size="icon"
+                    title={t("nfqws.editStrategy")}
+                    variant="outline"
+                  >
+                    <KeenPencilIcon className="size-4" />
+                  </Button>
+                  <Button
+                    aria-label={t("common.delete")}
+                    className="keen-row-action keen-row-action--danger size-8 rounded-[4px]"
+                    onClick={() => setDeleting(name)}
+                    size="icon"
+                    title={
+                      item?.builtin && item.overridden
+                        ? t("nfqws.restoreBuiltin")
+                        : t("common.delete")
+                    }
+                    variant="outline"
+                  >
+                    <KeenTrashIcon className="size-4" />
+                  </Button>
+                </span>
               </span>,
             ]
           })}
@@ -1786,32 +1793,38 @@ function FilesEditor({
               >
                 {formatFileSize(file.size)}
               </span>,
-              <span className="flex items-center justify-end gap-1" key="acts">
+              <span
+                className="keen-row-actions flex items-center justify-end gap-1"
+                key="acts"
+              >
                 <Button
                   aria-label={t("nfqws.openFile")}
-                  className="size-8"
+                  className="keen-row-action size-8 rounded-[4px]"
                   onClick={() => setSelected(file.name)}
                   size="icon"
                   title={t("nfqws.openFile")}
-                  variant="ghost"
+                  variant="outline"
                 >
                   <KeenPencilIcon className="size-4" />
                 </Button>
                 {category === "log" ? (
                   <Button
                     aria-label={t("nfqws.clearLog")}
-                    className="size-8"
+                    className="keen-row-action size-8 rounded-[4px]"
                     onClick={() => setClearing(file)}
                     size="icon"
                     title={t("nfqws.clearLog")}
-                    variant="ghost"
+                    variant="outline"
                   >
                     <EraserIcon className="size-4" />
                   </Button>
                 ) : null}
                 <Button
                   aria-label={t("common.delete")}
-                  className="size-8 text-destructive hover:text-destructive"
+                  className={cn(
+                    "keen-row-action size-8 rounded-[4px]",
+                    file.removable && "keen-row-action--danger"
+                  )}
                   disabled={!file.removable}
                   onClick={() => setDeleting(file)}
                   size="icon"
@@ -1820,9 +1833,9 @@ function FilesEditor({
                       ? t("common.delete")
                       : t("nfqws.fileNotRemovable")
                   }
-                  variant="ghost"
+                  variant="outline"
                 >
-                  <TrashIcon className="size-4" />
+                  <KeenTrashIcon className="size-4" />
                 </Button>
               </span>,
             ]

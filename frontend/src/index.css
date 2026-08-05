@@ -1245,3 +1245,18 @@ html:not(.dark)
 .dark .keen-row-action {
   border-color: color-mix(in oklab, var(--primary) 40%, transparent);
 }
+
+/* Удаление остаётся красным: геометрия и поведение общие, сигнал опасности —
+ * свой. В самой прошивке удаления в строке нет вовсе, оно живёт в диалоге
+ * редактирования, поэтому цвет тут наш и снять его было неоткуда. */
+.keen-row-action--danger {
+  border-color: color-mix(in oklab, var(--destructive) 35%, transparent);
+  color: var(--destructive);
+}
+
+.keen-row-action--danger:hover:not(:disabled),
+.keen-row-action--danger:focus-visible:not(:disabled) {
+  background-color: var(--destructive);
+  border-color: var(--destructive);
+  color: var(--destructive-foreground);
+}

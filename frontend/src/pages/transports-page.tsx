@@ -8,7 +8,6 @@ import {
   RefreshCwIcon,
   Settings2Icon,
   ShieldCheckIcon,
-  TrashIcon,
   WorkflowIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
@@ -49,7 +48,10 @@ import {
   useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
-import { KeenPencilIcon } from "@/components/shared/keen-icons"
+import {
+  KeenPencilIcon,
+  KeenTrashIcon,
+} from "@/components/shared/keen-icons"
 import { DataTable } from "@/components/shared/data-table"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
@@ -1557,31 +1559,36 @@ function RowActions({
 }) {
   return (
     <span className="flex items-center justify-end gap-1">
-      <span className="flex items-center gap-1 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+      {/* Появление и вид — общие с таблицами правил и списков: класс
+          `keen-row-actions` прячет группу до наведения там, где курсор есть,
+          `keen-row-action` даёт прошивочную кнопку 32×32 с рамкой. Раньше тут
+          было своё скрытие через прозрачность и кнопки без рамки — из-за
+          этого одни и те же действия на разных страницах выглядели по-разному. */}
+      <span className="keen-row-actions flex items-center gap-1">
         <Button
           aria-label={editTitle}
-          className="size-8"
+          className="keen-row-action size-8 rounded-[4px]"
           disabled={editDisabled}
           onClick={onEdit}
           size="icon"
           title={editTitle}
-          variant="ghost"
+          variant="outline"
         >
           <KeenPencilIcon className="size-4" />
         </Button>
         <Button
           aria-label={deleteTitle}
           className={cn(
-            "size-8",
-            !deleteDisabled && "text-destructive hover:text-destructive"
+            "keen-row-action size-8 rounded-[4px]",
+            !deleteDisabled && "keen-row-action--danger"
           )}
           disabled={deleteDisabled}
           onClick={onDelete}
           size="icon"
           title={deleteTitle}
-          variant="ghost"
+          variant="outline"
         >
-          <TrashIcon className="size-4" />
+          <KeenTrashIcon className="size-4" />
         </Button>
       </span>
       <Button
