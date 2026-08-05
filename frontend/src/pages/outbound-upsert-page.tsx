@@ -582,7 +582,7 @@ function OutboundForm({
             {(field) => {
               const error = getFirstFieldError(field.state.meta.errors)
               return (
-                <Field invalid={Boolean(error)}>
+                <Field width="short" invalid={Boolean(error)}>
                   <FieldLabel htmlFor={tagId}>
                     {t("pages.outboundUpsert.fields.technicalId")}
                   </FieldLabel>
@@ -615,7 +615,7 @@ function OutboundForm({
           {(field) => {
             const error = getFirstFieldError(field.state.meta.errors)
             return (
-              <Field invalid={Boolean(error)}>
+              <Field width="short" invalid={Boolean(error)}>
                 <FieldLabel>{t("pages.outboundUpsert.fields.type")}</FieldLabel>
                 <FieldContent>
                   <Select
@@ -668,7 +668,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={interfaceId}>
                       {t("pages.outboundUpsert.interface.interface")}
                     </FieldLabel>
@@ -704,7 +704,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={gatewayId}>
                       {t("pages.outboundUpsert.interface.gateway")}
                     </FieldLabel>
@@ -734,7 +734,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={gateway6Id}>
                       {t("pages.outboundUpsert.interface.gateway6")}
                     </FieldLabel>
@@ -772,7 +772,7 @@ function OutboundForm({
             {(field) => {
               const error = getFirstFieldError(field.state.meta.errors)
               return (
-                <Field invalid={Boolean(error)}>
+                <Field width="short" invalid={Boolean(error)}>
                   <FieldLabel htmlFor={tableId}>
                     {t("pages.outboundUpsert.table.field")}
                   </FieldLabel>
@@ -1150,7 +1150,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={intervalId}>
                       {t("pages.outboundUpsert.urltest.interval")}
                     </FieldLabel>
@@ -1180,7 +1180,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={probeTimeoutId}>
                       {t("pages.outboundUpsert.urltest.probeTimeout")}
                     </FieldLabel>
@@ -1213,7 +1213,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={toleranceId}>
                       {t("pages.outboundUpsert.urltest.tolerance")}
                     </FieldLabel>
@@ -1243,7 +1243,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={retryAttemptsId}>
                       {t("pages.outboundUpsert.urltest.retryAttempts")}
                     </FieldLabel>
@@ -1273,7 +1273,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={retryIntervalId}>
                       {t("pages.outboundUpsert.urltest.retryInterval")}
                     </FieldLabel>
@@ -1312,7 +1312,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerFailuresId}>
                       {t("pages.outboundUpsert.circuitBreaker.failures")}
                     </FieldLabel>
@@ -1342,7 +1342,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerSuccessesId}>
                       {t("pages.outboundUpsert.circuitBreaker.successes")}
                     </FieldLabel>
@@ -1372,7 +1372,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerTimeoutId}>
                       {t("pages.outboundUpsert.circuitBreaker.timeout")}
                     </FieldLabel>
@@ -1402,7 +1402,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field invalid={Boolean(error)}>
+                  <Field width="short" invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerHalfOpenId}>
                       {t("pages.outboundUpsert.circuitBreaker.halfOpen")}
                     </FieldLabel>
@@ -1436,7 +1436,7 @@ function OutboundForm({
           {(field) => {
             const error = getFirstFieldError(field.state.meta.errors)
             return (
-              <Field invalid={Boolean(error)}>
+              <Field width="short" invalid={Boolean(error)}>
                 <FieldLabel>
                   {t("pages.outboundUpsert.strictEnforcement.label")}
                 </FieldLabel>

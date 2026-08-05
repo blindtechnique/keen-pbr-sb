@@ -21,22 +21,42 @@ const fieldVariants = cva("group/field flex w-full gap-2", {
       horizontal:
         "flex-row items-start [&>[data-slot=field-label]]:flex-auto [&>[data-slot=field-label]]:pt-0.5",
     },
+    /**
+     * Ширина поля — по длине значения, а не по ширине диалога.
+     *
+     * Диалог редактирования шире формы: в него помещаются список участников
+     * группы и таблицы. Поля наследовали эту ширину целиком, и «3 попытки»,
+     * «5 секунд», адрес шлюза и номер таблицы получали строку ввода в 854 px.
+     * Поле почти во весь экран под ввод на несколько символов не помогает
+     * вводить, а мешает читать: форма превращается в набор одинаковых полос,
+     * по которым не видно, где короткое значение, а где длинное.
+     *
+     * `short` — для значений с ограниченной длиной: числа, порты, адреса,
+     * маски, технические идентификаторы и выбор из списка. Свободный текст,
+     * URL и пути остаются во всю ширину: там длина осмысленна.
+     */
+    width: {
+      full: "",
+      short: "max-w-[480px]",
+    },
   },
   defaultVariants: {
     orientation: "vertical",
+    width: "full",
   },
 })
 
 function Field({
   className,
   orientation = "vertical",
+  width = "full",
   invalid = false,
   ...props
 }: React.ComponentProps<"div"> &
   VariantProps<typeof fieldVariants> & { invalid?: boolean }) {
   return (
     <div
-      className={cn(fieldVariants({ orientation }), className)}
+      className={cn(fieldVariants({ orientation, width }), className)}
       data-invalid={invalid}
       data-slot="field"
       role="group"
