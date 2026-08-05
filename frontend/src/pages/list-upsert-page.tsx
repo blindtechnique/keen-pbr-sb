@@ -49,14 +49,7 @@ import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { SectionHeading } from "@/components/shared/section-heading"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -641,14 +634,12 @@ function ListForm({
         form.handleSubmit()
       }}
     >
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("pages.listUpsert.common.title")}</CardTitle>
-          <CardDescription>
-            {t("pages.listUpsert.common.description")}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+      <section className="space-y-4">
+        <SectionHeading
+          description={t("pages.listUpsert.common.description")}
+          title={t("pages.listUpsert.common.title")}
+        />
+        <div>
           <FieldGroup>
             <form.Field
               name={LIST_FIELD_NAMES.displayName}
@@ -787,17 +778,15 @@ function ListForm({
               </form.Field>
             ) : null}
           </FieldGroup>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("pages.listUpsert.sourceSwitcher.title")}</CardTitle>
-          <CardDescription>
-            {t("pages.listUpsert.sourceSwitcher.description")}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+      <section className="space-y-4">
+        <SectionHeading
+          description={t("pages.listUpsert.sourceSwitcher.description")}
+          title={t("pages.listUpsert.sourceSwitcher.title")}
+        />
+        <div>
           {/* Тот же переключатель, что и при добавлении туннеля: ndw-picker
               KeeneticOS. Здесь он с множественным выбором — источников можно
               указать сразу несколько, — поэтому кнопки, а не радиогруппа. */}
@@ -835,31 +824,27 @@ function ListForm({
               )
             })}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
       {activeSourceGroups.includes("url") ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              {t("pages.listUpsert.sourceGroups.url.title")}
-            </CardTitle>
-            <CardDescription>
-              {t("pages.listUpsert.sourceGroups.url.description")}
-            </CardDescription>
-            <CardAction>
-              <Button
-                onClick={() => setTemplatePickerOpen(true)}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <SparklesIcon className="mr-1 h-4 w-4" />
-                {t("pages.listUpsert.templates.button")}
-              </Button>
-            </CardAction>
-          </CardHeader>
-          <CardContent>
+        <section className="space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <SectionHeading
+              description={t("pages.listUpsert.sourceGroups.url.description")}
+              title={t("pages.listUpsert.sourceGroups.url.title")}
+            />
+            <Button
+              onClick={() => setTemplatePickerOpen(true)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <SparklesIcon className="mr-1 h-4 w-4" />
+              {t("pages.listUpsert.templates.button")}
+            </Button>
+          </div>
+          <div>
             <FieldGroup>
               <form.Field name={LIST_FIELD_NAMES.url}>
                 {(field) => (
@@ -1020,21 +1005,17 @@ function ListForm({
                 }
               </form.Subscribe>
             </FieldGroup>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       {activeSourceGroups.includes("file") ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              {t("pages.listUpsert.sourceGroups.file.title")}
-            </CardTitle>
-            <CardDescription>
-              {t("pages.listUpsert.sourceGroups.file.description")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+        <section className="space-y-4">
+          <SectionHeading
+            description={t("pages.listUpsert.sourceGroups.file.description")}
+            title={t("pages.listUpsert.sourceGroups.file.title")}
+          />
+          <div>
             <FieldGroup>
               <form.Field name={LIST_FIELD_NAMES.file}>
                 {(field) => (
@@ -1059,21 +1040,17 @@ function ListForm({
                 )}
               </form.Field>
             </FieldGroup>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       {activeSourceGroups.includes("inline") ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              {t("pages.listUpsert.sourceGroups.inline.title")}
-            </CardTitle>
-            <CardDescription>
-              {t("pages.listUpsert.sourceGroups.inline.description")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+        <section className="space-y-4">
+          <SectionHeading
+            description={t("pages.listUpsert.sourceGroups.inline.description")}
+            title={t("pages.listUpsert.sourceGroups.inline.title")}
+          />
+          <div>
             <FieldGroup>
               <form.Field name={LIST_FIELD_NAMES.domains}>
                 {(field) => (
@@ -1120,19 +1097,17 @@ function ListForm({
                 )}
               </form.Field>
             </FieldGroup>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       {!isCreate ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("pages.listUpsert.dnsRule.title")}</CardTitle>
-            <CardDescription>
-              {t("pages.listUpsert.dnsRule.description")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
+        <section className="space-y-4">
+          <SectionHeading
+            description={t("pages.listUpsert.dnsRule.description")}
+            title={t("pages.listUpsert.dnsRule.title")}
+          />
+          <div className="space-y-3">
             <Select
               items={dnsServerSelectItems}
               onValueChange={(value) => setDnsServerForList(value ?? "")}
@@ -1161,8 +1136,8 @@ function ListForm({
                 {t("pages.listUpsert.quickSetup.noDnsServers")}
               </p>
             ) : null}
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       <TemplatePicker
@@ -1197,18 +1172,16 @@ function ListForm({
       />
 
       {isCreate ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("pages.listUpsert.quickSetup.title")}</CardTitle>
-            <CardDescription>
-              {t(
-                recommendedSetup
-                  ? "pages.listUpsert.quickSetup.recommendedDescription"
-                  : "pages.listUpsert.quickSetup.description"
-              )}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-5">
+        <section className="space-y-4">
+          <SectionHeading
+            description={t(
+              recommendedSetup
+                ? "pages.listUpsert.quickSetup.recommendedDescription"
+                : "pages.listUpsert.quickSetup.description"
+            )}
+            title={t("pages.listUpsert.quickSetup.title")}
+          />
+          <div className="space-y-5">
             {recommendedSetup ? (
               <Alert className="border-primary/25 bg-primary/5">
                 <CheckCircle2Icon />
@@ -1381,8 +1354,8 @@ function ListForm({
                   : "pages.listUpsert.quickSetup.manualHint"
               )}
             </p>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       {apiErrorMessage ? (
