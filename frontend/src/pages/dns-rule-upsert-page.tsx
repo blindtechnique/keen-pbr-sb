@@ -29,6 +29,7 @@ import {
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
+import { UpsertDeleteAction } from "@/components/shared/upsert-delete-action"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
@@ -227,6 +228,34 @@ function DnsRuleForm({
     }
   )
   const postConfigMutation = usePostConfigMutation()
+
+  // Удаление правила из самой формы — как в конфигураторе, где в строке стоит
+  // только карандаш. На DNS-правило никто не ссылается, поэтому список
+  // последствий пуст и диалог остаётся подтверждением.
+  const handleDelete = () => {
+    if (mode !== "edit" || parsedRuleIndex < 0) {
+      return
+    }
+
+    postConfigMutation.mutate(
+      {
+        data: buildUpdatedConfigWithRules(
+          loadedConfig,
+          loadedConfig.dns?.fallback ?? [],
+          rules
+            .map((rule) => getRuleDraft(rule))
+            .filter((_rule, index) => index !== parsedRuleIndex)
+        ),
+      },
+      {
+        onSuccess: async () => {
+          await queryClient.invalidateQueries({ queryKey: queryKeys.dnsTest() })
+          toast.success(t("pages.dnsRuleUpsert.messages.deleted"))
+          navigate("/dns-rules")
+        },
+      }
+    )
+  }
   const existingRuleIds = rules
     .map((rule) => rule.id?.trim())
     .filter((id): id is string => Boolean(id))
@@ -672,6 +701,17 @@ function DnsRuleForm({
       <ServerValidationAlert errors={unmappedServerErrors} />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
+        {mode === "edit" ? (
+          <UpsertDeleteAction
+            confirmLabel={t("pages.dnsRuleUpsert.delete.confirm")}
+            description={t("pages.dnsRuleUpsert.delete.description")}
+            impactItems={[]}
+            isPending={postConfigMutation.isPending}
+            label={t("common.delete")}
+            onConfirm={handleDelete}
+            title={t("pages.dnsRuleUpsert.delete.title")}
+          />
+        ) : null}
         <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>

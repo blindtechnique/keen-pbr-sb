@@ -1987,6 +1987,12 @@ export const enTranslation = {
       },
     },
     routingRuleUpsert: {
+      delete: {
+        title: "Delete this routing rule?",
+        description:
+          "The rule stops applying. Lists, routes and DNS rules stay as they are - nothing references a routing rule.",
+        confirm: "Delete rule",
+      },
       createTitle: "Create routing rule",
       editTitle: "Edit routing rule",
       editCardTitle: "Edit {{name}}",
@@ -1998,6 +2004,8 @@ export const enTranslation = {
       advancedConditionsPresent:
         "This rule already has additional conditions. They will be preserved; open the advanced editor to review or change them.",
       messages: {
+        deleted:
+          "Routing rule removed from the draft. Apply the new config to make the change take effect.",
         saved: "Routing rule staged. Apply new config to persist it.",
       },
       missing: {
@@ -2408,13 +2416,23 @@ export const enTranslation = {
       },
     },
     dnsRuleUpsert: {
+      delete: {
+        title: "Delete this DNS rule?",
+        description:
+          "Domains from its lists resolve the usual way again. The lists and DNS servers themselves stay as they are.",
+        confirm: "Delete rule",
+      },
       createTitle: "Create DNS rule",
       editTitle: "Edit DNS rule",
       editCardTitle: "Edit {{name}}",
       description:
         "This rule defines which DNS server to use for domains in a specific list.",
       cardDescription: "Set the list names and DNS server for this rule.",
-      messages: { saved: "DNS rule staged. Apply new config to persist it." },
+      messages: {
+        deleted:
+          "DNS rule removed from the draft. Apply the new config to make the change take effect.",
+        saved: "DNS rule staged. Apply new config to persist it.",
+      },
       validation: {
         displayNameRequired: "Enter a readable DNS rule name.",
         displayNameTooLong: "The name must not exceed 80 characters.",

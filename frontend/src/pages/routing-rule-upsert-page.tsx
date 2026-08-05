@@ -28,6 +28,7 @@ import {
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
 import { useUpsertPageClose } from "@/components/shared/upsert-page-context"
+import { UpsertDeleteAction } from "@/components/shared/upsert-delete-action"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -244,6 +245,34 @@ function RoutingRuleForm({
   }))
 
   const postConfigMutation = usePostConfigMutation()
+
+  // Удаление правила из самой формы. В конфигураторе так и сделано: в строке
+  // только карандаш, а удаление живёт в диалоге, который он открывает.
+  // Ломаться тут нечему — на правило маршрутизации никто не ссылается,
+  // поэтому список последствий пуст, и диалог остаётся подтверждением.
+  const handleDelete = () => {
+    if (mode !== "edit" || parsedRuleIndex < 0) {
+      return
+    }
+
+    postConfigMutation.mutate(
+      {
+        data: {
+          ...loadedConfig,
+          route: {
+            ...loadedConfig.route,
+            rules: rules.filter((_rule, index) => index !== parsedRuleIndex),
+          },
+        },
+      },
+      {
+        onSuccess: () => {
+          toast.success(t("pages.routingRuleUpsert.messages.deleted"))
+          navigate("/routing-rules")
+        },
+      }
+    )
+  }
   const existingRuleIds = rules
     .map((rule) => rule.id?.trim())
     .filter((id): id is string => Boolean(id))
@@ -858,6 +887,17 @@ function RoutingRuleForm({
       />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
+        {mode === "edit" ? (
+          <UpsertDeleteAction
+            confirmLabel={t("pages.routingRuleUpsert.delete.confirm")}
+            description={t("pages.routingRuleUpsert.delete.description")}
+            impactItems={[]}
+            isPending={postConfigMutation.isPending}
+            label={t("common.delete")}
+            onConfirm={handleDelete}
+            title={t("pages.routingRuleUpsert.delete.title")}
+          />
+        ) : null}
         <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>
