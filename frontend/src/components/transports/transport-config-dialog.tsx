@@ -650,8 +650,13 @@ export function TransportConfigForm({
           </div>
         ) : null}
 
+        {/* Раньше здесь была рамка вокруг переключателя «ссылка / JSON» и
+            поля ввода — карточка внутри карточки диалога. Границу она не
+            обозначала: переключатель и так виден, а лишний контур делал форму
+            многослойной. Ссылка подключения — обычное поле формы, а не
+            отдельный блок. */}
         {isSingBox ? (
-          <div className="grid gap-4 rounded-lg border p-4">
+          <div className="grid gap-4">
             {!singBoxAvailable ? (
               <Alert variant="destructive">
                 <AlertTitle>{t("transports.singBoxMissing.title")}</AlertTitle>
