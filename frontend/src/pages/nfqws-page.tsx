@@ -979,14 +979,14 @@ function NotInstalled() {
           <p className="mb-1 font-medium">
             {t("nfqws.notInstalled.ourInstaller")}
           </p>
-          <code className="block overflow-x-auto rounded bg-muted p-2 text-xs text-foreground">
+          <code className="block rounded bg-muted p-2 text-xs break-all text-foreground">
             sh -c &quot;$(curl -fsSL
             https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)&quot;
           </code>
         </div>
         <div>
           <p className="mb-1 font-medium">{t("nfqws.notInstalled.original")}</p>
-          <code className="block overflow-x-auto rounded bg-muted p-2 text-xs text-foreground">
+          <code className="block rounded bg-muted p-2 text-xs break-all text-foreground">
             echo &quot;src/gz nfqws2-keenetic
             https://nfqws.github.io/nfqws2-keenetic/all&quot; &gt;
             /opt/etc/opkg/nfqws2-keenetic.conf &amp;&amp; opkg update &amp;&amp;

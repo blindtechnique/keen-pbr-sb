@@ -662,7 +662,7 @@ export function TransportConfigForm({
                 <AlertTitle>{t("transports.singBoxMissing.title")}</AlertTitle>
                 <AlertDescription className="space-y-2">
                   <p>{t("transports.singBoxMissing.description")}</p>
-                  <code className="block overflow-x-auto rounded bg-muted p-2 text-xs text-foreground">
+                  <code className="block rounded bg-muted p-2 text-xs break-all text-foreground">
                     sh -c &quot;$(curl -fsSL
                     https://raw.githubusercontent.com/blindtechnique/keen-pbr-sb/main/install.sh)&quot;
                   </code>
