@@ -488,7 +488,7 @@ function LoadedGeneralConfigPage({
             <FieldGroup>
               <form.Field name={SETTINGS_FIELD_NAMES.strictEnforcement}>
                 {(field) => (
-                  <Field
+                  <Field width="short"
                     className={activeTab === "general" ? undefined : "hidden"}
                   >
                     <FieldLabel>
@@ -1297,7 +1297,7 @@ function LoadedGeneralConfigPage({
                                 )
 
                         return (
-                          <Field invalid={Boolean(error)}>
+                          <Field width="short" invalid={Boolean(error)}>
                             <FieldLabel id="reconnect-owned-flows-on-routing-change-lists-label">
                               {t(
                                 "pages.settings.advanced.reconnectOwnedFlowsOnRoutingChangeListsLabel"
@@ -1432,7 +1432,7 @@ function LoadedGeneralConfigPage({
                   const error = getFirstFieldError(field.state.meta.errors)
 
                   return (
-                    <Field invalid={Boolean(error)}>
+                    <Field width="short" invalid={Boolean(error)}>
                       <FieldLabel htmlFor="fwmark-start">
                         {t("pages.settings.advanced.fwmarkStartLabel")}
                       </FieldLabel>
@@ -1465,7 +1465,7 @@ function LoadedGeneralConfigPage({
                   const error = getFirstFieldError(field.state.meta.errors)
 
                   return (
-                    <Field invalid={Boolean(error)}>
+                    <Field width="short" invalid={Boolean(error)}>
                       <FieldLabel htmlFor="fwmark-mask">
                         {t("pages.settings.advanced.fwmarkMaskLabel")}
                       </FieldLabel>
@@ -1507,7 +1507,7 @@ function LoadedGeneralConfigPage({
                   const error = getFirstFieldError(field.state.meta.errors)
 
                   return (
-                    <Field invalid={Boolean(error)}>
+                    <Field width="short" invalid={Boolean(error)}>
                       <FieldLabel htmlFor="table-start">
                         {t("pages.settings.advanced.tableStartLabel")}
                       </FieldLabel>
