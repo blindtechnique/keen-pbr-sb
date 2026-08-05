@@ -33,3 +33,33 @@ export function KeenPencilIcon({
     </svg>
   )
 }
+
+/**
+ * Корзина из того же спрайта прошивки (`sprite.svg#delete`): сетка 16×16,
+ * одна заливка `currentColor`.
+ *
+ * Значка «обновить» в спрайте нет: ближайший по имени `update` — это облако
+ * со стрелкой вниз, то есть «скачать обновление». Для «перечитать список»
+ * он означал бы не то, поэтому обновление осталось на круговых стрелках
+ * lucide; размер, цвет и поведение у него общие с остальными.
+ */
+export function KeenTrashIcon({
+  className,
+  ...props
+}: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="currentColor"
+      focusable="false"
+      height="16"
+      viewBox="0 0 16 16"
+      width="16"
+      xmlns="http://www.w3.org/2000/svg"
+      {...props}
+    >
+      <path d="M2.667 14.222c0 .978.8 1.778 1.777 1.778h7.112c.977 0 1.777-.8 1.777-1.778V3.556H2.667v10.666Zm1.777-8.889h7.112v8.89H4.444v-8.89ZM11.111.89 10.222 0H5.778l-.89.889h-3.11v1.778h12.444V.889h-3.111Z" />
+    </svg>
+  )
+}

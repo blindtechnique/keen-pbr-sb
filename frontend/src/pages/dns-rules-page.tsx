@@ -1,4 +1,4 @@
-import { Plus, Save, SparklesIcon, Trash2 } from "lucide-react"
+import { Plus, Save, SparklesIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -16,7 +16,7 @@ import {
 import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
-import { KeenPencilIcon } from "@/components/shared/keen-icons"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -373,7 +373,7 @@ function DnsRulesEditor({
                   size="sm"
                   variant="destructive"
                 >
-                  <Trash2 className="mr-1 h-4 w-4" />
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
                   {t("pages.dnsRules.bulk.delete")}
                 </Button>
               </BulkSelectionToolbar>

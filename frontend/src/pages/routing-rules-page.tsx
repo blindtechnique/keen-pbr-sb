@@ -1,4 +1,4 @@
-import { Plus, Save, SparklesIcon, Trash2 } from "lucide-react"
+import { Plus, Save, SparklesIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useLocation } from "wouter"
@@ -13,7 +13,7 @@ import {
 import type { RuntimeOutboundState } from "@/api/generated/model"
 import { useGetConfig, useGetRuntimeOutbounds } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
-import { KeenPencilIcon } from "@/components/shared/keen-icons"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -383,7 +383,7 @@ function RoutingRulesEditor({
                   size="sm"
                   variant="destructive"
                 >
-                  <Trash2 className="mr-1 h-4 w-4" />
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
                   {t("pages.routingRules.bulk.delete")}
                 </Button>
               </BulkSelectionToolbar>

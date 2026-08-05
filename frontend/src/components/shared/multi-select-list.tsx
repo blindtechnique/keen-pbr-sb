@@ -1,5 +1,6 @@
 import { Autocomplete } from "@base-ui/react/autocomplete"
-import { ChevronsUpDown, ListPlus, Plus, Trash2 } from "lucide-react"
+import { KeenTrashIcon } from "@/components/shared/keen-icons"
+import { ChevronsUpDown, ListPlus, Plus } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -152,7 +153,7 @@ export function MultiSelectList({
         type="button"
         variant="ghost"
       >
-        <Trash2 className="h-4 w-4" />
+        <KeenTrashIcon className="h-4 w-4" />
       </Button>
     </div>
   )

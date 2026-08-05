@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query"
-import { ArrowRight, ExternalLink, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { ArrowRight, ExternalLink, Plus, RefreshCw } from "lucide-react"
 import type { ReactNode } from "react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -25,7 +25,7 @@ import {
   selectConfigRevision,
   selectListRefreshState,
 } from "@/api/selectors"
-import { KeenPencilIcon } from "@/components/shared/keen-icons"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -547,7 +547,7 @@ export function ListsPage() {
                   size="sm"
                   variant="destructive"
                 >
-                  <Trash2 className="mr-1 h-4 w-4" />
+                  <KeenTrashIcon className="mr-1 h-4 w-4" />
                   {t("pages.lists.bulk.deleteSelected")}
                 </Button>
               </BulkSelectionToolbar>

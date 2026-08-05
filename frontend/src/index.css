@@ -1216,3 +1216,32 @@ html:not(.dark)
     visibility: visible;
   }
 }
+
+/* Кнопка действия в строке таблицы — карандаш, обновление, корзина.
+ *
+ * Снято с живого конфигуратора: в ячейке действия стоит `ndw-button
+ * ndw-button--outline` размером 32×32 с белым фоном, рамкой 1px
+ * `rgb(193, 221, 237)` и радиусом 4px; значок внутри 16×16 цвета
+ * `rgb(0, 134, 203)`. Под курсором уже на самой кнопке она заливается тем же
+ * синим, а значок становится белым.
+ *
+ * Тёмную тему прошивки я не мерил: переключить её у владельца означало бы
+ * менять его настройку. Поэтому там рамка берётся от собственного primary —
+ * это заведомо согласованный цвет, но не снятый с прошивки.
+ */
+.keen-row-action {
+  background-color: var(--card);
+  border: 1px solid #c1dded;
+  color: var(--primary);
+}
+
+.keen-row-action:hover:not(:disabled),
+.keen-row-action:focus-visible:not(:disabled) {
+  background-color: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.dark .keen-row-action {
+  border-color: color-mix(in oklab, var(--primary) 40%, transparent);
+}

@@ -35,15 +35,15 @@ export function ActionButtons({
       {actions.map((action) => (
         <IconButtonWithTooltip
           key={action.label}
-          // Размер области нажатия — прошивочный: в конфигураторе ячейка
-          // карандаша 41×32 при значке 16 px. `icon-sm` давал 28×28 — меньше
-          // и значка, и любого разумного пальца.
-          className="rounded-[4px] text-primary hover:bg-primary hover:text-primary-foreground"
+          // Вид и размер прошивочные: 32×32, радиус 4px, белый фон и рамка,
+          // значок 16px. Всё в `.keen-row-action` — там же и заливка под
+          // курсором, чтобы карандаш, обновление и корзина не разъезжались.
+          className="keen-row-action rounded-[4px]"
           disabled={action.disabled}
           label={action.label}
           onClick={action.onClick}
           size="icon"
-          variant="ghost"
+          variant="outline"
         >
           {action.icon}
         </IconButtonWithTooltip>

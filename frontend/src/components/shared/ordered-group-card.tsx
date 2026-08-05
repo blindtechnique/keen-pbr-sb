@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
+import { KeenTrashIcon } from "@/components/shared/keen-icons"
 
-import { ArrowDown, ArrowUp, Trash2 } from "lucide-react"
+import { ArrowDown, ArrowUp } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { Button } from "@/components/ui/button"
@@ -76,7 +77,7 @@ export function OrderedGroupCard({
             type="button"
             variant="outline"
           >
-            <Trash2 className="h-4 w-4" />
+            <KeenTrashIcon className="h-4 w-4" />
             <span className="hidden lg:inline">{removeLabel}</span>
           </Button>
         </div>
