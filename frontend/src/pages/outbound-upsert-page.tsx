@@ -463,11 +463,13 @@ function OutboundForm({
           | undefined
       )?.unmapped ?? []
   )
-  const isDirty = useStore(form.store, (state) =>
-    !semanticJsonEqual(
-      normalizeOutboundDraftForPersistence(state.values),
-      baselinePayload
-    )
+  const isDirty = useStore(
+    form.store,
+    (state) =>
+      !semanticJsonEqual(
+        normalizeOutboundDraftForPersistence(state.values),
+        baselinePayload
+      )
   )
   const canSubmit = useStore(form.store, (state) => state.canSubmit)
 
@@ -514,12 +516,11 @@ function OutboundForm({
         </Alert>
       ) : null}
 
-      <FieldGroup>
+      <FieldGroup width="short">
         <form.Field
           name={OUTBOUND_FIELD_NAMES.displayName}
           validators={{
-            onChange: ({ value }) =>
-              getDisplayNameError(value, t) ?? undefined,
+            onChange: ({ value }) => getDisplayNameError(value, t) ?? undefined,
           }}
         >
           {(field) => {
@@ -582,7 +583,7 @@ function OutboundForm({
             {(field) => {
               const error = getFirstFieldError(field.state.meta.errors)
               return (
-                <Field width="short" invalid={Boolean(error)}>
+                <Field invalid={Boolean(error)}>
                   <FieldLabel htmlFor={tagId}>
                     {t("pages.outboundUpsert.fields.technicalId")}
                   </FieldLabel>
@@ -615,7 +616,7 @@ function OutboundForm({
           {(field) => {
             const error = getFirstFieldError(field.state.meta.errors)
             return (
-              <Field width="short" invalid={Boolean(error)}>
+              <Field invalid={Boolean(error)}>
                 <FieldLabel>{t("pages.outboundUpsert.fields.type")}</FieldLabel>
                 <FieldContent>
                   <Select
@@ -659,16 +660,17 @@ function OutboundForm({
       </FieldGroup>
 
       {isInterface ? (
-        <SectionCard flat
+        <SectionCard
+          flat
           description={t("pages.outboundUpsert.interface.description")}
           title={t("pages.outboundUpsert.interface.title")}
         >
-          <div className="grid gap-4">
+          <FieldGroup className="gap-4" width="short">
             <form.Field name={OUTBOUND_FIELD_NAMES.interfaceName}>
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={interfaceId}>
                       {t("pages.outboundUpsert.interface.interface")}
                     </FieldLabel>
@@ -704,7 +706,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={gatewayId}>
                       {t("pages.outboundUpsert.interface.gateway")}
                     </FieldLabel>
@@ -734,7 +736,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={gateway6Id}>
                       {t("pages.outboundUpsert.interface.gateway6")}
                     </FieldLabel>
@@ -759,47 +761,51 @@ function OutboundForm({
                 )
               }}
             </form.Field>
-          </div>
+          </FieldGroup>
         </SectionCard>
       ) : null}
 
       {isTable ? (
-        <SectionCard flat
+        <SectionCard
+          flat
           description={t("pages.outboundUpsert.table.description")}
           title={t("pages.outboundUpsert.table.title")}
         >
-          <form.Field name={OUTBOUND_FIELD_NAMES.table}>
-            {(field) => {
-              const error = getFirstFieldError(field.state.meta.errors)
-              return (
-                <Field width="short" invalid={Boolean(error)}>
-                  <FieldLabel htmlFor={tableId}>
-                    {t("pages.outboundUpsert.table.field")}
-                  </FieldLabel>
-                  <FieldContent>
-                    <Input
-                      aria-invalid={Boolean(error)}
-                      id={tableId}
-                      onBlur={field.handleBlur}
-                      onChange={(event) =>
-                        field.handleChange(event.target.value)
-                      }
-                      value={field.state.value}
-                    />
-                    <FieldHint
-                      description={t("pages.outboundUpsert.table.hint")}
-                      error={error ?? null}
-                    />
-                  </FieldContent>
-                </Field>
-              )
-            }}
-          </form.Field>
+          <FieldGroup width="short">
+            <form.Field name={OUTBOUND_FIELD_NAMES.table}>
+              {(field) => {
+                const error = getFirstFieldError(field.state.meta.errors)
+                return (
+                  <Field invalid={Boolean(error)}>
+                    <FieldLabel htmlFor={tableId}>
+                      {t("pages.outboundUpsert.table.field")}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Input
+                        aria-invalid={Boolean(error)}
+                        id={tableId}
+                        onBlur={field.handleBlur}
+                        onChange={(event) =>
+                          field.handleChange(event.target.value)
+                        }
+                        value={field.state.value}
+                      />
+                      <FieldHint
+                        description={t("pages.outboundUpsert.table.hint")}
+                        error={error ?? null}
+                      />
+                    </FieldContent>
+                  </Field>
+                )
+              }}
+            </form.Field>
+          </FieldGroup>
         </SectionCard>
       ) : null}
 
       {isBlackhole ? (
-        <SectionCard flat
+        <SectionCard
+          flat
           description={t("pages.outboundUpsert.blackhole.description")}
           title={t("pages.outboundUpsert.blackhole.title")}
         >
@@ -810,7 +816,8 @@ function OutboundForm({
       ) : null}
 
       {isIgnore ? (
-        <SectionCard flat
+        <SectionCard
+          flat
           description={t("pages.outboundUpsert.ignore.description")}
           title={t("pages.outboundUpsert.ignore.title")}
         >
@@ -826,7 +833,8 @@ function OutboundForm({
             const error = getFirstFieldError(field.state.meta.errors)
             const groups = normalizeOutboundGroups(field.state.value)
             return (
-              <SectionCard flat
+              <SectionCard
+                flat
                 description={t(
                   "pages.outboundUpsert.urltest.groupsDescription"
                 )}
@@ -1001,7 +1009,8 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
-        <SectionCard flat
+        <SectionCard
+          flat
           description={t("pages.outboundUpsert.urltest.probingDescription")}
           title={t("pages.outboundUpsert.urltest.probingTitle")}
         >
@@ -1020,23 +1029,21 @@ function OutboundForm({
                           `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
                         ),
                       }))}
-                      onValueChange={(value) =>
-                        {
-                          const nextMode =
-                            (value as UrltestSelectionMode | null) ?? "latency"
-                          field.handleChange(nextMode)
-                          if (
-                            nextMode !== "priority" &&
-                            form.state.values.conntrackOnSwitch ===
-                              "delete_on_failure"
-                          ) {
-                            form.setFieldValue(
-                              OUTBOUND_FIELD_NAMES.conntrackOnSwitch,
-                              "preserve"
-                            )
-                          }
+                      onValueChange={(value) => {
+                        const nextMode =
+                          (value as UrltestSelectionMode | null) ?? "latency"
+                        field.handleChange(nextMode)
+                        if (
+                          nextMode !== "priority" &&
+                          form.state.values.conntrackOnSwitch ===
+                            "delete_on_failure"
+                        ) {
+                          form.setFieldValue(
+                            OUTBOUND_FIELD_NAMES.conntrackOnSwitch,
+                            "preserve"
+                          )
                         }
-                      }
+                      }}
                       value={field.state.value}
                     >
                       <SelectTrigger>
@@ -1150,7 +1157,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={intervalId}>
                       {t("pages.outboundUpsert.urltest.interval")}
                     </FieldLabel>
@@ -1180,7 +1187,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={probeTimeoutId}>
                       {t("pages.outboundUpsert.urltest.probeTimeout")}
                     </FieldLabel>
@@ -1213,7 +1220,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={toleranceId}>
                       {t("pages.outboundUpsert.urltest.tolerance")}
                     </FieldLabel>
@@ -1243,7 +1250,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={retryAttemptsId}>
                       {t("pages.outboundUpsert.urltest.retryAttempts")}
                     </FieldLabel>
@@ -1273,7 +1280,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={retryIntervalId}>
                       {t("pages.outboundUpsert.urltest.retryInterval")}
                     </FieldLabel>
@@ -1303,7 +1310,8 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
-        <SectionCard flat
+        <SectionCard
+          flat
           description={t("pages.outboundUpsert.circuitBreaker.description")}
           title={t("pages.outboundUpsert.circuitBreaker.title")}
         >
@@ -1312,7 +1320,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerFailuresId}>
                       {t("pages.outboundUpsert.circuitBreaker.failures")}
                     </FieldLabel>
@@ -1342,7 +1350,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerSuccessesId}>
                       {t("pages.outboundUpsert.circuitBreaker.successes")}
                     </FieldLabel>
@@ -1372,7 +1380,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerTimeoutId}>
                       {t("pages.outboundUpsert.circuitBreaker.timeout")}
                     </FieldLabel>
@@ -1402,7 +1410,7 @@ function OutboundForm({
               {(field) => {
                 const error = getFirstFieldError(field.state.meta.errors)
                 return (
-                  <Field width="short" invalid={Boolean(error)}>
+                  <Field invalid={Boolean(error)}>
                     <FieldLabel htmlFor={circuitBreakerHalfOpenId}>
                       {t("pages.outboundUpsert.circuitBreaker.halfOpen")}
                     </FieldLabel>
@@ -1432,54 +1440,56 @@ function OutboundForm({
       ) : null}
 
       {isInterface ? (
-        <form.Field name={OUTBOUND_FIELD_NAMES.strictEnforcement}>
-          {(field) => {
-            const error = getFirstFieldError(field.state.meta.errors)
-            return (
-              <Field width="short" invalid={Boolean(error)}>
-                <FieldLabel>
-                  {t("pages.outboundUpsert.strictEnforcement.label")}
-                </FieldLabel>
-                <FieldContent>
-                  <Select
-                    items={strictSelectItems}
-                    onValueChange={(value) =>
-                      field.handleChange(value ?? draft.strictEnforcement)
-                    }
-                    value={field.state.value}
-                  >
-                    <SelectTrigger aria-invalid={Boolean(error)}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        <SelectLabel>
-                          {t("pages.outboundUpsert.strictEnforcement.label")}
-                        </SelectLabel>
-                        {strictOptions.map((option) => (
-                          <SelectItem key={option} value={option}>
-                            {getStrictOptionLabel(option, t)}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldHint
-                    description={t(
-                      "pages.outboundUpsert.strictEnforcement.hint"
-                    )}
-                    error={error ?? null}
-                  />
-                  <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                    {t(
-                      `pages.outboundUpsert.strictEnforcement.explanations.${field.state.value}`
-                    )}
-                  </p>
-                </FieldContent>
-              </Field>
-            )
-          }}
-        </form.Field>
+        <FieldGroup width="short">
+          <form.Field name={OUTBOUND_FIELD_NAMES.strictEnforcement}>
+            {(field) => {
+              const error = getFirstFieldError(field.state.meta.errors)
+              return (
+                <Field invalid={Boolean(error)}>
+                  <FieldLabel>
+                    {t("pages.outboundUpsert.strictEnforcement.label")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Select
+                      items={strictSelectItems}
+                      onValueChange={(value) =>
+                        field.handleChange(value ?? draft.strictEnforcement)
+                      }
+                      value={field.state.value}
+                    >
+                      <SelectTrigger aria-invalid={Boolean(error)}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectLabel>
+                            {t("pages.outboundUpsert.strictEnforcement.label")}
+                          </SelectLabel>
+                          {strictOptions.map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {getStrictOptionLabel(option, t)}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldHint
+                      description={t(
+                        "pages.outboundUpsert.strictEnforcement.hint"
+                      )}
+                      error={error ?? null}
+                    />
+                    <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                      {t(
+                        `pages.outboundUpsert.strictEnforcement.explanations.${field.state.value}`
+                      )}
+                    </p>
+                  </FieldContent>
+                </Field>
+              )
+            }}
+          </form.Field>
+        </FieldGroup>
       ) : null}
 
       <ServerValidationAlert errors={unmappedServerErrors} />

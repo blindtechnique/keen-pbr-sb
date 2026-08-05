@@ -422,7 +422,7 @@ function RoutingRuleForm({
         void form.handleSubmit()
       }}
     >
-      <FieldGroup>
+      <FieldGroup width="short">
         {presentation === "dialog" && hasAdvancedConditions ? (
           <Alert>
             <AlertDescription>

@@ -412,7 +412,7 @@ function DnsRuleForm({
         void form.handleSubmit()
       }}
     >
-      <FieldGroup>
+      <FieldGroup width="short">
         <form.Field
           name={DNS_RULE_FIELD_NAMES.displayName}
           validators={{

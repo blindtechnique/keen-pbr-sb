@@ -4,10 +4,27 @@ import { useMemo, type ReactNode } from "react"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 
-function FieldGroup({ className, ...props }: React.ComponentProps<"div">) {
+/**
+ * Ширина задаётся форме целиком, а не полю по отдельности.
+ *
+ * Отмечать «короткое» у каждого поля можно, но тогда в одной форме появляются
+ * поля разной ширины, и это читается как ошибка вёрстки, а не как замысел:
+ * в диалоге транспорта единственный узкий селект среди широких полей выглядел
+ * именно так. Ширина — свойство формы: если её значения короткие, узкая вся
+ * колонка; если среди них есть ссылка или JSON, широкая вся колонка.
+ */
+function FieldGroup({
+  className,
+  width = "full",
+  ...props
+}: React.ComponentProps<"div"> & { width?: "full" | "short" }) {
   return (
     <div
-      className={cn("group/field-group flex w-full flex-col gap-6", className)}
+      className={cn(
+        "group/field-group flex w-full flex-col gap-6",
+        width === "short" && "max-w-[480px]",
+        className
+      )}
       data-slot="field-group"
       {...props}
     />

@@ -367,7 +367,7 @@ function DnsServerForm({
         void form.handleSubmit()
       }}
     >
-      <FieldGroup>
+      <FieldGroup width="short">
         <form.Field
           name={DNS_SERVER_FIELD_NAMES.displayName}
           validators={{
@@ -516,7 +516,7 @@ function DnsServerForm({
                     }
 
                     return (
-                      <Field width="short" invalid={Boolean(error)}>
+                      <Field invalid={Boolean(error)}>
                         <FieldLabel htmlFor="dns-server-address">
                           {t("pages.dnsServerUpsert.fields.address")}
                         </FieldLabel>
@@ -562,7 +562,7 @@ function DnsServerForm({
                 mode === "create" &&
                 presetSelection === "custom" ? (
                   <>
-                    <Field width="short" invalid={customSecondaryInvalid}>
+                    <Field invalid={customSecondaryInvalid}>
                       <FieldLabel htmlFor="dns-server-secondary-address">
                         {t("pages.dnsServerUpsert.fields.secondaryAddress")}
                       </FieldLabel>
@@ -625,7 +625,7 @@ function DnsServerForm({
                     }
 
                     return (
-                      <Field width="short">
+                      <Field>
                         <FieldLabel>
                           {t("pages.dnsServerUpsert.fields.detour")}
                         </FieldLabel>
