@@ -317,6 +317,10 @@ export const enTranslation = {
       about: "About this section",
     },
     moreControls: "More",
+    expandable: {
+      more: "Read more",
+      less: "Show less",
+    },
     loading: "Loading the page",
     tableSearch: {
       clear: "Clear search",

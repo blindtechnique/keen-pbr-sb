@@ -317,6 +317,10 @@ export const ruTranslation = {
       about: "Об этом разделе",
     },
     moreControls: "Ещё",
+    expandable: {
+      more: "Читать далее",
+      less: "Свернуть",
+    },
     loading: "Загрузка страницы",
     tableSearch: {
       clear: "Очистить поиск",

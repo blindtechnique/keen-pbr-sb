@@ -39,6 +39,7 @@ import { ConfigTransferButtons } from "@/components/shared/config-transfer-butto
 import { DataTable } from "@/components/shared/data-table"
 import { TableSearch } from "@/components/shared/table-search"
 import { DependencyList } from "@/components/shared/dependency-list"
+import { ExpandableText } from "@/components/shared/expandable-text"
 import {
   DeleteImpactDialog,
   type DeleteImpactItem,
@@ -582,7 +583,16 @@ export function ListsPage() {
                       >
                         {list.displayName}
                       </p>
-                      <p className="truncate text-xs text-muted-foreground">
+                      {/* Адрес остаётся обрезанным намеренно. Раскрывать его
+                          здесь я пробовал: на строку с неудачной загрузкой
+                          выходит две кнопки «Читать далее» подряд, и неясно,
+                          какая к чему. Полный адрес показывает экран
+                          редактирования, до которого один шаг — карандаш в этой
+                          же строке. `title` помогает мыши на узком окне. */}
+                      <p
+                        className="truncate text-xs text-muted-foreground"
+                        title={list.locationLabel}
+                      >
                         {list.locationLabel}
                       </p>
                       <ListRefreshSummary list={list} t={t} />
@@ -1234,8 +1244,14 @@ function ListRefreshSummary({
         {t("pages.lists.lastUpdated", { value: successfulAt })}
       </div>
       {list.lastError ? (
-        <div className="break-words text-destructive">
-          {t(
+        // Ошибка демона содержит адрес и системное сообщение целиком: на
+        // телефоне это десять строк, после которых следующий список уезжает за
+        // экран. Две строки говорят, что обновление не прошло; подробности —
+        // по «Читать далее».
+        <ExpandableText
+          className="text-destructive"
+          lines={2}
+          text={t(
             list.lastDetour
               ? "pages.lists.lastRefreshFailedVia"
               : "pages.lists.lastRefreshFailed",
@@ -1245,7 +1261,7 @@ function ListRefreshSummary({
               message: list.lastError,
             }
           )}
-        </div>
+        />
       ) : null}
     </div>
   )

@@ -18,6 +18,7 @@ import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig, selectListRefreshState } from "@/api/selectors"
 import { BottomActionBar } from "@/components/shared/bottom-action-bar"
+import { ExpandableText } from "@/components/shared/expandable-text"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
@@ -151,11 +152,15 @@ function CatalogListRefreshSummary({
         </span>
       ) : null}
       {state?.last_error ? (
-        <span className="block break-words text-destructive">
-          {t("pages.catalog.refreshState.error", {
+        // Та же ошибка демона, что и в списках, и та же беда: в строке
+        // заготовки каталога она вытесняет всё остальное.
+        <ExpandableText
+          className="text-destructive"
+          lines={2}
+          text={t("pages.catalog.refreshState.error", {
             message: state.last_error,
           })}
-        </span>
+        />
       ) : null}
     </span>
   )
