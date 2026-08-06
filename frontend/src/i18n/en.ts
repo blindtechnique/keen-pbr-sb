@@ -2310,18 +2310,18 @@ export const enTranslation = {
       urltest: {
         groupsTitle: "Group members",
         groupsDescription:
-          "Add tunnels in preference order. The available-tunnel selection policy is configured below.",
+          "Add VPNs or proxies in preference order. The selection policy is configured below.",
         groupTitle: "Tier {{index}}",
         groupDescription:
-          "Tier {{index}} — tunnels in higher tiers are preferred; the next tier is used when the one above is unavailable.",
+          "Tier {{index}} — VPNs and proxies in higher tiers are preferred; the next tier is used when the one above is unavailable.",
         groupWeight: "Tier weight",
         groupWeightHint:
           "Lower weights have higher priority. Leave empty to use the default weight of 1.",
-        interfaceOutbounds: "Tunnels",
-        addOutbound: "Add a tunnel",
-        noInterfaceOutbounds: "No tunnels with a route found.",
+        interfaceOutbounds: "VPN or proxy",
+        addOutbound: "Add VPN or proxy",
+        noInterfaceOutbounds: "No VPNs or proxies with a route found.",
         addInterfaceOutboundsFirst:
-          "Create a route for at least one tunnel first so the group has selectable targets.",
+          "Create a route for at least one VPN or proxy first so the group has selectable targets.",
         addGroup: "Add tier",
         advancedTitle: "Advanced",
         advancedHint:

@@ -509,8 +509,10 @@ export function OutboundInterfaceLabel({
 
   return (
     <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
+      {/* Пол ширины: имя — главное в строке. Без него техническое имя,
+          статус и адресные плашки (все shrink-0) сжимали имя до «s…». */}
       <span
-        className="min-w-0 truncate text-sm font-medium text-foreground"
+        className="min-w-[8rem] truncate text-sm font-medium text-foreground"
         title={primary}
       >
         {primary}

@@ -977,6 +977,10 @@ function OutboundForm({
                             {interfaceOutboundOptions.length ? (
                               <MultiSelectList
                                 error={error}
+                                // Узкое поле (20rem) обрезало имена туннелей
+                                // до «s…»: выпадающий список наследует ширину
+                                // поля, поэтому оба — во всю колонку.
+                                fullWidthAdd
                                 name={OUTBOUND_FIELD_NAMES.outboundGroups}
                                 addLabel={t(
                                   "pages.outboundUpsert.urltest.addOutbound"
