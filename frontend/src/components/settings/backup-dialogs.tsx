@@ -16,7 +16,6 @@ import {
 import {
   BACKUP_GROUPS,
   createBackup,
-  createDefaultBackupSelection,
   downloadBackup,
   getRollbackAvailability,
   readBackupFile,
@@ -27,37 +26,44 @@ import {
   type BackupSelection,
 } from "@/lib/backup"
 
-// Ключ группы приходит из бэкенда и совпадает с ключом в словаре: отдельная
-// карта «группа -> подпись» здесь была бы вторым списком тех же имён, который
-// однажды разойдётся с первым.
-const groupLabelKey = (group: BackupGroup) =>
-  `pages.settings.backup.groups.${group}` as const
-
 /**
- * Группы, которые по новой концепции ходят парой: туннель и есть маршрут,
- * а DNS-правила привязаны к спискам. Галочки остаются раздельными — состав
- * копии решает человек, — но половинчатый выбор получает честное
- * предупреждение о том, что восстановится не целое.
+ * Галочки бэкапа — по смыслу, а не по внутренним группам API.
+ *
+ * По новой концепции туннель и есть маршрут, а DNS-правила привязаны к
+ * спискам: раздельные галочки позволяли молча выгрузить половину пары —
+ * туннели без маршрутов или списки без их DNS. Одна галочка теперь включает
+ * обе группы API сразу; формат архива не меняется, старые копии
+ * восстанавливаются как раньше (решение владельца: копия должна быть
+ * целой, а не предупреждать о нецелой).
  */
-const BACKUP_PAIR_WARNINGS = [
-  {
-    present: "transports",
-    missing: "outbounds",
-    key: "transportsWithoutOutbounds",
-  },
-  {
-    present: "outbounds",
-    missing: "transports",
-    key: "outboundsWithoutTransports",
-  },
-  { present: "routing", missing: "dns", key: "routingWithoutDns" },
-  { present: "dns", missing: "routing", key: "dnsWithoutRouting" },
-] as const
+const BACKUP_CHOICES = [
+  { key: "general", groups: ["general"] },
+  { key: "vpn", groups: ["transports", "outbounds"] },
+  { key: "listsDns", groups: ["routing", "dns"] },
+  { key: "nfqws_config", groups: ["nfqws_config"] },
+  { key: "nfqws_lists", groups: ["nfqws_lists"] },
+] as const satisfies readonly {
+  key: string
+  groups: readonly BackupGroup[]
+}[]
 
-function getBackupPairWarningKeys(groups: BackupSelection): string[] {
-  return BACKUP_PAIR_WARNINGS.filter(
-    (pair) => groups[pair.present] && !groups[pair.missing]
-  ).map((pair) => `pages.settings.backup.pairWarnings.${pair.key}`)
+type BackupChoiceKey = (typeof BACKUP_CHOICES)[number]["key"]
+
+const choiceLabelKey = (choice: BackupChoiceKey) =>
+  `pages.settings.backup.choices.${choice}` as const
+
+function toBackupSelection(
+  choices: Record<BackupChoiceKey, boolean>
+): BackupSelection {
+  const selection = Object.fromEntries(
+    BACKUP_GROUPS.map((group) => [group, false])
+  ) as BackupSelection
+  for (const choice of BACKUP_CHOICES) {
+    for (const group of choice.groups) {
+      selection[group] = choices[choice.key]
+    }
+  }
+  return selection
 }
 
 type ManagedDialogProps = {
@@ -125,15 +131,18 @@ type BackupPanelProps = {
 
 export function BackupPanel({ onComplete }: BackupPanelProps) {
   const { t } = useTranslation()
-  const [groups, setGroups] = useState<BackupSelection>(
-    createDefaultBackupSelection
+  const [choices, setChoices] = useState<Record<BackupChoiceKey, boolean>>(
+    () =>
+      Object.fromEntries(
+        BACKUP_CHOICES.map((choice) => [choice.key, true])
+      ) as Record<BackupChoiceKey, boolean>
   )
   const [pending, setPending] = useState(false)
 
   const create = async () => {
     setPending(true)
     try {
-      downloadBackup(await createBackup(groups))
+      downloadBackup(await createBackup(toBackupSelection(choices)))
       toast.success(t("pages.settings.backup.created"))
       onComplete?.()
     } catch (error) {
@@ -153,41 +162,29 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
         {t("pages.settings.backup.secretsWarning")}
       </p>
       <div className="grid gap-2 sm:grid-cols-2">
-        {BACKUP_GROUPS.map((group) => (
+        {BACKUP_CHOICES.map((choice) => (
           <label
             className="flex cursor-pointer items-center gap-3 rounded-md border p-3"
-            key={group}
+            key={choice.key}
           >
             <Checkbox
-              checked={groups[group]}
+              checked={choices[choice.key]}
               onCheckedChange={(checked) =>
-                setGroups((value) => ({
+                setChoices((value) => ({
                   ...value,
-                  [group]: checked === true,
+                  [choice.key]: checked === true,
                 }))
               }
             />
             <span className="text-sm font-medium">
-              {t(groupLabelKey(group))}
+              {t(choiceLabelKey(choice.key))}
             </span>
           </label>
         ))}
       </div>
-      {getBackupPairWarningKeys(groups).length > 0 ? (
-        <div className="space-y-1">
-          {getBackupPairWarningKeys(groups).map((warningKey) => (
-            <p
-              className="text-xs leading-5 text-amber-700 dark:text-amber-300"
-              key={warningKey}
-            >
-              {t(warningKey)}
-            </p>
-          ))}
-        </div>
-      ) : null}
       <div className="flex justify-end">
         <Button
-          disabled={pending || !Object.values(groups).some(Boolean)}
+          disabled={pending || !Object.values(choices).some(Boolean)}
           onClick={() => void create()}
         >
           <DownloadIcon />

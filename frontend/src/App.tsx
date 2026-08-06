@@ -24,6 +24,9 @@ const ConnectionsPage = lazy(() =>
     default: m.ConnectionsPage,
   }))
 )
+const DnsRulesPage = lazy(() =>
+  import("@/pages/dns-rules-page").then((m) => ({ default: m.DnsRulesPage }))
+)
 const DnsRuleUpsertPage = lazy(() =>
   import("@/pages/dns-rule-upsert-page").then((m) => ({
     default: m.DnsRuleUpsertPage,
@@ -203,7 +206,7 @@ function DnsRuleEditorRoute({
 
   return (
     <>
-      <RulesPage initialTab="dns" />
+      <DnsRulesPage />
       <DnsRuleUpsertPage mode={mode} presentation="dialog" ruleId={ruleId} />
     </>
   )
@@ -345,8 +348,11 @@ function App() {
                 />
               )}
             </Route>
+            {/* Общий список DNS-правил остался по прямому адресу: сюда
+                ведёт честный блок из редактора списка, когда правило общее
+                для нескольких списков. В меню страницы больше нет. */}
             <Route path="/dns-rules">
-              <RulesPage initialTab="dns" />
+              <DnsRulesPage />
             </Route>
             <Route path="/routing-rules/create">
               <RoutingRuleEditorRoute mode="create" />

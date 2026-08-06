@@ -337,10 +337,9 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   },
   {
     file: "src/components/settings/backup-dialogs.tsx",
-    argument: "warningKey",
-    keys: ["pages.settings.backup.pairWarnings.*"],
-    reason:
-      "Backup pair warnings are a finite list assembled from BACKUP_PAIR_WARNINGS.",
+    argument: "choiceLabelKey(choice.key)",
+    keys: ["pages.settings.backup.choices.*"],
+    reason: "Backup choices are the finite BACKUP_CHOICES table.",
   },
   {
     file: "src/pages/transport-upsert-page.tsx",
@@ -359,11 +358,5 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     argument: "`transports.states.${*}`",
     keys: ["transports.states.*"],
     reason: "Transport state is a finite API enum.",
-  },
-  {
-    file: "src/components/settings/backup-dialogs.tsx",
-    argument: "groupLabelKey(group)",
-    keys: ["pages.settings.backup.groups.*"],
-    reason: "Backup groups are a finite API enum (BackupGroup).",
   },
 ] as const

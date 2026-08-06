@@ -1415,15 +1415,12 @@ export const enTranslation = {
           nfqws_config: "nfqws2 configuration",
           nfqws_lists: "nfqws2 lists",
         },
-        pairWarnings: {
-          transportsWithoutOutbounds:
-            "VPN and proxies selected without routes: after restore the tunnels will have no routes or groups.",
-          outboundsWithoutTransports:
-            "Routes selected without VPN and proxies: after restore the routes will point at missing tunnels.",
-          routingWithoutDns:
-            "Lists and rules selected without DNS settings: the lists' DNS rules will not be in the copy.",
-          dnsWithoutRouting:
-            "DNS settings selected without lists and rules: DNS rules will reference missing lists.",
+        choices: {
+          general: "General settings",
+          vpn: "VPN, proxies, groups and their routes",
+          listsDns: "Lists, rules and DNS",
+          nfqws_config: "nfqws2 configuration",
+          nfqws_lists: "nfqws2 lists",
         },
         dialog: {
           backupTitle: "Backup",
@@ -2105,7 +2102,7 @@ export const enTranslation = {
     rules: {
       title: "Rules",
       description:
-        "Where traffic goes and which DNS servers resolve which domains. A single list usually needs both rules.",
+        "Where traffic goes, by lists and conditions. A list's DNS server is assigned in the list editor.",
       tabs: {
         ariaLabel: "Rule sections",
         routing: "Routing",
@@ -2701,7 +2698,7 @@ export const enTranslation = {
           "Domains from this list resolve through the selected server. Without one the list uses the primary servers.",
         none: "Not set",
         shared:
-          "DNS for this list comes from the rule \u201c{{names}}\u201d, shared by several lists. Change it under Rules, where everything it affects is visible.",
+          "DNS for this list comes from the rule \u201c{{names}}\u201d, shared by several lists. Change it in the full DNS rules list, where everything it affects is visible.",
         openRules: "Open DNS rules",
       },
       refreshRoute: {
@@ -2722,12 +2719,12 @@ export const enTranslation = {
       quickSetup: {
         title: "Quick rule setup",
         description:
-          "Optionally create linked rules together with the list. All changes are saved in one operation.",
+          "Optionally point the list at a route and assign it a DNS server together with creation. All changes are saved in one operation.",
         recommendedDescription:
-          "For a stable default, simple mode creates dedicated routing and DNS rules for this list.",
+          "For a stable default, simple mode points the list at the selected route and assigns it a DNS server.",
         createRouteRule: "Create a routing rule for this list",
         selectOutbound: "Select a route or group",
-        createDnsRule: "Create a DNS rule for this list",
+        createDnsRule: "Assign a DNS server to this list",
         selectDnsServer: "Select a DNS server",
         noDnsServers:
           "Create a DNS server first, then it will become available here.",
@@ -2745,7 +2742,7 @@ export const enTranslation = {
         recommendedPlan: {
           title: "Recommended setup",
           description:
-            "One list, one routing rule, and one DNS rule are validated and saved together.",
+            "The list, its routing rule, and its DNS server are validated and saved together.",
           route: "Route: {{route}}",
           dnsReuse: "DNS: reuse {{dns}}",
           dnsCreate: "DNS: create {{dns}}",

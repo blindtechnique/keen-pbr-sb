@@ -1224,7 +1224,7 @@ function ListForm({
                   ) {
                     return
                   }
-                  navigate("/rules#dns")
+                  navigate("/dns-rules")
                 }}
                 type="button"
                 variant="outline"
