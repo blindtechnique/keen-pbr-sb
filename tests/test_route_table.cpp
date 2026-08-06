@@ -121,6 +121,7 @@ TEST_CASE("RouteTable deletes only routes created by this process") {
     routes.add(owned);
     netlink.add_result = RouteAddResult::AlreadyPresent;
     const auto foreign = route("192.0.2.0/24", 150);
+    netlink.live.push_back(live_route(foreign));
     routes.add(foreign);
 
     REQUIRE(routes.get_routes().size() == 2);
@@ -134,6 +135,7 @@ TEST_CASE("RouteTable remove preserves an identical pre-existing route") {
     netlink.add_result = RouteAddResult::AlreadyPresent;
     RouteTable routes(netlink);
     const auto foreign = route("default", 150);
+    netlink.live.push_back(live_route(foreign));
     routes.add(foreign);
     routes.remove(foreign);
 
@@ -455,11 +457,14 @@ TEST_CASE("competing replacement is never claimed or deleted") {
         });
     const auto expected = interface_route("default", 153, "tun0");
     routes.add(expected);
-    netlink.add_result = RouteAddResult::AlreadyPresent;
+    netlink.add_hook = [&](const RouteSpec& spec) {
+        netlink.live.push_back(live_route(spec));
+        return RouteAddResult::AlreadyPresent;
+    };
     netlink.added.clear();
 
-    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
-    routes.reconcile({expected}, RouteReconcileMode::DeferredRepair);
+    routes.add_missing({expected}, RouteReconcileMode::DeferredRepair);
+    routes.add_missing({expected}, RouteReconcileMode::DeferredRepair);
     routes.clear();
 
     CHECK(netlink.added.size() == 1);
@@ -843,9 +848,10 @@ TEST_CASE("RouteTable never sweeps a protocol-marked reserved table") {
 
 TEST_CASE("RouteTable claims a tracked route recreated after it vanishes") {
     FakeRouteNetlink netlink;
-    netlink.add_result = RouteAddResult::AlreadyPresent;
     RouteTable routes(netlink);
     const auto expected = route("default", 150);
+    netlink.live.push_back(live_route(expected));
+    netlink.add_result = RouteAddResult::AlreadyPresent;
     routes.add(expected);
 
     netlink.add_result = RouteAddResult::Created;
