@@ -267,7 +267,7 @@ export const enTranslation = {
     exported: "The export was prepared and downloaded.",
     exportFailed: "Failed to create the export file.",
     replaceOutboundConflicts:
-      "Replace existing routes and failover targets tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
+      "Replace existing routes and groups tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
     replaceTransportConflicts:
       "Replace existing tunnels and proxies tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
     transportSecretsWarning:
@@ -280,7 +280,7 @@ export const enTranslation = {
     mapOutbound:
       "Route “{{missing}}” does not exist. Select one of: {{available}}",
     outboundRequired:
-      "Every imported rule must be mapped to an existing route or failover target.",
+      "Every imported rule must be mapped to an existing route or group.",
   },
   auth: {
     title: "Sign in to keen-pbr-sb",
@@ -345,7 +345,7 @@ export const enTranslation = {
         routingRule: "Routing rules:",
         dnsRule: "DNS rules:",
         dnsServer: "DNS servers:",
-        failoverGroup: "Failover:",
+        failoverGroup: "Groups:",
         list: "Lists:",
         listRefresh: "URL list refresh:",
       },
@@ -477,7 +477,7 @@ export const enTranslation = {
       systemMonitor: "Dashboard",
       catalog: "List catalogue",
       settings: "Settings",
-      outbounds: "Routes and failover",
+      outbounds: "Routes and groups",
       transports: "Tunnels and proxies",
       routesAndTunnels: "Routes and tunnels",
       rules: "Rules",
@@ -710,7 +710,7 @@ export const enTranslation = {
     form: {
       createOutbound: "Create a route now",
       createOutboundHint:
-        "The tunnel or proxy appears under Routes and failover with the same name and can be picked in routing rules straight away.",
+        "The tunnel or proxy appears under Routes and groups with the same name and can be picked in routing rules straight away.",
       outboundExists: "A route tagged {{tag}} already exists",
       createTitle: "Add tunnel or proxy",
       editTitle: "Edit tunnel or proxy",
@@ -730,7 +730,7 @@ export const enTranslation = {
       displayName: "Friendly name",
       displayNamePlaceholder: "For example, Netherlands - primary",
       displayNameHint:
-        "Shown in the interface instead of the technical tag. The tag stays unchanged, so routes and failover keep working.",
+        "Shown in the interface instead of the technical tag. The tag stays unchanged, so routes and groups keep working.",
       displayNameInvalid: "Enter a name — 1 to 80 characters.",
       useAliasSuggestion: "Use “{{name}}”",
       advancedSettings: "Advanced settings",
@@ -790,9 +790,9 @@ export const enTranslation = {
     routing: {
       title: "This tunnel or proxy is not used by a route yet",
       description:
-        "First create an Interface route for this interface. For automatic switching, create a URLTest failover target and add two or more interface routes to its groups.",
+        "First create an Interface route for this interface. For automatic switching, create a group and add two or more interface routes to it.",
       createOutbound: "Create route",
-      createFailover: "Create failover",
+      createFailover: "Create group",
       bindOutbound: "Create route",
       alreadyBound: "Already linked to “{{tag}}”",
       openOutbound: "Open the route",
@@ -1029,11 +1029,11 @@ export const enTranslation = {
         degraded: "The route is responding unreliably",
         unavailable: "No route is currently available",
         member: "{{name}}: {{reason}}",
-        open: "Open routes and failover",
+        open: "Open routes and groups",
       },
       members: "{{count}} in group",
       kind: {
-        failover: "Failover",
+        failover: "Groups",
         table: "Table",
         blackhole: "Blackhole",
         ignore: "Pass-through",
@@ -1053,10 +1053,10 @@ export const enTranslation = {
         unavailable: "Unavailable",
         unknown: "Unknown",
       },
-      title: "Routes and failover",
-      loadError: "Unable to load route and failover health.",
-      emptyTitle: "No routes or failover targets configured",
-      emptyDescription: "Add a route or failover target to see its health.",
+      title: "Routes and groups",
+      loadError: "Unable to load route and group health.",
+      emptyTitle: "No routes or groups configured",
+      emptyDescription: "Add a route or group to see its health.",
       inUse: "In use",
       urltestTitle: "urltest",
       headers: {
@@ -1119,7 +1119,7 @@ export const enTranslation = {
           config: "Your full configuration file (including the lists in use)",
           serviceHealth: "Service health",
           routingHealth: "Routing health",
-          outbounds: "Routes and failover status",
+          outbounds: "Routes and groups status",
           names: "Names of lists, routes, and interfaces",
         },
         trustWarning: "Please share this file only with people you trust.",
@@ -1387,7 +1387,7 @@ export const enTranslation = {
         groups: {
           general: "General settings",
           transports: "Tunnels and proxies",
-          outbounds: "Routes and failover",
+          outbounds: "Routes and groups",
           dns: "DNS settings",
           routing: "Lists and routing rules",
           nfqws_config: "nfqws2 configuration",
@@ -2083,12 +2083,12 @@ export const enTranslation = {
     routesAndTunnels: {
       title: "Routes and tunnels",
       description:
-        "How traffic leaves the router: tunnels and proxies, router interfaces, failover and system destinations.",
+        "How traffic leaves the router: tunnels and proxies, router interfaces, tunnel groups and system destinations.",
       tabs: {
         ariaLabel: "Route and tunnel sections",
         tunnels: "Tunnels and proxies",
         interfaces: "Routes",
-        failover: "Failover",
+        failover: "Groups",
         system: "System",
       },
     },
@@ -2096,7 +2096,7 @@ export const enTranslation = {
       plain: {
         interface: "Traffic leaves through {{name}}",
         urltest:
-          "Failover: if the first exit stops answering, traffic moves to the next",
+          "A group automatically switches to a working tunnel",
         table: "Traffic goes straight through the provider, past the tunnels",
         blackhole: "Connections are not let out",
         ignore: "Traffic passes without changing its route",
@@ -2109,7 +2109,7 @@ export const enTranslation = {
       },
       groups: {
         interfaces: "Tunnels and interfaces",
-        failover: "Failover groups",
+        failover: "Groups",
         system: "System routes",
       },
       split: {
@@ -2120,31 +2120,31 @@ export const enTranslation = {
       },
       groupsEmpty: {
         interfaces: "No tunnels or interfaces have been added yet.",
-        failover: "No failover groups have been configured yet.",
+        failover: "No groups have been configured yet.",
         system: "No system routes have been configured yet.",
       },
       tabs: {
-        ariaLabel: "Route and failover sections",
+        ariaLabel: "Route and group sections",
       },
-      title: "Routes and failover",
+      title: "Routes and groups",
       description:
-        "Traffic destinations: tunnels and interfaces, failover groups, and system routes.",
-      actions: { new: "Add route or failover target" },
+        "Traffic destinations: tunnels and interfaces, tunnel groups, and system routes.",
+      actions: { new: "Add route or group" },
       bulk: {
         selected: "{{count}} selected",
         delete: "Delete selected",
         confirmDelete:
-          "Delete {{count}} route(s) or failover target(s)? Dependencies are not validated until save.",
+          "Delete {{count}} route(s) or group(s)? Dependencies are not validated until save.",
       },
       deleteDialog: {
-        title: "Delete routes or failover targets?",
+        title: "Delete routes or groups?",
         description:
           "Confirming this operation will make the following changes:",
         confirm: "Delete",
         items: {
           outboundPrefix: "Route",
           outboundSuffix: "will be deleted.",
-          dependentOutboundPrefix: "Dependent failover target",
+          dependentOutboundPrefix: "Dependent group",
           dependentOutboundSuffix: "will be deleted.",
           routingRule: "Routing rule “{{name}}” will be removed.",
           ruleDetail: "{{label}}: {{value}}",
@@ -2155,23 +2155,23 @@ export const enTranslation = {
             "The global URL list refresh routes will be changed.",
           downloadRoutes: "Download routes",
           urltestGroupChanged:
-            'Group #{{group}} in failover target "{{outbound}}" will be changed.',
+            'Tier #{{group}} in group "{{outbound}}" will be changed.',
           urltestGroupRemoved:
-            'Group #{{group}} in failover target "{{outbound}}" will be deleted.',
+            'Tier #{{group}} in group "{{outbound}}" will be deleted.',
           groupOutbounds: "Group routes",
         },
       },
       empty: {
-        title: "No routes or failover targets yet",
+        title: "No routes or groups yet",
         description:
-          "Add a route or failover target to start building routing behavior.",
+          "Add a route or group to start building routing behavior.",
       },
       headers: {
         tag: "Name",
         type: "Source",
         summary: "Details",
         purpose: "What it does",
-        memberChain: "Failover order",
+        memberChain: "Switchover order",
         usedBy: "Used by",
         runtime: "Runtime",
         actions: "Actions",
@@ -2192,17 +2192,17 @@ export const enTranslation = {
       },
     },
     outboundUpsert: {
-      createTitle: "Create route or failover target",
-      editTitle: "Edit route or failover target",
+      createTitle: "Create route or group",
+      editTitle: "Edit route or group",
       editCardTitle: "Edit {{tag}}",
       description:
-        "A route can use a network interface, an existing routing table, or a failover group that selects an available option.",
-      cardDescription: "Configure a route, system action, or failover target.",
+        "A route can use a network interface, an existing routing table, or a tunnel group that picks a working tunnel by itself.",
+      cardDescription: "Configure a route, system action, or group.",
       missing: {
         cardDescription:
-          "The requested route or failover target could not be found.",
+          "The requested route or group could not be found.",
         cardTitle: "Missing route",
-        description: "Return to Routes and failover and choose a valid entry.",
+        description: "Return to Routes and groups and choose a valid entry.",
         back: "Back to routes",
       },
       actions: { create: "Create route", save: "Save route" },
@@ -2213,19 +2213,19 @@ export const enTranslation = {
       fields: {
         displayName: "Name",
         displayNameHint:
-          "A readable route or failover group name shown throughout the interface.",
+          "A readable route or group name shown throughout the interface.",
         technicalId: "Technical ID",
         technicalIdHint:
           "A stable internal identifier used by rules and references. It is generated automatically.",
         tag: "Technical ID",
         tagHint:
-          "A unique name for this route. Referenced in traffic rules and failover groups.",
+          "A unique name for this route. Referenced in traffic rules and groups.",
         type: "Type",
         outboundTypes: "Route types",
         typeOptions: {
           interface: "Interface",
           table: "Routing table",
-          urltest: "Auto-select (urltest)",
+          urltest: "Tunnel group (auto-select)",
           blackhole: "Blackhole",
           ignore: "Ignore",
         },
@@ -2259,21 +2259,24 @@ export const enTranslation = {
           "Ignore routes pass matching traffic through without policy-based routing changes.",
       },
       urltest: {
-        groupsTitle: "Failover groups",
+        groupsTitle: "Group members",
         groupsDescription:
           "Add routes in preference order. The available-route selection policy is configured below.",
-        groupTitle: "Group {{index}}",
+        groupTitle: "Tier {{index}}",
         groupDescription:
-          "Priority {{index}} - higher priority groups are preferred.",
-        groupWeight: "Group weight",
+          "Tier {{index}} — tunnels in higher tiers are preferred; the next tier is used when the one above is unavailable.",
+        groupWeight: "Tier weight",
         groupWeightHint:
           "Lower weights have higher priority. Leave empty to use the default weight of 1.",
         interfaceOutbounds: "Interface routes",
         addOutbound: "Add route",
         noInterfaceOutbounds: "No interface routes found.",
         addInterfaceOutboundsFirst:
-          "Add interface routes first so the failover group has selectable targets.",
-        addGroup: "Add group",
+          "Add interface routes first so the group has selectable targets.",
+        addGroup: "Add tier",
+        advancedTitle: "Advanced",
+        advancedHint:
+          "Availability probing, retries, and the circuit breaker. The defaults suit most setups.",
         probingTitle: "Probing and retries",
         probingDescription:
           "Configure the selection policy, availability probe, and retries after failures.",
@@ -2680,7 +2683,7 @@ export const enTranslation = {
         recommendedDescription:
           "For a stable default, simple mode creates dedicated routing and DNS rules for this list.",
         createRouteRule: "Create a routing rule for this list",
-        selectOutbound: "Select a route or failover target",
+        selectOutbound: "Select a route or group",
         createDnsRule: "Create a DNS rule for this list",
         selectDnsServer: "Select a DNS server",
         noDnsServers:
@@ -2706,7 +2709,7 @@ export const enTranslation = {
           notSelected: "not selected",
         },
         routeRequired:
-          "Select a route or failover target for the routing rule.",
+          "Select a route or group for the routing rule.",
         dnsRequired: "Select a DNS server for the DNS rule.",
       },
       fields: {

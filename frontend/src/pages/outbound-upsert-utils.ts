@@ -227,3 +227,45 @@ function parseNumber(value: string): number | undefined {
   const parsed = Number(trimmed)
   return Number.isFinite(parsed) ? parsed : undefined
 }
+
+/**
+ * Отличается ли тонкая настройка группы от умолчаний.
+ *
+ * Решает, раскрывать ли «Дополнительно» при редактировании: если человек уже
+ * менял проверку доступности или circuit breaker, прятать их от него нечестно.
+ * `selectionMode` и `conntrackOnSwitch` сюда входят по той же причине — они
+ * живут в том же свёрнутом блоке.
+ */
+export function urltestTuningIsDefault(
+  draft: Pick<
+    OutboundDraft,
+    | "probeUrl"
+    | "interval"
+    | "probeTimeout"
+    | "tolerance"
+    | "selectionMode"
+    | "conntrackOnSwitch"
+    | "retryAttempts"
+    | "retryInterval"
+    | "circuitBreakerFailures"
+    | "circuitBreakerSuccesses"
+    | "circuitBreakerTimeout"
+    | "circuitBreakerHalfOpen"
+  >
+): boolean {
+  const defaults = createDefaultOutboundDraft()
+  return (
+    draft.probeUrl === defaults.probeUrl &&
+    draft.interval === defaults.interval &&
+    draft.probeTimeout === defaults.probeTimeout &&
+    draft.tolerance === defaults.tolerance &&
+    draft.selectionMode === defaults.selectionMode &&
+    draft.conntrackOnSwitch === defaults.conntrackOnSwitch &&
+    draft.retryAttempts === defaults.retryAttempts &&
+    draft.retryInterval === defaults.retryInterval &&
+    draft.circuitBreakerFailures === defaults.circuitBreakerFailures &&
+    draft.circuitBreakerSuccesses === defaults.circuitBreakerSuccesses &&
+    draft.circuitBreakerTimeout === defaults.circuitBreakerTimeout &&
+    draft.circuitBreakerHalfOpen === defaults.circuitBreakerHalfOpen
+  )
+}

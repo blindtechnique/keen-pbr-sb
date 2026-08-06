@@ -36,6 +36,7 @@ import {
 } from "@/components/shared/interface-picker"
 import { MultiSelectList } from "@/components/shared/multi-select-list"
 import { OrderedGroupCard } from "@/components/shared/ordered-group-card"
+import { AdvancedSection } from "@/components/shared/advanced-section"
 import { SectionCard } from "@/components/shared/section-card"
 import { ServerValidationAlert } from "@/components/shared/server-validation-alert"
 import {
@@ -68,6 +69,7 @@ import {
   type OutboundGroupDraft,
   type StrictEnforcementOption,
   type UrltestSelectionMode,
+  urltestTuningIsDefault,
 } from "@/pages/outbound-upsert-utils"
 import {
   Select,
@@ -1009,11 +1011,19 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
-        <SectionCard
-          flat
-          description={t("pages.outboundUpsert.urltest.probingDescription")}
-          title={t("pages.outboundUpsert.urltest.probingTitle")}
+        // Тонкая настройка спрятана: у неё хорошие умолчания, а развёрнутой
+        // она превращала форму группы в анкету на десяток полей. Если группа
+        // уже настроена не по умолчаниям, блок открывается сам.
+        <AdvancedSection
+          defaultOpen={!urltestTuningIsDefault(draft)}
+          hint={t("pages.outboundUpsert.urltest.advancedHint")}
+          title={t("pages.outboundUpsert.urltest.advancedTitle")}
         >
+          <SectionCard
+            flat
+            description={t("pages.outboundUpsert.urltest.probingDescription")}
+            title={t("pages.outboundUpsert.urltest.probingTitle")}
+          >
           <div className="grid gap-4 md:grid-cols-2">
             <form.Field name={OUTBOUND_FIELD_NAMES.selectionMode}>
               {(field) => (
@@ -1306,15 +1316,13 @@ function OutboundForm({
               }}
             </form.Field>
           </div>
-        </SectionCard>
-      ) : null}
+          </SectionCard>
 
-      {isUrltest ? (
-        <SectionCard
-          flat
-          description={t("pages.outboundUpsert.circuitBreaker.description")}
-          title={t("pages.outboundUpsert.circuitBreaker.title")}
-        >
+          <SectionCard
+            flat
+            description={t("pages.outboundUpsert.circuitBreaker.description")}
+            title={t("pages.outboundUpsert.circuitBreaker.title")}
+          >
           <div className="grid gap-4 md:grid-cols-2">
             <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerFailures}>
               {(field) => {
@@ -1436,7 +1444,8 @@ function OutboundForm({
               }}
             </form.Field>
           </div>
-        </SectionCard>
+          </SectionCard>
+        </AdvancedSection>
       ) : null}
 
       {isInterface ? (
