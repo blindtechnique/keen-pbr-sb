@@ -358,31 +358,41 @@ export function OutboundsPage({
           />
         ),
         // Связи видно до удаления, а не из диалога, который перечислял
-        // последствия постфактум.
+        // последствия постфактум. До трёх однострочных категорий — чуть
+        // больше, чем у туннелей (решение владельца), но строки таблицы
+        // остаются одной высоты; остаток — числом «Ещё N».
         <DependencyList
-          compact
+          cellRows={3}
+          className="min-h-[72px]"
           dependencies={dependenciesByTag.get(item.id) ?? []}
           emptyHint={t("pages.outbounds.usage.none")}
           key={`${item.id}-usage`}
         />,
         <ActionButtons
           actions={[
-            {
-              // Проверка задержки бьёт по всем выходам разом: у демона
-              // одна общая проверка, отдельной «проверь только этот»
-              // не существует.
-              disabled: probeMutation.isPending,
-              icon: (
-                <RotateCw
-                  className={cn(
-                    "h-4 w-4",
-                    probeMutation.isPending && "animate-spin"
-                  )}
-                />
-              ),
-              label: t("transports.latencyRefresh"),
-              onClick: () => probeMutation.mutate(),
-            },
+            // У системных направлений кнопки замера нет: wan и blackhole
+            // демон не пробирует, и кнопка ничего не замеряла — мёртвый
+            // элемент управления хуже отсутствующего (замечание владельца).
+            ...(systemGroupActive
+              ? []
+              : [
+                  {
+                    // Проверка задержки бьёт по всем выходам разом: у демона
+                    // одна общая проверка, отдельной «проверь только этот»
+                    // не существует.
+                    disabled: probeMutation.isPending,
+                    icon: (
+                      <RotateCw
+                        className={cn(
+                          "h-4 w-4",
+                          probeMutation.isPending && "animate-spin"
+                        )}
+                      />
+                    ),
+                    label: t("transports.latencyRefresh"),
+                    onClick: () => probeMutation.mutate(),
+                  },
+                ]),
             {
               icon: <KeenPencilIcon className="h-4 w-4" />,
               label: t("common.edit"),

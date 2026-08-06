@@ -1802,28 +1802,19 @@ function UsedByCell({
 }) {
   const { t } = useTranslation()
 
-  const list = trimSelfRouteSuffix(dependencies, selfNames)
-  if (!bound || list.length === 0) {
-    const hint = bound
-      ? t("common.dependencies.none")
-      : t("transports.usedByNone")
-    return (
-      // `truncate`, а не перенос: строка в прошивке ровно 48px, а длинный
-      // текст («удаление ничего не сломает») без потолка распирал колонку и
-      // сжимал имя туннеля до одной буквы. Полный текст остаётся в title.
-      <span
-        className="block max-w-[26rem] truncate text-xs text-muted-foreground"
-        title={hint}
-      >
-        {hint}
-      </span>
-    )
-  }
-
   // Тег маршрута здесь больше не показывается: туннель и есть маршрут, и имя
   // маршрута повторяло имя туннеля из соседней колонки. Вместо этого — кто
-  // туннелем пользуется: правила, DNS-серверы, загрузка списков.
-  return <DependencyList compact dependencies={list} />
+  // туннелем пользуется, но не больше двух строк (решение владельца: строки
+  // таблицы одной высоты, полный список — в раскрытии строки). min-h — чтобы
+  // строка с одной категорией была той же высоты, что с двумя.
+  return (
+    <DependencyList
+      cellRows={2}
+      className="min-h-[46px]"
+      dependencies={bound ? trimSelfRouteSuffix(dependencies, selfNames) : []}
+      emptyHint={bound ? undefined : t("transports.usedByNone")}
+    />
+  )
 }
 
 /**
