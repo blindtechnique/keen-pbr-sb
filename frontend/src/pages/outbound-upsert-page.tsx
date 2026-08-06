@@ -976,6 +976,11 @@ function OutboundForm({
                           <FieldContent>
                             {interfaceOutboundOptions.length ? (
                               <MultiSelectList
+                                // Порядок внутри ступени значим (режим «по
+                                // приоритету» идёт по списку сверху вниз),
+                                // поэтому участников можно перетаскивать —
+                                // как резервные DNS-серверы.
+                                allowReorder
                                 error={error}
                                 // Узкое поле (20rem) обрезало имена туннелей
                                 // до «s…»: выпадающий список наследует ширину

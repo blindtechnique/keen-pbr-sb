@@ -503,16 +503,22 @@ export function OutboundInterfaceLabel({
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const ipv4 = runtimeInterface?.ipv4_addresses?.[0]
-  const ipv6 = runtimeInterface?.ipv6_addresses?.[0]
+  // fe80:: — link-local, он есть у любого интерфейса и ни о чём не говорит,
+  // а занимает пол строки. Показывается только глобальный IPv6.
+  const ipv6 = runtimeInterface?.ipv6_addresses?.find(
+    (address) => !isLinkLocalIpv6(address)
+  )
   const primary = label?.trim() || tag
   const technical = interfaceName ?? (primary === tag ? undefined : tag)
 
   return (
     <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
-      {/* Пол ширины: имя — главное в строке. Без него техническое имя,
-          статус и адресные плашки (все shrink-0) сжимали имя до «s…». */}
+      {/* Имя — главное в строке и не сжимается (владелец: «имя должно быть
+          намного приоритетнее ipv6»). Сжатие достаётся IPv6-плашке: она
+          единственная с min-w-0 и усекается первой. Кап на имя — защита от
+          патологически длинного названия. */}
       <span
-        className="min-w-[8rem] truncate text-sm font-medium text-foreground"
+        className="max-w-[24rem] shrink-0 truncate text-sm font-medium text-foreground"
         title={primary}
       >
         {primary}
@@ -526,8 +532,12 @@ export function OutboundInterfaceLabel({
         runtimeInterface ? (
           <>
             <InterfaceStatusBadge status={runtimeInterface.status} />
-            {ipv4 ? <AddressPreviewChip address={ipv4} /> : null}
-            {ipv6 ? <AddressPreviewChip address={ipv6} /> : null}
+            {ipv4 ? (
+              <AddressPreviewChip address={ipv4} className="shrink-0" />
+            ) : null}
+            {ipv6 ? (
+              <AddressPreviewChip address={ipv6} className="min-w-0" />
+            ) : null}
           </>
         ) : (
           <span className="text-xs text-muted-foreground">
@@ -537,6 +547,11 @@ export function OutboundInterfaceLabel({
       ) : null}
     </div>
   )
+}
+
+/** fe80::/10 — link-local диапазон fe80…febf. */
+function isLinkLocalIpv6(address: string): boolean {
+  return /^fe[89ab]/i.test(address.trim())
 }
 
 function InterfaceStatusBadge({
@@ -590,9 +605,20 @@ function AddressPreview({
   )
 }
 
-function AddressPreviewChip({ address }: { address: string }) {
+function AddressPreviewChip({
+  address,
+  className,
+}: {
+  address: string
+  className?: string
+}) {
   return (
-    <code className="truncate rounded bg-muted px-1.5 py-0.5">{address}</code>
+    <code
+      className={cn("truncate rounded bg-muted px-1.5 py-0.5", className)}
+      title={address}
+    >
+      {address}
+    </code>
   )
 }
 
