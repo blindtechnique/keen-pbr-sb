@@ -417,6 +417,18 @@ export const enTranslation = {
     },
     interfacePicker: {
       open: "Open interface picker",
+      kinds: {
+        bridge: "network segment (bridge)",
+        ethernet: "Ethernet port",
+        firmwareWg: "firmware WireGuard/AWG",
+        keenPbr: "keen-pbr tunnel",
+        ppp: "PPP connection",
+        service: "service interface",
+        tun: "TUN tunnel",
+        wifiAp: "Wi-Fi access point",
+        wireguard: "WireGuard",
+        wisp: "Wi-Fi uplink (WISP)",
+      },
       empty: "No interfaces found.",
       notExists: "(not exists)",
       notFound: "Interface does not exist.",
@@ -1568,8 +1580,8 @@ export const enTranslation = {
           "Add interfaces here if you want policy routing to apply only to specific ingress interfaces.",
         inboundInterfacesLoadError:
           "Live interface inventory is temporarily unavailable. Saved selections are still editable.",
-        inboundInterfacesStatusUp: "UP",
-        inboundInterfacesStatusDown: "DOWN",
+        inboundInterfacesStatusUp: "Up",
+        inboundInterfacesStatusDown: "Down",
         inboundInterfacesStatusLoading: "Loading",
         inboundInterfacesStatusMissing: "Missing",
         inboundInterfacesMissingDetail:
@@ -2279,7 +2291,7 @@ export const enTranslation = {
           "Availability probing, retries, and the circuit breaker. The defaults suit most setups.",
         probingTitle: "Probing and retries",
         probingDescription:
-          "Configure the selection policy, availability probe, and retries after failures.",
+          "Availability probing and retries after failures.",
         selectionMode: "Selection mode",
         selectionModeOptions: {
           latency: "Lowest latency",

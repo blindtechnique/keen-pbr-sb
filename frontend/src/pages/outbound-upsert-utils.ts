@@ -233,8 +233,8 @@ function parseNumber(value: string): number | undefined {
  *
  * Решает, раскрывать ли «Дополнительно» при редактировании: если человек уже
  * менял проверку доступности или circuit breaker, прятать их от него нечестно.
- * `selectionMode` и `conntrackOnSwitch` сюда входят по той же причине — они
- * живут в том же свёрнутом блоке.
+ * `selectionMode` и `conntrackOnSwitch` сюда не входят: по решению владельца
+ * они видимы всегда — это поведение группы, а не тонкая настройка.
  */
 export function urltestTuningIsDefault(
   draft: Pick<
@@ -243,8 +243,6 @@ export function urltestTuningIsDefault(
     | "interval"
     | "probeTimeout"
     | "tolerance"
-    | "selectionMode"
-    | "conntrackOnSwitch"
     | "retryAttempts"
     | "retryInterval"
     | "circuitBreakerFailures"
@@ -259,8 +257,6 @@ export function urltestTuningIsDefault(
     draft.interval === defaults.interval &&
     draft.probeTimeout === defaults.probeTimeout &&
     draft.tolerance === defaults.tolerance &&
-    draft.selectionMode === defaults.selectionMode &&
-    draft.conntrackOnSwitch === defaults.conntrackOnSwitch &&
     draft.retryAttempts === defaults.retryAttempts &&
     draft.retryInterval === defaults.retryInterval &&
     draft.circuitBreakerFailures === defaults.circuitBreakerFailures &&

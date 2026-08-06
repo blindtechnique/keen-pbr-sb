@@ -19,6 +19,12 @@ export type DynamicTranslationUsage = Readonly<{
  */
 export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   {
+    file: "src/components/shared/interface-picker.tsx",
+    argument: "`common.interfacePicker.kinds.${*}`",
+    keys: ["common.interfacePicker.kinds.*"],
+    reason: "Kernel interface kinds are a closed union in kernel-interface-kind.ts.",
+  },
+  {
     file: "src/components/layout/header-health-indicator.tsx",
     argument: "`headerHealth.${*}`",
     keys: ["headerHealth.*"],

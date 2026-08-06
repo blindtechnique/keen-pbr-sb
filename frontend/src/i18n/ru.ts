@@ -418,6 +418,18 @@ export const ruTranslation = {
     },
     interfacePicker: {
       open: "Открыть выбор интерфейса",
+      kinds: {
+        bridge: "сегмент сети (мост)",
+        ethernet: "порт Ethernet",
+        firmwareWg: "WireGuard/AWG прошивки",
+        keenPbr: "туннель keen-pbr",
+        ppp: "PPP-подключение",
+        service: "служебный интерфейс",
+        tun: "туннель TUN",
+        wifiAp: "точка доступа Wi-Fi",
+        wireguard: "WireGuard",
+        wisp: "приём чужого Wi-Fi (WISP)",
+      },
       empty: "Интерфейсы не найдены.",
       notExists: "(не существует)",
       notFound: "Интерфейс не существует.",
@@ -1591,8 +1603,8 @@ export const ruTranslation = {
           "Добавьте интерфейсы, если policy routing должен применяться только к определённым входящим интерфейсам.",
         inboundInterfacesLoadError:
           "Живая инвентаризация интерфейсов временно недоступна. Сохранённые значения всё равно можно редактировать.",
-        inboundInterfacesStatusUp: "UP",
-        inboundInterfacesStatusDown: "DOWN",
+        inboundInterfacesStatusUp: "Работает",
+        inboundInterfacesStatusDown: "Не работает",
         inboundInterfacesStatusLoading: "Загрузка",
         inboundInterfacesStatusMissing: "Отсутствует",
         inboundInterfacesMissingDetail:
@@ -2310,7 +2322,7 @@ export const ruTranslation = {
           "Проверка доступности, повторы и circuit breaker. Умолчания подходят большинству.",
         probingTitle: "Проверки и повторы",
         probingDescription:
-          "Настройте режим выбора, проверку доступности и повторы после ошибок.",
+          "Проверка доступности маршрутов и повторы после ошибок.",
         selectionMode: "Режим выбора",
         selectionModeOptions: {
           latency: "По минимальной задержке",

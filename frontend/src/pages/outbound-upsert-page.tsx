@@ -935,7 +935,7 @@ function OutboundForm({
                                 value={group.outbounds}
                               />
                             ) : (
-                              <div className="rounded-lg border border-border p-3 text-sm text-muted-foreground md:text-xs">
+                              <div className="text-sm text-muted-foreground md:text-xs">
                                 {t(
                                   "pages.outboundUpsert.urltest.addInterfaceOutboundsFirst"
                                 )}
@@ -1011,6 +1011,120 @@ function OutboundForm({
       ) : null}
 
       {isUrltest ? (
+        // Режим выбора и судьба активных соединений — не тонкая настройка, а
+        // само поведение группы: владелец вернул их наверх из «Дополнительно».
+        <div className="grid gap-4 md:grid-cols-2">
+          <form.Field name={OUTBOUND_FIELD_NAMES.selectionMode}>
+            {(field) => (
+              <Field>
+                <FieldLabel>
+                  {t("pages.outboundUpsert.urltest.selectionMode")}
+                </FieldLabel>
+                <FieldContent>
+                  <Select
+                    items={urltestSelectionModes.map((mode) => ({
+                      value: mode,
+                      label: t(
+                        `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
+                      ),
+                    }))}
+                    onValueChange={(value) => {
+                      const nextMode =
+                        (value as UrltestSelectionMode | null) ?? "latency"
+                      field.handleChange(nextMode)
+                      if (
+                        nextMode !== "priority" &&
+                        form.state.values.conntrackOnSwitch ===
+                          "delete_on_failure"
+                      ) {
+                        form.setFieldValue(
+                          OUTBOUND_FIELD_NAMES.conntrackOnSwitch,
+                          "preserve"
+                        )
+                      }
+                    }}
+                    value={field.state.value}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {urltestSelectionModes.map((mode) => (
+                          <SelectItem key={mode} value={mode}>
+                            {t(
+                              `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldHint
+                    description={t(
+                      `pages.outboundUpsert.urltest.selectionModeHints.${field.state.value}`
+                    )}
+                  />
+                </FieldContent>
+              </Field>
+            )}
+          </form.Field>
+
+          <form.Field name={OUTBOUND_FIELD_NAMES.conntrackOnSwitch}>
+            {(field) => (
+              <Field>
+                <FieldLabel>
+                  {t("pages.outboundUpsert.urltest.conntrackOnSwitch")}
+                </FieldLabel>
+                <FieldContent>
+                  <Select
+                    items={conntrackOnSwitchModes.map((mode) => ({
+                      value: mode,
+                      label: t(
+                        `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
+                      ),
+                    }))}
+                    onValueChange={(value) => {
+                      const nextMode =
+                        (value as ConntrackOnSwitchMode | null) ?? "preserve"
+                      field.handleChange(nextMode)
+                      if (nextMode === "delete_on_failure") {
+                        form.setFieldValue(
+                          OUTBOUND_FIELD_NAMES.selectionMode,
+                          "priority"
+                        )
+                      }
+                    }}
+                    value={field.state.value}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {conntrackOnSwitchModes.map((mode) => (
+                          <SelectItem key={mode} value={mode}>
+                            {t(
+                              `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldHint
+                    description={t(
+                      `pages.outboundUpsert.urltest.conntrackOnSwitchHints.${field.state.value}`
+                    )}
+                  />
+                </FieldContent>
+              </Field>
+            )}
+          </form.Field>
+        </div>
+      ) : null}
+
+      {isUrltest ? (
         // Тонкая настройка спрятана: у неё хорошие умолчания, а развёрнутой
         // она превращала форму группы в анкету на десяток полей. Если группа
         // уже настроена не по умолчаниям, блок открывается сам.
@@ -1024,298 +1138,190 @@ function OutboundForm({
             description={t("pages.outboundUpsert.urltest.probingDescription")}
             title={t("pages.outboundUpsert.urltest.probingTitle")}
           >
-          <div className="grid gap-4 md:grid-cols-2">
-            <form.Field name={OUTBOUND_FIELD_NAMES.selectionMode}>
-              {(field) => (
-                <Field>
-                  <FieldLabel>
-                    {t("pages.outboundUpsert.urltest.selectionMode")}
-                  </FieldLabel>
-                  <FieldContent>
-                    <Select
-                      items={urltestSelectionModes.map((mode) => ({
-                        value: mode,
-                        label: t(
-                          `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
-                        ),
-                      }))}
-                      onValueChange={(value) => {
-                        const nextMode =
-                          (value as UrltestSelectionMode | null) ?? "latency"
-                        field.handleChange(nextMode)
-                        if (
-                          nextMode !== "priority" &&
-                          form.state.values.conntrackOnSwitch ===
-                            "delete_on_failure"
-                        ) {
-                          form.setFieldValue(
-                            OUTBOUND_FIELD_NAMES.conntrackOnSwitch,
-                            "preserve"
-                          )
-                        }
-                      }}
-                      value={field.state.value}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          {urltestSelectionModes.map((mode) => (
-                            <SelectItem key={mode} value={mode}>
-                              {t(
-                                `pages.outboundUpsert.urltest.selectionModeOptions.${mode}`
-                              )}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    <FieldHint
-                      description={t(
-                        `pages.outboundUpsert.urltest.selectionModeHints.${field.state.value}`
-                      )}
-                    />
-                  </FieldContent>
-                </Field>
-              )}
-            </form.Field>
+            <div className="grid gap-4 md:grid-cols-2">
+              <form.Field name={OUTBOUND_FIELD_NAMES.probeUrl}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={probeUrlId}>
+                        {t("pages.outboundUpsert.urltest.probeUrl")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={probeUrlId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.urltest.probeUrlHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.conntrackOnSwitch}>
-              {(field) => (
-                <Field>
-                  <FieldLabel>
-                    {t("pages.outboundUpsert.urltest.conntrackOnSwitch")}
-                  </FieldLabel>
-                  <FieldContent>
-                    <Select
-                      items={conntrackOnSwitchModes.map((mode) => ({
-                        value: mode,
-                        label: t(
-                          `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
-                        ),
-                      }))}
-                      onValueChange={(value) => {
-                        const nextMode =
-                          (value as ConntrackOnSwitchMode | null) ?? "preserve"
-                        field.handleChange(nextMode)
-                        if (nextMode === "delete_on_failure") {
-                          form.setFieldValue(
-                            OUTBOUND_FIELD_NAMES.selectionMode,
-                            "priority"
-                          )
-                        }
-                      }}
-                      value={field.state.value}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          {conntrackOnSwitchModes.map((mode) => (
-                            <SelectItem key={mode} value={mode}>
-                              {t(
-                                `pages.outboundUpsert.urltest.conntrackOnSwitchOptions.${mode}`
-                              )}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    <FieldHint
-                      description={t(
-                        `pages.outboundUpsert.urltest.conntrackOnSwitchHints.${field.state.value}`
-                      )}
-                    />
-                  </FieldContent>
-                </Field>
-              )}
-            </form.Field>
+              <form.Field name={OUTBOUND_FIELD_NAMES.interval}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={intervalId}>
+                        {t("pages.outboundUpsert.urltest.interval")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={intervalId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.urltest.intervalHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.probeUrl}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={probeUrlId}>
-                      {t("pages.outboundUpsert.urltest.probeUrl")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={probeUrlId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.urltest.probeUrlHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+              <form.Field name={OUTBOUND_FIELD_NAMES.probeTimeout}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={probeTimeoutId}>
+                        {t("pages.outboundUpsert.urltest.probeTimeout")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={probeTimeoutId}
+                          inputMode="numeric"
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          step="1"
+                          type="number"
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.urltest.probeTimeoutHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.interval}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={intervalId}>
-                      {t("pages.outboundUpsert.urltest.interval")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={intervalId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.urltest.intervalHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+              <form.Field name={OUTBOUND_FIELD_NAMES.tolerance}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={toleranceId}>
+                        {t("pages.outboundUpsert.urltest.tolerance")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={toleranceId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.urltest.toleranceHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.probeTimeout}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={probeTimeoutId}>
-                      {t("pages.outboundUpsert.urltest.probeTimeout")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={probeTimeoutId}
-                        inputMode="numeric"
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        step="1"
-                        type="number"
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.urltest.probeTimeoutHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+              <form.Field name={OUTBOUND_FIELD_NAMES.retryAttempts}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={retryAttemptsId}>
+                        {t("pages.outboundUpsert.urltest.retryAttempts")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={retryAttemptsId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.urltest.retryAttemptsHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.tolerance}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={toleranceId}>
-                      {t("pages.outboundUpsert.urltest.tolerance")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={toleranceId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.urltest.toleranceHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
-
-            <form.Field name={OUTBOUND_FIELD_NAMES.retryAttempts}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={retryAttemptsId}>
-                      {t("pages.outboundUpsert.urltest.retryAttempts")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={retryAttemptsId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.urltest.retryAttemptsHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
-
-            <form.Field name={OUTBOUND_FIELD_NAMES.retryInterval}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={retryIntervalId}>
-                      {t("pages.outboundUpsert.urltest.retryInterval")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={retryIntervalId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.urltest.retryIntervalHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
-          </div>
+              <form.Field name={OUTBOUND_FIELD_NAMES.retryInterval}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={retryIntervalId}>
+                        {t("pages.outboundUpsert.urltest.retryInterval")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={retryIntervalId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.urltest.retryIntervalHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+            </div>
           </SectionCard>
 
           <SectionCard
@@ -1323,127 +1329,127 @@ function OutboundForm({
             description={t("pages.outboundUpsert.circuitBreaker.description")}
             title={t("pages.outboundUpsert.circuitBreaker.title")}
           >
-          <div className="grid gap-4 md:grid-cols-2">
-            <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerFailures}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={circuitBreakerFailuresId}>
-                      {t("pages.outboundUpsert.circuitBreaker.failures")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={circuitBreakerFailuresId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.circuitBreaker.failuresHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+            <div className="grid gap-4 md:grid-cols-2">
+              <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerFailures}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={circuitBreakerFailuresId}>
+                        {t("pages.outboundUpsert.circuitBreaker.failures")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={circuitBreakerFailuresId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.circuitBreaker.failuresHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerSuccesses}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={circuitBreakerSuccessesId}>
-                      {t("pages.outboundUpsert.circuitBreaker.successes")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={circuitBreakerSuccessesId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.circuitBreaker.successesHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+              <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerSuccesses}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={circuitBreakerSuccessesId}>
+                        {t("pages.outboundUpsert.circuitBreaker.successes")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={circuitBreakerSuccessesId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.circuitBreaker.successesHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerTimeout}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={circuitBreakerTimeoutId}>
-                      {t("pages.outboundUpsert.circuitBreaker.timeout")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={circuitBreakerTimeoutId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.circuitBreaker.timeoutHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
+              <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerTimeout}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={circuitBreakerTimeoutId}>
+                        {t("pages.outboundUpsert.circuitBreaker.timeout")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={circuitBreakerTimeoutId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.circuitBreaker.timeoutHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
 
-            <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerHalfOpen}>
-              {(field) => {
-                const error = getFirstFieldError(field.state.meta.errors)
-                return (
-                  <Field invalid={Boolean(error)}>
-                    <FieldLabel htmlFor={circuitBreakerHalfOpenId}>
-                      {t("pages.outboundUpsert.circuitBreaker.halfOpen")}
-                    </FieldLabel>
-                    <FieldContent>
-                      <Input
-                        aria-invalid={Boolean(error)}
-                        id={circuitBreakerHalfOpenId}
-                        onBlur={field.handleBlur}
-                        onChange={(event) =>
-                          field.handleChange(event.target.value)
-                        }
-                        value={field.state.value}
-                      />
-                      <FieldHint
-                        description={t(
-                          "pages.outboundUpsert.circuitBreaker.halfOpenHint"
-                        )}
-                        error={error ?? null}
-                      />
-                    </FieldContent>
-                  </Field>
-                )
-              }}
-            </form.Field>
-          </div>
+              <form.Field name={OUTBOUND_FIELD_NAMES.circuitBreakerHalfOpen}>
+                {(field) => {
+                  const error = getFirstFieldError(field.state.meta.errors)
+                  return (
+                    <Field invalid={Boolean(error)}>
+                      <FieldLabel htmlFor={circuitBreakerHalfOpenId}>
+                        {t("pages.outboundUpsert.circuitBreaker.halfOpen")}
+                      </FieldLabel>
+                      <FieldContent>
+                        <Input
+                          aria-invalid={Boolean(error)}
+                          id={circuitBreakerHalfOpenId}
+                          onBlur={field.handleBlur}
+                          onChange={(event) =>
+                            field.handleChange(event.target.value)
+                          }
+                          value={field.state.value}
+                        />
+                        <FieldHint
+                          description={t(
+                            "pages.outboundUpsert.circuitBreaker.halfOpenHint"
+                          )}
+                          error={error ?? null}
+                        />
+                      </FieldContent>
+                    </Field>
+                  )
+                }}
+              </form.Field>
+            </div>
           </SectionCard>
         </AdvancedSection>
       ) : null}

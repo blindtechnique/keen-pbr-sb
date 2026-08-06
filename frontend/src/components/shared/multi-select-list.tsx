@@ -267,9 +267,9 @@ export function MultiSelectList({
               </div>
             </>
           ) : (
-            <div className="space-y-2">
+            <div className="divide-y divide-border">
               {value.map((item, itemIndex) => (
-                <div className="rounded-xl border bg-card p-3" key={item}>
+                <div className="py-2.5 first:pt-0 last:pb-0" key={item}>
                   {renderSelectedOption(item, itemIndex)}
                 </div>
               ))}
@@ -280,8 +280,11 @@ export function MultiSelectList({
       ) : (
         <div
           className={cn(
-            "space-y-3 rounded-xl border p-3",
-            error ? "border-destructive" : "border-border"
+            // Плоско: рамка-карточка вокруг пустого состояния убрана вместе с
+            // остальными вложенными прямоугольниками. Ошибке рамка остаётся —
+            // ей положено быть громкой.
+            "space-y-3",
+            error && "rounded-xl border border-destructive p-3"
           )}
         >
           <div className="flex items-start gap-3">

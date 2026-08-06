@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next"
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model"
 import { FieldError } from "@/components/shared/field"
 import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
+import { kernelInterfaceKind } from "@/lib/kernel-interface-kind"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -403,6 +404,10 @@ export function InterfaceRowContent({
   const { labelFor } = useInterfaceDisplayNames()
   const label = labelFor(name)
   const hasFirmwareLabel = label !== name
+  // Когда прошивка не дала человеческого имени, единственный источник смысла —
+  // само имя ядра: br0 — мост, apcli0 — приём чужого Wi-Fi. Говорим ровно то,
+  // что имя доказывает; неизвестное имя остаётся без описания.
+  const kindKey = hasFirmwareLabel ? undefined : kernelInterfaceKind(name)
   const addresses = interfaceEntry ? getInterfaceAddresses(interfaceEntry) : []
   const className = cn(
     "flex min-h-5 min-w-0 flex-wrap items-center gap-2",
@@ -420,6 +425,11 @@ export function InterfaceRowContent({
       {hasFirmwareLabel ? (
         <span className="truncate font-mono text-xs text-muted-foreground">
           {name}
+        </span>
+      ) : null}
+      {kindKey ? (
+        <span className="truncate text-xs text-muted-foreground">
+          {t(`common.interfacePicker.kinds.${kindKey}`)}
         </span>
       ) : null}
       {protocol ? (

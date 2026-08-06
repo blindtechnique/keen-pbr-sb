@@ -33,7 +33,10 @@ export function OrderedGroupCard({
   const removeLabel = t("common.delete")
 
   return (
-    <div className="rounded-xl border border-border p-4">
+    // Плоско, как весь остальной канвас: ступени разделяются линией, а не
+    // рамкой-карточкой. Рамка внутри формы внутри диалога давала третий
+    // уровень вложенных прямоугольников — владелец попросил убрать.
+    <div className="border-t border-border pt-4 first:border-t-0 first:pt-0">
       <div className="mb-4 flex items-start justify-between gap-3">
         <div className="space-y-1">
           <div className="text-sm font-medium md:text-xs">{title}</div>
