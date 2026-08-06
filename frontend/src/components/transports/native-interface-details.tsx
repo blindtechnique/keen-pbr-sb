@@ -226,8 +226,6 @@ function routeBlockTitle(
       return t("transports.nativeInterface.routeNotClient")
     case "unresolved":
       return t("transports.nativeInterface.routeUnresolved")
-    case "not-live":
-      return t("transports.nativeInterface.routeNotLive")
     case "already-bound":
       return t("transports.routing.alreadyBound", {
         tag: boundOutboundTag ?? "",

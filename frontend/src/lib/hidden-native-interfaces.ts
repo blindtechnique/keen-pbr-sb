@@ -1,5 +1,9 @@
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { NativeInterfaceModel } from "@/lib/native-interfaces"
+import {
+  getNativeBindBlockReason,
+  type NativeBindBlockReason,
+  type NativeInterfaceModel,
+} from "@/lib/native-interfaces"
 
 export interface NativeTransportCandidate {
   readonly id: string
@@ -8,6 +12,8 @@ export interface NativeTransportCandidate {
   readonly protocol: string
   readonly hidden: boolean
   readonly selectable: boolean
+  /** Почему кандидат недоступен — для подписи «недоступно: …» в списке. */
+  readonly blockReason?: NativeBindBlockReason
 }
 
 export function normalizeHiddenNativeInterfaceIds(value: unknown): string[] {
@@ -73,16 +79,19 @@ export function buildNativeTransportCandidates(
 ): NativeTransportCandidate[] {
   const hiddenIds = getHiddenNativeInterfaceIds(config)
 
-  return nativeInterfaces.map((nativeInterface) => ({
-    id: nativeInterface.id,
-    interfaceName: nativeInterface.kernelName,
-    label: nativeInterface.label,
-    protocol: nativeInterface.protocol.label,
-    hidden: hiddenIds.has(nativeInterface.id),
-    selectable:
-      nativeInterface.source.role === "client" &&
-      Boolean(nativeInterface.kernelName),
-  }))
+  return nativeInterfaces.map((nativeInterface) => {
+    const blockReason = getNativeBindBlockReason(nativeInterface)
+
+    return {
+      id: nativeInterface.id,
+      interfaceName: nativeInterface.kernelName,
+      label: nativeInterface.label,
+      protocol: nativeInterface.protocol.label,
+      hidden: hiddenIds.has(nativeInterface.id),
+      selectable: blockReason === undefined,
+      ...(blockReason ? { blockReason } : {}),
+    }
+  })
 }
 
 export function formatNativeTransportCandidate(
@@ -90,13 +99,25 @@ export function formatNativeTransportCandidate(
   labels: {
     readonly hidden: string
     readonly unavailable: string
+    /**
+     * Подпись по конкретной причине вместо голого «недоступно»: человек,
+     * добавивший туннель в KeeneticOS, должен из самого списка понять,
+     * что сделать, чтобы туннель стал доступен.
+     */
+    readonly unavailableReasons?: Partial<
+      Record<NativeBindBlockReason, string>
+    >
   }
 ): string {
   return [
     candidate.label,
     candidate.protocol,
     candidate.hidden ? labels.hidden : undefined,
-    !candidate.selectable ? labels.unavailable : undefined,
+    !candidate.selectable
+      ? ((candidate.blockReason
+          ? labels.unavailableReasons?.[candidate.blockReason]
+          : undefined) ?? labels.unavailable)
+      : undefined,
   ]
     .filter((part): part is string => Boolean(part))
     .join(" · ")

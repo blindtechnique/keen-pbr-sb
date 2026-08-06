@@ -359,6 +359,10 @@ export function TransportConfigForm({
       label: formatNativeTransportCandidate(candidate, {
         hidden: t("transports.form.nativeInterfaceHidden"),
         unavailable: t("transports.form.nativeInterfaceUnavailable"),
+        unavailableReasons: {
+          server: t("transports.form.nativeInterfaceUnavailableServer"),
+          unresolved: t("transports.form.nativeInterfaceUnavailableDisabled"),
+        },
       }),
       disabled: !candidate.selectable,
     })),

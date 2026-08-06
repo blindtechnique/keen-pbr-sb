@@ -703,17 +703,24 @@ export const enTranslation = {
       unknown: "Unknown",
       unresolved: "Not resolved",
       routeNotClient:
-        "Only interfaces confirmed by KeeneticOS as client tunnels can be attached to a route.",
+        "This interface is a VPN server: it accepts incoming connections, so outgoing traffic cannot be routed into it.",
       routeUnresolved:
-        "A route cannot be created until KeeneticOS resolves the Linux interface name.",
-      routeNotLive:
-        "A route can only be created while the kernel interface is present and enabled.",
+        "The interface has no system name yet, so there is nothing for a route to attach to. This usually means the tunnel is disabled in KeeneticOS — enable it and come back.",
       routeConfigUnavailable:
         "A route cannot be created until the current configuration is loaded.",
       hide: "Hide from the panel",
       restore: "Restore to the panel",
       showHidden: "Show hidden ({{count}})",
       hideHidden: "Stop showing hidden interfaces",
+    },
+    routeOffer: {
+      title: "New KeeneticOS tunnel",
+      question:
+        "“{{name}}” is not used as a VPN in keen-pbr-sb yet. Create a route for it?",
+      create: "Create a route",
+      dismiss: "Don't ask again",
+      created:
+        "The route “{{name}}” was created in the draft — apply the configuration for it to start working.",
     },
     deleteTitle: "Delete VPN or proxy?",
     deleteDescription:
@@ -770,8 +777,11 @@ export const enTranslation = {
       nativeInterfacePlaceholder: "Select a Keenetic interface",
       nativeInterfaceHidden: "hidden",
       nativeInterfaceUnavailable: "unavailable",
+      nativeInterfaceUnavailableServer: "unavailable: VPN server",
+      nativeInterfaceUnavailableDisabled:
+        "unavailable: disabled in KeeneticOS",
       nativeInterfaceHint:
-        "Hidden interfaces remain in this list and are clearly marked. Only a client interface with a resolved system name can be routed.",
+        "A tunnel marked “unavailable” is usually disabled in KeeneticOS: enable it in the Keenetic web configurator and it becomes selectable here. VPN servers are always unavailable: outgoing traffic cannot be routed into them. Hidden interfaces remain in this list and are clearly marked.",
       singBox: "sing-box connection",
       singBoxLegacy: "sing-box (legacy VLESS configuration)",
       interface: "Interface name",

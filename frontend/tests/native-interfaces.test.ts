@@ -152,22 +152,67 @@ describe("native Keenetic interfaces", () => {
     ).toEqual({ enabled: false, reason: "unresolved" })
   })
 
-  test("never attaches server or unclassified interfaces to routes", () => {
-    for (const role of ["server", "unknown"] as const) {
-      const [native] = mapNativeInterfaces(
-        [nativeInterface({ kernel_name: "nwg0", role })],
-        [{ name: "nwg0", status: "up" }]
-      )
+  test("never attaches server interfaces to routes", () => {
+    const [server] = mapNativeInterfaces(
+      [nativeInterface({ kernel_name: "nwg0", role: "server" })],
+      [{ name: "nwg0", status: "up" }]
+    )
+    expect(
+      getNativeRouteActionability(server, {
+        hasConfig: true,
+      })
+    ).toEqual({ enabled: false, reason: "not-client" })
 
-      expect(
-        getNativeRouteActionability(native, {
-          hasConfig: true,
-        })
-      ).toEqual({ enabled: false, reason: "not-client" })
-    }
+    // Прошивка не назвала роль, но распознала серверную форму WireGuard —
+    // это тоже сервер.
+    const [serverShaped] = mapNativeInterfaces(
+      [
+        nativeInterface({
+          kernel_name: "nwg0",
+          role: "unknown",
+          internal_vpn_server_candidate: true,
+        }),
+      ],
+      [{ name: "nwg0", status: "up" }]
+    )
+    expect(
+      getNativeRouteActionability(serverShaped, {
+        hasConfig: true,
+      })
+    ).toEqual({ enabled: false, reason: "not-client" })
   })
 
-  test("requires a live unbound interface and loaded config for route creation", () => {
+  test("binds tunnels whose role KeeneticOS simply did not report", () => {
+    // Реальный случай владельца: свежий AWG-клиент, RCI без поля роли.
+    // Раньше он навсегда оставался «недоступным».
+    const [unknownRole] = mapNativeInterfaces(
+      [nativeInterface({ kernel_name: "nwg0", role: "unknown" })],
+      [{ name: "nwg0", status: "up" }]
+    )
+
+    expect(
+      getNativeRouteActionability(unknownRole, {
+        hasConfig: true,
+      })
+    ).toEqual({ enabled: true, interfaceName: "nwg0" })
+  })
+
+  test("binds a present but currently down tunnel", () => {
+    // Туннель=маршрут: выключенный управляемый туннель сохраняет маршрут,
+    // значит и нативному временно неподключённому маршрут создать можно.
+    const [down] = mapNativeInterfaces(
+      [nativeInterface({ kernel_name: "nwg0" })],
+      [{ name: "nwg0", status: "down" }]
+    )
+
+    expect(
+      getNativeRouteActionability(down, {
+        hasConfig: true,
+      })
+    ).toEqual({ enabled: true, interfaceName: "nwg0" })
+  })
+
+  test("requires an unbound interface and loaded config for route creation", () => {
     const [live] = mapNativeInterfaces(
       [nativeInterface({ kernel_name: "nwg0" })],
       [{ name: "nwg0", status: "up" }]

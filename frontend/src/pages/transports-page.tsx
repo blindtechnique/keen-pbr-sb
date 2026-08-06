@@ -64,6 +64,7 @@ import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { NativeInterfaceDetails } from "@/components/transports/native-interface-details"
+import { NativeRouteOffer } from "@/components/transports/native-route-offer"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
 import {
@@ -84,6 +85,13 @@ import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import { getOutboundDisplayName } from "@/lib/outbound-display"
+import {
+  dismissNativeRouteOffer,
+  pickNativeRouteOfferCandidates,
+  readDismissedNativeRouteOffers,
+  type NativeRouteOfferCandidate,
+} from "@/lib/native-route-offers"
+import { makeTechnicalId } from "@/lib/technical-id"
 import {
   useServerLocations,
   type ServerLocation,
@@ -225,6 +233,11 @@ export function TransportsPage({
     baselineRuntimeUpdatedAt: number
   } | null>(null)
   const [showHiddenNative, setShowHiddenNative] = useState(false)
+  // «Не предлагать» из вопроса о новом туннеле; читается один раз при
+  // открытии страницы, дальше живёт в состоянии и localStorage.
+  const [dismissedRouteOffers, setDismissedRouteOffers] = useState<
+    Set<string>
+  >(() => readDismissedNativeRouteOffers())
   const transportImportRef = useRef<HTMLInputElement>(null)
   const query = useGetTransports({
     query: {
@@ -489,6 +502,18 @@ export function TransportsPage({
       )
       .map((outbound) => [outbound.interface!, outbound])
   )
+  // Вопрос «использовать новый туннель как VPN?»: владелец добавляет AWG в
+  // KeeneticOS и ждёт, что keen-pbr-sb сам предложит привязать маршрут.
+  // Спрашиваем только когда конфигурация загружена: иначе на мгновение
+  // возник бы вопрос про туннели, маршруты которых ещё не приехали.
+  const routeOfferCandidates = keenConfig
+    ? pickNativeRouteOfferCandidates({
+        nativeInterfaces,
+        boundInterfaceNames: new Set(interfaceOutboundByInterface.keys()),
+        hiddenIds: hiddenNativeIds,
+        dismissedIds: dismissedRouteOffers,
+      })
+    : []
   // Что реально ходит через этот транспорт. Транспорт создаёт интерфейс, на
   // интерфейс смотрит маршрут, а за маршрут держатся правила, списки и DNS —
   // ту же цепочку показывает страница маршрутов, здесь её просто не было.
@@ -761,6 +786,54 @@ export function TransportsPage({
         }),
     },
   })
+  const routeOfferMutation = usePostConfigMutation({
+    mutation: {
+      onError: (mutationError) =>
+        toast.error(getApiErrorMessage(mutationError as ApiError), {
+          richColors: true,
+        }),
+    },
+  })
+
+  // «Да» из вопроса о новом туннеле: маршрут создаётся сразу, с настройками
+  // по умолчанию — имя от туннеля, тег порождается из имени. Тонкая
+  // настройка (kill-switch, шлюзы) остаётся в редакторе маршрута.
+  const createRouteFromOffer = (candidate: NativeRouteOfferCandidate) => {
+    if (!keenConfig) return
+    const existingOutbounds = keenConfig.outbounds ?? []
+    const tag = makeTechnicalId(
+      candidate.label,
+      existingOutbounds.map((outbound) => outbound.tag),
+      { prefix: "outbound" }
+    )
+    routeOfferMutation.mutate(
+      {
+        data: {
+          ...keenConfig,
+          outbounds: [
+            ...existingOutbounds,
+            {
+              type: "interface",
+              tag,
+              display_name: candidate.label,
+              interface: candidate.interfaceName,
+            },
+          ],
+        },
+      },
+      {
+        onSuccess: () =>
+          toast.success(
+            t("transports.routeOffer.created", { name: candidate.label })
+          ),
+      }
+    )
+  }
+  const dismissRouteOffer = (candidate: NativeRouteOfferCandidate) => {
+    setDismissedRouteOffers((current) =>
+      dismissNativeRouteOffer(candidate.id, current)
+    )
+  }
 
   const addLoopProtection = (server: string) => {
     if (!keenConfig) return
@@ -1532,6 +1605,13 @@ export function TransportsPage({
       {query.isLoading || ndmsInventoryQuery.isLoading ? (
         <TableSkeleton />
       ) : null}
+
+      <NativeRouteOffer
+        candidates={routeOfferCandidates}
+        disabled={routeOfferMutation.isPending || !keenConfig}
+        onCreate={createRouteFromOffer}
+        onDismiss={dismissRouteOffer}
+      />
 
       {transportTabs.length > 1 ? (
         <SectionTabs

@@ -44,7 +44,6 @@ export interface NativeInterfaceModel {
 export type NativeRouteBlockReason =
   | "not-client"
   | "unresolved"
-  | "not-live"
   | "already-bound"
   | "no-config"
 
@@ -173,6 +172,41 @@ export function dedupeLegacyNativeTransports(
   })
 }
 
+/**
+ * Причина, по которой интерфейс нельзя привязать к маршруту, — единая для
+ * кнопки в строке туннеля, выпадающего списка в форме добавления и вопроса
+ * «использовать как VPN?». Раньше правила были разными, и один и тот же
+ * туннель в одном месте выглядел доступным, а в другом — нет.
+ *
+ * - `server`: прошивка явно назвала интерфейс сервером либо распознала
+ *   серверную форму WireGuard (internal_vpn_server_candidate). Направить
+ *   исходящий трафик во входящий сервер нельзя. Роль «не определена»
+ *   не блокирует: KeeneticOS часто вовсе не сообщает роль клиентских
+ *   туннелей, и только что добавленный AWG оставался «недоступным».
+ * - `unresolved`: нет системного имени — маршруту не к чему привязаться.
+ *   Обычно это значит, что туннель выключен в KeeneticOS.
+ *
+ * «Выключен, но присутствует в системе» больше не блокирует: маршрут к
+ * временно неподключённому туннелю — нормальное состояние, ровно как у
+ * управляемых туннелей (выключенный туннель сохраняет свой маршрут).
+ */
+export type NativeBindBlockReason = "server" | "unresolved"
+
+export function getNativeBindBlockReason(
+  nativeInterface: NativeInterfaceModel
+): NativeBindBlockReason | undefined {
+  if (
+    nativeInterface.source.role === "server" ||
+    nativeInterface.source.internal_vpn_server_candidate
+  ) {
+    return "server"
+  }
+  if (!nativeInterface.kernelName) {
+    return "unresolved"
+  }
+  return undefined
+}
+
 export function getNativeRouteActionability(
   nativeInterface: NativeInterfaceModel,
   {
@@ -183,14 +217,12 @@ export function getNativeRouteActionability(
     readonly boundOutboundTag?: string
   }
 ): NativeRouteActionability {
-  if (nativeInterface.source.role !== "client") {
+  const blockReason = getNativeBindBlockReason(nativeInterface)
+  if (blockReason === "server") {
     return { enabled: false, reason: "not-client" }
   }
-  if (!nativeInterface.kernelName) {
+  if (blockReason === "unresolved" || !nativeInterface.kernelName) {
     return { enabled: false, reason: "unresolved" }
-  }
-  if (!nativeInterface.live) {
-    return { enabled: false, reason: "not-live" }
   }
   if (nonEmpty(boundOutboundTag)) {
     return { enabled: false, reason: "already-bound" }

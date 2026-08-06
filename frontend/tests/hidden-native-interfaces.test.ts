@@ -166,6 +166,7 @@ describe("server-persisted hidden native interface preference", () => {
         protocol: "OPENVPN",
         hidden: false,
         selectable: false,
+        blockReason: "server",
       },
     ])
 
@@ -181,5 +182,80 @@ describe("server-persisted hidden native interface preference", () => {
         unavailable: "недоступно",
       })
     ).toBe("Server · OPENVPN · недоступно")
+    // Подпись по конкретной причине, когда она передана.
+    expect(
+      formatNativeTransportCandidate(candidates[1]!, {
+        hidden: "скрытое",
+        unavailable: "недоступно",
+        unavailableReasons: {
+          server: "недоступно: VPN-сервер",
+          unresolved: "недоступно: выключен в KeeneticOS",
+        },
+      })
+    ).toBe("Server · OPENVPN · недоступно: VPN-сервер")
+  })
+
+  test("marks a tunnel without a system name as disabled, not as a server", () => {
+    const candidates = buildNativeTransportCandidates([
+      {
+        id: "Wireguard5",
+        label: "New AWG",
+        logicalName: "Wireguard5",
+        kernelName: undefined,
+        protocol: {
+          kind: "amneziawg",
+          label: "AWG",
+          evidence: "ndms-kind",
+          exact: true,
+        },
+        live: false,
+        source: {
+          id: "Wireguard5",
+          firmware_interface_name: "Wireguard5",
+          label: "New AWG",
+          firmware_type: "Wireguard",
+          kind: "amnezia_wireguard",
+          // Реальный случай владельца: прошивка не сообщила роль свежего
+          // клиентского AWG. Роль «не определена» не делает его сервером.
+          role: "unknown",
+          owner: "keenetic",
+          capabilities: {
+            can_edit: false,
+            can_delete: false,
+            can_hide: true,
+            backup_required: true,
+          },
+          management_readiness: {
+            candidate: false,
+            identity_stable: true,
+            observed_revision: "revision-new-awg",
+            configuration_snapshot_available: false,
+            blockers: ["kernel_identity_unresolved"],
+          },
+        },
+      },
+    ])
+
+    expect(candidates).toEqual([
+      {
+        id: "Wireguard5",
+        interfaceName: undefined,
+        label: "New AWG",
+        protocol: "AWG",
+        hidden: false,
+        selectable: false,
+        blockReason: "unresolved",
+      },
+    ])
+    expect(
+      formatNativeTransportCandidate(candidates[0]!, {
+        hidden: "скрытое",
+        unavailable: "недоступно",
+        unavailableReasons: {
+          server: "недоступно: VPN-сервер",
+          unresolved: "недоступно: выключен в KeeneticOS",
+        },
+      })
+    ).toBe("New AWG · AWG · недоступно: выключен в KeeneticOS")
   })
 })
