@@ -477,7 +477,7 @@ function LoadedGeneralConfigPage({
                   : "pages.settings.general.title"
               )}
             </CardTitle>
-            <CardDescription>
+            <CardDescription className="max-w-[480px]">
               {t(
                 activeTab === "incoming"
                   ? "pages.settings.incoming.description"
@@ -1079,7 +1079,7 @@ function LoadedGeneralConfigPage({
         <Card hidden={activeTab !== "general"} size="sm">
           <CardHeader>
             <CardTitle>{t("pages.settings.autoupdate.title")}</CardTitle>
-            <CardDescription>
+            <CardDescription className="max-w-[480px]">
               {t("pages.settings.autoupdate.description")}
             </CardDescription>
           </CardHeader>
@@ -1232,7 +1232,7 @@ function LoadedGeneralConfigPage({
         <Card size="sm">
           <CardHeader>
             <CardTitle>{t("pages.settings.advanced.title")}</CardTitle>
-            <CardDescription>
+            <CardDescription className="max-w-[480px]">
               {t("pages.settings.advanced.description")}
             </CardDescription>
           </CardHeader>

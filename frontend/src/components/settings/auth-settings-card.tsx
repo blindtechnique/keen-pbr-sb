@@ -204,7 +204,7 @@ function AuthSettingsCardInner(
     <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.auth.title")}</CardTitle>
-        <CardDescription>
+        <CardDescription className="max-w-[480px]">
           {t("pages.settings.auth.description")}
         </CardDescription>
       </CardHeader>
@@ -224,7 +224,7 @@ function AuthSettingsCardInner(
 
         {enabled ? (
           <>
-            <div className="grid gap-1.5">
+            <div className="grid max-w-[480px] gap-1.5">
               <Label>{t("pages.settings.auth.provider")}</Label>
               <Select
                 onValueChange={(value) =>
@@ -262,7 +262,7 @@ function AuthSettingsCardInner(
             </div>
 
             {provider === "keenetic" ? (
-              <div className="grid gap-3">
+              <div className="grid max-w-[480px] gap-3">
                 <div className="grid gap-1.5">
                   <Label>{t("pages.settings.auth.endpointMode")}</Label>
                   <Select
@@ -347,7 +347,7 @@ function AuthSettingsCardInner(
               </div>
             ) : null}
 
-            <div className="grid gap-1.5 sm:grid-cols-2 sm:gap-3">
+            <div className="grid max-w-[480px] gap-1.5 sm:grid-cols-2 sm:gap-3">
               <div className="grid gap-1.5">
                 <Label htmlFor="auth-username">
                   {t("pages.settings.auth.username")}
@@ -373,7 +373,7 @@ function AuthSettingsCardInner(
               </div>
             </div>
 
-            <p className="text-xs text-muted-foreground">
+            <p className="max-w-[480px] text-xs text-muted-foreground">
               {provider === "keenetic"
                 ? t("pages.settings.auth.verifyHint")
                 : t("pages.settings.auth.localStoreHint")}

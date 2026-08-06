@@ -153,13 +153,13 @@ function RemoteAccessCardInner(
     <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.remoteAccess.title")}</CardTitle>
-        <CardDescription>
+        <CardDescription className="max-w-[480px]">
           {t("pages.settings.remoteAccess.description")}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {!loginRequired ? (
-          <Alert className="border-warning/40 bg-warning/10">
+          <Alert className="max-w-[480px] border-warning/40 bg-warning/10">
             <AlertTriangleIcon className="size-4 text-warning-foreground" />
             <AlertDescription>
               {t("pages.settings.remoteAccess.loginDisabled")}
@@ -168,7 +168,7 @@ function RemoteAccessCardInner(
         ) : null}
 
         {!listenReachable ? (
-          <Alert className="border-warning/40 bg-warning/10">
+          <Alert className="max-w-[480px] border-warning/40 bg-warning/10">
             <AlertTriangleIcon className="size-4 text-warning-foreground" />
             <AlertDescription>
               {t("pages.settings.remoteAccess.listenLoopback", {
@@ -194,7 +194,7 @@ function RemoteAccessCardInner(
 
         {enabled ? (
           <>
-            <Alert className="border-destructive/40 bg-destructive/5">
+            <Alert className="max-w-[480px] border-destructive/40 bg-destructive/5">
               <AlertTriangleIcon className="size-4 text-destructive" />
               <AlertDescription>
                 {t("pages.settings.remoteAccess.warning")}

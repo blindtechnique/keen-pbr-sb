@@ -75,7 +75,7 @@ export function BackupAndRestoreCard() {
       <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.backup.title")}</CardTitle>
-          <CardDescription>
+          <CardDescription className="max-w-[480px]">
             {t("pages.settings.backup.description")}
           </CardDescription>
         </CardHeader>
@@ -328,11 +328,14 @@ export function SoftwareUpdateCard() {
       <Card size="sm">
         <CardHeader>
           <CardTitle>{t("pages.settings.softwareUpdate.title")}</CardTitle>
-          <CardDescription>
+          <CardDescription className="max-w-[480px]">
             {t("pages.settings.softwareUpdate.description")}
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        {/* Компактная колонка, как у остальных вкладок настроек: статус и
+            версии сверху, кнопки под ними, ничего не растянуто на всю
+            ширину карточки. */}
+        <CardContent className="flex max-w-[480px] flex-col gap-3">
           <div className="flex min-w-0 flex-col items-start gap-2">
             <KeeneticStatus tone={status?.available ? "success" : "neutral"}>
               {status?.available
@@ -525,7 +528,7 @@ function UpdateVersionSummary({
   const { t } = useTranslation()
 
   return (
-    <div className="grid min-w-0 gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+    <div className="grid min-w-0 gap-y-1 text-sm">
       <div>
         <span className="text-muted-foreground">
           {t("pages.settings.softwareUpdate.current")}:{" "}

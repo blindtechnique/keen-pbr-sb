@@ -119,7 +119,7 @@ function LoggingSettingsCardInner(
     <Card size="sm">
       <CardHeader>
         <CardTitle>{t("pages.settings.logging.title")}</CardTitle>
-        <CardDescription>
+        <CardDescription className="max-w-[480px]">
           {t("pages.settings.logging.description")}
         </CardDescription>
       </CardHeader>
@@ -166,7 +166,7 @@ function LoggingSettingsCardInner(
           </p>
         </div>
 
-        <p className="text-xs text-muted-foreground">
+        <p className="max-w-[480px] text-xs text-muted-foreground">
           {t("pages.settings.logging.pathHint")}
         </p>
         <LogDiagnosticsTools
