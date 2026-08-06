@@ -65,15 +65,24 @@ private:
     bool accepting_{true};
 };
 
-bool wait_until(const std::function<bool()>& predicate) {
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (predicate()) {
-            return true;
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-    return predicate();
+// Deterministic barrier for the outcomes the coordinator records on the
+// worker thread with no control-queue callback to observe (post rejected or
+// post throwing). The tests run a single-worker BlockingExecutor and its queue
+// is FIFO, so a task submitted after the refresh task can only start once
+// `run_worker` has returned - after its metric write and after the claim and
+// callback leases have been released. Waiting on that future is the
+// coordinator's own completion signal.
+//
+// This replaces a poll loop on a fixed 2s wall-clock deadline, which was wrong
+// three times over. It could expire under CPU contention before the metric
+// converged. Every spin re-evaluated the predicate, so a predicate that
+// asserted made the binary's total assertion count depend on how many times
+// the loop happened to turn. And waiting on the metric alone was too weak an
+// event: the token is finished before the claim lease is released, so a test
+// that resumed on the metric could still find the single-flight gate closed
+// and see its next `request()` coalesce instead of start.
+void drain_refresh_worker(BlockingExecutor& executor) {
+    executor.submit("test-drain-refresh-worker", []() {}).get();
 }
 
 PeriodicTaskMetricsSnapshot only_metrics(
@@ -232,9 +241,8 @@ TEST_CASE("Keenetic DNS refresh releases gate when control post is rejected") {
 
     REQUIRE(coordinator.request(1) ==
             KeeneticDnsRefreshCoordinator::RequestResult::started);
-    REQUIRE(wait_until([&]() {
-        return only_metrics(metrics).abandoned == 1;
-    }));
+    drain_refresh_worker(executor);
+    REQUIRE(only_metrics(metrics).abandoned == 1);
 
     control.set_accepting(true);
     const auto retry_request = coordinator.request(2);
@@ -279,9 +287,8 @@ TEST_CASE("Keenetic DNS refresh ignores a callback queued before post throws") {
     REQUIRE(coordinator.request(1) ==
             KeeneticDnsRefreshCoordinator::RequestResult::started);
     REQUIRE(control.wait_for_size(1));
-    REQUIRE(wait_until([&]() {
-        return only_metrics(metrics).failure == 1;
-    }));
+    drain_refresh_worker(executor);
+    REQUIRE(only_metrics(metrics).failure == 1);
 
     REQUIRE(coordinator.request(2) ==
             KeeneticDnsRefreshCoordinator::RequestResult::started);
@@ -363,9 +370,8 @@ TEST_CASE("Keenetic DNS refresh fences a callback started before post throws") {
 
     REQUIRE(coordinator.request(1) ==
             KeeneticDnsRefreshCoordinator::RequestResult::started);
-    REQUIRE(wait_until([&]() {
-        return only_metrics(metrics).failure == 1;
-    }));
+    drain_refresh_worker(executor);
+    REQUIRE(only_metrics(metrics).failure == 1);
     REQUIRE(early_control_callback.joinable());
     early_control_callback.join();
     CHECK(callback_started_in_time);
@@ -502,7 +508,25 @@ TEST_CASE("Keenetic DNS refresh stop waits for callback and suppresses commit") 
         coordinator.stop();
         stop_returned.store(true, std::memory_order_release);
     });
-    std::this_thread::sleep_for(5ms);
+
+    // `stop()` publishes the stopping flag under the state mutex before it
+    // blocks on the in-flight callback, and `request()` is rejected only once
+    // that flag is set. A rejection is therefore proof that `stop()` has
+    // reached its wait. The refresh callback is still parked inside
+    // `refresh()` holding the callback lease, so the in-flight count cannot
+    // have dropped to zero and `stop()` cannot have returned yet.
+    //
+    // The previous `sleep_for(5ms)` guessed at that instead. Under CPU
+    // contention the stopper thread could go unscheduled for the whole 5ms,
+    // the test would then release the refresh before `stop()` had set the
+    // flag, and the run would complete normally through the control queue -
+    // leaving the token unfinished and failing the abandoned/in_flight checks
+    // below with no indication that a timing assumption, not the coordinator,
+    // was at fault.
+    while (coordinator.request(10) !=
+           KeeneticDnsRefreshCoordinator::RequestResult::rejected) {
+        std::this_thread::yield();
+    }
     CHECK_FALSE(stop_returned.load(std::memory_order_acquire));
 
     {
