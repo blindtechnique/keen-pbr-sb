@@ -17,10 +17,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
-import {
-  KeenPencilIcon,
-  KeenTrashIcon,
-} from "@/components/shared/keen-icons"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
@@ -1088,7 +1085,7 @@ function SettingsEditor({
   )
   const toggle = (key: "IPV6_ENABLED" | "POLICY_EXCLUDE" | "LOG_LEVEL") => (
     <label
-      className="flex min-h-10 cursor-pointer items-start gap-3 py-1"
+      className="flex min-h-10 max-w-[480px] cursor-pointer items-start gap-3 py-1"
       key={key}
     >
       <Checkbox
@@ -1138,7 +1135,7 @@ function SettingsEditor({
           size="compact"
           title={t("nfqws.groups.bypass")}
         />
-        <div className="grid gap-1.5">
+        <div className="grid max-w-[480px] gap-1.5">
           <Label>{t("nfqws.fields.NFQWS_EXTRA_ARGS.label")}</Label>
           <Select
             items={MODE_OPTIONS.map((mode) => ({
@@ -1238,7 +1235,7 @@ function NfqwsField({
   }
 
   return (
-    <div className="grid gap-1.5">
+    <div className="grid max-w-[480px] gap-1.5">
       <Label className="flex flex-wrap items-baseline gap-2">
         {t(`nfqws.fields.${variable}.label`)}
         <span className="font-mono text-[11px] font-normal text-muted-foreground">
@@ -2162,7 +2159,9 @@ function ArgsField({
     .filter((token) => token.startsWith("--")).length
 
   return (
-    <div className="grid gap-1.5">
+    // Компактная ширина, как у всех полей настроек (решение владельца):
+    // пусть страница длиннее, но в едином стиле.
+    <div className="grid max-w-[480px] gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <Label className="flex flex-wrap items-center gap-2">
           {label}

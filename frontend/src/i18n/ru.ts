@@ -344,6 +344,7 @@ export const ruTranslation = {
       kind: {
         routingRule: "Правила маршрутизации:",
         dnsRule: "Правила DNS:",
+        dns: "DNS:",
         dnsServer: "DNS-серверы:",
         failoverGroup: "Группы:",
         list: "Списки:",

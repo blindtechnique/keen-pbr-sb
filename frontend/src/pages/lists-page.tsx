@@ -33,6 +33,9 @@ import { DependencyList } from "@/components/shared/dependency-list"
 import { ExpandableText } from "@/components/shared/expandable-text"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { getListDeleteImpactItems } from "@/components/delete-impact/list-items"
+import { createDnsServerDisplayNameMap } from "@/lib/dns-display"
+import { getRuleEditHref } from "@/lib/rule-route"
+import type { Dependency } from "@/lib/dependencies"
 import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
@@ -193,16 +196,41 @@ export function ListsPage() {
     loadedConfig,
     dependencyTargets
   )
-  const dependenciesByList = useMemo(
-    () =>
-      new Map(
-        tableRows.map((row) => [
-          row.id,
-          dependencyAnalysis.dependenciesByTarget.get(`list:${row.id}`) ?? [],
-        ])
-      ),
-    [dependencyAnalysis.dependenciesByTarget, tableRows]
-  )
+  const dependenciesByList = useMemo(() => {
+    // «Правила DNS: правило → сервер» заменены на «DNS: сервер» (решение
+    // владельца): по новой концепции DNS назначается списку, а правило —
+    // деталь реализации. Сервер берётся из правил, покрывающих список;
+    // ссылка ведёт в редактор правила — для общего правила там видно всех.
+    const dnsServerNames = createDnsServerDisplayNameMap(
+      loadedConfig?.dns?.servers ?? []
+    )
+    const dnsChipsByList = new Map<string, Dependency[]>()
+    for (const [index, rule] of (loadedConfig?.dns?.rules ?? []).entries()) {
+      for (const listId of rule.list ?? []) {
+        const chips = dnsChipsByList.get(listId) ?? []
+        const label = dnsServerNames.get(rule.server) ?? rule.server
+        if (!chips.some((chip) => chip.label === label)) {
+          chips.push({
+            kind: "dns",
+            label,
+            href: getRuleEditHref("dns-rules", rule, index),
+          })
+        }
+        dnsChipsByList.set(listId, chips)
+      }
+    }
+    return new Map(
+      tableRows.map((row) => [
+        row.id,
+        [
+          ...(
+            dependencyAnalysis.dependenciesByTarget.get(`list:${row.id}`) ?? []
+          ).filter((dependency) => dependency.kind !== "dnsRule"),
+          ...(dnsChipsByList.get(row.id) ?? []),
+        ],
+      ])
+    )
+  }, [dependencyAnalysis.dependenciesByTarget, loadedConfig, tableRows])
   const [search, setSearch] = useState("")
   // Строки ищутся по имени, техническому идентификатору, источнику и по тому,
   // где список используется: именно так его и вспоминают — «тот, что для

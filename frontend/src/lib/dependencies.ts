@@ -12,6 +12,9 @@ export type DependencyKind =
   | "routingRule"
   | "dnsRule"
   | "dnsServer"
+  // «DNS:» без слова «правила» — так таблица списков показывает выбранный
+  // для списка DNS-сервер (по новой концепции правило — деталь реализации).
+  | "dns"
   | "failoverGroup"
   | "listRefresh"
   | "list"

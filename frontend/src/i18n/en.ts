@@ -344,6 +344,7 @@ export const enTranslation = {
       kind: {
         routingRule: "Routing rules:",
         dnsRule: "DNS rules:",
+        dns: "DNS:",
         dnsServer: "DNS servers:",
         failoverGroup: "Groups:",
         list: "Lists:",

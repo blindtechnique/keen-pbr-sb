@@ -566,6 +566,7 @@ function LoadedGeneralConfigPage({
               <form.Field name={SETTINGS_FIELD_NAMES.skipMarkedPackets}>
                 {(field) => (
                   <Field
+                    width="short"
                     className={activeTab === "general" ? undefined : "hidden"}
                   >
                     <FieldContent>
@@ -606,6 +607,7 @@ function LoadedGeneralConfigPage({
               <form.Field name={SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply}>
                 {(field) => (
                   <Field
+                    width="short"
                     className={activeTab === "general" ? undefined : "hidden"}
                   >
                     <FieldContent>
@@ -643,6 +645,7 @@ function LoadedGeneralConfigPage({
               <form.Field name={SETTINGS_FIELD_NAMES.ipv6Enabled}>
                 {(field) => (
                   <Field
+                    width="short"
                     className={activeTab === "general" ? undefined : "hidden"}
                   >
                     <FieldContent>
@@ -678,6 +681,7 @@ function LoadedGeneralConfigPage({
               <form.Field name={SETTINGS_FIELD_NAMES.clientDnsEnforcement}>
                 {(field) => (
                   <Field
+                    width="short"
                     className={activeTab === "general" ? undefined : "hidden"}
                   >
                     <FieldContent>
@@ -713,6 +717,7 @@ function LoadedGeneralConfigPage({
                   const error = getFirstFieldError(field.state.meta.errors)
                   return (
                     <Field
+                      width="short"
                       className={
                         activeTab === "incoming" ? undefined : "hidden"
                       }
@@ -818,6 +823,7 @@ function LoadedGeneralConfigPage({
                       const error = getFirstFieldError(field.state.meta.errors)
                       return (
                         <Field
+                          width="short"
                           className={
                             activeTab === "incoming" ? undefined : "hidden"
                           }
@@ -960,6 +966,7 @@ function LoadedGeneralConfigPage({
                       const error = getFirstFieldError(field.state.meta.errors)
                       return (
                         <Field
+                          width="short"
                           className={
                             activeTab === "incoming" ? undefined : "hidden"
                           }
@@ -1080,7 +1087,7 @@ function LoadedGeneralConfigPage({
             <FieldGroup>
               <form.Field name={SETTINGS_FIELD_NAMES.listsAutoupdateEnabled}>
                 {(field) => (
-                  <Field>
+                  <Field width="short">
                     <FieldContent>
                       <div className="flex items-center space-x-3">
                         <Checkbox
@@ -1112,7 +1119,7 @@ function LoadedGeneralConfigPage({
                   const error = getFirstFieldError(field.state.meta.errors)
 
                   return (
-                    <Field invalid={Boolean(error)}>
+                    <Field width="short" invalid={Boolean(error)}>
                       <FieldLabel>
                         {t("pages.settings.autoupdate.cronLabel")}
                       </FieldLabel>
@@ -1151,6 +1158,7 @@ function LoadedGeneralConfigPage({
                   >
                     {(fallbackField) => (
                       <ListRefreshRouteFields
+                        fieldWidth="short"
                         chain={{
                           detour: detourField.state.value,
                           fallbackDetours: fallbackField.state.value,
@@ -1236,7 +1244,7 @@ function LoadedGeneralConfigPage({
                 }
               >
                 {(field) => (
-                  <Field>
+                  <Field width="short">
                     <FieldContent>
                       <div className="flex items-center space-x-3">
                         <Checkbox

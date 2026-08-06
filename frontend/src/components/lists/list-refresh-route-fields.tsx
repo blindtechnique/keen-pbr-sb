@@ -24,10 +24,13 @@ export function ListRefreshRouteFields({
   detourFieldName,
   fallbackError,
   fallbackFieldName,
+  fieldWidth = "full",
   onChange,
   outbounds,
   primaryEmptyLabel,
 }: {
+  /** «Настройки» показывают эти поля компактными, редактор списка — во всю ширину. */
+  fieldWidth?: "full" | "short"
   chain: ListRefreshRouteChain
   detourError?: string | null
   detourFieldName?: string
@@ -49,7 +52,7 @@ export function ListRefreshRouteFields({
 
   return (
     <>
-      <Field invalid={Boolean(detourError)}>
+      <Field invalid={Boolean(detourError)} width={fieldWidth}>
         <FieldLabel>{t("common.listRefreshRoute.primary")}</FieldLabel>
         <FieldContent data-field-name={detourFieldName}>
           <OutboundSelect
@@ -80,7 +83,7 @@ export function ListRefreshRouteFields({
       </Field>
 
       {chain.detour ? (
-        <Field invalid={Boolean(fallbackError)}>
+        <Field invalid={Boolean(fallbackError)} width={fieldWidth}>
           <FieldLabel>{t("common.listRefreshRoute.fallbacks")}</FieldLabel>
           <FieldContent>
             <MultiSelectList
