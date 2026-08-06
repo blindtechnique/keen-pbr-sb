@@ -96,7 +96,11 @@ public:
                 }
             });
     }
-    void apply(FirewallApplyMode) override { events.push_back("apply"); }
+    std::vector<FirewallApplyMode> applied_modes;
+    void apply(FirewallApplyMode mode) override {
+        events.push_back("apply");
+        applied_modes.push_back(mode);
+    }
     void cleanup() override {}
     FirewallBackend backend() const override {
         return backend_;
@@ -604,4 +608,136 @@ TEST_CASE(
             {{"eth3", "172.16.2.32/27"}},
             {{"ppp0", "172.16.2.32/27"}}) ==
         std::vector<std::string>{"172.16.2.32/27"});
+}
+
+// --- Seam between staging and commit -----------------------------------
+//
+// Staging reads daemon state and touches nothing outside this process; the
+// commit is the one step that spawns `ipset restore`, `iptables-restore` or
+// `nft -f -`, each with a multi-second timeout and its own bounded retry.
+// These cases pin that boundary so the commit can later be moved off the
+// control loop without the staging silently following it.
+
+namespace {
+
+Config staged_transaction_config() {
+    return parse_config(R"json({
+      "daemon": {"ipv6_enabled": false},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "seam": {"ip_cidrs": ["198.51.100.0/24"]}
+      },
+      "route": {
+        "rules": [
+          {"list": ["seam"], "outbound": "vpn"}
+        ]
+      }
+    })json");
+}
+
+}  // namespace
+
+TEST_CASE("staging builds the whole transaction without committing it") {
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+
+    const auto staged = stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets);
+
+    // The transaction is fully described...
+    CHECK(!firewall.events.empty());
+    CHECK(!staged.rule_states.empty());
+    // ...and nothing has been handed to the kernel yet.
+    CHECK(std::find(firewall.events.begin(), firewall.events.end(), "apply") ==
+          firewall.events.end());
+    CHECK(firewall.applied_modes.empty());
+
+    commit_runtime_firewall(firewall, staged);
+
+    REQUIRE(!firewall.events.empty());
+    CHECK(firewall.events.back() == "apply");
+    CHECK(std::count(firewall.events.begin(), firewall.events.end(), "apply") ==
+          1);
+}
+
+TEST_CASE("commit uses the mode the transaction was staged with") {
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+
+    const auto staged = stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets);
+    CHECK(staged.mode == FirewallApplyMode::PreserveSets);
+
+    commit_runtime_firewall(firewall, staged);
+
+    REQUIRE(firewall.applied_modes.size() == 1U);
+    // Staging one mode and committing another would build one transaction and
+    // publish a different one.
+    CHECK(firewall.applied_modes.front() == FirewallApplyMode::PreserveSets);
+}
+
+TEST_CASE("staging then committing equals the single-shot apply") {
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+
+    RecordingFirewall split;
+    const auto staged = stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        split,
+        FirewallApplyMode::Destructive);
+    commit_runtime_firewall(split, staged);
+
+    RecordingFirewall single;
+    AppliedListContentState single_content;
+    const auto rules = apply_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        single,
+        FirewallApplyMode::Destructive,
+        nullptr,
+        nullptr,
+        nullptr,
+        &single_content);
+
+    CHECK(split.events == single.events);
+    CHECK(split.applied_modes == single.applied_modes);
+    CHECK(split.marked_destinations == single.marked_destinations);
+    CHECK(staged.rule_states.size() == rules.size());
+}
+
+TEST_CASE("a transaction rejected during staging never reaches the backend") {
+    const auto config = keenetic_detour_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+
+    CHECK_THROWS_WITH(
+        stage_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::PreserveSets),
+        "DNS server 'keenetic' requires a prepared Keenetic DNS snapshot");
+    CHECK(firewall.events.empty());
+    CHECK(firewall.applied_modes.empty());
 }

@@ -15,9 +15,59 @@
 
 namespace keen_pbr3 {
 
+// A firewall transaction that is fully described in memory but has not been
+// handed to the kernel yet.
+//
+// The split exists because the commit step is the only part that spawns child
+// processes - `ipset restore`, `iptables-restore`, `nft -f -` - each with a
+// multi-second timeout and its own bounded retry. Staging reads daemon state
+// and touches nothing outside this process, so it belongs on the thread that
+// owns that state; the commit does not. Naming the boundary is what lets the
+// commit later move off the control loop without the staging following it.
+struct StagedRuntimeFirewall {
+    // The realized rule-state snapshot to store for verification and status.
+    std::vector<RuleState> rule_states;
+    // Which list content this transaction was built from.
+    AppliedListContentState list_content_state;
+    // Carried through because the backend needs the same mode for both
+    // `prepare_apply()` during staging and `apply()` at commit; splitting them
+    // across two different modes would build one transaction and commit
+    // another.
+    FirewallApplyMode mode{FirewallApplyMode::Destructive};
+};
+
+// Build the complete backend transaction in memory. Spawns no process.
+StagedRuntimeFirewall stage_runtime_firewall(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& urltest_selections,
+    const CacheManager& cache_manager,
+    Firewall& firewall,
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers = nullptr,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets = nullptr,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors = nullptr,
+    bool udp_call_affinity_ipset_available = true,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot =
+        std::nullopt,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot = nullptr);
+
+// Hand the staged transaction to the kernel. This is the one blocking step:
+// every child process of a firewall apply originates here.
+void commit_runtime_firewall(Firewall& firewall,
+                             const StagedRuntimeFirewall& staged);
+
 // Materialize the runtime firewall configuration using the real backend.
 // Returns the realized rule-state snapshot that should be stored for later
 // verification and status reporting.
+//
+// Staging and commit back to back, which is what every current caller wants:
+// they run inside a synchronous transaction whose rollback depends on the
+// commit having already happened or not.
 std::vector<RuleState> apply_runtime_firewall(
     const Config& config,
     const OutboundMarkMap& outbound_marks,

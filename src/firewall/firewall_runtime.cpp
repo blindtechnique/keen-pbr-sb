@@ -118,7 +118,7 @@ changed_native_vpn_direct_egress_source_cidrs(
     return {changed_sources.begin(), changed_sources.end()};
 }
 
-std::vector<RuleState> apply_runtime_firewall(
+StagedRuntimeFirewall stage_runtime_firewall(
     const Config& config,
     const OutboundMarkMap& outbound_marks,
     const std::map<std::string, std::string>& urltest_selections,
@@ -131,7 +131,6 @@ std::vector<RuleState> apply_runtime_firewall(
         effective_internal_vpn_targets,
     const std::vector<FirewallSourceEgressSnatSelector>*
         native_vpn_direct_egress_snat_selectors,
-    AppliedListContentState* applied_list_content_state,
     bool udp_call_affinity_ipset_available,
     const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
     std::shared_ptr<const ListCacheGenerationSnapshot>
@@ -450,12 +449,58 @@ std::vector<RuleState> apply_runtime_firewall(
         firewall.create_mark_rule(target.fwmark, affinity);
     }
 
-    firewall.apply(mode);
+    StagedRuntimeFirewall staged;
+    staged.rule_states = std::move(rule_states);
+    staged.list_content_state = std::move(candidate_list_content_state);
+    staged.mode = mode;
+    return staged;
+}
+
+void commit_runtime_firewall(Firewall& firewall,
+                             const StagedRuntimeFirewall& staged) {
+    firewall.apply(staged.mode);
+}
+
+std::vector<RuleState> apply_runtime_firewall(
+    const Config& config,
+    const OutboundMarkMap& outbound_marks,
+    const std::map<std::string, std::string>& urltest_selections,
+    const CacheManager& cache_manager,
+    Firewall& firewall,
+    FirewallApplyMode mode,
+    const std::vector<InternalVpnServer>*
+        effective_internal_vpn_servers,
+    const std::vector<InternalVpnRuntimeTarget>*
+        effective_internal_vpn_targets,
+    const std::vector<FirewallSourceEgressSnatSelector>*
+        native_vpn_direct_egress_snat_selectors,
+    AppliedListContentState* applied_list_content_state,
+    bool udp_call_affinity_ipset_available,
+    const std::optional<KeeneticDnsSnapshot>& keenetic_dns_snapshot,
+    std::shared_ptr<const ListCacheGenerationSnapshot>
+        list_cache_snapshot) {
+    auto staged = stage_runtime_firewall(
+        config,
+        outbound_marks,
+        urltest_selections,
+        cache_manager,
+        firewall,
+        mode,
+        effective_internal_vpn_servers,
+        effective_internal_vpn_targets,
+        native_vpn_direct_egress_snat_selectors,
+        udp_call_affinity_ipset_available,
+        keenetic_dns_snapshot,
+        std::move(list_cache_snapshot));
+    commit_runtime_firewall(firewall, staged);
+    // Published only after the commit, exactly as before: a transaction that
+    // never reached the kernel must not advertise the list content it was
+    // built from.
     if (applied_list_content_state != nullptr) {
         *applied_list_content_state =
-            std::move(candidate_list_content_state);
+            std::move(staged.list_content_state);
     }
-    return rule_states;
+    return std::move(staged.rule_states);
 }
 
 } // namespace keen_pbr3
