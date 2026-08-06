@@ -166,7 +166,8 @@ PolicyRuleCheck RoutingVerifier::verify_policy_rule(const RuleSpec& expected) {
 
         for (const auto& r : rules) {
             if (r.fwmark != expected.fwmark || r.fwmask != expected.fwmask ||
-                r.table  != expected.table) {
+                r.table  != expected.table ||
+                r.priority != expected.priority) {
                 continue;
             }
             if (r.family == AF_INET) {

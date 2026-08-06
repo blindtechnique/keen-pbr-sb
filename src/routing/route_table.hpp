@@ -4,6 +4,7 @@
 #include <deque>
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,19 @@ bool route_metric_matches_live(const RouteSpec& expected,
 // protocol are part of the identity because urltest intentionally keeps
 // several default routes through the same interface with different metrics.
 bool route_matches_live(const RouteSpec& expected, const DumpedRoute& actual);
+
+// Kernel route key used to classify an EEXIST response. Interface, gateway,
+// type, and protocol may differ while the route still occupies the slot that
+// must be atomically replaced.
+bool route_occupies_same_slot(const RouteSpec& expected,
+                              const DumpedRoute& actual);
+
+// Convert an exact kernel snapshot back to a deletion spec.
+RouteSpec route_spec_from_live(const DumpedRoute& route);
+
+// Protocol 186 is the ownership marker. System/reserved routing tables are
+// excluded defensively even if a malformed old build happened to tag one.
+bool is_generated_route_candidate(const DumpedRoute& route);
 
 std::vector<RouteSpec> find_missing_live_routes(
     const std::vector<RouteSpec>& desired,
@@ -93,6 +107,23 @@ public:
         RouteReconcileMode mode = RouteReconcileMode::Strict);
     void remove_obsolete(const std::vector<RouteSpec>& desired);
 
+    // The route phase can atomically replace a protocol-186 object before the
+    // policy-rule phase succeeds. Until the caller commits the generation,
+    // clear() restores that previous object instead of deleting the slot.
+    void rollback_pending_replacements() noexcept;
+    void finalize_pending_replacements() noexcept;
+
+    // After a complete route+rule transaction succeeds, adopt exact desired
+    // protocol-186 routes that survived a daemon restart. This is deliberately
+    // separate from add()/clear() so rollback never claims the previous LKG.
+    void adopt_live_generated_desired(
+        const std::vector<RouteSpec>& desired) noexcept;
+
+    // Snapshot tables for which live route protocol 186 proves prior
+    // keen-pbr ownership. Policy rules have no protocol marker and use this as
+    // corroboration when retiring stale mark-to-table generations.
+    std::set<uint32_t> live_generated_route_tables() const;
+
     // Replace the tracked desired snapshot without mutating netlink. Existing
     // kernel objects are observed, not claimed, until this process creates a
     // replacement itself.
@@ -113,6 +144,17 @@ public:
     const std::vector<RouteSpec>& get_routes() const { return routes_; }
 
 private:
+    enum class RouteInstallOutcome {
+        Created,
+        AlreadyManaged,
+        ReplacedManaged,
+    };
+
+    struct PendingReplacement {
+        RouteSpec installed;
+        std::vector<RouteSpec> previous;
+    };
+
     struct RouteRepairRecord {
         RouteSpec route;
         route_table_detail::RouteRepairRateState rate;
@@ -127,6 +169,7 @@ private:
     std::vector<RouteSpec> routes_;
     std::vector<RouteSpec> owned_routes_;
     std::vector<RouteRepairRecord> repair_records_;
+    std::vector<PendingReplacement> pending_replacements_;
 
     // Check if an identical route is already tracked.
     bool is_tracked(const RouteSpec& spec) const;
@@ -136,7 +179,9 @@ private:
     bool repair_retry_due(const RouteSpec& spec) const;
     void defer_repair(const RouteSpec& spec);
     void reset_repair_backoff(const RouteSpec& spec);
-    RouteAddResult add_route_checked(const RouteSpec& spec);
+    RouteInstallOutcome add_route_checked(const RouteSpec& spec);
+    void adopt_generated_orphans(const std::vector<RouteSpec>& desired);
+    bool restore_pending_replacement(const RouteSpec& installed) noexcept;
     void forget_owned_route(const RouteSpec& spec);
     void forget_repair_record(const RouteSpec& spec);
 };

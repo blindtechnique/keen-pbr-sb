@@ -1,10 +1,12 @@
 #include "routing_state.hpp"
 
 #include "addr_spec.hpp"
+#include "../log/logger.hpp"
 #include "../routing/target.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <exception>
 #include <set>
 #include <tuple>
 
@@ -77,6 +79,47 @@ bool strict_enforcement_enabled(const Config& cfg, const Outbound& ob) {
         return true;
     }
     return false;
+}
+
+std::set<uint32_t> desired_generated_route_tables(
+    const std::vector<RouteSpec>& desired_routes) {
+    std::set<uint32_t> tables;
+    for (const auto& route : desired_routes) {
+        if (route.protocol == KEEN_PBR_GENERATED_ROUTE_PROTOCOL) {
+            tables.insert(route.table);
+        }
+    }
+    return tables;
+}
+
+void adopt_committed_generated_state(
+    RouteTable& routes,
+    PolicyRuleManager& rules,
+    const std::vector<RouteSpec>& desired_routes,
+    const std::vector<RuleSpec>& desired_rules) noexcept {
+    routes.adopt_live_generated_desired(desired_routes);
+    try {
+        const auto live_tables = routes.live_generated_route_tables();
+        const auto desired_tables =
+            desired_generated_route_tables(desired_routes);
+        std::set<uint32_t> confirmed_tables;
+        for (const auto table : desired_tables) {
+            if (live_tables.count(table) != 0) {
+                confirmed_tables.insert(table);
+            }
+        }
+        rules.adopt_live_generated_desired(
+            desired_rules, confirmed_tables);
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Could not confirm live generated route ownership after commit; "
+            "policy-rule adoption was skipped: {}",
+            error.what());
+    } catch (...) {
+        Logger::instance().warn(
+            "Could not confirm live generated route ownership after commit; "
+            "policy-rule adoption was skipped: unknown error");
+    }
 }
 
 bool parse_ip(const std::string& ip, int family, void* out) {
@@ -416,6 +459,8 @@ void populate_routing_state(const Config& cfg,
     const uint32_t fwmark_mask = fwmark_mask_value(cfg.fwmark.value_or(FwmarkConfig{}));
     std::vector<RouteSpec> planned_routes;
     std::vector<RuleSpec> planned_rules;
+    const auto prior_generated_route_tables =
+        routes.live_generated_route_tables();
 
     auto add_route_if_enabled = [&](const RouteSpec& route) {
         if (!ipv6_enabled && route.family == AF_INET6) {
@@ -578,8 +623,8 @@ void populate_routing_state(const Config& cfg,
     }
 
     // Do not expose a policy rule until every route it can select exists.
-    // If either phase fails, remove only the state tracked by this manager and
-    // leave the caller to report a failed runtime apply instead of a partial one.
+    // If either phase fails, remove newly created routes and restore any
+    // protocol-186 route that was atomically replaced during this transaction.
     try {
         for (const auto& route : planned_routes) {
             routes.add(route);
@@ -592,6 +637,18 @@ void populate_routing_state(const Config& cfg,
         routes.clear();
         throw;
     }
+
+    // The new route+rule generation is now complete. From this point stale
+    // restart debris is best-effort cleanup and must not roll back working
+    // forwarding. Exact protocol-marked state is adopted only at this commit
+    // boundary, never by generic clear().
+    routes.finalize_pending_replacements();
+    rules.remove_orphaned_generated(
+        planned_rules, prior_generated_route_tables);
+    routes.remove_obsolete(planned_routes);
+
+    adopt_committed_generated_state(
+        routes, rules, planned_routes, planned_rules);
 }
 
 void reconcile_kernel_routing_state(
@@ -600,10 +657,27 @@ void reconcile_kernel_routing_state(
     const std::vector<RouteSpec>& desired_routes,
     const std::vector<RuleSpec>& desired_rules,
     RouteReconcileMode mode) {
+    const auto prior_generated_route_tables =
+        routes.live_generated_route_tables();
     routes.add_missing(desired_routes, mode);
-    rules.add_missing(desired_rules);
+    try {
+        rules.add_missing(desired_rules);
+    } catch (...) {
+        // A newly created route is inert until its policy rule exists and may
+        // remain for the bounded retry. Replacing an already active route is
+        // different: restore that last-known-good slot when the rule phase
+        // does not commit.
+        routes.rollback_pending_replacements();
+        throw;
+    }
+    routes.finalize_pending_replacements();
+    rules.remove_orphaned_generated(
+        desired_rules, prior_generated_route_tables);
     rules.remove_obsolete(desired_rules);
     routes.remove_obsolete(desired_routes);
+
+    adopt_committed_generated_state(
+        routes, rules, desired_routes, desired_rules);
 }
 
 bool is_interface_outbound_reachable(const Outbound& outbound, NetlinkManager& netlink) {

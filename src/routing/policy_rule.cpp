@@ -26,6 +26,10 @@ bool rule_covers_family(const RuleSpec& rule,
            (rule.family == 0 || rule.family == concrete.family);
 }
 
+} // anonymous namespace
+
+namespace policy_rule_detail {
+
 bool rule_matches_live(const RuleSpec& expected, const DumpedRule& actual) {
     return expected.fwmark == actual.fwmark &&
            expected.fwmask == actual.fwmask &&
@@ -33,6 +37,54 @@ bool rule_matches_live(const RuleSpec& expected, const DumpedRule& actual) {
            expected.priority == actual.priority &&
            expected.family == actual.family;
 }
+
+std::vector<RuleSpec> find_orphaned_generated_rules(
+    const std::vector<RuleSpec>& desired,
+    const std::vector<DumpedRule>& live,
+    const std::set<uint32_t>& corroborated_route_tables) {
+    std::vector<RuleSpec> orphaned;
+    for (const auto& candidate : live) {
+        if ((candidate.family != AF_INET && candidate.family != AF_INET6) ||
+            candidate.priority != candidate.table ||
+            corroborated_route_tables.count(candidate.table) == 0) {
+            continue;
+        }
+
+        const bool collides_with_current_mark = std::any_of(
+            desired.begin(), desired.end(), [&](const RuleSpec& expected) {
+                return expected.fwmark == candidate.fwmark &&
+                       expected.fwmask == candidate.fwmask;
+            });
+        if (!collides_with_current_mark) {
+            continue;
+        }
+
+        const bool exact_desired = std::any_of(
+            desired.begin(), desired.end(), [&](const RuleSpec& expected) {
+                RuleSpec concrete = expected;
+                concrete.family = candidate.family;
+                return (expected.family == 0 ||
+                        expected.family == candidate.family) &&
+                       rule_matches_live(concrete, candidate);
+            });
+        if (exact_desired) {
+            continue;
+        }
+
+        RuleSpec spec;
+        spec.fwmark = candidate.fwmark;
+        spec.fwmask = candidate.fwmask;
+        spec.table = candidate.table;
+        spec.priority = candidate.priority;
+        spec.family = candidate.family;
+        orphaned.push_back(spec);
+    }
+    return orphaned;
+}
+
+} // namespace policy_rule_detail
+
+namespace {
 
 std::vector<RuleSpec> missing_live_rules(
     const std::vector<RuleSpec>& desired,
@@ -55,7 +107,8 @@ std::vector<RuleSpec> missing_live_rules(
                 live.begin(),
                 live.end(),
                 [&](const DumpedRule& candidate) {
-                    return rule_matches_live(concrete, candidate);
+                    return policy_rule_detail::rule_matches_live(
+                        concrete, candidate);
                 });
             if (!present) {
                 missing.push_back(concrete);
@@ -249,6 +302,109 @@ void PolicyRuleManager::remove_obsolete(const std::vector<RuleSpec>& desired) {
         if (!still_desired) {
             remove(rule);
         }
+    }
+}
+
+void PolicyRuleManager::remove_orphaned_generated(
+    const std::vector<RuleSpec>& desired,
+    const std::set<uint32_t>& corroborated_route_tables) {
+    if (dry_run_ || corroborated_route_tables.empty()) {
+        return;
+    }
+
+    std::vector<RuleSpec> orphaned;
+    try {
+        orphaned = policy_rule_detail::find_orphaned_generated_rules(
+            desired, netlink_.dump_policy_rules(), corroborated_route_tables);
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Could not inspect stale managed policy rules: {}", error.what());
+        return;
+    }
+    for (const auto& rule : orphaned) {
+        const bool tracked_by_this_process = std::any_of(
+            rules_.begin(), rules_.end(), [&](const RuleSpec& tracked) {
+                return rule_covers_family(tracked, rule);
+            });
+        if (tracked_by_this_process) {
+            // remove_obsolete() owns the normal in-process generation change
+            // and retains its existing rollback/ownership semantics.
+            continue;
+        }
+        try {
+            netlink_.delete_rule_for_family(rule, rule.family);
+            Logger::instance().info(
+                "Removed stale managed policy rule (table={}, fwmark={}, mask={}, priority={}, family={})",
+                rule.table,
+                rule.fwmark,
+                rule.fwmask,
+                rule.priority,
+                rule.family);
+        } catch (const std::exception& error) {
+            // The committed desired generation is already complete. Keep
+            // stale cleanup convergent and retryable instead of rolling that
+            // generation back because one exact delete raced firmware.
+            Logger::instance().warn(
+                "Could not remove stale managed policy rule "
+                "(table={}, fwmark={}, mask={}, priority={}, family={}): {}",
+                rule.table,
+                rule.fwmark,
+                rule.fwmask,
+                rule.priority,
+                rule.family,
+                error.what());
+        }
+    }
+}
+
+void PolicyRuleManager::adopt_live_generated_desired(
+    const std::vector<RuleSpec>& desired,
+    const std::set<uint32_t>& corroborated_route_tables) noexcept {
+    if (dry_run_ || corroborated_route_tables.empty()) {
+        return;
+    }
+    try {
+        const auto live = netlink_.dump_policy_rules();
+        auto committed = owned_rules_;
+        for (const auto& logical : desired) {
+            if (corroborated_route_tables.count(logical.table) == 0) {
+                continue;
+            }
+            const int dual_stack_families[] = {AF_INET, AF_INET6};
+            const int* begin = dual_stack_families;
+            const int* end = dual_stack_families + 2;
+            int single_family = logical.family;
+            if (logical.family != 0) {
+                begin = &single_family;
+                end = begin + 1;
+            }
+            for (auto family = begin; family != end; ++family) {
+                RuleSpec concrete = logical;
+                concrete.family = *family;
+                const bool present = std::any_of(
+                    live.begin(), live.end(), [&](const DumpedRule& actual) {
+                        return policy_rule_detail::rule_matches_live(
+                            concrete, actual);
+                    });
+                const bool already_owned = std::any_of(
+                    committed.begin(), committed.end(),
+                    [&](const RuleSpec& candidate) {
+                        return rules_equal(candidate, concrete);
+                    });
+                if (present && !already_owned) {
+                    committed.push_back(concrete);
+                }
+            }
+        }
+        owned_rules_.swap(committed);
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "Could not adopt exact live managed policy rules after commit: {}",
+            error.what());
+    } catch (...) {
+        Logger::instance().warn(
+            "Could not adopt exact live managed policy rules after commit: "
+            "unknown error");
     }
 }
 

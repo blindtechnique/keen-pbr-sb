@@ -27,8 +27,27 @@ public:
         return add_result;
     }
 
+    void replace_route(const RouteSpec& spec) override {
+        replaced.push_back(spec);
+        live.erase(
+            std::remove_if(
+                live.begin(), live.end(), [&](const DumpedRoute& candidate) {
+                    return route_table_detail::route_occupies_same_slot(
+                        spec, candidate);
+                }),
+            live.end());
+        live.push_back(live_route_value(spec));
+    }
+
     void delete_route(const RouteSpec& spec) override {
         deleted.push_back(spec);
+        live.erase(
+            std::remove_if(
+                live.begin(), live.end(), [&](const DumpedRoute& candidate) {
+                    return route_table_detail::route_matches_live(
+                        spec, candidate);
+                }),
+            live.end());
     }
 
     std::vector<DumpedRoute> dump_routes(int) override {
@@ -39,8 +58,24 @@ public:
     bool fail_add{false};
     std::function<RouteAddResult(const RouteSpec&)> add_hook;
     std::vector<RouteSpec> added;
+    std::vector<RouteSpec> replaced;
     std::vector<RouteSpec> deleted;
     std::vector<DumpedRoute> live;
+
+private:
+    static DumpedRoute live_route_value(const RouteSpec& spec) {
+        DumpedRoute value;
+        value.destination = spec.destination;
+        value.table = spec.table;
+        value.interface = spec.interface;
+        value.gateway = spec.gateway;
+        value.blackhole = spec.blackhole;
+        value.unreachable = spec.unreachable;
+        value.family = spec.family;
+        value.metric = spec.metric;
+        value.protocol = spec.protocol;
+        return value;
+    }
 };
 
 RouteSpec route(std::string destination, std::uint32_t table) {
@@ -669,6 +704,140 @@ TEST_CASE("RouteTable adopts desired state without claiming ownership") {
     routes.clear();
 
     CHECK(netlink.deleted.empty());
+}
+
+TEST_CASE("RouteTable adopts an exact restart route only after commit") {
+    FakeRouteNetlink netlink;
+    netlink.add_result = RouteAddResult::AlreadyPresent;
+    const auto expected = route("default", 153);
+    netlink.live.push_back(live_route(expected));
+    {
+        RouteTable uncommitted(netlink);
+        uncommitted.add(expected);
+        uncommitted.clear();
+    }
+
+    CHECK(netlink.deleted.empty());
+    REQUIRE(netlink.live.size() == 1);
+
+    RouteTable committed(netlink);
+    committed.add(expected);
+    committed.finalize_pending_replacements();
+    committed.adopt_live_generated_desired({expected});
+    committed.clear();
+
+    REQUIRE(netlink.deleted.size() == 1);
+    CHECK(netlink.deleted.front().table == expected.table);
+}
+
+TEST_CASE("RouteTable atomically replaces a stale managed route slot") {
+    FakeRouteNetlink netlink;
+    netlink.add_result = RouteAddResult::AlreadyPresent;
+    auto expected = interface_route("default", 154, "nwg1");
+    expected.family = AF_INET;
+    auto stale = expected;
+    stale.interface = "nwg3";
+    netlink.live.push_back(live_route(stale));
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+
+    routes.add(expected);
+
+    REQUIRE(netlink.replaced.size() == 1);
+    CHECK(netlink.replaced.front().interface == expected.interface);
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(route_table_detail::route_matches_live(expected, netlink.live.front()));
+}
+
+TEST_CASE("RouteTable restores a replaced route when the generation rolls back") {
+    FakeRouteNetlink netlink;
+    netlink.add_result = RouteAddResult::AlreadyPresent;
+    auto expected = interface_route("default", 154, "nwg1");
+    expected.family = AF_INET;
+    auto stale = expected;
+    stale.interface = "nwg3";
+    netlink.live.push_back(live_route(stale));
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+
+    routes.add(expected);
+    routes.clear();
+
+    REQUIRE(netlink.replaced.size() == 2);
+    CHECK(netlink.replaced.front().interface == expected.interface);
+    CHECK(netlink.replaced.back().interface == stale.interface);
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(route_table_detail::route_matches_live(stale, netlink.live.front()));
+}
+
+TEST_CASE("RouteTable never accepts a vanished EEXIST route as installed") {
+    FakeRouteNetlink netlink;
+    netlink.add_result = RouteAddResult::AlreadyPresent;
+    const auto expected = route("default", 154);
+    RouteTable routes(netlink);
+
+    CHECK_THROWS_AS(routes.add(expected), NetlinkError);
+    CHECK(netlink.added.size() == 2);
+    CHECK(routes.size() == 0);
+}
+
+TEST_CASE("RouteTable refuses to replace a foreign route slot") {
+    FakeRouteNetlink netlink;
+    netlink.add_result = RouteAddResult::AlreadyPresent;
+    auto expected = interface_route("default", 154, "nwg1");
+    expected.family = AF_INET;
+    auto foreign = expected;
+    foreign.interface = "nwg3";
+    foreign.protocol = 4;
+    netlink.live.push_back(live_route(foreign));
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Up;
+        });
+
+    CHECK_THROWS_AS(routes.add(expected), NetlinkError);
+    CHECK(netlink.replaced.empty());
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(netlink.live.front().protocol == 4);
+}
+
+TEST_CASE("RouteTable sweeps only orphaned protocol-marked routes") {
+    FakeRouteNetlink netlink;
+    const auto managed = route("default", 153);
+    auto foreign = route("default", 154);
+    foreign.protocol = 4;
+    netlink.live = {live_route(managed), live_route(foreign)};
+    RouteTable routes(netlink);
+
+    routes.remove_obsolete({});
+
+    REQUIRE(netlink.deleted.size() == 1);
+    CHECK(netlink.deleted.front().table == managed.table);
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(netlink.live.front().table == foreign.table);
+}
+
+TEST_CASE("RouteTable never sweeps a protocol-marked reserved table") {
+    FakeRouteNetlink netlink;
+    const auto reserved = route("default", 254);
+    netlink.live.push_back(live_route(reserved));
+    RouteTable routes(netlink);
+
+    routes.remove_obsolete({});
+
+    CHECK(netlink.deleted.empty());
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(netlink.live.front().table == 254);
 }
 
 TEST_CASE("RouteTable claims a tracked route recreated after it vanishes") {

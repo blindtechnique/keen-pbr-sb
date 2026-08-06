@@ -87,6 +87,10 @@ class RouteNetlinkOperations {
 public:
     virtual ~RouteNetlinkOperations() = default;
     virtual RouteAddResult add_route(const RouteSpec& spec) = 0;
+    // Atomically replace the route occupying the same kernel slot. Callers
+    // must first prove that the conflicting object is keen-pbr-owned (route
+    // protocol 186); NetlinkManager deliberately does not infer ownership.
+    virtual void replace_route(const RouteSpec& spec) = 0;
     virtual void delete_route(const RouteSpec& spec) = 0;
     virtual std::vector<DumpedRoute> dump_routes(int family = 0) = 0;
 };
@@ -174,6 +178,7 @@ public:
 
     // Route operations
     RouteAddResult add_route(const RouteSpec& spec) override;
+    void replace_route(const RouteSpec& spec) override;
     void delete_route(const RouteSpec& spec) override;
     void flush_routes_in_table(uint32_t table_id, int family = 0);
 

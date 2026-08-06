@@ -1,10 +1,25 @@
 #pragma once
 
+#include <set>
 #include <vector>
 
 #include "netlink.hpp"
 
 namespace keen_pbr3 {
+
+namespace policy_rule_detail {
+
+bool rule_matches_live(const RuleSpec& expected, const DumpedRule& actual);
+
+// Policy rules have no owner protocol. A stale rule is considered generated
+// only when its shape, current mark namespace, and a protocol-186 route in its
+// target table all corroborate prior keen-pbr ownership.
+std::vector<RuleSpec> find_orphaned_generated_rules(
+    const std::vector<RuleSpec>& desired,
+    const std::vector<DumpedRule>& live,
+    const std::set<uint32_t>& corroborated_route_tables);
+
+} // namespace policy_rule_detail
 
 // Manages installed ip policy rules, tracking them for duplicate avoidance and cleanup.
 // Uses NetlinkManager for actual kernel operations.
@@ -31,6 +46,15 @@ public:
     void reconcile(const std::vector<RuleSpec>& desired);
     void add_missing(const std::vector<RuleSpec>& desired);
     void remove_obsolete(const std::vector<RuleSpec>& desired);
+    void remove_orphaned_generated(
+        const std::vector<RuleSpec>& desired,
+        const std::set<uint32_t>& corroborated_route_tables);
+
+    // Exact desired rules can safely be adopted only after the complete
+    // route+rule generation commits and protocol-186 route evidence exists.
+    void adopt_live_generated_desired(
+        const std::vector<RuleSpec>& desired,
+        const std::set<uint32_t>& corroborated_route_tables) noexcept;
 
     // Adopt an independently reconciled desired snapshot without taking
     // ownership of pre-existing kernel rules.

@@ -337,4 +337,51 @@ TEST_CASE("PolicyRuleManager removes only IPv6 while narrowing to IPv4") {
     CHECK(netlink.live.empty());
 }
 
+TEST_CASE("PolicyRuleManager removes a corroborated stale mark generation") {
+    FakeRuleNetlink netlink;
+    const auto desired = ipv4_rule(0x50000, 155, 155);
+    const auto stale = ipv4_rule(0x50000, 152, 152);
+    netlink.add_live(desired, AF_INET);
+    netlink.add_live(stale, AF_INET);
+    PolicyRuleManager rules(netlink);
+    rules.adopt_desired({desired});
+
+    rules.remove_orphaned_generated({desired}, {152, 155});
+
+    REQUIRE(netlink.deleted_specs.size() == 1);
+    CHECK(netlink.deleted_specs.front().table == stale.table);
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(netlink.live.front().table == desired.table);
+}
+
+TEST_CASE("PolicyRuleManager preserves a stale-looking rule without route evidence") {
+    FakeRuleNetlink netlink;
+    const auto desired = ipv4_rule(0x50000, 155, 155);
+    const auto ambiguous = ipv4_rule(0x50000, 152, 152);
+    netlink.add_live(ambiguous, AF_INET);
+    PolicyRuleManager rules(netlink);
+
+    rules.remove_orphaned_generated({desired}, {155});
+
+    CHECK(netlink.deleted_specs.empty());
+    REQUIRE(netlink.live.size() == 1);
+    CHECK(netlink.live.front().table == ambiguous.table);
+}
+
+TEST_CASE("PolicyRuleManager preserves non-generated rule shapes") {
+    FakeRuleNetlink netlink;
+    const auto desired = ipv4_rule(0x50000, 155, 155);
+    auto foreign_priority = ipv4_rule(0x50000, 152, 10052);
+    auto foreign_mask = ipv4_rule(0x50000, 152, 152);
+    foreign_mask.fwmask = 0xFFFF0000;
+    netlink.add_live(foreign_priority, AF_INET);
+    netlink.add_live(foreign_mask, AF_INET);
+    PolicyRuleManager rules(netlink);
+
+    rules.remove_orphaned_generated({desired}, {152, 155});
+
+    CHECK(netlink.deleted_specs.empty());
+    CHECK(netlink.live.size() == 2);
+}
+
 } // namespace keen_pbr3

@@ -565,6 +565,123 @@ void run_command(const std::vector<std::string>& command) {
     (void)capture_command(command);
 }
 
+void verify_restart_adopts_and_replaces_generated_default_route(
+    NetlinkManager& netlink) {
+    constexpr uint32_t kTable = 247;
+    const std::string replacement_interface{"kpbr_rt_new"};
+
+    RouteSpec stale_primary;
+    stale_primary.destination = "default";
+    stale_primary.table = kTable;
+    stale_primary.interface = "lo";
+    stale_primary.family = AF_INET;
+
+    RouteSpec replacement_primary = stale_primary;
+    replacement_primary.interface = replacement_interface;
+
+    RouteSpec fallback = stale_primary;
+    fallback.metric = 1;
+
+    RouteSpec fail_closed = stale_primary;
+    fail_closed.interface.reset();
+    fail_closed.unreachable = true;
+    fail_closed.metric = 65535;
+
+    auto cleanup = [&]() {
+        for (const auto& route : std::array<RouteSpec, 4>{
+                 replacement_primary, stale_primary, fallback, fail_closed}) {
+            try {
+                netlink.delete_route(route);
+            } catch (...) {
+            }
+        }
+        (void)safe_exec(
+            {"ip", "link", "del", replacement_interface},
+            /*suppress_output=*/true);
+    };
+
+    cleanup();
+    try {
+        run_command({"ip", "link", "add", replacement_interface,
+                     "type", "dummy"});
+        run_command({"ip", "link", "set", replacement_interface, "up"});
+
+        // Simulate state that survived a daemon restart: the previous active
+        // child still owns metric 0, while the weighted fallback and
+        // fail-closed route are already correct. All three are explicitly
+        // tagged with keen-pbr's reserved protocol by RouteSpec.
+        netlink.add_route(stale_primary);
+        netlink.add_route(fallback);
+        netlink.add_route(fail_closed);
+
+        RouteTable restarted(netlink);
+        const std::vector<RouteSpec> desired{
+            replacement_primary, fallback, fail_closed};
+        restarted.reconcile(desired);
+
+        const auto live = netlink.dump_routes_in_table(kTable, AF_INET);
+        auto contains = [&](const RouteSpec& expected) {
+            return std::any_of(
+                live.begin(), live.end(), [&](const DumpedRoute& actual) {
+                    return route_table_detail::route_matches_live(
+                        expected, actual);
+                });
+        };
+
+        if (!contains(replacement_primary)) {
+            throw std::runtime_error(
+                "Restart reconciliation did not atomically replace the stale "
+                "protocol-186 primary route");
+        }
+        if (contains(stale_primary)) {
+            throw std::runtime_error(
+                "Restart reconciliation left the stale protocol-186 primary "
+                "route installed");
+        }
+        if (!contains(fallback) || !contains(fail_closed)) {
+            throw std::runtime_error(
+                "Replacing the stale primary route damaged its weighted "
+                "fallback or fail-closed route");
+        }
+
+        const size_t primary_count = std::count_if(
+            live.begin(), live.end(), [&](const DumpedRoute& route) {
+                return route.table == kTable &&
+                       route.destination == "default" &&
+                       route.metric == 0 &&
+                       route.protocol ==
+                           KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+            });
+        if (primary_count != 1) {
+            throw std::runtime_error(
+                "Restart reconciliation left an ambiguous protocol-186 "
+                "metric-zero route generation");
+        }
+
+        // Already-present protocol-186 objects are adopted by the restarted
+        // manager, so its ordinary exact cleanup must retire all three without
+        // flushing or touching foreign state in the table.
+        restarted.clear();
+        const auto after_clear =
+            netlink.dump_routes_in_table(kTable, AF_INET);
+        const bool generated_left = std::any_of(
+            after_clear.begin(), after_clear.end(), [](const DumpedRoute& route) {
+                return route.protocol ==
+                       KEEN_PBR_GENERATED_ROUTE_PROTOCOL;
+            });
+        if (generated_left) {
+            throw std::runtime_error(
+                "Restarted route manager did not adopt protocol-186 routes "
+                "for exact cleanup");
+        }
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    cleanup();
+}
+
 size_t count_exact_line(const std::string& text, const std::string& expected) {
     size_t count = 0;
     std::istringstream lines(text);
@@ -1085,6 +1202,7 @@ int run_firewall_integration(int argc, char* argv[]) {
     NetlinkManager netlink;
     verify_metric_scoped_route_delete(netlink);
     verify_route_reconcile_restores_vanished_route(netlink);
+    verify_restart_adopts_and_replaces_generated_default_route(netlink);
     RouteTable route_table(netlink);
     PolicyRuleManager policy_rules(netlink);
     auto firewall = create_firewall(

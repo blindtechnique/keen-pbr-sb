@@ -147,6 +147,77 @@ struct RuleDeleter {
 };
 using RulePtr = std::unique_ptr<struct rtnl_rule, RuleDeleter>;
 
+int route_family(const RouteSpec& spec) {
+    if (spec.family != 0) {
+        return spec.family;
+    }
+    if (spec.destination == "default") {
+        return AF_INET;
+    }
+    return detect_family(spec.destination);
+}
+
+// Build the exact libnl object used by add/replace/delete. A missing output
+// interface is transient for installation, while deletion is already complete
+// because Linux removes routes when their interface vanishes.
+RoutePtr build_route(const RouteSpec& spec,
+                     bool missing_interface_means_absent = false) {
+    const int family = route_family(spec);
+    RoutePtr route(rtnl_route_alloc());
+    if (!route) {
+        throw NetlinkError("Failed to allocate route object");
+    }
+
+    rtnl_route_set_family(route.get(), family);
+    if (spec.table != 0) {
+        rtnl_route_set_table(route.get(), spec.table);
+    }
+    // Zero is part of route identity: urltest keeps metric-zero primary and
+    // metric-N fallbacks in the same table.
+    rtnl_route_set_priority(route.get(), spec.metric);
+    rtnl_route_set_protocol(route.get(), spec.protocol);
+
+    if (spec.destination == "default") {
+        NlAddrPtr dst = parse_addr(
+            family == AF_INET6 ? "::/0" : "0.0.0.0/0", family);
+        rtnl_route_set_dst(route.get(), dst.get());
+    } else {
+        NlAddrPtr dst = parse_addr(spec.destination, family);
+        rtnl_route_set_dst(route.get(), dst.get());
+    }
+
+    if (spec.blackhole) {
+        rtnl_route_set_type(route.get(), RTN_BLACKHOLE);
+        return route;
+    }
+    if (spec.unreachable) {
+        rtnl_route_set_type(route.get(), RTN_UNREACHABLE);
+        return route;
+    }
+
+    NexthopPtr nh(rtnl_route_nh_alloc());
+    if (!nh) {
+        throw NetlinkError("Failed to allocate nexthop object");
+    }
+    if (spec.interface) {
+        const unsigned int ifindex = if_nametoindex(spec.interface->c_str());
+        if (ifindex == 0) {
+            if (missing_interface_means_absent) {
+                return {};
+            }
+            throw RouteInterfaceUnavailableError(
+                "Interface not found: " + *spec.interface);
+        }
+        rtnl_route_nh_set_ifindex(nh.get(), static_cast<int>(ifindex));
+    }
+    if (spec.gateway) {
+        NlAddrPtr gw = parse_addr(*spec.gateway, family);
+        rtnl_route_nh_set_gateway(nh.get(), gw.get());
+    }
+    rtnl_route_add_nexthop(route.get(), nh.release());
+    return route;
+}
+
 } // anonymous namespace
 
 struct NetlinkManager::Impl {
@@ -185,70 +256,8 @@ NetlinkManager::~NetlinkManager() = default;
 
 RouteAddResult NetlinkManager::add_route(const RouteSpec& spec) {
     KPBR_LOCK_GUARD(mutex_);
-
-    int family = spec.family;
-    if (family == 0) {
-        if (spec.destination == "default") {
-            family = AF_INET;
-        } else {
-            family = detect_family(spec.destination);
-        }
-    }
-
-    RoutePtr route(rtnl_route_alloc());
-    if (!route) {
-        throw NetlinkError("Failed to allocate route object");
-    }
-
-    rtnl_route_set_family(route.get(), family);
-
-    if (spec.table != 0) {
-        rtnl_route_set_table(route.get(), spec.table);
-    }
-
-    if (spec.metric != 0) {
-        rtnl_route_set_priority(route.get(), spec.metric);
-    }
-    rtnl_route_set_protocol(route.get(), spec.protocol);
-
-    // Set destination
-    if (spec.destination == "default") {
-        // Default route: destination is 0.0.0.0/0 or ::/0
-        NlAddrPtr dst = parse_addr(family == AF_INET6 ? "::/0" : "0.0.0.0/0", family);
-        rtnl_route_set_dst(route.get(), dst.get());
-    } else {
-        NlAddrPtr dst = parse_addr(spec.destination, family);
-        rtnl_route_set_dst(route.get(), dst.get());
-    }
-
-    if (spec.blackhole) {
-        rtnl_route_set_type(route.get(), RTN_BLACKHOLE);
-    } else if (spec.unreachable) {
-        rtnl_route_set_type(route.get(), RTN_UNREACHABLE);
-    } else {
-        // Create nexthop with interface and optional gateway
-        NexthopPtr nh(rtnl_route_nh_alloc());
-        if (!nh) {
-            throw NetlinkError("Failed to allocate nexthop object");
-        }
-
-        if (spec.interface) {
-            unsigned int ifindex = if_nametoindex(spec.interface->c_str());
-            if (ifindex == 0) {
-                throw RouteInterfaceUnavailableError(
-                    "Interface not found: " + *spec.interface);
-            }
-            rtnl_route_nh_set_ifindex(nh.get(), static_cast<int>(ifindex));
-        }
-
-        if (spec.gateway) {
-            NlAddrPtr gw = parse_addr(*spec.gateway, family);
-            rtnl_route_nh_set_gateway(nh.get(), gw.get());
-        }
-
-        // rtnl_route_add_nexthop takes ownership of nh
-        rtnl_route_add_nexthop(route.get(), nh.release());
-    }
+    const int family = route_family(spec);
+    RoutePtr route = build_route(spec);
 
     int err = rtnl_route_add(impl_->sock, route.get(), NLM_F_CREATE | NLM_F_EXCL);
     if (err < 0) {
@@ -276,68 +285,39 @@ RouteAddResult NetlinkManager::add_route(const RouteSpec& spec) {
     return RouteAddResult::Created;
 }
 
+void NetlinkManager::replace_route(const RouteSpec& spec) {
+    KPBR_LOCK_GUARD(mutex_);
+    const int family = route_family(spec);
+    RoutePtr route = build_route(spec);
+
+    const int err = rtnl_route_add(
+        impl_->sock, route.get(), NLM_F_CREATE | NLM_F_REPLACE);
+    if (err < 0) {
+        if (err == -NLE_NODEV) {
+            throw RouteInterfaceUnavailableError(keen_pbr3::format(
+                "Route interface is unavailable during replacement: {} (dst={}, table={}, iface={})",
+                nl_geterror(err),
+                spec.destination,
+                spec.table,
+                spec.interface.value_or("(none)")));
+        }
+        throw NetlinkError(keen_pbr3::format(
+            "Failed to replace managed route: {} (dst={}, table={}, iface={}, gw={}, family={}, metric={})",
+            nl_geterror(err),
+            spec.destination,
+            spec.table,
+            spec.interface.value_or("(none)"),
+            spec.gateway.value_or("(none)"),
+            family,
+            spec.metric));
+    }
+}
+
 void NetlinkManager::delete_route(const RouteSpec& spec) {
     KPBR_LOCK_GUARD(mutex_);
-
-    int family = spec.family;
-    if (family == 0) {
-        if (spec.destination == "default") {
-            family = AF_INET;
-        } else {
-            family = detect_family(spec.destination);
-        }
-    }
-
-    RoutePtr route(rtnl_route_alloc());
+    RoutePtr route = build_route(spec, true);
     if (!route) {
-        throw NetlinkError("Failed to allocate route object");
-    }
-
-    rtnl_route_set_family(route.get(), family);
-
-    if (spec.table != 0) {
-        rtnl_route_set_table(route.get(), spec.table);
-    }
-
-    // Priority zero is still part of a route's identity. Omitting it from a
-    // delete request lets the kernel match every otherwise identical route,
-    // including weighted urltest fallbacks on the same interface.
-    rtnl_route_set_priority(route.get(), spec.metric);
-    rtnl_route_set_protocol(route.get(), spec.protocol);
-
-    if (spec.destination == "default") {
-        NlAddrPtr dst = parse_addr(family == AF_INET6 ? "::/0" : "0.0.0.0/0", family);
-        rtnl_route_set_dst(route.get(), dst.get());
-    } else {
-        NlAddrPtr dst = parse_addr(spec.destination, family);
-        rtnl_route_set_dst(route.get(), dst.get());
-    }
-
-    if (spec.blackhole) {
-        rtnl_route_set_type(route.get(), RTN_BLACKHOLE);
-    } else if (spec.unreachable) {
-        rtnl_route_set_type(route.get(), RTN_UNREACHABLE);
-    } else if (spec.interface) {
-        NexthopPtr nh(rtnl_route_nh_alloc());
-        if (!nh) {
-            throw NetlinkError("Failed to allocate nexthop object");
-        }
-        unsigned int ifindex = if_nametoindex(spec.interface->c_str());
-        if (ifindex == 0) {
-            // Kernel routes bound to an interface disappear with that
-            // interface. Treat an already removed TUN/WireGuard link as a
-            // successful idempotent delete instead of retaining the route
-            // forever in RouteTable's retry set.
-            return;
-        }
-        rtnl_route_nh_set_ifindex(nh.get(), static_cast<int>(ifindex));
-
-        if (spec.gateway) {
-            NlAddrPtr gw = parse_addr(*spec.gateway, family);
-            rtnl_route_nh_set_gateway(nh.get(), gw.get());
-        }
-
-        rtnl_route_add_nexthop(route.get(), nh.release());
+        return;
     }
 
     int err = rtnl_route_delete(impl_->sock, route.get(), 0);
@@ -442,6 +422,9 @@ void NetlinkManager::delete_rule_for_family(const RuleSpec& spec, int family) {
 
     const int err = rtnl_rule_delete(impl_->sock, rule.get(), 0);
     if (err < 0) {
+        if (netlink_detail::route_delete_target_absent(err)) {
+            return;
+        }
         throw NetlinkError(std::string("Failed to delete rule (family ") +
                            std::to_string(family) + "): " + nl_geterror(err));
     }

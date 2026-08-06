@@ -1775,11 +1775,31 @@ class RecordingRoutingNetlink final : public RouteNetlinkOperations,
 public:
     RouteAddResult add_route(const RouteSpec& spec) override {
         events.push_back("route:add:" + std::to_string(spec.table));
-        if (has_live_route(spec)) {
+        if (std::any_of(
+                live_routes.begin(),
+                live_routes.end(),
+                [&](const DumpedRoute& route) {
+                    return route_table_detail::route_occupies_same_slot(
+                        spec, route);
+                })) {
             return RouteAddResult::AlreadyPresent;
         }
         live_routes.push_back(to_live_route(spec));
         return RouteAddResult::Created;
+    }
+
+    void replace_route(const RouteSpec& spec) override {
+        events.push_back("route:replace:" + std::to_string(spec.table));
+        live_routes.erase(
+            std::remove_if(
+                live_routes.begin(),
+                live_routes.end(),
+                [&](const DumpedRoute& route) {
+                    return route_table_detail::route_occupies_same_slot(
+                        spec, route);
+                }),
+            live_routes.end());
+        live_routes.push_back(to_live_route(spec));
     }
 
     void delete_route(const RouteSpec& spec) override {
@@ -1854,9 +1874,31 @@ public:
         return result;
     }
 
+    void seed_generated_route(const RouteSpec& spec) {
+        const auto generated = to_live_route(spec);
+        if (!std::any_of(
+                live_routes.begin(),
+                live_routes.end(),
+                [&](const DumpedRoute& route) {
+                    return route_table_detail::route_matches_live(
+                        spec, route);
+                })) {
+            live_routes.push_back(generated);
+        }
+    }
+
     void seed_foreign_route(const RouteSpec& spec) {
-        if (!has_live_route(spec)) {
-            live_routes.push_back(to_live_route(spec));
+        auto foreign = to_live_route(spec);
+        foreign.protocol = 4;
+        if (!std::any_of(
+                live_routes.begin(),
+                live_routes.end(),
+                [&](const DumpedRoute& route) {
+                    return route_table_detail::route_matches_live(
+                        route_table_detail::route_spec_from_live(foreign),
+                        route);
+                })) {
+            live_routes.push_back(std::move(foreign));
         }
     }
 
@@ -1870,6 +1912,14 @@ public:
     std::vector<std::string> events;
     std::vector<DumpedRoute> live_routes;
     std::vector<DumpedRule> live_rules;
+
+    bool contains_live_route(const RouteSpec& spec) const {
+        return has_live_route(spec);
+    }
+
+    bool contains_live_rule(const RuleSpec& spec, int family) const {
+        return has_live_rule(spec, family);
+    }
 
 private:
     static DumpedRoute to_live_route(const RouteSpec& spec) {
@@ -2002,7 +2052,69 @@ TEST_CASE("kernel routing reconciliation converges after a partial rule failure"
     CHECK(rules.get_rules().front().table == new_rule.table);
 }
 
-TEST_CASE("kernel routing reconciliation never claims desired foreign state") {
+TEST_CASE("kernel routing reconciliation restores a replaced route when policy commit fails") {
+    RecordingRoutingNetlink netlink;
+    RouteTable routes(netlink);
+    PolicyRuleManager rules(netlink);
+    const auto old_route = coordinator_route(154);
+    auto new_route = old_route;
+    new_route.blackhole = false;
+    new_route.unreachable = true;
+    const auto old_rule = coordinator_rule(154);
+    auto new_rule = old_rule;
+    new_rule.fwmark = 0x90000;
+    new_rule.priority = 155;
+    routes.add(old_route);
+    rules.add(old_rule);
+    netlink.events.clear();
+    netlink.failing_rule_priority = new_rule.priority;
+
+    CHECK_THROWS_WITH(
+        reconcile_kernel_routing_state(
+            routes, rules, {new_route}, {new_rule}),
+        "injected policy batch failure");
+
+    CHECK(netlink.events == std::vector<std::string>({
+        "route:add:154",
+        "route:replace:154",
+        "rule:add:154",
+        "route:replace:154",
+    }));
+    CHECK(netlink.contains_live_route(old_route));
+    CHECK_FALSE(netlink.contains_live_route(new_route));
+    CHECK(netlink.contains_live_rule(old_rule, AF_INET));
+}
+
+TEST_CASE("kernel routing reconciliation does not adopt a policy rule without a live managed route") {
+    RecordingRoutingNetlink netlink;
+    RouteTable routes(
+        netlink,
+        false,
+        [](const std::string&) {
+            return netlink_detail::InterfaceAdminState::Down;
+        });
+    PolicyRuleManager rules(netlink);
+    auto desired_route = coordinator_route(160);
+    desired_route.blackhole = false;
+    desired_route.interface = "tun0";
+    const auto desired_rule = coordinator_rule(160);
+    routes.adopt_desired({desired_route});
+    netlink.seed_foreign_rule(desired_rule, AF_INET);
+
+    reconcile_kernel_routing_state(
+        routes,
+        rules,
+        {desired_route},
+        {desired_rule},
+        RouteReconcileMode::DeferredRepair);
+
+    netlink.events.clear();
+    rules.clear();
+    CHECK(netlink.events.empty());
+    CHECK(netlink.contains_live_rule(desired_rule, AF_INET));
+}
+
+TEST_CASE("kernel routing reconciliation refuses a foreign route collision") {
     RecordingRoutingNetlink netlink;
     RouteTable routes(netlink);
     PolicyRuleManager rules(netlink);
@@ -2016,22 +2128,75 @@ TEST_CASE("kernel routing reconciliation never claims desired foreign state") {
     netlink.seed_foreign_rule(foreign_rule, AF_INET);
     netlink.events.clear();
 
-    reconcile_kernel_routing_state(
-        routes, rules, {foreign_route}, {foreign_rule});
+    CHECK_THROWS_AS(
+        reconcile_kernel_routing_state(
+            routes, rules, {foreign_route}, {foreign_rule}),
+        NetlinkError);
 
-    CHECK(netlink.events == std::vector<std::string>({
-        "route:add:151",
-        "rule:add:151",
-        "rule:delete:150",
-        "route:delete:150",
-    }));
+    CHECK(netlink.events == std::vector<std::string>({"route:add:151"}));
 
     netlink.events.clear();
     rules.clear();
     routes.clear();
-    CHECK(netlink.events.empty());
+    CHECK(netlink.events == std::vector<std::string>({
+        "rule:delete:150",
+        "route:delete:150",
+    }));
     REQUIRE(netlink.live_routes.size() == 1);
     CHECK(netlink.live_routes.front().table == foreign_route.table);
     REQUIRE(netlink.live_rules.size() == 1);
     CHECK(netlink.live_rules.front().table == foreign_rule.table);
+}
+
+TEST_CASE("kernel routing reconciliation removes only corroborated stale policy generation") {
+    RecordingRoutingNetlink netlink;
+    RouteTable routes(netlink);
+    PolicyRuleManager rules(netlink);
+
+    const auto desired_route = coordinator_route(159);
+    const auto stale_generated_route = coordinator_route(154);
+    const auto uncorroborated_foreign_route = coordinator_route(158);
+    netlink.seed_generated_route(stale_generated_route);
+    netlink.seed_foreign_route(uncorroborated_foreign_route);
+
+    auto marked_rule = [](std::uint32_t table, std::uint32_t fwmark) {
+        RuleSpec rule;
+        rule.fwmark = fwmark;
+        rule.fwmask = 0x00FF0000;
+        rule.table = table;
+        rule.priority = table;
+        rule.family = AF_INET;
+        return rule;
+    };
+
+    const auto desired_rule = marked_rule(159, 0x00070000);
+    const auto stale_corroborated_rule = marked_rule(154, 0x00070000);
+    const auto stale_uncorroborated_rule = marked_rule(158, 0x00070000);
+    const auto unrelated_foreign_rule = marked_rule(154, 0x00090000);
+    netlink.seed_foreign_rule(stale_corroborated_rule, AF_INET);
+    netlink.seed_foreign_rule(stale_uncorroborated_rule, AF_INET);
+    netlink.seed_foreign_rule(unrelated_foreign_rule, AF_INET);
+
+    reconcile_kernel_routing_state(
+        routes, rules, {desired_route}, {desired_rule});
+
+    auto has_rule = [&](const RuleSpec& expected) {
+        return std::any_of(
+            netlink.live_rules.begin(),
+            netlink.live_rules.end(),
+            [&](const DumpedRule& actual) {
+                return policy_rule_detail::rule_matches_live(expected, actual);
+            });
+    };
+    CHECK(has_rule(desired_rule));
+    CHECK_FALSE(has_rule(stale_corroborated_rule));
+    CHECK(has_rule(stale_uncorroborated_rule));
+    CHECK(has_rule(unrelated_foreign_rule));
+
+    CHECK(netlink.events == std::vector<std::string>({
+        "route:add:159",
+        "rule:add:159",
+        "rule:delete:154",
+        "route:delete:154",
+    }));
 }
