@@ -485,40 +485,53 @@ export function InterfaceRowContent({
 
 export function OutboundInterfaceLabel({
   tag,
+  label,
   interfaceName,
   runtimeInterface,
   t,
 }: {
   tag: string
+  /**
+   * Имя туннеля вместо технического тега маршрута: раз туннель=маршрут,
+   * в выборе участников группы человек ищет туннель по имени, а не по
+   * тегу вроде `vpn_main`. Техническое имя интерфейса остаётся рядом
+   * приглушённым.
+   */
+  label?: string
   interfaceName?: string
   runtimeInterface?: RuntimeInterfaceInventoryEntry
   t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const ipv4 = runtimeInterface?.ipv4_addresses?.[0]
   const ipv6 = runtimeInterface?.ipv6_addresses?.[0]
+  const primary = label?.trim() || tag
+  const technical = interfaceName ?? (primary === tag ? undefined : tag)
 
   return (
     <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
-      <span className="shrink-0 text-sm font-medium text-foreground">
-        {tag}
+      <span
+        className="min-w-0 truncate text-sm font-medium text-foreground"
+        title={primary}
+      >
+        {primary}
       </span>
+      {technical ? (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          ({technical})
+        </span>
+      ) : null}
       {interfaceName ? (
-        <>
-          <span className="shrink-0 text-sm font-medium text-foreground">
-            ({interfaceName})
+        runtimeInterface ? (
+          <>
+            <InterfaceStatusBadge status={runtimeInterface.status} />
+            {ipv4 ? <AddressPreviewChip address={ipv4} /> : null}
+            {ipv6 ? <AddressPreviewChip address={ipv6} /> : null}
+          </>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            {t("common.interfacePicker.notExists")}
           </span>
-          {runtimeInterface ? (
-            <>
-              <InterfaceStatusBadge status={runtimeInterface.status} />
-              {ipv4 ? <AddressPreviewChip address={ipv4} /> : null}
-              {ipv6 ? <AddressPreviewChip address={ipv6} /> : null}
-            </>
-          ) : (
-            <span className="text-xs text-muted-foreground">
-              {t("common.interfacePicker.notExists")}
-            </span>
-          )}
-        </>
+        )
       ) : null}
     </div>
   )

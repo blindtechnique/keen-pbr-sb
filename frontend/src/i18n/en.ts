@@ -2310,18 +2310,18 @@ export const enTranslation = {
       urltest: {
         groupsTitle: "Group members",
         groupsDescription:
-          "Add routes in preference order. The available-route selection policy is configured below.",
+          "Add tunnels in preference order. The available-tunnel selection policy is configured below.",
         groupTitle: "Tier {{index}}",
         groupDescription:
           "Tier {{index}} — tunnels in higher tiers are preferred; the next tier is used when the one above is unavailable.",
         groupWeight: "Tier weight",
         groupWeightHint:
           "Lower weights have higher priority. Leave empty to use the default weight of 1.",
-        interfaceOutbounds: "Interface routes",
-        addOutbound: "Add route",
-        noInterfaceOutbounds: "No interface routes found.",
+        interfaceOutbounds: "Tunnels",
+        addOutbound: "Add a tunnel",
+        noInterfaceOutbounds: "No tunnels with a route found.",
         addInterfaceOutboundsFirst:
-          "Add interface routes first so the group has selectable targets.",
+          "Create a route for at least one tunnel first so the group has selectable targets.",
         addGroup: "Add tier",
         advancedTitle: "Advanced",
         advancedHint:

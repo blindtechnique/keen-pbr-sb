@@ -61,7 +61,12 @@ import {
 } from "@/lib/form-api-errors"
 import { getTagNameValidationError } from "@/lib/tag-name-validation"
 import { getInterfaceSearchText } from "@/lib/runtime-interfaces"
-import { getOutboundDisplayName } from "@/lib/outbound-display"
+import {
+  getOutboundDisplayName,
+  getOutboundSelectDisplayName,
+  sortOutboundsByDisplayName,
+} from "@/lib/outbound-display"
+import { useInterfaceDisplayNames } from "@/hooks/use-interface-display-names"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { makeTechnicalId } from "@/lib/technical-id"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
@@ -349,15 +354,28 @@ function OutboundForm({
   )
   // A failover group may contain plain interfaces as well as other failover
   // groups; routing resolves nested selections down to a leaf interface.
-  const groupMemberCandidates = existingOutbounds.filter(
-    (item) =>
-      (item.type === "interface" || item.type === "urltest") &&
-      item.tag !== initialDraft.tag
+  // Сортировка по имени: раз туннель=маршрут, участников группы ищут по
+  // имени туннеля, и список должен идти в том же порядке, что и таблица.
+  const groupMemberCandidates = sortOutboundsByDisplayName(
+    existingOutbounds.filter(
+      (item) =>
+        (item.type === "interface" || item.type === "urltest") &&
+        item.tag !== initialDraft.tag
+    )
   )
   const interfaceOutboundByTag = new Map(
     groupMemberCandidates.map((item) => [item.tag, item])
   )
   const interfaceOutboundOptions = groupMemberCandidates.map((item) => item.tag)
+  const { labelFor: interfaceLabelFor } = useInterfaceDisplayNames()
+  // Имя туннеля для участника группы: имя маршрута, затем имя туннеля по
+  // интерфейсу (управляемого или KeeneticOS), тег — последний запасной.
+  const groupMemberLabel = (tag: string) => {
+    const outbound = interfaceOutboundByTag.get(tag)
+    return outbound
+      ? getOutboundSelectDisplayName(outbound, interfaceLabelFor)
+      : tag
+  }
   const strictSelectItems = strictOptions.map((option) => ({
     value: option,
     label: getStrictOptionLabel(option, t),
@@ -986,7 +1004,8 @@ function OutboundForm({
                                   getInterfaceOutboundSearchText(
                                     tag,
                                     interfaceOutboundByTag.get(tag)?.interface,
-                                    runtimeInterfaceByName
+                                    runtimeInterfaceByName,
+                                    groupMemberLabel(tag)
                                   )
                                 }
                                 renderItem={(tag) => (
@@ -994,6 +1013,7 @@ function OutboundForm({
                                     interfaceName={
                                       interfaceOutboundByTag.get(tag)?.interface
                                     }
+                                    label={groupMemberLabel(tag)}
                                     runtimeInterface={runtimeInterfaceByName.get(
                                       interfaceOutboundByTag.get(tag)
                                         ?.interface ?? ""
@@ -1692,13 +1712,14 @@ function getNextAvailableOutbounds(
 function getInterfaceOutboundSearchText(
   tag: string,
   interfaceName: string | undefined,
-  runtimeInterfaceByName: Map<string, RuntimeInterfaceInventoryEntry>
+  runtimeInterfaceByName: Map<string, RuntimeInterfaceInventoryEntry>,
+  label?: string
 ) {
   const runtimeInterface = interfaceName
     ? runtimeInterfaceByName.get(interfaceName)
     : undefined
 
-  return [tag, interfaceName, getInterfaceSearchText(runtimeInterface)]
+  return [label, tag, interfaceName, getInterfaceSearchText(runtimeInterface)]
     .filter(Boolean)
     .join(" ")
 }
