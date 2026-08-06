@@ -512,13 +512,13 @@ export function OutboundInterfaceLabel({
   const technical = interfaceName ?? (primary === tag ? undefined : tag)
 
   return (
-    <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
-      {/* Имя — главное в строке и не сжимается (владелец: «имя должно быть
-          намного приоритетнее ipv6»). Сжатие достаётся IPv6-плашке: она
-          единственная с min-w-0 и усекается первой. Кап на имя — защита от
-          патологически длинного названия. */}
+    /* Имя — главное в строке и не сжимается (владелец: «имя должно быть
+       намного приоритетнее ipv6»). Всё, что не помещается рядом с ним,
+       переносится на следующую строку целиком, а не обрезается: nowrap с
+       clip прятал плашки за краем экрана телефона. */
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <span
-        className="max-w-[24rem] shrink-0 truncate text-sm font-medium text-foreground"
+        className="max-w-[min(24rem,100%)] shrink-0 truncate text-sm font-medium text-foreground"
         title={primary}
       >
         {primary}
@@ -533,10 +533,16 @@ export function OutboundInterfaceLabel({
           <>
             <InterfaceStatusBadge status={runtimeInterface.status} />
             {ipv4 ? (
-              <AddressPreviewChip address={ipv4} className="shrink-0" />
+              <AddressPreviewChip
+                address={ipv4}
+                className="max-w-full shrink-0"
+              />
             ) : null}
             {ipv6 ? (
-              <AddressPreviewChip address={ipv6} className="min-w-0" />
+              <AddressPreviewChip
+                address={ipv6}
+                className="max-w-full shrink-0"
+              />
             ) : null}
           </>
         ) : (

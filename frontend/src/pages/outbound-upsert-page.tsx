@@ -966,7 +966,11 @@ function OutboundForm({
                         index: index + 1,
                       })}
                     >
-                      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_10rem]">
+                      {/* minmax(0,1fr) и в одну колонку: автоколонка грида
+                          растёт до min-content содержимого, и nowrap-строка
+                          участника (имя shrink-0 + плашки) раздувала ступень
+                          шире экрана телефона — горизонтальная прокрутка. */}
+                      <div className="grid grid-cols-[minmax(0,1fr)] gap-4 md:grid-cols-[minmax(0,1fr)_10rem]">
                         <Field invalid={Boolean(error)}>
                           <FieldLabel>
                             {t(
