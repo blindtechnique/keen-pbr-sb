@@ -714,6 +714,12 @@ export const enTranslation = {
     deleteTitle: "Delete tunnel or proxy?",
     deleteDescription:
       "The managed process will be stopped and its definition removed.",
+    deleteWithRouteDescription:
+      "Deleting this tunnel also deletes its route. The list below shows what that touches; route changes go to the draft and take effect when the config is applied.",
+    routeStagedForDelete:
+      "The tunnel's route was removed from the draft - apply the configuration for the change to take effect.",
+    deleteTunnelAfterRouteFailed:
+      "The route is already removed from the draft, but the tunnel could not be deleted. Retry deleting the tunnel or discard the draft.",
     configMessages: {
       create: "Tunnel or proxy created",
       update: "Tunnel or proxy updated",
@@ -2093,6 +2099,11 @@ export const enTranslation = {
       },
     },
     routesAndTunnels: {
+      otherRoutes: {
+        title: "Other routes",
+        description:
+          "Routes without a tunnel of their own: to firmware interfaces or other packages. This block is usually empty.",
+      },
       title: "Routes and tunnels",
       description:
         "How traffic leaves the router: tunnels and proxies, router interfaces, tunnel groups and system destinations.",

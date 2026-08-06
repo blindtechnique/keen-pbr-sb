@@ -1,8 +1,9 @@
 import { useTranslation } from "react-i18next"
 
-import { useGetConfig } from "@/api/queries"
+import { useGetConfig, useGetTransportConfig } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
 import { PageHeader } from "@/components/shared/page-header"
+import { SectionHeading } from "@/components/shared/section-heading"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { OutboundsPage } from "@/pages/outbounds-page"
@@ -10,6 +11,8 @@ import { TransportsPage } from "@/pages/transports-page"
 
 type ConnectionsTab = "tunnels" | "interfaces" | "failover" | "system"
 
+// «interfaces» остаётся в списке ради старых ссылок с #interfaces: такая
+// ссылка открывает объединённую первую вкладку, а не ломается.
 const CONNECTIONS_TABS: ConnectionsTab[] = [
   "tunnels",
   "interfaces",
@@ -20,16 +23,12 @@ const CONNECTIONS_TABS: ConnectionsTab[] = [
 /**
  * Подключения и маршруты на одной странице.
  *
- * Раньше это были два пункта меню, и одно и то же лежало под ними дважды:
- * туннель `tr_85f462c5` и маршрут `tr_85f462c5` — одинаковое имя в разных
- * разделах. Разными объектами они остались (демон так устроен) и создаются
- * одной операцией, но человек видел два «sddvpn mooo VLESS» и не мог понять,
- * чем они отличаются.
- *
- * Первая вкладка отвечает на вопрос «через что ходит трафик» — это
- * подключения, и новичку дальше идти не нужно: маршрут к туннелю создаётся
- * вместе с ним. Остальные вкладки — для тех, кому нужен сам маршрут:
- * привязка к интерфейсу, резервирование, системные направления.
+ * Раньше туннели и их маршруты были двумя вкладками, и одно и то же лежало
+ * под ними дважды: человек видел два «sddvpn mooo VLESS» и не мог понять, чем
+ * они отличаются. По решению владельца туннель и есть маршрут: первая вкладка
+ * показывает туннели (маршрут создаётся и удаляется вместе с туннелем), а
+ * редкие маршруты без туннеля — на интерфейсы прошивки или чужих пакетов —
+ * живут ниже отдельным блоком «Прочие маршруты» и не прячутся.
  */
 export function RoutesAndTunnelsPage({
   initialTab,
@@ -41,6 +40,33 @@ export function RoutesAndTunnelsPage({
   )
   const configQuery = useGetConfig()
   const outbounds = selectOutbounds(selectConfig(configQuery.data))
+  const transportConfigQuery = useGetTransportConfig()
+  const transports =
+    transportConfigQuery.data?.status === 200
+      ? transportConfigQuery.data.data
+      : []
+
+  // Маршрут принадлежит туннелю, если совпал тег или интерфейс. Всё, что не
+  // совпало, — «прочее»: прятать его нельзя, у владельца может жить маршрут
+  // на tun0 чужого пакета Entware.
+  const transportTags = new Set(transports.map((item) => item.tag))
+  const transportInterfaces = new Set(transports.map((item) => item.interface))
+  const linkedOutboundTags = new Set(
+    outbounds
+      .filter(
+        (outbound) =>
+          outbound.type === "interface" &&
+          (transportTags.has(outbound.tag) ||
+            (outbound.interface
+              ? transportInterfaces.has(outbound.interface)
+              : false))
+      )
+      .map((outbound) => outbound.tag)
+  )
+  const otherRouteCount = outbounds.filter(
+    (outbound) =>
+      outbound.type === "interface" && !linkedOutboundTags.has(outbound.tag)
+  ).length
   const countOf = (predicate: (type: string) => boolean) =>
     outbounds.filter((item) => predicate(item.type)).length
 
@@ -48,11 +74,6 @@ export function RoutesAndTunnelsPage({
     {
       value: "tunnels",
       label: t("pages.routesAndTunnels.tabs.tunnels"),
-    },
-    {
-      value: "interfaces",
-      label: t("pages.routesAndTunnels.tabs.interfaces"),
-      count: countOf((type) => type === "interface"),
     },
     {
       value: "failover",
@@ -65,6 +86,7 @@ export function RoutesAndTunnelsPage({
       count: countOf((type) => type !== "interface" && type !== "urltest"),
     },
   ]
+  const mergedTabActive = activeTab === "tunnels" || activeTab === "interfaces"
 
   return (
     <div className="space-y-3">
@@ -76,10 +98,27 @@ export function RoutesAndTunnelsPage({
         ariaLabel={t("pages.routesAndTunnels.tabs.ariaLabel")}
         onValueChange={setActiveTab}
         tabs={tabs}
-        value={activeTab}
+        value={mergedTabActive ? "tunnels" : activeTab}
       />
-      {activeTab === "tunnels" ? (
-        <TransportsPage embedded />
+      {mergedTabActive ? (
+        <>
+          <TransportsPage embedded />
+          {otherRouteCount > 0 ? (
+            <div className="space-y-3 border-t border-border pt-4">
+              <SectionHeading
+                description={t(
+                  "pages.routesAndTunnels.otherRoutes.description"
+                )}
+                title={t("pages.routesAndTunnels.otherRoutes.title")}
+              />
+              <OutboundsPage
+                embedded
+                excludeTags={linkedOutboundTags}
+                group="interfaces"
+              />
+            </div>
+          ) : null}
+        </>
       ) : (
         <OutboundsPage embedded group={activeTab} />
       )}

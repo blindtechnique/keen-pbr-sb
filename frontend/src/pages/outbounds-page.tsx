@@ -81,6 +81,7 @@ type OutboundGroupKey = "interfaces" | "failover" | "system"
 export function OutboundsPage({
   embedded = false,
   group,
+  excludeTags,
 }: {
   embedded?: boolean
   /**
@@ -91,6 +92,11 @@ export function OutboundsPage({
    * два разных раздела на одном экране.
    */
   group?: OutboundGroupKey
+  /**
+   * Маршруты, слитые с туннелями: в блоке «Прочие маршруты» их показывать
+   * нельзя — они уже стоят строками в списке туннелей выше.
+   */
+  excludeTags?: ReadonlySet<string>
 } = {}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -132,14 +138,16 @@ export function OutboundsPage({
   )
   const outboundItems = useMemo(
     () =>
-      selectOutbounds(loadedConfig).map((outbound) =>
-        mapOutboundToItem(
-          outbound,
-          runtimeOutboundByTag.get(outbound.tag),
-          runtimeInterfaceByName.get(outbound.interface ?? "")
-        )
-      ),
-    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName]
+      selectOutbounds(loadedConfig)
+        .filter((outbound) => !excludeTags?.has(outbound.tag))
+        .map((outbound) =>
+          mapOutboundToItem(
+            outbound,
+            runtimeOutboundByTag.get(outbound.tag),
+            runtimeInterfaceByName.get(outbound.interface ?? "")
+          )
+        ),
+    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, excludeTags]
   )
   const outboundDisplayNames = useMemo(
     () => createOutboundDisplayNameMap(selectOutbounds(loadedConfig)),

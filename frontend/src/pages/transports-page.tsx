@@ -48,12 +48,14 @@ import {
   useGetTransports,
 } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
-import {
-  KeenPencilIcon,
-  KeenTrashIcon,
-} from "@/components/shared/keen-icons"
+import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
 import { DataTable } from "@/components/shared/data-table"
 import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
+import {
+  buildUpdatedConfigForOutboundsDelete,
+  getOutboundDeleteImpact,
+} from "@/pages/outbounds-utils"
+import { getOutboundDeleteImpactItems } from "@/components/delete-impact/outbound-items"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
@@ -574,6 +576,12 @@ export function TransportsPage({
       })
     },
   })
+  // Удаление маршрута перед удалением туннеля. Порядок сознательный: маршрут
+  // уходит в черновик конфигурации (ничего не меняя на роутере до apply), и
+  // только после этого туннель удаляется по-настоящему. В обратном порядке
+  // упавший второй шаг оставил бы правила, ведущие в несуществующий туннель.
+  // Атомарной пары операций в API пока нет — это отмечено Codex в changelog.
+  const routeDeleteMutation = usePostConfigMutation()
   const configMutation = usePostTransportConfigMutation({
     mutation: {
       onSuccess: (_data, variables) => {
@@ -994,7 +1002,10 @@ export function TransportsPage({
             onClick={() =>
               navigate(
                 boundOutbound
-                  ? `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit`
+                  ? // Тонкая настройка маршрута — только в расширенном
+                    // редакторе (решение владельца): диалог туннеля остаётся
+                    // простым, а kill-switch и шлюзы живут на полной странице.
+                    `/outbounds/${encodeURIComponent(boundOutbound.tag)}/edit?view=page`
                   : `/outbounds/create?type=interface&interface=${encodeURIComponent(item.interface)}`
               )
             }
@@ -1138,6 +1149,15 @@ export function TransportsPage({
   })
 
   const transportRows = [...managedRows, ...nativeRows]
+  // Маршрут, связанный с удаляемым туннелем: по интерфейсу либо по тегу.
+  const deletingLinkedOutbound = deleting
+    ? (interfaceOutboundByInterface.get(deleting.interface) ??
+      keenConfig?.outbounds?.find(
+        (outbound) =>
+          outbound.type === "interface" && outbound.tag === deleting.tag
+      ))
+    : undefined
+
   const transportRowDetails: Record<number, ReactNode> = {}
   for (const [index, row] of transportRows.entries()) {
     if (row.details) transportRowDetails[index] = row.details
@@ -1418,18 +1438,71 @@ export function TransportsPage({
       ) : null}
       <DeleteImpactDialog
         confirmLabel={t("common.delete")}
-        description={t("transports.deleteDescription")}
-        impactItems={deleting ? [{ label: deleting.tag }] : []}
-        isPending={configMutation.isPending}
-        onConfirm={() =>
-          deleting &&
-          configMutation.mutate({
-            data: {
-              operation: TransportConfigOperationOperation.delete,
-              tag: deleting.tag,
-            },
-          })
+        description={
+          deletingLinkedOutbound
+            ? t("transports.deleteWithRouteDescription")
+            : t("transports.deleteDescription")
         }
+        impactItems={
+          deleting
+            ? deletingLinkedOutbound && keenConfig
+              ? getOutboundDeleteImpactItems(
+                  keenConfig,
+                  [deletingLinkedOutbound.tag],
+                  getOutboundDeleteImpact(keenConfig, [
+                    deletingLinkedOutbound.tag,
+                  ]),
+                  t
+                )
+              : [{ label: deleting.tag }]
+            : []
+        }
+        isPending={configMutation.isPending || routeDeleteMutation.isPending}
+        onConfirm={() => {
+          if (!deleting) {
+            return
+          }
+
+          const deleteTransport = () =>
+            configMutation.mutate(
+              {
+                data: {
+                  operation: TransportConfigOperationOperation.delete,
+                  tag: deleting.tag,
+                },
+              },
+              deletingLinkedOutbound
+                ? {
+                    onSuccess: () => {
+                      toast.info(t("transports.routeStagedForDelete"))
+                    },
+                    onError: () => {
+                      // Маршрут уже в черновике на удаление, а туннель остался.
+                      // Молчать нельзя: состояния разъехались, и человек должен
+                      // знать, что повторить.
+                      toast.error(
+                        t("transports.deleteTunnelAfterRouteFailed"),
+                        { richColors: true }
+                      )
+                    },
+                  }
+                : undefined
+            )
+
+          if (deletingLinkedOutbound && keenConfig) {
+            routeDeleteMutation.mutate(
+              {
+                data: buildUpdatedConfigForOutboundsDelete(keenConfig, [
+                  deletingLinkedOutbound.tag,
+                ]),
+              },
+              { onSuccess: deleteTransport }
+            )
+            return
+          }
+
+          deleteTransport()
+        }}
         onOpenChange={(open) => !open && setDeleting(undefined)}
         open={Boolean(deleting)}
         title={t("transports.deleteTitle")}
