@@ -33,6 +33,33 @@ import {
 const groupLabelKey = (group: BackupGroup) =>
   `pages.settings.backup.groups.${group}` as const
 
+/**
+ * Группы, которые по новой концепции ходят парой: туннель и есть маршрут,
+ * а DNS-правила привязаны к спискам. Галочки остаются раздельными — состав
+ * копии решает человек, — но половинчатый выбор получает честное
+ * предупреждение о том, что восстановится не целое.
+ */
+const BACKUP_PAIR_WARNINGS = [
+  {
+    present: "transports",
+    missing: "outbounds",
+    key: "transportsWithoutOutbounds",
+  },
+  {
+    present: "outbounds",
+    missing: "transports",
+    key: "outboundsWithoutTransports",
+  },
+  { present: "routing", missing: "dns", key: "routingWithoutDns" },
+  { present: "dns", missing: "routing", key: "dnsWithoutRouting" },
+] as const
+
+function getBackupPairWarningKeys(groups: BackupSelection): string[] {
+  return BACKUP_PAIR_WARNINGS.filter(
+    (pair) => groups[pair.present] && !groups[pair.missing]
+  ).map((pair) => `pages.settings.backup.pairWarnings.${pair.key}`)
+}
+
 type ManagedDialogProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -146,6 +173,18 @@ export function BackupPanel({ onComplete }: BackupPanelProps) {
           </label>
         ))}
       </div>
+      {getBackupPairWarningKeys(groups).length > 0 ? (
+        <div className="space-y-1">
+          {getBackupPairWarningKeys(groups).map((warningKey) => (
+            <p
+              className="text-xs leading-5 text-amber-700 dark:text-amber-300"
+              key={warningKey}
+            >
+              {t(warningKey)}
+            </p>
+          ))}
+        </div>
+      ) : null}
       <div className="flex justify-end">
         <Button
           disabled={pending || !Object.values(groups).some(Boolean)}

@@ -1415,6 +1415,16 @@ export const enTranslation = {
           nfqws_config: "nfqws2 configuration",
           nfqws_lists: "nfqws2 lists",
         },
+        pairWarnings: {
+          transportsWithoutOutbounds:
+            "VPN and proxies selected without routes: after restore the tunnels will have no routes or groups.",
+          outboundsWithoutTransports:
+            "Routes selected without VPN and proxies: after restore the routes will point at missing tunnels.",
+          routingWithoutDns:
+            "Lists and rules selected without DNS settings: the lists' DNS rules will not be in the copy.",
+          dnsWithoutRouting:
+            "DNS settings selected without lists and rules: DNS rules will reference missing lists.",
+        },
         dialog: {
           backupTitle: "Backup",
           backupDescription:

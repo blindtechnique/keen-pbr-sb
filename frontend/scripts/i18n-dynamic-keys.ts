@@ -336,6 +336,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
       "The tunnel form edits the linked route's kill-switch with the same finite enum and wording.",
   },
   {
+    file: "src/components/settings/backup-dialogs.tsx",
+    argument: "warningKey",
+    keys: ["pages.settings.backup.pairWarnings.*"],
+    reason:
+      "Backup pair warnings are a finite list assembled from BACKUP_PAIR_WARNINGS.",
+  },
+  {
     file: "src/pages/transport-upsert-page.tsx",
     argument: "`transports.configMessages.${*}`",
     keys: ["transports.configMessages.*"],

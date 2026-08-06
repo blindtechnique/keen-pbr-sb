@@ -1436,6 +1436,16 @@ export const ruTranslation = {
           nfqws_config: "Конфигурация nfqws2",
           nfqws_lists: "Списки nfqws2",
         },
+        pairWarnings: {
+          transportsWithoutOutbounds:
+            "Выбраны VPN и прокси без маршрутов: после восстановления туннели останутся без маршрутов и групп.",
+          outboundsWithoutTransports:
+            "Выбраны маршруты без VPN и прокси: после восстановления маршруты будут вести в отсутствующие туннели.",
+          routingWithoutDns:
+            "Выбраны списки и правила без настроек DNS: DNS-правила списков в копию не попадут.",
+          dnsWithoutRouting:
+            "Выбраны настройки DNS без списков и правил: DNS-правила будут ссылаться на отсутствующие списки.",
+        },
         dialog: {
           backupTitle: "Резервная копия",
           backupDescription:
