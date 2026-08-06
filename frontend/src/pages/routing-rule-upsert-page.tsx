@@ -583,6 +583,7 @@ function RoutingRuleForm({
                 </FieldLabel>
                 <FieldContent>
                   <MultiSelectList
+                    fullWidthAdd
                     error={error}
                     name={ROUTING_RULE_FIELD_NAMES.list}
                     onChange={field.handleChange}

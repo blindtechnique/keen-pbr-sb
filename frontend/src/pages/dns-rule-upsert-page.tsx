@@ -618,6 +618,7 @@ function DnsRuleForm({
                 </FieldLabel>
                 <FieldContent>
                   <MultiSelectList
+                    fullWidthAdd
                     name={DNS_RULE_FIELD_NAMES.lists}
                     onChange={field.handleChange}
                     options={listOptions}
