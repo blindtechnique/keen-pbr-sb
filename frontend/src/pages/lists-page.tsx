@@ -1,6 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query"
-import { ArrowRight, ExternalLink, Plus, RefreshCw } from "lucide-react"
-import type { ReactNode } from "react"
+import { ExternalLink, Plus, RefreshCw } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -9,8 +8,6 @@ import { useLocation } from "wouter"
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { ConfigStateResponseListRefreshState } from "@/api/generated/model/configStateResponseListRefreshState"
-import type { DnsRule } from "@/api/generated/model/dnsRule"
-import type { RouteRule } from "@/api/generated/model/routeRule"
 import {
   useConfigMutationPending,
   usePostListDeleteStageMutation,
@@ -34,10 +31,9 @@ import { DataTable } from "@/components/shared/data-table"
 import { TableSearch } from "@/components/shared/table-search"
 import { DependencyList } from "@/components/shared/dependency-list"
 import { ExpandableText } from "@/components/shared/expandable-text"
-import {
-  DeleteImpactDialog,
-  type DeleteImpactItem,
-} from "@/components/shared/delete-impact-dialog"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
+import { getListDeleteImpactItems } from "@/components/delete-impact/list-items"
+import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageHeader } from "@/components/shared/page-header"
 import { PageActionBar } from "@/components/shared/page-action-bar"
@@ -50,31 +46,17 @@ import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { getApiErrorMessage } from "@/lib/api-errors"
-import {
-  createDnsServerDisplayNameMap,
-  getDnsRuleDisplayName,
-} from "@/lib/dns-display"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import {
   formatListReferenceLabels,
   getListDisplayName,
   getListReferenceLabel,
 } from "@/lib/list-display"
-import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildListDeleteTargets,
   getListDeleteImpact,
   getListStatsState,
-  type ListDeleteImpact,
 } from "@/pages/lists-utils"
 
 type ListDraft = {
@@ -107,7 +89,6 @@ type ListTableRow = {
 
 const MAX_FAILED_LIST_NAMES_IN_TOAST = 5
 const REFRESH_ALL_TARGET = "__all__"
-const DELETE_REFERENCES = "__delete_references__"
 
 function isRefreshIconActive(
   activeRefreshTarget: string | null,
@@ -268,22 +249,6 @@ export function ListsPage() {
         : null,
     [replacementListId, visibleDeleteRequest]
   )
-  const replacementCandidates = useMemo(() => {
-    if (!visibleDeleteRequest) {
-      return []
-    }
-    const deletedIds = new Set(visibleDeleteRequest.ids)
-    return Object.keys(visibleDeleteRequest.config.lists ?? {})
-      .filter((listId) => !deletedIds.has(listId))
-      .sort((left, right) =>
-        getListReferenceLabel(
-          left,
-          visibleDeleteRequest.config.lists
-        ).localeCompare(
-          getListReferenceLabel(right, visibleDeleteRequest.config.lists)
-        )
-      )
-  }, [visibleDeleteRequest])
 
   const postConfigMutation = usePostConfigMutation({
     mutation: {
@@ -800,341 +765,16 @@ export function ListsPage() {
         title={t("pages.lists.deleteDialog.title")}
       >
         {visibleDeleteRequest ? (
-          <div className="space-y-2 rounded-[4px] border border-border/70 bg-secondary/30 p-3">
-            <label
-              className="text-sm font-medium"
-              htmlFor="list-delete-replacement"
-            >
-              {t("pages.lists.deleteDialog.referencesLabel")}
-            </label>
-            <Select
-              items={[
-                {
-                  label: t("pages.lists.deleteDialog.referencesRemoveOption"),
-                  value: DELETE_REFERENCES,
-                },
-                ...replacementCandidates.map((listId) => ({
-                  label: getListReferenceLabel(
-                    listId,
-                    visibleDeleteRequest.config.lists
-                  ),
-                  value: listId,
-                })),
-              ]}
-              onValueChange={(value) =>
-                setReplacementListId(
-                  value && value !== DELETE_REFERENCES ? value : ""
-                )
-              }
-              value={replacementListId || DELETE_REFERENCES}
-            >
-              <SelectTrigger id="list-delete-replacement">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value={DELETE_REFERENCES}>
-                    {t("pages.lists.deleteDialog.referencesRemoveOption")}
-                  </SelectItem>
-                  {replacementCandidates.map((listId) => (
-                    <SelectItem key={listId} value={listId}>
-                      {getListReferenceLabel(
-                        listId,
-                        visibleDeleteRequest.config.lists
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <p className="text-xs leading-5 text-muted-foreground">
-              {replacementListId
-                ? t("pages.lists.deleteDialog.referencesReplaceHint", {
-                    name: getListReferenceLabel(
-                      replacementListId,
-                      visibleDeleteRequest.config.lists
-                    ),
-                  })
-                : t("pages.lists.deleteDialog.referencesRemoveHint")}
-            </p>
-          </div>
+          <ListDeleteReplacementPicker
+            config={visibleDeleteRequest.config}
+            deletedIds={visibleDeleteRequest.ids}
+            onChange={setReplacementListId}
+            replacementListId={replacementListId}
+          />
         ) : null}
       </DeleteImpactDialog>
     </div>
   )
-}
-
-function getListDeleteImpactItems(
-  config: ConfigObject | undefined,
-  listIds: string[],
-  impact: ListDeleteImpact,
-  replacementListId: string | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  const items: DeleteImpactItem[] = []
-  const deletedListIds = new Set(listIds)
-
-  for (const listId of listIds) {
-    items.push({
-      label: (
-        <>
-          {t("pages.lists.deleteDialog.items.listPrefix")}{" "}
-          <strong>{getListReferenceLabel(listId, config?.lists)}</strong>{" "}
-          {t("pages.lists.deleteDialog.items.listSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const index of impact.removedRouteRuleIndexes) {
-    const rule = config?.route?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.routeRuleRemoved", {
-        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
-      }),
-      details: getRouteRuleDetails(
-        rule,
-        deletedListIds,
-        true,
-        replacementListId,
-        config?.lists,
-        t
-      ),
-    })
-  }
-
-  for (const index of impact.routeRuleIndexes) {
-    if (impact.removedRouteRuleIndexes.includes(index)) {
-      continue
-    }
-    const rule = config?.route?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.routeRuleUpdated", {
-        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
-      }),
-      details: getRouteRuleDetails(
-        rule,
-        deletedListIds,
-        false,
-        replacementListId,
-        config?.lists,
-        t
-      ),
-    })
-  }
-
-  for (const index of impact.removedDnsRuleIndexes) {
-    const rule = config?.dns?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.dnsRuleRemoved", {
-        name: getDnsRuleDisplayName(rule, index),
-      }),
-      details: getDnsRuleDetails(
-        rule,
-        deletedListIds,
-        true,
-        replacementListId,
-        config,
-        t
-      ),
-    })
-  }
-
-  for (const index of impact.dnsRuleIndexes) {
-    if (impact.removedDnsRuleIndexes.includes(index)) {
-      continue
-    }
-    const rule = config?.dns?.rules?.[index]
-    items.push({
-      label: t("pages.lists.deleteDialog.items.dnsRuleUpdated", {
-        name: getDnsRuleDisplayName(rule, index),
-      }),
-      details: getDnsRuleDetails(
-        rule,
-        deletedListIds,
-        false,
-        replacementListId,
-        config,
-        t
-      ),
-    })
-  }
-
-  return items
-}
-
-function getRouteRuleDetails(
-  rule: RouteRule | undefined,
-  deletedListIds: ReadonlySet<string>,
-  isRemoved: boolean,
-  replacementListId: string | undefined,
-  lists: ConfigObject["lists"],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  const beforeLists = rule.list ?? []
-  const afterLists = rewriteDisplayedListReferences(
-    beforeLists,
-    deletedListIds,
-    replacementListId
-  )
-  const details: ReactNode[] = []
-
-  if (beforeLists.length > 0) {
-    details.push(
-      formatDetail(
-        t("pages.routingRules.criteriaLabels.lists"),
-        isRemoved
-          ? formatListValue(beforeLists, lists, t)
-          : formatTransition(beforeLists, afterLists, lists, t)
-      )
-    )
-  }
-
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.proto"),
-    rule.proto
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.dscp"),
-    rule.dscp?.toString()
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.sourceIp"),
-    rule.src_addr
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.destinationIp"),
-    rule.dest_addr
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.sourcePort"),
-    rule.src_port
-  )
-  appendOptionalDetail(
-    details,
-    t("pages.routingRules.criteriaLabels.destinationPort"),
-    rule.dest_port
-  )
-
-  return details
-}
-
-function getDnsRuleDetails(
-  rule: DnsRule | undefined,
-  deletedListIds: ReadonlySet<string>,
-  isRemoved: boolean,
-  replacementListId: string | undefined,
-  config: ConfigObject | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  const afterLists = rewriteDisplayedListReferences(
-    rule.list,
-    deletedListIds,
-    replacementListId
-  )
-  const dnsServerNames = createDnsServerDisplayNameMap(
-    config?.dns?.servers ?? []
-  )
-
-  return [
-    formatDetail(
-      t("pages.dnsRules.criteriaLabels.lists"),
-      isRemoved
-        ? formatListValue(rule.list, config?.lists, t)
-        : formatTransition(rule.list, afterLists, config?.lists, t)
-    ),
-    formatDetail(
-      t("pages.dnsRules.headers.serverTag"),
-      dnsServerNames.get(rule.server) ?? rule.server
-    ),
-  ]
-}
-
-function appendOptionalDetail(
-  details: ReactNode[],
-  label: string,
-  value: string | undefined
-) {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return
-  }
-
-  details.push(formatDetail(label, value))
-}
-
-function rewriteDisplayedListReferences(
-  references: readonly string[],
-  deletedListIds: ReadonlySet<string>,
-  replacementListId?: string
-) {
-  const rewritten: string[] = []
-  for (const listId of references) {
-    const next =
-      deletedListIds.has(listId) && replacementListId
-        ? replacementListId
-        : deletedListIds.has(listId)
-          ? undefined
-          : listId
-    if (next && !rewritten.includes(next)) {
-      rewritten.push(next)
-    }
-  }
-  return rewritten
-}
-
-function formatDetail(label: string, value: ReactNode) {
-  return (
-    <>
-      {label}: {value}
-    </>
-  )
-}
-
-function formatTransition(
-  before: string[],
-  after: string[],
-  lists: ConfigObject["lists"],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return (
-    <ChangeValue
-      after={formatListValue(after, lists, t)}
-      before={formatListValue(before, lists, t)}
-    />
-  )
-}
-
-function ChangeValue({ after, before }: { after: string; before: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 leading-4">
-      <span className="min-w-0 truncate">{before}</span>
-      <ArrowRight className="mt-px size-3 shrink-0" />
-      <span className="min-w-0 truncate">{after}</span>
-    </span>
-  )
-}
-
-function formatListValue(
-  values: string[],
-  lists: ConfigObject["lists"],
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  return values.length > 0
-    ? formatListReferenceLabels(values, lists)
-    : t("common.noneShort")
 }
 
 function formatFailedListNamesForToast(

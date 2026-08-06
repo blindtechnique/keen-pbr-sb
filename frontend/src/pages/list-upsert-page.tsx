@@ -19,8 +19,19 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { Outbound } from "@/api/generated/model/outbound"
 import {
   usePostConfigMutation,
+  usePostListDeleteStageMutation,
   usePostRecommendedListSetupMutation,
 } from "@/api/mutations"
+import { getListDeleteImpactItems } from "@/components/delete-impact/list-items"
+import { ListDeleteReplacementPicker } from "@/components/lists/list-delete-replacement-picker"
+import { UpsertDeleteAction } from "@/components/shared/upsert-delete-action"
+import { getApiErrorMessage } from "@/lib/api-errors"
+import { getDnsRuleDisplayName } from "@/lib/dns-display"
+import { getListReferenceLabel } from "@/lib/list-display"
+import {
+  buildListDeleteTargets,
+  getListDeleteImpact,
+} from "@/pages/lists-utils"
 import { queryKeys } from "@/api/query-keys"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig, selectConfigRevision } from "@/api/selectors"
@@ -335,14 +346,54 @@ function ListForm({
     : undefined
   // DNS rules are edited where they belong — next to the list they apply to —
   // instead of in a separate section listing every rule at once.
-  const currentDnsServer =
-    (loadedConfig.dns?.rules ?? []).find((rule) =>
-      (rule.list ?? []).includes(listId ?? "")
-    )?.server ?? ""
+  const dnsRulesForList = (loadedConfig.dns?.rules ?? [])
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ rule }) => (rule.list ?? []).includes(listId ?? ""))
+  // Общее правило (на несколько списков) отсюда не редактируется: молчаливое
+  // «отцепить список и завести ему отдельное правило» меняло бы поведение
+  // соседних списков без их ведома. Такое правило показывается честно, со
+  // ссылкой в «Правила». То же — редкий случай нескольких правил на список.
+  const dnsRuleEditable =
+    dnsRulesForList.length <= 1 &&
+    dnsRulesForList.every(({ rule }) => (rule.list ?? []).length === 1)
+  const currentDnsServer = dnsRuleEditable
+    ? (dnsRulesForList[0]?.rule.server ?? "")
+    : ""
   const [initialDnsServerForList] = useState(currentDnsServer)
   const [dnsServerForList, setDnsServerForList] = useState(
     initialDnsServerForList
   )
+  const [replacementListId, setReplacementListId] = useState("")
+  const deleteStageMutation = usePostListDeleteStageMutation({
+    mutation: {
+      onSuccess: async () => {
+        toast.success(t("pages.lists.deleteDialog.staged"))
+        await queryClient.invalidateQueries({ queryKey: queryKeys.config() })
+        navigate("/lists")
+      },
+      onError: async (error) => {
+        if (error.status === 409) {
+          // Конфигурация изменилась под руками: показываем свежую и даём
+          // повторить — сам диалог пересчитает последствия по новым данным.
+          toast.warning(t("pages.lists.deleteDialog.revisionChanged"), {
+            richColors: true,
+          })
+          await queryClient.invalidateQueries({ queryKey: queryKeys.config() })
+          deleteStageMutation.reset()
+          return
+        }
+        toast.error(getApiErrorMessage(error), { richColors: true })
+      },
+    },
+  })
+  const deleteImpact =
+    mode === "edit" && listId
+      ? getListDeleteImpact(
+          loadedConfig,
+          [listId],
+          replacementListId || undefined
+        )
+      : null
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
   const form = useForm({
     defaultValues: baselineDraft,
@@ -474,7 +525,12 @@ function ListForm({
           valueToPersist,
           listId,
           mode === "create" ? quickSetupForSave : undefined,
-          mode === "edit" ? dnsServerForList : undefined
+          // Селект DNS пишет правило только когда он показан и правит 1:1:
+          // общее правило соседей отсюда не трогается. В диалоге создания
+          // DNS-правило создаёт быстрая настройка, а не этот селект.
+          (mode === "edit" || presentation === "page") && dnsRuleEditable
+            ? dnsServerForList
+            : undefined
         )
 
         try {
@@ -557,7 +613,9 @@ function ListForm({
 
   const isCreate = mode === "create"
   const hasDnsServerChange =
-    mode === "edit" && dnsServerForList !== initialDnsServerForList
+    (mode === "edit" || presentation === "page") &&
+    dnsRuleEditable &&
+    dnsServerForList !== initialDnsServerForList
   const hasQuickSetupChange =
     mode === "create" &&
     isSemanticallyDirty(quickSetup, initialQuickSetup, {
@@ -1101,42 +1159,80 @@ function ListForm({
         </section>
       ) : null}
 
-      {!isCreate ? (
+      {!isCreate || presentation === "page" ? (
         <section className="space-y-4">
           <SectionHeading
             description={t("pages.listUpsert.dnsRule.description")}
             title={t("pages.listUpsert.dnsRule.title")}
           />
-          <div className="space-y-3">
-            <Select
-              items={dnsServerSelectItems}
-              onValueChange={(value) => setDnsServerForList(value ?? "")}
-              value={dnsServerForList || NO_DNS_RULE}
-            >
-              <SelectTrigger>
-                <SelectValue
-                  placeholder={t("pages.listUpsert.quickSetup.selectDnsServer")}
-                />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value={NO_DNS_RULE}>
-                    {t("pages.listUpsert.dnsRule.none")}
-                  </SelectItem>
-                  {dnsServers.map((server) => (
-                    <SelectItem key={server.tag} value={server.tag}>
-                      {server.display_name?.trim() || server.tag}
+          {dnsRuleEditable ? (
+            <div className="space-y-3">
+              <Select
+                items={dnsServerSelectItems}
+                onValueChange={(value) => setDnsServerForList(value ?? "")}
+                value={dnsServerForList || NO_DNS_RULE}
+              >
+                <SelectTrigger>
+                  <SelectValue
+                    placeholder={t(
+                      "pages.listUpsert.quickSetup.selectDnsServer"
+                    )}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={NO_DNS_RULE}>
+                      {t("pages.listUpsert.dnsRule.none")}
                     </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            {dnsServerTags.length === 0 ? (
+                    {dnsServers.map((server) => (
+                      <SelectItem key={server.tag} value={server.tag}>
+                        {server.display_name?.trim() || server.tag}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              {dnsServerTags.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {t("pages.listUpsert.quickSetup.noDnsServers")}
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            // Общее правило честно показывается, а не молча переписывается:
+            // оно обслуживает и другие списки, и менять его нужно там, где
+            // видно всех, кого это заденет.
+            <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                {t("pages.listUpsert.quickSetup.noDnsServers")}
+                {t("pages.listUpsert.dnsRule.shared", {
+                  names: dnsRulesForList
+                    .map(({ rule, index }) =>
+                      getDnsRuleDisplayName(rule, index)
+                    )
+                    .join(", "),
+                })}
               </p>
-            ) : null}
-          </div>
+              <Button
+                onClick={() => {
+                  if (
+                    isDirty &&
+                    !window.confirm(
+                      `${t("common.unsavedChanges.title")}\n\n${t(
+                        "common.unsavedChanges.description"
+                      )}`
+                    )
+                  ) {
+                    return
+                  }
+                  navigate("/rules#dns")
+                }}
+                type="button"
+                variant="outline"
+              >
+                {t("pages.listUpsert.dnsRule.openRules")}
+              </Button>
+            </div>
+          )}
         </section>
       ) : null}
 
@@ -1369,6 +1465,42 @@ function ListForm({
       <ServerValidationAlert errors={unmappedServerErrors} />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
+        {mode === "edit" && listId && deleteImpact ? (
+          <UpsertDeleteAction
+            confirmLabel={t("pages.lists.deleteDialog.confirm")}
+            description={t("pages.lists.deleteDialog.description", {
+              names: getListReferenceLabel(listId, loadedConfig.lists),
+            })}
+            impactItems={getListDeleteImpactItems(
+              loadedConfig,
+              [listId],
+              deleteImpact,
+              replacementListId || undefined,
+              t
+            )}
+            isPending={deleteStageMutation.isPending}
+            label={t("common.delete")}
+            onConfirm={() =>
+              deleteStageMutation.mutate({
+                data: {
+                  base_revision: loadedConfigRevision,
+                  targets: buildListDeleteTargets(
+                    [listId],
+                    replacementListId || undefined
+                  ),
+                },
+              })
+            }
+            title={t("pages.lists.deleteDialog.title")}
+          >
+            <ListDeleteReplacementPicker
+              config={loadedConfig}
+              deletedIds={[listId]}
+              onChange={setReplacementListId}
+              replacementListId={replacementListId}
+            />
+          </UpsertDeleteAction>
+        ) : null}
         <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>

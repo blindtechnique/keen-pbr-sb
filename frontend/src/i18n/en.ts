@@ -2690,6 +2690,9 @@ export const enTranslation = {
         description:
           "Domains from this list resolve through the selected server. Without one the list uses the primary servers.",
         none: "Not set",
+        shared:
+          "DNS for this list comes from the rule \u201c{{names}}\u201d, shared by several lists. Change it under Rules, where everything it affects is visible.",
+        openRules: "Open DNS rules",
       },
       refreshRoute: {
         modeLabel: "Refresh route",

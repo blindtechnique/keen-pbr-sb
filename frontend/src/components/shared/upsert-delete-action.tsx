@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 import {
@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/button"
  * список пуст и диалог остаётся просто подтверждением.
  */
 export function UpsertDeleteAction({
+  children,
   confirmLabel,
   description,
   disabled = false,
@@ -38,6 +39,8 @@ export function UpsertDeleteAction({
   onConfirm,
   title,
 }: {
+  /** Дополнительное содержимое диалога — например, перепривязка ссылок. */
+  children?: ReactNode
   confirmLabel: string
   description: string
   disabled?: boolean
@@ -76,7 +79,9 @@ export function UpsertDeleteAction({
         onOpenChange={setOpen}
         open={open}
         title={title}
-      />
+      >
+        {children}
+      </DeleteImpactDialog>
     </>
   )
 }
