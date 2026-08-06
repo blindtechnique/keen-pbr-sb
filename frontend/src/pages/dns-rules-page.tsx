@@ -21,6 +21,7 @@ import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { DataTable } from "@/components/shared/data-table"
+import { RuleConditionsCell } from "@/components/shared/rule-conditions-cell"
 import { TableSearch } from "@/components/shared/table-search"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
@@ -417,17 +418,22 @@ function DnsRulesEditor({
               >
                 {getDnsRuleDisplayName(rule, index)}
               </span>,
-              <ul
-                className="list-disc space-y-1 pl-5 text-sm"
+              // Однострочная ячейка с многоточием: правило на десяток
+              // списков растягивало строку, а полный перечень есть в
+              // редакторе и в подсказке ячейки.
+              <RuleConditionsCell
+                conditions={[
+                  {
+                    label: t("pages.dnsRules.criteriaLabels.lists"),
+                    value: formatListReferenceLabels(
+                      rule.list,
+                      loadedConfig?.lists
+                    ),
+                  },
+                ]}
                 key={`criteria-${index}`}
-              >
-                <li className="text-muted-foreground">
-                  <span className="font-medium text-foreground">
-                    {t("pages.dnsRules.criteriaLabels.lists")}:
-                  </span>{" "}
-                  {formatListReferenceLabels(rule.list, loadedConfig?.lists)}
-                </li>
-              </ul>,
+                maxRows={1}
+              />,
               <span className="font-medium" key={`server-${index}`}>
                 <span title={rule.server}>
                   {serverNames.get(rule.server) ?? rule.server}

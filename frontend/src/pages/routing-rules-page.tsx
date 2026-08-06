@@ -19,6 +19,7 @@ import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
 import { ConfigTransferButtons } from "@/components/shared/config-transfer-buttons"
 import { DataTable } from "@/components/shared/data-table"
+import { RuleConditionsCell } from "@/components/shared/rule-conditions-cell"
 import { TableSearch } from "@/components/shared/table-search"
 import { SortableCards } from "@/components/shared/sortable-cards"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
@@ -551,22 +552,15 @@ function RoutingRulesEditor({
                       : row.displayName}
                   </span>
                 </div>,
-                <ul
-                  className="min-w-0 list-disc space-y-1 pl-5 text-sm break-words"
+                // До двух однострочных условий и «Ещё N» — строки таблицы
+                // одной высоты, как в остальных таблицах; полный список — в
+                // редакторе и в подсказке ячейки.
+                <RuleConditionsCell
+                  className="min-h-11"
+                  conditions={row.conditions}
                   key={`${row.id}-conditions`}
-                >
-                  {row.conditions.map((condition) => (
-                    <li
-                      className="text-muted-foreground"
-                      key={`${row.id}-${condition.label}`}
-                    >
-                      <span className="font-medium text-foreground">
-                        {condition.label}:
-                      </span>{" "}
-                      {condition.value}
-                    </li>
-                  ))}
-                </ul>,
+                  maxRows={2}
+                />,
                 <div className="min-w-0" key={`${row.id}-outbound`}>
                   <RuntimeOutboundEntry
                     runtimeState={row.runtimeState}
