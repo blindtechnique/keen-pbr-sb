@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 export type InterfaceName = {
   label: string
   id?: string
+  firmware_interface_name?: string
   type?: string
   connected?: boolean
   link?: boolean
@@ -22,6 +23,34 @@ export function resolveInterfaceDisplayName(
   }
 
   return names[kernelName]?.label?.trim() || kernelName
+}
+
+/**
+ * Ищет понятное имя по логическому идентификатору NDMS (например `Bridge0`),
+ * а не по kernel-имени: каталог ключуется kernel-именами, но каждая запись
+ * несёт свои NDMS-идентификаторы. Возвращает undefined, когда прошивка имени
+ * не дала — выдумывать «Домашняя сеть» по одному только `Bridge0` нельзя:
+ * сегмент могли переименовать.
+ */
+export function resolveNdmsInterfaceLabel(
+  names: Record<string, InterfaceName>,
+  ndmsId?: string | null
+): string | undefined {
+  const wanted = ndmsId?.trim()
+  if (!wanted) {
+    return undefined
+  }
+
+  for (const entry of Object.values(names)) {
+    if (entry.id === wanted || entry.firmware_interface_name === wanted) {
+      const label = entry.label?.trim()
+      if (label && label !== wanted) {
+        return label
+      }
+    }
+  }
+
+  return undefined
 }
 
 /**

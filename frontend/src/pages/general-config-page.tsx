@@ -93,6 +93,10 @@ import {
 } from "@/lib/list-refresh-route"
 import { mapNativeInterfaces } from "@/lib/native-interfaces"
 import { getGeneralConfigActionState } from "@/pages/general-config-form-state"
+import {
+  resolveNdmsInterfaceLabel,
+  useInterfaceNames,
+} from "@/hooks/use-interface-names"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { toast } from "sonner"
 
@@ -390,6 +394,32 @@ function LoadedGeneralConfigPage({
         : [],
     [ndmsVpnServicesQuery.data]
   )
+  // «Привязан к: Bridge0» → «Привязан к: Домашняя сеть»: имя берётся из
+  // данных NDMS (каталог имён интерфейсов и инвентарь туннелей), а не из
+  // словаря — переименованный сегмент покажется своим настоящим именем.
+  // Если прошивка имени не дала, остаётся технический идентификатор.
+  const ndmsInterfaceNames = useInterfaceNames()
+  const resolveBoundInterfaceName = useMemo(() => {
+    const names = ndmsInterfaceNames.names
+    return (ndmsId: string): string | undefined => {
+      const wanted = ndmsId.trim()
+      if (!wanted) {
+        return undefined
+      }
+      for (const nativeInterface of nativeInterfaces) {
+        if (
+          nativeInterface.id === wanted ||
+          nativeInterface.logicalName === wanted
+        ) {
+          const label = nativeInterface.label.trim()
+          if (label && label !== wanted) {
+            return label
+          }
+        }
+      }
+      return resolveNdmsInterfaceLabel(names, wanted)
+    }
+  }, [nativeInterfaces, ndmsInterfaceNames.names])
   const reconnectListOptions = useMemo(
     () =>
       sortListIdsByDisplayName(
@@ -1062,6 +1092,9 @@ function LoadedGeneralConfigPage({
                               legacyInboundInterfaces={legacyInboundInterfaces}
                               onChange={field.handleChange}
                               overrides={field.state.value}
+                              resolveBoundInterfaceName={
+                                resolveBoundInterfaceName
+                              }
                               services={nativeVpnServices}
                             />
                             <FieldHint error={error ?? null} />
@@ -1142,7 +1175,7 @@ function LoadedGeneralConfigPage({
 
               <FieldSeparator />
 
-              <div className="space-y-1">
+              <div className="max-w-[480px] space-y-1">
                 <FieldLabel>
                   {t("pages.settings.autoupdate.routeTitle")}
                 </FieldLabel>
@@ -1184,12 +1217,14 @@ function LoadedGeneralConfigPage({
                 )}
               </form.Field>
 
-              <FieldHint
-                description={t(
-                  "pages.settings.autoupdate.inheritedListsCount",
-                  { count: inheritedUrlListCount }
-                )}
-              />
+              <div className="max-w-[480px]">
+                <FieldHint
+                  description={t(
+                    "pages.settings.autoupdate.inheritedListsCount",
+                    { count: inheritedUrlListCount }
+                  )}
+                />
+              </div>
             </FieldGroup>
           </CardContent>
         </Card>

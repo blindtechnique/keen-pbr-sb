@@ -12,6 +12,13 @@ export interface InternalVpnServiceOption {
   readonly enabled: boolean
   readonly sourceCidrs: readonly string[]
   readonly boundInterfaceId?: string | null
+  /**
+   * Понятное имя интерфейса привязки из NDMS, если backend его отдал.
+   * Поле опережает сгенерированную модель: сервер пока присылает только
+   * `bound_interface_id`, но как только появится `bound_interface_label`,
+   * интерфейс покажет его без дальнейших правок.
+   */
+  readonly boundInterfaceLabel?: string
   readonly missing: boolean
 }
 
@@ -59,6 +66,13 @@ export function buildInternalVpnServiceOptions({
       continue
     }
 
+    const boundInterfaceLabel = (
+      service as NdmsVpnServerService & {
+        bound_interface_label?: string | null
+      }
+    ).bound_interface_label
+      ?.trim()
+
     byId.set(serviceId, {
       key: serviceId,
       serviceId,
@@ -67,6 +81,7 @@ export function buildInternalVpnServiceOptions({
       enabled: service.enabled,
       sourceCidrs: normalizeCidrs(service.source_cidrs),
       boundInterfaceId: service.bound_interface_id,
+      ...(boundInterfaceLabel ? { boundInterfaceLabel } : {}),
       missing: false,
     })
   }

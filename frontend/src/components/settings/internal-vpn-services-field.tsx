@@ -50,6 +50,12 @@ interface InternalVpnServicesFieldProps {
   readonly copy: InternalVpnServicesFieldCopy
   readonly disabled?: boolean
   readonly inventoryState?: InternalVpnServerInventoryState
+  /**
+   * Понятное имя интерфейса привязки по его NDMS-идентификатору
+   * («Bridge0» → «Домашняя сеть»). undefined — имени у прошивки нет,
+   * показывается сам идентификатор.
+   */
+  readonly resolveBoundInterfaceName?: (ndmsId: string) => string | undefined
 }
 
 export function InternalVpnServicesField({
@@ -61,6 +67,7 @@ export function InternalVpnServicesField({
   copy,
   disabled = false,
   inventoryState = "ready",
+  resolveBoundInterfaceName,
 }: InternalVpnServicesFieldProps) {
   const options = buildInternalVpnServiceOptions({ services, overrides })
   const inventoryNotice =
@@ -185,9 +192,22 @@ export function InternalVpnServicesField({
                       {copy.poolLabel}: {service.sourceCidrs.join(", ")}
                     </p>
                   ) : null}
+                  {/* «Привязан к: Bridge0» никому не говорит, что это
+                      домашняя сеть. Показывается имя из NDMS, когда оно
+                      есть; технический идентификатор остаётся в подсказке.
+                      Придумывать имя по одному идентификатору нельзя —
+                      сегмент могли переименовать. */}
                   {service.boundInterfaceId ? (
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {copy.boundInterfaceLabel}: {service.boundInterfaceId}
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      title={service.boundInterfaceId}
+                    >
+                      {copy.boundInterfaceLabel}:{" "}
+                      {service.boundInterfaceLabel ??
+                        resolveBoundInterfaceName?.(
+                          service.boundInterfaceId
+                        ) ??
+                        service.boundInterfaceId}
                     </p>
                   ) : null}
                   {!isAuthoritative ? (
