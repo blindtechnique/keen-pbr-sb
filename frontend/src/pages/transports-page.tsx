@@ -78,10 +78,12 @@ import {
 import { SingBoxProcessModeDialog } from "@/components/transports/sing-box-process-mode-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { DependencyList } from "@/components/shared/dependency-list"
+import type { Dependency } from "@/lib/dependencies"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { getApiErrorMessage } from "@/lib/api-errors"
+import { getOutboundDisplayName } from "@/lib/outbound-display"
 import {
   useServerLocations,
   type ServerLocation,
@@ -873,8 +875,20 @@ export function TransportsPage({
         runtimeMilliseconds={transportLatencyByInterface.get(item.interface)}
       />,
       <UsedByCell
+        bound={Boolean(boundOutbound)}
+        dependencies={
+          boundOutbound
+            ? transportDependencies.dependenciesByTarget.get(
+                `outbound:${boundOutbound.tag}`
+              )
+            : undefined
+        }
         key="usedBy"
-        tag={boundOutbound?.display_name?.trim() || boundOutbound?.tag}
+        selfNames={
+          boundOutbound
+            ? [getOutboundDisplayName(boundOutbound), boundOutbound.tag]
+            : []
+        }
       />,
       <RowActions
         deleteDisabled={isNative}
@@ -1113,7 +1127,22 @@ export function TransportsPage({
           }
         />
       ) : null,
-      <UsedByCell key="usedBy" tag={boundOutbound?.tag} />,
+      <UsedByCell
+        bound={Boolean(boundOutbound)}
+        dependencies={
+          boundOutbound
+            ? transportDependencies.dependenciesByTarget.get(
+                `outbound:${boundOutbound.tag}`
+              )
+            : undefined
+        }
+        key="usedBy"
+        selfNames={
+          boundOutbound
+            ? [getOutboundDisplayName(boundOutbound), boundOutbound.tag]
+            : []
+        }
+      />,
       <RowActions
         deleteDisabled
         deleteTitle={firmwareTitle}
@@ -1148,7 +1177,82 @@ export function TransportsPage({
     return { cells, details }
   })
 
-  const transportRows = [...managedRows, ...nativeRows]
+  // Маршруты без туннеля. По новой модели их быть не должно — маршрут
+  // создаётся вместе с туннелем, — но чужой tun0 из другого пакета Entware
+  // никуда не делся. Отдельного блока «Прочие маршруты» владелец не захотел,
+  // поэтому такие маршруты стоят строками в общем списке, честно подписанные.
+  const linkedOutboundTags = new Set<string>()
+  for (const item of visibleItems) {
+    const bound = interfaceOutboundByInterface.get(item.interface)
+    if (bound) linkedOutboundTags.add(bound.tag)
+    linkedOutboundTags.add(item.tag)
+  }
+  for (const nativeInterface of displayedNativeInterfaces) {
+    const bound = nativeInterface.kernelName
+      ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
+      : undefined
+    if (bound) linkedOutboundTags.add(bound.tag)
+  }
+  const orphanOutbounds = (keenConfig?.outbounds ?? []).filter(
+    (outbound) =>
+      outbound.type === "interface" && !linkedOutboundTags.has(outbound.tag)
+  )
+  const orphanRows = orphanOutbounds.map((outbound) => {
+    const runtimeInterface = runtimeInterfaceByName.get(
+      outbound.interface ?? ""
+    )
+    const editHref = `/outbounds/${encodeURIComponent(outbound.tag)}/edit?view=page`
+    const cells: ReactNode[] = [
+      <span key="power" />,
+      <span className="flex min-w-0 flex-col" key="name">
+        <span className="truncate text-sm font-medium">
+          {outbound.display_name?.trim() || outbound.tag}
+        </span>
+        <span className="truncate font-mono text-xs text-muted-foreground">
+          {outbound.interface}
+        </span>
+      </span>,
+      <KeeneticStatus
+        key="state"
+        tone={runtimeInterface?.status === "up" ? "success" : "neutral"}
+      >
+        {runtimeInterface
+          ? runtimeInterface.status === "up"
+            ? t("pages.settings.general.inboundInterfacesStatusUp")
+            : t("pages.settings.general.inboundInterfacesStatusDown")
+          : t("runtime.outboundStatus.unknown")}
+      </KeeneticStatus>,
+      <span className="text-xs text-muted-foreground" key="latency">
+        —
+      </span>,
+      <UsedByCell
+        bound
+        dependencies={transportDependencies.dependenciesByTarget.get(
+          `outbound:${outbound.tag}`
+        )}
+        key="usedBy"
+        selfNames={[getOutboundDisplayName(outbound), outbound.tag]}
+      />,
+      <span
+        className="keen-row-actions ml-auto inline-flex justify-end gap-2"
+        key="actions"
+      >
+        <Button
+          aria-label={t("transports.routing.openOutbound")}
+          className="keen-row-action size-8 rounded-[4px]"
+          onClick={() => navigate(editHref)}
+          size="icon"
+          title={t("transports.routing.openOutbound")}
+          variant="outline"
+        >
+          <KeenPencilIcon className="size-4" />
+        </Button>
+      </span>,
+    ]
+    return { cells, details: undefined as ReactNode }
+  })
+
+  const transportRows = [...managedRows, ...nativeRows, ...orphanRows]
   // Маршрут, связанный с удаляемым туннелем: по интерфейсу либо по тегу.
   const deletingLinkedOutbound = deleting
     ? (interfaceOutboundByInterface.get(deleting.interface) ??
@@ -1165,24 +1269,28 @@ export function TransportsPage({
   // Подзаголовки нужны только когда в таблице оба вида строк: свои туннели
   // включаются и удаляются, интерфейсы прошивки — нет, и без подписи это
   // выглядит как случайно неактивные кнопки.
-  const transportGroupHeadings =
-    managedRows.length > 0 && nativeRows.length > 0
-      ? {
-          0: (
-            <SectionHeading
-              size="compact"
-              title={t("transports.groups.managed")}
-            />
-          ),
-          [managedRows.length]: (
-            <SectionHeading
-              description={t("transports.groups.nativeDescription")}
-              size="compact"
-              title={t("transports.groups.native")}
-            />
-          ),
-        }
-      : undefined
+  const transportGroupHeadings: Record<number, ReactNode> = {}
+  if (managedRows.length > 0 && nativeRows.length > 0) {
+    transportGroupHeadings[0] = (
+      <SectionHeading size="compact" title={t("transports.groups.managed")} />
+    )
+    transportGroupHeadings[managedRows.length] = (
+      <SectionHeading
+        description={t("transports.groups.nativeDescription")}
+        size="compact"
+        title={t("transports.groups.native")}
+      />
+    )
+  }
+  if (orphanRows.length > 0) {
+    transportGroupHeadings[managedRows.length + nativeRows.length] = (
+      <SectionHeading
+        description={t("transports.groups.orphanDescription")}
+        size="compact"
+        title={t("transports.groups.orphan")}
+      />
+    )
+  }
 
   return (
     <div className="space-y-3">
@@ -1406,20 +1514,26 @@ export function TransportsPage({
             // расти ей больше не с чего.
             "min-w-[11rem]",
             "min-w-[11rem]",
-            // «Где используется» тоже фиксировано: «Не привязан к маршруту» —
-            // 137px, а короткая плашка с названием маршрута — 63px, и таблица
-            // разъезжалась, когда в списке появлялась хоть одна непривязанная
-            // строка. Плашка длиннее колонки обрезается, полное имя — в
-            // подсказке.
-            "min-w-[11rem]",
+            // «Где используется» переносится, а не расталкивает соседей: с
+            // плашками зависимостей узкая nowrap-колонка вырастала до своего
+            // max-content (~360px) и сжимала имя туннеля до одной буквы.
+            // Тот же приём, что у имени: `max-width: 0` на ячейке — «не
+            // требовать ширину по содержимому», пол в 14rem — чтобы плашки
+            // не рассыпались по слову на строку.
+            "min-w-[14rem] [&:where(td)]:max-w-0",
             "py-2",
           ]}
-          groupHeadings={transportGroupHeadings}
+          groupHeadings={
+            Object.keys(transportGroupHeadings).length > 0
+              ? transportGroupHeadings
+              : undefined
+          }
           headers={transportTableHeaders}
-          // Все колонки, кроме имени, имеют постоянную ширину, а имя забирает
+          // Колонки состояния и задержки — постоянной ширины, имя забирает
           // остаток. Только так таблица не шевелится: данные в ней обновляются
-          // каждые три секунды.
-          narrowColumns={[0, 2, 3, 4]}
+          // каждые три секунды. «Где используется» не в списке: ей нужен
+          // перенос строк, nowrap раздувал её до самой длинной плашки.
+          narrowColumns={[0, 2, 3]}
           rowDetails={transportRowDetails}
           rows={transportRows.map((row) => row.cells)}
         />
@@ -1571,33 +1685,54 @@ function TransportName({
 }
 
 /** «Где используется» — тот же вопрос «можно ли это удалить», что и в маршрутах. */
-function UsedByCell({ tag }: { readonly tag?: string }) {
+function UsedByCell({
+  bound,
+  dependencies,
+  selfNames = [],
+}: {
+  /** Есть ли у туннеля маршрут вообще. Без маршрута использовать его нечем. */
+  readonly bound: boolean
+  readonly dependencies?: readonly Dependency[]
+  /**
+   * Имена самого туннеля (отображаемое и тег). Плашка правила заканчивается
+   * на «→ куда»; в колонке этого самого туннеля хвост повторяет строку — по
+   * новой концепции маршрут не показывается, поэтому хвост срезается.
+   */
+  readonly selfNames?: readonly string[]
+}) {
   const { t } = useTranslation()
 
-  if (!tag) {
+  const suffixes = selfNames
+    .filter((name) => name.length > 0)
+    .map((name) => ` → ${name}`)
+  const list = [...(dependencies ?? [])].map((dependency) => {
+    if (dependency.kind !== "routingRule") return dependency
+    const suffix = suffixes.find((entry) => dependency.label.endsWith(entry))
+    return suffix
+      ? { ...dependency, label: dependency.label.slice(0, -suffix.length) }
+      : dependency
+  })
+  if (!bound || list.length === 0) {
+    const hint = bound
+      ? t("common.dependencies.none")
+      : t("transports.usedByNone")
     return (
-      // `truncate`, а не перенос: строка в прошивке ровно 48px, а «Не привязан
-      // к маршруту» в узкой колонке разъезжалось на две строки и делало ряд
-      // выше соседних.
+      // `truncate`, а не перенос: строка в прошивке ровно 48px, а длинный
+      // текст («удаление ничего не сломает») без потолка распирал колонку и
+      // сжимал имя туннеля до одной буквы. Полный текст остаётся в title.
       <span
-        className="block truncate text-xs text-muted-foreground"
-        title={t("transports.usedByNone")}
+        className="block max-w-[26rem] truncate text-xs text-muted-foreground"
+        title={hint}
       >
-        {t("transports.usedByNone")}
+        {hint}
       </span>
     )
   }
 
-  return (
-    <Badge
-      className="max-w-full min-w-0"
-      size="xs"
-      title={tag}
-      variant="outline"
-    >
-      <span className="truncate">{tag}</span>
-    </Badge>
-  )
+  // Тег маршрута здесь больше не показывается: туннель и есть маршрут, и имя
+  // маршрута повторяло имя туннеля из соседней колонки. Вместо этого — кто
+  // туннелем пользуется: правила, DNS-серверы, загрузка списков.
+  return <DependencyList compact dependencies={list} />
 }
 
 /**

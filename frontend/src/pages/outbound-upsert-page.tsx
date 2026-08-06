@@ -214,10 +214,18 @@ export function OutboundUpsertPage({
 
   return (
     <UpsertPage
-      cardDescription={t("pages.outboundUpsert.cardDescription")}
+      cardDescription={t(
+        draft.type === "urltest"
+          ? "pages.outboundUpsert.groupCardDescription"
+          : "pages.outboundUpsert.cardDescription"
+      )}
       cardTitle={
         mode === "create"
-          ? t("pages.outboundUpsert.createTitle")
+          ? t(
+              draft.type === "urltest"
+                ? "pages.outboundUpsert.createGroupTitle"
+                : "pages.outboundUpsert.createTitle"
+            )
           : t("pages.outboundUpsert.editCardTitle", {
               tag: getOutboundDisplayName(
                 findOutboundByTag(loadedConfig, draft.tag) ?? {
@@ -230,12 +238,20 @@ export function OutboundUpsertPage({
       }
       description={t("pages.outboundUpsert.description")}
       dirty={dirty}
-      onClose={() => navigate("/outbounds")}
+      onClose={() => navigate(outboundReturnHref(draft.type))}
       presentation={presentation}
       title={
         mode === "create"
-          ? t("pages.outboundUpsert.createTitle")
-          : t("pages.outboundUpsert.editTitle")
+          ? t(
+              draft.type === "urltest"
+                ? "pages.outboundUpsert.createGroupTitle"
+                : "pages.outboundUpsert.createTitle"
+            )
+          : t(
+              draft.type === "urltest"
+                ? "pages.outboundUpsert.editGroupTitle"
+                : "pages.outboundUpsert.editTitle"
+            )
       }
     >
       <OutboundForm
@@ -249,6 +265,21 @@ export function OutboundUpsertPage({
       />
     </UpsertPage>
   )
+}
+
+/**
+ * Куда возвращаться после закрытия формы: группа живёт на вкладке «Группы»,
+ * системные направления — на «Системных». Раньше любое закрытие вело на
+ * вкладку туннелей, и человек, добавлявший группу, оказывался не там, где был.
+ */
+function outboundReturnHref(type: Outbound["type"]): string {
+  if (type === "urltest") {
+    return "/outbounds#failover"
+  }
+  if (type !== "interface") {
+    return "/outbounds#system"
+  }
+  return "/outbounds"
 }
 
 function getCreateDraftFromLocation(): OutboundDraft {
@@ -430,7 +461,7 @@ function OutboundForm({
             }),
           ])
           if (onSaved) onSaved()
-          else navigate("/outbounds")
+          else navigate(outboundReturnHref(valueToPersist?.type ?? draft.type))
           return undefined
         } catch (error) {
           const result = splitFormApiErrors({
@@ -477,7 +508,7 @@ function OutboundForm({
       },
       {
         onSuccess: () => {
-          navigate("/outbounds")
+          navigate(outboundReturnHref(existingOutbound?.type ?? draft.type))
         },
       }
     )
@@ -647,51 +678,60 @@ function OutboundForm({
           </form.Field>
         ) : null}
 
-        <form.Field name={OUTBOUND_FIELD_NAMES.type}>
-          {(field) => {
-            const error = getFirstFieldError(field.state.meta.errors)
-            return (
-              <Field invalid={Boolean(error)}>
-                <FieldLabel>{t("pages.outboundUpsert.fields.type")}</FieldLabel>
-                <FieldContent>
-                  <Select
-                    items={outboundTypeOptions.map((type) => ({
-                      value: type,
-                      label: t(
-                        `pages.outboundUpsert.fields.typeOptions.${type}`
-                      ),
-                    }))}
-                    onValueChange={(value) =>
-                      field.handleChange(
-                        (value as Outbound["type"]) ?? initialDraft.type
-                      )
-                    }
-                    value={field.state.value}
-                  >
-                    <SelectTrigger aria-invalid={Boolean(error)}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        <SelectLabel>
-                          {t("pages.outboundUpsert.fields.outboundTypes")}
-                        </SelectLabel>
-                        {outboundTypeOptions.map((option) => (
-                          <SelectItem key={option} value={option}>
-                            {t(
-                              `pages.outboundUpsert.fields.typeOptions.${option}`
-                            )}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldHint error={error ?? null} />
-                </FieldContent>
-              </Field>
-            )
-          }}
-        </form.Field>
+        {/*
+         * Выбор типа живёт только в расширенном редакторе: в упрощённом
+         * диалоге тип задан кнопкой, которой человек его открыл («Добавить
+         * туннель» / «Добавить группу»), и лишний селект здесь только путает.
+         */}
+        {presentation === "page" ? (
+          <form.Field name={OUTBOUND_FIELD_NAMES.type}>
+            {(field) => {
+              const error = getFirstFieldError(field.state.meta.errors)
+              return (
+                <Field invalid={Boolean(error)}>
+                  <FieldLabel>
+                    {t("pages.outboundUpsert.fields.type")}
+                  </FieldLabel>
+                  <FieldContent>
+                    <Select
+                      items={outboundTypeOptions.map((type) => ({
+                        value: type,
+                        label: t(
+                          `pages.outboundUpsert.fields.typeOptions.${type}`
+                        ),
+                      }))}
+                      onValueChange={(value) =>
+                        field.handleChange(
+                          (value as Outbound["type"]) ?? initialDraft.type
+                        )
+                      }
+                      value={field.state.value}
+                    >
+                      <SelectTrigger aria-invalid={Boolean(error)}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectLabel>
+                            {t("pages.outboundUpsert.fields.outboundTypes")}
+                          </SelectLabel>
+                          {outboundTypeOptions.map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {t(
+                                `pages.outboundUpsert.fields.typeOptions.${option}`
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <FieldHint error={error ?? null} />
+                  </FieldContent>
+                </Field>
+              )
+            }}
+          </form.Field>
+        ) : null}
       </FieldGroup>
 
       {isInterface ? (

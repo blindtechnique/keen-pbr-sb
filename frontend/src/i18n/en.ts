@@ -586,6 +586,9 @@ export const enTranslation = {
       native: "KeeneticOS interfaces",
       nativeDescription:
         "Created by the router firmware. keen-pbr-sb only shows them: starting, restarting or deleting such an interface happens in the Keenetic web configurator. Here you can point a route at it.",
+      orphan: "Routes without a tunnel",
+      orphanDescription:
+        "Normally there are none: a route is created together with its tunnel. These point at interfaces keen-pbr does not manage - for example, another Entware package's tunnel.",
     },
     refresh: "Refresh",
     add: "Add tunnel or proxy",
@@ -2118,8 +2121,7 @@ export const enTranslation = {
     outbounds: {
       plain: {
         interface: "Traffic leaves through {{name}}",
-        urltest:
-          "A group automatically switches to a working tunnel",
+        urltest: "A group automatically switches to a working tunnel",
         table: "Traffic goes straight through the provider, past the tunnels",
         blackhole: "Connections are not let out",
         ignore: "Traffic passes without changing its route",
@@ -2152,7 +2154,10 @@ export const enTranslation = {
       title: "Routes and groups",
       description:
         "Traffic destinations: tunnels and interfaces, tunnel groups, and system routes.",
-      actions: { new: "Add route or group" },
+      actions: {
+        new: "Add route or group",
+        newGroup: "Add group",
+      },
       bulk: {
         selected: "{{count}} selected",
         delete: "Delete selected",
@@ -2186,8 +2191,7 @@ export const enTranslation = {
       },
       empty: {
         title: "No routes or groups yet",
-        description:
-          "Add a route or group to start building routing behavior.",
+        description: "Add a route or group to start building routing behavior.",
       },
       headers: {
         tag: "Name",
@@ -2217,13 +2221,16 @@ export const enTranslation = {
     outboundUpsert: {
       createTitle: "Create route or group",
       editTitle: "Edit route or group",
+      createGroupTitle: "Create group",
+      editGroupTitle: "Edit group",
+      groupCardDescription:
+        "A group combines several tunnels and automatically switches to a working one.",
       editCardTitle: "Edit {{tag}}",
       description:
         "A route can use a network interface, an existing routing table, or a tunnel group that picks a working tunnel by itself.",
       cardDescription: "Configure a route, system action, or group.",
       missing: {
-        cardDescription:
-          "The requested route or group could not be found.",
+        cardDescription: "The requested route or group could not be found.",
         cardTitle: "Missing route",
         description: "Return to Routes and groups and choose a valid entry.",
         back: "Back to routes",
@@ -2301,8 +2308,7 @@ export const enTranslation = {
         advancedHint:
           "Availability probing, retries, and the circuit breaker. The defaults suit most setups.",
         probingTitle: "Probing and retries",
-        probingDescription:
-          "Availability probing and retries after failures.",
+        probingDescription: "Availability probing and retries after failures.",
         selectionMode: "Selection mode",
         selectionModeOptions: {
           latency: "Lowest latency",
@@ -2731,8 +2737,7 @@ export const enTranslation = {
           dnsCreate: "DNS: create {{dns}}",
           notSelected: "not selected",
         },
-        routeRequired:
-          "Select a route or group for the routing rule.",
+        routeRequired: "Select a route or group for the routing rule.",
         dnsRequired: "Select a DNS server for the DNS rule.",
       },
       fields: {

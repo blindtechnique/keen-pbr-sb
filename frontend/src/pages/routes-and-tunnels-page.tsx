@@ -1,9 +1,8 @@
 import { useTranslation } from "react-i18next"
 
-import { useGetConfig, useGetTransportConfig } from "@/api/queries"
+import { useGetConfig } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
 import { PageHeader } from "@/components/shared/page-header"
-import { SectionHeading } from "@/components/shared/section-heading"
 import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { OutboundsPage } from "@/pages/outbounds-page"
@@ -27,8 +26,8 @@ const CONNECTIONS_TABS: ConnectionsTab[] = [
  * под ними дважды: человек видел два «sddvpn mooo VLESS» и не мог понять, чем
  * они отличаются. По решению владельца туннель и есть маршрут: первая вкладка
  * показывает туннели (маршрут создаётся и удаляется вместе с туннелем), а
- * редкие маршруты без туннеля — на интерфейсы прошивки или чужих пакетов —
- * живут ниже отдельным блоком «Прочие маршруты» и не прячутся.
+ * редкие маршруты без туннеля — например, на tun0 чужого пакета — стоят
+ * строками в том же списке, честно подписанные.
  */
 export function RoutesAndTunnelsPage({
   initialTab,
@@ -40,33 +39,6 @@ export function RoutesAndTunnelsPage({
   )
   const configQuery = useGetConfig()
   const outbounds = selectOutbounds(selectConfig(configQuery.data))
-  const transportConfigQuery = useGetTransportConfig()
-  const transports =
-    transportConfigQuery.data?.status === 200
-      ? transportConfigQuery.data.data
-      : []
-
-  // Маршрут принадлежит туннелю, если совпал тег или интерфейс. Всё, что не
-  // совпало, — «прочее»: прятать его нельзя, у владельца может жить маршрут
-  // на tun0 чужого пакета Entware.
-  const transportTags = new Set(transports.map((item) => item.tag))
-  const transportInterfaces = new Set(transports.map((item) => item.interface))
-  const linkedOutboundTags = new Set(
-    outbounds
-      .filter(
-        (outbound) =>
-          outbound.type === "interface" &&
-          (transportTags.has(outbound.tag) ||
-            (outbound.interface
-              ? transportInterfaces.has(outbound.interface)
-              : false))
-      )
-      .map((outbound) => outbound.tag)
-  )
-  const otherRouteCount = outbounds.filter(
-    (outbound) =>
-      outbound.type === "interface" && !linkedOutboundTags.has(outbound.tag)
-  ).length
   const countOf = (predicate: (type: string) => boolean) =>
     outbounds.filter((item) => predicate(item.type)).length
 
@@ -101,24 +73,7 @@ export function RoutesAndTunnelsPage({
         value={mergedTabActive ? "tunnels" : activeTab}
       />
       {mergedTabActive ? (
-        <>
-          <TransportsPage embedded />
-          {otherRouteCount > 0 ? (
-            <div className="space-y-3 border-t border-border pt-4">
-              <SectionHeading
-                description={t(
-                  "pages.routesAndTunnels.otherRoutes.description"
-                )}
-                title={t("pages.routesAndTunnels.otherRoutes.title")}
-              />
-              <OutboundsPage
-                embedded
-                excludeTags={linkedOutboundTags}
-                group="interfaces"
-              />
-            </div>
-          ) : null}
-        </>
+        <TransportsPage embedded />
       ) : (
         <OutboundsPage embedded group={activeTab} />
       )}

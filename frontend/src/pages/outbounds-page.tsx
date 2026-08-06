@@ -81,7 +81,6 @@ type OutboundGroupKey = "interfaces" | "failover" | "system"
 export function OutboundsPage({
   embedded = false,
   group,
-  excludeTags,
 }: {
   embedded?: boolean
   /**
@@ -92,11 +91,6 @@ export function OutboundsPage({
    * два разных раздела на одном экране.
    */
   group?: OutboundGroupKey
-  /**
-   * Маршруты, слитые с туннелями: в блоке «Прочие маршруты» их показывать
-   * нельзя — они уже стоят строками в списке туннелей выше.
-   */
-  excludeTags?: ReadonlySet<string>
 } = {}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -138,16 +132,14 @@ export function OutboundsPage({
   )
   const outboundItems = useMemo(
     () =>
-      selectOutbounds(loadedConfig)
-        .filter((outbound) => !excludeTags?.has(outbound.tag))
-        .map((outbound) =>
-          mapOutboundToItem(
-            outbound,
-            runtimeOutboundByTag.get(outbound.tag),
-            runtimeInterfaceByName.get(outbound.interface ?? "")
-          )
-        ),
-    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName, excludeTags]
+      selectOutbounds(loadedConfig).map((outbound) =>
+        mapOutboundToItem(
+          outbound,
+          runtimeOutboundByTag.get(outbound.tag),
+          runtimeInterfaceByName.get(outbound.interface ?? "")
+        )
+      ),
+    [loadedConfig, runtimeOutboundByTag, runtimeInterfaceByName]
   )
   const outboundDisplayNames = useMemo(
     () => createOutboundDisplayNameMap(selectOutbounds(loadedConfig)),
@@ -510,10 +502,25 @@ export function OutboundsPage({
         primary={
           <Button
             disabled={configMutationPending}
-            onClick={() => navigate("/outbounds/create")}
+            onClick={() =>
+              navigate(
+                group === "failover"
+                  ? // На вкладке групп добавляется группа, а не «маршрут или
+                    // группа»: выбор типа уехал в расширенный редактор.
+                    "/outbounds/create?type=urltest"
+                  : group === "system"
+                    ? // Системные направления — заведомо тонкая настройка.
+                      "/outbounds/create?view=page"
+                    : "/outbounds/create"
+              )
+            }
           >
             <Plus className="mr-1 h-4 w-4" />
-            {t("pages.outbounds.actions.new")}
+            {t(
+              group === "failover"
+                ? "pages.outbounds.actions.newGroup"
+                : "pages.outbounds.actions.new"
+            )}
           </Button>
         }
       >
