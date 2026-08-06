@@ -76,7 +76,6 @@ import {
   type OutboundGroupDraft,
   type StrictEnforcementOption,
   type UrltestSelectionMode,
-  urltestTuningIsDefault,
 } from "@/pages/outbound-upsert-utils"
 import {
   Select,
@@ -582,7 +581,9 @@ function OutboundForm({
         </Alert>
       ) : null}
 
-      <FieldGroup width="short">
+      {/* Название, технический ID и тип — на всю ширину формы (решение
+          владельца): это главные поля, узкая колонка им не по чину. */}
+      <FieldGroup>
         <form.Field
           name={OUTBOUND_FIELD_NAMES.displayName}
           validators={{
@@ -1197,12 +1198,13 @@ function OutboundForm({
         </div>
       ) : null}
 
-      {isUrltest ? (
-        // Тонкая настройка спрятана: у неё хорошие умолчания, а развёрнутой
-        // она превращала форму группы в анкету на десяток полей. Если группа
-        // уже настроена не по умолчаниям, блок открывается сам.
+      {isUrltest && presentation === "page" ? (
+        // Тонкая настройка живёт только в расширенном редакторе и сразу
+        // раскрыта (решение владельца): в диалоге группы её нет вообще —
+        // умолчания хороши, а кто пришёл в расширенный редактор, пришёл
+        // именно за этими полями, и прятать их от него нечестно.
         <AdvancedSection
-          defaultOpen={!urltestTuningIsDefault(draft)}
+          defaultOpen
           hint={t("pages.outboundUpsert.urltest.advancedHint")}
           title={t("pages.outboundUpsert.urltest.advancedTitle")}
         >

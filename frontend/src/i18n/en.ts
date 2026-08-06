@@ -492,7 +492,7 @@ export const enTranslation = {
       outbounds: "Routes and groups",
       transports: "VPN and proxies",
       routesAndTunnels: "VPN, proxies, groups",
-      rules: "Rules",
+      rules: "Routing rules",
       connections: "Connections",
       dnsServers: "DNS Servers",
       lists: "Lists",
@@ -750,7 +750,7 @@ export const enTranslation = {
       tagHint:
         "1–24 characters: start with a lowercase Latin letter, then use only a–z, 0–9 and underscore. Example: my_tunnel.",
       sourceMode: "How to add",
-      displayName: "Friendly name",
+      displayName: "Name",
       displayNamePlaceholder: "For example, Netherlands - primary",
       displayNameHint:
         "Shown in the interface instead of the technical tag. The tag stays unchanged, so routes and groups keep working.",
@@ -2100,7 +2100,7 @@ export const enTranslation = {
       },
     },
     rules: {
-      title: "Rules",
+      title: "Routing rules",
       description:
         "Where traffic goes, by lists and conditions. A list's DNS server is assigned in the list editor.",
       tabs: {
@@ -2752,7 +2752,7 @@ export const enTranslation = {
         dnsRequired: "Select a DNS server for the DNS rule.",
       },
       fields: {
-        displayName: "Display name",
+        displayName: "Name",
         displayNameHint: "A readable list name shown throughout the interface.",
         technicalId: "Technical ID",
         technicalIdCreateHint:

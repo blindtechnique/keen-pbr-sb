@@ -9,6 +9,7 @@ import {
 import { useTranslation } from "react-i18next"
 
 import { TransportSpecType, type TransportSpec } from "@/api/generated/model"
+import { HelpHint } from "@/components/shared/help-hint"
 import { SegmentedControl } from "@/components/shared/segmented-control"
 import { Button } from "@/components/ui/button"
 import type { UpsertPagePresentation } from "@/components/shared/upsert-page"
@@ -608,67 +609,67 @@ export function TransportConfigForm({
             }
           />
         </div>
-        {showAdvanced ? (
-          <Field label={t("transports.form.countryDisplay")}>
-            <div className="grid gap-2">
-              {(["disabled", "manual", "auto"] as const).map((mode) => (
-                <label
-                  className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
-                  key={mode}
-                >
-                  <input
-                    checked={(spec.geo_mode ?? "disabled") === mode}
-                    className="mt-1 accent-primary"
-                    name="transport-geo-mode"
-                    onChange={() => setSpec({ ...spec, geo_mode: mode })}
-                    type="radio"
-                  />
-                  <span className="grid gap-0.5">
-                    <span className="text-sm font-medium">
-                      {t(`transports.form.geo.${mode}`)}
-                    </span>
-                    {mode === "auto" ? (
-                      <span className="text-xs text-amber-700 dark:text-amber-300">
-                        {t("transports.form.geo.autoWarning")}
-                      </span>
-                    ) : null}
+        {/* Выбор страны доступен и в диалоге (просьба владельца): флаг у
+            туннеля помогает различать серверы, это не тонкая настройка. */}
+        <Field label={t("transports.form.countryDisplay")}>
+          <div className="grid gap-2">
+            {(["disabled", "manual", "auto"] as const).map((mode) => (
+              <label
+                className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
+                key={mode}
+              >
+                <input
+                  checked={(spec.geo_mode ?? "disabled") === mode}
+                  className="mt-1 accent-primary"
+                  name="transport-geo-mode"
+                  onChange={() => setSpec({ ...spec, geo_mode: mode })}
+                  type="radio"
+                />
+                <span className="grid gap-0.5">
+                  <span className="text-sm font-medium">
+                    {t(`transports.form.geo.${mode}`)}
                   </span>
-                </label>
-              ))}
-              {spec.geo_mode === "manual" ? (
-                <Select
-                  items={countryItems}
-                  onValueChange={(value) => {
-                    const selected = countries.find(
-                      (country) => country.code === value
-                    )
-                    setSpec({
-                      ...spec,
-                      country_code: selected?.code,
-                      country: selected?.name,
-                    })
-                  }}
-                  value={spec.country_code?.toUpperCase() ?? ""}
-                >
-                  <SelectTrigger>
-                    <SelectValue
-                      placeholder={t("transports.form.geo.countryPlaceholder")}
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {countryItems.map((item) => (
-                        <SelectItem key={item.value} value={item.value}>
-                          {item.label}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              ) : null}
-            </div>
-          </Field>
-        ) : null}
+                  {mode === "auto" ? (
+                    <span className="text-xs text-amber-700 dark:text-amber-300">
+                      {t("transports.form.geo.autoWarning")}
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            ))}
+            {spec.geo_mode === "manual" ? (
+              <Select
+                items={countryItems}
+                onValueChange={(value) => {
+                  const selected = countries.find(
+                    (country) => country.code === value
+                  )
+                  setSpec({
+                    ...spec,
+                    country_code: selected?.code,
+                    country: selected?.name,
+                  })
+                }}
+                value={spec.country_code?.toUpperCase() ?? ""}
+              >
+                <SelectTrigger>
+                  <SelectValue
+                    placeholder={t("transports.form.geo.countryPlaceholder")}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {countryItems.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            ) : null}
+          </div>
+        </Field>
         {/* «Сразу создать маршрут» — только в расширенном редакторе: по
             умолчанию туннель и есть маршрут (решение владельца), и в простом
             диалоге этот выбор лишний — маршрут создаётся всегда. */}
@@ -697,7 +698,15 @@ export function TransportConfigForm({
             редактировании — когда он уже есть. Формулировки — те же, что в
             расширенном редакторе маршрута. */}
         {killSwitchAvailable && (initial || createOutbound) ? (
-          <Field label={t("pages.outboundUpsert.strictEnforcement.label")}>
+          <Field
+            hint={
+              <HelpHint
+                label={t("pages.outboundUpsert.strictEnforcement.label")}
+                text={t("pages.settings.general.strictEnforcementHelp")}
+              />
+            }
+            label={t("pages.outboundUpsert.strictEnforcement.label")}
+          >
             <Select
               items={KILL_SWITCH_OPTIONS.map((option) => ({
                 value: option,
@@ -793,8 +802,11 @@ export function TransportConfigForm({
               </Field>
             ) : (
               <Field label={t("transports.form.outboundJson")}>
+                {/* Та же высота, что у ссылки подключения: разные высоты
+                    читались как разные по важности поля (замечание
+                    владельца). Textarea растягивается вручную при нужде. */}
                 <Textarea
-                  className="min-h-48 font-mono text-xs"
+                  className="min-h-28 font-mono text-xs"
                   onChange={(event) =>
                     setSpec((current) =>
                       withAutomaticTechnicalIdentity({
@@ -901,10 +913,26 @@ export function TransportConfigForm({
   )
 }
 
-function Field({ children, label }: { children: ReactNode; label: string }) {
+function Field({
+  children,
+  hint,
+  label,
+}: {
+  children: ReactNode
+  /** Знак вопроса рядом с подписью — например, «что такое kill-switch». */
+  hint?: ReactNode
+  label: string
+}) {
   return (
     <div className="grid gap-1.5">
-      <Label>{label}</Label>
+      {hint ? (
+        <div className="flex items-center gap-1">
+          <Label>{label}</Label>
+          {hint}
+        </div>
+      ) : (
+        <Label>{label}</Label>
+      )}
       {children}
     </div>
   )

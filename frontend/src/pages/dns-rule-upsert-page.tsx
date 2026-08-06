@@ -99,9 +99,7 @@ export function DnsRuleUpsertPage({
   const parsedRuleIndex =
     mode === "edit" ? resolveRuleRouteIndex(rules, ruleId) : -1
   const existingRule =
-    mode === "edit" && parsedRuleIndex >= 0
-      ? rules[parsedRuleIndex]
-      : undefined
+    mode === "edit" && parsedRuleIndex >= 0 ? rules[parsedRuleIndex] : undefined
 
   if (mode === "edit" && loadedConfig && !existingRule) {
     return (
@@ -206,9 +204,7 @@ function DnsRuleForm({
   const [, navigate] = useLocation()
   const close = useUpsertPageClose()
   const dnsServers = loadedConfig.dns?.servers ?? []
-  const serverTags = dnsServers
-    .map((server) => server.tag)
-    .filter(Boolean)
+  const serverTags = dnsServers.map((server) => server.tag).filter(Boolean)
   const serverNames = createDnsServerDisplayNameMap(dnsServers)
   const serverSelectItems = dnsServers.map((server) => ({
     value: server.tag,
@@ -263,7 +259,8 @@ function DnsRuleForm({
     if (mode === "edit" && existingRule) {
       const draft = getRuleDraft(existingRule)
       const displayName =
-        draft.displayName || getDnsRuleDisplayName(existingRule, parsedRuleIndex)
+        draft.displayName ||
+        getDnsRuleDisplayName(existingRule, parsedRuleIndex)
       return {
         ...draft,
         displayName,
@@ -306,11 +303,9 @@ function DnsRuleForm({
         const valueToPersist = !value.rule.id.trim()
           ? {
               ...value.rule,
-              id: makeTechnicalId(
-                value.rule.displayName,
-                existingRuleIds,
-                { prefix: "dns_rule" }
-              ),
+              id: makeTechnicalId(value.rule.displayName, existingRuleIds, {
+                prefix: "dns_rule",
+              }),
             }
           : value.rule
         const idError = validateRuleId(
@@ -441,7 +436,7 @@ function DnsRuleForm({
         void form.handleSubmit()
       }}
     >
-      <FieldGroup width="short">
+      <FieldGroup>
         <form.Field
           name={DNS_RULE_FIELD_NAMES.displayName}
           validators={{
@@ -496,12 +491,7 @@ function DnsRuleForm({
             name={DNS_RULE_FIELD_NAMES.id}
             validators={{
               onChange: ({ value }) =>
-                validateRuleId(
-                  value,
-                  existingRuleIds,
-                  existingRule?.id,
-                  t
-                ),
+                validateRuleId(value, existingRuleIds, existingRule?.id, t),
             }}
           >
             {(field) => {
@@ -595,14 +585,11 @@ function DnsRuleForm({
                             )
                           )
                           .map((server) => (
-                          <SelectItem
-                            key={server.tag}
-                            value={server.tag}
-                          >
-                            <span title={server.tag}>
-                              {serverNames.get(server.tag) ?? server.tag}
-                            </span>
-                          </SelectItem>
+                            <SelectItem key={server.tag} value={server.tag}>
+                              <span title={server.tag}>
+                                {serverNames.get(server.tag) ?? server.tag}
+                              </span>
+                            </SelectItem>
                           ))}
                       </SelectGroup>
                     </SelectContent>

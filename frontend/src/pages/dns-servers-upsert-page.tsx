@@ -389,7 +389,7 @@ function DnsServerForm({
         void form.handleSubmit()
       }}
     >
-      <FieldGroup width="short">
+      <FieldGroup>
         <form.Field
           name={DNS_SERVER_FIELD_NAMES.displayName}
           validators={{

@@ -100,9 +100,7 @@ export function RoutingRuleUpsertPage({
   const parsedRuleIndex =
     mode === "edit" ? resolveRuleRouteIndex(rules, ruleId) : -1
   const existingRule =
-    mode === "edit" && parsedRuleIndex >= 0
-      ? rules[parsedRuleIndex]
-      : undefined
+    mode === "edit" && parsedRuleIndex >= 0 ? rules[parsedRuleIndex] : undefined
 
   if (mode === "edit" && loadedConfig && !existingRule) {
     return (
@@ -235,7 +233,8 @@ function RoutingRuleForm({
           ? getRouteRuleDisplayName(rules[index], index)
           : `#${index + 1}`,
       target: (tag) =>
-        loadedConfig.outbounds?.find((outbound) => outbound.tag === tag)
+        loadedConfig.outbounds
+          ?.find((outbound) => outbound.tag === tag)
           ?.display_name?.trim() || tag,
     }
   )
@@ -326,15 +325,14 @@ function RoutingRuleForm({
           }
         }
 
-        const valueToPersist =
-          !value.id.trim()
-            ? {
-                ...value,
-                id: makeTechnicalId(value.displayName, existingRuleIds, {
-                  prefix: "rule",
-                }),
-              }
-            : value
+        const valueToPersist = !value.id.trim()
+          ? {
+              ...value,
+              id: makeTechnicalId(value.displayName, existingRuleIds, {
+                prefix: "rule",
+              }),
+            }
+          : value
         const idError = validateRuleId(
           valueToPersist.id,
           existingRuleIds,
@@ -451,7 +449,7 @@ function RoutingRuleForm({
         void form.handleSubmit()
       }}
     >
-      <FieldGroup width="short">
+      <FieldGroup>
         {presentation === "dialog" && hasAdvancedConditions ? (
           <Alert>
             <AlertDescription>
@@ -514,12 +512,7 @@ function RoutingRuleForm({
             name={ROUTING_RULE_FIELD_NAMES.id}
             validators={{
               onChange: ({ value }) =>
-                validateRuleId(
-                  value,
-                  existingRuleIds,
-                  existingRule?.id,
-                  t
-                ),
+                validateRuleId(value, existingRuleIds, existingRule?.id, t),
             }}
           >
             {(field) => {

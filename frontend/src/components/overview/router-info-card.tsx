@@ -71,11 +71,16 @@ export function RouterInfoPanel() {
 
       {info?.available ? (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          {/* Строка в две строки текста: справа архитектура и процессор,
+              имя роутера отцентрировано по вертикали относительно них
+              (замечание владельца — с items-baseline имя прилипало к
+              верхней строке). min-h резервирует две строки, даже когда
+              процессор не определился. */}
+          <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-4 gap-y-1">
             <div className="text-[16px] leading-6 font-medium">
               {[info.vendor, info.model].filter(Boolean).join(" ")}
             </div>
-            <div className="min-w-0 text-xs text-muted-foreground sm:text-right">
+            <div className="min-w-0 text-xs leading-5 text-muted-foreground sm:text-right">
               <div>
                 {[info.hw_id, info.region, info.arch]
                   .filter(Boolean)

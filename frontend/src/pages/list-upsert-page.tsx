@@ -936,6 +936,23 @@ function ListForm({
                       </FieldLabel>
                       <FieldContent>
                         <Select
+                          // items обязательны: без них кнопка селекта
+                          // показывала сырое значение inherit/override
+                          // вместо человеческой подписи.
+                          items={[
+                            {
+                              value: "inherit",
+                              label: t(
+                                "pages.listUpsert.refreshRoute.modes.inherit"
+                              ),
+                            },
+                            {
+                              value: "override",
+                              label: t(
+                                "pages.listUpsert.refreshRoute.modes.override"
+                              ),
+                            },
+                          ]}
                           onValueChange={(value) => {
                             const nextMode = value as "inherit" | "override"
                             field.handleChange(nextMode)

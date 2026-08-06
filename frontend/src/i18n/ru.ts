@@ -493,7 +493,7 @@ export const ruTranslation = {
       outbounds: "Маршруты и группы",
       transports: "VPN и прокси",
       routesAndTunnels: "VPN, прокси, группы",
-      rules: "Правила",
+      rules: "Правила маршрутизации",
       connections: "Соединения",
       dnsServers: "DNS-серверы",
       lists: "Списки",
@@ -755,7 +755,7 @@ export const ruTranslation = {
       tagHint:
         "От 1 до 24 символов: сначала строчная латинская буква, затем только a–z, 0–9 и подчёркивание. Например: my_tunnel.",
       sourceMode: "Способ добавления",
-      displayName: "Понятное название",
+      displayName: "Название",
       displayNamePlaceholder: "Например, Нидерланды - основной",
       displayNameHint:
         "Показывается в интерфейсе вместо технического тега. Тег не меняется, поэтому маршруты и группы продолжат работать.",
@@ -2129,7 +2129,7 @@ export const ruTranslation = {
       },
     },
     rules: {
-      title: "Правила",
+      title: "Правила маршрутизации",
       description:
         "Куда направлять трафик по спискам и условиям. DNS-сервер для списка назначается в редакторе самого списка.",
       tabs: {
