@@ -7,6 +7,15 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { DnsServer } from "@/api/generated/model/dnsServer"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
 import { usePostConfigMutation } from "@/api/mutations"
+import {
+  buildUpdatedConfigForDnsServersDelete,
+  getDnsServerDeleteImpact,
+} from "@/pages/dns-servers-utils"
+import {
+  formatDnsServerNames,
+  getDnsServerDeleteImpactItems,
+} from "@/components/delete-impact/dns-server-items"
+import { UpsertDeleteAction } from "@/components/shared/upsert-delete-action"
 import { useGetConfig } from "@/api/queries"
 import { selectConfig } from "@/api/selectors"
 import {
@@ -302,6 +311,19 @@ function DnsServerForm({
       },
     },
   })
+
+  // Удаление из формы — как в конфигураторе, где корзина живёт в диалоге
+  // редактирования. Тот же диалог «что сломается», что и в таблице: удаление
+  // сервера меняет DNS-правила и fallback, и человек видит это до подтверждения.
+  const handleDelete = () => {
+    if (!config || !serverTag) {
+      return
+    }
+
+    postConfigMutation.mutate({
+      data: buildUpdatedConfigForDnsServersDelete(config, [serverTag], true),
+    })
+  }
 
   useEffect(() => {
     onDirtyChange(isDirty)
@@ -701,6 +723,24 @@ function DnsServerForm({
       <ServerValidationAlert errors={unmappedServerErrors} />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
+        {mode === "edit" && serverTag && config ? (
+          <UpsertDeleteAction
+            confirmLabel={t("pages.dnsServers.deleteDialog.confirm")}
+            description={t("pages.dnsServers.deleteDialog.description", {
+              tags: formatDnsServerNames(config, [serverTag]),
+            })}
+            impactItems={getDnsServerDeleteImpactItems(
+              config,
+              [serverTag],
+              getDnsServerDeleteImpact(config, [serverTag]),
+              t
+            )}
+            isPending={postConfigMutation.isPending}
+            label={t("common.delete")}
+            onConfirm={handleDelete}
+            title={t("pages.dnsServers.deleteDialog.title")}
+          />
+        ) : null}
         <Button onClick={close} size="xl" type="button" variant="outline">
           {t("common.cancel")}
         </Button>

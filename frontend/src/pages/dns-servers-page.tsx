@@ -1,5 +1,4 @@
-import { ArrowRight, Plus, Save } from "lucide-react"
-import type { ReactNode } from "react"
+import { Plus, Save } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -7,7 +6,6 @@ import { useLocation } from "wouter"
 
 import type { getConfigResponse } from "@/api/generated/keen-api"
 import type { ConfigObject } from "@/api/generated/model/configObject"
-import type { DnsRule } from "@/api/generated/model/dnsRule"
 import { DnsServerType } from "@/api/generated/model/dnsServerType"
 import {
   useConfigMutationPending,
@@ -15,6 +13,10 @@ import {
 } from "@/api/mutations"
 import { useGetConfig } from "@/api/queries"
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import {
+  formatDnsServerNames,
+  getDnsServerDeleteImpactItems,
+} from "@/components/delete-impact/dns-server-items"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -22,10 +24,7 @@ import { FallbackServersField } from "@/components/dns/fallback-servers-field"
 import { DataTable } from "@/components/shared/data-table"
 import { SectionHeading } from "@/components/shared/section-heading"
 import { TableSearch } from "@/components/shared/table-search"
-import {
-  DeleteImpactDialog,
-  type DeleteImpactItem,
-} from "@/components/shared/delete-impact-dialog"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
@@ -34,12 +33,7 @@ import { useRowSelection } from "@/hooks/use-row-selection"
 import { useTableSort } from "@/hooks/use-table-sort"
 import { filterBySearchQuery } from "@/lib/table-search"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
-import { formatListReferenceLabels } from "@/lib/list-display"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
-import {
-  createDnsServerDisplayNameMap,
-  getDnsRuleDisplayName,
-} from "@/lib/dns-display"
 import { semanticJsonEqual } from "@/lib/semantic-json"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -404,117 +398,6 @@ function DnsServersEditor({
         title={t("pages.dnsServers.deleteDialog.title")}
       />
     </div>
-  )
-}
-
-function getDnsServerDeleteImpactItems(
-  config: ConfigObject | undefined,
-  serverTags: string[],
-  impact: DnsServerDeleteImpact,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  const items: DeleteImpactItem[] = []
-  const serverDisplayNames = createDnsServerDisplayNameMap(
-    config?.dns?.servers ?? []
-  )
-
-  for (const tag of serverTags) {
-    items.push({
-      label: (
-        <>
-          {t("pages.dnsServers.deleteDialog.items.serverPrefix")}{" "}
-          <strong>{serverDisplayNames.get(tag) ?? tag}</strong>{" "}
-          {t("pages.dnsServers.deleteDialog.items.serverSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const index of impact.matchingRuleIndexes) {
-    items.push({
-      label: t("pages.dnsServers.deleteDialog.items.dnsRule", {
-        name: getDnsRuleDisplayName(config?.dns?.rules?.[index], index),
-      }),
-      details: getDnsRuleDetails(config?.dns?.rules?.[index], config, t),
-    })
-  }
-
-  if (impact.usesFallback) {
-    const fallback = config?.dns?.fallback ?? []
-    items.push({
-      label: t("pages.dnsServers.deleteDialog.items.fallback"),
-      details: [
-        formatDetail(
-          t("pages.dnsRules.fallback.title"),
-          <ChangeValue
-            after={formatListValue(
-              fallback.filter((tag) => !serverTags.includes(tag)),
-              t,
-              serverDisplayNames
-            )}
-            before={formatListValue(fallback, t, serverDisplayNames)}
-          />
-        ),
-      ],
-    })
-  }
-
-  return items
-}
-
-function getDnsRuleDetails(
-  rule: DnsRule | undefined,
-  config: ConfigObject | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  return [
-    formatDetail(
-      t("pages.dnsRules.criteriaLabels.lists"),
-      formatListReferenceLabels(rule.list, config?.lists)
-    ),
-    formatDetail(
-      t("pages.dnsRules.headers.serverTag"),
-      createDnsServerDisplayNameMap(config?.dns?.servers ?? []).get(
-        rule.server
-      ) ?? rule.server
-    ),
-  ]
-}
-
-function formatDetail(label: string, value: ReactNode) {
-  return (
-    <>
-      {label}: {value}
-    </>
-  )
-}
-
-function formatListValue(
-  values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string,
-  displayNames?: ReadonlyMap<string, string>
-) {
-  return values.length > 0
-    ? values.map((value) => displayNames?.get(value) ?? value).join(", ")
-    : t("common.noneShort")
-}
-
-function formatDnsServerNames(config: ConfigObject, tags: string[]) {
-  const displayNames = createDnsServerDisplayNameMap(config.dns?.servers ?? [])
-  return tags.map((tag) => displayNames.get(tag) ?? tag).join(", ")
-}
-
-function ChangeValue({ after, before }: { after: string; before: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 leading-4">
-      <span className="min-w-0 truncate">{before}</span>
-      <ArrowRight className="mt-px size-3 shrink-0" />
-      <span className="min-w-0 truncate">{after}</span>
-    </span>
   )
 }
 

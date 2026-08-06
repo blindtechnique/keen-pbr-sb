@@ -12,6 +12,13 @@ import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { Outbound } from "@/api/generated/model/outbound"
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model/runtimeInterfaceInventoryEntry"
 import { usePostConfigMutation } from "@/api/mutations"
+import { getOutboundDeleteImpactItems } from "@/components/delete-impact/outbound-items"
+import { UpsertDeleteAction } from "@/components/shared/upsert-delete-action"
+import {
+  buildUpdatedConfigForOutboundsDelete,
+  getOutboundDeleteImpact,
+  isSystemOutboundType,
+} from "@/pages/outbounds-utils"
 import { queryKeys } from "@/api/query-keys"
 import {
   useGetConfig,
@@ -449,6 +456,32 @@ function OutboundForm({
   })
 
   const postConfigMutation = usePostConfigMutation()
+
+  // Удаление из формы. Системные wan и block удалить нельзя — как и в таблице,
+  // где их отфильтровывает filterDeletableOutboundTags; для них кнопки нет.
+  const existingOutbound =
+    mode === "edit" && outboundId
+      ? loadedConfig.outbounds?.find((outbound) => outbound.tag === outboundId)
+      : undefined
+  const deletableFromForm = Boolean(
+    existingOutbound && !isSystemOutboundType(existingOutbound.type)
+  )
+  const handleDelete = () => {
+    if (!loadedConfig || !outboundId || !deletableFromForm) {
+      return
+    }
+
+    postConfigMutation.mutate(
+      {
+        data: buildUpdatedConfigForOutboundsDelete(loadedConfig, [outboundId]),
+      },
+      {
+        onSuccess: () => {
+          navigate("/outbounds")
+        },
+      }
+    )
+  }
 
   const outboundType = useStore(form.store, (state) => state.values.type)
   const apiErrorMessage = useStore(
@@ -1510,6 +1543,24 @@ function OutboundForm({
       <ServerValidationAlert errors={unmappedServerErrors} />
 
       <div className="flex justify-end gap-3" data-upsert-actions>
+        {deletableFromForm && outboundId ? (
+          <UpsertDeleteAction
+            confirmLabel={t("pages.outbounds.deleteDialog.confirm")}
+            description={t("pages.outbounds.deleteDialog.description", {
+              tags: outboundId,
+            })}
+            impactItems={getOutboundDeleteImpactItems(
+              loadedConfig,
+              [outboundId],
+              getOutboundDeleteImpact(loadedConfig, [outboundId]),
+              t
+            )}
+            isPending={postConfigMutation.isPending}
+            label={t("common.delete")}
+            onConfirm={handleDelete}
+            title={t("pages.outbounds.deleteDialog.title")}
+          />
+        ) : null}
         <Button
           onClick={onCancel ?? close}
           size="xl"

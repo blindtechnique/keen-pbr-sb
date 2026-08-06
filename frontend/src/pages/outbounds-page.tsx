@@ -1,5 +1,4 @@
-import { ArrowRight, Plus, RotateCw } from "lucide-react"
-import type { ReactNode } from "react"
+import { Plus, RotateCw } from "lucide-react"
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -9,7 +8,6 @@ import { useLocation } from "wouter"
 import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { Outbound } from "@/api/generated/model/outbound"
-import type { RouteRule } from "@/api/generated/model/routeRule"
 import type { RuntimeInterfaceInventoryEntry } from "@/api/generated/model/runtimeInterfaceInventoryEntry"
 import type { RuntimeOutboundState } from "@/api/generated/model/runtimeOutboundState"
 import {
@@ -24,6 +22,7 @@ import {
 } from "@/api/queries"
 import { selectConfig, selectOutbounds } from "@/api/selectors"
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import { getOutboundDeleteImpactItems } from "@/components/delete-impact/outbound-items"
 import { ActionButtons } from "@/components/shared/action-buttons"
 import { BulkSelectionToolbar } from "@/components/shared/bulk-selection-toolbar"
 import { ConfigSaveErrorAlert } from "@/components/shared/config-save-error-alert"
@@ -40,10 +39,7 @@ import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import { useRunSystemProbes } from "@/hooks/use-run-system-probes"
 import { useConfigDependencies } from "@/hooks/use-config-dependencies"
 import { findBrokenReferences } from "@/lib/dependencies"
-import {
-  DeleteImpactDialog,
-  type DeleteImpactItem,
-} from "@/components/shared/delete-impact-dialog"
+import { DeleteImpactDialog } from "@/components/shared/delete-impact-dialog"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import { PageHeader } from "@/components/shared/page-header"
@@ -60,18 +56,9 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { getApiErrorMessage } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import {
-  createDnsServerDisplayNameMap,
-  getDnsServerDisplayName,
-} from "@/lib/dns-display"
-import {
-  formatListReferenceLabels,
-  getListReferenceLabel,
-} from "@/lib/list-display"
-import {
   createOutboundDisplayNameMap,
   getOutboundDisplayName,
 } from "@/lib/outbound-display"
-import { getRouteRuleDisplayName } from "@/pages/routing-rules-utils"
 import {
   buildUpdatedConfigForOutboundsDelete,
   filterDeletableOutboundTags,
@@ -632,268 +619,6 @@ export function OutboundsPage({
       />
     </div>
   )
-}
-
-function getOutboundDeleteImpactItems(
-  config: ConfigObject | undefined,
-  requestedTags: string[],
-  impact: OutboundDeleteImpact,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  const items: DeleteImpactItem[] = []
-  const requestedTagSet = new Set(requestedTags)
-  const outboundNames = createOutboundDisplayNameMap(config?.outbounds ?? [])
-  const dnsServerNames = createDnsServerDisplayNameMap(
-    config?.dns?.servers ?? []
-  )
-
-  for (const tag of requestedTags) {
-    const outbound = config?.outbounds?.find((item) => item.tag === tag)
-    items.push({
-      label: (
-        <>
-          {t("pages.outbounds.deleteDialog.items.outboundPrefix")}{" "}
-          <strong>{outbound ? getOutboundDisplayName(outbound) : tag}</strong>{" "}
-          {t("pages.outbounds.deleteDialog.items.outboundSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const tag of impact.deletedOutboundTags) {
-    if (requestedTagSet.has(tag)) {
-      continue
-    }
-
-    const outbound = config?.outbounds?.find((item) => item.tag === tag)
-    items.push({
-      label: (
-        <>
-          {t("pages.outbounds.deleteDialog.items.dependentOutboundPrefix")}{" "}
-          <strong>{outbound ? getOutboundDisplayName(outbound) : tag}</strong>{" "}
-          {t("pages.outbounds.deleteDialog.items.dependentOutboundSuffix")}
-        </>
-      ),
-    })
-  }
-
-  for (const index of impact.routeRuleIndexes) {
-    const rule = config?.route?.rules?.[index]
-    items.push({
-      label: t("pages.outbounds.deleteDialog.items.routingRule", {
-        name: rule ? getRouteRuleDisplayName(rule, index) : `#${index + 1}`,
-      }),
-      details: getRouteRuleImpactDetails(
-        rule,
-        config?.lists,
-        config?.outbounds,
-        t
-      ),
-    })
-  }
-
-  for (const server of impact.dnsServerDetours) {
-    const dnsServer = config?.dns?.servers?.find((item) => item.tag === server)
-    items.push({
-      label: t("pages.outbounds.deleteDialog.items.dnsDetour", {
-        server: dnsServer
-          ? getDnsServerDisplayName(dnsServer)
-          : (dnsServerNames.get(server) ?? server),
-      }),
-      details: [
-        formatDetail(
-          t("pages.dnsServers.headers.outbound"),
-          formatValueTransition(
-            outboundNames.get(dnsServer?.detour ?? "") ??
-              dnsServer?.detour ??
-              t("common.noneShort"),
-            t("common.noneShort")
-          )
-        ),
-      ],
-    })
-  }
-
-  for (const listRoute of impact.listDownloadRoutes) {
-    items.push({
-      label: t("pages.outbounds.deleteDialog.items.listDownloadRoutes", {
-        list: getListReferenceLabel(listRoute.listName, config?.lists),
-      }),
-      details: [
-        formatDetail(
-          t("pages.outbounds.deleteDialog.items.downloadRoutes"),
-          formatTransition(listRoute.before, listRoute.after, t, outboundNames)
-        ),
-      ],
-    })
-  }
-
-  if (impact.globalListRefreshRoute) {
-    items.push({
-      label: t("pages.outbounds.deleteDialog.items.globalListRefreshRoutes"),
-      details: [
-        formatDetail(
-          t("pages.outbounds.deleteDialog.items.downloadRoutes"),
-          formatTransition(
-            impact.globalListRefreshRoute.before,
-            impact.globalListRefreshRoute.after,
-            t,
-            outboundNames
-          )
-        ),
-      ],
-    })
-  }
-
-  for (const membership of impact.urltestMemberships) {
-    const group = config?.outbounds?.find(
-      (outbound) => outbound.tag === membership.outboundTag
-    )?.outbound_groups?.[membership.groupIndex]
-    const remainingTags =
-      group?.outbounds.filter(
-        (tag) => !impact.deletedOutboundTags.includes(tag)
-      ) ?? []
-    const isRemoved = remainingTags.length === 0
-
-    items.push({
-      label: isRemoved
-        ? t("pages.outbounds.deleteDialog.items.urltestGroupRemoved", {
-            group: membership.groupIndex + 1,
-            outbound:
-              outboundNames.get(membership.outboundTag) ??
-              membership.outboundTag,
-          })
-        : t("pages.outbounds.deleteDialog.items.urltestGroupChanged", {
-            group: membership.groupIndex + 1,
-            outbound:
-              outboundNames.get(membership.outboundTag) ??
-              membership.outboundTag,
-          }),
-      details: [
-        formatDetail(
-          t("pages.outbounds.deleteDialog.items.groupOutbounds"),
-          isRemoved
-            ? formatListValue(group?.outbounds ?? [], t, outboundNames)
-            : formatTransition(
-                group?.outbounds ?? [],
-                remainingTags,
-                t,
-                outboundNames
-              )
-        ),
-      ],
-    })
-  }
-
-  return items
-}
-
-function getRouteRuleImpactDetails(
-  rule: RouteRule | undefined,
-  lists: ConfigObject["lists"],
-  outbounds: Outbound[] | undefined,
-  t: (key: string, options?: Record<string, unknown>) => string
-) {
-  if (!rule) {
-    return []
-  }
-
-  const details = [
-    {
-      label: t("pages.routingRules.headers.outbound"),
-      value:
-        outbounds?.find((outbound) => outbound.tag === rule.outbound)
-          ?.display_name ?? rule.outbound,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.lists"),
-      value: formatListReferenceLabels(rule.list ?? [], lists),
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.proto"),
-      value: rule.proto,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.dscp"),
-      value: rule.dscp?.toString(),
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.sourceIp"),
-      value: rule.src_addr,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.destinationIp"),
-      value: rule.dest_addr,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.sourcePort"),
-      value: rule.src_port,
-    },
-    {
-      label: t("pages.routingRules.criteriaLabels.destinationPort"),
-      value: rule.dest_port,
-    },
-  ]
-    .filter(
-      (
-        item
-      ): item is {
-        label: string
-        value: string
-      } => typeof item.value === "string" && item.value.trim().length > 0
-    )
-    .map((item) =>
-      t("pages.outbounds.deleteDialog.items.ruleDetail", {
-        label: item.label,
-        value: item.value,
-      })
-    )
-
-  return details
-}
-
-function formatDetail(label: string, value: ReactNode) {
-  return (
-    <>
-      {label}: {value}
-    </>
-  )
-}
-
-function formatTransition(
-  before: string[],
-  after: string[],
-  t: (key: string, options?: Record<string, unknown>) => string,
-  displayNames?: ReadonlyMap<string, string>
-) {
-  return formatValueTransition(
-    formatListValue(before, t, displayNames),
-    formatListValue(after, t, displayNames)
-  )
-}
-
-function formatValueTransition(before: string, after: string) {
-  return <ChangeValue after={after} before={before} />
-}
-
-function ChangeValue({ after, before }: { after: string; before: string }) {
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1 leading-4">
-      <span className="min-w-0 truncate">{before}</span>
-      <ArrowRight className="mt-px size-3 shrink-0" />
-      <span className="min-w-0 truncate">{after}</span>
-    </span>
-  )
-}
-
-function formatListValue(
-  values: string[],
-  t: (key: string, options?: Record<string, unknown>) => string,
-  displayNames?: ReadonlyMap<string, string>
-) {
-  return values.length > 0
-    ? values.map((value) => displayNames?.get(value) ?? value).join(", ")
-    : t("common.noneShort")
 }
 
 function mapOutboundToItem(
