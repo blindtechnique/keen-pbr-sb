@@ -251,6 +251,79 @@ inline void record_safe_exec_pipe_failure(
     errno = saved_errno;
 }
 
+using ChildEnvironmentOverrides =
+    std::vector<std::pair<std::string, std::string>>;
+
+// A name must be a real name and a value must survive being copied into a
+// NUL-terminated "NAME=VALUE" entry. Anything else would produce an entry the
+// child cannot interpret, so it is rejected before fork() rather than after.
+inline bool child_environment_overrides_are_valid(
+    const ChildEnvironmentOverrides& child_environment) {
+    for (const auto& [name, value] : child_environment) {
+        if (name.empty() ||
+            name.find('=') != std::string::npos ||
+            name.find('\0') != std::string::npos ||
+            value.find('\0') != std::string::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// execve() intentionally does not perform a PATH lookup. Requiring an absolute
+// executable keeps the child branch async-signal-safe.
+inline bool child_environment_needs_absolute_executable(
+    const ChildEnvironmentOverrides& child_environment,
+    const std::string& executable) {
+    return !child_environment.empty() &&
+           (executable.empty() || executable.front() != '/');
+}
+
+// Build the complete child environment before fork(). The child performs only
+// descriptor operations and execve(); it never calls setenv(), which may
+// allocate and deadlock after fork in this multithreaded daemon.
+//
+// `storage` owns the entries and must outlive `pointers`, which alias into it.
+// `pointers` stays empty when there is nothing to override, which is the signal
+// to keep using execvp() and the inherited environment.
+inline void build_child_environment(
+    const ChildEnvironmentOverrides& child_environment,
+    std::vector<std::string>& storage,
+    std::vector<char*>& pointers) {
+    storage.clear();
+    pointers.clear();
+    if (child_environment.empty()) {
+        return;
+    }
+    const auto is_overridden =
+        [&child_environment](const std::string_view entry) {
+            return std::any_of(
+                child_environment.begin(),
+                child_environment.end(),
+                [entry](const auto& override_value) {
+                    const auto& name = override_value.first;
+                    return entry.size() > name.size() &&
+                           entry.compare(0, name.size(), name) == 0 &&
+                           entry[name.size()] == '=';
+                });
+        };
+    for (char** entry = environ;
+         entry != nullptr && *entry != nullptr;
+         ++entry) {
+        if (!is_overridden(*entry)) {
+            storage.emplace_back(*entry);
+        }
+    }
+    for (const auto& [name, value] : child_environment) {
+        storage.push_back(name + "=" + value);
+    }
+    pointers.reserve(storage.size() + 1U);
+    for (auto& entry : storage) {
+        pointers.push_back(entry.data());
+    }
+    pointers.push_back(nullptr);
+}
+
 // Execute a command with arguments directly via fork()+execvp(), bypassing
 // the shell entirely. This prevents shell injection attacks.
 // Returns the process exit code (0-255), or -1 on fork/exec failure.
@@ -258,22 +331,13 @@ inline int safe_exec_with_timeouts(
     const std::vector<std::string>& args,
     bool suppress_output,
     const SafeExecTimeouts& timeouts,
-    const std::vector<std::pair<std::string, std::string>>&
-        child_environment = {}) {
+    const ChildEnvironmentOverrides& child_environment = {}) {
     if (args.empty()) return -1;
-    for (const auto& [name, value] : child_environment) {
-        if (name.empty() ||
-            name.find('=') != std::string::npos ||
-            name.find('\0') != std::string::npos ||
-            value.find('\0') != std::string::npos) {
-            return -1;
-        }
+    if (!child_environment_overrides_are_valid(child_environment)) {
+        return -1;
     }
-    if (!child_environment.empty() &&
-        (args.front().empty() ||
-         args.front().front() != '/')) {
-        // execve() intentionally does not perform a PATH lookup. Requiring an
-        // absolute executable keeps the child branch async-signal-safe.
+    if (child_environment_needs_absolute_executable(
+            child_environment, args.front())) {
         return -1;
     }
     const std::string command = safe_exec_command_string(args);
@@ -289,48 +353,10 @@ inline int safe_exec_with_timeouts(
     }
     argv.push_back(nullptr);
 
-    // Build the complete child environment before fork(). The child performs
-    // only descriptor operations and execve(); it never calls setenv(), which
-    // may allocate and deadlock after fork in this multithreaded daemon.
     std::vector<std::string> environment_storage;
     std::vector<char*> environment;
-    if (!child_environment.empty()) {
-        const auto is_overridden =
-            [&child_environment](
-                const std::string_view entry) {
-                return std::any_of(
-                    child_environment.begin(),
-                    child_environment.end(),
-                    [entry](const auto& override_value) {
-                        const auto& name =
-                            override_value.first;
-                        return entry.size() > name.size() &&
-                               entry.compare(
-                                   0,
-                                   name.size(),
-                                   name) == 0 &&
-                               entry[name.size()] == '=';
-                    });
-            };
-        for (char** entry = environ;
-             entry != nullptr && *entry != nullptr;
-             ++entry) {
-            if (!is_overridden(*entry)) {
-                environment_storage.emplace_back(*entry);
-            }
-        }
-        for (const auto& [name, value] :
-             child_environment) {
-            environment_storage.push_back(
-                name + "=" + value);
-        }
-        environment.reserve(
-            environment_storage.size() + 1U);
-        for (auto& entry : environment_storage) {
-            environment.push_back(entry.data());
-        }
-        environment.push_back(nullptr);
-    }
+    build_child_environment(
+        child_environment, environment_storage, environment);
 
     const pid_t pid = fork();
     if (pid == -1) {
@@ -357,7 +383,7 @@ inline int safe_exec_with_timeouts(
                 close(devnull);
             }
         }
-        if (!child_environment.empty()) {
+        if (!environment.empty()) {
             ::execve(
                 argv[0],
                 const_cast<char* const*>(
@@ -421,8 +447,7 @@ inline int safe_exec(const std::vector<std::string>& args,
 // PATH lookup, allocation, or mutation of the daemon's environment.
 inline int safe_exec_with_environment(
     const std::vector<std::string>& args,
-    const std::vector<std::pair<std::string, std::string>>&
-        child_environment,
+    const ChildEnvironmentOverrides& child_environment,
     bool suppress_output = false) {
     return safe_exec_with_timeouts(
         args,
@@ -812,6 +837,11 @@ inline int safe_exec_pipe_stdin(const std::vector<std::string>& args,
 // Execute a command with arguments and capture its output. Existing callers
 // capture stdout only; security-sensitive callers may explicitly merge stderr
 // into the bounded capture so a non-zero exit cannot lose its diagnostic.
+//
+// `child_environment` applies the same child-only override contract as
+// safe_exec_with_timeouts(): the environment is built before fork(), the
+// daemon's own environ is never mutated, and a non-empty override requires an
+// absolute executable because execve() performs no PATH lookup.
 inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
                                            bool suppress_stderr = false,
                                            size_t max_bytes = 0,
@@ -821,9 +851,18 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
                                                SafeExecFailureLog::Enabled,
                                            std::optional<SafeExecTimeouts>
                                                timeout_override =
-                                                   std::nullopt) {
+                                                   std::nullopt,
+                                           const ChildEnvironmentOverrides&
+                                               child_environment = {}) {
     ExecCaptureResult result;
     if (args.empty()) return result;
+    if (!child_environment_overrides_are_valid(child_environment)) {
+        return result;
+    }
+    if (child_environment_needs_absolute_executable(
+            child_environment, args.front())) {
+        return result;
+    }
     const std::string command = safe_exec_command_string(args);
     const auto started_at = std::chrono::steady_clock::now();
     Logger::instance().trace("safe_exec_capture_start",
@@ -840,6 +879,11 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
         argv.push_back(arg.c_str());
     }
     argv.push_back(nullptr);
+
+    std::vector<std::string> environment_storage;
+    std::vector<char*> environment;
+    build_child_environment(
+        child_environment, environment_storage, environment);
 
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC) == -1) {
@@ -884,7 +928,13 @@ inline ExecCaptureResult safe_exec_capture(const std::vector<std::string>& args,
             }
         }
         close(pipefd[1]);
-        execvp(argv[0], const_cast<char* const*>(argv.data()));
+        if (!environment.empty()) {
+            ::execve(argv[0],
+                     const_cast<char* const*>(argv.data()),
+                     environment.data());
+        } else {
+            ::execvp(argv[0], const_cast<char* const*>(argv.data()));
+        }
         _exit(127);
     }
 

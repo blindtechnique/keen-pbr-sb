@@ -348,6 +348,26 @@ die() {
     exit 1
 }
 
+# Единственный способ звать Keenetic CLI из этого скрипта.
+#
+# ndmc линкуется с библиотеками прошивки, а Entware держит собственную glibc в
+# /opt/lib. Унаследованный LD_LIBRARY_PATH заставляет загрузчик подсунуть ndmc
+# чужую libc, и он умирает до выполнения команды:
+#
+#     ndm: ndmc: system failed [0xcffd0062].
+#     Cli::Main: failed to initialize.
+#
+# Переменная чистится только для дочернего процесса. Диагностику ndmc пишет в
+# stdout, а не в stderr, поэтому её нельзя просто отправить в /dev/null вместе
+# с обычным выводом: она сохраняется и печатается ровно при ошибке.
+run_ndmc() {
+    ndmc_output="$(LD_LIBRARY_PATH= ndmc -c "$1" 2>&1)" && return 0
+    ndmc_status=$?
+    say "Keenetic CLI не выполнил '$1':" >&2
+    printf '%s\n' "$ndmc_output" >&2
+    return "$ndmc_status"
+}
+
 ask() {
     prompt="$1"
     default="$2"
@@ -714,15 +734,15 @@ configure_dns() {
 
     cp "$template" "$config"
     chmod 0600 "$config"
-    if ! ndmc -c "opkg dns-override" >/dev/null ||
-       ! ndmc -c "system configuration save" >/dev/null; then
+    if ! run_ndmc "opkg dns-override" ||
+       ! run_ndmc "system configuration save"; then
         [ ! -f "$backup" ] || cp -p "$backup" "$config"
         die "не удалось включить opkg dns-override"
     fi
     if ! /opt/etc/init.d/S56dnsmasq restart >/dev/null 2>&1; then
         [ ! -f "$backup" ] || cp -p "$backup" "$config"
-        ndmc -c "no opkg dns-override" >/dev/null 2>&1 || true
-        ndmc -c "system configuration save" >/dev/null 2>&1 || true
+        run_ndmc "no opkg dns-override" || true
+        run_ndmc "system configuration save" || true
         die "dnsmasq не запустился; DNS Override отменён"
     fi
     if ! nslookup google.com 127.0.0.1 >/dev/null 2>&1; then

@@ -2,8 +2,9 @@
 
 #include "handler_connections.hpp"
 #include "connection_query.hpp"
+#include "dhcp_bindings.hpp"
 #include "../util/base64.hpp"
-#include "../util/safe_exec.hpp"
+#include "../util/ndmc.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -136,37 +137,12 @@ std::map<std::string, std::string> read_device_names() {
     // Keenetic keeps the user-visible client name in NDMS, separately from
     // the DHCP hostname. Querying NDMS also covers statically registered and
     // currently connected clients that are absent from dnsmasq lease files.
-    const auto bindings = safe_exec_capture(
-        {"ndmc", "-c", "show ip dhcp bindings"}, true, 512U * 1024U);
-    if (bindings.exit_code == 0 && !bindings.truncated) {
-        std::string ip, hostname, name;
-        const auto flush = [&]() {
-            const auto& preferred = name.empty() ? hostname : name;
-            if (!ip.empty() && !preferred.empty()) result[ip] = preferred;
-        };
-        std::istringstream output(bindings.stdout_output);
-        for (std::string line; std::getline(output, line);) {
-            const auto first = line.find_first_not_of(" \t\r\n");
-            if (first == std::string::npos) continue;
-            line.erase(0, first);
-            const auto last = line.find_last_not_of(" \t\r\n");
-            line.erase(last + 1);
-            if (line == "lease:" || line == "binding:") {
-                flush();
-                ip.clear(); hostname.clear(); name.clear();
-                continue;
-            }
-            const auto separator = line.find(':');
-            if (separator == std::string::npos) continue;
-            auto key = line.substr(0, separator);
-            auto value = line.substr(separator + 1);
-            const auto value_first = value.find_first_not_of(" \t");
-            value = value_first == std::string::npos ? std::string{} : value.substr(value_first);
-            if (key == "ip" || key == "address") ip = value;
-            else if (key == "hostname") hostname = value;
-            else if (key == "name") name = value;
-        }
-        flush();
+    // ndmc must not inherit Entware's LD_LIBRARY_PATH; see src/util/ndmc.hpp.
+    // A failure is reported there rather than swallowed here: an empty result
+    // used to be indistinguishable from "this router has no bindings".
+    const auto bindings = ndmc_capture("show ip dhcp bindings", 512U * 1024U);
+    if (bindings.succeeded()) {
+        merge_dhcp_bindings(bindings.capture.stdout_output, result);
     }
     return result;
 }

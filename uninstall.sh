@@ -16,6 +16,22 @@ is_yes() {
     case "$1" in y|Y|yes|YES|д|Д|да|ДА) return 0 ;; *) return 1 ;; esac
 }
 
+# Единственный способ звать Keenetic CLI из этого скрипта; тот же контракт, что
+# в install.sh и в src/util/ndmc.hpp.
+#
+# ndmc линкуется с библиотеками прошивки, а Entware держит собственную glibc в
+# /opt/lib. Унаследованный LD_LIBRARY_PATH заставляет загрузчик подсунуть ndmc
+# чужую libc, и он умирает до выполнения команды. Переменная чистится только
+# для дочернего процесса. Диагностику ndmc пишет в stdout, поэтому её нельзя
+# просто отправить в /dev/null вместе с обычным выводом.
+run_ndmc() {
+    ndmc_output="$(LD_LIBRARY_PATH= ndmc -c "$1" 2>&1)" && return 0
+    ndmc_status=$?
+    echo "Keenetic CLI не выполнил '$1':" >&2
+    printf '%s\n' "$ndmc_output" >&2
+    return "$ndmc_status"
+}
+
 [ "$(id -u)" = "0" ] || { echo "Запустите деинсталлятор от пользователя root" >&2; exit 1; }
 
 RESCUE_DIR=/opt/var/lib/keen-pbr/rescue
@@ -125,8 +141,8 @@ else
 fi
 
 if is_yes "$restore_dns"; then
-    ndmc -c "no opkg dns-override" >/dev/null
-    ndmc -c "system configuration save" >/dev/null
+    run_ndmc "no opkg dns-override"
+    run_ndmc "system configuration save"
 fi
 
 # Do not delete the only recovery barrier if an uncoordinated actor created

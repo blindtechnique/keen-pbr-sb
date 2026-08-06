@@ -83,6 +83,7 @@ add_executable(keen-pbr-tests
   test_nfqws_file_writer.cpp
   test_nfqws_strategy_assets.cpp
   test_safe_exec.cpp
+  test_ndmc.cpp
   test_trace_logging.cpp
   test_interface_monitor.cpp
   test_status_stream.cpp

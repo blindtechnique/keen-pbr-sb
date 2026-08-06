@@ -126,6 +126,12 @@ jobs:
               /workspace/packages/openwrt/keen-pbr/files/etc/init.d/keen-pbr \
               /workspace/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/firewall.sh \
               /workspace/packages/openwrt/keen-pbr/files/etc/hotplug.d/firewall/70-keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-ndmc-env-contract.sh \
+              /workspace/install.sh \
+              /workspace/uninstall.sh
 
   crash-diagnostics-smoke:
     runs-on: ubuntu-latest

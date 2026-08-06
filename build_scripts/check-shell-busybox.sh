@@ -132,6 +132,36 @@ EOF
   fi
 done
 
+# Keenetic CLI не должен наследовать LD_LIBRARY_PATH Entware: в /opt/lib лежит
+# собственная glibc Entware, и ndmc умирает в Cli::Main до выполнения команды.
+# Проверено на прошивке 5.01.C.1.0-0: с LD_LIBRARY_PATH=/opt/lib вызов
+# `ndmc -c "show ip dhcp bindings"` возвращает 1 и печатает баннер вместо
+# аренд. Единственная разрешённая форма - `LD_LIBRARY_PATH= ndmc ...`.
+#
+# Комментарии срезаются до поиска: этот инвариант положено объяснять рядом с
+# кодом, и упоминание ndmc в комментарии не должно ронять гейт. Внутри строк
+# токен, наоборот, проверяется наравне с кодом - исключение "но это же просто
+# сообщение" превращается в дырку, через которую проходит настоящий вызов.
+# Поэтому в тексте сообщений используется "Keenetic CLI", а не имя бинарника.
+echo
+echo "== ndmc environment =="
+for file in "${scripts[@]}"; do
+  stripped="$(sed -e 's/^[[:space:]]*#.*$//' -e 's/[[:space:]]#.*$//' \
+                  -e 's/LD_LIBRARY_PATH=[[:space:]]*ndmc/<checked>/g' "$file")"
+  if hits="$(printf '%s\n' "$stripped" |
+             grep -nE '(^|[^A-Za-z0-9_./-])ndmc([[:space:]]|$)')"; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      echo "FAIL ndmc: $file:$line"
+      echo "    reason: call it as \`LD_LIBRARY_PATH= ndmc ...\`; Entware's"
+      echo "            glibc in /opt/lib otherwise breaks the Keenetic CLI"
+      failures=$((failures + 1))
+    done <<EOF
+$hits
+EOF
+  fi
+done
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "busybox shell gate: $failures problem(s) in ${#scripts[@]} scripts"
