@@ -12,6 +12,7 @@ import {
 } from "@/api/generated/model"
 import {
   createLinkedTransportApplyRequest,
+  usePostConfigMutation,
   usePostTransportConfigApplyMutation,
   usePostTransportConfigMutation,
 } from "@/api/mutations"
@@ -27,7 +28,10 @@ import {
   UpsertPage,
   type UpsertPagePresentation,
 } from "@/components/shared/upsert-page"
-import { TransportConfigForm } from "@/components/transports/transport-config-dialog"
+import {
+  TransportConfigForm,
+  type TransportKillSwitchOption,
+} from "@/components/transports/transport-config-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { getApiErrorMessage } from "@/lib/api-errors"
@@ -117,6 +121,9 @@ export function TransportUpsertPage({
     },
   })
   const configApplyMutation = usePostTransportConfigApplyMutation()
+  // Изменение kill-switch живёт в связанном маршруте, то есть в черновике
+  // конфигурации, — отдельная мутация с отдельным сообщением об ошибке.
+  const routeMutation = usePostConfigMutation()
   const close = () => navigate("/transports")
   const title =
     mode === "create"
@@ -199,9 +206,29 @@ export function TransportUpsertPage({
     )
   }
 
+  // Маршрут этого туннеля: по интерфейсу либо по тегу — так же, как строит
+  // привязку таблица туннелей.
+  const linkedOutbound = initial
+    ? ((loadedConfig.outbounds ?? []).find(
+        (outbound) =>
+          outbound.type === "interface" &&
+          outbound.interface === initial.interface
+      ) ??
+      (loadedConfig.outbounds ?? []).find(
+        (outbound) =>
+          outbound.type === "interface" && outbound.tag === initial.tag
+      ))
+    : undefined
+  const initialKillSwitch: TransportKillSwitchOption =
+    linkedOutbound?.strict_enforcement === undefined
+      ? "default"
+      : linkedOutbound.strict_enforcement
+        ? "enabled"
+        : "disabled"
+
   const saveTransport = (
     spec: TransportSpec,
-    options: { createOutbound: boolean }
+    options: { createOutbound: boolean; killSwitch: TransportKillSwitchOption }
   ) => {
     if (
       spec.display_name &&
@@ -213,9 +240,14 @@ export function TransportUpsertPage({
       return
     }
 
+    const killSwitchValue =
+      options.killSwitch === "default"
+        ? undefined
+        : options.killSwitch === "enabled"
+
     if (mode === "create" && options.createOutbound) {
       configApplyMutation.mutate(
-        { data: createLinkedTransportApplyRequest(spec) },
+        { data: createLinkedTransportApplyRequest(spec, killSwitchValue) },
         {
           onSuccess: () => {
             toast.success(t("transports.configMessages.create"))
@@ -231,19 +263,57 @@ export function TransportUpsertPage({
       return
     }
 
-    configMutation.mutate({
-      data:
-        mode === "edit" && initial
-          ? {
-              operation: TransportConfigOperationOperation.update,
-              tag: initial.tag,
-              transport: spec,
-            }
-          : {
-              operation: TransportConfigOperationOperation.create,
-              transport: spec,
-            },
-    })
+    const updateTransport = () =>
+      configMutation.mutate({
+        data:
+          mode === "edit" && initial
+            ? {
+                operation: TransportConfigOperationOperation.update,
+                tag: initial.tag,
+                transport: spec,
+              }
+            : {
+                operation: TransportConfigOperationOperation.create,
+                transport: spec,
+              },
+      })
+
+    // Kill-switch изменился — сначала изменение маршрута уходит в черновик
+    // (до «Применить» на роутере ничего не меняется), потом обновляется сам
+    // туннель. Тот же порядок, что при удалении: упади второй шаг, черновик
+    // останется виден и его можно применить или отменить, а не потеряться.
+    if (
+      mode === "edit" &&
+      linkedOutbound &&
+      options.killSwitch !== initialKillSwitch
+    ) {
+      routeMutation.mutate(
+        {
+          data: {
+            ...loadedConfig,
+            outbounds: (loadedConfig.outbounds ?? []).map((outbound) =>
+              outbound.tag === linkedOutbound.tag
+                ? { ...outbound, strict_enforcement: killSwitchValue }
+                : outbound
+            ),
+          },
+        },
+        {
+          onSuccess: () => {
+            toast.success(t("transports.killSwitchStaged"))
+            updateTransport()
+          },
+          onError: (mutationError) => {
+            toast.error(getApiErrorMessage(mutationError as ApiError), {
+              richColors: true,
+            })
+          },
+        }
+      )
+      return
+    }
+
+    updateTransport()
   }
 
   const existingInterfaces = [
@@ -277,8 +347,14 @@ export function TransportUpsertPage({
         existingInterfaces={existingInterfaces}
         existingTags={existingTags}
         initial={initial}
-        isPending={configMutation.isPending || configApplyMutation.isPending}
+        initialKillSwitch={initialKillSwitch}
+        isPending={
+          configMutation.isPending ||
+          configApplyMutation.isPending ||
+          routeMutation.isPending
+        }
         key={`${mode}:${transportTag ?? "new"}`}
+        killSwitchAvailable={mode === "create" || Boolean(linkedOutbound)}
         nativeCandidates={nativeCandidates}
         onDirtyChange={setDirty}
         onSubmit={saveTransport}

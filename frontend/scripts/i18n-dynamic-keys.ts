@@ -22,7 +22,8 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     file: "src/components/shared/interface-picker.tsx",
     argument: "`common.interfacePicker.kinds.${*}`",
     keys: ["common.interfacePicker.kinds.*"],
-    reason: "Kernel interface kinds are a closed union in kernel-interface-kind.ts.",
+    reason:
+      "Kernel interface kinds are a closed union in kernel-interface-kind.ts.",
   },
   {
     file: "src/components/layout/header-health-indicator.tsx",
@@ -326,6 +327,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     argument: "`pages.outboundUpsert.strictEnforcement.explanations.${*}`",
     keys: ["pages.outboundUpsert.strictEnforcement.explanations.*"],
     reason: "Kill-switch overrides are a finite config enum.",
+  },
+  {
+    file: "src/components/transports/transport-config-dialog.tsx",
+    argument: "`pages.outboundUpsert.strictEnforcement.explanations.${*}`",
+    keys: ["pages.outboundUpsert.strictEnforcement.explanations.*"],
+    reason:
+      "The tunnel form edits the linked route's kill-switch with the same finite enum and wording.",
   },
   {
     file: "src/pages/transport-upsert-page.tsx",

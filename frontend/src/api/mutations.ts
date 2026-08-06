@@ -57,7 +57,8 @@ type UsePostTransportConfigOptions = Parameters<
 >[0]
 
 export function createLinkedTransportApplyRequest(
-  transport: TransportSpec
+  transport: TransportSpec,
+  strictEnforcement?: boolean
 ): TransportConfigApplyRequest {
   const displayName = transport.display_name?.trim()
   return {
@@ -66,6 +67,9 @@ export function createLinkedTransportApplyRequest(
     linked_outbound: {
       mode: TransportLinkedOutboundEnsureMode.ensure,
       display_name: displayName || undefined,
+      // Undefined оставляет глобальную политику kill-switch — контракт
+      // допускает null/omission именно с этим смыслом.
+      strict_enforcement: strictEnforcement,
     },
   }
 }

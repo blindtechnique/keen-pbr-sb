@@ -3,7 +3,7 @@ import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Link } from "wouter"
 
-import type { Dependency } from "@/lib/dependencies"
+import type { Dependency, DependencyKind } from "@/lib/dependencies"
 import { Badge } from "@/components/ui/badge"
 import { planDependencyRows } from "@/lib/dependencies"
 import { cn } from "@/lib/utils"
@@ -34,15 +34,63 @@ export function DependencyList({
   dependencies,
   emptyHint,
   compact = false,
+  fixedKinds,
 }: {
   dependencies: Dependency[]
   /** Что написать, когда связей нет. Молчание тут читается как «не посчитали». */
   emptyHint?: string
   /** В колонке таблицы заголовок уже сказал «Где используется». */
   compact?: boolean
+  /**
+   * Всегда показывать эти виды связей в этом порядке, с честным «нет» у
+   * пустых. Нужно в раскрытой строке туннеля: владелец хочет видеть ответ на
+   * «кто этим пользуется» по всем четырём категориям, а не только по тем,
+   * где связи нашлись. Виды сверх списка показываются после — молча прятать
+   * найденную связь нельзя.
+   */
+  fixedKinds?: readonly DependencyKind[]
 }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
+
+  if (fixedKinds) {
+    const byKind = new Map<string, Dependency[]>()
+    for (const dependency of dependencies) {
+      byKind.set(dependency.kind, [
+        ...(byKind.get(dependency.kind) ?? []),
+        dependency,
+      ])
+    }
+    const fixedRows = [
+      ...fixedKinds.map((kind) => ({ kind, items: byKind.get(kind) ?? [] })),
+      ...[...byKind.entries()]
+        .filter(([kind]) => !fixedKinds.includes(kind as DependencyKind))
+        .map(([kind, items]) => ({ kind, items })),
+    ]
+    return (
+      <div className="max-w-[26rem] min-w-0 space-y-1">
+        {fixedRows.map(({ kind, items }) => (
+          <div
+            className="flex min-w-0 flex-wrap items-center gap-1.5"
+            key={kind}
+          >
+            <span className="text-xs text-muted-foreground">
+              {t(`common.dependencies.kind.${kind}`)}
+            </span>
+            {items.length === 0 ? (
+              <span className="text-xs text-muted-foreground">
+                {t("common.noneShort")}
+              </span>
+            ) : (
+              items.map((item) => (
+                <DependencyChip item={item} key={`${kind}-${item.label}`} />
+              ))
+            )}
+          </div>
+        ))}
+      </div>
+    )
+  }
 
   if (dependencies.length === 0) {
     return (
@@ -71,32 +119,9 @@ export function DependencyList({
           <span className="text-xs text-muted-foreground">
             {t(`common.dependencies.kind.${kind}`)}
           </span>
-          {items.map((item) =>
-            item.href ? (
-              <Link
-                className="max-w-full min-w-0 rounded"
-                href={item.href}
-                key={`${kind}-${item.label}`}
-              >
-                <Badge
-                  className={cn(CHIP, "cursor-pointer hover:bg-accent")}
-                  size="xs"
-                  variant="outline"
-                >
-                  {item.label}
-                </Badge>
-              </Link>
-            ) : (
-              <Badge
-                className={CHIP}
-                key={`${kind}-${item.label}`}
-                size="xs"
-                variant="outline"
-              >
-                {item.label}
-              </Badge>
-            )
-          )}
+          {items.map((item) => (
+            <DependencyChip item={item} key={`${kind}-${item.label}`} />
+          ))}
         </div>
       ))}
       {hiddenCount > 0 || expanded ? (
@@ -119,5 +144,23 @@ export function DependencyList({
         </button>
       ) : null}
     </div>
+  )
+}
+
+function DependencyChip({ item }: { readonly item: Dependency }) {
+  return item.href ? (
+    <Link className="max-w-full min-w-0 rounded" href={item.href}>
+      <Badge
+        className={cn(CHIP, "cursor-pointer hover:bg-accent")}
+        size="xs"
+        variant="outline"
+      >
+        {item.label}
+      </Badge>
+    </Link>
+  ) : (
+    <Badge className={CHIP} size="xs" variant="outline">
+      {item.label}
+    </Badge>
   )
 }

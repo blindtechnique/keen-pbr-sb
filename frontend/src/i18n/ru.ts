@@ -657,7 +657,7 @@ export const ruTranslation = {
     nativeManagedExternally:
       "Этот нативный интерфейс управляется KeeneticOS или другим сервисом.",
     nativeInterface: {
-      keeneticOwner: "Управляется KeeneticOS",
+      keeneticOwner: "KeeneticOS",
       managedByFirmware: "Этим интерфейсом управляет KeeneticOS",
       logicalName: "Интерфейс Keenetic",
       kernelName: "Системный интерфейс",
@@ -728,6 +728,8 @@ export const ruTranslation = {
       "Маршрут туннеля удалён из черновика — примените конфигурацию, чтобы изменение вступило в силу.",
     deleteTunnelAfterRouteFailed:
       "Маршрут уже удалён из черновика, а туннель удалить не удалось. Повторите удаление туннеля или отмените черновик.",
+    killSwitchStaged:
+      "Изменение kill-switch добавлено в черновик — примените конфигурацию, чтобы оно вступило в силу.",
     configMessages: {
       create: "Туннель или прокси создан",
       update: "Туннель или прокси обновлён",

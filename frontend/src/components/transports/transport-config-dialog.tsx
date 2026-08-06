@@ -43,15 +43,35 @@ type Props = {
   existingInterfaces?: readonly string[]
   existingTags?: readonly string[]
   initial?: TransportSpec
+  /**
+   * Начальное положение переопределения kill-switch связанного маршрута.
+   * Туннель и есть маршрут (решение владельца), поэтому настройка маршрута
+   * редактируется здесь же, а не в отдельном месте.
+   */
+  initialKillSwitch?: TransportKillSwitchOption
   isPending: boolean
+  /** Есть ли маршрут, которому можно записать kill-switch. Без него поле — обман. */
+  killSwitchAvailable?: boolean
   nativeCandidates?: readonly NativeTransportCandidate[]
   onDirtyChange: (dirty: boolean) => void
-  onSubmit: (spec: TransportSpec, options: { createOutbound: boolean }) => void
+  onSubmit: (
+    spec: TransportSpec,
+    options: { createOutbound: boolean; killSwitch: TransportKillSwitchOption }
+  ) => void
   presentation: UpsertPagePresentation
   singBoxAvailable?: boolean
 }
 
 type SourceMode = "link" | "json"
+
+/** Та же трёхпозиционная шкала, что у маршрута в расширенном редакторе. */
+export type TransportKillSwitchOption = "default" | "enabled" | "disabled"
+
+const KILL_SWITCH_OPTIONS: TransportKillSwitchOption[] = [
+  "default",
+  "enabled",
+  "disabled",
+]
 
 const emptySpec = (): TransportSpec => ({
   tag: "",
@@ -65,11 +85,12 @@ export type TransportFormValue = {
   spec: TransportSpec
   sourceMode: SourceMode
   createOutbound: boolean
+  killSwitch: TransportKillSwitchOption
 }
 
 export type TransportFormSubmission = {
   spec: TransportSpec
-  options: { createOutbound: boolean }
+  options: { createOutbound: boolean; killSwitch: TransportKillSwitchOption }
 }
 
 /**
@@ -126,7 +147,8 @@ export function inferTransportAliasSuggestion(
 // eslint-disable-next-line react-refresh/only-export-components
 export function createTransportFormValue(
   initial?: TransportSpec,
-  identity?: { interfaceName: string; tag: string }
+  identity?: { interfaceName: string; tag: string },
+  killSwitch: TransportKillSwitchOption = "default"
 ): TransportFormValue {
   const spec = initial
     ? structuredClone(initial)
@@ -143,6 +165,7 @@ export function createTransportFormValue(
         ? ("json" satisfies SourceMode)
         : ("link" satisfies SourceMode),
     createOutbound: !initial,
+    killSwitch,
   }
 }
 
@@ -184,7 +207,10 @@ export function normalizeTransportFormValue(
         tun_address: undefined,
         vless: undefined,
       },
-      options: { createOutbound: value.createOutbound && !editing },
+      options: {
+        createOutbound: value.createOutbound && !editing,
+        killSwitch: value.killSwitch,
+      },
     }
   }
 
@@ -200,7 +226,10 @@ export function normalizeTransportFormValue(
       bootstrap_dns: bootstrapDns?.length ? bootstrapDns : undefined,
       vless: undefined,
     },
-    options: { createOutbound: value.createOutbound && !editing },
+    options: {
+      createOutbound: value.createOutbound && !editing,
+      killSwitch: value.killSwitch,
+    },
   }
 }
 
@@ -237,7 +266,9 @@ export function TransportConfigForm({
   existingInterfaces = [],
   existingTags = [],
   initial,
+  initialKillSwitch = "default",
   isPending,
+  killSwitchAvailable = false,
   nativeCandidates = [],
   onDirtyChange,
   onSubmit,
@@ -254,7 +285,8 @@ export function TransportConfigForm({
         : generateTransportIdentity({
             existingInterfaces,
             existingTags,
-          })
+          }),
+      initialKillSwitch
     )
   )
   const [spec, setSpec] = useState<TransportSpec>(() =>
@@ -268,6 +300,7 @@ export function TransportConfigForm({
   // A transport only becomes a route once an interface outbound points at it,
   // so offer that step right here instead of sending people to another page.
   const [createOutbound, setCreateOutbound] = useState(baseline.createOutbound)
+  const [killSwitch, setKillSwitch] = useState(baseline.killSwitch)
   const countries = useMemo(
     () => countryOptions(i18n.resolvedLanguage ?? i18n.language ?? "ru"),
     [i18n.language, i18n.resolvedLanguage]
@@ -338,6 +371,7 @@ export function TransportConfigForm({
     spec,
     sourceMode,
     createOutbound,
+    killSwitch,
   }
   const isDirty = isSemanticallyDirty(formValue, baseline, {
     equals: semanticJsonEqual,
@@ -650,6 +684,47 @@ export function TransportConfigForm({
           </div>
         ) : null}
 
+        {/* Настройка маршрута прямо в форме туннеля: туннель и есть маршрут
+            (решение владельца), и посылать человека в расширенный редактор за
+            одним переключателем нечестно. Поле показывается только когда
+            маршрут будет: при создании — вместе с туннелем, при
+            редактировании — когда он уже есть. Формулировки — те же, что в
+            расширенном редакторе маршрута. */}
+        {killSwitchAvailable && (initial || createOutbound) ? (
+          <Field label={t("pages.outboundUpsert.strictEnforcement.label")}>
+            <Select
+              items={KILL_SWITCH_OPTIONS.map((option) => ({
+                value: option,
+                label: killSwitchOptionLabel(option, t),
+              }))}
+              onValueChange={(value) =>
+                setKillSwitch(
+                  (value as TransportKillSwitchOption) ?? killSwitch
+                )
+              }
+              value={killSwitch}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {KILL_SWITCH_OPTIONS.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {killSwitchOptionLabel(option, t)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                `pages.outboundUpsert.strictEnforcement.explanations.${killSwitch}`
+              )}
+            </p>
+          </Field>
+        ) : null}
+
         {/* Раньше здесь была рамка вокруг переключателя «ссылка / JSON» и
             поля ввода — карточка внутри карточки диалога. Границу она не
             обозначала: переключатель и так виден, а лишний контур делал форму
@@ -827,6 +902,16 @@ function Field({ children, label }: { children: ReactNode; label: string }) {
       {children}
     </div>
   )
+}
+
+function killSwitchOptionLabel(
+  option: TransportKillSwitchOption,
+  t: (key: string) => string
+): string {
+  if (option === "default") {
+    return t("pages.outboundUpsert.strictEnforcement.default")
+  }
+  return option === "enabled" ? t("common.enabled") : t("common.disabled")
 }
 
 function normalizeEndpointSuggestion(value: string) {

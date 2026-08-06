@@ -1,4 +1,5 @@
 import { EyeIcon, EyeOffIcon, WorkflowIcon } from "lucide-react"
+import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { NdmsManagementBlocker } from "@/api/generated/model"
@@ -24,6 +25,7 @@ export function NativeInterfaceDetails({
   hidden,
   onCreateRoute,
   onHiddenChange,
+  usage,
 }: {
   readonly nativeInterface: NativeInterfaceModel
   readonly boundOutboundTag?: string
@@ -31,6 +33,8 @@ export function NativeInterfaceDetails({
   readonly hidden: boolean
   readonly onCreateRoute: (interfaceName: string) => void
   readonly onHiddenChange: (hidden: boolean) => void
+  /** «Кто этим пользуется» — тот же блок категорий, что у своих туннелей. */
+  readonly usage?: ReactNode
 }) {
   const { t, i18n } = useTranslation()
   const actionability = getNativeRouteActionability(nativeInterface, {
@@ -54,7 +58,8 @@ export function NativeInterfaceDetails({
           label={t("transports.nativeInterface.boundRoute")}
           mono={Boolean(boundOutboundTag)}
           value={
-            boundOutboundTag ?? t("transports.nativeInterface.routeNotConfigured")
+            boundOutboundTag ??
+            t("transports.nativeInterface.routeNotConfigured")
           }
         />
         <NativeInterfaceField
@@ -125,6 +130,8 @@ export function NativeInterfaceDetails({
         traffic={nativeInterface.runtime?.traffic}
       />
 
+      {usage}
+
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Button
           disabled={!actionability.enabled}
@@ -143,10 +150,7 @@ export function NativeInterfaceDetails({
           <WorkflowIcon />
           {t("transports.routing.bindOutbound")}
         </Button>
-        <Button
-          onClick={() => onHiddenChange(!hidden)}
-          variant="outline"
-        >
+        <Button onClick={() => onHiddenChange(!hidden)} variant="outline">
           {hidden ? <EyeIcon /> : <EyeOffIcon />}
           {hidden
             ? t("transports.nativeInterface.restore")

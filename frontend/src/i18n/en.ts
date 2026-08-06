@@ -656,7 +656,7 @@ export const enTranslation = {
     nativeManagedExternally:
       "This native interface is managed by KeeneticOS or another service.",
     nativeInterface: {
-      keeneticOwner: "Managed by KeeneticOS",
+      keeneticOwner: "KeeneticOS",
       managedByFirmware: "This interface is managed by KeeneticOS",
       logicalName: "Keenetic interface",
       kernelName: "System interface",
@@ -723,6 +723,8 @@ export const enTranslation = {
       "The tunnel's route was removed from the draft - apply the configuration for the change to take effect.",
     deleteTunnelAfterRouteFailed:
       "The route is already removed from the draft, but the tunnel could not be deleted. Retry deleting the tunnel or discard the draft.",
+    killSwitchStaged:
+      "The kill-switch change was added to the draft - apply the configuration for it to take effect.",
     configMessages: {
       create: "Tunnel or proxy created",
       update: "Tunnel or proxy updated",

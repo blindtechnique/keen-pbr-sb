@@ -102,6 +102,7 @@ import {
 import {
   dedupeLegacyNativeTransports,
   mapNativeInterfaces,
+  type NativeInterfaceModel,
 } from "@/lib/native-interfaces"
 import {
   getHiddenNativeInterfaceIds,
@@ -127,6 +128,22 @@ type TransportProviderGroup = {
   items: TransportStatus[]
 }
 
+/**
+ * AWG и WG — одна вкладка, а не две. Решение владельца: сюда попадают
+ * AWG/WG-туннели из KeeneticOS, и сюда же лягут туннели, которые keen-pbr-sb
+ * научится создавать сам. Раздельные вкладки AmneziaWG/WireGuard дробили
+ * одну и ту же семью протоколов, а NDMS к тому же не всегда отличает их
+ * друг от друга.
+ */
+const AWG_WG_TAB = "amnezia-wireguard"
+const AWG_WG_LABEL = "Amnezia (WireGuard)"
+
+const WIREGUARD_NDMS_KINDS = new Set(["amnezia_wireguard", "wireguard"])
+
+function isWireguardNative(nativeInterface: NativeInterfaceModel): boolean {
+  return WIREGUARD_NDMS_KINDS.has(nativeInterface.source.kind)
+}
+
 function transportProvider(item: TransportStatus, otherLabel: string) {
   const type = item.type.trim().toLowerCase()
   const protocol = item.protocol?.trim().toLowerCase() ?? ""
@@ -145,7 +162,7 @@ function transportProvider(item: TransportStatus, otherLabel: string) {
     protocol.includes("amnezia") ||
     protocol === "awg"
   ) {
-    return { key: "amneziawg", label: "AmneziaWG" }
+    return { key: AWG_WG_TAB, label: AWG_WG_LABEL }
   }
   if (type.includes("freeturn") || protocol.includes("freeturn")) {
     return { key: "freeturn", label: "FreeTurn" }
@@ -158,7 +175,7 @@ function transportProvider(item: TransportStatus, otherLabel: string) {
     protocol.includes("wireguard") ||
     protocol === "wg"
   ) {
-    return { key: "wireguard", label: "WireGuard" }
+    return { key: AWG_WG_TAB, label: AWG_WG_LABEL }
   }
   const label = item.type.trim() || otherLabel
   const normalizedKey = label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
@@ -267,26 +284,37 @@ export function TransportsPage({
     () => groupTransports(managedItems, t("transports.tabs.other")),
     [managedItems, t]
   )
+  const nativeWgInterfaces = useMemo(
+    () => displayedNativeInterfaces.filter(isWireguardNative),
+    [displayedNativeInterfaces]
+  )
+  const otherNativeCount =
+    displayedNativeInterfaces.length - nativeWgInterfaces.length
   const transportTabs = useMemo<SectionTab<string>[]>(() => {
     const providerTabs = providerGroups.map((group) => ({
       value: group.key,
       label: group.label,
       count: group.items.length,
     }))
-    if (displayedNativeInterfaces.length > 0) {
-      const keeneticTab = providerTabs.find((tab) => tab.value === "keenetic")
-      if (keeneticTab) {
-        keeneticTab.count += displayedNativeInterfaces.length
+    // Вкладки KeeneticOS больше нет: AWG/WG-интерфейсы прошивки живут на
+    // общей вкладке Amnezia (WireGuard), остальные нативные — только в «Все».
+    if (nativeWgInterfaces.length > 0) {
+      const awgTab = providerTabs.find((tab) => tab.value === AWG_WG_TAB)
+      if (awgTab) {
+        awgTab.count += nativeWgInterfaces.length
       } else {
         providerTabs.push({
-          value: "keenetic",
-          label: "KeeneticOS",
-          count: displayedNativeInterfaces.length,
+          value: AWG_WG_TAB,
+          label: AWG_WG_LABEL,
+          count: nativeWgInterfaces.length,
         })
       }
     }
 
-    return providerTabs.length > 1
+    // «Все» нужна и тогда, когда вкладка одна, но есть нативные интерфейсы
+    // без своей вкладки (OpenVPN, L2TP…): иначе их не было бы видно нигде.
+    return providerTabs.length > 1 ||
+      (providerTabs.length > 0 && otherNativeCount > 0)
       ? [
           {
             value: "all",
@@ -296,7 +324,14 @@ export function TransportsPage({
           ...providerTabs,
         ]
       : providerTabs
-  }, [displayedNativeInterfaces.length, managedItems.length, providerGroups, t])
+  }, [
+    displayedNativeInterfaces.length,
+    managedItems.length,
+    nativeWgInterfaces.length,
+    otherNativeCount,
+    providerGroups,
+    t,
+  ])
   const transportTabValues =
     transportTabs.length > 0 ? transportTabs.map((tab) => tab.value) : ["all"]
   const [activeTransportTab, setActiveTransportTab] = useSectionTab(
@@ -309,9 +344,11 @@ export function TransportsPage({
       : (providerGroups.find((group) => group.key === activeTransportTab)
           ?.items ?? [])
   const visibleNativeInterfaces =
-    activeTransportTab === "all" || activeTransportTab === "keenetic"
+    activeTransportTab === "all"
       ? displayedNativeInterfaces
-      : []
+      : activeTransportTab === AWG_WG_TAB
+        ? nativeWgInterfaces
+        : []
   const setTransportExpanded = (id: string, expanded: boolean) => {
     setExpandedTransportIds((current) => {
       const next = new Set(current)
@@ -987,13 +1024,17 @@ export function TransportsPage({
         />
 
         {boundOutbound ? (
+          // Ответ на «кто этим пользуется» по всем четырём категориям сразу —
+          // правила, DNS-серверы, списки, группы, — а не только по тем, где
+          // связи нашлись: пустая категория с «-» тоже ответ.
           <DependencyList
-            dependencies={
+            dependencies={trimSelfRouteSuffix(
               transportDependencies.dependenciesByTarget.get(
                 `outbound:${boundOutbound.tag}`
-              ) ?? []
-            }
-            emptyHint={t("transports.routing.noTraffic")}
+              ),
+              [getOutboundDisplayName(boundOutbound), boundOutbound.tag]
+            )}
+            fixedKinds={TUNNEL_USAGE_KINDS}
           />
         ) : null}
 
@@ -1080,7 +1121,11 @@ export function TransportsPage({
       </span>,
       <span className="flex min-w-0 items-center gap-2" key="name">
         <TransportProtocolIcon protocol={nativeInterface.protocol.label} />
-        <span className="truncate">{nativeInterface.label}</span>
+        {/* Пол в 6rem: в тесной колонке имя сжималось до нуля, и от строки
+            оставался один бейдж KeeneticOS — без имени он ни о чём. */}
+        <span className="min-w-[6rem] truncate" title={nativeInterface.label}>
+          {nativeInterface.label}
+        </span>
         <Badge className="shrink-0" size="xs" variant="secondary">
           {t("transports.nativeInterface.keeneticOwner")}
         </Badge>
@@ -1171,6 +1216,19 @@ export function TransportsPage({
           )
         }
         onHiddenChange={(hidden) => setNativeHidden(nativeInterface.id, hidden)}
+        usage={
+          boundOutbound ? (
+            <DependencyList
+              dependencies={trimSelfRouteSuffix(
+                transportDependencies.dependenciesByTarget.get(
+                  `outbound:${boundOutbound.tag}`
+                ),
+                [getOutboundDisplayName(boundOutbound), boundOutbound.tag]
+              )}
+              fixedKinds={TUNNEL_USAGE_KINDS}
+            />
+          ) : undefined
+        }
       />
     ) : undefined
 
@@ -1181,21 +1239,43 @@ export function TransportsPage({
   // создаётся вместе с туннелем, — но чужой tun0 из другого пакета Entware
   // никуда не делся. Отдельного блока «Прочие маршруты» владелец не захотел,
   // поэтому такие маршруты стоят строками в общем списке, честно подписанные.
+  //
+  // Привязка считается от ВСЕХ туннелей и интерфейсов, а не от видимых на
+  // текущей вкладке: маршрут выключенного туннеля принадлежит его строке, а
+  // спрятанный интерфейс прошивки не делает свой маршрут «сиротой». Иначе
+  // переключение вкладки-провайдера превращало чужие туннели в «сирот».
   const linkedOutboundTags = new Set<string>()
-  for (const item of visibleItems) {
+  for (const item of managedItems) {
     const bound = interfaceOutboundByInterface.get(item.interface)
     if (bound) linkedOutboundTags.add(bound.tag)
     linkedOutboundTags.add(item.tag)
   }
-  for (const nativeInterface of displayedNativeInterfaces) {
+  for (const spec of configured) {
+    const bound = interfaceOutboundByInterface.get(spec.interface)
+    if (bound) linkedOutboundTags.add(bound.tag)
+    linkedOutboundTags.add(spec.tag)
+  }
+  for (const nativeInterface of nativeInterfaces) {
     const bound = nativeInterface.kernelName
       ? interfaceOutboundByInterface.get(nativeInterface.kernelName)
       : undefined
     if (bound) linkedOutboundTags.add(bound.tag)
   }
+  // Члены групп «сиротами» не считаются: их видно в составе группы, и
+  // показывать их ещё раз отдельными строками — тот же дубль, от которого
+  // владелец избавлялся, сливая туннели с маршрутами.
+  const groupMemberTags = new Set<string>()
+  for (const outbound of keenConfig?.outbounds ?? []) {
+    if (outbound.type !== "urltest") continue
+    for (const group of outbound.outbound_groups ?? []) {
+      for (const member of group.outbounds) groupMemberTags.add(member)
+    }
+  }
   const orphanOutbounds = (keenConfig?.outbounds ?? []).filter(
     (outbound) =>
-      outbound.type === "interface" && !linkedOutboundTags.has(outbound.tag)
+      outbound.type === "interface" &&
+      !linkedOutboundTags.has(outbound.tag) &&
+      !groupMemberTags.has(outbound.tag)
   )
   const orphanRows = orphanOutbounds.map((outbound) => {
     const runtimeInterface = runtimeInterfaceByName.get(
@@ -1266,22 +1346,11 @@ export function TransportsPage({
   for (const [index, row] of transportRows.entries()) {
     if (row.details) transportRowDetails[index] = row.details
   }
-  // Подзаголовки нужны только когда в таблице оба вида строк: свои туннели
-  // включаются и удаляются, интерфейсы прошивки — нет, и без подписи это
-  // выглядит как случайно неактивные кнопки.
+  // Подписи «свои туннели» / «интерфейсы прошивки» убраны по решению
+  // владельца: список общий, происхождение туннеля видно по вкладкам и по
+  // недоступным действиям. Единственная оставшаяся подпись — честное
+  // предупреждение про маршруты без туннеля.
   const transportGroupHeadings: Record<number, ReactNode> = {}
-  if (managedRows.length > 0 && nativeRows.length > 0) {
-    transportGroupHeadings[0] = (
-      <SectionHeading size="compact" title={t("transports.groups.managed")} />
-    )
-    transportGroupHeadings[managedRows.length] = (
-      <SectionHeading
-        description={t("transports.groups.nativeDescription")}
-        size="compact"
-        title={t("transports.groups.native")}
-      />
-    )
-  }
   if (orphanRows.length > 0) {
     transportGroupHeadings[managedRows.length + nativeRows.length] = (
       <SectionHeading
@@ -1684,6 +1753,39 @@ function TransportName({
   )
 }
 
+/**
+ * Срезать у плашки правила хвост «→ сам туннель». Плашка правила говорит
+ * «правило → куда»; рядом со строкой этого самого туннеля хвост повторяет её
+ * имя — по новой концепции маршрут не показывается. selfNames — отображаемое
+ * имя и тег.
+ */
+function trimSelfRouteSuffix(
+  dependencies: readonly Dependency[] | undefined,
+  selfNames: readonly string[]
+): Dependency[] {
+  const suffixes = selfNames
+    .filter((name) => name.length > 0)
+    .map((name) => ` → ${name}`)
+  return [...(dependencies ?? [])].map((dependency) => {
+    if (dependency.kind !== "routingRule") return dependency
+    const suffix = suffixes.find((entry) => dependency.label.endsWith(entry))
+    return suffix
+      ? { ...dependency, label: dependency.label.slice(0, -suffix.length) }
+      : dependency
+  })
+}
+
+/**
+ * Порядок категорий в раскрытой строке туннеля — решение владельца: правила,
+ * DNS-серверы, списки, группы. Все четыре видны всегда, пустые — с «-».
+ */
+const TUNNEL_USAGE_KINDS = [
+  "routingRule",
+  "dnsServer",
+  "list",
+  "failoverGroup",
+] as const
+
 /** «Где используется» — тот же вопрос «можно ли это удалить», что и в маршрутах. */
 function UsedByCell({
   bound,
@@ -1693,25 +1795,12 @@ function UsedByCell({
   /** Есть ли у туннеля маршрут вообще. Без маршрута использовать его нечем. */
   readonly bound: boolean
   readonly dependencies?: readonly Dependency[]
-  /**
-   * Имена самого туннеля (отображаемое и тег). Плашка правила заканчивается
-   * на «→ куда»; в колонке этого самого туннеля хвост повторяет строку — по
-   * новой концепции маршрут не показывается, поэтому хвост срезается.
-   */
+  /** Имена самого туннеля (отображаемое и тег) — для среза хвоста плашки. */
   readonly selfNames?: readonly string[]
 }) {
   const { t } = useTranslation()
 
-  const suffixes = selfNames
-    .filter((name) => name.length > 0)
-    .map((name) => ` → ${name}`)
-  const list = [...(dependencies ?? [])].map((dependency) => {
-    if (dependency.kind !== "routingRule") return dependency
-    const suffix = suffixes.find((entry) => dependency.label.endsWith(entry))
-    return suffix
-      ? { ...dependency, label: dependency.label.slice(0, -suffix.length) }
-      : dependency
-  })
+  const list = trimSelfRouteSuffix(dependencies, selfNames)
   if (!bound || list.length === 0) {
     const hint = bound
       ? t("common.dependencies.none")
