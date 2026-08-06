@@ -543,9 +543,12 @@ export function TransportConfigForm({
             </p>
           </Field>
         ) : null}
+        {/* Плоский раздел, а не карточка: рамка внутри формы внутри диалога
+            давала лишний уровень вложенных прямоугольников (замечание
+            владельца). Разделы отделяются линией сверху. */}
         {showAdvanced ? (
-          <div className="grid gap-4 rounded-md border px-3 py-3">
-            <p className="text-sm font-medium">
+          <div className="grid gap-4 border-t border-border pt-4">
+            <p className="text-sm font-bold">
               {t("transports.form.technicalSettings")}
             </p>
             <Field label={t("transports.form.tag")}>
@@ -593,7 +596,7 @@ export function TransportConfigForm({
             </Field>
           </div>
         ) : null}
-        <div className="flex items-center justify-between rounded-md border p-3">
+        <div className="flex items-center justify-between gap-3 py-1">
           <Label htmlFor="transport-auto-start">
             {t("transports.form.autoStart")}
           </Label>
@@ -607,7 +610,7 @@ export function TransportConfigForm({
         </div>
         {showAdvanced ? (
           <Field label={t("transports.form.countryDisplay")}>
-            <div className="grid gap-2 rounded-md border p-3">
+            <div className="grid gap-2">
               {(["disabled", "manual", "auto"] as const).map((mode) => (
                 <label
                   className="flex cursor-pointer items-start gap-3 rounded-md border border-transparent p-2 has-[:checked]:border-primary has-[:checked]:bg-primary/10"
@@ -666,8 +669,11 @@ export function TransportConfigForm({
             </div>
           </Field>
         ) : null}
-        {!initial ? (
-          <div className="flex items-center justify-between rounded-md border p-3">
+        {/* «Сразу создать маршрут» — только в расширенном редакторе: по
+            умолчанию туннель и есть маршрут (решение владельца), и в простом
+            диалоге этот выбор лишний — маршрут создаётся всегда. */}
+        {showAdvanced && !initial ? (
+          <div className="flex items-center justify-between gap-3 py-1">
             <div className="min-w-0 pr-3">
               <Label htmlFor="transport-create-outbound">
                 {t("transports.form.createOutbound")}

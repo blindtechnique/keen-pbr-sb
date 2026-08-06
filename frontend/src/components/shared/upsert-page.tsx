@@ -12,13 +12,7 @@ import { useLocation, useSearch } from "wouter"
 import { PageHeader } from "@/components/shared/page-header"
 import { UpsertCloseContext } from "@/components/shared/upsert-page-context"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { SectionCard } from "@/components/shared/section-card"
 import {
   Dialog,
   DialogContent,
@@ -178,13 +172,25 @@ export function UpsertPage({
     <UpsertCloseContext.Provider value={closeContextValue}>
       <div className="space-y-5 md:space-y-6">
         <PageHeader description={description} title={title} />
-        <Card size={isMobile ? "sm" : "default"}>
-          <CardHeader>
-            <CardTitle>{cardTitle}</CardTitle>
-            <CardDescription>{cardDescription}</CardDescription>
-          </CardHeader>
-          <CardContent>{children}</CardContent>
-        </Card>
+        {/* Плоский раздел вместо карточки: расширенный редактор — обычная
+            страница, и рамка вокруг всей формы была лишним прямоугольником
+            (решение владельца — «плоский» UI без карточек). Внутри карточки
+            повтор заголовка выглядел терпимо, на плоской странице те же
+            строки дважды подряд — как ошибка, поэтому подзаголовок остаётся
+            только когда он говорит что-то новое (например, имя записи). */}
+        {cardTitle === title ? (
+          children
+        ) : (
+          <SectionCard
+            flat
+            description={
+              cardDescription === description ? undefined : cardDescription
+            }
+            title={cardTitle}
+          >
+            {children}
+          </SectionCard>
+        )}
       </div>
       {discardDialog}
     </UpsertCloseContext.Provider>

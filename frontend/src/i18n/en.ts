@@ -269,9 +269,9 @@ export const enTranslation = {
     replaceOutboundConflicts:
       "Replace existing routes and groups tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
     replaceTransportConflicts:
-      "Replace existing tunnels and proxies tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
+      "Replace existing VPN and proxies tagged {{tags}}? If cancelled, conflicting entries will be skipped.",
     transportSecretsWarning:
-      "The export contains connection links, passwords, and other tunnel or proxy secrets. Save it to this computer?",
+      "The export contains connection links, passwords, and other VPN or proxy secrets. Save it to this computer?",
     invalidFormat: "The file is not a compatible keen-pbr-sb export.",
     replaceLists:
       "Replace all existing lists? Choose Cancel to merge them instead.",
@@ -490,8 +490,8 @@ export const enTranslation = {
       catalog: "List catalogue",
       settings: "Settings",
       outbounds: "Routes and groups",
-      transports: "Tunnels and proxies",
-      routesAndTunnels: "Routes and tunnels",
+      transports: "VPN and proxies",
+      routesAndTunnels: "VPN, proxies, groups",
       rules: "Rules",
       connections: "Connections",
       dnsServers: "DNS Servers",
@@ -544,7 +544,7 @@ export const enTranslation = {
         "NaiveProxy runs on Chromium's network stack, which sing-box keeps in a separate library of several dozen megabytes. It is not installed with the package so it does not take up room on routers that never use naive. It can be fetched now, from the same sing-box release that is installed.",
       install: "Fetch the component",
       installing: "Fetching…",
-      installed: "Component installed, the tunnel or proxy can start",
+      installed: "Component installed, the VPN or proxy can start",
       failed: "Could not fetch the component",
     },
     latencyValue: "{{value}} ms",
@@ -566,13 +566,13 @@ export const enTranslation = {
       description:
         "VLESS, VMess, Trojan, Shadowsocks and other managed proxy connections require sing-box. Run the keen-pbr-sb installer over SSH and select the tested version.",
     },
-    title: "Tunnels and proxies",
+    title: "VPN and proxies",
     description:
-      "Managed tunnels and proxies that provide interfaces for keen-pbr routing.",
+      "Managed VPN and proxies that provide interfaces for keen-pbr routing.",
     tabs: {
       all: "All",
       other: "Other",
-      ariaLabel: "Tunnel and proxy types",
+      ariaLabel: "VPN and proxy types",
     },
     headers: {
       name: "Name",
@@ -591,10 +591,10 @@ export const enTranslation = {
         "Normally there are none: a route is created together with its tunnel. These point at interfaces keen-pbr does not manage - for example, another Entware package's tunnel.",
     },
     refresh: "Refresh",
-    add: "Add tunnel or proxy",
-    unavailable: "Tunnel and proxy manager unavailable",
-    empty: "No tunnels or proxies configured.",
-    emptyTitle: "No tunnels or proxies yet",
+    add: "Add VPN or proxy",
+    unavailable: "VPN and proxy manager unavailable",
+    empty: "No VPN or proxies configured.",
+    emptyTitle: "No VPN or proxies yet",
     processMode: {
       action: "sing-box mode",
       unavailable:
@@ -650,9 +650,9 @@ export const enTranslation = {
     restart: "Restart",
     latency: "Latency",
     latencyUnavailable: "not measured",
-    started: "Tunnel or proxy start requested",
-    stopped: "Tunnel or proxy stop requested",
-    restarted: "Tunnel or proxy restart requested",
+    started: "VPN or proxy start requested",
+    stopped: "VPN or proxy stop requested",
+    restarted: "VPN or proxy restart requested",
     nativeManagedExternally:
       "This native interface is managed by KeeneticOS or another service.",
     nativeInterface: {
@@ -714,7 +714,7 @@ export const enTranslation = {
       showHidden: "Show hidden ({{count}})",
       hideHidden: "Stop showing hidden interfaces",
     },
-    deleteTitle: "Delete tunnel or proxy?",
+    deleteTitle: "Delete VPN or proxy?",
     deleteDescription:
       "The managed process will be stopped and its definition removed.",
     deleteWithRouteDescription:
@@ -726,21 +726,21 @@ export const enTranslation = {
     killSwitchStaged:
       "The kill-switch change was added to the draft - apply the configuration for it to take effect.",
     configMessages: {
-      create: "Tunnel or proxy created",
-      update: "Tunnel or proxy updated",
-      delete: "Tunnel or proxy deleted",
+      create: "VPN or proxy created",
+      update: "VPN or proxy updated",
+      delete: "VPN or proxy deleted",
     },
     form: {
       createOutbound: "Create a route now",
       createOutboundHint:
-        "The tunnel or proxy appears under Routes and groups with the same name and can be picked in routing rules straight away.",
+        "The route appears in the shared list with the same name and can be picked in routing rules straight away.",
       outboundExists: "A route tagged {{tag}} already exists",
-      createTitle: "Add tunnel or proxy",
-      editTitle: "Edit tunnel or proxy",
-      missingTitle: "Tunnel or proxy not found",
+      createTitle: "Add VPN or proxy",
+      editTitle: "Edit VPN or proxy",
+      missingTitle: "VPN or proxy not found",
       missingDescription:
-        "Return to the tunnels and proxies list and choose an existing entry.",
-      back: "Back to tunnels and proxies",
+        "Return to the VPN and proxies list and choose an existing entry.",
+      back: "Back to VPN and proxies",
       loadErrorTitle: "Transport data could not be loaded",
       loadErrorDescription:
         "Check that the service is available and try again. Saving is disabled to avoid overwriting the current configuration.",
@@ -811,7 +811,7 @@ export const enTranslation = {
       save: "Save",
     },
     routing: {
-      title: "This tunnel or proxy is not used by a route yet",
+      title: "This VPN or proxy is not used by a route yet",
       description:
         "First create an Interface route for this interface. For automatic switching, create a group and add two or more interface routes to it.",
       createOutbound: "Create route",
@@ -834,8 +834,7 @@ export const enTranslation = {
   },
   brand: {
     logoAlt: "keen-pbr-sb logo",
-    tagline:
-      "Routing, tunnels, and Keenetic network services in one interface.",
+    tagline: "Routing, VPN, and Keenetic network services in one interface.",
     openMenu: "Open menu",
     closeMenu: "Close menu",
     hideMenu: "Collapse menu",
@@ -901,8 +900,7 @@ export const enTranslation = {
     summary: {
       healthy: {
         title: "Everything is fine",
-        description:
-          "Routing, DNS, tunnels, and proxies are operating normally.",
+        description: "Routing, DNS, VPN, and proxies are operating normally.",
       },
       waiting: {
         title: "Loading system state",
@@ -967,7 +965,7 @@ export const enTranslation = {
       singbox: "sing-box",
       nfqws: "nfqws2",
       transportsRunning: "{{running}} of {{total}} running",
-      noTransports: "No tunnels or proxies configured",
+      noTransports: "No VPN or proxies configured",
       notInstalled: "Not installed",
       running: "Service is running",
       stopped: "Service is stopped",
@@ -975,8 +973,7 @@ export const enTranslation = {
       badgeDown: "Stopped",
       badgeAbsent: "None",
     },
-    pageDescription:
-      "Overview of routing runtime, routes, tunnels, and proxies",
+    pageDescription: "Overview of routing runtime, routes, VPN, and proxies",
     runtime: {
       title: "Routing runtime",
       description: "Control policy-based routing.",
@@ -1011,7 +1008,7 @@ export const enTranslation = {
       unavailableCounters: "Routes without available counters: {{count}}.",
     },
     outbounds: {
-      liveTraffic: "Traffic through used tunnels and proxies",
+      liveTraffic: "Traffic through used VPN and proxies",
       trafficCountersHint:
         "A tunnel interface counts only traffic on that path, while WAN counts all traffic on the physical connection. The values therefore do not have to match.",
       connected: "Connected",
@@ -1030,7 +1027,7 @@ export const enTranslation = {
       hint: {
         table: "Traffic goes straight through the provider, past the tunnels",
         tableTunnel:
-          "Traffic follows a {{protocol}} tunnel or proxy routing table",
+          "Traffic follows a {{protocol}} VPN or proxy routing table",
         blackhole: "Connections are not let out",
         ignore: "Traffic passes without changing its route",
         groupVia: "Going through {{active}}, {{backup}} on standby",
@@ -1409,7 +1406,7 @@ export const enTranslation = {
         restore: "Restore from backup",
         groups: {
           general: "General settings",
-          transports: "Tunnels and proxies",
+          transports: "VPN and proxies",
           outbounds: "Routes and groups",
           dns: "DNS settings",
           routing: "Lists and routing rules",
@@ -1425,7 +1422,7 @@ export const enTranslation = {
             "Restore the selected groups from a file, or roll back the last change.",
         },
         secretsWarning:
-          "If tunnels and proxies are selected, the file contains their UUIDs, passwords and keys in plain text. Keep the copy somewhere safe and do not pass it on.",
+          "If VPN and proxies are selected, the file contains their UUIDs, passwords and keys in plain text. Keep the copy somewhere safe and do not pass it on.",
         validationNote:
           "The configuration is validated before it is written and applied only after the check passes.",
         createButton: "Create and download",
@@ -2109,12 +2106,12 @@ export const enTranslation = {
         description:
           "Routes without a tunnel of their own: to firmware interfaces or other packages. This block is usually empty.",
       },
-      title: "Routes and tunnels",
+      title: "VPN, proxies, groups",
       description:
-        "How traffic leaves the router: tunnels and proxies, router interfaces, tunnel groups and system destinations.",
+        "How traffic leaves the router: VPN and proxies, router interfaces, groups and system destinations.",
       tabs: {
-        ariaLabel: "Route and tunnel sections",
-        tunnels: "Tunnels and proxies",
+        ariaLabel: "VPN, proxy and group sections",
+        tunnels: "VPN and proxies",
         interfaces: "Routes",
         failover: "Groups",
         system: "System",
