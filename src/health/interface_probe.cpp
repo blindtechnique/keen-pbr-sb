@@ -6,35 +6,48 @@
 
 namespace keen_pbr3 {
 
+namespace {
+
+bool verified_reachable(const InterfaceProbeResult& result) {
+    return result.success && result.attributed;
+}
+
+} // namespace
+
 std::vector<std::string> InterfaceProbe::probe(
     const std::vector<Target>& targets) {
     std::vector<std::string> transitioned_tags;
 
     for (const auto& target : targets) {
-        RetryConfig retry;
-        retry.attempts = 2;
-        retry.interval_ms = 500;
         const auto result = tester_.test(
-            url_, target.fwmark, static_cast<uint32_t>(timeout_.count()), retry);
+            url_, target.fwmark, static_cast<uint32_t>(timeout_.count()),
+            retry_, target.interface);
 
         InterfaceProbeResult stored;
         stored.success = result.success;
+        stored.attributed = !target.interface.empty();
         stored.latency_ms = result.latency_ms;
         stored.error = result.error;
         stored.measured_at = std::chrono::steady_clock::now();
 
         Logger::instance().trace("interface_probe",
-                                 "tag={} fwmark={} success={} latency_ms={} error={}",
+                                 "tag={} fwmark={} interface={} attributed={} success={} latency_ms={} error={}",
                                  target.tag,
                                  target.fwmark,
+                                 target.interface.empty() ? std::string("-")
+                                                          : target.interface,
+                                 stored.attributed,
                                  result.success,
                                  result.latency_ms,
                                  result.error);
 
         std::lock_guard<std::mutex> lock(mutex_);
         const auto previous = results_.find(target.tag);
+        // Only an attributed success counts as reachable, so losing the
+        // ability to attribute a transport is itself a transition: the
+        // failover group must stop trusting the previous green.
         if (previous != results_.end() &&
-            previous->second.success != stored.success) {
+            verified_reachable(previous->second) != verified_reachable(stored)) {
             transitioned_tags.push_back(target.tag);
         }
         results_[target.tag] = std::move(stored);

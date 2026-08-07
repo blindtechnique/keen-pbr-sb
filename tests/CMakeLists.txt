@@ -34,6 +34,7 @@ add_executable(keen-pbr-tests
   test_list_streamer.cpp
   test_srs_decoder.cpp
   test_http_client.cpp
+  test_interface_probe.cpp
   test_config_validation.cpp
   test_config_store.cpp
   test_catalog_setup_planner.cpp

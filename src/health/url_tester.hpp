@@ -28,15 +28,23 @@ public:
     URLTester& operator=(const URLTester&) = delete;
 
     // Test a URL through an outbound identified by its fwmark.
-    // Uses CURLOPT_MARK to route test traffic via the correct routing table.
+    // Uses SO_MARK to route test traffic via the correct routing table.
     // Retries up to retry.attempts times with retry.interval_ms delay between attempts.
     // Returns the result with latency_ms from the fastest successful attempt.
+    //
+    // bind_interface additionally pins the socket to that device. Without it a
+    // mark whose policy table holds no usable default falls through to main,
+    // and the test then reports the router's own connectivity instead of the
+    // outbound's. Pass it whenever the caller knows the device, so that a
+    // success is attributable to that transport.
     URLTestResult test(const std::string& url, uint32_t fwmark,
-                       uint32_t timeout_ms, const RetryConfig& retry);
+                       uint32_t timeout_ms, const RetryConfig& retry,
+                       const std::string& bind_interface = std::string());
 
 private:
     URLTestResult test_once(const std::string& url, uint32_t fwmark,
-                            uint32_t timeout_ms);
+                            uint32_t timeout_ms,
+                            const std::string& bind_interface);
     std::shared_ptr<HttpTransport> transport_;
 };
 

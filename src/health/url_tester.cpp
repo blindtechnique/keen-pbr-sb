@@ -12,13 +12,15 @@ URLTester::URLTester(std::shared_ptr<HttpTransport> transport) : transport_(std:
 }
 URLTester::~URLTester() = default;
 
-URLTestResult URLTester::test_once(const std::string& url, uint32_t fwmark, uint32_t timeout_ms) {
+URLTestResult URLTester::test_once(const std::string& url, uint32_t fwmark, uint32_t timeout_ms,
+                                   const std::string& bind_interface) {
     URLTestResult result;
     HttpTransportRequest request;
     request.url = url;
     request.timeout_ms = static_cast<long>(timeout_ms);
     request.user_agent = "keen-pbr-urltest";
     request.fwmark = fwmark;
+    request.bind_interface = bind_interface;
     request.max_redirects = 3;
     request.discard_body = true;
     try {
@@ -36,13 +38,13 @@ URLTestResult URLTester::test_once(const std::string& url, uint32_t fwmark, uint
 }
 
 URLTestResult URLTester::test(const std::string& url, uint32_t fwmark, uint32_t timeout_ms,
-                              const RetryConfig& retry) {
+                              const RetryConfig& retry, const std::string& bind_interface) {
     URLTestResult best;
     best.error = "No attempts made";
     const auto attempts = static_cast<uint32_t>(retry.attempts.value_or(1));
     for (uint32_t attempt = 0; attempt < attempts; ++attempt) {
         if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(retry.interval_ms.value_or(1000)));
-        auto result = test_once(url, fwmark, timeout_ms);
+        auto result = test_once(url, fwmark, timeout_ms, bind_interface);
         if (result.success) return result;
         best.error = result.error;
     }

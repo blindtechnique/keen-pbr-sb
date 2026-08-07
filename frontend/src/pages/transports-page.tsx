@@ -111,6 +111,8 @@ import {
 
 type ProbeEntry = {
   success: boolean
+  // Absent on daemons that predate probe attribution; treated as unattributed.
+  attributed?: boolean
   latency_ms: number
   age_seconds: number
   error?: string

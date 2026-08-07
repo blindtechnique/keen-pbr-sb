@@ -1990,7 +1990,9 @@ void Daemon::probe_interfaces_now() {
         if (mark_it == outbound_marks_.end()) {
             continue;
         }
-        targets.push_back({outbound.tag, mark_it->second});
+        targets.push_back({outbound.tag,
+                           mark_it->second,
+                           outbound.interface.value_or(std::string())});
         known_tags.push_back(outbound.tag);
     }
 

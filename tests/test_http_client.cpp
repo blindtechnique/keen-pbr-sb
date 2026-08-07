@@ -146,4 +146,23 @@ TEST_CASE("url tester uses discard transport probes and retry policy") {
     CHECK(transport->request.timeout_ms == 456);
     CHECK(transport->request.fwmark == 77);
     CHECK(transport->request.max_redirects == 3);
+    // Callers that do not name a device stay unpinned, as before.
+    CHECK(transport->request.bind_interface.empty());
+}
+
+TEST_CASE("url tester pins the probe socket to the requested device") {
+    auto transport = std::make_shared<FakeTransport>();
+    transport->response = {204, {}, {}, std::chrono::milliseconds(9)};
+    keen_pbr3::URLTester tester(transport);
+    keen_pbr3::RetryConfig retry;
+    retry.attempts = 1;
+
+    const auto result =
+        tester.test("https://example.test/health", 77, 456, retry, "nwg1");
+
+    CHECK(result.success);
+    // Without this the mark alone decides the route, and a table with no
+    // usable default sends the probe out over the WAN instead.
+    CHECK(transport->request.bind_interface == "nwg1");
+    CHECK(transport->request.fwmark == 77);
 }

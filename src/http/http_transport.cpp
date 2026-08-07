@@ -24,7 +24,7 @@ void setopt(CURL* curl, CURLoption option, T value) {
     if (rc != CURLE_OK) fail(rc, "curl_easy_setopt");
 }
 
-struct TransferContext { const HttpTransportRequest* request; HttpTransportResponse* response; int mark_errno{0}; };
+struct TransferContext { const HttpTransportRequest* request; HttpTransportResponse* response; int mark_errno{0}; int bind_errno{0}; };
 bool cancellation_requested(const HttpTransportRequest& request) {
     return request.cancellation &&
            request.cancellation->load(std::memory_order_relaxed);
@@ -63,8 +63,18 @@ size_t header_callback(char* data, size_t size, size_t count, void* opaque) {
 }
 int sockopt_callback(void* opaque, curl_socket_t fd, curlsocktype) {
     auto* context = static_cast<TransferContext*>(opaque);
-    if (context->request->fwmark == 0) return CURL_SOCKOPT_OK;
-    const uint32_t mark = context->request->fwmark;
+    const auto& request = *context->request;
+    // Bind before the mark: a request that asked to be attributable must fail
+    // rather than silently fall back to whatever routing the mark selects.
+    if (!request.bind_interface.empty()) {
+        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, request.bind_interface.c_str(),
+                       static_cast<socklen_t>(request.bind_interface.size())) != 0) {
+            context->bind_errno = errno;
+            return CURL_SOCKOPT_ERROR;
+        }
+    }
+    if (request.fwmark == 0) return CURL_SOCKOPT_OK;
+    const uint32_t mark = request.fwmark;
     if (setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark)) == 0) return CURL_SOCKOPT_OK;
     context->mark_errno = errno;
     return CURL_SOCKOPT_ERROR;
@@ -125,6 +135,10 @@ HttpTransportResponse LibcurlHttpTransport::perform(const HttpTransportRequest& 
             throw HttpTransportCancelled("HTTP request cancelled");
         }
         std::string message = error_buffer[0] ? error_buffer : curl_easy_strerror(result);
+        if (context.bind_errno) {
+            message += "; SO_BINDTODEVICE(" + request.bind_interface +
+                       ") failed: " + std::string(std::strerror(context.bind_errno));
+        }
         if (context.mark_errno) message += "; SO_MARK failed: " + std::string(std::strerror(context.mark_errno));
         throw HttpTransportError("HTTP request failed: " + message);
     }

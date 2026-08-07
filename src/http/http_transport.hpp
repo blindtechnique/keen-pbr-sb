@@ -19,6 +19,12 @@ struct HttpTransportRequest {
     long timeout_ms{0};
     std::string user_agent;
     uint32_t fwmark{0};
+    // Bind the socket to this device (SO_BINDTODEVICE) when non-empty.
+    // A mark alone only expresses a routing preference: if the policy table
+    // the mark selects holds no usable default, the lookup falls through to
+    // main and the request quietly succeeds over the WAN. Binding makes the
+    // measurement attributable to the device, or makes it fail.
+    std::string bind_interface;
     long max_redirects{5};
     std::vector<std::string> headers;
     bool discard_body{false};

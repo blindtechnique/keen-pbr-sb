@@ -1046,6 +1046,8 @@ export const enTranslation = {
         networkUnreachable: "The network or endpoint is currently unreachable",
         dnsFailed: "The remote endpoint address could not be resolved",
         permissionDenied: "The system could not perform the access check",
+        cannotVerify:
+          "Cannot verify this route. The check could not be tied to this transport, so a successful reply may have come over the router's own connection instead of through the tunnel.",
         degraded: "The route is responding unreliably",
         unavailable: "No route is currently available",
         member: "{{name}}: {{reason}}",

@@ -793,6 +793,9 @@ void Daemon::setup_api() {
             }
             nlohmann::json entry;
             entry["success"] = result->success;
+            // Without this the reader cannot tell a measurement of the tunnel
+            // from a measurement of the router's own WAN.
+            entry["attributed"] = result->attributed;
             entry["latency_ms"] = result->latency_ms;
             entry["age_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(
                                        now - result->measured_at).count();

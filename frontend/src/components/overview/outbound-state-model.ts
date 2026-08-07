@@ -15,6 +15,7 @@ export type OutboundRuntimeIssue =
       | "networkUnreachable"
       | "dnsFailed"
       | "permissionDenied"
+      | "cannotVerify"
       | "degraded"
       | "unavailable"
     memberTag?: string
@@ -46,13 +47,19 @@ export function outboundRuntimeIssue(
  * Runtime may report both a selector-wide mismatch and individual failed
  * candidates. Translate those details into a small, stable UI vocabulary:
  * arbitrary stderr from a probe belongs in diagnostics, not on the dashboard.
+ *
+ * "unknown" is included deliberately. It means the daemon could not attribute
+ * a measurement to this outbound, and staying silent about that would leave
+ * the card looking as settled as a verified one.
  */
 export function outboundRuntimeIssues(
   runtime: RuntimeOutboundState | undefined
 ): OutboundRuntimeIssue[] {
   if (
     runtime === undefined ||
-    (runtime.status !== "degraded" && runtime.status !== "unavailable")
+    (runtime.status !== "degraded" &&
+      runtime.status !== "unavailable" &&
+      runtime.status !== "unknown")
   ) {
     return []
   }
@@ -67,7 +74,8 @@ export function outboundRuntimeIssues(
   for (const member of runtime.interfaces) {
     if (
       member.status !== "degraded" &&
-      member.status !== "unavailable"
+      member.status !== "unavailable" &&
+      member.status !== "unknown"
     ) {
       continue
     }
@@ -77,14 +85,29 @@ export function outboundRuntimeIssues(
     })
   }
 
-  return issues.length > 0
-    ? deduplicateIssues(issues)
-    : [
-        {
-          code:
-            runtime.status === "unavailable" ? "unavailable" : "degraded",
-        },
-      ]
+  if (issues.length > 0) {
+    return deduplicateIssues(issues)
+  }
+
+  // A bare "unknown" with nothing to explain it is not an unverified probe.
+  // The daemon also reports UNKNOWN for shapes it never probes at all - a
+  // table outbound whose externally managed table holds no default, or a group
+  // with no resolvable members - so claiming the route "has not been checked
+  // yet" there would be permanently false. Say nothing instead.
+  if (runtime.status === "unknown") {
+    return []
+  }
+
+  return [{ code: fallbackIssueCode(runtime.status) }]
+}
+
+function fallbackIssueCode(
+  status: string
+): OutboundRuntimeIssue["code"] {
+  if (status === "unavailable") return "unavailable"
+  // A member the daemon could not attribute a measurement to.
+  if (status === "unknown") return "cannotVerify"
+  return "degraded"
 }
 
 function runtimeDetailCode(
@@ -92,6 +115,11 @@ function runtimeDetailCode(
   fallbackStatus: "degraded" | "unavailable" | string
 ): OutboundRuntimeIssue["code"] {
   const normalized = detail?.trim().toLocaleLowerCase("en-US") ?? ""
+  // Checked before the transport-error patterns: this detail says no usable
+  // measurement exists, which is not the same as a measured failure.
+  if (normalized.includes("cannot verify")) {
+    return "cannotVerify"
+  }
   if (
     normalized.includes(
       "interface is not reachable from the main routing table"
@@ -143,7 +171,7 @@ function runtimeDetailCode(
   ) {
     return "permissionDenied"
   }
-  return fallbackStatus === "unavailable" ? "unavailable" : "degraded"
+  return fallbackIssueCode(fallbackStatus)
 }
 
 function deduplicateIssues(

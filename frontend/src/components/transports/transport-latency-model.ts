@@ -2,6 +2,14 @@ import type { RuntimeOutboundState } from "@/api/generated/model"
 
 export type LatencyProbe = Readonly<{
   success: boolean
+  /**
+   * Whether the probe was pinned to the outbound's own device. A mark alone
+   * only expresses a routing preference: when the outbound's table holds no
+   * usable default the request leaves over the WAN and succeeds, so an
+   * unattributed probe measures the router rather than the transport. Older
+   * daemons omit the field; treat that as unattributed.
+   */
+  attributed?: boolean
   latency_ms: number
   age_seconds: number
 }>
@@ -78,9 +86,13 @@ export function collectRuntimeLatencyByInterface(
 
 /**
  * The detailed probe endpoint is keyed by outbound tag, while transport cards
- * are keyed by interface. Resolve collisions deterministically: a successful
- * probe with a real positive latency beats a failed/stale entry, and the
- * explicitly bound standalone outbound wins over a group member.
+ * are keyed by interface. Resolve collisions deterministically: an attributed
+ * successful probe with a real positive latency beats a failed/stale entry,
+ * and the explicitly bound standalone outbound wins over a group member.
+ *
+ * An unattributed success is discarded rather than shown: it is the router's
+ * own WAN latency, and rendering it against a transport whose server is gone
+ * is exactly the false green this filter exists to prevent.
  */
 export function collectProbeByInterface<T extends InterfaceLatencyProbe>(
   probes: Readonly<Record<string, T>>,
@@ -96,6 +108,7 @@ export function collectProbeByInterface<T extends InterfaceLatencyProbe>(
     if (
       !interfaceName ||
       probe.success !== true ||
+      probe.attributed !== true ||
       !isLatency(probe.latency_ms)
     ) {
       continue
@@ -135,18 +148,28 @@ export function selectVisibleLatency(
     return {
       milliseconds: runtimeMilliseconds,
       ageSeconds:
-        probe?.success === true && probe.latency_ms === runtimeMilliseconds
+        isAttributedSuccess(probe) && probe.latency_ms === runtimeMilliseconds
           ? nonNegativeInteger(probe.age_seconds)
           : undefined,
     }
   }
-  if (probe?.success === true && isLatency(probe.latency_ms)) {
+  if (isAttributedSuccess(probe) && isLatency(probe.latency_ms)) {
     return {
       milliseconds: probe.latency_ms,
       ageSeconds: nonNegativeInteger(probe.age_seconds),
     }
   }
   return undefined
+}
+
+/**
+ * Only a probe pinned to the outbound's device says anything about that
+ * transport, so only that probe may put a figure on its card.
+ */
+function isAttributedSuccess(
+  probe: LatencyProbe | undefined
+): probe is LatencyProbe {
+  return probe?.success === true && probe.attributed === true
 }
 
 function isLatency(value: number | undefined): value is number {
