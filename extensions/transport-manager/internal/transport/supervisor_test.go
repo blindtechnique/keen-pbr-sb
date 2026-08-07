@@ -103,7 +103,17 @@ func TestSupervisorBacksOffAfterUnstableCrash(t *testing.T) {
 	if err := manager.Add(fake); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := newSupervisor(manager, time.Millisecond, 20*time.Millisecond, 20*time.Millisecond)
+	// The backoff has to outlive the test. What this case asserts is that a crash
+	// schedules a retry instead of restarting immediately, and with a 20ms backoff
+	// that state existed for only 20ms: once it expired the retry fired, attempts
+	// incremented again, and RetryCount==1 was never observable afterwards. waitFor
+	// polls every 1ms, so under CPU contention the poller could miss the whole
+	// window and then wait out its full deadline on a condition that had already
+	// become permanently false - failing at the waitFor below rather than at the
+	// assertion this case is actually about. A backoff longer than the test turns
+	// that transient into a stable state, so the observation cannot be missed and
+	// upCalls==1 proves no early restart instead of merely not having caught one.
+	supervisor := newSupervisor(manager, time.Millisecond, time.Hour, time.Hour)
 	supervisor.Register(TransportSpec{Tag: fake.tag, Type: "sing-box-vless-reality", AutoStart: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

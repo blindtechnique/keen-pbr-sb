@@ -427,11 +427,21 @@ func TestSharedRuntimeCrashRemovesOwnedRulesAndReconciles(t *testing.T) {
 	fake.mu.Unlock()
 
 	fake.process(0).terminate(errors.New("unexpected shared crash"))
-	waitFor(t, func() bool { return fake.crashRemoveCount() == 1 })
+	// Receive the hook's own completion signal. Polling crashRemoveCount() and
+	// then peeking at the channel with a non-blocking select was racy: the fake's
+	// removeCrashRules hook publishes the counter and releases fake.mu one full
+	// critical section BEFORE it invokes the callback, so the poll could observe
+	// the counter while the callback body had not yet reached its send, and the
+	// default branch aborted the test for a hook that was about to finish. The
+	// timeout here is a diagnostic so a genuinely stuck hook cannot wedge CI; the
+	// receive, not the timeout, is the synchronisation.
 	select {
 	case <-callbackRan:
-	default:
+	case <-time.After(30 * time.Second):
 		t.Fatal("crash cleanup hook did not complete")
+	}
+	if got := fake.crashRemoveCount(); got != 1 {
+		t.Fatalf("crash rule removal ran %d times, want 1", got)
 	}
 	for _, tag := range []string{"proxy_a", "proxy_b"} {
 		status := group.memberStatus(context.Background(), tag)
