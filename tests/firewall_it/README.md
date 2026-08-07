@@ -18,7 +18,8 @@ which performs these steps for one fixture:
 1. Read the full JSON config file.
 2. Parse and validate it with the normal production config code.
 3. Allocate outbound fwmarks.
-4. Optionally run urltest probes when `--run-urltest-probes` is enabled.
+4. Optionally run urltest probes when `--run-urltest-probes` is enabled, and
+   fail the case if any urltest outbound selects no child.
 5. Populate real route tables and policy rules through `libnl`.
 6. Apply the real firewall backend through the normal runtime path.
 7. Verify live firewall chains, live firewall rules, route tables, and policy rules.
@@ -306,6 +307,16 @@ For urltest cases, add:
 ```sh
 --run-urltest-probes
 ```
+
+This flag asserts its own outcome: the config must contain at least one urltest
+outbound, and every urltest outbound must select a child. A probe that fails
+against every candidate makes the case red instead of being silently dropped.
+
+Because a probe gets exactly one attempt and no retry, a fixture that starts a
+probe target must hand the harness a readiness edge rather than a delay.
+`urltest_server.py --ready-fifo <path>` opens that FIFO for writing only after
+`bind()`/`listen()` have returned, so a fixture blocks on the read end and the
+probe cannot race the listening socket.
 
 To run the privileged iptables A/B convergence scenario, add:
 

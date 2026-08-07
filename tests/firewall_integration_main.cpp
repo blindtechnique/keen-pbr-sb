@@ -378,16 +378,29 @@ std::map<std::string, std::string> probe_urltests(const Config& config,
     URLTester tester;
     const auto& outbounds = config.outbounds.value_or(std::vector<Outbound>{});
 
+    size_t urltest_outbounds = 0;
     for (const auto& outbound : outbounds) {
         if (outbound.type != OutboundType::URLTEST) {
             continue;
         }
+        ++urltest_outbounds;
 
         const auto ordered_children = find_urltest_children(outbounds, outbound);
         auto selection = select_urltest_child(outbound, ordered_children, marks, tester);
-        if (selection.has_value()) {
-            selections[outbound.tag] = *selection;
+        // Dropping an empty selection here is what used to make
+        // --run-urltest-probes a no-op: every probe could fail and the case
+        // still reported ok. Requesting the probes means asserting they work.
+        if (!selection.has_value()) {
+            throw std::runtime_error(
+                "urltest outbound '" + outbound.tag +
+                "' selected no child: every probed candidate failed");
         }
+        selections[outbound.tag] = *selection;
+    }
+
+    if (urltest_outbounds == 0) {
+        throw std::runtime_error(
+            "--run-urltest-probes was requested but the config has no urltest outbound");
     }
 
     return selections;
