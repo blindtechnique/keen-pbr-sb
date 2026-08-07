@@ -37,9 +37,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=18080)
+    parser.add_argument(
+        "--ready-fifo",
+        default=None,
+        help="FIFO to signal once the listening socket is bound, so a caller "
+        "can block on readiness instead of guessing with a sleep",
+    )
     args = parser.parse_args()
 
     with socketserver.TCPServer((args.host, args.port), Handler) as httpd:
+        # TCPServer's constructor has already run bind() and listen(), so any
+        # connection made from this point on is queued in the backlog and will
+        # be answered once serve_forever() starts. Signalling here is therefore
+        # a genuine happens-before edge for the probe, not an approximation.
+        if args.ready_fifo:
+            # Opening for write blocks until the reader opens its end, and the
+            # reader sees EOF when this close() runs.
+            with open(args.ready_fifo, "w") as ready:
+                ready.write("ready\n")
         httpd.serve_forever()
 
 

@@ -68,8 +68,12 @@ run_case_expect_failure() {
 for backend in iptables nftables; do
   container="keen-pbr-firewall-it-${backend}"
   docker rm -f "$container" >/dev/null 2>&1 || true
+  # --init gives the container a real reaper: the fixtures background a probe
+  # server whose parent shell exits before it does, so without pid 1 reaping
+  # orphans each case would leave a zombie behind.
   docker run -d --name "$container" \
     --privileged \
+    --init \
     "${images[$backend]}" >/dev/null
 
   if [[ "$backend" == "iptables" ]]; then
