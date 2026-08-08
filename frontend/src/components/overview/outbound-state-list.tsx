@@ -14,6 +14,7 @@ import {
   outboundRuntimeIssues,
   outboundTrafficBucket,
 } from "@/components/overview/outbound-state-model"
+import { countEnabledRouteRuleListsByOutbound } from "@/components/overview/dashboard-outbound-relevance"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
 import {
@@ -49,14 +50,7 @@ export function OutboundStateList({
   const interfaceOfTag = (tag: string) =>
     outbounds.find((item) => item.tag === tag)?.interface ?? ""
 
-  const listsByTag = new Map<string, number>()
-  for (const rule of rules) {
-    if (!rule.outbound) continue
-    listsByTag.set(
-      rule.outbound,
-      (listsByTag.get(rule.outbound) ?? 0) + (rule.list?.length ?? 0)
-    )
-  }
+  const listsByTag = countEnabledRouteRuleListsByOutbound(rules)
 
   const entries = outbounds.map((outbound) => {
     const runtime = runtimeByTag.get(outbound.tag)

@@ -1,12 +1,19 @@
 import { CircleAlertIcon, CircleCheckBigIcon, CircleXIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
-import { useGetHealthService, useGetRuntimeOutbounds } from "@/api/queries"
+import {
+  useGetConfig,
+  useGetHealthService,
+  useGetRuntimeOutbounds,
+  useGetTransports,
+} from "@/api/queries"
+import { selectConfig } from "@/api/selectors"
 import { useStatusEventConnectionState } from "@/api/status-event-connection"
 import {
   getHeaderHealthTone,
   type HeaderHealthTone,
 } from "@/components/layout/header-health-state"
+import { selectDashboardRuntimeOutbounds } from "@/components/overview/dashboard-outbound-relevance"
 import { cn } from "@/lib/utils"
 
 const TONE_STYLES: Record<HeaderHealthTone, string> = {
@@ -19,13 +26,27 @@ export function HeaderHealthIndicator() {
   const { t } = useTranslation()
   const healthQuery = useGetHealthService()
   const outboundsQuery = useGetRuntimeOutbounds()
+  const configQuery = useGetConfig()
+  const transportsQuery = useGetTransports()
   const statusEvents = useStatusEventConnectionState()
   const service =
     healthQuery.data?.status === 200 ? healthQuery.data.data : undefined
-  const outbounds =
+  const rawOutbounds =
     outboundsQuery.data?.status === 200
       ? outboundsQuery.data.data.outbounds
       : undefined
+  const visibleConfig = selectConfig(configQuery.data)
+  const configIsDraft =
+    configQuery.data?.status === 200 && configQuery.data.data.is_draft
+  const transports =
+    transportsQuery.data?.status === 200 ? transportsQuery.data.data : undefined
+  const outbounds = rawOutbounds
+    ? selectDashboardRuntimeOutbounds({
+        config: configIsDraft ? undefined : visibleConfig,
+        runtimeOutbounds: rawOutbounds,
+        transports,
+      })
+    : undefined
   const tone = getHeaderHealthTone({
     outbounds,
     outboundsQueryFailed: outboundsQuery.isError,

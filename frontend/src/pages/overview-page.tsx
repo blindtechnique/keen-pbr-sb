@@ -30,6 +30,7 @@ import { DiagnosticsDownloadDialog } from "@/components/overview/diagnostics-dow
 import { RoutingTestPanel } from "@/components/overview/routing-test-panel"
 import { SystemStatusSummary } from "@/components/overview/system-status-summary"
 import { ActiveInterfaceTraffic } from "@/components/overview/active-interface-traffic"
+import { selectDashboardRuntimeOutbounds } from "@/components/overview/dashboard-outbound-relevance"
 import { dashboardSectionIds } from "@/components/overview/system-status-summary-model"
 import { useDocumentTitle } from "@/hooks/use-document-title"
 import { getApiErrorMessage } from "@/lib/api-errors"
@@ -59,6 +60,8 @@ export function OverviewPage() {
       ? serviceHealthQuery.data.data
       : undefined
   const loadedConfig = selectConfig(configQuery.data)
+  const configIsDraft =
+    configQuery.data?.status === 200 ? configQuery.data.data.is_draft : false
   const routingHealth =
     routingHealthQuery.data?.status === 200
       ? routingHealthQuery.data.data
@@ -70,15 +73,33 @@ export function OverviewPage() {
         : [],
     [runtimeOutboundsQuery.data]
   )
+  const transportStatuses = useMemo(
+    () =>
+      transportsQuery.data?.status === 200
+        ? transportsQuery.data.data
+        : undefined,
+    [transportsQuery.data]
+  )
+  const dashboardRuntimeOutbounds = useMemo(
+    () =>
+      selectDashboardRuntimeOutbounds({
+        // A visible draft is not necessarily the configuration that owns the
+        // live runtime. Stay conservative until it is applied.
+        config: configIsDraft ? undefined : loadedConfig,
+        runtimeOutbounds,
+        transports: transportStatuses,
+      }),
+    [configIsDraft, loadedConfig, runtimeOutbounds, transportStatuses]
+  )
   const runtimeOutboundByTag = useMemo(
     () =>
       new Map(
-        runtimeOutbounds.map((runtimeOutbound) => [
+        dashboardRuntimeOutbounds.map((runtimeOutbound) => [
           runtimeOutbound.tag,
           runtimeOutbound,
         ])
       ),
-    [runtimeOutbounds]
+    [dashboardRuntimeOutbounds]
   )
   const runtimeInterfaceByName = useMemo(
     () =>
@@ -100,9 +121,6 @@ export function OverviewPage() {
           runtimeInterfacesQuery.isError
         ? "error"
         : "loading"
-  const configIsDraft =
-    configQuery.data?.status === 200 ? configQuery.data.data.is_draft : false
-
   const diagnosticsDownloadReady =
     Boolean(loadedConfig) &&
     Boolean(serviceHealth) &&
@@ -130,7 +148,7 @@ export function OverviewPage() {
       <SystemStatusSummary
         configIsDraft={configIsDraft}
         listCount={Object.keys(loadedConfig?.lists ?? {}).length}
-        outbounds={runtimeOutbounds}
+        outbounds={dashboardRuntimeOutbounds}
         outboundsQueryFailed={runtimeOutboundsQuery.isError}
         routingOverall={routingHealth?.overall}
         ruleCount={loadedConfig?.route?.rules?.length ?? 0}
@@ -179,11 +197,7 @@ export function OverviewPage() {
                 rules={loadedConfig?.route?.rules ?? []}
                 runtimeByTag={runtimeOutboundByTag}
                 runtimeInterfaceByName={runtimeInterfaceByName}
-                transports={
-                  transportsQuery.data?.status === 200
-                    ? transportsQuery.data.data
-                    : []
-                }
+                transports={transportStatuses ?? []}
               />
             </>
           ) : null}
