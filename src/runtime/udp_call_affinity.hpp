@@ -264,7 +264,122 @@ struct UdpCallAffinityDecision {
     // persisted beyond the expiring classifier.
     std::vector<ConntrackExactForwardedFlow> baseline_flows;
     bool refresh_only{false};
+    // A completion may arrive after a detector reset or after a newer
+    // publication for the same peer was reserved.  Only the exact outstanding
+    // token may turn a kernel mutation into retained guard authority.
+    std::uint64_t confirmation_token{0U};
 };
+
+// Snapshot of an exact peer whose temporary call-affinity classifier was
+// already published successfully.  Source-wide UDP observation is useful for
+// these peers because call media can live outside the packaged Meta CIDRs, but
+// the source address alone is not sufficient authority: an unrelated QUIC or
+// DNS exchange from the same client must never suppress exact stale-flow
+// recovery.
+struct UdpCallAffinityGuardPeer {
+    ConntrackFlowFamily family{ConntrackFlowFamily::Ipv4};
+    std::string source;
+    std::string destination;
+    std::uint16_t destination_port{0};
+    std::uint32_t fwmark{0};
+
+    bool operator==(const UdpCallAffinityGuardPeer& other) const noexcept {
+        return family == other.family && source == other.source &&
+               destination == other.destination &&
+               destination_port == other.destination_port &&
+               fwmark == other.fwmark;
+    }
+};
+
+namespace udp_call_affinity_detail {
+
+inline bool same_exact_flow(const ConntrackExactForwardedFlow& left,
+                            const ConntrackExactForwardedFlow& right) noexcept {
+    return left.family == right.family &&
+           left.protocol == right.protocol && left.source == right.source &&
+           left.destination == right.destination &&
+           left.source_port == right.source_port &&
+           left.destination_port == right.destination_port &&
+           left.mark == right.mark;
+}
+
+inline bool guard_peer_matches(
+    const UdpCallAffinityGuardPeer& peer,
+    const ConntrackExactForwardedFlow& flow,
+    std::uint32_t owned_mask) noexcept {
+    const auto owned_mark = flow.mark & owned_mask;
+    return flow.protocol == ConntrackFlowProtocol::Udp &&
+           peer.family == flow.family && peer.source == flow.source &&
+           peer.destination == flow.destination &&
+           peer.destination_port == flow.destination_port &&
+           peer.fwmark != 0U && (peer.fwmark & ~owned_mask) == 0U &&
+           (owned_mark == 0U || owned_mark == peer.fwmark);
+}
+
+inline bool bidirectional_media_progressed(
+    const ConntrackExactForwardedFlow& current,
+    const std::vector<ConntrackExactForwardedFlow>& baselines) noexcept {
+    if (current.protocol != ConntrackFlowProtocol::Udp || !current.assured) {
+        return false;
+    }
+    const auto baseline = std::find_if(
+        baselines.begin(), baselines.end(), [&current](const auto& candidate) {
+            return same_exact_flow(candidate, current);
+        });
+    if (baseline == baselines.end()) {
+        // A newly observed, already-bidirectional flow necessarily progressed
+        // between the two bounded snapshots.
+        return current.original.packets != 0U && current.reply.packets != 0U;
+    }
+    return !counters_regressed(current,
+                               baseline->original,
+                               baseline->reply) &&
+           direction_progressed(current.original, baseline->original) &&
+           direction_progressed(current.reply, baseline->reply);
+}
+
+} // namespace udp_call_affinity_detail
+
+// Return only sources with trustworthy active media. Covered WhatsApp UDP is
+// authoritative by destination. UDP outside those CIDRs is authoritative only
+// when it matches an exact, successfully installed call-affinity peer.
+inline std::set<std::pair<ConntrackFlowFamily, std::string>>
+active_udp_media_guard_sources(
+    const std::vector<ConntrackExactForwardedFlow>& baselines,
+    const std::vector<ConntrackExactForwardedFlow>& current_covered_flows,
+    const std::vector<ConntrackExactForwardedFlow>& current_source_wide_flows,
+    const std::vector<UdpCallAffinityGuardPeer>& retained_peers,
+    std::uint32_t owned_mask,
+    const std::set<std::uint32_t>& trusted_covered_marks) {
+    std::set<std::pair<ConntrackFlowFamily, std::string>> protected_sources;
+    const auto protect_if_progressed =
+        [&baselines, &protected_sources](const auto& flow) {
+            if (udp_call_affinity_detail::bidirectional_media_progressed(
+                    flow, baselines)) {
+                protected_sources.emplace(flow.family, flow.source);
+            }
+        };
+
+    for (const auto& flow : current_covered_flows) {
+        if (trusted_covered_marks.count(flow.mark & owned_mask) != 0U) {
+            protect_if_progressed(flow);
+        }
+    }
+    for (const auto& flow : current_source_wide_flows) {
+        const bool exact_retained_peer = std::any_of(
+            retained_peers.begin(),
+            retained_peers.end(),
+            [&flow, owned_mask](const auto& peer) {
+                return udp_call_affinity_detail::guard_peer_matches(peer,
+                                                                    flow,
+                                                                    owned_mask);
+            });
+        if (exact_retained_peer) {
+            protect_if_progressed(flow);
+        }
+    }
+    return protected_sources;
+}
 
 struct UdpCallAffinityDetectorOptions {
     std::chrono::seconds active_seed_hold{15};
@@ -619,6 +734,8 @@ public:
                 target.fwmark,
                 {flow},
                 true});
+            decisions.back().confirmation_token =
+                reserve_confirmation_token(peer);
             peer_refreshed_at_[peer] = now;
         }
         media_counters_ = std::move(next_media);
@@ -792,6 +909,11 @@ public:
                     context->second.target.fwmark,
                     std::move(flows),
                     false});
+                decisions.back().confirmation_token =
+                    reserve_confirmation_token(peer);
+                // Reserve the peer while the kernel classifier mutation is in
+                // flight. This is not guard authority: only confirm_installed
+                // may publish the peer into confirmed_until_.
                 promoted_until_[peer] = PromotedPeer{
                     context->second.target,
                     now + options_.promoted_pair_hold};
@@ -835,25 +957,51 @@ public:
             decision.source,
             decision.destination_port,
             decision.destination);
+        const auto pending = pending_confirmation_tokens_.find(peer);
+        if (decision.confirmation_token == 0U ||
+            pending == pending_confirmation_tokens_.end() ||
+            pending->second != decision.confirmation_token) {
+            return;
+        }
+        pending_confirmation_tokens_.erase(pending);
         peer_refreshed_at_.erase(peer);
         if (!decision.refresh_only) {
+            // A failed initial publication never becomes guard authority and
+            // releases the reservation/rate budget for a later retry.
+            confirmed_until_.erase(peer);
             promoted_until_.erase(peer);
             promotion_times_.erase(peer);
         }
+        // A failed refresh does not extend the lease, but the previously
+        // confirmed classifier remains installed and trustworthy until its
+        // original expiry.
     }
 
-    void confirm_installed(const UdpCallAffinityDecision& decision,
-                           TimePoint now) noexcept {
+    bool confirm_installed(const UdpCallAffinityDecision& decision,
+                           TimePoint now) {
         const auto peer = std::make_tuple(
             decision.family,
             decision.source,
             decision.destination_port,
             decision.destination);
-        promoted_until_[peer] = PromotedPeer{
+        const auto pending = pending_confirmation_tokens_.find(peer);
+        if (decision.confirmation_token == 0U ||
+            pending == pending_confirmation_tokens_.end() ||
+            pending->second != decision.confirmation_token) {
+            return false;
+        }
+        const PromotedPeer confirmed{
             UdpCallAffinityTarget{decision.list_name, decision.fwmark},
             now + options_.promoted_pair_hold};
+        // confirmed_until_ is the only insertion that is not already reserved
+        // by observe().  Publish it first so an allocation failure leaves the
+        // outstanding token retryable rather than half-confirmed.
+        confirmed_until_[peer] = confirmed;
+        promoted_until_[peer] = confirmed;
         peer_refreshed_at_[peer] = now;
+        pending_confirmation_tokens_.erase(pending);
         candidate_streaks_.erase(peer);
+        return true;
     }
 
     std::vector<std::string> retained_guard_sources(TimePoint now) {
@@ -877,10 +1025,30 @@ public:
         return result;
     }
 
+    std::vector<UdpCallAffinityGuardPeer> retained_guard_peers(TimePoint now) {
+        prune_limits(now);
+        std::vector<UdpCallAffinityGuardPeer> result;
+        result.reserve(confirmed_until_.size());
+        for (const auto& [peer, promoted] : confirmed_until_) {
+            if (now >= promoted.expires_at) {
+                continue;
+            }
+            result.push_back(UdpCallAffinityGuardPeer{
+                std::get<0>(peer),
+                std::get<1>(peer),
+                std::get<3>(peer),
+                std::get<2>(peer),
+                promoted.target.fwmark});
+        }
+        return result;
+    }
+
     void reset() noexcept {
         active_epoch_.reset();
         reset_observation_continuity();
         promoted_until_.clear();
+        confirmed_until_.clear();
+        pending_confirmation_tokens_.clear();
         peer_refreshed_at_.clear();
         promotion_times_.clear();
     }
@@ -928,6 +1096,18 @@ private:
                                std::uint16_t,
                                std::string>;
 
+    std::uint64_t reserve_confirmation_token(const PeerKey& peer) {
+        auto token = next_confirmation_token_++;
+        if (token == 0U) {
+            token = next_confirmation_token_++;
+        }
+        if (next_confirmation_token_ == 0U) {
+            next_confirmation_token_ = 1U;
+        }
+        pending_confirmation_tokens_[peer] = token;
+        return token;
+    }
+
     void reset_observation_continuity() noexcept {
         seed_counters_.clear();
         media_counters_.clear();
@@ -953,6 +1133,23 @@ private:
                 ++iterator;
             }
         }
+        for (auto iterator = confirmed_until_.begin();
+             iterator != confirmed_until_.end();) {
+            if (now >= iterator->second.expires_at ||
+                promoted_until_.count(iterator->first) == 0U) {
+                iterator = confirmed_until_.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+        for (auto iterator = pending_confirmation_tokens_.begin();
+             iterator != pending_confirmation_tokens_.end();) {
+            if (promoted_until_.count(iterator->first) == 0U) {
+                iterator = pending_confirmation_tokens_.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
         for (auto iterator = peer_refreshed_at_.begin();
              iterator != peer_refreshed_at_.end();) {
             if (promoted_until_.count(iterator->first) == 0U) {
@@ -971,8 +1168,11 @@ private:
     std::map<SourceKey, ActiveContext> active_contexts_;
     std::map<PeerKey, CandidateStreak> candidate_streaks_;
     std::map<PeerKey, PromotedPeer> promoted_until_;
+    std::map<PeerKey, PromotedPeer> confirmed_until_;
+    std::map<PeerKey, std::uint64_t> pending_confirmation_tokens_;
     std::map<PeerKey, TimePoint> peer_refreshed_at_;
     std::map<PeerKey, TimePoint> promotion_times_;
+    std::uint64_t next_confirmation_token_{1U};
 };
 
 } // namespace keen_pbr3

@@ -504,7 +504,9 @@ private:
         ConntrackFlowObservation observation,
         std::vector<std::string> observed_local_interface_addresses,
         std::vector<std::string> destination_selectors,
+        std::vector<std::string> whatsapp_destination_selectors,
         std::vector<UdpCallAffinityTarget> call_affinity_targets,
+        std::set<std::uint32_t> trusted_whatsapp_marks,
         bool ipv6_enabled,
         bool coverage_complete,
         std::string failure_detail);

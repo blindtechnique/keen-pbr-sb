@@ -3901,14 +3901,20 @@ void Daemon::run_idle_stall_observer() noexcept {
                 ++iterator;
             }
         }
+        const auto trusted_whatsapp_targets =
+            active_udp_call_affinity_targets(
+                whatsapp_latency_list_names,
+                firewall_state_.get_rules(),
+                firewall_state_.get_fwmark_mask());
         auto call_affinity_targets =
             firewall_->backend() == FirewallBackend::iptables &&
                     !opts_.udp_call_affinity_ipset_available
                 ? std::vector<UdpCallAffinityTarget>{}
-                : active_udp_call_affinity_targets(
-                      whatsapp_latency_list_names,
-                      firewall_state_.get_rules(),
-                      firewall_state_.get_fwmark_mask());
+                : trusted_whatsapp_targets;
+        std::set<std::uint32_t> trusted_whatsapp_marks;
+        for (const auto& target : trusted_whatsapp_targets) {
+            trusted_whatsapp_marks.insert(target.fwmark);
+        }
 
         const auto coverage =
             collect_conntrack_destination_retirement_coverage(
@@ -3969,6 +3975,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                         whatsapp_coverage);
             if (!whatsapp_coverage_complete) {
                 call_affinity_targets.clear();
+                trusted_whatsapp_marks.clear();
                 whatsapp_destination_selectors.clear();
                 udp_call_affinity_detector_.reset();
             }
@@ -3986,12 +3993,13 @@ void Daemon::run_idle_stall_observer() noexcept {
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
         }
+        const auto affinity_snapshot_time =
+            UdpCallAffinityDetector::Clock::now();
         const auto retained_affinity_sources =
             call_affinity_targets.empty()
             ? std::vector<std::string>{}
             : udp_call_affinity_detector_.retained_guard_sources(
-                  UdpCallAffinityDetector::Clock::now());
-
+                  affinity_snapshot_time);
         const auto runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
         const auto coverage_generation =
@@ -4027,6 +4035,7 @@ void Daemon::run_idle_stall_observer() noexcept {
              coverage_complete,
              call_affinity_targets,
              retained_affinity_sources,
+             trusted_whatsapp_marks,
              whatsapp_destination_selectors,
              destination_selectors =
                  std::move(destination_selectors)]() mutable {
@@ -4057,10 +4066,6 @@ void Daemon::run_idle_stall_observer() noexcept {
                     }
                     // This is the last fence before the bounded /proc scan.
                     if (generation_is_current()) {
-                        std::set<std::uint32_t> call_affinity_marks;
-                        for (const auto& target : call_affinity_targets) {
-                            call_affinity_marks.insert(target.fwmark);
-                        }
                         observation = conntrack_manager_.
                             observe_forwarded_destination_flows(
                                 destination_selectors,
@@ -4075,7 +4080,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                                     /*allow_foreign_mark_bits_for_media=*/true},
                                 retained_affinity_sources,
                                 whatsapp_destination_selectors,
-                                call_affinity_marks);
+                                trusted_whatsapp_marks);
                     }
                 } catch (const std::exception& error) {
                     failure_detail = error.what();
@@ -4095,9 +4100,13 @@ void Daemon::run_idle_stall_observer() noexcept {
                          std::move(local_interface_addresses),
                      destination_selectors =
                          std::move(destination_selectors),
-                     call_affinity_targets =
-                         std::move(call_affinity_targets),
-                     ipv6_enabled,
+                      whatsapp_destination_selectors =
+                          std::move(whatsapp_destination_selectors),
+                      call_affinity_targets =
+                          std::move(call_affinity_targets),
+                      trusted_whatsapp_marks =
+                          std::move(trusted_whatsapp_marks),
+                      ipv6_enabled,
                      coverage_complete,
                      failure_detail =
                          std::move(failure_detail)]() mutable {
@@ -4109,7 +4118,9 @@ void Daemon::run_idle_stall_observer() noexcept {
                                 std::move(observation),
                                 std::move(local_interface_addresses),
                                 std::move(destination_selectors),
+                                std::move(whatsapp_destination_selectors),
                                 std::move(call_affinity_targets),
+                                std::move(trusted_whatsapp_marks),
                                 ipv6_enabled,
                                 coverage_complete,
                                 std::move(failure_detail));
@@ -4620,12 +4631,25 @@ void Daemon::dispatch_udp_call_affinity_mutations(
                             // published. A best-effort exact retirement
                             // failure must not erase the detector lease and
                             // cause duplicate promotion attempts.
-                            udp_call_affinity_detector_.confirm_installed(
-                                outcome.decision, completed_at);
-                            if (outcome.decision.refresh_only) {
-                                ++refreshed;
-                            } else {
-                                ++installed;
+                            bool confirmation_accepted = false;
+                            try {
+                                confirmation_accepted =
+                                    udp_call_affinity_detector_.
+                                        confirm_installed(
+                                            outcome.decision,
+                                            completed_at);
+                            } catch (...) {
+                                // Kernel publication may have succeeded, but
+                                // an in-memory authority update that cannot be
+                                // represented safely must fail closed.
+                                udp_call_affinity_detector_.reset();
+                            }
+                            if (confirmation_accepted) {
+                                if (outcome.decision.refresh_only) {
+                                    ++refreshed;
+                                } else {
+                                    ++installed;
+                                }
                             }
                         } else {
                             udp_call_affinity_detector_.release_failed(
@@ -4699,7 +4723,9 @@ void Daemon::commit_idle_stall_observation(
     ConntrackFlowObservation observation,
     std::vector<std::string> observed_local_interface_addresses,
     std::vector<std::string> destination_selectors,
+    std::vector<std::string> whatsapp_destination_selectors,
     std::vector<UdpCallAffinityTarget> call_affinity_targets,
+    std::set<std::uint32_t> trusted_whatsapp_marks,
     bool ipv6_enabled,
     bool coverage_complete,
     std::string failure_detail) {
@@ -4791,6 +4817,15 @@ void Daemon::commit_idle_stall_observation(
     const bool affinity_discovery_enabled =
         !call_affinity_targets.empty();
 
+    // A classifier publication completion can land on the control loop while
+    // the blocking conntrack snapshot is in progress. Recompute exact guard
+    // authority after observe() so that a newly confirmed call peer is visible
+    // to the final live revalidation, while an expired/reset peer is not.
+    auto retained_affinity_peers = call_affinity_targets.empty()
+        ? std::vector<UdpCallAffinityGuardPeer>{}
+        : udp_call_affinity_detector_.retained_guard_peers(
+              observation_time);
+
     dispatch_udp_call_affinity_mutations(
         expected_runtime_generation,
         expected_coverage_generation,
@@ -4843,9 +4878,31 @@ void Daemon::commit_idle_stall_observation(
     std::vector<IdleStallPendingDelete> pending_deletes;
     std::vector<ConntrackExactForwardedFlow> media_baselines;
     pending_deletes.reserve(decisions.size());
-    for (const auto& flow : observation.flows) {
+    for (const auto& flow : observation.media_seed_flows) {
         if (flow.protocol == ConntrackFlowProtocol::Udp && flow.assured) {
             media_baselines.push_back(flow);
+        }
+    }
+    for (const auto& flow : observation.source_wide_udp_flows) {
+        const bool exact_retained_peer = std::any_of(
+            retained_affinity_peers.begin(),
+            retained_affinity_peers.end(),
+            [&flow, owned_mask](const auto& peer) {
+                return udp_call_affinity_detail::guard_peer_matches(
+                    peer, flow, owned_mask);
+            });
+        if (flow.protocol == ConntrackFlowProtocol::Udp && flow.assured &&
+            exact_retained_peer) {
+            const bool duplicate = std::any_of(
+                media_baselines.begin(),
+                media_baselines.end(),
+                [&flow](const auto& candidate) {
+                    return udp_call_affinity_detail::same_exact_flow(
+                        candidate, flow);
+                });
+            if (!duplicate) {
+                media_baselines.push_back(flow);
+            }
         }
     }
     for (const auto& decision : decisions) {
@@ -4878,10 +4935,16 @@ void Daemon::commit_idle_stall_observation(
         schedule_idle_stall_observer_after(next_interval);
         return;
     }
-    std::vector<std::string> media_guard_sources;
-    media_guard_sources.reserve(pending_deletes.size());
+    std::set<std::pair<ConntrackFlowFamily, std::string>> pending_sources;
     for (const auto& pending : pending_deletes) {
-        media_guard_sources.push_back(pending.flow.source);
+        pending_sources.emplace(pending.flow.family, pending.flow.source);
+    }
+    std::vector<std::string> media_guard_sources;
+    media_guard_sources.reserve(retained_affinity_peers.size());
+    for (const auto& peer : retained_affinity_peers) {
+        if (pending_sources.count({peer.family, peer.source}) != 0U) {
+            media_guard_sources.push_back(peer.source);
+        }
     }
     std::sort(media_guard_sources.begin(), media_guard_sources.end());
     media_guard_sources.erase(
@@ -4898,7 +4961,11 @@ void Daemon::commit_idle_stall_observation(
          pending_deletes = std::move(pending_deletes),
          media_baselines = std::move(media_baselines),
          media_guard_sources = std::move(media_guard_sources),
+         retained_affinity_peers = std::move(retained_affinity_peers),
          destination_selectors = std::move(destination_selectors),
+         whatsapp_destination_selectors =
+             std::move(whatsapp_destination_selectors),
+         trusted_whatsapp_marks = std::move(trusted_whatsapp_marks),
          ipv6_enabled,
          observed_local_interface_addresses =
              std::move(observed_local_interface_addresses)]() mutable {
@@ -4950,7 +5017,9 @@ void Daemon::commit_idle_stall_observation(
                                     IDLE_STALL_MAX_SNAPSHOT_BYTES,
                                     IDLE_STALL_MAX_SNAPSHOT_LINES,
                                     /*allow_foreign_mark_bits_for_media=*/true},
-                                media_guard_sources);
+                                media_guard_sources,
+                                whatsapp_destination_selectors,
+                                trusted_whatsapp_marks);
                         live_scope_changed =
                             current_observation.snapshot_unavailable ||
                             current_observation.snapshot_truncated ||
@@ -4960,48 +5029,27 @@ void Daemon::commit_idle_stall_observation(
                             current_observation.destination_input_truncated ||
                             current_observation.invalid_owned_mask ||
                             current_observation.
+                                    media_seed_destination_input_truncated ||
+                            current_observation.
                                     invalid_media_guard_sources != 0U ||
                             current_observation.
-                                    invalid_destination_selectors != 0U;
+                                    invalid_destination_selectors != 0U ||
+                            current_observation.
+                                    invalid_media_seed_destination_selectors !=
+                                0U;
 
                         std::set<std::pair<ConntrackFlowFamily, std::string>>
                             protected_sources;
                         if (!live_scope_changed) {
-                            for (const auto& current :
-                                 current_observation.
-                                     source_wide_udp_flows) {
-                                if (current.protocol !=
-                                        ConntrackFlowProtocol::Udp ||
-                                    !current.assured) {
-                                    continue;
-                                }
-                                const auto baseline = std::find_if(
-                                    media_baselines.begin(),
-                                    media_baselines.end(),
-                                    [&current](const auto& candidate) {
-                                        return idle_stall_key_from(candidate) ==
-                                               idle_stall_key_from(current);
-                                    });
-                                const bool new_bidirectional_media =
-                                    baseline == media_baselines.end() &&
-                                    current.original.packets != 0U &&
-                                    current.reply.packets != 0U;
-                                const bool existing_media_progressed =
-                                    baseline != media_baselines.end() &&
-                                    (current.original.packets >
-                                         baseline->original.packets ||
-                                     current.original.bytes >
-                                         baseline->original.bytes) &&
-                                    (current.reply.packets >
-                                         baseline->reply.packets ||
-                                     current.reply.bytes >
-                                         baseline->reply.bytes);
-                                if (new_bidirectional_media ||
-                                    existing_media_progressed) {
-                                    protected_sources.emplace(
-                                        current.family, current.source);
-                                }
-                            }
+                            protected_sources =
+                                active_udp_media_guard_sources(
+                                    media_baselines,
+                                    current_observation.media_seed_flows,
+                                    current_observation.
+                                        source_wide_udp_flows,
+                                    retained_affinity_peers,
+                                    owned_mask,
+                                    trusted_whatsapp_marks);
                         }
 
                         if (!live_scope_changed) {

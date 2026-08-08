@@ -835,8 +835,8 @@ TEST_CASE("active unowned media refreshes the 90 second peer lease") {
         start + std::chrono::seconds{7});
     REQUIRE(promoted.size() == 4U);
     for (const auto& decision : promoted) {
-        detector.confirm_installed(
-            decision, start + std::chrono::seconds{7});
+        CHECK(detector.confirm_installed(
+            decision, start + std::chrono::seconds{7}));
     }
 
     auto media = udp_flow(
@@ -866,13 +866,329 @@ TEST_CASE("active unowned media refreshes the 90 second peer lease") {
     REQUIRE(refresh.front().baseline_flows.size() == 1U);
     CHECK(refresh.front().baseline_flows.front().destination_port ==
           refresh.front().destination_port);
-    detector.confirm_installed(
-        refresh.front(), start + std::chrono::seconds{40});
+    CHECK(detector.confirm_installed(
+        refresh.front(), start + std::chrono::seconds{40}));
 
     CHECK_FALSE(detector.retained_guard_sources(
         start + std::chrono::seconds{120}).empty());
     CHECK(detector.retained_guard_sources(
         start + std::chrono::seconds{131}).empty());
+}
+
+TEST_CASE("failed affinity refresh preserves the previous confirmed lease") {
+    UdpCallAffinityDetector detector;
+    const auto start = UdpCallAffinityDetector::TimePoint{};
+    detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(10U, 12U)},
+        call_candidates(3U),
+        start);
+    CHECK(detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        call_candidates(5U),
+        start + std::chrono::seconds{5}).empty());
+    const auto promoted = detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        call_candidates(7U),
+        start + std::chrono::seconds{7});
+    REQUIRE_FALSE(promoted.empty());
+    for (const auto& decision : promoted) {
+        REQUIRE(decision.confirmation_token != 0U);
+        REQUIRE(detector.confirm_installed(
+            decision, start + std::chrono::seconds{7}));
+    }
+
+    auto media = udp_flow(
+        "64.176.66.4", 443U, 0x00000041U,
+        20U, 24000U, 18U, 18000U, true, true);
+    CHECK(detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        {media},
+        start + std::chrono::seconds{10}).empty());
+    media.original = {30U, 36000U};
+    media.reply = {28U, 28000U};
+    const auto refresh = detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        {media},
+        start + std::chrono::seconds{40});
+    REQUIRE(refresh.size() == 1U);
+    REQUIRE(refresh.front().refresh_only);
+    REQUIRE(refresh.front().confirmation_token != 0U);
+
+    detector.release_failed(refresh.front());
+    CHECK_FALSE(detector.retained_guard_peers(
+        start + std::chrono::seconds{96}).empty());
+    CHECK(detector.retained_guard_peers(
+        start + std::chrono::seconds{97}).empty());
+    CHECK_FALSE(detector.confirm_installed(
+        refresh.front(), start + std::chrono::seconds{40}));
+}
+
+TEST_CASE(
+    "unrelated source-wide UDP cannot protect stale WhatsApp signalling") {
+    auto unrelated_baseline = udp_flow(
+        "1.1.1.1", 443U, 0U, 10U, 1000U, 10U, 1000U, true, true);
+    auto unrelated_current = unrelated_baseline;
+    unrelated_current.original = {20U, 4000U};
+    unrelated_current.reply = {20U, 4000U};
+
+    CHECK(active_udp_media_guard_sources(
+              {unrelated_baseline},
+              {},
+              {unrelated_current},
+              {},
+              0x00FF0000U,
+              {0x00070000U})
+              .empty());
+
+    const UdpCallAffinityGuardPeer retained_peer{
+        ConntrackFlowFamily::Ipv4,
+        "192.168.1.44",
+        "64.176.66.4",
+        3478U,
+        0x00070000U};
+    auto retained_unchanged = udp_flow(
+        retained_peer.destination,
+        retained_peer.destination_port,
+        0U,
+        20U,
+        4000U,
+        20U,
+        4000U,
+        true,
+        true);
+    CHECK(active_udp_media_guard_sources(
+              {unrelated_baseline, retained_unchanged},
+              {},
+              {unrelated_current, retained_unchanged},
+              {retained_peer},
+              0x00FF0000U,
+              {0x00070000U})
+              .empty());
+}
+
+TEST_CASE(
+    "covered WhatsApp UDP guards without affinity publication and exact "
+    "retained peers guard outside coverage") {
+    auto covered_baseline = udp_flow(
+        "157.240.253.142",
+        443U,
+        0x00070000U,
+        10U,
+        1000U,
+        10U,
+        1000U,
+        true,
+        true);
+    auto covered_current = covered_baseline;
+    covered_current.original = {11U, 1200U};
+    covered_current.reply = {11U, 1200U};
+    const auto covered_sources = active_udp_media_guard_sources(
+        {covered_baseline},
+        {covered_current},
+        {},
+        {},
+        0x00FF0000U,
+        {0x00070000U});
+    const std::set<std::pair<ConntrackFlowFamily, std::string>>
+        expected_covered_sources{
+            {ConntrackFlowFamily::Ipv4, "192.168.1.44"}};
+    CHECK(covered_sources == expected_covered_sources);
+
+    const UdpCallAffinityGuardPeer retained_peer{
+        ConntrackFlowFamily::Ipv4,
+        "192.168.1.45",
+        "64.176.66.4",
+        3478U,
+        0x00070000U};
+    auto peer_baseline = udp_flow(
+        retained_peer.destination,
+        retained_peer.destination_port,
+        0x41U,
+        20U,
+        4000U,
+        20U,
+        4000U,
+        true,
+        true,
+        retained_peer.source);
+    auto peer_current = peer_baseline;
+    peer_current.original = {22U, 4400U};
+    peer_current.reply = {22U, 4400U};
+    const auto peer_sources = active_udp_media_guard_sources(
+        {peer_baseline},
+        {},
+        {peer_current},
+        {retained_peer},
+        0x00FF0000U,
+        {0x00070000U});
+    const std::set<std::pair<ConntrackFlowFamily, std::string>>
+        expected_peer_sources{
+            {ConntrackFlowFamily::Ipv4, "192.168.1.45"}};
+    CHECK(peer_sources == expected_peer_sources);
+
+    // A new exact promoted peer is trustworthy even when it appeared between
+    // the two bounded snapshots.
+    CHECK(active_udp_media_guard_sources(
+              {},
+              {},
+              {peer_current},
+              {retained_peer},
+              0x00FF0000U,
+              {0x00070000U}) == peer_sources);
+
+    auto wrong_mark = peer_current;
+    wrong_mark.mark = 0x00060041U;
+    CHECK(active_udp_media_guard_sources(
+              {},
+              {},
+              {wrong_mark},
+              {retained_peer},
+              0x00FF0000U,
+              {0x00070000U})
+              .empty());
+
+    auto wrong_covered_mark = covered_current;
+    wrong_covered_mark.mark = 0x00060000U;
+    CHECK(active_udp_media_guard_sources(
+              {covered_baseline},
+              {wrong_covered_mark},
+              {},
+              {},
+              0x00FF0000U,
+              {0x00070000U})
+              .empty());
+}
+
+TEST_CASE("retained call guard exposes only exact unexpired promoted peers") {
+    UdpCallAffinityDetector detector;
+    const auto start = UdpCallAffinityDetector::TimePoint{};
+    detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(10U, 12U)},
+        call_candidates(3U),
+        start);
+    CHECK(detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        call_candidates(5U),
+        start + std::chrono::seconds{5}).empty());
+    const auto promoted = detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        call_candidates(7U),
+        start + std::chrono::seconds{7});
+    REQUIRE_FALSE(promoted.empty());
+    CHECK(detector.retained_guard_peers(
+        start + std::chrono::seconds{7}).empty());
+    const auto selected = std::find_if(
+        promoted.begin(), promoted.end(), [](const auto& decision) {
+            return decision.destination == "64.176.66.4" &&
+                   decision.destination_port == 443U;
+    });
+    REQUIRE(selected != promoted.end());
+    REQUIRE(selected->confirmation_token != 0U);
+    REQUIRE(detector.confirm_installed(
+        *selected, start + std::chrono::seconds{7}));
+
+    const std::vector<UdpCallAffinityGuardPeer> expected{
+        {ConntrackFlowFamily::Ipv4,
+         "192.168.1.44",
+         "64.176.66.4",
+         443U,
+         0x00070000U}};
+    CHECK(detector.retained_guard_peers(
+              start + std::chrono::seconds{8}) == expected);
+    // A late failure/duplicate completion for an already consumed token has no
+    // authority to revoke or extend the confirmed lease.
+    detector.release_failed(*selected);
+    CHECK(detector.retained_guard_peers(
+              start + std::chrono::seconds{8}) == expected);
+    CHECK_FALSE(detector.confirm_installed(
+        *selected, start + std::chrono::seconds{8}));
+    CHECK_FALSE(detector.retained_guard_peers(
+        start + std::chrono::seconds{96}).empty());
+    CHECK(detector.retained_guard_peers(
+        start + std::chrono::seconds{97}).empty());
+
+    detector.reset();
+    CHECK(detector.retained_guard_peers(
+        start + std::chrono::seconds{9}).empty());
+    // A completion from before reset cannot repopulate guard authority.
+    CHECK_FALSE(detector.confirm_installed(
+        *selected, start + std::chrono::seconds{9}));
+    CHECK(detector.retained_guard_peers(
+        start + std::chrono::seconds{9}).empty());
+
+    // Even if the same exact peer is reserved again after reset, the old
+    // completion token cannot consume the new reservation.
+    detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(10U, 12U)},
+        call_candidates(3U),
+        start + std::chrono::seconds{10});
+    CHECK(detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        call_candidates(5U),
+        start + std::chrono::seconds{15}).empty());
+    const auto replacement = detector.observe(
+        epoch,
+        trustworthy_status,
+        0x00FF0000U,
+        targets,
+        {seed(16U, 18U)},
+        call_candidates(7U),
+        start + std::chrono::seconds{17});
+    const auto replacement_selected = std::find_if(
+        replacement.begin(), replacement.end(), [](const auto& decision) {
+            return decision.destination == "64.176.66.4" &&
+                   decision.destination_port == 443U;
+        });
+    REQUIRE(replacement_selected != replacement.end());
+    REQUIRE(replacement_selected->confirmation_token !=
+            selected->confirmation_token);
+    CHECK_FALSE(detector.confirm_installed(
+        *selected, start + std::chrono::seconds{17}));
+    detector.release_failed(*selected);
+    REQUIRE(detector.confirm_installed(
+        *replacement_selected, start + std::chrono::seconds{17}));
+    CHECK(detector.retained_guard_peers(
+              start + std::chrono::seconds{18}) == expected);
 }
 
 TEST_CASE("failed pair insertion releases its global retry budget") {
