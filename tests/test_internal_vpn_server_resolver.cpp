@@ -892,9 +892,11 @@ TEST_CASE(
         config, "sstp-peer-link"));
     CHECK(interface_event_affects_managed_runtime(config, "sstp8"));
     CHECK(interface_event_affects_managed_runtime(config, "l2tp7"));
+    CHECK(interface_event_affects_managed_runtime(config, "oc9"));
     CHECK(interface_event_affects_managed_runtime(config, "xfrms1"));
     CHECK(interface_event_affects_managed_runtime(config, "xfrms2"));
     CHECK_FALSE(interface_event_affects_managed_runtime(config, "ppp0"));
+    CHECK_FALSE(interface_event_affects_managed_runtime(config, "oc"));
     CHECK_FALSE(interface_event_affects_managed_runtime(config, "xfrms3"));
 
     InternalVpnRuntimeTarget active{};

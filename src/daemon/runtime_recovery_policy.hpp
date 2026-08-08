@@ -960,6 +960,85 @@ private:
     std::atomic<std::uint8_t> state_{0};
 };
 
+// Single-flight admission for a periodic operation which also has a manual
+// "run now" caller. Repeated periodic requests collapse into one trailing
+// run. A manual request remains observable as in-flight until that trailing
+// run actually completes; the API must not accept a second click merely
+// because the first request has only reached the blocking queue.
+class CoalescedManualSingleFlightGate {
+public:
+    struct Admission {
+        bool launch{false};
+        bool manual_accepted{false};
+    };
+
+    struct Completion {
+        bool launch_trailing{false};
+        bool manual_completed{false};
+    };
+
+    Admission request(bool manual) noexcept {
+        auto state = state_.load(std::memory_order_acquire);
+        for (;;) {
+            if (manual && (state & kManual) != 0) {
+                return {};
+            }
+
+            const bool launch = (state & kInFlight) == 0;
+            auto desired = state;
+            if (launch) {
+                desired = static_cast<std::uint8_t>(desired | kInFlight);
+            } else {
+                desired = static_cast<std::uint8_t>(desired | kPending);
+            }
+            if (manual) {
+                desired = static_cast<std::uint8_t>(desired | kManual);
+            }
+
+            if (state_.compare_exchange_weak(
+                    state,
+                    desired,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return Admission{launch, manual};
+            }
+        }
+    }
+
+    Completion complete() noexcept {
+        auto state = state_.load(std::memory_order_acquire);
+        for (;;) {
+            const bool manual = (state & kManual) != 0;
+            const bool trailing = (state & kPending) != 0;
+            const auto desired = trailing
+                ? static_cast<std::uint8_t>(kInFlight |
+                                            (manual ? kManual : 0U))
+                : static_cast<std::uint8_t>(0U);
+            if (state_.compare_exchange_weak(
+                    state,
+                    desired,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return Completion{trailing, manual && !trailing};
+            }
+        }
+    }
+
+    bool abort() noexcept {
+        return (state_.exchange(0, std::memory_order_acq_rel) & kManual) != 0;
+    }
+
+    bool manual_inflight() const noexcept {
+        return (state_.load(std::memory_order_acquire) & kManual) != 0;
+    }
+
+private:
+    static constexpr std::uint8_t kInFlight = 1U;
+    static constexpr std::uint8_t kPending = 2U;
+    static constexpr std::uint8_t kManual = 4U;
+    std::atomic<std::uint8_t> state_{0};
+};
+
 class RuntimeIncidentLatch {
 public:
     struct Decision {

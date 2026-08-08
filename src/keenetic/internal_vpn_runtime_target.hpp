@@ -55,6 +55,13 @@ struct InternalVpnRuntimeTarget {
     // unusable address.
     std::vector<std::string> dns_redirect_bypass_ingress_v4;
     std::vector<std::string> dns_redirect_bypass_ingress_v6;
+    // Exact router-owned destination addresses that must keep their original
+    // destination when DNS arrives from a verified OpenConnect peer. Every
+    // selector is an exact address from the current Netlink inventory; a
+    // generic REDIRECT would otherwise replace the client-selected local
+    // address with the ephemeral ocN address before firmware INPUT policy.
+    std::vector<std::string> dns_redirect_local_destinations_v4;
+    std::vector<std::string> dns_redirect_local_destinations_v6;
     std::vector<std::string> source_cidrs_v4;
     std::vector<std::string> source_cidrs_v6;
 };

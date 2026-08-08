@@ -2052,6 +2052,56 @@ TEST_CASE("kernel routing reconciliation converges after a partial rule failure"
     CHECK(rules.get_rules().front().table == new_rule.table);
 }
 
+TEST_CASE(
+    "build_firewall_global_prefilter: verified OpenConnect ingress separates "
+    "processed and bypassed client modes") {
+    auto cfg = parse_minimal_config(
+        R"({"route":{"inbound_interfaces":["br0"],"rules":[]}})");
+
+    InternalVpnRuntimeTarget openconnect;
+    openconnect.stable_id = "ndms-service:oc-server";
+    openconnect.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    openconnect.process_clients = true;
+    openconnect.verified_ingress_interfaces = {"oc7"};
+    openconnect.source_cidrs_v4 = {"172.16.5.0/24"};
+    openconnect.dns_redirect_local_destinations_v4 = {
+        "192.168.77.1/32"};
+
+    auto prefilter =
+        build_firewall_global_prefilter_for_runtime_targets(
+            cfg, {openconnect});
+    CHECK(
+        prefilter.include_source_cidrs_v4 ==
+        std::vector<std::string>{"172.16.5.0/24"});
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+    CHECK(
+        prefilter.dns_redirect_local_destination_selectors_v4 ==
+        std::vector<FirewallIngressDestinationSelector>{
+            {"oc7", "192.168.77.1/32"}});
+
+    openconnect.process_clients = false;
+    openconnect.dns_redirect_local_destinations_v4.clear();
+    prefilter = build_firewall_global_prefilter_for_runtime_targets(
+        cfg, {openconnect});
+    CHECK(prefilter.include_source_cidrs_v4.empty());
+    REQUIRE(prefilter.bypass_source_selectors_v4.size() == 1U);
+    CHECK(
+        prefilter.bypass_source_selectors_v4.front().interface ==
+        "oc7");
+    CHECK(
+        prefilter.bypass_source_selectors_v4.front().cidr ==
+        "172.16.5.0/24");
+    CHECK(
+        prefilter.dns_redirect_local_destination_selectors_v4.empty());
+
+    // An authoritative pool without a verified live ocN ingress remains
+    // fail-closed in exclusion mode.
+    openconnect.verified_ingress_interfaces.clear();
+    prefilter = build_firewall_global_prefilter_for_runtime_targets(
+        cfg, {openconnect});
+    CHECK(prefilter.bypass_source_selectors_v4.empty());
+}
+
 TEST_CASE("kernel routing reconciliation restores a replaced route when policy commit fails") {
     RecordingRoutingNetlink netlink;
     RouteTable routes(netlink);

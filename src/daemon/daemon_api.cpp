@@ -815,18 +815,26 @@ void Daemon::setup_api() {
     // Manual "measure now": the scheduled round is deliberately unhurried, so
     // there has to be a way to ask for a fresh figure on the spot.
     api_server_->post("/api/system/probes/run", [this]() -> std::string {
-        bool expected = false;
-        const bool scheduled = manual_probe_inflight_.compare_exchange_strong(expected, true);
-        if (scheduled) {
-            post_control_task([this]() {
-                try {
-                    probe_interfaces_now();
-                } catch (...) {
-                    manual_probe_inflight_.store(false);
-                    throw;
-                }
-                manual_probe_inflight_.store(false);
-            });
+        const auto admission =
+            interface_probe_gate_.request(/*manual=*/true);
+        bool scheduled = admission.manual_accepted;
+        if (admission.launch) {
+            bool posted = false;
+            try {
+                posted = post_control_task(
+                    [this]() { start_interface_probe_round(); },
+                    "manual-interface-probe");
+            } catch (...) {
+                // std::function/control-queue allocation may fail before the
+                // task owns the admitted round. Never leave the manual gate
+                // permanently busy in that case.
+                (void)interface_probe_gate_.abort();
+                scheduled = false;
+            }
+            if (!posted) {
+                (void)interface_probe_gate_.abort();
+                scheduled = false;
+            }
         }
         nlohmann::json response;
         response["ok"] = true;

@@ -185,6 +185,10 @@ bool is_sstp_service(std::string_view stable_id) {
     return stable_id == "ndms-service:sstp-server";
 }
 
+bool is_openconnect_service(std::string_view stable_id) {
+    return stable_id == "ndms-service:oc-server";
+}
+
 bool is_server_peer_name(
     const InternalVpnRuntimeTarget& target,
     std::string_view interface) {
@@ -194,10 +198,79 @@ bool is_server_peer_name(
     if (is_sstp_service(target.stable_id)) {
         return has_decimal_suffix(interface, "sstp");
     }
-    // Keenetic's OpenConnect server interface ownership is not exposed by
-    // the authoritative inventory yet. Fail closed instead of guessing from
-    // oc*/tun* names or from a source address alone.
+    if (is_openconnect_service(target.stable_id)) {
+        // The name alone is never authority. The caller additionally requires
+        // a live point-to-point peer whose remote address belongs to the
+        // current authoritative NDMS OpenConnect pool.
+        return has_decimal_suffix(interface, "oc");
+    }
     return false;
+}
+
+bool is_live_openconnect_peer(const DumpedInterface& interface) {
+    return interface.admin_up &&
+           interface.carrier != std::optional<bool>{false};
+}
+
+std::optional<std::string> canonical_host_selector(
+    const std::string& address) {
+    const auto parsed = parse_network(address);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    if (parsed->family == AF_INET) {
+        const bool unspecified = std::all_of(
+            parsed->bytes.begin(),
+            parsed->bytes.begin() + 4,
+            [](std::uint8_t byte) { return byte == 0U; });
+        if (unspecified) {
+            return std::nullopt;
+        }
+    } else {
+        const bool unspecified = std::all_of(
+            parsed->bytes.begin(),
+            parsed->bytes.end(),
+            [](std::uint8_t byte) { return byte == 0U; });
+        const bool link_local =
+            parsed->bytes[0] == 0xfeU &&
+            (parsed->bytes[1] & 0xc0U) == 0x80U;
+        if (unspecified || link_local) {
+            return std::nullopt;
+        }
+    }
+
+    char output[INET6_ADDRSTRLEN]{};
+    if (inet_ntop(
+            parsed->family,
+            parsed->bytes.data(),
+            output,
+            sizeof(output)) == nullptr) {
+        return std::nullopt;
+    }
+    return std::string{output} +
+           (parsed->family == AF_INET ? "/32" : "/128");
+}
+
+std::vector<std::string> router_local_destinations(
+    const std::vector<DumpedInterface>& interfaces,
+    int family) {
+    std::vector<std::string> result;
+    for (const auto& interface : interfaces) {
+        if (!interface.admin_up) {
+            continue;
+        }
+        const auto& addresses = family == AF_INET
+            ? interface.ipv4_addresses
+            : interface.ipv6_addresses;
+        for (const auto& address : addresses) {
+            if (const auto selector = canonical_host_selector(address)) {
+                result.push_back(*selector);
+            }
+        }
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
 }
 
 bool is_fixed_ike_server_interface(std::string_view interface) {
@@ -296,6 +369,8 @@ std::vector<std::string> resolve_internal_vpn_service_ingress_interfaces(
             continue;
         }
         if (is_server_peer_name(target, interface.name) &&
+            (!is_openconnect_service(target.stable_id) ||
+             is_live_openconnect_peer(interface)) &&
             interface_peer_belongs_to_target(interface, target)) {
             if (is_sstp_service(target.stable_id) &&
                 interface.master_interface ==
@@ -348,6 +423,24 @@ void refresh_internal_vpn_service_ingress_interfaces(
         }
         target.dns_redirect_bypass_ingress_v4.clear();
         target.dns_redirect_bypass_ingress_v6.clear();
+        target.dns_redirect_local_destinations_v4.clear();
+        target.dns_redirect_local_destinations_v6.clear();
+        if (target.match_kind ==
+                InternalVpnRuntimeMatchKind::source_pool &&
+            target.process_clients &&
+            is_openconnect_service(target.stable_id) &&
+            !target.verified_ingress_interfaces.empty()) {
+            if (!target.source_cidrs_v4.empty()) {
+                target.dns_redirect_local_destinations_v4 =
+                    router_local_destinations(
+                        live_interfaces, AF_INET);
+            }
+            if (!target.source_cidrs_v6.empty()) {
+                target.dns_redirect_local_destinations_v6 =
+                    router_local_destinations(
+                        live_interfaces, AF_INET6);
+            }
+        }
         if (target.match_kind !=
                 InternalVpnRuntimeMatchKind::source_pool ||
             !target.process_clients ||
@@ -383,7 +476,8 @@ bool internal_vpn_service_interface_may_affect_ingress(
            interface == "sstp-br-link" ||
            interface == "sstp-peer-link" ||
            has_decimal_suffix(interface, "l2tp") ||
-           has_decimal_suffix(interface, "sstp");
+           has_decimal_suffix(interface, "sstp") ||
+           has_decimal_suffix(interface, "oc");
 }
 
 } // namespace keen_pbr3

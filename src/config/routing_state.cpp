@@ -747,6 +747,10 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
         dns_redirect_bypass_sources_v4;
     std::set<std::pair<std::string, std::string>>
         dns_redirect_bypass_sources_v6;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_local_destinations_v4;
+    std::set<std::pair<std::string, std::string>>
+        dns_redirect_local_destinations_v6;
     for (const auto& target : internal_targets) {
         if (target.match_kind == InternalVpnRuntimeMatchKind::interface &&
             target.interface.has_value() &&
@@ -776,6 +780,19 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
                 for (const auto& cidr : target.source_cidrs_v6) {
                     dns_redirect_bypass_sources_v6.emplace(
                         interface, cidr);
+                }
+            }
+            for (const auto& interface :
+                 target.verified_ingress_interfaces) {
+                for (const auto& destination :
+                     target.dns_redirect_local_destinations_v4) {
+                    dns_redirect_local_destinations_v4.emplace(
+                        interface, destination);
+                }
+                for (const auto& destination :
+                     target.dns_redirect_local_destinations_v6) {
+                    dns_redirect_local_destinations_v6.emplace(
+                        interface, destination);
                 }
             }
         } else {
@@ -843,6 +860,16 @@ FirewallGlobalPrefilter build_firewall_global_prefilter_for_runtime_targets(
          dns_redirect_bypass_sources_v6) {
         prefilter.dns_redirect_bypass_source_selectors_v6.push_back(
             {interface, cidr});
+    }
+    for (const auto& [interface, destination] :
+         dns_redirect_local_destinations_v4) {
+        prefilter.dns_redirect_local_destination_selectors_v4.push_back(
+            {interface, destination});
+    }
+    for (const auto& [interface, destination] :
+         dns_redirect_local_destinations_v6) {
+        prefilter.dns_redirect_local_destination_selectors_v6.push_back(
+            {interface, destination});
     }
 
     if (legacy_inbound_is_restricted) {

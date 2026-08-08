@@ -579,6 +579,56 @@ TEST_CASE("single-flight refresh hands one pending request to an immediate rerun
     CHECK_FALSE(gate.complete());
 }
 
+TEST_CASE("manual single-flight stays active through its coalesced trailing run") {
+    CoalescedManualSingleFlightGate gate;
+
+    const auto periodic = gate.request(/*manual=*/false);
+    CHECK(periodic.launch);
+    CHECK_FALSE(periodic.manual_accepted);
+
+    const auto manual = gate.request(/*manual=*/true);
+    CHECK_FALSE(manual.launch);
+    CHECK(manual.manual_accepted);
+    CHECK(gate.manual_inflight());
+
+    // More timer ticks cannot build an unbounded queue, and another click is
+    // rejected until the accepted manual observation actually completes.
+    CHECK_FALSE(gate.request(/*manual=*/false).launch);
+    const auto duplicate_manual = gate.request(/*manual=*/true);
+    CHECK_FALSE(duplicate_manual.launch);
+    CHECK_FALSE(duplicate_manual.manual_accepted);
+
+    const auto first_completion = gate.complete();
+    CHECK(first_completion.launch_trailing);
+    CHECK_FALSE(first_completion.manual_completed);
+    CHECK(gate.manual_inflight());
+
+    const auto final_completion = gate.complete();
+    CHECK_FALSE(final_completion.launch_trailing);
+    CHECK(final_completion.manual_completed);
+    CHECK_FALSE(gate.manual_inflight());
+}
+
+TEST_CASE("aborting a manual single-flight releases its admission") {
+    CoalescedManualSingleFlightGate gate;
+    const auto periodic = gate.request(/*manual=*/false);
+    REQUIRE(periodic.launch);
+
+    // This is the exception-sensitive handoff shape: the manual request has
+    // been accepted as the one trailing round, but the active producer fails
+    // before it can transfer ownership to its executor/control queue.
+    const auto admission = gate.request(/*manual=*/true);
+    REQUIRE_FALSE(admission.launch);
+    REQUIRE(admission.manual_accepted);
+
+    CHECK(gate.abort());
+    CHECK_FALSE(gate.manual_inflight());
+
+    const auto retry = gate.request(/*manual=*/true);
+    CHECK(retry.launch);
+    CHECK(retry.manual_accepted);
+}
+
 TEST_CASE("observation gap recovery invalidates, cancels, reconciles, then coalesces refresh") {
     CoalescedSingleFlightGate refresh_gate;
     std::vector<std::string> events;

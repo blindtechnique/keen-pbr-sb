@@ -83,6 +83,17 @@ struct FirewallIngressSourceSelector {
     std::string cidr;
 };
 
+struct FirewallIngressDestinationSelector {
+    std::string interface;
+    std::string destination;
+
+    bool operator==(
+        const FirewallIngressDestinationSelector& other) const {
+        return interface == other.interface &&
+               destination == other.destination;
+    }
+};
+
 struct FirewallBridgeIngressSourceSelector {
     // Both names come from a verified live bridge topology. The source CIDR
     // comes from authoritative NDMS inventory. Backends must match all three
@@ -140,6 +151,14 @@ struct FirewallGlobalPrefilter {
         dns_redirect_bypass_source_selectors_v4;
     std::vector<FirewallIngressSourceSelector>
         dns_redirect_bypass_source_selectors_v6;
+    // DNS-only passthrough for a router-owned destination on a verified
+    // native-VPN ingress. Unlike the source selectors above, this keeps only
+    // the already-local resolver address out of REDIRECT; arbitrary external
+    // DNS remains subject to normal client DNS enforcement.
+    std::vector<FirewallIngressDestinationSelector>
+        dns_redirect_local_destination_selectors_v4;
+    std::vector<FirewallIngressDestinationSelector>
+        dns_redirect_local_destination_selectors_v6;
     bool skip_established_or_dnat{false};
     bool skip_marked_packets{false};
     // Restore only the keen-pbr-owned portion of the conntrack mark before
@@ -170,7 +189,9 @@ struct FirewallGlobalPrefilter {
 
     bool has_dns_redirect_bypass_source_cidrs() const {
         return !dns_redirect_bypass_source_selectors_v4.empty() ||
-               !dns_redirect_bypass_source_selectors_v6.empty();
+               !dns_redirect_bypass_source_selectors_v6.empty() ||
+               !dns_redirect_local_destination_selectors_v4.empty() ||
+               !dns_redirect_local_destination_selectors_v6.empty();
     }
 
     bool empty() const {

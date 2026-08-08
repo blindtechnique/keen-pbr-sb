@@ -245,6 +245,95 @@ TEST_CASE("dnsmasq access policy follows exact live server peers") {
 }
 
 TEST_CASE(
+    "OpenConnect ingress requires a live oc peer from the authoritative pool") {
+    InternalVpnRuntimeTarget openconnect;
+    openconnect.stable_id = "ndms-service:oc-server";
+    openconnect.match_kind = InternalVpnRuntimeMatchKind::source_pool;
+    openconnect.process_clients = true;
+    openconnect.source_cidrs_v4 = {"172.16.5.0/24"};
+
+    DumpedInterface lan;
+    lan.name = "br7";
+    lan.admin_up = true;
+    lan.ipv4_addresses = {"192.168.77.1/24"};
+
+    DumpedInterface session;
+    session.name = "oc9";
+    session.admin_up = true;
+    session.carrier = true;
+    session.ipv4_addresses = {"172.16.5.1/32"};
+    session.ipv4_peer_addresses = {"172.16.5.42/32"};
+
+    std::vector<InternalVpnRuntimeTarget> targets{openconnect};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {lan, session});
+    CHECK(
+        targets.front().verified_ingress_interfaces ==
+        std::vector<std::string>{"oc9"});
+    CHECK(
+        targets.front().dns_redirect_local_destinations_v4 ==
+        std::vector<std::string>{
+            "172.16.5.1/32",
+            "192.168.77.1/32",
+        });
+    CHECK(
+        build_dnsmasq_trusted_interfaces({}, targets) ==
+        std::vector<std::string>{"br*", "oc9"});
+
+    // The same verified peer remains exact authority for an exclusion, but
+    // exclusion bypasses keen-pbr entirely and needs no DNS-only exception.
+    openconnect.process_clients = false;
+    targets = {openconnect};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {lan, session});
+    CHECK(
+        targets.front().verified_ingress_interfaces ==
+        std::vector<std::string>{"oc9"});
+    CHECK(targets.front().dns_redirect_local_destinations_v4.empty());
+
+    // Name, source pool and live state are all mandatory. No individual
+    // observation is allowed to broaden native-VPN ownership on its own.
+    openconnect.process_clients = true;
+    session.name = "tun9";
+    targets = {openconnect};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {lan, session});
+    CHECK(targets.front().verified_ingress_interfaces.empty());
+
+    session.name = "oc9";
+    session.ipv4_peer_addresses = {"172.31.5.42/32"};
+    targets = {openconnect};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {lan, session});
+    CHECK(targets.front().verified_ingress_interfaces.empty());
+
+    session.ipv4_peer_addresses = {"172.16.5.42/32"};
+    session.admin_up = false;
+    targets = {openconnect};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {lan, session});
+    CHECK(targets.front().verified_ingress_interfaces.empty());
+
+    // A reconnect may allocate another dynamic ocN name. The next live
+    // inventory replaces the old selector; disconnect removes authority.
+    session.name = "oc12";
+    session.admin_up = true;
+    targets = {openconnect};
+    refresh_internal_vpn_service_ingress_interfaces(
+        targets, {lan, session});
+    CHECK(
+        targets.front().verified_ingress_interfaces ==
+        std::vector<std::string>{"oc12"});
+    refresh_internal_vpn_service_ingress_interfaces(targets, {lan});
+    CHECK(targets.front().verified_ingress_interfaces.empty());
+    CHECK(targets.front().dns_redirect_local_destinations_v4.empty());
+
+    CHECK(internal_vpn_service_interface_may_affect_ingress("oc9"));
+    CHECK_FALSE(internal_vpn_service_interface_may_affect_ingress("oc"));
+    CHECK_FALSE(internal_vpn_service_interface_may_affect_ingress("tun9"));
+}
+
+TEST_CASE(
     "addressless IKE ingress bypasses DNS redirect only until it has a "
     "usable local address") {
     InternalVpnRuntimeTarget ikev2;

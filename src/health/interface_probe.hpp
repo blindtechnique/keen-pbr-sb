@@ -19,6 +19,7 @@
 #include "url_tester.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -61,6 +62,15 @@ public:
         std::string interface;
     };
 
+    // A network observation is deliberately separate from publication. The
+    // daemon may replace the active routing generation while a slow HTTPS
+    // request is in flight; committing that old answer under a reused tag
+    // would make the new transport inherit stale health.
+    struct Observation {
+        Target target;
+        InterfaceProbeResult result;
+    };
+
     void set_url(std::string url) { url_ = std::move(url); }
     void set_timeout(std::chrono::milliseconds timeout) { timeout_ = timeout; }
     // A second attempt absorbs a single dropped packet without declaring a
@@ -73,6 +83,14 @@ public:
     // reachability changed since the previous completed probe; the first
     // observation only establishes a baseline.
     std::vector<std::string> probe(const std::vector<Target>& targets);
+
+    // Split form used by the daemon's generation-fenced async coordinator.
+    // measure() performs blocking I/O but does not mutate published state;
+    // commit() is cheap and may therefore run on the control loop after the
+    // caller has revalidated the runtime generation and target identity.
+    std::vector<Observation> measure(const std::vector<Target>& targets);
+    std::vector<std::string> commit(
+        const std::vector<Observation>& observations);
 
     std::optional<InterfaceProbeResult> result_for(const std::string& tag) const;
 
@@ -95,5 +113,14 @@ private:
     std::map<std::string, InterfaceProbeResult> results_;
     URLTester tester_;
 };
+
+// A probe answer is publishable only for the exact routing generation and
+// target identity it measured. Tags alone are insufficient because an apply
+// may reuse a friendly tag with a different mark or device.
+bool interface_probe_snapshot_is_current(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t current_runtime_generation,
+    const std::vector<InterfaceProbe::Target>& expected_targets,
+    const std::vector<InterfaceProbe::Target>& current_targets) noexcept;
 
 } // namespace keen_pbr3

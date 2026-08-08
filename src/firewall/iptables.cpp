@@ -463,6 +463,23 @@ std::string IptablesFirewall::build_dns_nat_script(
                 selector.interface,
                 selector.cidr);
         }
+        const auto& local_destination_selectors = ipv6
+            ? prefilter.dns_redirect_local_destination_selectors_v6
+            : prefilter.dns_redirect_local_destination_selectors_v4;
+        for (const auto& selector : local_destination_selectors) {
+            if (selector.interface.empty() ||
+                selector.destination.empty()) {
+                continue;
+            }
+            for (const char* proto : {"udp", "tcp"}) {
+                s += keen_pbr3::format(
+                    "-A {} -i {} -d {} -p {} --dport 53 -j RETURN\n",
+                    DNS_NAT_CHAIN_NAME,
+                    selector.interface,
+                    selector.destination,
+                    proto);
+            }
+        }
         for (const auto& [set_name, declaration] : udp_peer_sets) {
             const bool set_is_ipv6 = declaration.first == AF_INET6;
             if (set_is_ipv6 != ipv6) {

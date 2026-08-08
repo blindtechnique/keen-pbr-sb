@@ -619,6 +619,11 @@ private:
     void schedule_catalog_refresh();
     // Runs a probe round immediately, for the manual refresh button.
     void probe_interfaces_now();
+    // Starts an already-admitted single-flight round. Completion either
+    // launches the one coalesced trailing request or releases manual state.
+    void start_interface_probe_round() noexcept;
+    void start_interface_probe_round_impl();
+    void complete_interface_probe_round() noexcept;
     CacheCommitCallback make_guarded_cache_commit_callback();
     void refresh_lists_and_maybe_reload_async(
         std::string source = "autoupdate");
@@ -912,10 +917,10 @@ private:
     // the IPC handler and again into the worker closure.
     std::shared_ptr<const ResolverGenerationSnapshot>
         resolver_generation_snapshot_;
-    // Multiple open pages can request the same manual probe at once. Keep at
-    // most one queued/running round so a weak router never forks duplicate
-    // health checks for a single click or refresh cycle.
-    std::atomic<bool> manual_probe_inflight_{false};
+    // Scheduled and manual requests share one worker round. Slow or dead
+    // tunnels may hold a probe for multiple seconds, so bound queued work to
+    // one coalesced trailing round and retain manual state through completion.
+    CoalescedManualSingleFlightGate interface_probe_gate_;
 
 #ifdef WITH_API
     std::unique_ptr<ApiServer> api_server_;

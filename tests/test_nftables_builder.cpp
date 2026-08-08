@@ -1097,6 +1097,48 @@ TEST_CASE(
   CHECK(routing.dump().find("@myset") != std::string::npos);
 }
 
+TEST_CASE(
+    "nft OpenConnect local DNS exceptions precede global redirects and stay "
+    "destination-scoped") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.dns_redirect_local_destination_selectors_v4 = {
+      {"oc7", "192.168.77.1/32"}};
+  prefilter.dns_redirect_local_destination_selectors_v6 = {
+      {"oc8", "2001:db8:77::1/128"}};
+
+  const auto dns = T::build_dns_redirect_rules_json(prefilter);
+  REQUIRE(dns.is_array());
+  REQUIRE(dns.size() == 6U);
+
+  std::size_t first_redirect = dns.size();
+  std::size_t ipv4_bypass_count = 0U;
+  std::size_t ipv6_bypass_count = 0U;
+  for (std::size_t index = 0; index < dns.size(); ++index) {
+    const auto serialized = dns[index].dump();
+    if (serialized.find("\"redirect\"") != std::string::npos) {
+      first_redirect = std::min(first_redirect, index);
+    }
+    if (serialized.find("192.168.77.1") != std::string::npos) {
+      ++ipv4_bypass_count;
+      CHECK(serialized.find("oc7") != std::string::npos);
+      CHECK(serialized.find("\"daddr\"") != std::string::npos);
+      CHECK(serialized.find("\"accept\"") != std::string::npos);
+      CHECK(first_redirect == dns.size());
+    }
+    if (serialized.find("2001:db8:77::1") != std::string::npos) {
+      ++ipv6_bypass_count;
+      CHECK(serialized.find("oc8") != std::string::npos);
+      CHECK(serialized.find("\"daddr\"") != std::string::npos);
+      CHECK(serialized.find("\"accept\"") != std::string::npos);
+      CHECK(first_redirect == dns.size());
+    }
+  }
+  CHECK(ipv4_bypass_count == 2U);
+  CHECK(ipv6_bypass_count == 2U);
+  REQUIRE(first_redirect < dns.size());
+  CHECK(first_redirect == 4U);
+}
+
 TEST_CASE("nft pooled VPN bypass fails closed without exact ingress") {
   FirewallGlobalPrefilter prefilter;
   prefilter.bypass_source_selectors_v4 = {

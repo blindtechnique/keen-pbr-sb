@@ -2236,6 +2236,52 @@ TEST_CASE(
   CHECK(routing.find("kpbr4_local") != std::string::npos);
 }
 
+TEST_CASE(
+    "iptables OpenConnect keeps only verified local DNS destinations before "
+    "the global redirect") {
+  FirewallGlobalPrefilter prefilter;
+  prefilter.dns_redirect_local_destination_selectors_v4 = {
+      {"oc7", "192.168.77.1/32"}};
+  prefilter.dns_redirect_local_destination_selectors_v6 = {
+      {"oc8", "2001:db8:77::1/128"}};
+
+  const auto dns = T::build_dns_nat_script(prefilter);
+  const auto udp_bypass = dns.find(
+      "-A KeenPbrDnsRdr -i oc7 -d 192.168.77.1/32 "
+      "-p udp --dport 53 -j RETURN\n");
+  const auto tcp_bypass = dns.find(
+      "-A KeenPbrDnsRdr -i oc7 -d 192.168.77.1/32 "
+      "-p tcp --dport 53 -j RETURN\n");
+  const auto udp_redirect = dns.find(
+      "-A KeenPbrDnsRdr -p udp --dport 53 -j REDIRECT "
+      "--to-ports 53\n");
+  const auto tcp_redirect = dns.find(
+      "-A KeenPbrDnsRdr -p tcp --dport 53 -j REDIRECT "
+      "--to-ports 53\n");
+  REQUIRE(udp_bypass != std::string::npos);
+  REQUIRE(tcp_bypass != std::string::npos);
+  REQUIRE(udp_redirect != std::string::npos);
+  REQUIRE(tcp_redirect != std::string::npos);
+  CHECK(udp_bypass < udp_redirect);
+  CHECK(tcp_bypass < tcp_redirect);
+  CHECK(dns.find("2001:db8:77::1") == std::string::npos);
+  // Only the confirmed local router address is exempt. DNS to any external
+  // destination on oc7 still reaches the global redirect below it.
+  CHECK(dns.find("-A KeenPbrDnsRdr -i oc7 -j RETURN") ==
+        std::string::npos);
+
+  const auto dns_v6 = T::build_dns_nat_script(
+      prefilter,
+      /*dns_redirect=*/true,
+      /*router_origin_snat=*/false,
+      {},
+      /*ipv6=*/true);
+  CHECK(dns_v6.find(
+      "-A KeenPbrDnsRdr -i oc8 -d 2001:db8:77::1/128 "
+      "-p udp --dport 53 -j RETURN\n") != std::string::npos);
+  CHECK(dns_v6.find("192.168.77.1") == std::string::npos);
+}
+
 TEST_CASE("iptables policy rules classify verified service source pools") {
   FirewallGlobalPrefilter prefilter;
   prefilter.inbound_interfaces =

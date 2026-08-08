@@ -196,6 +196,65 @@ void append_source_bypass_rules(
     append_family("ip6", selectors_v6);
 }
 
+void append_local_dns_destination_bypass_rules(
+    nlohmann::json& commands,
+    const char* chain,
+    const std::vector<FirewallIngressDestinationSelector>& selectors_v4,
+    const std::vector<FirewallIngressDestinationSelector>& selectors_v6) {
+    const auto append_family =
+        [&commands, chain](
+            const char* protocol,
+            const std::vector<FirewallIngressDestinationSelector>&
+                selectors) {
+            for (const auto& selector : selectors) {
+                if (selector.interface.empty() ||
+                    selector.destination.empty()) {
+                    continue;
+                }
+                for (const char* transport : {"udp", "tcp"}) {
+                    nlohmann::json expr = nlohmann::json::array();
+                    expr.push_back({{"match", {
+                        {"op", "=="},
+                        {"left", {{"meta", {{"key", "iifname"}}}}},
+                        {"right", selector.interface}
+                    }}});
+                    expr.push_back({{"match", {
+                        {"op", "=="},
+                        {"left", {{"payload", {
+                            {"protocol", protocol},
+                            {"field", "daddr"}
+                        }}}},
+                        {"right", cidr_list_to_nft_rhs(
+                            {selector.destination})}
+                    }}});
+                    expr.push_back({{"match", {
+                        {"op", "=="},
+                        {"left", {{"meta", {{"key", "l4proto"}}}}},
+                        {"right", transport}
+                    }}});
+                    expr.push_back({{"match", {
+                        {"op", "=="},
+                        {"left", {{"payload", {
+                            {"protocol", transport},
+                            {"field", "dport"}
+                        }}}},
+                        {"right", 53}
+                    }}});
+                    expr.push_back({{"counter", nullptr}});
+                    expr.push_back({{"accept", nullptr}});
+                    commands.push_back({{"add", {{"rule", {
+                        {"family", "inet"},
+                        {"table", kNftTableName},
+                        {"chain", chain},
+                        {"expr", expr}
+                    }}}}});
+                }
+            }
+        };
+    append_family("ip", selectors_v4);
+    append_family("ip6", selectors_v6);
+}
+
 void append_extended_inbound_guard_rules(
     nlohmann::json& commands,
     const FirewallGlobalPrefilter& prefilter,
@@ -969,6 +1028,11 @@ nlohmann::json NftablesFirewall::build_dns_redirect_rules_json(
         DNS_NAT_CHAIN_NAME,
         prefilter.dns_redirect_bypass_source_selectors_v4,
         prefilter.dns_redirect_bypass_source_selectors_v6);
+    append_local_dns_destination_bypass_rules(
+        commands,
+        DNS_NAT_CHAIN_NAME,
+        prefilter.dns_redirect_local_destination_selectors_v4,
+        prefilter.dns_redirect_local_destination_selectors_v6);
     append_extended_inbound_guard_rules(
         commands, prefilter, DNS_NAT_CHAIN_NAME);
 

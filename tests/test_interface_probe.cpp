@@ -157,3 +157,41 @@ TEST_CASE("interface probe stamps every result with its measurement time") {
     CHECK(result->measured_at >= before);
     CHECK(result->measured_at <= std::chrono::steady_clock::now());
 }
+
+TEST_CASE("interface probe does not publish a measurement before guarded commit") {
+    auto transport = std::make_shared<RecordingTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+
+    const auto observations = probe.measure(
+        {InterfaceProbe::Target{"tunnel", 0x80000, "hy1"}});
+
+    REQUIRE(observations.size() == 1);
+    CHECK_FALSE(probe.result_for("tunnel").has_value());
+
+    CHECK(probe.commit(observations).empty());
+    const auto result = probe.result_for("tunnel");
+    REQUIRE(result.has_value());
+    CHECK(result->success);
+    CHECK(result->attributed);
+}
+
+TEST_CASE("interface probe snapshot fence rejects a reused tag") {
+    const std::vector<InterfaceProbe::Target> measured{
+        InterfaceProbe::Target{"friendly", 0x80000, "hy1"}};
+
+    CHECK(interface_probe_snapshot_is_current(12, 12, measured, measured));
+
+    auto changed_mark = measured;
+    changed_mark.front().fwmark = 0x90000;
+    CHECK_FALSE(interface_probe_snapshot_is_current(
+        12, 12, measured, changed_mark));
+
+    auto changed_device = measured;
+    changed_device.front().interface = "hy2";
+    CHECK_FALSE(interface_probe_snapshot_is_current(
+        12, 12, measured, changed_device));
+
+    CHECK_FALSE(interface_probe_snapshot_is_current(
+        12, 13, measured, measured));
+}
