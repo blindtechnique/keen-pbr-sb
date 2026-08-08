@@ -3679,6 +3679,7 @@ void Daemon::cancel_idle_stall_observer() noexcept {
     udp_call_affinity_detector_.reset();
     idle_stall_destination_selectors_.clear();
     udp_call_affinity_destination_selectors_.clear();
+    meta_quic_destinations_by_owned_mark_.clear();
     idle_stall_coverage_generation_.fetch_add(
         1U, std::memory_order_acq_rel);
 }
@@ -3711,6 +3712,7 @@ void Daemon::schedule_idle_stall_observer_after(
         udp_call_affinity_detector_.reset();
         idle_stall_destination_selectors_.clear();
         udp_call_affinity_destination_selectors_.clear();
+        meta_quic_destinations_by_owned_mark_.clear();
         idle_stall_coverage_generation_.fetch_add(
             1U, std::memory_order_acq_rel);
         try {
@@ -3727,6 +3729,7 @@ void Daemon::schedule_idle_stall_observer_after(
         udp_call_affinity_detector_.reset();
         idle_stall_destination_selectors_.clear();
         udp_call_affinity_destination_selectors_.clear();
+        meta_quic_destinations_by_owned_mark_.clear();
         idle_stall_coverage_generation_.fetch_add(
             1U, std::memory_order_acq_rel);
     }
@@ -3735,9 +3738,12 @@ void Daemon::schedule_idle_stall_observer_after(
 void Daemon::reset_idle_stall_observer(
     bool schedule_if_eligible) noexcept {
     cancel_idle_stall_observer();
+    const auto meta_scope = active_packaged_meta_quic_recovery_scope(
+        config_, firewall_state_.get_rules());
     if (!schedule_if_eligible || !routing_runtime_active_ ||
         !reconnect_unmarked_flows_on_routing_change_enabled(config_) ||
-        reconnect_owned_flows_on_routing_change_list_names(config_).empty()) {
+        (reconnect_owned_flows_on_routing_change_list_names(config_).empty() &&
+         meta_scope.empty())) {
         return;
     }
     idle_stall_observer_enabled_.store(true, std::memory_order_release);
@@ -3756,8 +3762,15 @@ void Daemon::run_idle_stall_observer() noexcept {
             return;
         }
 
-        const auto configured_list_names =
+        auto configured_list_names =
             reconnect_owned_flows_on_routing_change_list_names(config_);
+        const auto meta_scope = active_packaged_meta_quic_recovery_scope(
+            config_, firewall_state_.get_rules());
+        const auto meta_companion_list_names =
+            meta_scope.companion_list_names();
+        configured_list_names.insert(
+            meta_companion_list_names.begin(),
+            meta_companion_list_names.end());
         const auto selected_list_names =
             active_destination_only_reconnect_list_names(
                 configured_list_names,
@@ -3808,6 +3821,7 @@ void Daemon::run_idle_stall_observer() noexcept {
             udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_.clear();
             udp_call_affinity_destination_selectors_.clear();
+            meta_quic_destinations_by_owned_mark_.clear();
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
             schedule_idle_stall_observer_after(
@@ -3848,16 +3862,49 @@ void Daemon::run_idle_stall_observer() noexcept {
                 udp_call_affinity_detector_.reset();
             }
         }
+
+        ConntrackRecoveryPolicyDestinationsByOwnedMark
+            meta_quic_destinations_by_owned_mark;
+        bool meta_coverage_complete = true;
+        for (const auto& [owned_mark, companion_list_names] :
+             meta_scope.companion_list_names_by_owned_mark) {
+            const auto meta_coverage =
+                collect_conntrack_destination_retirement_coverage(
+                    destination_retirement_plan_for_lists(
+                        companion_list_names),
+                    applied_list_content_state_);
+            auto mark_destinations = meta_coverage.destination_selectors;
+            std::sort(mark_destinations.begin(), mark_destinations.end());
+            mark_destinations.erase(
+                std::unique(
+                    mark_destinations.begin(), mark_destinations.end()),
+                mark_destinations.end());
+            if (meta_coverage.partial() || mark_destinations.empty() ||
+                runtime_recovery_detail::
+                    contains_global_destination_selector(meta_coverage)) {
+                meta_coverage_complete = false;
+                break;
+            }
+            meta_quic_destinations_by_owned_mark.emplace(
+                owned_mark, std::move(mark_destinations));
+        }
+        if (!meta_coverage_complete) {
+            meta_quic_destinations_by_owned_mark.clear();
+        }
         const bool idle_observation_scope_changed =
             destination_selectors != idle_stall_destination_selectors_ ||
             whatsapp_destination_selectors !=
-                udp_call_affinity_destination_selectors_;
+                udp_call_affinity_destination_selectors_ ||
+            meta_quic_destinations_by_owned_mark !=
+                meta_quic_destinations_by_owned_mark_;
         if (idle_observation_scope_changed) {
             idle_stall_detector_.reset();
             udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_ = destination_selectors;
             udp_call_affinity_destination_selectors_ =
                 whatsapp_destination_selectors;
+            meta_quic_destinations_by_owned_mark_ =
+                meta_quic_destinations_by_owned_mark;
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
         }
@@ -3903,6 +3950,7 @@ void Daemon::run_idle_stall_observer() noexcept {
              call_affinity_targets,
              retained_affinity_sources,
              whatsapp_destination_selectors,
+             meta_quic_destinations_by_owned_mark,
              destination_selectors =
                  std::move(destination_selectors)]() mutable {
                 AtomicFlagResetGuard inflight_guard(
@@ -3950,7 +3998,8 @@ void Daemon::run_idle_stall_observer() noexcept {
                                     /*allow_foreign_mark_bits_for_media=*/true},
                                 retained_affinity_sources,
                                 whatsapp_destination_selectors,
-                                call_affinity_marks);
+                                call_affinity_marks,
+                                meta_quic_destinations_by_owned_mark);
                     }
                 } catch (const std::exception& error) {
                     failure_detail = error.what();
@@ -4624,21 +4673,34 @@ void Daemon::commit_idle_stall_observation(
         observation.invalid_destination_selectors == 0U &&
         observation.invalid_media_seed_destination_selectors == 0U &&
         !observation.media_seed_destination_input_truncated &&
+        observation.invalid_recovery_policy_destination_selectors == 0U &&
+        !observation.recovery_policy_destination_input_truncated &&
         observation.invalid_media_guard_sources == 0U &&
         !observation.invalid_owned_mask;
     std::set<IdleStallFlowKey> whatsapp_latency_flow_keys;
     for (const auto& flow : observation.media_seed_flows) {
         whatsapp_latency_flow_keys.insert(idle_stall_key_from(flow));
     }
+    std::set<IdleStallFlowKey> meta_quic_flow_keys;
+    for (const auto& flow : observation.recovery_policy_flows) {
+        if (flow.protocol != ConntrackFlowProtocol::Udp ||
+            flow.destination_port != 443U) {
+            continue;
+        }
+        meta_quic_flow_keys.insert(idle_stall_key_from(flow));
+    }
     scan.flows.reserve(observation.flows.size());
     for (const auto& flow : observation.flows) {
         const auto key = idle_stall_key_from(flow);
+        const auto recovery_policy =
+            meta_quic_flow_keys.count(key) != 0U
+                ? IdleStallRecoveryPolicy::packaged_meta_quic
+                : whatsapp_latency_flow_keys.count(key) != 0U
+                      ? IdleStallRecoveryPolicy::
+                            packaged_whatsapp_ip_companion
+                      : IdleStallRecoveryPolicy::standard;
         scan.flows.push_back(idle_stall_sample_from(
-            flow,
-            whatsapp_latency_flow_keys.count(key) != 0U
-                ? IdleStallRecoveryPolicy::
-                      packaged_whatsapp_ip_companion
-                : IdleStallRecoveryPolicy::standard));
+            flow, recovery_policy));
     }
 
     const auto observation_time = UdpCallAffinityDetector::Clock::now();
@@ -4690,8 +4752,8 @@ void Daemon::commit_idle_stall_observation(
         !observation.flows.empty() ||
         !observation.source_wide_udp_flows.empty();
     if (decisions.empty()) {
-        const auto whatsapp_fast_followup =
-            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+        const auto latency_fast_followup =
+            idle_stall_detector_.take_latency_sensitive_fast_followup_delay();
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
         // A bounded/truncated snapshot cannot produce a safe decision. Back
@@ -4699,8 +4761,8 @@ void Daemon::commit_idle_stall_observation(
         // five seconds on a small router.
         auto next_interval = IDLE_STALL_QUIET_SCAN_INTERVAL;
         if (scan.status.trustworthy()) {
-            if (whatsapp_fast_followup.has_value()) {
-                next_interval = *whatsapp_fast_followup;
+            if (latency_fast_followup.has_value()) {
+                next_interval = *latency_fast_followup;
             } else if (affinity_fast_followup) {
                 next_interval = UDP_CALL_AFFINITY_FAST_SCAN_INTERVAL;
             } else if (relevant_flows_observed ||
@@ -4716,13 +4778,19 @@ void Daemon::commit_idle_stall_observation(
     }
 
     std::vector<IdleStallPendingDelete> pending_deletes;
-    std::vector<ConntrackExactForwardedFlow> media_baselines;
+    std::vector<IdleStallFlowSample> initial_media_samples;
+    initial_media_samples.reserve(
+        observation.flows.size() +
+        observation.source_wide_udp_flows.size());
     pending_deletes.reserve(decisions.size());
     for (const auto& flow : observation.flows) {
-        if (flow.protocol == ConntrackFlowProtocol::Udp && flow.assured) {
-            media_baselines.push_back(flow);
-        }
+        initial_media_samples.push_back(idle_stall_sample_from(flow));
     }
+    for (const auto& flow : observation.source_wide_udp_flows) {
+        initial_media_samples.push_back(idle_stall_sample_from(flow));
+    }
+    auto media_baselines =
+        idle_stall_media_baselines_from(initial_media_samples);
     for (const auto& decision : decisions) {
         const auto flow = std::find_if(
             observation.flows.begin(),
@@ -4747,7 +4815,7 @@ void Daemon::commit_idle_stall_observation(
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
         const auto fast_followup =
-            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+            idle_stall_detector_.take_latency_sensitive_fast_followup_delay();
         const auto next_interval =
             fast_followup.value_or(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
         schedule_idle_stall_observer_after(next_interval);
@@ -4839,42 +4907,36 @@ void Daemon::commit_idle_stall_observation(
                             current_observation.
                                     invalid_destination_selectors != 0U;
 
-                        std::set<std::pair<ConntrackFlowFamily, std::string>>
-                            protected_sources;
+                        std::set<IdleStallFlowKey>
+                            media_protected_pending_flows;
                         if (!live_scope_changed) {
+                            std::vector<IdleStallFlowSample>
+                                current_media_samples;
+                            current_media_samples.reserve(
+                                current_observation.
+                                    source_wide_udp_flows.size());
                             for (const auto& current :
                                  current_observation.
                                      source_wide_udp_flows) {
-                                if (current.protocol !=
-                                        ConntrackFlowProtocol::Udp ||
-                                    !current.assured) {
-                                    continue;
-                                }
-                                const auto baseline = std::find_if(
-                                    media_baselines.begin(),
-                                    media_baselines.end(),
-                                    [&current](const auto& candidate) {
-                                        return idle_stall_key_from(candidate) ==
-                                               idle_stall_key_from(current);
+                                current_media_samples.push_back(
+                                    idle_stall_sample_from(current));
+                            }
+                            for (const auto& pending : pending_deletes) {
+                                const auto protected_by_media = std::any_of(
+                                    current_media_samples.begin(),
+                                    current_media_samples.end(),
+                                    [&pending,
+                                     &media_baselines](const auto& current) {
+                                        return idle_stall_live_media_flow_protects_pending(
+                                            pending.decision.recovery_policy,
+                                            pending.decision.flow,
+                                            current,
+                                            media_baselines,
+                                            IDLE_STALL_APPLICATION_REPLY_BYTES);
                                     });
-                                const bool new_bidirectional_media =
-                                    baseline == media_baselines.end() &&
-                                    current.original.packets != 0U &&
-                                    current.reply.packets != 0U;
-                                const bool existing_media_progressed =
-                                    baseline != media_baselines.end() &&
-                                    (current.original.packets >
-                                         baseline->original.packets ||
-                                     current.original.bytes >
-                                         baseline->original.bytes) &&
-                                    (current.reply.packets >
-                                         baseline->reply.packets ||
-                                     current.reply.bytes >
-                                         baseline->reply.bytes);
-                                if (new_bidirectional_media ||
-                                    existing_media_progressed) {
-                                    protected_sources.emplace(
-                                        current.family, current.source);
+                                if (protected_by_media) {
+                                    media_protected_pending_flows.insert(
+                                        pending.decision.flow);
                                 }
                             }
                         }
@@ -4884,11 +4946,10 @@ void Daemon::commit_idle_stall_observation(
                                 std::remove_if(
                                     pending_deletes.begin(),
                                     pending_deletes.end(),
-                                    [&protected_sources,
+                                    [&media_protected_pending_flows,
                                      &media_protected](const auto& pending) {
-                                        if (protected_sources.count(
-                                                {pending.flow.family,
-                                                 pending.flow.source}) == 0U) {
+                                        if (media_protected_pending_flows.count(
+                                                pending.decision.flow) == 0U) {
                                             return false;
                                         }
                                         ++media_protected;
@@ -5089,7 +5150,7 @@ void Daemon::commit_idle_stall_observation(
                     }
                     const auto fast_followup =
                         idle_stall_detector_.
-                            take_whatsapp_fast_followup_delay();
+                            take_latency_sensitive_fast_followup_delay();
                     const auto next_interval = fast_followup.value_or(
                         IDLE_STALL_ACTIVE_SCAN_INTERVAL);
                     schedule_idle_stall_observer_after(next_interval);
@@ -5106,7 +5167,7 @@ void Daemon::commit_idle_stall_observation(
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
         const auto fast_followup =
-            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+            idle_stall_detector_.take_latency_sensitive_fast_followup_delay();
         const auto next_interval =
             fast_followup.value_or(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
         schedule_idle_stall_observer_after(next_interval);

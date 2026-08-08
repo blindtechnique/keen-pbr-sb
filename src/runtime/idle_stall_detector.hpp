@@ -35,6 +35,7 @@ enum class IdleStallFlowReadiness : std::uint8_t {
 enum class IdleStallRecoveryPolicy : std::uint8_t {
     standard,
     packaged_whatsapp_ip_companion,
+    packaged_meta_quic,
 };
 
 struct IdleStallFlowKey {
@@ -130,6 +131,7 @@ struct IdleStallScan {
 
 enum class IdleStallDecisionReason : std::uint8_t {
     idle_request_without_reply,
+    idle_meta_quic_request_without_meaningful_reply,
     idle_fastnat_rotation,
 };
 
@@ -139,19 +141,26 @@ struct IdleStallDeleteDecision {
         IdleStallDecisionReason::idle_request_without_reply};
     IdleStallEpoch epoch;
     std::uint64_t attempt_id{0};
+    IdleStallRecoveryPolicy recovery_policy{
+        IdleStallRecoveryPolicy::standard};
 };
 
 struct IdleStallDetectorOptions {
-    // Strong reconnect is currently enabled only for explicitly selected
-    // latency-sensitive lists (the packaged WhatsApp IP companion). Thirty
-    // seconds keeps the worst pre-emptive recovery window short without
-    // turning the observer into a per-packet watchdog.
+    // Strong reconnect is enabled only for provenance-qualified list
+    // policies. Thirty seconds keeps the ordinary/WhatsApp recovery window
+    // short without turning the observer into a per-packet watchdog.
     std::chrono::seconds idle_threshold{30};
     std::chrono::seconds confirmation_delay{5};
-    // The immutable packaged WhatsApp IP companion is the only policy that
-    // may request one early confirmation scan. The ordinary cadence and every
-    // safety/rate boundary remain unchanged.
+    // Latency-sensitive packaged policies may request one early confirmation
+    // scan. The ordinary cadence and every safety/rate boundary remain
+    // unchanged.
     std::chrono::seconds whatsapp_confirmation_delay{1};
+    // The packaged Meta profile is provenance-qualified by the caller and
+    // applies only to UDP/443. It may detect a stale reused QUIC tuple sooner,
+    // while the exact-delete path still waits for a separate one-shot
+    // confirmation and live counter revalidation.
+    std::chrono::seconds meta_quic_idle_threshold{15};
+    std::chrono::seconds meta_quic_confirmation_delay{1};
     bool rotate_idle_fastnat_tcp{true};
     std::chrono::seconds fastnat_idle_rotation_threshold{30};
     // Active bidirectional UDP refreshes this guard on every five-second
@@ -161,6 +170,7 @@ struct IdleStallDetectorOptions {
     // Bound repeated recovery for one client without leaving a newly stalled
     // replacement tuple untouched for two minutes.
     std::chrono::seconds source_cooldown{30};
+    std::chrono::seconds meta_quic_source_cooldown{90};
     std::chrono::seconds global_rate_window{60};
     // Small bidirectional control exchanges must not make a long-idle
     // application flow look healthy. A direction has application progress
@@ -192,7 +202,7 @@ public:
         // The fast hint belongs to one completed observation. If its caller
         // did not consume it before another snapshot arrived, it is stale and
         // must not create a delayed burst of one-second scans.
-        whatsapp_fast_followup_requested_ = false;
+        latency_fast_followup_delay_.reset();
         prune_limits(now);
 
         if (!scan.epoch.valid() || scan.owned_mark_mask == 0U ||
@@ -288,7 +298,8 @@ public:
                     options_.tiny_keepalive_max_bytes_per_direction,
                 reply_byte_delta >
                     options_.tiny_keepalive_max_bytes_per_direction,
-                now - state.last_activity_at >= options_.idle_threshold});
+                now - state.last_activity_at >=
+                    idle_threshold_for(sample.recovery_policy)});
         }
 
         for (auto iterator = states_.begin(); iterator != states_.end();) {
@@ -314,6 +325,12 @@ public:
             const auto protected_until = now + options_.active_media_hold;
             auto& current_until = active_media_until_[source];
             current_until = std::max(current_until, protected_until);
+            if (current.reply_application_progress) {
+                auto& application_until =
+                    active_reply_media_until_[source];
+                application_until =
+                    std::max(application_until, protected_until);
+            }
         }
 
         struct Candidate {
@@ -328,9 +345,15 @@ public:
             }
             auto& state = *current.state;
             const auto source = source_key(current.sample->key);
+            const bool meta_quic_policy =
+                state.recovery_policy ==
+                IdleStallRecoveryPolicy::packaged_meta_quic;
+            const auto& media_guard = meta_quic_policy
+                ? active_reply_media_until_
+                : active_media_until_;
             const bool media_protected =
-                active_media_until_.count(source) != 0U &&
-                now < active_media_until_.at(source);
+                media_guard.count(source) != 0U &&
+                now < media_guard.at(source);
 
             if (media_protected ||
                 current.reply_application_progress) {
@@ -341,16 +364,26 @@ public:
                     confirmation_delay_for(state.recovery_policy)) {
                     candidates.push_back(Candidate{
                         current.sample->key,
-                        IdleStallDecisionReason::
-                            idle_request_without_reply});
+                        meta_quic_policy
+                            ? IdleStallDecisionReason::
+                                  idle_meta_quic_request_without_meaningful_reply
+                            : IdleStallDecisionReason::
+                                  idle_request_without_reply});
                 }
             } else if (current.was_idle &&
                        current.original_application_progress) {
                 state.suspect_since = now;
                 if (state.recovery_policy ==
-                    IdleStallRecoveryPolicy::
-                        packaged_whatsapp_ip_companion) {
-                    whatsapp_fast_followup_requested_ = true;
+                        IdleStallRecoveryPolicy::
+                            packaged_whatsapp_ip_companion ||
+                    state.recovery_policy ==
+                        IdleStallRecoveryPolicy::packaged_meta_quic) {
+                    const auto requested_delay =
+                        confirmation_delay_for(state.recovery_policy);
+                    if (!latency_fast_followup_delay_.has_value() ||
+                        requested_delay < *latency_fast_followup_delay_) {
+                        latency_fast_followup_delay_ = requested_delay;
+                    }
                 }
             } else if (options_.rotate_idle_fastnat_tcp &&
                        current.sample->fastnat &&
@@ -407,7 +440,8 @@ public:
         for (const auto& candidate : candidates) {
             auto& state = states_.at(candidate.key);
             const auto source = source_key(candidate.key);
-            const auto cooldown = source_cooldown_until_.find(source);
+            const auto cooldown = source_cooldown_until_.find(
+                cooldown_key(candidate.key, state.recovery_policy));
             if (cooldown != source_cooldown_until_.end() &&
                 now < cooldown->second) {
                 // A source in cooldown must generate a new post-idle request
@@ -442,11 +476,13 @@ public:
                 candidate.key,
                 candidate.reason,
                 scan.epoch,
-                attempt_id});
+                attempt_id,
+                state.recovery_policy});
             pending_attempts_[candidate.key] = PendingAttempt{
                 scan.epoch,
                 candidate.reason,
-                attempt_id};
+                attempt_id,
+                state.recovery_policy};
         }
 
         return decisions;
@@ -470,7 +506,8 @@ public:
         if (pending == pending_attempts_.end() ||
             pending->second.epoch != decision.epoch ||
             pending->second.reason != decision.reason ||
-            pending->second.attempt_id != decision.attempt_id) {
+            pending->second.attempt_id != decision.attempt_id ||
+            pending->second.recovery_policy != decision.recovery_policy) {
             return false;
         }
         pending_attempts_.erase(pending);
@@ -481,15 +518,20 @@ public:
         prune_limits(now);
         decision_times_.push_back(now);
         const auto source = source_key(decision.flow);
-        const auto cooldown_until = now + options_.source_cooldown;
-        auto& current_until = source_cooldown_until_[source];
+        const auto cooldown_until =
+            now + source_cooldown_for(decision.recovery_policy);
+        auto& current_until = source_cooldown_until_[cooldown_key(
+            decision.flow, decision.recovery_policy)];
         current_until = std::max(current_until, cooldown_until);
-        // Cooldown is source-wide. Every old suspect for that source must be
-        // retired at the same successful commit; otherwise a sibling tuple
-        // could immediately spend another token without a new client request.
+        // Preserve the historical source-wide ordinary/WhatsApp cooldown,
+        // while isolating the packaged Meta QUIC policy. Recovering media must
+        // not suppress a WhatsApp reconnect on the same phone (or vice versa).
         for (auto& [key, state] : states_) {
             if (source_key(key).family != source.family ||
-                source_key(key).source != source.source) {
+                source_key(key).source != source.source ||
+                cooldown_key(key, state.recovery_policy).category !=
+                    cooldown_key(
+                        decision.flow, decision.recovery_policy).category) {
                 continue;
             }
             state.suspect_since.reset();
@@ -502,27 +544,33 @@ public:
         active_epoch_.reset();
         states_.clear();
         active_media_until_.clear();
+        active_reply_media_until_.clear();
         pending_attempts_.clear();
         source_cooldown_until_.clear();
         decision_times_.clear();
-        whatsapp_fast_followup_requested_ = false;
+        latency_fast_followup_delay_.reset();
     }
 
     std::size_t tracked_flow_count() const noexcept {
         return states_.size();
     }
 
-    // Consume the coalesced request emitted by one observation containing one
-    // or more newly suspected packaged WhatsApp flows. A caller may schedule
-    // one early scan with this delay; subsequent observations fall back to the
-    // normal cadence unless another flow becomes newly suspect.
+    // Backward-compatible name retained for focused WhatsApp tests and callers
+    // outside the daemon. The hint may now also originate from the separately
+    // provenance-qualified packaged Meta QUIC policy.
     std::optional<std::chrono::seconds>
     take_whatsapp_fast_followup_delay() noexcept {
-        if (!whatsapp_fast_followup_requested_) {
+        return take_latency_sensitive_fast_followup_delay();
+    }
+
+    std::optional<std::chrono::seconds>
+    take_latency_sensitive_fast_followup_delay() noexcept {
+        if (!latency_fast_followup_delay_.has_value()) {
             return std::nullopt;
         }
-        whatsapp_fast_followup_requested_ = false;
-        return options_.whatsapp_confirmation_delay;
+        const auto delay = latency_fast_followup_delay_;
+        latency_fast_followup_delay_.reset();
+        return delay;
     }
 
 private:
@@ -533,6 +581,24 @@ private:
         bool operator<(const SourceKey& other) const noexcept {
             return std::tie(family, source) <
                    std::tie(other.family, other.source);
+        }
+    };
+
+    enum class CooldownClass : std::uint8_t {
+        ordinary_and_whatsapp,
+        meta_quic,
+    };
+
+    struct CooldownKey {
+        SourceKey source;
+        CooldownClass category{
+            CooldownClass::ordinary_and_whatsapp};
+
+        bool operator<(const CooldownKey& other) const noexcept {
+            return std::tie(source.family, source.source, category) <
+                   std::tie(other.source.family,
+                            other.source.source,
+                            other.category);
         }
     };
 
@@ -549,10 +615,22 @@ private:
         IdleStallDecisionReason reason{
             IdleStallDecisionReason::idle_request_without_reply};
         std::uint64_t attempt_id{0};
+        IdleStallRecoveryPolicy recovery_policy{
+            IdleStallRecoveryPolicy::standard};
     };
 
     static SourceKey source_key(const IdleStallFlowKey& key) {
         return SourceKey{key.family, key.source};
+    }
+
+    static CooldownKey cooldown_key(
+        const IdleStallFlowKey& key,
+        IdleStallRecoveryPolicy policy) {
+        return CooldownKey{
+            source_key(key),
+            policy == IdleStallRecoveryPolicy::packaged_meta_quic
+                ? CooldownClass::meta_quic
+                : CooldownClass::ordinary_and_whatsapp};
     }
 
     static bool valid_key(const IdleStallFlowKey& key) noexcept {
@@ -562,6 +640,12 @@ private:
 
     static bool eligible_sample(const IdleStallFlowSample& sample,
                                 std::uint32_t owned_mark_mask) noexcept {
+        if (sample.recovery_policy ==
+                IdleStallRecoveryPolicy::packaged_meta_quic &&
+            (sample.key.protocol != IdleStallProtocol::udp ||
+             sample.key.destination_port != 443U)) {
+            return false;
+        }
         const bool state_matches_protocol =
             (sample.key.protocol == IdleStallProtocol::tcp &&
              sample.readiness ==
@@ -592,17 +676,39 @@ private:
 
     std::chrono::seconds confirmation_delay_for(
         IdleStallRecoveryPolicy policy) const noexcept {
-        return policy == IdleStallRecoveryPolicy::
-                             packaged_whatsapp_ip_companion
-            ? options_.whatsapp_confirmation_delay
-            : options_.confirmation_delay;
+        if (policy == IdleStallRecoveryPolicy::
+                          packaged_whatsapp_ip_companion) {
+            return options_.whatsapp_confirmation_delay;
+        }
+        if (policy ==
+            IdleStallRecoveryPolicy::packaged_meta_quic) {
+            return options_.meta_quic_confirmation_delay;
+        }
+        return options_.confirmation_delay;
+    }
+
+    std::chrono::seconds idle_threshold_for(
+        IdleStallRecoveryPolicy policy) const noexcept {
+        return policy ==
+                       IdleStallRecoveryPolicy::packaged_meta_quic
+            ? options_.meta_quic_idle_threshold
+            : options_.idle_threshold;
+    }
+
+    std::chrono::seconds source_cooldown_for(
+        IdleStallRecoveryPolicy policy) const noexcept {
+        return policy ==
+                       IdleStallRecoveryPolicy::packaged_meta_quic
+            ? options_.meta_quic_source_cooldown
+            : options_.source_cooldown;
     }
 
     void reset_observation_continuity() noexcept {
         states_.clear();
         active_media_until_.clear();
+        active_reply_media_until_.clear();
         pending_attempts_.clear();
-        whatsapp_fast_followup_requested_ = false;
+        latency_fast_followup_delay_.reset();
     }
 
     std::uint64_t allocate_attempt_id() noexcept {
@@ -635,6 +741,14 @@ private:
                 ++iterator;
             }
         }
+        for (auto iterator = active_reply_media_until_.begin();
+             iterator != active_reply_media_until_.end();) {
+            if (now >= iterator->second) {
+                iterator = active_reply_media_until_.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
     }
 
     void validate_options() const {
@@ -644,10 +758,18 @@ private:
                 std::chrono::seconds::zero() ||
             options_.whatsapp_confirmation_delay >
                 options_.confirmation_delay ||
+            options_.meta_quic_idle_threshold <=
+                std::chrono::seconds::zero() ||
+            options_.meta_quic_confirmation_delay <=
+                std::chrono::seconds::zero() ||
+            options_.meta_quic_confirmation_delay >
+                options_.confirmation_delay ||
             options_.fastnat_idle_rotation_threshold <=
                 std::chrono::seconds::zero() ||
             options_.active_media_hold <= std::chrono::seconds::zero() ||
             options_.source_cooldown <= std::chrono::seconds::zero() ||
+            options_.meta_quic_source_cooldown <=
+                std::chrono::seconds::zero() ||
             options_.global_rate_window <= std::chrono::seconds::zero() ||
             options_.max_tracked_flows == 0U ||
             options_.max_decisions_per_scan == 0U ||
@@ -661,11 +783,114 @@ private:
     std::optional<IdleStallEpoch> active_epoch_;
     std::map<IdleStallFlowKey, FlowState> states_;
     std::map<SourceKey, TimePoint> active_media_until_;
+    std::map<SourceKey, TimePoint> active_reply_media_until_;
     std::map<IdleStallFlowKey, PendingAttempt> pending_attempts_;
-    std::map<SourceKey, TimePoint> source_cooldown_until_;
+    std::map<CooldownKey, TimePoint> source_cooldown_until_;
     std::deque<TimePoint> decision_times_;
     std::uint64_t next_attempt_id_{0};
-    bool whatsapp_fast_followup_requested_{false};
+    std::optional<std::chrono::seconds> latency_fast_followup_delay_;
 };
+
+// Revalidation must preserve the historical broad UDP-media protection for
+// ordinary/WhatsApp recovery, but a Meta QUIC keepalive on the exact stalled
+// tuple is not proof that application delivery resumed. A newly appeared
+// bidirectional flow is always protected; an existing Meta flow needs
+// meaningful downstream byte progress.
+inline bool idle_stall_live_media_progress_protects(
+    IdleStallRecoveryPolicy policy,
+    const IdleStallFlowCounters& current,
+    const std::optional<IdleStallFlowCounters>& baseline,
+    std::uint64_t application_reply_threshold = 256U) noexcept {
+    if (!baseline.has_value()) {
+        return current.original_packets != 0U &&
+               current.reply_packets != 0U;
+    }
+    if (current.original_packets < baseline->original_packets ||
+        current.original_bytes < baseline->original_bytes ||
+        current.reply_packets < baseline->reply_packets ||
+        current.reply_bytes < baseline->reply_bytes) {
+        return false;
+    }
+    if (policy == IdleStallRecoveryPolicy::packaged_meta_quic) {
+        return current.reply_bytes - baseline->reply_bytes >
+               application_reply_threshold;
+    }
+    const bool original_progress =
+        current.original_packets > baseline->original_packets ||
+        current.original_bytes > baseline->original_bytes;
+    const bool reply_progress =
+        current.reply_packets > baseline->reply_packets ||
+        current.reply_bytes > baseline->reply_bytes;
+    return original_progress && reply_progress;
+}
+
+using IdleStallMediaBaselines =
+    std::map<IdleStallFlowKey, IdleStallFlowCounters>;
+
+inline IdleStallMediaBaselines idle_stall_media_baselines_from(
+    const std::vector<IdleStallFlowSample>& samples) {
+    IdleStallMediaBaselines baselines;
+    for (const auto& sample : samples) {
+        if (sample.key.protocol != IdleStallProtocol::udp ||
+            sample.readiness != IdleStallFlowReadiness::udp_assured) {
+            continue;
+        }
+        const auto [iterator, inserted] =
+            baselines.emplace(sample.key, sample.counters);
+        if (!inserted) {
+            // Both semantic views come from one snapshot and normally carry
+            // identical counters. Keep the maxima if they ever differ so a
+            // later regression fails closed instead of inventing progress.
+            iterator->second.original_packets = std::max(
+                iterator->second.original_packets,
+                sample.counters.original_packets);
+            iterator->second.original_bytes = std::max(
+                iterator->second.original_bytes,
+                sample.counters.original_bytes);
+            iterator->second.reply_packets = std::max(
+                iterator->second.reply_packets,
+                sample.counters.reply_packets);
+            iterator->second.reply_bytes = std::max(
+                iterator->second.reply_bytes,
+                sample.counters.reply_bytes);
+        }
+    }
+    return baselines;
+}
+
+// Meta revalidation is exact-tuple aware. Tiny bidirectional progress on the
+// pending QUIC tuple is still a keepalive and does not block recovery. A
+// different existing UDP tuple retains the historical broad call guard, a
+// genuinely new bidirectional tuple protects immediately, and meaningful
+// downstream progress on the pending tuple protects it directly.
+inline bool idle_stall_live_media_flow_protects_pending(
+    IdleStallRecoveryPolicy pending_policy,
+    const IdleStallFlowKey& pending_key,
+    const IdleStallFlowSample& current,
+    const IdleStallMediaBaselines& baselines,
+    std::uint64_t application_reply_threshold = 256U) noexcept {
+    if (current.key.protocol != IdleStallProtocol::udp ||
+        current.readiness != IdleStallFlowReadiness::udp_assured ||
+        current.key.family != pending_key.family ||
+        current.key.source != pending_key.source) {
+        return false;
+    }
+
+    const auto baseline = baselines.find(current.key);
+    const std::optional<IdleStallFlowCounters> baseline_counters =
+        baseline == baselines.end()
+            ? std::nullopt
+            : std::optional<IdleStallFlowCounters>{baseline->second};
+    const auto progress_policy =
+        pending_policy == IdleStallRecoveryPolicy::packaged_meta_quic &&
+                current.key == pending_key
+            ? IdleStallRecoveryPolicy::packaged_meta_quic
+            : IdleStallRecoveryPolicy::standard;
+    return idle_stall_live_media_progress_protects(
+        progress_policy,
+        current.counters,
+        baseline_counters,
+        application_reply_threshold);
+}
 
 } // namespace keen_pbr3

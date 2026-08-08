@@ -875,6 +875,174 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "ConntrackManager recovery policy view requires both destination and exact owned mark") {
+    const std::string snapshot =
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.44 dst=57.144.244.192 sport=45640 dport=443 "
+        "packets=40 bytes=32000 "
+        "src=57.144.244.192 dst=192.168.1.44 sport=443 dport=45640 "
+        "packets=38 bytes=30000 [ASSURED] [SEEN_REPLY] "
+        "mark=393216 zone=0 use=2\n"
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.45 dst=57.144.244.193 sport=45641 dport=443 "
+        "packets=20 bytes=16000 "
+        "src=57.144.244.193 dst=192.168.1.45 sport=443 dport=45641 "
+        "packets=18 bytes=14000 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n"
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.46 dst=149.154.167.50 sport=45642 dport=443 "
+        "packets=10 bytes=8000 "
+        "src=149.154.167.50 dst=192.168.1.46 sport=443 dport=45642 "
+        "packets=8 bytes=6000 [ASSURED] [SEEN_REPLY] "
+        "mark=393216 zone=0 use=2\n";
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    const std::vector<std::string> empty_strings;
+    const std::set<std::uint32_t> empty_marks;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"57.144.244.0/24", "149.154.160.0/20"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{},
+        empty_strings,
+        empty_strings,
+        empty_marks,
+        {{0x00060000U, {"57.144.244.0/24"}}});
+
+    REQUIRE(observation.flows.size() == 3U);
+    REQUIRE(observation.recovery_policy_flows.size() == 1U);
+    CHECK(observation.recovery_policy_flows.front().source ==
+          "192.168.1.44");
+    CHECK(observation.recovery_policy_flows.front().destination ==
+          "57.144.244.192");
+    CHECK(observation.recovery_policy_flows.front().mark ==
+          0x00060000U);
+}
+
+TEST_CASE(
+    "ConntrackManager recovery policy authority fails closed before snapshot IO") {
+    std::size_t snapshot_calls = 0U;
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot_calls](std::size_t) {
+            ++snapshot_calls;
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{}};
+        });
+    const std::vector<std::string> empty_strings;
+    const std::set<std::uint32_t> empty_marks;
+
+    const auto invalid_selector =
+        manager.observe_forwarded_destination_flows(
+            {"57.144.244.0/24"},
+            {"192.168.1.1/24"},
+            0x00FF0000U,
+            ConntrackFlowObservationOptions{},
+            empty_strings,
+            empty_strings,
+            empty_marks,
+            {{0x00060000U, {"not-a-network"}}});
+    CHECK(invalid_selector.
+              invalid_recovery_policy_destination_selectors == 1U);
+    CHECK(invalid_selector.recovery_policy_flows.empty());
+
+    const auto invalid_mark = manager.observe_forwarded_destination_flows(
+        {"57.144.244.0/24"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{},
+        empty_strings,
+        empty_strings,
+        empty_marks,
+        {{0x01060000U, {"57.144.244.0/24"}}});
+    CHECK(invalid_mark.invalid_owned_mask);
+    CHECK(invalid_mark.recovery_policy_flows.empty());
+
+    const auto truncated = manager.observe_forwarded_destination_flows(
+        {"57.144.244.0/24"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{
+            /*ipv6_enabled=*/true,
+            /*max_flows=*/8U,
+            /*max_destination_input_cidrs=*/1U,
+            /*max_snapshot_bytes=*/64U * 1024U,
+            /*max_snapshot_lines=*/8U},
+        empty_strings,
+        empty_strings,
+        empty_marks,
+        {{0x00060000U,
+          {"57.144.244.0/24", "157.240.0.0/16"}}});
+    CHECK(truncated.recovery_policy_destination_input_truncated);
+    CHECK(truncated.recovery_policy_flows.empty());
+    CHECK(snapshot_calls == 0U);
+}
+
+TEST_CASE(
+    "ConntrackManager preserves recovery destination association per exact mark") {
+    const std::string snapshot =
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.40 dst=57.144.244.10 sport=45000 dport=443 "
+        "packets=10 bytes=1000 "
+        "src=57.144.244.10 dst=192.168.1.40 sport=443 dport=45000 "
+        "packets=9 bytes=900 [ASSURED] [SEEN_REPLY] "
+        "mark=393216 zone=0 use=2\n"
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.41 dst=157.240.10.10 sport=45001 dport=443 "
+        "packets=10 bytes=1000 "
+        "src=157.240.10.10 dst=192.168.1.41 sport=443 dport=45001 "
+        "packets=9 bytes=900 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n"
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.42 dst=157.240.10.11 sport=45002 dport=443 "
+        "packets=10 bytes=1000 "
+        "src=157.240.10.11 dst=192.168.1.42 sport=443 dport=45002 "
+        "packets=9 bytes=900 [ASSURED] [SEEN_REPLY] "
+        "mark=393216 zone=0 use=2\n"
+        "ipv4 2 udp 17 120 "
+        "src=192.168.1.43 dst=57.144.244.11 sport=45003 dport=443 "
+        "packets=10 bytes=1000 "
+        "src=57.144.244.11 dst=192.168.1.43 sport=443 dport=45003 "
+        "packets=9 bytes=900 [ASSURED] [SEEN_REPLY] "
+        "mark=458752 zone=0 use=2\n";
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"57.144.244.0/24", "157.240.0.0/16"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        ConntrackFlowObservationOptions{},
+        {},
+        {},
+        {},
+        {{0x00060000U, {"57.144.244.0/24"}},
+         {0x00070000U, {"157.240.0.0/16"}}});
+
+    REQUIRE(observation.flows.size() == 4U);
+    REQUIRE(observation.recovery_policy_flows.size() == 2U);
+    CHECK(observation.recovery_policy_flows[0].source == "192.168.1.40");
+    CHECK(observation.recovery_policy_flows[0].mark == 0x00060000U);
+    CHECK(observation.recovery_policy_flows[1].source == "192.168.1.41");
+    CHECK(observation.recovery_policy_flows[1].mark == 0x00070000U);
+}
+
+TEST_CASE(
     "ConntrackManager media views retain foreign bits without broadening ordinary flows") {
     const std::string snapshot =
         "ipv4 2 udp 17 120 "
@@ -954,7 +1122,9 @@ TEST_CASE(
                 /*max_snapshot_bytes=*/64U * 1024U,
                 /*max_snapshot_lines=*/8U},
             {"192.168.1.44"},
-            {"31.13.64.0/18"});
+            {"31.13.64.0/18"},
+            {},
+            {{0x00070000U, {"31.13.64.0/18"}}});
     };
 
     SUBCASE("one identity can populate every semantic view") {
@@ -963,10 +1133,13 @@ TEST_CASE(
         REQUIRE(observation.flows.size() == 1U);
         REQUIRE(observation.source_wide_udp_flows.size() == 1U);
         REQUIRE(observation.media_seed_flows.size() == 1U);
+        REQUIRE(observation.recovery_policy_flows.size() == 1U);
         CHECK(observation.flows.front().destination == "31.13.66.10");
         CHECK(observation.source_wide_udp_flows.front().destination ==
               "31.13.66.10");
         CHECK(observation.media_seed_flows.front().destination ==
+              "31.13.66.10");
+        CHECK(observation.recovery_policy_flows.front().destination ==
               "31.13.66.10");
     }
 
@@ -976,6 +1149,7 @@ TEST_CASE(
         REQUIRE(observation.flows.size() == 1U);
         REQUIRE(observation.source_wide_udp_flows.size() == 1U);
         REQUIRE(observation.media_seed_flows.size() == 1U);
+        REQUIRE(observation.recovery_policy_flows.size() == 1U);
         CHECK(observation.source_wide_udp_flows.front().destination ==
               "31.13.66.10");
     }

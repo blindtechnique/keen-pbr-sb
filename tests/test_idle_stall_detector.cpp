@@ -59,7 +59,10 @@ IdleStallFlowSample udp_sample(
     std::uint64_t original_bytes,
     std::uint64_t reply_packets,
     std::uint64_t reply_bytes,
-    std::uint32_t mark = 0U) {
+    std::uint32_t mark = 0U,
+    IdleStallRecoveryPolicy recovery_policy =
+        IdleStallRecoveryPolicy::standard,
+    std::uint16_t destination_port = 443U) {
     return IdleStallFlowSample{
         IdleStallFlowKey{
             IdleStallAddressFamily::ipv4,
@@ -67,7 +70,7 @@ IdleStallFlowSample udp_sample(
             std::move(source),
             std::move(destination),
             source_port,
-            443,
+            destination_port,
             mark},
         IdleStallFlowCounters{
             original_packets,
@@ -76,7 +79,7 @@ IdleStallFlowSample udp_sample(
             reply_bytes},
         IdleStallFlowReadiness::udp_assured,
         false,
-        IdleStallRecoveryPolicy::standard};
+        recovery_policy};
 }
 
 IdleStallScan scan(
@@ -366,6 +369,254 @@ TEST_CASE(
     CHECK_FALSE(
         reset_detector.take_whatsapp_fast_followup_delay().has_value());
     CHECK(reset_detector.tracked_flow_count() == 0U);
+}
+
+TEST_CASE(
+    "IdleStallDetector confirms a packaged Meta QUIC stall after one second") {
+    auto flow = udp_sample(
+        "192.168.1.44",
+        "57.144.244.192",
+        45640,
+        40,
+        32000,
+        38,
+        30000,
+        0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    IdleStallDetector detector;
+    CHECK(detector.observe(scan({flow}), at(0s)).empty());
+
+    flow.counters.original_packets += 5;
+    flow.counters.original_bytes += 600;
+    flow.counters.reply_packets += 1;
+    flow.counters.reply_bytes += 120;
+    CHECK(detector.observe(scan({flow}), at(15s)).empty());
+    CHECK(detector.take_latency_sensitive_fast_followup_delay() ==
+          std::optional<std::chrono::seconds>{1s});
+    CHECK(detector.observe(scan({flow}), at(15s + 999ms)).empty());
+
+    const auto decisions = detector.observe(scan({flow}), at(16s));
+    REQUIRE(decisions.size() == 1U);
+    CHECK(decisions.front().flow == flow.key);
+    CHECK(decisions.front().reason ==
+          IdleStallDecisionReason::
+              idle_meta_quic_request_without_meaningful_reply);
+    CHECK(decisions.front().recovery_policy ==
+          IdleStallRecoveryPolicy::packaged_meta_quic);
+    CHECK(decisions.front().epoch == (IdleStallEpoch{1U, 1U}));
+    CHECK(decisions.front().attempt_id != 0U);
+
+    auto too_early = udp_sample(
+        "192.168.1.45",
+        "57.144.244.193",
+        45641,
+        10,
+        1000,
+        10,
+        1000,
+        0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    IdleStallDetector boundary_detector;
+    CHECK(boundary_detector.observe(scan({too_early}), at(0s)).empty());
+    too_early.counters.original_packets += 3;
+    too_early.counters.original_bytes += 600;
+    CHECK(boundary_detector.observe(
+        scan({too_early}), at(15s - 1ms)).empty());
+    CHECK_FALSE(boundary_detector.
+                    take_latency_sensitive_fast_followup_delay().has_value());
+}
+
+TEST_CASE(
+    "IdleStallDetector cancels Meta recovery when downstream payload resumes") {
+    auto flow = udp_sample(
+        "192.168.1.44",
+        "57.144.244.192",
+        45640,
+        40,
+        32000,
+        38,
+        30000,
+        0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    IdleStallDetector detector;
+    CHECK(detector.observe(scan({flow}), at(0s)).empty());
+
+    flow.counters.original_packets += 5;
+    flow.counters.original_bytes += 600;
+    flow.counters.reply_packets += 1;
+    flow.counters.reply_bytes += 120;
+    CHECK(detector.observe(scan({flow}), at(15s)).empty());
+    REQUIRE(detector.take_latency_sensitive_fast_followup_delay().has_value());
+
+    flow.counters.reply_packets += 2;
+    flow.counters.reply_bytes += 257;
+    CHECK(detector.observe(scan({flow}), at(15s + 500ms)).empty());
+    CHECK_FALSE(detector.
+                    take_latency_sensitive_fast_followup_delay().has_value());
+    CHECK(detector.observe(scan({flow}), at(17s)).empty());
+}
+
+TEST_CASE(
+    "IdleStallDetector rejects Meta policy outside UDP port 443") {
+    auto wrong_port = udp_sample(
+        "192.168.1.44",
+        "57.144.244.192",
+        45640,
+        10,
+        1000,
+        10,
+        1000,
+        0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        3478U);
+    auto wrong_protocol = tcp_sample(
+        "192.168.1.45",
+        "57.144.244.193",
+        45641,
+        10,
+        1000,
+        10,
+        1000,
+        0x00060000U,
+        false,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    IdleStallDetector detector;
+    CHECK(detector.observe(
+        scan({wrong_port, wrong_protocol}), at(0s)).empty());
+    CHECK(detector.tracked_flow_count() == 0U);
+
+    auto ordinary = udp_sample(
+        "192.168.1.46", "57.144.244.194", 45642,
+        10, 1000, 10, 1000);
+    IdleStallDetector ordinary_detector;
+    CHECK(ordinary_detector.observe(scan({ordinary}), at(0s)).empty());
+    ordinary.counters.original_packets += 3;
+    ordinary.counters.original_bytes += 600;
+    CHECK(ordinary_detector.observe(scan({ordinary}), at(31s)).empty());
+    CHECK_FALSE(ordinary_detector.
+                    take_latency_sensitive_fast_followup_delay().has_value());
+}
+
+TEST_CASE(
+    "Meta live revalidation is exact-tuple aware across deduplicated views") {
+    const auto pending = udp_sample(
+        "192.168.1.44", "57.144.244.10", 45640,
+        10, 1000, 10, 1000, 0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    const auto unrelated = udp_sample(
+        "192.168.1.44", "64.176.66.4", 45641,
+        8, 800, 8, 800, 0U,
+        IdleStallRecoveryPolicy::standard,
+        3478U);
+    const auto baselines = idle_stall_media_baselines_from(
+        {pending, unrelated, pending, unrelated});
+    REQUIRE(baselines.size() == 2U);
+
+    auto tiny_pending = pending;
+    tiny_pending.counters.original_packets += 1U;
+    tiny_pending.counters.original_bytes += 120U;
+    tiny_pending.counters.reply_packets += 1U;
+    tiny_pending.counters.reply_bytes += 120U;
+    CHECK_FALSE(idle_stall_live_media_flow_protects_pending(
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        pending.key,
+        tiny_pending,
+        baselines));
+    CHECK_FALSE(idle_stall_live_media_flow_protects_pending(
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        pending.key,
+        unrelated,
+        baselines));
+
+    auto progressing_unrelated = unrelated;
+    progressing_unrelated.counters.original_packets += 1U;
+    progressing_unrelated.counters.original_bytes += 80U;
+    progressing_unrelated.counters.reply_packets += 1U;
+    progressing_unrelated.counters.reply_bytes += 80U;
+    CHECK(idle_stall_live_media_flow_protects_pending(
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        pending.key,
+        progressing_unrelated,
+        baselines));
+
+    const auto new_bidirectional = udp_sample(
+        "192.168.1.44", "64.176.66.5", 45642,
+        1, 100, 1, 100, 0U,
+        IdleStallRecoveryPolicy::standard,
+        3478U);
+    CHECK(idle_stall_live_media_flow_protects_pending(
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        pending.key,
+        new_bidirectional,
+        baselines));
+
+    auto payload = pending;
+    payload.counters.original_packets += 1U;
+    payload.counters.original_bytes += 120U;
+    payload.counters.reply_packets += 2U;
+    payload.counters.reply_bytes += 257U;
+    CHECK(idle_stall_live_media_flow_protects_pending(
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        pending.key,
+        payload,
+        baselines));
+}
+
+TEST_CASE(
+    "Meta and WhatsApp recovery cooldowns do not suppress each other") {
+    const auto exercise = [](
+        IdleStallFlowSample first,
+        IdleStallRecoveryPolicy expected_first,
+        IdleStallFlowSample second,
+        IdleStallRecoveryPolicy expected_second) {
+        IdleStallDetector detector;
+        CHECK(detector.observe(scan({first, second}), at(0s)).empty());
+        first.counters.original_packets += 4;
+        first.counters.original_bytes += 600;
+        second.counters.original_packets += 4;
+        second.counters.original_bytes += 600;
+        CHECK(detector.observe(scan({first, second}), at(31s)).empty());
+
+        const auto first_decision =
+            detector.observe(scan({first, second}), at(32s));
+        REQUIRE(first_decision.size() == 1U);
+        REQUIRE(first_decision.front().recovery_policy == expected_first);
+        REQUIRE(detector.acknowledge_delete_result(
+            first_decision.front(), true, at(32s)));
+
+        const auto second_decision =
+            detector.observe(scan({first, second}), at(33s));
+        REQUIRE(second_decision.size() == 1U);
+        CHECK(second_decision.front().recovery_policy == expected_second);
+    };
+
+    const auto meta_first = udp_sample(
+        "192.168.1.44", "57.144.244.10", 45640,
+        10, 1000, 10, 1000, 0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    const auto whatsapp_second = udp_sample(
+        "192.168.1.44", "57.144.244.20", 45641,
+        10, 1000, 10, 1000, 0x00060000U,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    exercise(
+        meta_first,
+        IdleStallRecoveryPolicy::packaged_meta_quic,
+        whatsapp_second,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+
+    const auto whatsapp_first = udp_sample(
+        "192.168.1.45", "57.144.244.10", 45642,
+        10, 1000, 10, 1000, 0x00060000U,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    const auto meta_second = udp_sample(
+        "192.168.1.45", "57.144.244.20", 45643,
+        10, 1000, 10, 1000, 0x00060000U,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
+    exercise(
+        whatsapp_first,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion,
+        meta_second,
+        IdleStallRecoveryPolicy::packaged_meta_quic);
 }
 
 TEST_CASE(
