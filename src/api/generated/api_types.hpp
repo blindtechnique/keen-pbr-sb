@@ -243,6 +243,8 @@ namespace api {
 
     enum class DaemonConfigFirewallBackend : int { AUTO, IPTABLES, NFTABLES };
 
+    enum class MetaUdp443Policy : int { BALANCED, MESSAGES_FIRST };
+
     struct Daemon {
         std::optional<std::string> cache_dir;
         std::optional<bool> clear_dynamic_sets_on_apply;
@@ -250,6 +252,7 @@ namespace api {
         std::optional<int64_t> firewall_verify_max_bytes;
         std::optional<bool> ipv6_enabled;
         std::optional<int64_t> max_file_size_bytes;
+        std::optional<MetaUdp443Policy> meta_udp443_policy;
         std::optional<std::string> pid_file;
         std::optional<std::vector<std::string>> reconnect_owned_flows_on_routing_change_lists;
         std::optional<bool> reconnect_unmarked_flows_on_routing_change;
@@ -1587,6 +1590,9 @@ namespace api {
     void from_json(const json & j, DaemonConfigFirewallBackend & x);
     void to_json(json & j, const DaemonConfigFirewallBackend & x);
 
+    void from_json(const json & j, MetaUdp443Policy & x);
+    void to_json(json & j, const MetaUdp443Policy & x);
+
     void from_json(const json & j, DnsServerType & x);
     void to_json(json & j, const DnsServerType & x);
 
@@ -2063,6 +2069,7 @@ namespace api {
         x.firewall_verify_max_bytes = get_stack_optional<int64_t>(j, "firewall_verify_max_bytes");
         x.ipv6_enabled = get_stack_optional<bool>(j, "ipv6_enabled");
         x.max_file_size_bytes = get_stack_optional<int64_t>(j, "max_file_size_bytes");
+        x.meta_udp443_policy = get_stack_optional<MetaUdp443Policy>(j, "meta_udp443_policy");
         x.pid_file = get_stack_optional<std::string>(j, "pid_file");
         x.reconnect_owned_flows_on_routing_change_lists = get_stack_optional<std::vector<std::string>>(j, "reconnect_owned_flows_on_routing_change_lists");
         x.reconnect_unmarked_flows_on_routing_change = get_stack_optional<bool>(j, "reconnect_unmarked_flows_on_routing_change");
@@ -2078,6 +2085,7 @@ namespace api {
         j["firewall_verify_max_bytes"] = x.firewall_verify_max_bytes;
         j["ipv6_enabled"] = x.ipv6_enabled;
         j["max_file_size_bytes"] = x.max_file_size_bytes;
+        j["meta_udp443_policy"] = x.meta_udp443_policy;
         j["pid_file"] = x.pid_file;
         j["reconnect_owned_flows_on_routing_change_lists"] = x.reconnect_owned_flows_on_routing_change_lists;
         j["reconnect_unmarked_flows_on_routing_change"] = x.reconnect_unmarked_flows_on_routing_change;
@@ -3995,6 +4003,20 @@ namespace api {
             case DaemonConfigFirewallBackend::IPTABLES: j = "iptables"; break;
             case DaemonConfigFirewallBackend::NFTABLES: j = "nftables"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"DaemonConfigFirewallBackend\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, MetaUdp443Policy & x) {
+        if (j == "balanced") x = MetaUdp443Policy::BALANCED;
+        else if (j == "messages_first") x = MetaUdp443Policy::MESSAGES_FIRST;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"MetaUdp443Policy\""); }
+    }
+
+    inline void to_json(json & j, const MetaUdp443Policy & x) {
+        switch (x) {
+            case MetaUdp443Policy::BALANCED: j = "balanced"; break;
+            case MetaUdp443Policy::MESSAGES_FIRST: j = "messages_first"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"MetaUdp443Policy\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

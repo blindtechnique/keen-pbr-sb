@@ -2592,6 +2592,56 @@ TEST_CASE("daemon.firewall_backend: rejects unsupported value") {
     CHECK_THROWS_AS(parse_test_config(R"({"daemon":{"firewall_backend":"pf"}})"), ConfigError);
 }
 
+TEST_CASE("daemon.meta_udp443_policy: omitted and null use balanced default") {
+    for (const auto* input : {
+             R"({"daemon":{}})",
+             R"({"daemon":{"meta_udp443_policy":null}})",
+         }) {
+        const auto cfg = parse_test_config(input);
+        REQUIRE(cfg.daemon.has_value());
+        CHECK(
+            cfg.daemon->meta_udp443_policy.value_or(
+                api::MetaUdp443Policy::BALANCED) ==
+            api::MetaUdp443Policy::BALANCED);
+    }
+}
+
+TEST_CASE("daemon.meta_udp443_policy: explicit policies round-trip") {
+    for (const auto& [value, expected] :
+         std::vector<std::pair<std::string, api::MetaUdp443Policy>>{
+             {"balanced", api::MetaUdp443Policy::BALANCED},
+             {"messages_first", api::MetaUdp443Policy::MESSAGES_FIRST},
+         }) {
+        const auto parsed = parse_test_config(
+            nlohmann::json{
+                {"daemon", {{"meta_udp443_policy", value}}},
+            }
+                .dump());
+        REQUIRE(parsed.daemon.has_value());
+        REQUIRE(parsed.daemon->meta_udp443_policy.has_value());
+        CHECK(*parsed.daemon->meta_udp443_policy == expected);
+
+        const auto serialized = nlohmann::json(parsed);
+        CHECK(serialized.at("daemon").at("meta_udp443_policy") == value);
+
+        const auto reparsed = parse_test_config(serialized.dump());
+        REQUIRE(reparsed.daemon->meta_udp443_policy.has_value());
+        CHECK(*reparsed.daemon->meta_udp443_policy == expected);
+    }
+}
+
+TEST_CASE("daemon.meta_udp443_policy: rejects malformed values") {
+    const auto unsupported = parse_issues(
+        R"({"daemon":{"meta_udp443_policy":"calls_first"}})");
+    REQUIRE(unsupported.size() == 1U);
+    CHECK(unsupported.front().path == "daemon.meta_udp443_policy");
+
+    const auto wrong_type =
+        parse_issues(R"({"daemon":{"meta_udp443_policy":true}})");
+    REQUIRE(wrong_type.size() == 1U);
+    CHECK(wrong_type.front().path == "daemon.meta_udp443_policy");
+}
+
 TEST_CASE("daemon.skip_marked_packets: defaults to true behavior when absent") {
     auto cfg = parse_test_config(R"({"daemon":{}})");
     REQUIRE(cfg.daemon.has_value());

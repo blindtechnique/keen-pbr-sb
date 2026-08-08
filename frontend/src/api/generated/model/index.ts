@@ -42,6 +42,7 @@ export * from './connectionSort';
 export * from './conntrackOnSwitch';
 export * from './daemonConfig';
 export * from './daemonConfigFirewallBackend';
+export * from './daemonConfigMetaUdp443Policy';
 export * from './dependencyAnalysisRequest';
 export * from './dependencyAnalysisResponse';
 export * from './dependencyAnalysisTargetRequest';

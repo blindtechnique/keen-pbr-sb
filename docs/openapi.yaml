@@ -1560,6 +1560,23 @@ components:
           items:
             type: string
           example: [meta_whatsapp_ip]
+        meta_udp443_policy:
+          type: string
+          nullable: true
+          enum: [balanced, messages_first]
+          description: >
+            WhatsApp/Meta transport preference for the authoritative packaged
+            Meta/WhatsApp IP companion. `balanced` keeps UDP/443 available for
+            the fastest call setup. `messages_first` sends an immediate ICMP
+            port-unreachable response for forwarded UDP/443 packets only when
+            the companion is selected by one unambiguous active broad route;
+            this makes clients fall back to TCP and can improve message
+            reliability, while call audio may take 10-20 seconds longer to
+            connect. UDP/3478, UDP/5349, peer-to-peer media and all traffic
+            outside the authoritative companion are unchanged. Omitting the
+            field or setting it to `null` uses `balanced`.
+          default: balanced
+          example: balanced
         ipv6_enabled:
           type: boolean
           nullable: true

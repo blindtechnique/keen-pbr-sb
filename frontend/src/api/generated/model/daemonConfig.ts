@@ -6,6 +6,7 @@
  * OpenAPI spec version: 3.0.0
  */
 import type { DaemonConfigFirewallBackend } from './daemonConfigFirewallBackend';
+import type { DaemonConfigMetaUdp443Policy } from './daemonConfigMetaUdp443Policy';
 
 export interface DaemonConfig {
   /** Path to the PID file. */
@@ -34,6 +35,9 @@ export interface DaemonConfig {
      * @maxItems 128
      */
   reconnect_owned_flows_on_routing_change_lists?: string[] | null;
+  /** WhatsApp/Meta transport preference for the authoritative packaged Meta/WhatsApp IP companion. `balanced` keeps UDP/443 available for the fastest call setup. `messages_first` sends an immediate ICMP port-unreachable response for forwarded UDP/443 packets only when the companion is selected by one unambiguous active broad route; this makes clients fall back to TCP and can improve message reliability, while call audio may take 10-20 seconds longer to connect. UDP/3478, UDP/5349, peer-to-peer media and all traffic outside the authoritative companion are unchanged. Omitting the field or setting it to `null` uses `balanced`.
+   */
+  meta_udp443_policy?: DaemonConfigMetaUdp443Policy;
   /** Whether keen-pbr should install IPv6 routes/firewall rules and emit IPv6 resolver set targets. When disabled, managed dnsmasq also suppresses AAAA, SVCB, and HTTPS answers so clients cannot use IPv6 hints from service-binding records. This IPv4-only mode also disables automatic HTTP/3 and ECH discovery; ordinary A-record resolution is unaffected. Defaults to `true` when omitted or set to `null`. If enabled but the system lacks IPv6 support, keen-pbr logs an error and continues in IPv4-only mode.
    */
   ipv6_enabled?: boolean | null;
