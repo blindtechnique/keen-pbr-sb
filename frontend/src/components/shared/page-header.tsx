@@ -1,5 +1,6 @@
 import type { ReactNode } from "react"
 
+import { ExpandableText } from "@/components/shared/expandable-text"
 import { useDocumentTitle } from "@/hooks/use-document-title"
 
 export function PageHeader({
@@ -30,7 +31,13 @@ export function PageHeader({
         {/* Ритм страницы KeeneticOS, снятый с живого конфигуратора: блок
             заголовка, 8px, описание, 24px, вкладки. Здесь `mb-3` плюс `space-y-3`
             страницы и дают эти 24px. */}
-        <p className="mt-2 mb-3 max-w-[110ch] text-[14px] leading-[24px] text-pretty text-foreground">
+        <ExpandableText
+          className="mt-2 mb-3 md:hidden"
+          lines={2}
+          text={description}
+          textClassName="max-w-[110ch] text-[14px] leading-[24px] text-pretty text-foreground"
+        />
+        <p className="mt-2 mb-3 hidden max-w-[110ch] text-[14px] leading-[24px] text-pretty text-foreground md:block">
           {description}
         </p>
       </div>

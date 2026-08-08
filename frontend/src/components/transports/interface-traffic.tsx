@@ -32,6 +32,7 @@ export function InterfaceTraffic({
     received: string
     transmitted: string
     chart: string
+    noTraffic: string
   }>
   readonly className?: string
   readonly showChart?: boolean
@@ -82,6 +83,7 @@ function KeeneticTrafficChart({
     receive: string
     transmit: string
     chart: string
+    noTraffic: string
   }>
 }) {
   const series = buildTrafficSeries(traffic)
@@ -181,9 +183,15 @@ function KeeneticTrafficChart({
         role="group"
         tabIndex={0}
       >
-        <span className="absolute -top-2 right-0 z-10 bg-card pl-2 text-xs leading-4 text-muted-foreground tabular-nums">
-          {formatBitRate(series.maximum, locale)}
-        </span>
+        {series.hasTraffic ? (
+          <span className="absolute -top-2 right-0 z-10 bg-card pl-2 text-xs leading-4 text-muted-foreground tabular-nums">
+            {formatBitRate(series.maximum, locale)}
+          </span>
+        ) : (
+          <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground">
+            {labels.noTraffic}
+          </span>
+        )}
         <svg
           className="block h-[162px] w-full overflow-visible"
           preserveAspectRatio="none"

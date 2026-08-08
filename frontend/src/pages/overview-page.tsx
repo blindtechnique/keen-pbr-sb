@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Download } from "lucide-react"
+import { Download, WandSparklesIcon } from "lucide-react"
+import { useLocation } from "wouter"
 
 import type { ApiError } from "@/api/client"
 
@@ -35,6 +36,7 @@ import { getApiErrorMessage } from "@/lib/api-errors"
 
 export function OverviewPage() {
   const { t } = useTranslation()
+  const [, navigate] = useLocation()
   const [dnsCheckStatus, setDnsCheckStatus] = useState<DnsCheckStatus>("idle")
   const [isDiagnosticsDialogOpen, setIsDiagnosticsDialogOpen] = useState(false)
   const serviceHealthQuery = useGetHealthService()
@@ -155,6 +157,12 @@ export function OverviewPage() {
           {!configQuery.isLoading &&
           (loadedConfig?.outbounds ?? []).length === 0 ? (
             <ListPlaceholder
+              action={
+                <Button onClick={() => navigate("/setup")}>
+                  <WandSparklesIcon className="mr-1 h-4 w-4" />
+                  {t("overview.outbounds.startSetup")}
+                </Button>
+              }
               description={t("overview.outbounds.emptyDescription")}
               title={t("overview.outbounds.emptyTitle")}
             />

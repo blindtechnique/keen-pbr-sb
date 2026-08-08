@@ -560,6 +560,7 @@ export const enTranslation = {
       chart: "Receive and transmit chart",
       showChart: "Show chart",
       hideChart: "Hide chart",
+      noTraffic: "No traffic yet",
     },
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
@@ -713,6 +714,7 @@ export const enTranslation = {
       showHidden: "Show hidden ({{count}})",
       hideHidden: "Stop showing hidden interfaces",
     },
+    setupWizard: "Setup wizard",
     routeOffer: {
       title: "New KeeneticOS tunnel",
       question:
@@ -778,8 +780,7 @@ export const enTranslation = {
       nativeInterfaceHidden: "hidden",
       nativeInterfaceUnavailable: "unavailable",
       nativeInterfaceUnavailableServer: "unavailable: VPN server",
-      nativeInterfaceUnavailableDisabled:
-        "unavailable: disabled in KeeneticOS",
+      nativeInterfaceUnavailableDisabled: "unavailable: disabled in KeeneticOS",
       nativeInterfaceHint:
         "A tunnel marked “unavailable” is usually disabled in KeeneticOS: enable it in the Keenetic web configurator and it becomes selectable here. VPN servers are always unavailable: outgoing traffic cannot be routed into them. Hidden interfaces remain in this list and are clearly marked.",
       singBox: "sing-box connection",
@@ -1090,6 +1091,7 @@ export const enTranslation = {
       loadError: "Unable to load route and group health.",
       emptyTitle: "No routes or groups configured",
       emptyDescription: "Add a route or group to see its health.",
+      startSetup: "Quick setup",
       inUse: "In use",
       urltestTitle: "urltest",
       headers: {
@@ -1971,6 +1973,69 @@ export const enTranslation = {
         save: "Save DNS server",
       },
     },
+    setupWizard: {
+      title: "Setup wizard",
+      description:
+        "Three steps: connect a VPN, pick services and finish. The panel applies each safe operation as it completes.",
+      steps: {
+        connection: "Connection",
+        services: "Services",
+        done: "Done",
+      },
+      connection: {
+        title: "Step 1. Connect a VPN",
+        description:
+          "Paste the connection link from your VPN provider. The panel creates a sing-box tunnel and its outgoing route in one atomic operation.",
+        linkLabel: "Connection link",
+        linkHint:
+          "Links like vless://, vmess://, trojan://, ss://, hy2:// work — your VPN provider issues them.",
+        nameLabel: "Name",
+        namePlaceholder: "For example, Netherlands — primary",
+        create: "Create the tunnel and route",
+        creating: "Creating…",
+        existingHint:
+          "Already have a configured tunnel or route? You can point services at it.",
+        existingLabel: "Existing route",
+        existingPlaceholder: "Select a route…",
+        useExisting: "Use the selected one",
+        inventoryLoading: "Loading the current tunnels and routes…",
+        inventoryErrorTitle: "The wizard could not be prepared",
+        inventoryUnavailable:
+          "The current tunnels and routes could not be loaded. Creation is disabled to avoid overwriting or duplicating an existing setup.",
+      },
+      services: {
+        title: "Step 2. What goes through the VPN",
+        description:
+          "Tick the services — their traffic goes through “{{name}}”. The panel creates and applies the lists and rules itself; everything else stays direct.",
+        loading: "Loading the catalogue…",
+        catalogErrorTitle: "The catalogue could not be loaded",
+        catalogUnavailable:
+          "Check that the service is available and try again. The tunnel and route created in step one are already saved.",
+        empty:
+          "The catalogue is empty or unavailable. Skip this step — lists can be added later from the list catalogue.",
+        selectionInvalid:
+          "This combination cannot be set up in one step — pick services without blocking tiles.",
+        configUnavailable:
+          "Could not reload the active configuration before preview.",
+        draftBlocked:
+          "Discard or apply the existing configuration draft before using quick setup.",
+        warningsTitle: "Review the warnings before setting up",
+        acceptWarnings: "I understand, continue",
+        applying: "Setting up…",
+        route: "Route the selected ({{count}})",
+        skip: "Skip",
+      },
+      done: {
+        title: "Setup complete",
+        summary:
+          "The setup is saved and applied. {{count}} services now use “{{name}}”.",
+        summaryNoLists:
+          "The route “{{name}}” is ready. Services can be added later from the list catalogue.",
+        openDashboard: "Open dashboard",
+        openTunnels: "Open VPN and proxies",
+        openRules: "Open rules",
+      },
+    },
     routingRules: {
       title: "Routing rules",
       searchPlaceholder: "Search by name, condition or route",
@@ -2615,6 +2680,12 @@ export const enTranslation = {
       noStats: "-",
       statsLoaded: "Downloaded",
       statsNotLoaded: "Not downloaded",
+      statsParts: {
+        domains: "Domains",
+        ipv4: "IPv4",
+        ipv6: "IPv6",
+        empty: "Empty",
+      },
       statsNotLoadedFailed:
         "The last download attempt failed - details are in the line under the list name.",
       source: {

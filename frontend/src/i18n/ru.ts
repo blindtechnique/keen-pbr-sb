@@ -561,6 +561,7 @@ export const ruTranslation = {
       chart: "График приёма и передачи",
       showChart: "Показать график",
       hideChart: "Скрыть график",
+      noTraffic: "Трафика пока нет",
     },
     dnsDetour: "DNS через этот туннель",
     singBoxMissing: {
@@ -718,6 +719,7 @@ export const ruTranslation = {
       showHidden: "Показать скрытые ({{count}})",
       hideHidden: "Не показывать скрытые",
     },
+    setupWizard: "Мастер настройки",
     routeOffer: {
       title: "Новый туннель KeeneticOS",
       question:
@@ -783,8 +785,7 @@ export const ruTranslation = {
       nativeInterfaceHidden: "скрытое",
       nativeInterfaceUnavailable: "недоступно",
       nativeInterfaceUnavailableServer: "недоступно: VPN-сервер",
-      nativeInterfaceUnavailableDisabled:
-        "недоступно: выключен в KeeneticOS",
+      nativeInterfaceUnavailableDisabled: "недоступно: выключен в KeeneticOS",
       nativeInterfaceHint:
         "Туннель с пометкой «недоступно» обычно выключен в KeeneticOS: включите его в веб-конфигураторе Keenetic — и он станет доступен здесь. VPN-серверы недоступны всегда: направить в них исходящий трафик нельзя. Скрытые интерфейсы остаются в списке и помечаются отдельно.",
       singBox: "Подключение sing-box",
@@ -1101,6 +1102,7 @@ export const ruTranslation = {
       emptyTitle: "Маршруты и группы не настроены",
       emptyDescription:
         "Добавьте маршрут или группу, чтобы видеть его состояние.",
+      startSetup: "Быстрая настройка",
       inUse: "Используется",
       urltestTitle: "Группы",
       headers: {
@@ -1994,6 +1996,69 @@ export const ruTranslation = {
         save: "Сохранить DNS-сервер",
       },
     },
+    setupWizard: {
+      title: "Мастер настройки",
+      description:
+        "Три шага: подключение VPN, выбор сервисов и завершение. Каждое безопасное действие панель применяет сразу.",
+      steps: {
+        connection: "Подключение",
+        services: "Сервисы",
+        done: "Готово",
+      },
+      connection: {
+        title: "Шаг 1. Подключите VPN",
+        description:
+          "Вставьте ссылку подключения от VPN-провайдера. Панель одной атомарной операцией создаст туннель sing-box и связанный исходящий маршрут.",
+        linkLabel: "Ссылка подключения",
+        linkHint:
+          "Подойдут ссылки vless://, vmess://, trojan://, ss://, hy2:// и подобные — их выдаёт VPN-провайдер.",
+        nameLabel: "Название",
+        namePlaceholder: "Например, Нидерланды — основной",
+        create: "Создать туннель и маршрут",
+        creating: "Создаю…",
+        existingHint:
+          "Уже есть настроенный туннель или маршрут? Можно направить сервисы в него.",
+        existingLabel: "Существующий маршрут",
+        existingPlaceholder: "Выберите маршрут…",
+        useExisting: "Использовать выбранный",
+        inventoryLoading: "Загружаю актуальные туннели и маршруты…",
+        inventoryErrorTitle: "Не удалось подготовить мастер",
+        inventoryUnavailable:
+          "Не удалось загрузить актуальные туннели и маршруты. Создание отключено, чтобы не перезаписать или не задублировать существующую настройку.",
+      },
+      services: {
+        title: "Шаг 2. Что направить в VPN",
+        description:
+          "Отметьте сервисы — их трафик пойдёт через «{{name}}». Списки и правила панель создаст и применит сама; остальной трафик пойдёт напрямую.",
+        loading: "Загружаю каталог…",
+        catalogErrorTitle: "Не удалось загрузить каталог",
+        catalogUnavailable:
+          "Проверьте доступность сервиса и повторите загрузку. Туннель и маршрут, созданные на первом шаге, уже сохранены.",
+        empty:
+          "Каталог пуст или недоступен. Пропустите шаг — списки можно добавить позже из «Каталога списков».",
+        selectionInvalid:
+          "Эту комбинацию нельзя настроить одним шагом — выберите сервисы без блокировочных плиток.",
+        configUnavailable:
+          "Не удалось перечитать активную конфигурацию перед предпросмотром.",
+        draftBlocked:
+          "Перед быстрой настройкой примените или отмените существующий черновик конфигурации.",
+        warningsTitle: "Перед настройкой посмотрите на предупреждения",
+        acceptWarnings: "Понимаю, продолжить",
+        applying: "Настраиваю…",
+        route: "Направить выбранное ({{count}})",
+        skip: "Пропустить",
+      },
+      done: {
+        title: "Настройка завершена",
+        summary:
+          "Настройка сохранена и применена. Через «{{name}}» теперь работает сервисов: {{count}}.",
+        summaryNoLists:
+          "Маршрут «{{name}}» готов. Сервисы можно добавить позже из «Каталога списков».",
+        openDashboard: "Открыть дашборд",
+        openTunnels: "Открыть VPN и прокси",
+        openRules: "Открыть правила",
+      },
+    },
     routingRules: {
       title: "Правила маршрутизации",
       searchPlaceholder: "Поиск по названию, условию или маршруту",
@@ -2656,6 +2721,12 @@ export const ruTranslation = {
       noStats: "-",
       statsLoaded: "Загружен",
       statsNotLoaded: "Не загружен",
+      statsParts: {
+        domains: "Доменов",
+        ipv4: "IPv4",
+        ipv6: "IPv6",
+        empty: "Пусто",
+      },
       statsNotLoadedFailed:
         "Последняя попытка загрузки закончилась ошибкой — подробности в строке под названием списка.",
       source: {

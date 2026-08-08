@@ -55,6 +55,7 @@ const GeneralConfigPage = lazy(() =>
     default: m.GeneralConfigPage,
   }))
 )
+const SetupWizardPage = lazy(() => import("@/pages/setup-wizard-page"))
 const BackupPage = lazy(() =>
   import("@/pages/backup-page").then((m) => ({ default: m.BackupPage }))
 )
@@ -322,6 +323,9 @@ function App() {
             </Route>
             <Route path="/transports">
               <RoutesAndTunnelsPage />
+            </Route>
+            <Route path="/setup">
+              <SetupWizardPage />
             </Route>
             <Route component={ConnectionsPage} path="/connections" />
             <Route component={NfqwsPage} path="/nfqws" />

@@ -83,7 +83,7 @@ type ListTableRow = {
   lastError?: string
   lastDetour?: string
   stats?: {
-    totalHosts: number
+    domains: number
     ipv4Subnets: number
     ipv6Subnets: number
   }
@@ -590,9 +590,9 @@ export function ListsPage() {
                   </div>
                   {list.stats ? (
                     <StatsDisplay
+                      domains={list.stats.domains}
                       ipv4Subnets={list.stats.ipv4Subnets}
                       ipv6Subnets={list.stats.ipv6Subnets}
-                      totalHosts={list.stats.totalHosts}
                     />
                   ) : null}
                   <DependencyList
@@ -678,10 +678,10 @@ export function ListsPage() {
                 // выдуманное число, а честное состояние загрузки.
                 getListStatsState(list) === "counted" && list.stats ? (
                   <StatsDisplay
+                    domains={list.stats.domains}
                     ipv4Subnets={list.stats.ipv4Subnets}
                     ipv6Subnets={list.stats.ipv6Subnets}
                     key={`${list.id}-stats`}
-                    totalHosts={list.stats.totalHosts}
                   />
                 ) : getListStatsState(list) === "loaded" ? (
                   <span
@@ -870,7 +870,7 @@ function getTableRowsFromListMap(
         : undefined,
       stats: showInlineStats
         ? {
-            totalHosts: domains.length + ipCidrs.length,
+            domains: domains.length,
             ipv4Subnets: ipCidrs.filter((value) => value.includes(".")).length,
             ipv6Subnets: ipCidrs.filter((value) => value.includes(":")).length,
           }

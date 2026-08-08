@@ -8,6 +8,7 @@ import {
   RefreshCwIcon,
   Settings2Icon,
   ShieldCheckIcon,
+  WandSparklesIcon,
   WorkflowIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
@@ -235,9 +236,9 @@ export function TransportsPage({
   const [showHiddenNative, setShowHiddenNative] = useState(false)
   // «Не предлагать» из вопроса о новом туннеле; читается один раз при
   // открытии страницы, дальше живёт в состоянии и localStorage.
-  const [dismissedRouteOffers, setDismissedRouteOffers] = useState<
-    Set<string>
-  >(() => readDismissedNativeRouteOffers())
+  const [dismissedRouteOffers, setDismissedRouteOffers] = useState<Set<string>>(
+    () => readDismissedNativeRouteOffers()
+  )
   const transportImportRef = useRef<HTMLInputElement>(null)
   const query = useGetTransports({
     query: {
@@ -1089,6 +1090,7 @@ export function TransportsPage({
             received: t("transports.traffic.received"),
             transmitted: t("transports.traffic.transmitted"),
             chart: t("transports.traffic.chart"),
+            noTraffic: t("transports.traffic.noTraffic"),
           }}
           locale={i18n.resolvedLanguage ?? i18n.language}
           // График живёт только на дашборде: рядом с цепочкой зависимостей он
@@ -1452,6 +1454,10 @@ export function TransportsPage({
           </Button>
         }
       >
+        <Button onClick={() => navigate("/setup")} variant="outline">
+          <WandSparklesIcon />
+          {t("transports.setupWizard")}
+        </Button>
         <Button
           disabled={
             transferMutation.isPending ||
@@ -1592,10 +1598,19 @@ export function TransportsPage({
       nativeInterfaces.length === 0 ? (
         <ListPlaceholder
           action={
-            <Button onClick={() => navigate(transportCreateHref)}>
-              <PlusIcon className="mr-1 h-4 w-4" />
-              {t("transports.add")}
-            </Button>
+            <span className="flex flex-wrap justify-center gap-2">
+              <Button onClick={() => navigate("/setup")}>
+                <WandSparklesIcon className="mr-1 h-4 w-4" />
+                {t("transports.setupWizard")}
+              </Button>
+              <Button
+                onClick={() => navigate(transportCreateHref)}
+                variant="outline"
+              >
+                <PlusIcon className="mr-1 h-4 w-4" />
+                {t("transports.add")}
+              </Button>
+            </span>
           }
           description={t("transports.empty")}
           title={t("transports.emptyTitle")}

@@ -34,6 +34,7 @@ export const allowedLiterals: readonly string[] = [
   // пример невалидным либо менее узнаваемым.
   "vless1",
   "vless://… vmess://… trojan://… ss://… hy2://… tuic://…",
+  "vless://…, trojan://…, hy2://…",
   '{ "type": "ssh", "server": "example.com", "server_port": 22 }',
   "0x00ff0000",
   // Протокольный статус и developer-only invariant errors. Они попадают в

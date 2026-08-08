@@ -19,6 +19,7 @@ export type TrafficSeries = Readonly<{
   txArea: string
   samples: readonly TrafficChartSample[]
   maximum: number
+  hasTraffic: boolean
   oldestSampledAt?: number
   newestSampledAt?: number
 }>
@@ -55,6 +56,7 @@ export function buildTrafficSeries(
     txArea: area(tx),
     samples,
     maximum,
+    hasTraffic: rawMaximum > 0,
     oldestSampledAt:
       newestSampledAt === undefined ? undefined : newestSampledAt - oldestAge,
     newestSampledAt,

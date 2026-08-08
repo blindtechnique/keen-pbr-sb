@@ -52,6 +52,21 @@ describe("interface traffic presentation", () => {
 
     expect(series.rx).toBe("0.00,162.00 744.00,162.00")
     expect(series.tx).toBe("0.00,162.00 744.00,162.00")
+    expect(series.hasTraffic).toBe(false)
+  })
+
+  test("reports whether the retained window contains real traffic", () => {
+    expect(
+      buildTrafficSeries({
+        history: [
+          {
+            age_ms: 0,
+            rx_bits_per_second: 1,
+            tx_bits_per_second: 0,
+          },
+        ],
+      }).hasTraffic
+    ).toBe(true)
   })
 
   test("preserves real sampling gaps on the horizontal axis", () => {

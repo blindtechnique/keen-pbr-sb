@@ -87,6 +87,21 @@ export function isRouteRuleNameGenerated(rule: RouteRule): boolean {
   return !rule.display_name?.trim()
 }
 
+export function getRouteRuleDerivedName(
+  rule: RouteRule,
+  listDisplayName: (technicalId: string) => string
+): string | undefined {
+  const listIds = (rule.list ?? [])
+    .map((technicalId) => technicalId.trim())
+    .filter(Boolean)
+  if (listIds.length === 0) {
+    return undefined
+  }
+
+  const first = listDisplayName(listIds[0]!)
+  return listIds.length > 1 ? `${first} +${listIds.length - 1}` : first
+}
+
 export function toRouteRuleDraft(rule: RouteRule): RouteRuleDraft {
   return {
     id: rule.id ?? "",

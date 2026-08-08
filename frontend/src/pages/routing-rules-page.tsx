@@ -33,7 +33,10 @@ import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useSemanticEditSession } from "@/hooks/use-semantic-edit-session"
-import { formatListReferenceLabels } from "@/lib/list-display"
+import {
+  formatListReferenceLabels,
+  getListDisplayName,
+} from "@/lib/list-display"
 import { createOutboundDisplayNameMap } from "@/lib/outbound-display"
 import { getRuleEditHref } from "@/lib/rule-route"
 import { filterBySearchQuery, normalizeSearchQuery } from "@/lib/table-search"
@@ -42,6 +45,7 @@ import {
   areRouteRulesSemanticallyEqual,
   getApiErrorMessage,
   getRouteRulesSemanticKey,
+  getRouteRuleDerivedName,
   getRouteRuleDisplayName,
   getRoutingRuleRowId,
   isRouteRuleNameGenerated,
@@ -137,7 +141,7 @@ function RoutingRulesEditor({
     )
   })
   const tableRows = filterBySearchQuery(allRows, search, (row) => [
-    row.nameIsGenerated ? "" : row.displayName,
+    row.nameIsGenerated ? (row.derivedName ?? "") : row.displayName,
     row.technicalId,
     row.outbound,
     ...row.conditions.map((condition) => condition.value),
@@ -418,12 +422,13 @@ function RoutingRulesEditor({
                       className={cn(
                         "min-w-0 flex-1 truncate text-sm font-medium",
                         row.nameIsGenerated &&
-                          "font-normal text-muted-foreground italic"
+                          "font-normal text-muted-foreground",
+                        row.nameIsGenerated && !row.derivedName && "italic"
                       )}
                       title={row.technicalId}
                     >
                       {row.nameIsGenerated
-                        ? t("pages.routingRules.unnamed")
+                        ? (row.derivedName ?? t("pages.routingRules.unnamed"))
                         : row.displayName}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1">
@@ -544,11 +549,12 @@ function RoutingRulesEditor({
                     className={cn(
                       "block truncate font-medium",
                       row.nameIsGenerated &&
-                        "font-normal text-muted-foreground italic"
+                        "font-normal text-muted-foreground",
+                      row.nameIsGenerated && !row.derivedName && "italic"
                     )}
                   >
                     {row.nameIsGenerated
-                      ? t("pages.routingRules.unnamed")
+                      ? (row.derivedName ?? t("pages.routingRules.unnamed"))
                       : row.displayName}
                   </span>
                 </div>,
@@ -656,11 +662,18 @@ function getRouteRuleRow(
       typeof condition.value === "string" && condition.value.trim().length > 0
   )
 
+  const nameIsGenerated = isRouteRuleNameGenerated(rule)
+
   return {
     id: getRoutingRuleRowId(rule, index),
     technicalId: rule.id ?? "",
     displayName: getRouteRuleDisplayName(rule, index),
-    nameIsGenerated: isRouteRuleNameGenerated(rule),
+    nameIsGenerated,
+    derivedName: nameIsGenerated
+      ? getRouteRuleDerivedName(rule, (technicalId) =>
+          getListDisplayName(technicalId, lists)
+        )
+      : undefined,
     enabled: rule.enabled ?? true,
     index,
     order: index + 1,
