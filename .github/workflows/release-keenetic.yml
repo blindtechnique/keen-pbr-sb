@@ -129,6 +129,11 @@ jobs:
           docker run --rm \
             -v "$PWD:/workspace:ro" \
             busybox:1.37 \
+            sh /workspace/tests/package_it/run-keenetic-iptables-wait.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
             sh /workspace/tests/package_it/run-ndmc-env-contract.sh \
               /workspace/install.sh \
               /workspace/uninstall.sh

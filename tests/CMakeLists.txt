@@ -525,6 +525,13 @@ add_test(
     ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/prerm
 )
 
+add_test(
+  NAME keen-pbr-keenetic-iptables-wait
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-keenetic-iptables-wait.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+)
+
 set_target_properties(keen-pbr-tests PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED YES

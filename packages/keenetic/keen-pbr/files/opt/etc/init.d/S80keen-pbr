@@ -63,6 +63,11 @@ IPSET_PROBE_SET="kpbr_probe_hash_net_$$"
 IPSET_UDP_PEER_PROBE_SET="kpbr_probe_udp_peer_$$"
 IPTABLES_UDP_PEER_PROBE_CHAIN="KpbrUdpProbe$$"
 IPSET_COMPONENTS_MESSAGE="ipset kernel modules are not available. Make sure that you followed the installation process and installed all required components: Netfilter Subsystem Kernel Modules and Xtables-addons Extension Package for Netfilter."
+IPTABLES_WAIT_MODE=""
+IPTABLES_BARE_WAIT_SECONDS="${IPTABLES_BARE_WAIT_SECONDS:-10}"
+case "$IPTABLES_BARE_WAIT_SECONDS" in
+    ''|*[!0-9]*|0) IPTABLES_BARE_WAIT_SECONDS=10 ;;
+esac
 
 log() {
     logger -s -t "keen-pbr" "$1"
@@ -70,6 +75,141 @@ log() {
 
 log_error() {
     logger -s -t "keen-pbr" -p "user.err" "$1"
+}
+
+run_bounded_command() {
+    local limit="$1"
+    local command_pid
+    local watchdog_pid
+    local status
+
+    shift
+    "$@" &
+    command_pid=$!
+    (
+        elapsed=0
+        while [ "$elapsed" -lt "$limit" ]; do
+            sleep 1
+            kill -0 "$command_pid" >/dev/null 2>&1 || exit 0
+            elapsed=$((elapsed + 1))
+        done
+        kill -TERM "$command_pid" >/dev/null 2>&1 || exit 0
+        sleep 1
+        kill -KILL "$command_pid" >/dev/null 2>&1 || true
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+
+    if wait "$command_pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    kill "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_iptables_wait_probe() {
+    local limit="$1"
+
+    shift
+    if IPTABLES_WAIT_PROBE_OUTPUT=$(
+        run_bounded_command "$limit" "$@" 2>&1
+    ); then
+        IPTABLES_WAIT_PROBE_STATUS=0
+    else
+        IPTABLES_WAIT_PROBE_STATUS=$?
+    fi
+}
+
+iptables_wait_probe_is_lock_failure() {
+    local normalized
+
+    [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 4 ] && return 0
+    normalized=$(printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"xtables lock"*|*"holding the xtables lock"*|\
+        *"another app is currently holding"*) return 0 ;;
+    esac
+    return 1
+}
+
+iptables_wait_value_is_unsupported() {
+    local attempted_value="$1"
+
+    printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        grep -Eiq '(bad argument|invalid argument|invalid wait)[[:space:]]+[^[:alnum:]]*'"$attempted_value"'([^[:digit:]]|$)'
+}
+
+iptables_wait_option_is_unsupported() {
+    printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        grep -Eiq -- '(-w|wait|option[[:space:]]+--[[:space:]]+[^[:alnum:]]*w([^[:alnum:]]|$))' ||
+        return 1
+    printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        grep -Eiq '(unknown option|unrecognized option|invalid option|illegal option|not supported)'
+}
+
+detect_iptables_wait_mode() {
+    case "$IPTABLES_WAIT_MODE" in
+        timeout|flag|none) return 0 ;;
+        error) return 1 ;;
+    esac
+
+    # Keenetic ships several generations of legacy iptables. Newer builds
+    # accept a numeric xtables lock timeout, some accept only the bare -w
+    # flag, and old builds do not know -w at all. Exit 4 or an xtables-lock
+    # diagnostic proves that the probed syntax was accepted even though the
+    # read-only command could not acquire the lock. Only an explicit syntax
+    # rejection may select a weaker form; timeouts and unrelated failures are
+    # operational errors and must never authorize unguarded mutations.
+    run_iptables_wait_probe "$((IPTABLES_BARE_WAIT_SECONDS + 2))" \
+        iptables -w 10 -S
+    if [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 0 ] ||
+       iptables_wait_probe_is_lock_failure; then
+        IPTABLES_WAIT_MODE=timeout
+        return 0
+    fi
+
+    if ! iptables_wait_value_is_unsupported 10; then
+        if iptables_wait_option_is_unsupported; then
+            IPTABLES_WAIT_MODE=none
+            return 0
+        fi
+        IPTABLES_WAIT_MODE=error
+        return 1
+    fi
+
+    run_iptables_wait_probe "$IPTABLES_BARE_WAIT_SECONDS" iptables -w -S
+    if [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 0 ] ||
+       iptables_wait_probe_is_lock_failure; then
+        IPTABLES_WAIT_MODE=flag
+        return 0
+    fi
+    if iptables_wait_option_is_unsupported; then
+        IPTABLES_WAIT_MODE=none
+        return 0
+    fi
+
+    IPTABLES_WAIT_MODE=error
+    return 1
+}
+
+iptables_with_wait() {
+    detect_iptables_wait_mode || return 1
+
+    case "$IPTABLES_WAIT_MODE" in
+        timeout)
+            iptables -w 10 "$@"
+            ;;
+        flag)
+            run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
+                iptables -w "$@"
+            ;;
+        *)
+            iptables "$@"
+            ;;
+    esac
 }
 
 is_module_loaded() {
@@ -154,20 +294,23 @@ iptables_udp_peer_match_available() {
     command -v ipset >/dev/null 2>&1 || return 1
     ipset create "$IPSET_UDP_PEER_PROBE_SET" hash:ip,port,ip \
         family inet timeout 90 >/dev/null 2>&1 || return 1
-    if iptables -w 10 -t mangle -N "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
+    if iptables_with_wait -t mangle -N "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
            >/dev/null 2>&1; then
-        if iptables -w 10 -t mangle \
+        if iptables_with_wait -t mangle \
                -A "$IPTABLES_UDP_PEER_PROBE_CHAIN" \
                -p udp -m set \
                --match-set "$IPSET_UDP_PEER_PROBE_SET" src,dst,dst \
                -j RETURN >/dev/null 2>&1; then
             status=0
         fi
-        iptables -w 10 -t mangle \
-            -F "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
-        iptables -w 10 -t mangle \
-            -X "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
     fi
+    # A bounded -N may be killed after the kernel accepted the mutation but
+    # before userspace reported success. Always clean this PID-unique probe
+    # chain, including that deliberately ambiguous timeout path.
+    iptables_with_wait -t mangle \
+        -F "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
+    iptables_with_wait -t mangle \
+        -X "$IPTABLES_UDP_PEER_PROBE_CHAIN" >/dev/null 2>&1 || true
     ipset destroy "$IPSET_UDP_PEER_PROBE_SET" >/dev/null 2>&1 || true
     return "$status"
 }
@@ -251,7 +394,7 @@ add_daemon_arg() {
 probe_raw_table() {
     # Wait for concurrent NDMS/Entware xtables users instead of treating a
     # transient lock as proof that raw PREROUTING is unavailable.
-    iptables -w 10 -t raw -S >/dev/null 2>&1
+    iptables_with_wait -t raw -S >/dev/null 2>&1
 }
 
 ensure_raw_table_available() {
