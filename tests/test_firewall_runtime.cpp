@@ -427,7 +427,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "Native VPN direct egress covers SSTP L2TP and IKEv1 in both modes") {
+    "Native VPN direct egress covers SSTP OpenConnect L2TP and IKEv1 in both "
+    "modes") {
     const auto disabled = service_target(
         "ndms-service:sstp-server",
         /*process_clients=*/false,
@@ -436,6 +437,14 @@ TEST_CASE(
         "ndms-service:sstp-server",
         /*process_clients=*/true,
         {"172.16.1.33/32", "172.16.1.36/30"});
+    const auto openconnect_disabled = service_target(
+        "ndms-service:oc-server",
+        /*process_clients=*/false,
+        {"172.30.4.17/32", "172.30.4.18/31"});
+    const auto openconnect_enabled = service_target(
+        "ndms-service:oc-server",
+        /*process_clients=*/true,
+        {"172.30.4.20/30", "172.16.1.33/32"});
     const auto l2tp_disabled = service_target(
         "ndms-crypto-map:l2tp:VPNL2TPServer",
         /*process_clients=*/false,
@@ -457,6 +466,8 @@ TEST_CASE(
         select_native_vpn_direct_egress_snat_selectors(
         {disabled,
          enabled,
+         openconnect_disabled,
+         openconnect_enabled,
          l2tp_disabled,
          l2tp_enabled,
          ikev1_disabled,
@@ -469,6 +480,9 @@ TEST_CASE(
             {"eth3", "172.16.1.33/32"},
             {"eth3", "172.16.1.34/31"},
             {"eth3", "172.16.1.36/30"},
+            {"eth3", "172.30.4.17/32"},
+            {"eth3", "172.30.4.18/31"},
+            {"eth3", "172.30.4.20/30"},
             {"eth3", "172.16.2.33/32"},
             {"eth3", "172.16.2.34/31"},
             {"eth3", "172.16.2.36/30"},
@@ -478,6 +492,9 @@ TEST_CASE(
             {"ppp0", "172.16.1.33/32"},
             {"ppp0", "172.16.1.34/31"},
             {"ppp0", "172.16.1.36/30"},
+            {"ppp0", "172.30.4.17/32"},
+            {"ppp0", "172.30.4.18/31"},
+            {"ppp0", "172.30.4.20/30"},
             {"ppp0", "172.16.2.33/32"},
             {"ppp0", "172.16.2.34/31"},
             {"ppp0", "172.16.2.36/30"},
@@ -501,6 +518,10 @@ TEST_CASE(
         "ndms-service:sstp-server-backup",
         /*process_clients=*/false,
         {"172.30.0.0/24"});
+    const auto similarly_named_openconnect = service_target(
+        "ndms-service:oc-server-backup",
+        /*process_clients=*/true,
+        {"172.30.4.0/24"});
     const auto empty_l2tp_name = service_target(
         "ndms-crypto-map:l2tp:",
         /*process_clients=*/true,
@@ -549,6 +570,7 @@ TEST_CASE(
             {ikev2,
              wireguard,
              similarly_named,
+             similarly_named_openconnect,
              empty_l2tp_name,
              wrong_l2tp_namespace,
              empty_ikev1_name,

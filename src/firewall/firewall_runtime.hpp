@@ -89,10 +89,10 @@ std::vector<RuleState> apply_runtime_firewall(
         list_cache_snapshot = nullptr);
 
 // Build the source-scoped direct-egress SNAT contract for Keenetic's SSTP,
-// L2TP and IKEv1 servers. Their clients need this on the ordinary WAN path
-// regardless of whether policy routing is enabled for them. Other native VPN
-// services are deliberately excluded so their established firmware/runtime
-// paths remain unchanged.
+// OpenConnect, L2TP and IKEv1 servers. Their clients need this on the ordinary
+// WAN path regardless of whether policy routing is enabled for them. Other
+// native VPN services are deliberately excluded so their established
+// firmware/runtime paths remain unchanged.
 std::vector<FirewallSourceEgressSnatSelector>
 select_native_vpn_direct_egress_snat_selectors(
     const std::vector<InternalVpnRuntimeTarget>& internal_vpn_targets,

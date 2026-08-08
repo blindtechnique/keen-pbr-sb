@@ -37,12 +37,15 @@ const Outbound* find_outbound_by_tag(const std::vector<Outbound>& outbounds,
 bool needs_native_vpn_direct_egress_snat(std::string_view stable_id) {
     constexpr std::string_view kSstpServiceId{
         "ndms-service:sstp-server"};
+    constexpr std::string_view kOpenConnectServiceId{
+        "ndms-service:oc-server"};
     constexpr std::string_view kL2tpServicePrefix{
         "ndms-crypto-map:l2tp:"};
     constexpr std::string_view kIkev1ServicePrefix{
         "ndms-crypto-map:ikev1:"};
 
-    if (stable_id == kSstpServiceId) {
+    if (stable_id == kSstpServiceId ||
+        stable_id == kOpenConnectServiceId) {
         return true;
     }
     const auto has_nonempty_suffix =
