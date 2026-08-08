@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
-#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -186,23 +185,12 @@ struct ConntrackFlowObservationOptions {
     bool allow_foreign_mark_bits_for_media{false};
 };
 
-// A recovery policy is authoritative only for destinations attached to the
-// exact owned mark that selected them. Keeping the association in the API
-// prevents two valid rules from being broadened into a mark x CIDR cartesian
-// product by callers or by the conntrack observer.
-using ConntrackRecoveryPolicyDestinationsByOwnedMark =
-    std::map<std::uint32_t, std::vector<std::string>>;
-
 struct ConntrackFlowObservation {
     std::vector<ConntrackExactForwardedFlow> flows;
     // Destination-selected subset belonging specifically to the caller's
     // trusted media-seed coverage. Keeping this separate prevents an outbound
     // mark shared by unrelated lists from being mistaken for a call seed.
     std::vector<ConntrackExactForwardedFlow> media_seed_flows;
-    // Ordinary-mark-safe subset belonging to a second trusted recovery
-    // policy. It shares the same immutable snapshot and flow budget but is
-    // never used to expand the source-wide media authority.
-    std::vector<ConntrackExactForwardedFlow> recovery_policy_flows;
     // Read-only, source-scoped UDP media guard. These flows may target an
     // arbitrary peer outside destination_cidrs and are never deletion
     // candidates; callers use them only to protect a same-source signalling
@@ -210,13 +198,11 @@ struct ConntrackFlowObservation {
     std::vector<ConntrackExactForwardedFlow> source_wide_udp_flows;
     std::size_t invalid_destination_selectors{0};
     std::size_t invalid_media_seed_destination_selectors{0};
-    std::size_t invalid_recovery_policy_destination_selectors{0};
     std::size_t invalid_media_guard_sources{0};
     std::size_t skipped_destination_selectors{0};
     bool invalid_owned_mask{false};
     bool destination_input_truncated{false};
     bool media_seed_destination_input_truncated{false};
-    bool recovery_policy_destination_input_truncated{false};
     bool snapshot_unavailable{false};
     bool snapshot_truncated{false};
     bool line_limit_reached{false};
@@ -333,9 +319,7 @@ public:
         ConntrackFlowObservationOptions options = {},
         const std::vector<std::string>& media_guard_source_addresses = {},
         const std::vector<std::string>& media_seed_destination_cidrs = {},
-        const std::set<uint32_t>& media_seed_owned_marks = {},
-        const ConntrackRecoveryPolicyDestinationsByOwnedMark&
-            recovery_policy_destinations_by_owned_mark = {})
+        const std::set<uint32_t>& media_seed_owned_marks = {})
         const;
 
     // Delete one previously observed flow by its full original 5-tuple and

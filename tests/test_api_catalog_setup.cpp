@@ -9,9 +9,6 @@
 #include "../src/api/sse_broadcaster.hpp"
 #include "../src/config/config_writer.hpp"
 #include "../src/daemon/config_store.hpp"
-#include "../src/runtime/meta_catalog_identity.hpp"
-#include "../src/runtime/whatsapp_catalog_identity.hpp"
-#include "../src/setup/catalog_setup_planner.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -705,23 +702,6 @@ TEST_CASE(
     CHECK(
         identified_preset("meta").at("catalog_identity") !=
         meta_companion.at("catalog_identity"));
-}
-
-TEST_CASE(
-    "runtime recovery identities match the authoritative catalog") {
-    const auto catalog = load_catalog_snapshot();
-
-    CHECK(
-        setup::catalog_preset_identity(catalog, "instagram") ==
-        kInstagramCatalogIdentity);
-    CHECK(
-        setup::catalog_preset_identity(catalog, "meta") ==
-        kMetaCatalogIdentity);
-    CHECK(
-        setup::catalog_preset_identity(
-            catalog,
-            "meta#routing-companion:meta_whatsapp_ip") ==
-        kWhatsappIpCatalogIdentity);
 }
 
 TEST_CASE(

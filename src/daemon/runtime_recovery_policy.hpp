@@ -18,7 +18,6 @@
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
-#include "../runtime/meta_catalog_identity.hpp"
 #include "../runtime/whatsapp_catalog_identity.hpp"
 
 namespace keen_pbr3 {
@@ -155,90 +154,6 @@ active_destination_only_reconnect_list_names(
         }
     }
     return active;
-}
-
-struct PackagedMetaQuicRecoveryScope {
-    std::map<std::uint32_t, std::set<std::string>>
-        companion_list_names_by_owned_mark;
-
-    bool empty() const noexcept {
-        return companion_list_names_by_owned_mark.empty();
-    }
-
-    std::set<std::string> companion_list_names() const {
-        std::set<std::string> names;
-        for (const auto& [mark, mark_names] :
-             companion_list_names_by_owned_mark) {
-            static_cast<void>(mark);
-            names.insert(mark_names.begin(), mark_names.end());
-        }
-        return names;
-    }
-};
-
-// Grant the relaxed Meta QUIC media heuristic only when an official
-// Instagram/Meta catalogue list and the immutable packaged Meta/WhatsApp IP
-// companion participate in the same committed destination-only mark rule.
-// The companion CIDRs are shared by Meta services, so this is deliberately
-// named Meta rather than Instagram. Companion-only rules retain the older
-// WhatsApp policy and do not acquire this authority.
-inline PackagedMetaQuicRecoveryScope active_packaged_meta_quic_recovery_scope(
-    const Config& config,
-    const std::vector<RuleState>& committed_rules) {
-    PackagedMetaQuicRecoveryScope scope;
-    if (!reconnect_unmarked_flows_on_routing_change_enabled(config)) {
-        return scope;
-    }
-
-    const auto selected_list_names =
-        reconnect_owned_flows_on_routing_change_list_names(config);
-    // An explicitly persisted [] is the user's opt-out. Automatic catalogue
-    // recommendation still selects the packaged companion when the setting
-    // is absent, but this policy must never silently re-enable itself after
-    // an explicit empty or narrower selection.
-    if (selected_list_names.empty()) {
-        return scope;
-    }
-
-    if (!config.lists.has_value()) {
-        return scope;
-    }
-    const auto& lists = *config.lists;
-    for (const auto& rule : committed_rules) {
-        if (rule.action_type != RuleActionType::Mark ||
-            rule.fwmark == 0U ||
-            !runtime_recovery_detail::
-                destination_only_conntrack_cleanup_eligible(rule)) {
-            continue;
-        }
-
-        bool has_official_instagram_or_meta = false;
-        std::set<std::string> packaged_companions;
-        for (const auto& list_name : rule.list_names) {
-            const auto list = lists.find(list_name);
-            if (list == lists.end()) {
-                continue;
-            }
-            has_official_instagram_or_meta =
-                has_official_instagram_or_meta ||
-                is_official_instagram_or_meta_catalog_identity(
-                    list->second.catalog_identity);
-            if (list->second.catalog_identity ==
-                    kWhatsappIpCatalogIdentity &&
-                selected_list_names.count(list_name) != 0U) {
-                packaged_companions.insert(list_name);
-            }
-        }
-        if (!has_official_instagram_or_meta ||
-            packaged_companions.empty()) {
-            continue;
-        }
-        auto& mark_companions =
-            scope.companion_list_names_by_owned_mark[rule.fwmark];
-        mark_companions.insert(
-            packaged_companions.begin(), packaged_companions.end());
-    }
-    return scope;
 }
 
 struct ConntrackDestinationRetirementPlan {

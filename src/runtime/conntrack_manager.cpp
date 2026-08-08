@@ -1186,9 +1186,7 @@ ConntrackManager::observe_forwarded_destination_flows(
     ConntrackFlowObservationOptions options,
     const std::vector<std::string>& media_guard_source_addresses,
     const std::vector<std::string>& media_seed_destination_cidrs,
-    const std::set<uint32_t>& media_seed_owned_marks,
-    const ConntrackRecoveryPolicyDestinationsByOwnedMark&
-        recovery_policy_destinations_by_owned_mark) const {
+    const std::set<uint32_t>& media_seed_owned_marks) const {
     ConntrackFlowObservation observation;
     if (owned_mask == 0U) {
         observation.invalid_owned_mask = true;
@@ -1266,54 +1264,6 @@ ConntrackManager::observe_forwarded_destination_flows(
     }
     if (observation.invalid_media_seed_destination_selectors != 0U ||
         observation.media_seed_destination_input_truncated) {
-        return observation;
-    }
-
-    std::map<std::uint32_t, std::vector<NormalizedTargetCidr>>
-        recovery_policy_selectors_by_owned_mark;
-    std::size_t recovery_policy_input_count = 0U;
-    for (const auto& [mark, raw_selectors] :
-         recovery_policy_destinations_by_owned_mark) {
-        if (mark == 0U || (mark & ~owned_mask) != 0U) {
-            observation.invalid_owned_mask = true;
-            return observation;
-        }
-        if (raw_selectors.size() >
-            options.max_destination_input_cidrs -
-                std::min(recovery_policy_input_count,
-                         options.max_destination_input_cidrs)) {
-            observation.recovery_policy_destination_input_truncated = true;
-            break;
-        }
-        recovery_policy_input_count += raw_selectors.size();
-
-        auto& normalized_selectors =
-            recovery_policy_selectors_by_owned_mark[mark];
-        normalized_selectors.reserve(raw_selectors.size());
-        std::set<std::string> seen_recovery_policy_selectors;
-        for (const auto& raw_selector : raw_selectors) {
-            const auto normalized = normalize_targeted_cidr(raw_selector);
-            if (!normalized.has_value()) {
-                ++observation.
-                    invalid_recovery_policy_destination_selectors;
-                continue;
-            }
-            if (normalized->family == TargetAddressFamily::Ipv6 &&
-                !options.ipv6_enabled) {
-                continue;
-            }
-            const std::string key =
-                (normalized->family == TargetAddressFamily::Ipv6
-                     ? "6:"
-                     : "4:") +
-                normalized->value;
-            if (seen_recovery_policy_selectors.insert(key).second) {
-                normalized_selectors.push_back(*normalized);
-            }
-        }
-    }
-    if (observation.invalid_recovery_policy_destination_selectors != 0U ||
-        observation.recovery_policy_destination_input_truncated) {
         return observation;
     }
 
@@ -1403,7 +1353,6 @@ ConntrackManager::observe_forwarded_destination_flows(
     std::set<FlowIdentity> seen_flows;
     std::set<FlowIdentity> seen_media_flows;
     std::set<FlowIdentity> seen_media_seed_flows;
-    std::set<FlowIdentity> seen_recovery_policy_flows;
     // One conntrack entry may intentionally appear in more than one semantic
     // view (for example, a selected WhatsApp seed is also part of the
     // source-wide UDP guard). Charge the bounded observation budget once per
@@ -1522,19 +1471,6 @@ ConntrackManager::observe_forwarded_destination_flows(
             [&parsed](const NormalizedTargetCidr& selector) {
                 return cidr_contains(selector, parsed->original.destination);
             });
-        const auto recovery_policy_selectors =
-            recovery_policy_selectors_by_owned_mark.find(
-                parsed->mark & owned_mask);
-        const bool recovery_policy_matches =
-            recovery_policy_selectors !=
-                recovery_policy_selectors_by_owned_mark.end() &&
-            std::any_of(
-                recovery_policy_selectors->second.begin(),
-                recovery_policy_selectors->second.end(),
-                [&parsed](const NormalizedTargetCidr& selector) {
-                    return cidr_contains(
-                        selector, parsed->original.destination);
-                });
         if (ordinary_mark_eligible &&
             seen_flows.insert(identity).second) {
             if (!claim_flow_budget(identity)) {
@@ -1542,14 +1478,6 @@ ConntrackManager::observe_forwarded_destination_flows(
                 break;
             }
             observation.flows.push_back(observed_flow);
-        }
-        if (ordinary_mark_eligible && recovery_policy_matches &&
-            seen_recovery_policy_flows.insert(identity).second) {
-            if (!claim_flow_budget(identity)) {
-                observation.flow_limit_reached = true;
-                break;
-            }
-            observation.recovery_policy_flows.push_back(observed_flow);
         }
         if (media_seed_matches &&
             seen_media_seed_flows.insert(identity).second) {

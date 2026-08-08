@@ -758,8 +758,6 @@ private:
     UdpCallAffinityDetector udp_call_affinity_detector_;
     std::vector<std::string> idle_stall_destination_selectors_;
     std::vector<std::string> udp_call_affinity_destination_selectors_;
-    ConntrackRecoveryPolicyDestinationsByOwnedMark
-        meta_quic_destinations_by_owned_mark_;
     std::atomic<bool> idle_stall_observer_enabled_{false};
     std::atomic<bool> idle_stall_observer_inflight_{false};
     // Pair publication and exact conntrack retirement execute on the bounded
