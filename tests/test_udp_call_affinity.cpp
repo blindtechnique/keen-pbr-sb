@@ -956,3 +956,34 @@ TEST_CASE("call affinity is limited to the packaged WhatsApp companion") {
         std::vector<std::string>{};
     CHECK(whatsapp_call_affinity_list_names(config).empty());
 }
+
+TEST_CASE(
+    "WhatsApp latency provenance ignores name spoofing copies and manual lists") {
+    Config config;
+    config.daemon = DaemonConfig{};
+
+    ListConfig packaged;
+    packaged.catalog_identity = kWhatsappIpCatalogIdentity;
+    ListConfig copied;
+    ListConfig spoofed_named_like_whatsapp;
+    ListConfig manual;
+    config.lists = std::map<std::string, ListConfig>{
+        {"catalog_entry_42", packaged},
+        {"meta_whatsapp_ip_copy", copied},
+        {"whatsapp", spoofed_named_like_whatsapp},
+        {"manual_meta_networks", manual},
+    };
+
+    CHECK(whatsapp_call_affinity_list_names(config) ==
+          std::set<std::string>{"catalog_entry_42"});
+
+    config.daemon->reconnect_owned_flows_on_routing_change_lists =
+        std::vector<std::string>{
+            "meta_whatsapp_ip_copy", "whatsapp", "manual_meta_networks"};
+    CHECK(whatsapp_call_affinity_list_names(config).empty());
+
+    config.daemon->reconnect_owned_flows_on_routing_change_lists =
+        std::vector<std::string>{"catalog_entry_42"};
+    config.daemon->reconnect_unmarked_flows_on_routing_change = false;
+    CHECK(whatsapp_call_affinity_list_names(config).empty());
+}

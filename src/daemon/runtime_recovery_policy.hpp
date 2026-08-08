@@ -18,6 +18,7 @@
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
+#include "../runtime/whatsapp_catalog_identity.hpp"
 
 namespace keen_pbr3 {
 
@@ -41,12 +42,10 @@ reconnect_owned_flows_on_routing_change_list_names(
     // created before this setting existed. This is the immutable provenance
     // identity shared by the packaged Meta/WhatsApp IP companion. New
     // catalogue installs persist the resolved technical ID explicitly.
-    constexpr const char* whatsapp_ip_catalog_identity =
-        "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
     std::set<std::string> recommended;
     for (const auto& [list_name, list] :
          config.lists.value_or(std::map<std::string, ListConfig>{})) {
-        if (list.catalog_identity == whatsapp_ip_catalog_identity) {
+        if (list.catalog_identity == kWhatsappIpCatalogIdentity) {
             recommended.insert(list_name);
         }
     }

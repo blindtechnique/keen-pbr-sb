@@ -32,6 +32,11 @@ enum class IdleStallFlowReadiness : std::uint8_t {
     udp_assured,
 };
 
+enum class IdleStallRecoveryPolicy : std::uint8_t {
+    standard,
+    packaged_whatsapp_ip_companion,
+};
+
 struct IdleStallFlowKey {
     IdleStallAddressFamily family{IdleStallAddressFamily::ipv4};
     IdleStallProtocol protocol{IdleStallProtocol::tcp};
@@ -82,6 +87,8 @@ struct IdleStallFlowSample {
     IdleStallFlowReadiness readiness{
         IdleStallFlowReadiness::ineligible};
     bool fastnat{false};
+    IdleStallRecoveryPolicy recovery_policy{
+        IdleStallRecoveryPolicy::standard};
 };
 
 struct IdleStallEpoch {
@@ -141,6 +148,10 @@ struct IdleStallDetectorOptions {
     // turning the observer into a per-packet watchdog.
     std::chrono::seconds idle_threshold{30};
     std::chrono::seconds confirmation_delay{5};
+    // The immutable packaged WhatsApp IP companion is the only policy that
+    // may request one early confirmation scan. The ordinary cadence and every
+    // safety/rate boundary remain unchanged.
+    std::chrono::seconds whatsapp_confirmation_delay{1};
     bool rotate_idle_fastnat_tcp{true};
     std::chrono::seconds fastnat_idle_rotation_threshold{30};
     // Active bidirectional UDP refreshes this guard on every five-second
@@ -178,6 +189,10 @@ public:
     std::vector<IdleStallDeleteDecision> observe(
         const IdleStallScan& scan,
         TimePoint now) {
+        // The fast hint belongs to one completed observation. If its caller
+        // did not consume it before another snapshot arrived, it is stale and
+        // must not create a delayed burst of one-second scans.
+        whatsapp_fast_followup_requested_ = false;
         prune_limits(now);
 
         if (!scan.epoch.valid() || scan.owned_mark_mask == 0U ||
@@ -230,12 +245,19 @@ public:
             observed_keys.insert(sample.key);
             auto [iterator, inserted] = states_.try_emplace(
                 sample.key,
-                FlowState{sample.counters, now, std::nullopt});
+                FlowState{sample.counters,
+                          now,
+                          std::nullopt,
+                          sample.recovery_policy});
             auto& state = iterator->second;
             if (inserted || counters_regressed(sample.counters,
-                                               state.counters)) {
+                                               state.counters) ||
+                state.recovery_policy != sample.recovery_policy) {
                 pending_attempts_.erase(sample.key);
-                state = FlowState{sample.counters, now, std::nullopt};
+                state = FlowState{sample.counters,
+                                  now,
+                                  std::nullopt,
+                                  sample.recovery_policy};
                 prepared.push_back(
                     PreparedSample{&sample, &state, true, false, false,
                                    false, false, false});
@@ -316,7 +338,7 @@ public:
                 pending_attempts_.erase(current.sample->key);
             } else if (state.suspect_since.has_value()) {
                 if (now - *state.suspect_since >=
-                    options_.confirmation_delay) {
+                    confirmation_delay_for(state.recovery_policy)) {
                     candidates.push_back(Candidate{
                         current.sample->key,
                         IdleStallDecisionReason::
@@ -325,6 +347,11 @@ public:
             } else if (current.was_idle &&
                        current.original_application_progress) {
                 state.suspect_since = now;
+                if (state.recovery_policy ==
+                    IdleStallRecoveryPolicy::
+                        packaged_whatsapp_ip_companion) {
+                    whatsapp_fast_followup_requested_ = true;
+                }
             } else if (options_.rotate_idle_fastnat_tcp &&
                        current.sample->fastnat &&
                        current.sample->key.protocol ==
@@ -478,10 +505,24 @@ public:
         pending_attempts_.clear();
         source_cooldown_until_.clear();
         decision_times_.clear();
+        whatsapp_fast_followup_requested_ = false;
     }
 
     std::size_t tracked_flow_count() const noexcept {
         return states_.size();
+    }
+
+    // Consume the coalesced request emitted by one observation containing one
+    // or more newly suspected packaged WhatsApp flows. A caller may schedule
+    // one early scan with this delay; subsequent observations fall back to the
+    // normal cadence unless another flow becomes newly suspect.
+    std::optional<std::chrono::seconds>
+    take_whatsapp_fast_followup_delay() noexcept {
+        if (!whatsapp_fast_followup_requested_) {
+            return std::nullopt;
+        }
+        whatsapp_fast_followup_requested_ = false;
+        return options_.whatsapp_confirmation_delay;
     }
 
 private:
@@ -499,6 +540,8 @@ private:
         IdleStallFlowCounters counters;
         TimePoint last_activity_at;
         std::optional<TimePoint> suspect_since;
+        IdleStallRecoveryPolicy recovery_policy{
+            IdleStallRecoveryPolicy::standard};
     };
 
     struct PendingAttempt {
@@ -547,10 +590,19 @@ private:
                current.reply_bytes < previous.reply_bytes;
     }
 
+    std::chrono::seconds confirmation_delay_for(
+        IdleStallRecoveryPolicy policy) const noexcept {
+        return policy == IdleStallRecoveryPolicy::
+                             packaged_whatsapp_ip_companion
+            ? options_.whatsapp_confirmation_delay
+            : options_.confirmation_delay;
+    }
+
     void reset_observation_continuity() noexcept {
         states_.clear();
         active_media_until_.clear();
         pending_attempts_.clear();
+        whatsapp_fast_followup_requested_ = false;
     }
 
     std::uint64_t allocate_attempt_id() noexcept {
@@ -588,6 +640,10 @@ private:
     void validate_options() const {
         if (options_.idle_threshold <= std::chrono::seconds::zero() ||
             options_.confirmation_delay <= std::chrono::seconds::zero() ||
+            options_.whatsapp_confirmation_delay <=
+                std::chrono::seconds::zero() ||
+            options_.whatsapp_confirmation_delay >
+                options_.confirmation_delay ||
             options_.fastnat_idle_rotation_threshold <=
                 std::chrono::seconds::zero() ||
             options_.active_media_hold <= std::chrono::seconds::zero() ||
@@ -609,6 +665,7 @@ private:
     std::map<SourceKey, TimePoint> source_cooldown_until_;
     std::deque<TimePoint> decision_times_;
     std::uint64_t next_attempt_id_{0};
+    bool whatsapp_fast_followup_requested_{false};
 };
 
 } // namespace keen_pbr3

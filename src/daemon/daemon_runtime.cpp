@@ -120,7 +120,9 @@ IdleStallFlowKey idle_stall_key_from(
 }
 
 IdleStallFlowSample idle_stall_sample_from(
-    const ConntrackExactForwardedFlow& flow) {
+    const ConntrackExactForwardedFlow& flow,
+    IdleStallRecoveryPolicy recovery_policy =
+        IdleStallRecoveryPolicy::standard) {
     IdleStallFlowReadiness readiness =
         IdleStallFlowReadiness::ineligible;
     if (flow.protocol == ConntrackFlowProtocol::Tcp &&
@@ -138,7 +140,8 @@ IdleStallFlowSample idle_stall_sample_from(
             flow.reply.packets,
             flow.reply.bytes},
         readiness,
-        flow.fastnat};
+        flow.fastnat,
+        recovery_policy};
 }
 
 struct IdleStallPendingDelete {
@@ -3763,12 +3766,22 @@ void Daemon::run_idle_stall_observer() noexcept {
             cancel_idle_stall_observer();
             return;
         }
+        auto whatsapp_latency_list_names =
+            whatsapp_call_affinity_list_names(config_);
+        for (auto iterator = whatsapp_latency_list_names.begin();
+             iterator != whatsapp_latency_list_names.end();) {
+            if (selected_list_names.count(*iterator) == 0U) {
+                iterator = whatsapp_latency_list_names.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
         auto call_affinity_targets =
             firewall_->backend() == FirewallBackend::iptables &&
                     !opts_.udp_call_affinity_ipset_available
                 ? std::vector<UdpCallAffinityTarget>{}
                 : active_udp_call_affinity_targets(
-                      whatsapp_call_affinity_list_names(config_),
+                      whatsapp_latency_list_names,
                       firewall_state_.get_rules(),
                       firewall_state_.get_fwmark_mask());
 
@@ -3794,6 +3807,7 @@ void Daemon::run_idle_stall_observer() noexcept {
             idle_stall_detector_.reset();
             udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_.clear();
+            udp_call_affinity_destination_selectors_.clear();
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
             schedule_idle_stall_observer_after(
@@ -3801,51 +3815,51 @@ void Daemon::run_idle_stall_observer() noexcept {
             return;
         }
 
-        std::vector<std::string> call_affinity_destination_selectors;
-        if (!call_affinity_targets.empty()) {
-            std::set<std::string> call_affinity_list_names;
-            for (const auto& target : call_affinity_targets) {
-                call_affinity_list_names.insert(target.list_name);
-            }
-            const auto call_coverage =
+        // Classification for the one-shot latency follow-up is provenance
+        // based and independent of whether the optional ipset-backed call
+        // affinity feature is available. Only the immutable packaged
+        // WhatsApp IP companion may contribute this exact-flow subset.
+        std::vector<std::string> whatsapp_destination_selectors;
+        if (!whatsapp_latency_list_names.empty()) {
+            const auto whatsapp_coverage =
                 collect_conntrack_destination_retirement_coverage(
                     destination_retirement_plan_for_lists(
-                        call_affinity_list_names),
+                        whatsapp_latency_list_names),
                     applied_list_content_state_);
-            call_affinity_destination_selectors =
-                call_coverage.destination_selectors;
+            whatsapp_destination_selectors =
+                whatsapp_coverage.destination_selectors;
             std::sort(
-                call_affinity_destination_selectors.begin(),
-                call_affinity_destination_selectors.end());
-            call_affinity_destination_selectors.erase(
+                whatsapp_destination_selectors.begin(),
+                whatsapp_destination_selectors.end());
+            whatsapp_destination_selectors.erase(
                 std::unique(
-                    call_affinity_destination_selectors.begin(),
-                    call_affinity_destination_selectors.end()),
-                call_affinity_destination_selectors.end());
-            const bool call_coverage_complete =
-                !call_coverage.partial() &&
-                !call_affinity_destination_selectors.empty() &&
+                    whatsapp_destination_selectors.begin(),
+                    whatsapp_destination_selectors.end()),
+                whatsapp_destination_selectors.end());
+            const bool whatsapp_coverage_complete =
+                !whatsapp_coverage.partial() &&
+                !whatsapp_destination_selectors.empty() &&
                 !runtime_recovery_detail::
-                    contains_global_destination_selector(call_coverage);
-            if (!call_coverage_complete) {
+                    contains_global_destination_selector(
+                        whatsapp_coverage);
+            if (!whatsapp_coverage_complete) {
                 call_affinity_targets.clear();
-                call_affinity_destination_selectors.clear();
+                whatsapp_destination_selectors.clear();
                 udp_call_affinity_detector_.reset();
             }
         }
-        if (destination_selectors !=
-            idle_stall_destination_selectors_) {
+        const bool idle_observation_scope_changed =
+            destination_selectors != idle_stall_destination_selectors_ ||
+            whatsapp_destination_selectors !=
+                udp_call_affinity_destination_selectors_;
+        if (idle_observation_scope_changed) {
             idle_stall_detector_.reset();
             udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_ = destination_selectors;
+            udp_call_affinity_destination_selectors_ =
+                whatsapp_destination_selectors;
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
-        }
-        if (call_affinity_destination_selectors !=
-            udp_call_affinity_destination_selectors_) {
-            udp_call_affinity_detector_.reset();
-            udp_call_affinity_destination_selectors_ =
-                call_affinity_destination_selectors;
         }
         const auto retained_affinity_sources =
             call_affinity_targets.empty()
@@ -3888,7 +3902,7 @@ void Daemon::run_idle_stall_observer() noexcept {
              coverage_complete,
              call_affinity_targets,
              retained_affinity_sources,
-             call_affinity_destination_selectors,
+             whatsapp_destination_selectors,
              destination_selectors =
                  std::move(destination_selectors)]() mutable {
                 AtomicFlagResetGuard inflight_guard(
@@ -3935,7 +3949,7 @@ void Daemon::run_idle_stall_observer() noexcept {
                                     IDLE_STALL_MAX_SNAPSHOT_LINES,
                                     /*allow_foreign_mark_bits_for_media=*/true},
                                 retained_affinity_sources,
-                                call_affinity_destination_selectors,
+                                whatsapp_destination_selectors,
                                 call_affinity_marks);
                     }
                 } catch (const std::exception& error) {
@@ -4612,9 +4626,19 @@ void Daemon::commit_idle_stall_observation(
         !observation.media_seed_destination_input_truncated &&
         observation.invalid_media_guard_sources == 0U &&
         !observation.invalid_owned_mask;
+    std::set<IdleStallFlowKey> whatsapp_latency_flow_keys;
+    for (const auto& flow : observation.media_seed_flows) {
+        whatsapp_latency_flow_keys.insert(idle_stall_key_from(flow));
+    }
     scan.flows.reserve(observation.flows.size());
     for (const auto& flow : observation.flows) {
-        scan.flows.push_back(idle_stall_sample_from(flow));
+        const auto key = idle_stall_key_from(flow);
+        scan.flows.push_back(idle_stall_sample_from(
+            flow,
+            whatsapp_latency_flow_keys.count(key) != 0U
+                ? IdleStallRecoveryPolicy::
+                      packaged_whatsapp_ip_companion
+                : IdleStallRecoveryPolicy::standard));
     }
 
     const auto observation_time = UdpCallAffinityDetector::Clock::now();
@@ -4662,26 +4686,31 @@ void Daemon::commit_idle_stall_observation(
     } catch (...) {
         idle_stall_detector_.reset();
     }
-
     const bool relevant_flows_observed =
         !observation.flows.empty() ||
         !observation.source_wide_udp_flows.empty();
     if (decisions.empty()) {
+        const auto whatsapp_fast_followup =
+            idle_stall_detector_.take_whatsapp_fast_followup_delay();
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
         // A bounded/truncated snapshot cannot produce a safe decision. Back
         // off instead of reparsing the same oversized conntrack table every
         // five seconds on a small router.
-        const auto next_interval = !scan.status.trustworthy()
-            ? IDLE_STALL_QUIET_SCAN_INTERVAL
-            : (affinity_fast_followup
-                   ? UDP_CALL_AFFINITY_FAST_SCAN_INTERVAL
-                   : (relevant_flows_observed ||
-                              idle_stall_detector_.tracked_flow_count() != 0U
-                          ? IDLE_STALL_ACTIVE_SCAN_INTERVAL
-                          : (affinity_discovery_enabled
-                                 ? UDP_CALL_AFFINITY_DISCOVERY_SCAN_INTERVAL
-                                 : IDLE_STALL_QUIET_SCAN_INTERVAL)));
+        auto next_interval = IDLE_STALL_QUIET_SCAN_INTERVAL;
+        if (scan.status.trustworthy()) {
+            if (whatsapp_fast_followup.has_value()) {
+                next_interval = *whatsapp_fast_followup;
+            } else if (affinity_fast_followup) {
+                next_interval = UDP_CALL_AFFINITY_FAST_SCAN_INTERVAL;
+            } else if (relevant_flows_observed ||
+                       idle_stall_detector_.tracked_flow_count() != 0U) {
+                next_interval = IDLE_STALL_ACTIVE_SCAN_INTERVAL;
+            } else if (affinity_discovery_enabled) {
+                next_interval =
+                    UDP_CALL_AFFINITY_DISCOVERY_SCAN_INTERVAL;
+            }
+        }
         schedule_idle_stall_observer_after(next_interval);
         return;
     }
@@ -4717,8 +4746,11 @@ void Daemon::commit_idle_stall_observation(
         release_pending_decisions();
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
-        schedule_idle_stall_observer_after(
-            IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+        const auto fast_followup =
+            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+        const auto next_interval =
+            fast_followup.value_or(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+        schedule_idle_stall_observer_after(next_interval);
         return;
     }
     std::vector<std::string> media_guard_sources;
@@ -5055,8 +5087,12 @@ void Daemon::commit_idle_stall_observation(
                             "generation={} reason=live_scope_changed",
                             expected_runtime_generation);
                     }
-                    schedule_idle_stall_observer_after(
+                    const auto fast_followup =
+                        idle_stall_detector_.
+                            take_whatsapp_fast_followup_delay();
+                    const auto next_interval = fast_followup.value_or(
                         IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+                    schedule_idle_stall_observer_after(next_interval);
                 },
                 "idle-stall-delete-commit");
             if (completion_posted) {
@@ -5069,8 +5105,11 @@ void Daemon::commit_idle_stall_observation(
         release_pending_decisions();
         idle_stall_observer_inflight_.store(
             false, std::memory_order_release);
-        schedule_idle_stall_observer_after(
-            IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+        const auto fast_followup =
+            idle_stall_detector_.take_whatsapp_fast_followup_delay();
+        const auto next_interval =
+            fast_followup.value_or(IDLE_STALL_ACTIVE_SCAN_INTERVAL);
+        schedule_idle_stall_observer_after(next_interval);
     }
 }
 

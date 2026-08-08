@@ -2,6 +2,7 @@
 
 #include "conntrack_manager.hpp"
 #include "idle_stall_detector.hpp"
+#include "whatsapp_catalog_identity.hpp"
 
 #include "../config/config.hpp"
 #include "../routing/firewall_state.hpp"
@@ -23,8 +24,6 @@
 
 namespace keen_pbr3 {
 
-inline constexpr const char* kWhatsappIpCatalogIdentity =
-    "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
 inline constexpr std::uint32_t kUdpCallAffinityRefreshSeconds = 30U;
 // Three refresh windows provide headroom for brief observer gaps while
 // keeping an abandoned peer route bounded to roughly a minute and a half.

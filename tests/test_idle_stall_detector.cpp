@@ -16,7 +16,7 @@ using namespace std::chrono_literals;
 
 constexpr std::uint32_t kOwnedMask = 0x00FF0000U;
 
-IdleStallDetector::TimePoint at(std::chrono::seconds elapsed) {
+IdleStallDetector::TimePoint at(std::chrono::milliseconds elapsed) {
     return IdleStallDetector::TimePoint{} + elapsed;
 }
 
@@ -29,7 +29,9 @@ IdleStallFlowSample tcp_sample(
     std::uint64_t reply_packets,
     std::uint64_t reply_bytes,
     std::uint32_t mark = 0U,
-    bool fastnat = false) {
+    bool fastnat = false,
+    IdleStallRecoveryPolicy recovery_policy =
+        IdleStallRecoveryPolicy::standard) {
     return IdleStallFlowSample{
         IdleStallFlowKey{
             IdleStallAddressFamily::ipv4,
@@ -45,7 +47,8 @@ IdleStallFlowSample tcp_sample(
             reply_packets,
             reply_bytes},
         IdleStallFlowReadiness::tcp_established,
-        fastnat};
+        fastnat,
+        recovery_policy};
 }
 
 IdleStallFlowSample udp_sample(
@@ -72,7 +75,8 @@ IdleStallFlowSample udp_sample(
             reply_packets,
             reply_bytes},
         IdleStallFlowReadiness::udp_assured,
-        false};
+        false,
+        IdleStallRecoveryPolicy::standard};
 }
 
 IdleStallScan scan(
@@ -152,6 +156,216 @@ TEST_CASE(
     CHECK(decisions.front().flow == flow.key);
     CHECK(decisions.front().reason ==
           IdleStallDecisionReason::idle_request_without_reply);
+}
+
+TEST_CASE(
+    "IdleStallDetector gives only the packaged WhatsApp policy a one-second confirmation") {
+    auto official = tcp_sample(
+        "192.168.1.44",
+        "31.13.66.10",
+        41000,
+        10,
+        1000,
+        10,
+        1000,
+        0U,
+        false,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    IdleStallDetector official_detector;
+    CHECK(official_detector.observe(scan({official}), at(0s)).empty());
+    official.counters.original_packets += 4;
+    official.counters.original_bytes += 600;
+    CHECK(official_detector.observe(scan({official}), at(31s)).empty());
+    CHECK(official_detector.take_whatsapp_fast_followup_delay() ==
+          std::optional<std::chrono::seconds>{1s});
+    CHECK_FALSE(
+        official_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(official_detector.observe(
+        scan({official}), at(31s + 999ms)).empty());
+    const auto official_decisions =
+        official_detector.observe(scan({official}), at(32s));
+    REQUIRE(official_decisions.size() == 1U);
+    CHECK_FALSE(
+        official_detector.take_whatsapp_fast_followup_delay().has_value());
+
+    auto ordinary = tcp_sample(
+        "192.168.1.45", "31.13.66.11", 41001,
+        10, 1000, 10, 1000);
+    IdleStallDetector ordinary_detector;
+    CHECK(ordinary_detector.observe(scan({ordinary}), at(0s)).empty());
+    ordinary.counters.original_packets += 4;
+    ordinary.counters.original_bytes += 600;
+    CHECK(ordinary_detector.observe(scan({ordinary}), at(31s)).empty());
+    CHECK_FALSE(
+        ordinary_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(ordinary_detector.observe(scan({ordinary}), at(32s)).empty());
+    CHECK(ordinary_detector.observe(
+        scan({ordinary}), at(35s + 999ms)).empty());
+    REQUIRE(ordinary_detector.observe(scan({ordinary}), at(36s)).size() ==
+            1U);
+}
+
+TEST_CASE(
+    "IdleStallDetector cancels packaged WhatsApp confirmation on reply or active UDP media") {
+    const auto whatsapp_policy =
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
+    auto replied = tcp_sample(
+        "192.168.1.44", "31.13.66.10", 41000,
+        10, 1000, 10, 1000, 0U, false, whatsapp_policy);
+    IdleStallDetector reply_detector;
+    CHECK(reply_detector.observe(scan({replied}), at(0s)).empty());
+    replied.counters.original_packets += 4;
+    replied.counters.original_bytes += 600;
+    CHECK(reply_detector.observe(scan({replied}), at(31s)).empty());
+    REQUIRE(reply_detector.take_whatsapp_fast_followup_delay().has_value());
+    replied.counters.reply_packets += 4;
+    replied.counters.reply_bytes += 600;
+    CHECK(reply_detector.observe(
+        scan({replied}), at(31s + 999ms)).empty());
+    CHECK_FALSE(
+        reply_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(reply_detector.observe(scan({replied}), at(40s)).empty());
+
+    auto signalling = tcp_sample(
+        "192.168.1.46", "31.13.66.12", 41002,
+        10, 1000, 10, 1000, 0U, false, whatsapp_policy);
+    auto media = udp_sample(
+        "192.168.1.46", "31.13.66.20", 42000,
+        100, 10000, 100, 10000);
+    IdleStallDetector media_detector;
+    CHECK(media_detector.observe(scan({signalling, media}), at(0s)).empty());
+    signalling.counters.original_packets += 4;
+    signalling.counters.original_bytes += 600;
+    CHECK(media_detector.observe(scan({signalling, media}), at(31s)).empty());
+    REQUIRE(media_detector.take_whatsapp_fast_followup_delay().has_value());
+    media.counters.original_packets += 1;
+    media.counters.original_bytes += 120;
+    media.counters.reply_packets += 1;
+    media.counters.reply_bytes += 120;
+    CHECK(media_detector.observe(
+        scan({signalling, media}), at(31s + 999ms)).empty());
+    CHECK_FALSE(
+        media_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(media_detector.observe(scan({signalling, media}), at(40s)).empty());
+}
+
+TEST_CASE(
+    "IdleStallDetector preserves the 256-byte keepalive boundary for WhatsApp") {
+    auto flow = tcp_sample(
+        "192.168.1.44",
+        "31.13.66.10",
+        41000,
+        10,
+        1000,
+        10,
+        1000,
+        0U,
+        false,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    IdleStallDetector detector;
+    CHECK(detector.observe(scan({flow}), at(0s)).empty());
+
+    flow.counters.original_packets += 1;
+    flow.counters.original_bytes += 256;
+    CHECK(detector.observe(scan({flow}), at(31s)).empty());
+    CHECK_FALSE(detector.take_whatsapp_fast_followup_delay().has_value());
+
+    flow.counters.original_packets += 1;
+    flow.counters.original_bytes += 1;
+    CHECK(detector.observe(scan({flow}), at(31s + 500ms)).empty());
+    CHECK_FALSE(detector.take_whatsapp_fast_followup_delay().has_value());
+
+    flow.counters.original_packets += 1;
+    flow.counters.original_bytes += 257;
+    CHECK(detector.observe(scan({flow}), at(32s)).empty());
+    CHECK(detector.take_whatsapp_fast_followup_delay() ==
+          std::optional<std::chrono::seconds>{1s});
+}
+
+TEST_CASE(
+    "IdleStallDetector retains a WhatsApp follow-up beside a ready ordinary decision") {
+    auto ordinary = tcp_sample(
+        "192.168.1.40", "31.13.66.10", 41000,
+        10, 1000, 10, 1000);
+    auto whatsapp = tcp_sample(
+        "192.168.1.44",
+        "31.13.66.11",
+        41001,
+        10,
+        1000,
+        10,
+        1000,
+        0U,
+        false,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    IdleStallDetector detector;
+    CHECK(detector.observe(scan({ordinary, whatsapp}), at(0s)).empty());
+
+    ordinary.counters.original_packets += 4;
+    ordinary.counters.original_bytes += 600;
+    CHECK(detector.observe(scan({ordinary, whatsapp}), at(31s)).empty());
+
+    whatsapp.counters.original_packets += 4;
+    whatsapp.counters.original_bytes += 600;
+    const auto decisions =
+        detector.observe(scan({ordinary, whatsapp}), at(36s));
+    REQUIRE(decisions.size() == 1U);
+    CHECK(decisions.front().flow == ordinary.key);
+    CHECK(detector.take_whatsapp_fast_followup_delay() ==
+          std::optional<std::chrono::seconds>{1s});
+    CHECK_FALSE(detector.take_whatsapp_fast_followup_delay().has_value());
+}
+
+TEST_CASE(
+    "IdleStallDetector clears WhatsApp follow-up on policy or authority reset") {
+    auto flow = tcp_sample(
+        "192.168.1.44",
+        "31.13.66.10",
+        41000,
+        10,
+        1000,
+        10,
+        1000,
+        0U,
+        false,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    IdleStallDetector policy_detector;
+    CHECK(policy_detector.observe(scan({flow}), at(0s)).empty());
+    flow.counters.original_packets += 4;
+    flow.counters.original_bytes += 600;
+    CHECK(policy_detector.observe(scan({flow}), at(31s)).empty());
+    flow.recovery_policy = IdleStallRecoveryPolicy::standard;
+    CHECK(policy_detector.observe(
+        scan({flow}), at(31s + 500ms)).empty());
+    CHECK_FALSE(
+        policy_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(policy_detector.observe(scan({flow}), at(40s)).empty());
+
+    flow.recovery_policy =
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
+    IdleStallDetector authority_detector;
+    CHECK(authority_detector.observe(scan({flow}), at(0s)).empty());
+    flow.counters.original_packets += 4;
+    flow.counters.original_bytes += 600;
+    CHECK(authority_detector.observe(scan({flow}), at(31s)).empty());
+    auto incomplete = scan({flow});
+    incomplete.status.coverage_complete = false;
+    CHECK(authority_detector.observe(incomplete, at(31s + 500ms)).empty());
+    CHECK_FALSE(
+        authority_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(authority_detector.tracked_flow_count() == 0U);
+
+    flow.counters.original_packets += 4;
+    flow.counters.original_bytes += 600;
+    IdleStallDetector reset_detector;
+    CHECK(reset_detector.observe(scan({flow}), at(0s)).empty());
+    flow.counters.original_packets += 4;
+    flow.counters.original_bytes += 600;
+    CHECK(reset_detector.observe(scan({flow}), at(31s)).empty());
+    reset_detector.reset();
+    CHECK_FALSE(
+        reset_detector.take_whatsapp_fast_followup_delay().has_value());
+    CHECK(reset_detector.tracked_flow_count() == 0U);
 }
 
 TEST_CASE(
