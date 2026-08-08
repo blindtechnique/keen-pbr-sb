@@ -850,6 +850,17 @@ export const ruTranslation = {
       up: "Работает",
       degraded: "Есть проблема",
     },
+    operationalStates: {
+      down: "Остановлен",
+      starting: "Запускается",
+      supervisorDegraded: "Есть проблема",
+      processRunning: "Процесс запущен",
+      verificationPending: "Проверка ожидается",
+      healthy: "Работает",
+      runtimeDegraded: "Не работает",
+      runtimeUnavailable: "Не отвечает",
+      runtimeUnknown: "Состояние неизвестно",
+    },
   },
   brand: {
     logoAlt: "логотип keen-pbr-sb",

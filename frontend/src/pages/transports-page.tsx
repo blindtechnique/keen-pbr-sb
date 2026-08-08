@@ -68,6 +68,7 @@ import { NativeInterfaceDetails } from "@/components/transports/native-interface
 import { NativeRouteOffer } from "@/components/transports/native-route-offer"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { TransportLatencyPill } from "@/components/transports/transport-latency-pill"
+import { transportOperationalState } from "@/components/transports/transport-operational-state"
 import {
   collectProbeByInterface,
   collectRuntimeLatencyByInterface,
@@ -555,6 +556,12 @@ export function TransportsPage({
       : [],
     preferredOutboundTagByInterface
   )
+  const runtimeOutboundByTag = new Map(
+    (runtimeOutboundsQuery.data?.status === 200
+      ? runtimeOutboundsQuery.data.data.outbounds
+      : []
+    ).map((runtimeOutbound) => [runtimeOutbound.tag, runtimeOutbound])
+  )
   // DNS detour is a property of the DNS server, not of the transport, so the
   // card only points at it instead of duplicating the setting.
   const dnsServersByInterface = new Map<string, string[]>()
@@ -909,6 +916,11 @@ export function TransportsPage({
 
   const managedRows = visibleItems.map((item) => {
     const boundOutbound = interfaceOutboundByInterface.get(item.interface)
+    const operationalState = transportOperationalState(
+      item,
+      boundOutbound ? runtimeOutboundByTag.get(boundOutbound.tag) : undefined,
+      Boolean(boundOutbound)
+    )
     const configuredSpec = configuredByTag.get(item.tag)
     const displayName =
       item.display_name?.trim() ||
@@ -976,9 +988,10 @@ export function TransportsPage({
       />,
       <KeeneticStatus
         key="state"
-        tone={item.state === "up" ? "success" : "neutral"}
+        title={operationalState.detail}
+        tone={operationalState.healthy ? "success" : "neutral"}
       >
-        {t(`transports.states.${item.state}`)}
+        {t(`transports.operationalStates.${operationalState.key}`)}
       </KeeneticStatus>,
       <TransportLatencyPill
         key="latency"

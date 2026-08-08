@@ -355,8 +355,8 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
   },
   {
     file: "src/pages/transports-page.tsx",
-    argument: "`transports.states.${*}`",
-    keys: ["transports.states.*"],
-    reason: "Transport state is a finite API enum.",
+    argument: "`transports.operationalStates.${*}`",
+    keys: ["transports.operationalStates.*"],
+    reason: "Operational transport state is a finite local union.",
   },
 ] as const

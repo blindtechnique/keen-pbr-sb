@@ -843,6 +843,17 @@ export const enTranslation = {
       up: "Up",
       degraded: "Degraded",
     },
+    operationalStates: {
+      down: "Down",
+      starting: "Starting",
+      supervisorDegraded: "Degraded",
+      processRunning: "Process running",
+      verificationPending: "Awaiting verification",
+      healthy: "Working",
+      runtimeDegraded: "Not working",
+      runtimeUnavailable: "Unresponsive",
+      runtimeUnknown: "Status unknown",
+    },
   },
   brand: {
     logoAlt: "keen-pbr-sb logo",
