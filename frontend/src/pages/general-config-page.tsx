@@ -99,6 +99,12 @@ import {
 } from "@/hooks/use-interface-names"
 import { useSectionTab } from "@/hooks/use-section-tab"
 import { toast } from "sonner"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  getMetaUdp443Policy,
+  type MetaUdp443Policy,
+  withMetaUdp443Policy,
+} from "@/lib/meta-udp-443-policy"
 
 type StrictEnforcementOption = "automatic" | "enabled" | "disabled"
 
@@ -111,6 +117,7 @@ type SettingsDraft = {
   clearDynamicSetsOnApply: boolean
   reconnectUnmarkedFlowsOnRoutingChange: boolean
   reconnectOwnedFlowsOnRoutingChangeLists: string[] | undefined
+  metaUdp443Policy: MetaUdp443Policy
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
   inboundInterfaces: string[]
@@ -131,6 +138,7 @@ const fallbackDraft: SettingsDraft = {
   clearDynamicSetsOnApply: true,
   reconnectUnmarkedFlowsOnRoutingChange: true,
   reconnectOwnedFlowsOnRoutingChangeLists: undefined,
+  metaUdp443Policy: "balanced",
   ipv6Enabled: true,
   clientDnsEnforcement: false,
   inboundInterfaces: [],
@@ -151,6 +159,7 @@ const SETTINGS_FIELD_NAMES = {
     "reconnectUnmarkedFlowsOnRoutingChange",
   reconnectOwnedFlowsOnRoutingChangeLists:
     "reconnectOwnedFlowsOnRoutingChangeLists",
+  metaUdp443Policy: "metaUdp443Policy",
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
   inboundInterfaces: "inboundInterfaces",
@@ -1483,6 +1492,82 @@ function LoadedGeneralConfigPage({
 
               <FieldSeparator />
 
+              <form.Field name={SETTINGS_FIELD_NAMES.metaUdp443Policy}>
+                {(field) => (
+                  <Field width="short">
+                    <FieldLabel htmlFor="meta-udp-443-policy">
+                      {t("pages.settings.advanced.metaUdp443PolicyLabel")}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Select
+                        items={[
+                          {
+                            value: "balanced",
+                            label: t(
+                              "pages.settings.advanced.metaUdp443PolicyOptions.balanced"
+                            ),
+                          },
+                          {
+                            value: "messages_first",
+                            label: t(
+                              "pages.settings.advanced.metaUdp443PolicyOptions.messagesFirst"
+                            ),
+                          },
+                        ]}
+                        onValueChange={(value) => {
+                          if (
+                            value === "balanced" ||
+                            value === "messages_first"
+                          ) {
+                            field.handleChange(value)
+                          }
+                        }}
+                        value={field.state.value}
+                      >
+                        <SelectTrigger id="meta-udp-443-policy">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="balanced">
+                              {t(
+                                "pages.settings.advanced.metaUdp443PolicyOptions.balanced"
+                              )}
+                            </SelectItem>
+                            <SelectItem value="messages_first">
+                              {t(
+                                "pages.settings.advanced.metaUdp443PolicyOptions.messagesFirst"
+                              )}
+                            </SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FieldHint
+                        description={t(
+                          "pages.settings.advanced.metaUdp443PolicyHint"
+                        )}
+                      />
+                      {field.state.value === "messages_first" ? (
+                        <Alert className="mt-2" variant="warning">
+                          <AlertTitle>
+                            {t(
+                              "pages.settings.advanced.metaUdp443PolicyWarningTitle"
+                            )}
+                          </AlertTitle>
+                          <AlertDescription>
+                            {t(
+                              "pages.settings.advanced.metaUdp443PolicyWarningDescription"
+                            )}
+                          </AlertDescription>
+                        </Alert>
+                      ) : null}
+                    </FieldContent>
+                  </Field>
+                )}
+              </form.Field>
+
+              <FieldSeparator />
+
               <form.Field name={SETTINGS_FIELD_NAMES.fwmarkStart}>
                 {(field) => {
                   const error = getFirstFieldError(field.state.meta.errors)
@@ -1746,6 +1831,7 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     reconnectOwnedFlowsOnRoutingChangeLists:
       config.daemon?.reconnect_owned_flows_on_routing_change_lists ??
       fallbackDraft.reconnectOwnedFlowsOnRoutingChangeLists,
+    metaUdp443Policy: getMetaUdp443Policy(config.daemon),
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
     clientDnsEnforcement:
       config.dns?.client_dns_enforcement?.enabled ??
@@ -1788,20 +1874,23 @@ function buildUpdatedConfig(
 
   const updatedConfig: ConfigObject = {
     ...config,
-    daemon: {
-      ...config.daemon,
-      strict_enforcement:
-        draft.strictEnforcement === "automatic"
-          ? undefined
-          : draft.strictEnforcement === "enabled",
-      skip_marked_packets: draft.skipMarkedPackets,
-      clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
-      reconnect_unmarked_flows_on_routing_change:
-        draft.reconnectUnmarkedFlowsOnRoutingChange,
-      reconnect_owned_flows_on_routing_change_lists:
-        draft.reconnectOwnedFlowsOnRoutingChangeLists,
-      ipv6_enabled: draft.ipv6Enabled,
-    },
+    daemon: withMetaUdp443Policy(
+      {
+        ...config.daemon,
+        strict_enforcement:
+          draft.strictEnforcement === "automatic"
+            ? undefined
+            : draft.strictEnforcement === "enabled",
+        skip_marked_packets: draft.skipMarkedPackets,
+        clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
+        reconnect_unmarked_flows_on_routing_change:
+          draft.reconnectUnmarkedFlowsOnRoutingChange,
+        reconnect_owned_flows_on_routing_change_lists:
+          draft.reconnectOwnedFlowsOnRoutingChangeLists,
+        ipv6_enabled: draft.ipv6Enabled,
+      },
+      draft.metaUdp443Policy
+    ),
     route: {
       ...config.route,
       inbound_interfaces: normalizeInternalVpnServerInterfaceNames(
@@ -1926,6 +2015,8 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply
     case "daemon.reconnect_unmarked_flows_on_routing_change":
       return SETTINGS_FIELD_NAMES.reconnectUnmarkedFlowsOnRoutingChange
+    case "daemon.meta_udp443_policy":
+      return SETTINGS_FIELD_NAMES.metaUdp443Policy
     case "daemon.ipv6_enabled":
       return SETTINGS_FIELD_NAMES.ipv6Enabled
     case "dns.client_dns_enforcement.enabled":

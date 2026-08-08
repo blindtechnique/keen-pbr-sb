@@ -1824,6 +1824,16 @@ export const enTranslation = {
           "This is an explicit selection. Removing every list saves an explicit opt-out.",
         reconnectOwnedFlowsOnRoutingChangeListsDisabledStatus:
           "The master switch is off, so enhanced reconnection is disabled for the selected lists.",
+        metaUdp443PolicyLabel: "Meta and WhatsApp transport",
+        metaUdp443PolicyHint:
+          "Applies only to traffic routed through keen-pbr-sb and covered by the packaged Meta/WhatsApp IP companion.",
+        metaUdp443PolicyOptions: {
+          balanced: "Balanced (recommended)",
+          messagesFirst: "Messages first (TCP)",
+        },
+        metaUdp443PolicyWarningTitle: "Calls may take longer to connect",
+        metaUdp443PolicyWarningDescription:
+          "This mode blocks Meta/WhatsApp QUIC over UDP/443 only on the keen-pbr-sb route covered by the packaged IP companion, forcing messages and media to TCP. This improves their reliability, but call audio may start 10–20 seconds after the immediate call notification. STUN, ICE, P2P, and all other call UDP remain allowed.",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
           "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",
