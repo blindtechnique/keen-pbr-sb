@@ -48,6 +48,7 @@ describe("Meta UDP/443 policy", () => {
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("UDP/443")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("TCP")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("10–20")
+      expect(advanced.metaUdp443PolicyWarningDescription).toContain("Instagram")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("STUN")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("ICE")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("P2P")
