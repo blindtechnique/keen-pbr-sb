@@ -173,6 +173,45 @@ bool install_missing_asset(const fs::path& source, const fs::path& target) {
 
 } // namespace
 
+std::vector<NfqwsStrategyAssetVerificationPath>
+inspect_nfqws_strategy_assets(
+    const fs::path& manifest,
+    const fs::path& source_directory,
+    const fs::path& destination_directory) {
+    const auto names = read_manifest(manifest);
+    std::vector<NfqwsStrategyAssetVerificationPath> result;
+    result.reserve(names.size());
+    for (const auto& name : names) {
+        const auto source = source_directory / name;
+        const auto destination = destination_directory / name;
+        require_regular_file(source, "asset");
+        std::error_code ec;
+        const auto size = fs::file_size(source, ec);
+        if (ec || size > kMaxAssetBytes) {
+            throw std::runtime_error(
+                "nfqws strategy asset is too large: " + name);
+        }
+
+        fs::path verification = source;
+        const auto destination_status = fs::symlink_status(destination, ec);
+        if (!ec && fs::exists(destination_status)) {
+            if (fs::is_symlink(destination_status) ||
+                !fs::is_regular_file(destination_status)) {
+                throw std::runtime_error(
+                    "nfqws strategy asset target is not a regular file: " +
+                    name);
+            }
+            verification = destination;
+        } else if (ec && ec != std::errc::no_such_file_or_directory) {
+            throw std::runtime_error(
+                "cannot inspect nfqws strategy asset target: " + name);
+        }
+        result.push_back(
+            {name, source, destination, std::move(verification)});
+    }
+    return result;
+}
+
 NfqwsStrategyAssetSync sync_nfqws_strategy_assets(
     const fs::path& manifest,
     const fs::path& source_directory,

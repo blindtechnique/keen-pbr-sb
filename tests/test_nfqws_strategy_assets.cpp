@@ -74,3 +74,23 @@ TEST_CASE("nfqws strategy asset manifests reject traversal") {
     CHECK_THROWS(keen_pbr3::sync_nfqws_strategy_assets(
         manifest, temporary.path / "source", temporary.path / "destination"));
 }
+
+TEST_CASE("nfqws strategy asset inspection is read-only and prefers live bytes") {
+    TemporaryDirectory temporary;
+    const auto manifest = temporary.path / "required-blobs.txt";
+    const auto source = temporary.path / "source";
+    const auto destination = temporary.path / "destination";
+    write_file(manifest, "missing.bin\nexisting.bin\n");
+    write_file(source / "missing.bin", "package-missing");
+    write_file(source / "existing.bin", "package-existing");
+    write_file(destination / "existing.bin", "user-existing");
+
+    const auto plan = keen_pbr3::inspect_nfqws_strategy_assets(
+        manifest, source, destination);
+    REQUIRE(plan.size() == 2U);
+    CHECK(plan[0].destination == destination / "missing.bin");
+    CHECK(plan[0].verification_path == source / "missing.bin");
+    CHECK(plan[1].verification_path == destination / "existing.bin");
+    CHECK_FALSE(fs::exists(destination / "missing.bin"));
+    CHECK(read_file(destination / "existing.bin") == "user-existing");
+}

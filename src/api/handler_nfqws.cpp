@@ -8,19 +8,24 @@
 #include "../util/nfqws_config.hpp"
 #include "../util/nfqws_file_writer.hpp"
 #include "../util/nfqws_strategy_assets.hpp"
+#include "../util/nfqws_validator.hpp"
+#include "../util/safe_exec.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <httplib.h>
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <signal.h>
 #include <sstream>
@@ -50,6 +55,16 @@ constexpr const char* kUserStrategies = "/opt/etc/keen-pbr/nfqws-strategies";
 constexpr const char* kDurabilityWarning =
     "Warning: the nfqws file is visible, but directory durability could not "
     "be confirmed. Runtime reconciliation continued.";
+
+struct ApplyStrategyHooks {
+    std::function<bool()> installed;
+    std::function<std::vector<ConfigValidationIssue>(
+        const std::string&, const std::string&)>
+        validate;
+    std::function<NfqwsStrategyAssetSync(const std::string&)> provision;
+    std::function<NfqwsFileWriteResult(const std::string&)> write_active;
+    std::function<std::string(int&)> restart;
+};
 
 std::string read_file(const fs::path& path, std::size_t limit = 2U * 1024U * 1024U);
 
@@ -86,6 +101,22 @@ nlohmann::json successful_write_response(bool durable) {
     nlohmann::json response{{"ok", true}, {"durable", durable}};
     if (!durable) response["warning"] = kDurabilityWarning;
     return response;
+}
+
+[[noreturn]] void throw_candidate_invalid(
+    const std::vector<ConfigValidationIssue>& issues) {
+    nlohmann::json rendered = nlohmann::json::array();
+    for (const auto& issue : issues) {
+        rendered.push_back({{"path", issue.path}, {"message", issue.message}});
+    }
+    const nlohmann::json body{
+        {"error", "The nfqws2 strategy candidate is invalid"},
+        {"validation_errors", std::move(rendered)},
+        {"saved", false},
+        {"applied", false},
+    };
+    throw ApiError(
+        "The nfqws2 strategy candidate is invalid", 400, body.dump());
 }
 
 std::string render_wan_interfaces(const std::string& content) {
@@ -555,9 +586,166 @@ NfqwsStrategyAssetSync provision_strategy_assets(const std::string& name) {
     }
 }
 
+std::map<std::string, std::string> strategy_asset_validation_paths(
+    const std::string& name) {
+    std::map<std::string, std::string> result;
+    if (!builtin_strategy(name)) return result;
+    const auto strategy_directory = fs::path(kBuiltinStrategies) / name;
+    try {
+        for (const auto& asset : inspect_nfqws_strategy_assets(
+                 strategy_directory / "required-blobs.txt",
+                 kBuiltinBlobs,
+                 fs::path(kConfigDir) / "blobs")) {
+            result.emplace(asset.destination.lexically_normal().string(),
+                           asset.verification_path.lexically_normal().string());
+        }
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("failed to inspect nfqws strategy blobs: ") +
+                error.what(),
+            500);
+    }
+    return result;
+}
+
+std::optional<NfqwsBinaryIdentity> read_nfqws_binary_identity(
+    const std::string& path) {
+    struct stat metadata {};
+    if (::stat(path.c_str(), &metadata) != 0 ||
+        !S_ISREG(metadata.st_mode) || metadata.st_size < 0) {
+        return std::nullopt;
+    }
+    return NfqwsBinaryIdentity{
+        static_cast<std::uint64_t>(metadata.st_dev),
+        static_cast<std::uint64_t>(metadata.st_ino),
+        static_cast<std::uint64_t>(metadata.st_size),
+        static_cast<std::int64_t>(metadata.st_mtim.tv_sec),
+        static_cast<std::int64_t>(metadata.st_mtim.tv_nsec),
+        static_cast<std::int64_t>(metadata.st_ctim.tv_sec),
+        static_cast<std::int64_t>(metadata.st_ctim.tv_nsec),
+    };
+}
+
+NfqwsDryRunCapabilityCache& dry_run_capability_cache() {
+    static NfqwsDryRunCapabilityCache cache;
+    return cache;
+}
+
+std::optional<std::string> probe_nfqws_help(const std::string& binary) {
+    const auto result = safe_exec_capture(
+        {binary, "--help"},
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/256U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/false,
+        SafeExecFailureLog::Suppressed,
+        SafeExecTimeouts{std::chrono::seconds{5}, std::chrono::seconds{1}});
+    if (result.timed_out || result.exit_code < 0 || result.exit_code == 127) {
+        return std::nullopt;
+    }
+    return result.stdout_output;
+}
+
+[[noreturn]] void throw_candidate_verification_unavailable(
+    const std::string& reason) {
+    const nlohmann::json body{
+        {"error", "The nfqws2 strategy candidate could not be verified"},
+        {"detail", reason},
+        {"saved", false},
+        {"applied", false},
+    };
+    throw ApiError(
+        "The nfqws2 strategy candidate could not be verified", 503,
+        body.dump());
+}
+
+std::string last_nonempty_line(const std::string& text) {
+    std::istringstream input(text);
+    std::string line;
+    std::string result;
+    while (std::getline(input, line)) {
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' ||
+                line.back() == '\t')) {
+            line.pop_back();
+        }
+        if (!line.empty()) result = std::move(line);
+    }
+    return result;
+}
+
+void validate_candidate_or_throw(const std::string& name,
+                                 const std::string& content) {
+    const auto packaged_assets = strategy_asset_validation_paths(name);
+    const NfqwsPathResolver resolve_path =
+        [packaged_assets](const std::string& path)
+        -> std::optional<std::string> {
+        const auto normalized = fs::path(path).lexically_normal().string();
+        const auto packaged = packaged_assets.find(normalized);
+        if (packaged != packaged_assets.end()) return packaged->second;
+        std::error_code ec;
+        if (fs::is_regular_file(fs::path(path), ec) && !ec) return path;
+        return std::nullopt;
+    };
+
+    auto issues = validate_nfqws_candidate(content, resolve_path);
+    if (!issues.empty()) throw_candidate_invalid(issues);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto before = read_nfqws_binary_identity(kBinary);
+        if (!before.has_value()) {
+            throw_candidate_verification_unavailable(
+                "the installed nfqws2 binary identity is unavailable; nothing was changed");
+        }
+        const auto capability = dry_run_capability_cache().detect(
+            kBinary, read_nfqws_binary_identity, probe_nfqws_help);
+        const auto after_probe = read_nfqws_binary_identity(kBinary);
+        if (!after_probe.has_value() || *after_probe != *before) continue;
+        if (capability == NfqwsDryRunCapability::unavailable) {
+            throw_candidate_verification_unavailable(
+                "the nfqws2 capability probe did not complete; nothing was changed");
+        }
+        if (capability == NfqwsDryRunCapability::unsupported) return;
+
+        auto args = build_nfqws_dry_run_args(
+            content, configured_nfqueue_num(), resolve_path);
+        args.insert(args.begin(), kBinary);
+        const auto verified = safe_exec_capture(
+            args,
+            /*suppress_stderr=*/false,
+            /*max_bytes=*/64U * 1024U,
+            /*capture_stderr=*/true,
+            /*drain_after_limit=*/false,
+            SafeExecFailureLog::Suppressed,
+            SafeExecTimeouts{std::chrono::seconds{15},
+                             std::chrono::seconds{1}});
+        const auto after_run = read_nfqws_binary_identity(kBinary);
+        if (!after_run.has_value() || *after_run != *before) continue;
+        if (verified.timed_out || verified.exit_code < 0) {
+            throw_candidate_verification_unavailable(
+                "nfqws2 --dry-run did not complete; nothing was changed");
+        }
+        if (verified.exit_code == 0) return;
+
+        auto reason = last_nonempty_line(verified.stdout_output);
+        if (reason.empty()) {
+            reason = "nfqws2 rejected the candidate (exit code " +
+                     std::to_string(verified.exit_code) + ')';
+        }
+        issues.push_back(
+            {"NFQWS_ARGS", "nfqws2 --dry-run: " + reason});
+        throw_candidate_invalid(issues);
+    }
+    throw_candidate_verification_unavailable(
+        "the nfqws2 binary changed during validation; nothing was changed");
+}
+
 } // namespace
 
-void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
+void register_nfqws_handler_impl(
+    ApiServer& server,
+    ApiContext& ctx,
+    std::optional<ApplyStrategyHooks> apply_hooks) {
     server.get("/api/nfqws", []() -> std::string {
         std::error_code ec;
         const bool installed = fs::is_regular_file(kBinary, ec);
@@ -594,7 +782,7 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             .dump();
     });
 
-    server.post("/api/nfqws", [&ctx](const std::string& body) -> std::string {
+    server.post("/api/nfqws", [&ctx, apply_hooks](const std::string& body) -> std::string {
         nlohmann::json request;
         try { request = nlohmann::json::parse(body); }
         catch (const nlohmann::json::exception&) { throw ApiError("invalid nfqws request", 400); }
@@ -705,17 +893,41 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
             const std::lock_guard lock(nfqws_operation_mutex());
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);
-            if (!fs::exists(kBinary) || !fs::exists(kInit))
+            const bool installed = apply_hooks.has_value()
+                                       ? apply_hooks->installed()
+                                       : fs::exists(kBinary) && fs::exists(kInit);
+            if (!installed)
                 throw ApiError("nfqws2 is not installed", 409);
             auto content = request.contains("content") && request["content"].is_string()
                                ? request["content"].get<std::string>()
                                : read_file(strategy_source(name));
             if (automatic_wan_strategy(name)) content = render_wan_interfaces(content);
-            const auto assets = provision_strategy_assets(name);
-            const auto saved = save_nfqws_file(
-                fs::path(kConfigDir) / "nfqws2.conf", content);
+            if (content.size() > kMaxNfqwsFileSize) {
+                throw ApiError("nfqws file is too large", 413);
+            }
+
+            // This is the no-mutation boundary.  Both the structural parser
+            // and, when supported, the exact engine dry-run finish before blob
+            // provisioning, config replacement, or service restart.
+            if (apply_hooks.has_value()) {
+                const auto issues = apply_hooks->validate(name, content);
+                if (!issues.empty()) throw_candidate_invalid(issues);
+            } else {
+                validate_candidate_or_throw(name, content);
+            }
+
+            const auto assets = apply_hooks.has_value()
+                                    ? apply_hooks->provision(name)
+                                    : provision_strategy_assets(name);
+            const auto saved = apply_hooks.has_value()
+                                   ? apply_hooks->write_active(content)
+                                   : save_nfqws_file(
+                                         fs::path(kConfigDir) / "nfqws2.conf",
+                                         content);
             int status = 0;
-            auto output = run_nfqws_service_command("restart", status);
+            auto output = apply_hooks.has_value()
+                              ? apply_hooks->restart(status)
+                              : run_nfqws_service_command("restart", status);
             if (!assets.installed.empty()) {
                 std::ostringstream details;
                 details << "Installed missing strategy blobs:";
@@ -871,6 +1083,25 @@ void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
         throw ApiError("unsupported nfqws action", 400);
     });
 }
+
+void register_nfqws_handler(ApiServer& server, ApiContext& ctx) {
+    register_nfqws_handler_impl(server, ctx, std::nullopt);
+}
+
+#ifdef KEEN_PBR3_TESTING
+void register_nfqws_handler_for_test(
+    ApiServer& server,
+    ApiContext& ctx,
+    NfqwsApplyStrategyTestHooks hooks) {
+    ApplyStrategyHooks internal;
+    internal.installed = std::move(hooks.installed);
+    internal.validate = std::move(hooks.validate);
+    internal.provision = std::move(hooks.provision);
+    internal.write_active = std::move(hooks.write_active);
+    internal.restart = std::move(hooks.restart);
+    register_nfqws_handler_impl(server, ctx, std::move(internal));
+}
+#endif
 
 } // namespace keen_pbr3
 
