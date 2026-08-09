@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <fstream>
 #include <future>
 #include <iterator>
@@ -2848,20 +2849,25 @@ void Daemon::register_urltest_outbounds() {
     }
 }
 
-void Daemon::probe_interfaces_now() {
+void Daemon::probe_interfaces_now() noexcept {
     const auto admission = interface_probe_gate_.request(/*manual=*/false);
     if (!admission.launch) {
-        Logger::instance().trace(
-            "interface_probe_coalesced",
-            "trigger=scheduled_or_startup");
+        try {
+            Logger::instance().trace(
+                "interface_probe_coalesced",
+                "trigger=scheduled_or_startup");
+        } catch (...) {
+        }
         return;
     }
     start_interface_probe_round();
 }
 
 void Daemon::start_interface_probe_round() noexcept {
+    const bool failure_retry_round =
+        interface_probe_failure_retry_.consume_for_round();
     try {
-        start_interface_probe_round_impl();
+        start_interface_probe_round_impl(failure_retry_round);
     } catch (const std::exception& error) {
         // Admission happens before target snapshots, metrics tokens and queue
         // closures allocate. Any of those may throw, including a recursively
@@ -2884,14 +2890,14 @@ void Daemon::start_interface_probe_round() noexcept {
     }
 }
 
-void Daemon::start_interface_probe_round_impl() {
-    std::vector<std::string> known_tags;
+void Daemon::start_interface_probe_round_impl(
+    bool failure_retry_round) {
     const auto targets = collect_interface_probe_targets(
-        config_, outbound_marks_, &known_tags);
+        config_, outbound_marks_);
     const auto expected_runtime_generation =
         runtime_generation_.load(std::memory_order_acquire);
 
-    interface_probe_.retain_only(known_tags);
+    interface_probe_.retain_only(targets);
 
     if (targets.empty()) {
         auto task_metrics =
@@ -2902,6 +2908,8 @@ void Daemon::start_interface_probe_round_impl() {
     }
     auto task_metrics = std::make_shared<PeriodicTaskRunToken>(
         periodic_task_metrics_.begin("interface-probe"));
+    auto publication_failed =
+        std::make_shared<std::atomic<bool>>(false);
     // Probing blocks on the network, so it must not run on the event loop.
     bool enqueued = false;
     try {
@@ -2910,11 +2918,122 @@ void Daemon::start_interface_probe_round_impl() {
             [this,
              targets,
              expected_runtime_generation,
+             failure_retry_round,
+             publication_failed,
              task_metrics]() {
-            std::vector<InterfaceProbe::Observation> observations;
+            auto abort_gate = [this](Daemon*) noexcept {
+                (void)interface_probe_gate_.abort();
+            };
+            std::unique_ptr<Daemon, decltype(abort_gate)> gate_guard(
+                this, abort_gate);
             std::string probe_error;
             try {
-                observations = interface_probe_.measure(targets);
+                const bool all_results_posted =
+                    interface_probe_.measure_each(
+                        targets,
+                        [this,
+                         expected_runtime_generation,
+                         publication_failed](
+                            InterfaceProbe::Observation observation) {
+                    const auto target = observation.target;
+                    return post_control_task(
+                        [this,
+                         target,
+                         expected_runtime_generation,
+                         observation = std::move(observation),
+                         publication_failed]() {
+                            try {
+                                const auto current_targets =
+                                    collect_interface_probe_targets(
+                                        config_, outbound_marks_);
+                                if (!interface_probe_target_is_current(
+                                        expected_runtime_generation,
+                                        runtime_generation_.load(
+                                            std::memory_order_acquire),
+                                        target,
+                                        current_targets)) {
+                                    return;
+                                }
+
+                                // Resolve the dependent selectors before the
+                                // observation consumes its transition edge.
+                                // An allocation failure here leaves the old
+                                // observation authoritative, so the trailing
+                                // interface round can retry the same edge.
+                                std::vector<std::string>
+                                    affected_urltests;
+                                if (urltest_manager_) {
+                                    affected_urltests =
+                                        find_affected_urltests(
+                                            config_.outbounds.value_or(
+                                                std::vector<Outbound>{}),
+                                            {target.tag});
+                                }
+                                const bool transitioned =
+                                    interface_probe_.commit_observation(
+                                        observation);
+                                if (urltest_manager_ && transitioned) {
+                                    for (const auto& urltest_tag :
+                                         affected_urltests) {
+                                        urltest_manager_
+                                            ->trigger_external_health_test(
+                                                urltest_tag);
+                                        try {
+                                            Logger::instance().trace(
+                                                "urltest_transition_probe",
+                                                "tag={} changed_children=1",
+                                                urltest_tag);
+                                        } catch (...) {
+                                        }
+                                    }
+                                }
+#ifdef WITH_API
+                                if (status_stream_) {
+                                    try {
+                                        status_stream_->reconcile();
+                                    } catch (const std::exception& error) {
+                                        try {
+                                            Logger::instance().trace(
+                                                "interface_probe_status_skip",
+                                                "tag={} error={}",
+                                                target.tag,
+                                                error.what());
+                                        } catch (...) {
+                                        }
+                                    } catch (...) {
+                                    }
+                                }
+#endif
+                            } catch (const std::exception& error) {
+                                publication_failed->store(
+                                    true, std::memory_order_release);
+                                try {
+                                    Logger::instance().info(
+                                        "Interface probe result for '{}' "
+                                        "could not be published: {}",
+                                        target.tag,
+                                        error.what());
+                                } catch (...) {
+                                }
+                            } catch (...) {
+                                publication_failed->store(
+                                    true, std::memory_order_release);
+                                try {
+                                    Logger::instance().info(
+                                        "Interface probe result for '{}' "
+                                        "could not be published: unknown "
+                                        "error",
+                                        target.tag);
+                                } catch (...) {
+                                }
+                            }
+                        },
+                        "interface-probe-result:" + target.tag);
+                        });
+                if (!all_results_posted) {
+                    probe_error =
+                        "control loop is not accepting probe results";
+                }
             } catch (const std::exception& error) {
                 probe_error = error.what();
             } catch (...) {
@@ -2926,122 +3045,192 @@ void Daemon::start_interface_probe_round_impl() {
                     [this,
                      targets,
                      expected_runtime_generation,
-                     observations = std::move(observations),
+                     failure_retry_round,
                      probe_error = std::move(probe_error),
+                     publication_failed,
                      task_metrics]() {
-                    try {
-                        if (!probe_error.empty()) {
-                            task_metrics->failure(probe_error);
-                            complete_interface_probe_round();
-                            return;
-                        }
+                    const bool accepting_commits =
+                        accept_posted_control_tasks_.load(
+                            std::memory_order_acquire);
+                    const bool result_publication_failed =
+                        publication_failed->load(
+                            std::memory_order_acquire);
+                    bool authority_failed =
+                        result_publication_failed || !probe_error.empty();
+                    bool snapshot_known = false;
+                    bool snapshot_current = false;
+                    bool request_trailing = false;
 
+                    try {
                         const auto current_targets =
                             collect_interface_probe_targets(
                                 config_, outbound_marks_);
-                        const bool current =
+                        snapshot_current =
                             interface_probe_snapshot_is_current(
                                 expected_runtime_generation,
                                 runtime_generation_.load(
                                     std::memory_order_acquire),
                                 targets,
                                 current_targets);
-                        if (!current) {
+                        snapshot_known = true;
+                    } catch (const std::exception& error) {
+                        authority_failed = true;
+                        try {
+                            task_metrics->failure(error.what());
+                        } catch (...) {
+                        }
+                    } catch (...) {
+                        authority_failed = true;
+                        try {
+                            task_metrics->failure(
+                                "interface probe commit failed");
+                        } catch (...) {
+                        }
+                    }
+
+                    if (snapshot_known && !snapshot_current) {
+                        // Every per-result task used the narrow fence. Hand
+                        // one fresh full snapshot to the existing coalescing
+                        // gate, but do not consume the failure-retry budget of
+                        // this obsolete round.
+                        request_trailing = accepting_commits;
+                        try {
                             task_metrics->skipped(
                                 "stale runtime generation or probe targets");
-                            // The completed answer belongs to the previous
-                            // generation. Make the already admitted round hand
-                            // one fresh snapshot to its trailing successor.
+                        } catch (...) {
+                        }
+                    } else if (snapshot_known) {
+                        if (!probe_error.empty()) {
+                            try {
+                                task_metrics->failure(probe_error);
+                            } catch (...) {
+                            }
+                        } else {
+                            std::string reconciliation_error;
+                            if (routing_runtime_active_) {
+                                // Keenetic may recreate a tunnel route without
+                                // changing administrative UP. Reconcile once,
+                                // after all per-target observations have been
+                                // published.
+                                try {
+                                    reconcile_static_routing(
+                                        RouteReconcileMode::DeferredRepair);
+                                } catch (
+                                    const RouteInterfaceUnavailableError&
+                                        error) {
+                                    try {
+                                        Logger::instance().verbose(
+                                            "Interface-probe route "
+                                            "reconciliation is waiting for "
+                                            "its interface: {}",
+                                            error.what());
+                                    } catch (...) {
+                                    }
+                                } catch (const std::exception& error) {
+                                    reconciliation_error = error.what();
+                                    try {
+                                        Logger::instance().info(
+                                            "Interface-probe route "
+                                            "reconciliation was deferred: "
+                                            "{}",
+                                            error.what());
+                                    } catch (...) {
+                                    }
+                                    try {
+                                        (void)
+                                            refresh_iproute_and_firewall_runtime(
+                                                0,
+                                                std::nullopt,
+                                                std::nullopt,
+                                                /*schedule_catalog_refresh=*/
+                                                    false);
+                                    } catch (...) {
+                                    }
+                                }
+                            }
+#ifdef WITH_API
+                            if (status_stream_) {
+                                try {
+                                    status_stream_->reconcile();
+                                } catch (const std::exception& error) {
+                                    try {
+                                        Logger::instance().trace(
+                                            "interface_probe_status_skip",
+                                            "phase=round error={}",
+                                            error.what());
+                                    } catch (...) {
+                                    }
+                                } catch (...) {
+                                }
+                            }
+#endif
+                            try {
+                                if (result_publication_failed) {
+                                    task_metrics->failure(
+                                        "one or more interface probe results "
+                                        "could not be published");
+                                } else if (
+                                    reconciliation_error.empty()) {
+                                    task_metrics->success();
+                                } else {
+                                    task_metrics->failure(
+                                        reconciliation_error);
+                                }
+                            } catch (...) {
+                            }
+                        }
+                    }
+
+                    const bool failure_retry_eligible =
+                        accepting_commits &&
+                        (!snapshot_known || snapshot_current);
+                    if (authority_failed &&
+                        interface_probe_failure_retry_.request(
+                            failure_retry_round,
+                            failure_retry_eligible)) {
+                        request_trailing = true;
+                    }
+                    if (request_trailing) {
+                        try {
                             (void)interface_probe_gate_.request(
                                 /*manual=*/false);
-                            complete_interface_probe_round();
-                            return;
+                        } catch (...) {
                         }
-
-                        const auto transitioned_tags =
-                            interface_probe_.commit(observations);
-                        std::string reconciliation_error;
-                        if (urltest_manager_ &&
-                            !transitioned_tags.empty()) {
-                            const auto affected_urltests =
-                                find_affected_urltests(
-                                    config_.outbounds.value_or(
-                                        std::vector<Outbound>{}),
-                                    transitioned_tags);
-                            for (const auto& urltest_tag :
-                                 affected_urltests) {
-                                Logger::instance().trace(
-                                    "urltest_transition_probe",
-                                    "tag={} changed_children={}",
-                                    urltest_tag,
-                                    transitioned_tags.size());
-                                urltest_manager_->trigger_immediate_test(
-                                    urltest_tag);
-                            }
-                        }
-                        if (routing_runtime_active_) {
-                            // Keenetic may recreate a tunnel route without
-                            // changing its administrative UP state. Reconcile
-                            // the owned policy tables after the regular probe.
-                            try {
-                                reconcile_static_routing(
-                                    RouteReconcileMode::DeferredRepair);
-                            } catch (
-                                const RouteInterfaceUnavailableError& error) {
-                                Logger::instance().verbose(
-                                    "Interface-probe route reconciliation is "
-                                    "waiting for its interface: {}",
-                                    error.what());
-                            } catch (const std::exception& error) {
-                                Logger::instance().info(
-                                    "Interface-probe route reconciliation was "
-                                    "deferred: {}",
-                                    error.what());
-                                reconciliation_error = error.what();
-                                (void)refresh_iproute_and_firewall_runtime(
-                                    0,
-                                    std::nullopt,
-                                    std::nullopt,
-                                    /*schedule_catalog_refresh=*/false);
-                            }
-                        }
-#ifdef WITH_API
-                        if (status_stream_) {
-                            status_stream_->reconcile();
-                        }
-#endif
-                        if (reconciliation_error.empty()) {
-                            task_metrics->success();
-                        } else {
-                            task_metrics->failure(reconciliation_error);
-                        }
-                    } catch (const std::exception& error) {
-                        task_metrics->failure(error.what());
-                    } catch (...) {
-                        task_metrics->failure(
-                            "interface probe commit failed");
                     }
-                        complete_interface_probe_round();
+                    complete_interface_probe_round();
                     },
                     "interface-probe-status");
             } catch (const std::exception& error) {
                 // The worker no longer owns a usable control-loop handoff.
                 // Release both periodic and manual admission before recording
                 // the failure, even if metrics allocation were to fail.
-                (void)interface_probe_gate_.abort();
-                task_metrics->failure(error.what());
+                gate_guard.reset();
+                try {
+                    task_metrics->failure(error.what());
+                } catch (...) {
+                }
                 return;
             } catch (...) {
-                (void)interface_probe_gate_.abort();
-                task_metrics->failure(
-                    "interface probe control handoff failed");
+                gate_guard.reset();
+                try {
+                    task_metrics->failure(
+                        "interface probe control handoff failed");
+                } catch (...) {
+                }
                 return;
             }
             if (!posted) {
-                task_metrics->skipped(
-                    "control loop is not accepting commits");
-                (void)interface_probe_gate_.abort();
+                gate_guard.reset();
+                try {
+                    task_metrics->skipped(
+                        "control loop is not accepting commits");
+                } catch (...) {
+                }
+                return;
             }
+            // The queued completion callback now owns exactly one release of
+            // this round. No worker exception may abort it after admission.
+            (void)gate_guard.release();
             });
     } catch (const std::exception& error) {
         // Capturing the worker closure and queue insertion may allocate. A
@@ -3103,11 +3292,13 @@ void Daemon::schedule_interface_probe() {
     // HTTPS request, and network latency does not change faster than this.
     constexpr auto kInterval = std::chrono::seconds(20);
 
-    scheduler_->schedule_oneshot(
+    // A repeating timer owns periodic liveness independently of an
+    // individual probe round. A coalesced tick or any fenced callback failure
+    // therefore cannot silently remove the next 20-second observation.
+    scheduler_->schedule_repeating(
         kInterval,
         [this]() {
             probe_interfaces_now();
-            schedule_interface_probe();
         },
         "interface-probe");
 }

@@ -20,11 +20,13 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -73,6 +75,10 @@ public:
 
     void set_url(std::string url) { url_ = std::move(url); }
     void set_timeout(std::chrono::milliseconds timeout) { timeout_ = timeout; }
+    void set_clock(
+        std::function<std::chrono::steady_clock::time_point()> clock) {
+        clock_ = std::move(clock);
+    }
     // A second attempt absorbs a single dropped packet without declaring a
     // working tunnel dead. Injectable so a test can exercise the failure path
     // without waiting out the retry interval.
@@ -85,20 +91,54 @@ public:
     std::vector<std::string> probe(const std::vector<Target>& targets);
 
     // Split form used by the daemon's generation-fenced async coordinator.
-    // measure() performs blocking I/O but does not mutate published state;
-    // commit() is cheap and may therefore run on the control loop after the
-    // caller has revalidated the runtime generation and target identity.
+    // The single-target form lets the coordinator publish an early result
+    // before later, slow targets finish. Both measure() overloads perform
+    // blocking I/O but do not mutate published state; commit() is cheap and
+    // may therefore run on the control loop after the caller has revalidated
+    // the runtime generation and target identity.
+    Observation measure_one(const Target& target);
     std::vector<Observation> measure(const std::vector<Target>& targets);
+    // Measure sequentially but hand each result to the caller immediately.
+    // Returning false from the sink stops the round before another blocking
+    // request begins.
+    bool measure_each(
+        const std::vector<Target>& targets,
+        const std::function<bool(Observation)>& observation_sink);
+    bool commit_observation(const Observation& observation);
     std::vector<std::string> commit(
         const std::vector<Observation>& observations);
 
+#ifdef KEEN_PBR3_TESTING
+    // Deterministic strong-publication seam. The injected failure occurs
+    // after the complete tag/identity/result candidate has been prepared but
+    // before any published state is changed.
+    void fail_next_commit_after_prepare_for_testing();
+#endif
+
     std::optional<InterfaceProbeResult> result_for(const std::string& tag) const;
+    std::optional<InterfaceProbeResult> result_for(
+        const Target& expected_target) const;
 
     // Drops results for outbounds that no longer exist, so a renamed tag does
     // not keep reporting a latency measured for something else.
-    void retain_only(const std::vector<std::string>& tags);
+    // Retain only observations belonging to the exact current tag/mark/device
+    // identity. Reusing a friendly tag for another transport must not inherit
+    // the previous transport's health.
+    void retain_only(const std::vector<Target>& targets);
 
 private:
+    struct PublishedObservation {
+        Target target;
+        InterfaceProbeResult result;
+    };
+
+    static_assert(
+        std::is_nothrow_swappable_v<PublishedObservation>,
+        "published interface observations must support atomic replacement");
+
+    using PublishedObservations =
+        std::map<std::string, PublishedObservation>;
+
     static RetryConfig default_retry() {
         RetryConfig retry;
         retry.attempts = 2;
@@ -109,8 +149,13 @@ private:
     std::string url_{kDefaultUrl};
     std::chrono::milliseconds timeout_{5000};
     RetryConfig retry_{default_retry()};
+    std::function<std::chrono::steady_clock::time_point()> clock_{
+        [] { return std::chrono::steady_clock::now(); }};
     mutable std::mutex mutex_;
-    std::map<std::string, InterfaceProbeResult> results_;
+    PublishedObservations published_observations_;
+#ifdef KEEN_PBR3_TESTING
+    bool fail_next_commit_after_prepare_{false};
+#endif
     URLTester tester_;
 };
 
@@ -121,6 +166,15 @@ bool interface_probe_snapshot_is_current(
     std::uint64_t expected_runtime_generation,
     std::uint64_t current_runtime_generation,
     const std::vector<InterfaceProbe::Target>& expected_targets,
+    const std::vector<InterfaceProbe::Target>& current_targets) noexcept;
+
+// Per-result publication uses the narrower fence: the runtime generation must
+// still match and this exact tag/mark/device tuple must still be configured.
+// Other targets are allowed to finish later in the same sequential round.
+bool interface_probe_target_is_current(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t current_runtime_generation,
+    const InterfaceProbe::Target& expected_target,
     const std::vector<InterfaceProbe::Target>& current_targets) noexcept;
 
 } // namespace keen_pbr3

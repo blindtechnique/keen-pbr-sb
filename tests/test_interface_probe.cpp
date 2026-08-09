@@ -1,7 +1,10 @@
 #include <doctest/doctest.h>
 
 #include "../src/health/interface_probe.hpp"
+#include "../src/health/runtime_outbound_state.hpp"
 
+#include <functional>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -15,9 +18,14 @@ class RecordingTransport final : public HttpTransport {
 public:
     std::vector<HttpTransportRequest> requests;
     bool fail{false};
+    std::function<HttpTransportResponse(const HttpTransportRequest&)>
+        responder;
 
     HttpTransportResponse perform(const HttpTransportRequest& request) override {
         requests.push_back(request);
+        if (responder) {
+            return responder(request);
+        }
         if (fail) {
             throw HttpTransportError("HTTP request failed: Connection timed out");
         }
@@ -176,6 +184,156 @@ TEST_CASE("interface probe does not publish a measurement before guarded commit"
     CHECK(result->attributed);
 }
 
+TEST_CASE("interface probe commit publishes identity and result atomically after allocation failure") {
+    InterfaceProbe probe;
+    const InterfaceProbe::Target original{
+        "friendly", 0x80000, "hy1"};
+
+    InterfaceProbeResult healthy;
+    healthy.success = true;
+    healthy.attributed = true;
+    healthy.latency_ms = 41;
+    healthy.error = "old-complete-result";
+    CHECK_FALSE(probe.commit_observation({original, healthy}));
+
+    auto replacement = original;
+    replacement.fwmark = 0x90000;
+    replacement.interface = "hy2";
+    InterfaceProbeResult down;
+    down.success = false;
+    down.attributed = true;
+    down.error = std::string(4096, 'x');
+
+    probe.fail_next_commit_after_prepare_for_testing();
+    CHECK_THROWS_AS(
+        probe.commit_observation({replacement, down}),
+        std::bad_alloc);
+
+    // A failed replacement must leave both halves of the old publication
+    // intact. In particular, the friendly tag cannot expose the new health
+    // under the old identity (or vice versa).
+    const auto old_exact = probe.result_for(original);
+    REQUIRE(old_exact.has_value());
+    CHECK(old_exact->success);
+    CHECK(old_exact->attributed);
+    CHECK(old_exact->latency_ms == 41);
+    CHECK(old_exact->error == "old-complete-result");
+    CHECK_FALSE(probe.result_for(replacement).has_value());
+
+    // Retrying the same observation must still see the real green -> down
+    // edge. A partial first publication used to consume this transition and
+    // strand URLTEST until its normal interval.
+    CHECK(probe.commit_observation({replacement, down}));
+    CHECK_FALSE(probe.result_for(original).has_value());
+    const auto replacement_exact = probe.result_for(replacement);
+    REQUIRE(replacement_exact.has_value());
+    CHECK_FALSE(replacement_exact->success);
+    CHECK(replacement_exact->attributed);
+    CHECK(replacement_exact->error == down.error);
+}
+
+// Regression for the live Keenetic failure: a round used to measure every
+// target first and publish the whole batch only after several later 5-second
+// timeouts. The next round could therefore cross the 60-second freshness
+// boundary while its new early success was still hidden in the batch, making
+// a working AWG route alternate HEALTHY -> UNKNOWN -> HEALTHY.
+TEST_CASE("interface probe publishes an early success before later timeouts expire the previous round") {
+    using runtime_outbound_detail::ProbeVerdict;
+    using runtime_outbound_detail::classify_interface_probe;
+    using runtime_outbound_detail::kInterfaceProbeFreshnessLimit;
+
+    auto transport = std::make_shared<RecordingTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+
+    auto now = std::chrono::steady_clock::time_point{
+        std::chrono::seconds{1000}};
+    probe.set_clock([&now] { return now; });
+
+    const std::vector<InterfaceProbe::Target> targets{
+        InterfaceProbe::Target{"early_awg", 0x30000, "nwg1"},
+        InterfaceProbe::Target{"slow_dead", 0x90000, "kpbrdead"},
+    };
+
+    std::optional<InterfaceProbeResult> first_round_early;
+    int slow_attempt = 0;
+    bool prior_sample_was_stale = false;
+    bool current_sample_was_verified = false;
+    transport->responder =
+        [&](const HttpTransportRequest& request) -> HttpTransportResponse {
+        if (request.bind_interface == "nwg1") {
+            HttpTransportResponse response;
+            response.status_code = 204;
+            response.elapsed = std::chrono::milliseconds{250};
+            return response;
+        }
+
+        ++slow_attempt;
+        if (slow_attempt == 1) {
+            // The first sweep is slow but still shorter than the freshness
+            // window, matching the live router's mix of working and timed-out
+            // children.
+            now += std::chrono::seconds{35};
+        } else {
+            // During the next slow tail, the previous round's early sample is
+            // now older than 60 seconds. The promptly published sample from
+            // this round is only 26 seconds old and must remain authoritative.
+            now += std::chrono::seconds{26};
+            prior_sample_was_stale =
+                first_round_early.has_value() &&
+                classify_interface_probe(first_round_early, now) ==
+                    ProbeVerdict::Unverifiable;
+
+            const auto current = probe.result_for("early_awg");
+            current_sample_was_verified =
+                current.has_value() &&
+                classify_interface_probe(current, now) ==
+                    ProbeVerdict::Verified;
+            now += std::chrono::seconds{9};
+        }
+        throw HttpTransportError(
+            "HTTP request failed: Connection timed out");
+    };
+
+    const auto publish = [&probe](InterfaceProbe::Observation observation) {
+        (void)probe.commit_observation(observation);
+        return true;
+    };
+
+    CHECK(probe.measure_each(targets, publish));
+    first_round_early = probe.result_for("early_awg");
+    REQUIRE(first_round_early.has_value());
+
+    CHECK(probe.measure_each(targets, publish));
+    CHECK(slow_attempt == 2);
+    CHECK(prior_sample_was_stale);
+    CHECK(current_sample_was_verified);
+    const auto current = probe.result_for("early_awg");
+    REQUIRE(current.has_value());
+    CHECK(now - current->measured_at < kInterfaceProbeFreshnessLimit);
+}
+
+TEST_CASE("interface probe stops before another blocking target when publication is rejected") {
+    auto transport = std::make_shared<RecordingTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    const std::vector<InterfaceProbe::Target> targets{
+        InterfaceProbe::Target{"first", 0x30000, "nwg1"},
+        InterfaceProbe::Target{"must_not_run", 0x60000, "nwg3"},
+    };
+
+    int publications = 0;
+    CHECK_FALSE(probe.measure_each(
+        targets,
+        [&publications](InterfaceProbe::Observation) {
+            ++publications;
+            return false;
+        }));
+    CHECK(publications == 1);
+    REQUIRE(transport->requests.size() == 1);
+    CHECK(transport->requests.front().bind_interface == "nwg1");
+}
+
 TEST_CASE("interface probe snapshot fence rejects a reused tag") {
     const std::vector<InterfaceProbe::Target> measured{
         InterfaceProbe::Target{"friendly", 0x80000, "hy1"}};
@@ -194,4 +352,36 @@ TEST_CASE("interface probe snapshot fence rejects a reused tag") {
 
     CHECK_FALSE(interface_probe_snapshot_is_current(
         12, 13, measured, measured));
+
+    CHECK(interface_probe_target_is_current(
+        12, 12, measured.front(), measured));
+    CHECK_FALSE(interface_probe_target_is_current(
+        12, 13, measured.front(), measured));
+    CHECK_FALSE(interface_probe_target_is_current(
+        12, 12, measured.front(), changed_mark));
+    CHECK_FALSE(interface_probe_target_is_current(
+        12, 12, measured.front(), changed_device));
+}
+
+TEST_CASE("interface probe exact lookup never lends health to a reused tag") {
+    auto transport = std::make_shared<RecordingTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+
+    const InterfaceProbe::Target original{
+        "friendly", 0x80000, "hy1"};
+    probe.probe({original});
+    REQUIRE(probe.result_for(original).has_value());
+
+    auto changed_mark = original;
+    changed_mark.fwmark = 0x90000;
+    auto changed_device = original;
+    changed_device.interface = "hy2";
+    CHECK_FALSE(probe.result_for(changed_mark).has_value());
+    CHECK_FALSE(probe.result_for(changed_device).has_value());
+
+    // The next round removes the obsolete storage as well; production lookup
+    // was already safe before this cleanup because it uses exact identity.
+    probe.retain_only({changed_device});
+    CHECK_FALSE(probe.result_for("friendly").has_value());
 }

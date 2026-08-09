@@ -2,7 +2,10 @@
 
 #include "../src/daemon/config_store.hpp"
 
+#include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace keen_pbr3 {
 namespace {
@@ -11,6 +14,17 @@ Config config_named(const std::string& name) {
     Config config;
     config.daemon = DaemonConfig{};
     config.daemon->cache_dir = "/tmp/" + name;
+    return config;
+}
+
+Config interface_config_named(const std::string& name,
+                              const std::string& device) {
+    auto config = config_named(name);
+    Outbound outbound;
+    outbound.tag = "reused-interface";
+    outbound.type = OutboundType::INTERFACE;
+    outbound.interface = device;
+    config.outbounds = std::vector<Outbound>{std::move(outbound)};
     return config;
 }
 
@@ -121,6 +135,39 @@ TEST_CASE(
     CHECK(
         staged->config.daemon->cache_dir ==
         "/tmp/second-draft");
+}
+
+TEST_CASE("active snapshot keeps a reused interface tag and mark generation together") {
+    constexpr std::uint32_t old_mark = 0x10000U;
+    constexpr std::uint32_t new_mark = 0x90000U;
+    const auto old_config =
+        interface_config_named("old-interface", "nwg-old");
+    const auto new_config =
+        interface_config_named("new-interface", "nwg-new");
+    ConfigStore store(old_config);
+    store.replace_active(
+        old_config,
+        OutboundMarkMap{{"reused-interface", old_mark}});
+
+    // This deliberately models the old two-read API shape: an apply can land
+    // between reads and pair the old device identity with the new mark.
+    const auto independently_read_config = store.active_config();
+    store.replace_active(
+        new_config,
+        OutboundMarkMap{{"reused-interface", new_mark}});
+    const auto independently_read_marks = store.outbound_marks();
+    REQUIRE(independently_read_config.outbounds.has_value());
+    REQUIRE(independently_read_config.outbounds->front().interface.has_value());
+    CHECK(*independently_read_config.outbounds->front().interface ==
+          "nwg-old");
+    CHECK(independently_read_marks.at("reused-interface") == new_mark);
+
+    // The production probe readers now use this one locked generation.
+    const auto active = store.active_snapshot();
+    REQUIRE(active.config.outbounds.has_value());
+    REQUIRE(active.config.outbounds->front().interface.has_value());
+    CHECK(*active.config.outbounds->front().interface == "nwg-new");
+    CHECK(active.outbound_marks.at("reused-interface") == new_mark);
 }
 
 } // namespace keen_pbr3

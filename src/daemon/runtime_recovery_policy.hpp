@@ -1134,6 +1134,36 @@ private:
     std::atomic<std::uint8_t> state_{0};
 };
 
+// Grants at most one immediate trailing round for a failed asynchronous
+// publication/handoff. The retry round itself cannot recursively mint another
+// retry, while a later independent round starts with a fresh allowance.
+class OneTrailingFailureRetry {
+public:
+    bool request(bool current_round_is_retry,
+                 bool eligible) noexcept {
+        if (current_round_is_retry || !eligible) {
+            return false;
+        }
+        bool expected = false;
+        return pending_.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire);
+    }
+
+    bool consume_for_round() noexcept {
+        return pending_.exchange(false, std::memory_order_acq_rel);
+    }
+
+    void clear() noexcept {
+        pending_.store(false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool> pending_{false};
+};
+
 class RuntimeIncidentLatch {
 public:
     struct Decision {

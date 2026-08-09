@@ -721,6 +721,52 @@ TEST_CASE("aborting a manual single-flight releases its admission") {
     CHECK(retry.manual_accepted);
 }
 
+TEST_CASE("interface publication failure receives exactly one trailing round") {
+    CoalescedManualSingleFlightGate gate;
+    OneTrailingFailureRetry failure_retry;
+
+    REQUIRE(gate.request(/*manual=*/false).launch);
+    CHECK_FALSE(failure_retry.consume_for_round());
+
+    REQUIRE(failure_retry.request(
+        /*current_round_is_retry=*/false,
+        /*eligible=*/true));
+    CHECK_FALSE(gate.request(/*manual=*/false).launch);
+    // Duplicate failures in the same round cannot queue extra work.
+    CHECK_FALSE(failure_retry.request(
+        /*current_round_is_retry=*/false,
+        /*eligible=*/true));
+
+    const auto first_completion = gate.complete();
+    REQUIRE(first_completion.launch_trailing);
+    REQUIRE(failure_retry.consume_for_round());
+
+    // A persistent failure in the retry round stops here instead of spinning
+    // immediately until the executor/control queue recovers.
+    CHECK_FALSE(failure_retry.request(
+        /*current_round_is_retry=*/true,
+        /*eligible=*/true));
+    const auto retry_completion = gate.complete();
+    CHECK_FALSE(retry_completion.launch_trailing);
+    CHECK_FALSE(failure_retry.consume_for_round());
+}
+
+TEST_CASE("stale or stopping interface rounds do not mint failure retries") {
+    OneTrailingFailureRetry failure_retry;
+
+    CHECK_FALSE(failure_retry.request(
+        /*current_round_is_retry=*/false,
+        /*eligible=*/false));
+    CHECK_FALSE(failure_retry.consume_for_round());
+
+    // An independent later round has a fresh one-retry allowance.
+    CHECK(failure_retry.request(
+        /*current_round_is_retry=*/false,
+        /*eligible=*/true));
+    failure_retry.clear();
+    CHECK_FALSE(failure_retry.consume_for_round());
+}
+
 TEST_CASE("observation gap recovery invalidates, cancels, reconciles, then coalesces refresh") {
     CoalescedSingleFlightGate refresh_gate;
     std::vector<std::string> events;

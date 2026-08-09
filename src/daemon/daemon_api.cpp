@@ -650,7 +650,9 @@ void Daemon::setup_api() {
             return report;
         },
         [this]() {
-            const Config config_snapshot = config_store_.active_config();
+            const auto active_snapshot =
+                config_store_.active_snapshot();
+            const Config& config_snapshot = active_snapshot.config;
             const auto runtime_snapshot = runtime_state_store_.snapshot();
 
             return build_runtime_outbounds_response(
@@ -663,8 +665,33 @@ void Daemon::setup_api() {
                     }
                     return it->second;
                 },
-                [this](const std::string& tag) -> std::optional<InterfaceProbeResult> {
-                    return interface_probe_.result_for(tag);
+                [this, &active_snapshot, &config_snapshot](
+                    const std::string& tag)
+                    -> std::optional<InterfaceProbeResult> {
+                    if (!config_snapshot.outbounds.has_value()) {
+                        return std::nullopt;
+                    }
+                    const auto& outbounds = *config_snapshot.outbounds;
+                    const auto stable_outbound = std::find_if(
+                        outbounds.begin(),
+                        outbounds.end(),
+                        [&tag](const Outbound& candidate) {
+                            return candidate.tag == tag &&
+                                   candidate.type == OutboundType::INTERFACE;
+                        });
+                    const auto& marks =
+                        active_snapshot.outbound_marks;
+                    const auto mark = marks.find(tag);
+                    if (stable_outbound == outbounds.end() ||
+                        mark == marks.end()) {
+                        return std::nullopt;
+                    }
+                    return interface_probe_.result_for(
+                        InterfaceProbe::Target{
+                            tag,
+                            mark->second,
+                            stable_outbound->interface.value_or(
+                                std::string{})});
                 });
         },
         [this]() {
@@ -775,7 +802,8 @@ void Daemon::setup_api() {
     // labelled "measured 12 s ago", and the age belongs to the probe rather
     // than to the outbound state schema.
     api_server_->get("/api/system/probes", [this]() -> std::string {
-        const Config config_snapshot = config_store_.active_config();
+        const auto active_snapshot = config_store_.active_snapshot();
+        const Config& config_snapshot = active_snapshot.config;
         const auto now = std::chrono::steady_clock::now();
 
         nlohmann::json response;
@@ -787,7 +815,16 @@ void Daemon::setup_api() {
             if (outbound.type != OutboundType::INTERFACE) {
                 continue;
             }
-            const auto result = interface_probe_.result_for(outbound.tag);
+            const auto& marks = active_snapshot.outbound_marks;
+            const auto mark = marks.find(outbound.tag);
+            if (mark == marks.end()) {
+                continue;
+            }
+            const auto result = interface_probe_.result_for(
+                InterfaceProbe::Target{
+                    outbound.tag,
+                    mark->second,
+                    outbound.interface.value_or(std::string{})});
             if (!result.has_value()) {
                 continue;
             }
