@@ -46,6 +46,7 @@
 #include "../runtime/runtime_mutation_admission.hpp"
 #include "../firewall/firewall.hpp"
 #include "../util/blocking_executor.hpp"
+#include "../util/bounded_operation_admission.hpp"
 #include "../util/ipv6_support.hpp"
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
@@ -75,6 +76,7 @@ struct ApiContext;
 class SseBroadcaster;
 class StatusStream;
 struct ConfigApplyResult;
+struct TestRoutingResult;
 struct ListRefreshOperationResult;
 
 struct InterfaceTrafficTargetPlan {
@@ -527,6 +529,13 @@ private:
     void handle_control_commands();
     void setup_ipc_control_socket();
     void handle_ipc_control_socket();
+    struct RoutingTestSnapshot {
+        Config config;
+        std::vector<RuleState> realized_rules;
+        FirewallBackend firewall_backend{FirewallBackend::iptables};
+        bool unapplied_draft{false};
+    };
+    RoutingTestSnapshot capture_routing_test_snapshot();
     void remove_ipc_control_socket() noexcept;
     void wake_control_loop();
     bool cancel_control_task_if_still_queued(
@@ -809,6 +818,8 @@ private:
 #ifdef WITH_API
     // API integration
     void setup_api();
+    TestRoutingResult run_api_routing_test(
+        const std::string& target);
     RuntimeMutationAdmission::Lease acquire_runtime_mutation_or_throw(
         std::string label,
         bool require_runtime_running,
@@ -1047,6 +1058,10 @@ private:
     BlockingExecutor resolver_hook_executor_{1, 16};
     BlockingExecutor resolver_stream_executor_{1, 16};
     BlockingExecutor resolver_io_executor_{1, 32};
+    // API and IPC share one bounded diagnostics pool. Admission counts work,
+    // not queue entries, so no more than two whole tests can exist at once.
+    BlockingExecutor routing_test_executor_{2, 2};
+    BoundedOperationAdmission routing_test_admission_{2};
     std::atomic<std::uint64_t> runtime_generation_{1};
     KeeneticDnsRefreshCoordinator keenetic_dns_refresh_coordinator_;
     std::atomic<bool> ipc_resolver_hook_inflight_{false};

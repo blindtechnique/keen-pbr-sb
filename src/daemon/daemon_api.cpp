@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <limits>
 #include <sys/epoll.h>
 #include <thread>
@@ -527,6 +528,120 @@ ListRefreshOperationResult Daemon::refresh_lists_via_api(std::optional<std::stri
     }
 }
 
+TestRoutingResult Daemon::run_api_routing_test(
+    const std::string& target) {
+    if (!event_loop_active_.load(std::memory_order_acquire)) {
+        throw ApiError(
+            "Routing diagnostics are unavailable until the control loop is running",
+            503);
+    }
+    const RoutingTestDeadline operation_deadline =
+        std::chrono::steady_clock::now() +
+        kRoutingTestOperationTimeout;
+    auto admitted = routing_test_admission_.try_acquire();
+    if (!admitted.has_value()) {
+        throw ApiError(
+            "Too many routing tests are already running", 503);
+    }
+
+    auto snapshot_promise =
+        std::make_shared<std::promise<RoutingTestSnapshot>>();
+    auto snapshot_future = snapshot_promise->get_future();
+    bool snapshot_posted = false;
+    try {
+        snapshot_posted = post_control_task(
+            [this, snapshot_promise]() {
+                try {
+                    snapshot_promise->set_value(
+                        capture_routing_test_snapshot());
+                } catch (...) {
+                    try {
+                        snapshot_promise->set_exception(
+                            std::current_exception());
+                    } catch (...) {
+                    }
+                }
+            },
+            "api-test-routing-snapshot");
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("Routing diagnostics snapshot is unavailable: ") +
+                error.what(),
+            503);
+    }
+    if (!snapshot_posted) {
+        throw ApiError(
+            "Routing diagnostics snapshot queue is unavailable", 503);
+    }
+
+    if (snapshot_future.wait_until(operation_deadline) !=
+        std::future_status::ready) {
+        throw ApiError(
+            "Routing diagnostics snapshot deadline exceeded", 504);
+    }
+    std::shared_ptr<RoutingTestSnapshot> snapshot;
+    try {
+        snapshot = std::make_shared<RoutingTestSnapshot>(
+            snapshot_future.get());
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("Routing diagnostics snapshot failed: ") +
+                error.what(),
+            503);
+    }
+
+    auto promise = std::make_shared<std::promise<TestRoutingResult>>();
+    auto future = promise->get_future();
+    bool queued = false;
+    try {
+        queued = routing_test_executor_.try_post(
+            "api-test-routing",
+            [this,
+             snapshot,
+             target,
+             promise,
+             operation_deadline,
+             lease = std::move(*admitted)]() mutable {
+                (void)lease;
+                try {
+                    auto result = compute_test_routing(
+                        snapshot->config,
+                        list_service_.cache_manager(),
+                        target,
+                        &snapshot->realized_rules,
+                        operation_deadline,
+                        snapshot->firewall_backend);
+                    result.unapplied_draft =
+                        snapshot->unapplied_draft;
+                    if (result.unapplied_draft) {
+                        result.warnings.push_back(
+                            "An unapplied draft exists; diagnostics use the active applied configuration.");
+                    }
+                    promise->set_value(std::move(result));
+                } catch (...) {
+                    try {
+                        promise->set_exception(
+                            std::current_exception());
+                    } catch (...) {
+                    }
+                }
+            });
+    } catch (const std::exception& error) {
+        throw ApiError(
+            std::string("Routing test executor is unavailable: ") +
+                error.what(),
+            503);
+    }
+    if (!queued) {
+        throw ApiError("Routing test executor queue is full", 503);
+    }
+    try {
+        return future.get();
+    } catch (const RoutingTestTimeoutError& error) {
+        throw ApiError(error.what(), 504);
+    }
+}
+
 void Daemon::setup_api() {
     if (!config_.api || !config_.api->enabled.value_or(false) || opts_.no_api) return;
 
@@ -702,8 +817,7 @@ void Daemon::setup_api() {
             return build_list_refresh_state_map(config, list_service_.cache_manager());
         },
         [this](const std::string& target) {
-            const Config visible_config = config_store_.visible_config();
-            return compute_test_routing(visible_config, list_service_.cache_manager(), target);
+            return run_api_routing_test(target);
         },
         []() {
             throw std::logic_error(

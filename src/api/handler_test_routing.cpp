@@ -8,6 +8,41 @@
 
 namespace keen_pbr3 {
 
+namespace {
+
+api::Evaluation to_api_evaluation(RoutingMatchEvaluation evaluation) {
+    switch (evaluation) {
+        case RoutingMatchEvaluation::Matched:
+            return api::Evaluation::MATCHED;
+        case RoutingMatchEvaluation::NotMatched:
+            return api::Evaluation::NOT_MATCHED;
+        case RoutingMatchEvaluation::InsufficientContext:
+            return api::Evaluation::INSUFFICIENT_CONTEXT;
+    }
+    return api::Evaluation::INSUFFICIENT_CONTEXT;
+}
+
+std::vector<api::RoutingTestUnknownConditionElement>
+to_api_unknown_conditions(const std::vector<std::string>& conditions) {
+    std::vector<api::RoutingTestUnknownConditionElement> converted;
+    converted.reserve(conditions.size());
+    for (const auto& condition : conditions) {
+        nlohmann::json value = condition;
+        converted.push_back(
+            value.get<api::RoutingTestUnknownConditionElement>());
+    }
+    return converted;
+}
+
+api::ListMatch to_api_list_match(const ListMatchInfo& match) {
+    api::ListMatch converted;
+    converted.list = match.list_name;
+    converted.via = match.via;
+    return converted;
+}
+
+} // namespace
+
 void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
     server.post("/api/routing/test", [&ctx](const std::string& body) -> std::string {
         nlohmann::json j;
@@ -36,6 +71,8 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
         api::RoutingTestResponse resp;
         resp.target       = result.target;
         resp.is_domain    = result.is_domain;
+        resp.config_scope = api::ConfigScope::ACTIVE;
+        resp.unapplied_draft = result.unapplied_draft;
         resp.dns_error    = result.dns_error;
         resp.no_matching_rule = result.no_matching_rule;
         resp.resolved_ips = result.resolved_ips;
@@ -47,11 +84,11 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
             e.expected_outbound = entry.expected_outbound;
             e.actual_outbound   = entry.actual_outbound;
             e.ok                = entry.ok;
+            e.evaluation = to_api_evaluation(entry.evaluation);
+            e.unknown_conditions =
+                to_api_unknown_conditions(entry.unknown_conditions);
             if (entry.list_match) {
-                api::ListMatch lm;
-                lm.list = entry.list_match->list_name;
-                lm.via  = entry.list_match->via;
-                e.list_match = std::move(lm);
+                e.list_match = to_api_list_match(*entry.list_match);
             }
             resp.results.push_back(std::move(e));
         }
@@ -73,6 +110,16 @@ void register_test_routing_handler(ApiServer& server, ApiContext& ctx) {
                 api::RoutingTestRuleIpDiagnosticElement ipd;
                 ipd.ip = ip_diag.ip;
                 ipd.in_ipset = ip_diag.in_ipset;
+                ipd.in_lists = ip_diag.in_lists;
+                ipd.evaluation =
+                    to_api_evaluation(ip_diag.evaluation);
+                ipd.unknown_conditions =
+                    to_api_unknown_conditions(
+                        ip_diag.unknown_conditions);
+                if (ip_diag.list_match) {
+                    ipd.list_match =
+                        to_api_list_match(*ip_diag.list_match);
+                }
                 rd.ip_rows.push_back(std::move(ipd));
             }
             resp.rule_diagnostics.push_back(std::move(rd));

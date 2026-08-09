@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <grp.h>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -39,6 +40,7 @@
 #include "../firewall/firewall_verifier.hpp"
 #include "../health/routing_health_checker.hpp"
 #include "../ipc/control_protocol.hpp"
+#include "../ipc/bounded_socket_writer.hpp"
 #include "../keenetic/internal_vpn_server_resolver.hpp"
 #include "../keenetic/internal_vpn_service_resolver.hpp"
 #include "../keenetic/internal_vpn_runtime_generation.hpp"
@@ -114,6 +116,25 @@ void receive_all(int fd, char* data, std::size_t size) {
         received += static_cast<std::size_t>(count);
     }
 }
+
+class UniqueSocketFd {
+public:
+    explicit UniqueSocketFd(int fd) noexcept : fd_(fd) {}
+
+    ~UniqueSocketFd() noexcept {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+    }
+
+    UniqueSocketFd(const UniqueSocketFd&) = delete;
+    UniqueSocketFd& operator=(const UniqueSocketFd&) = delete;
+
+    int get() const noexcept { return fd_; }
+
+private:
+    int fd_{-1};
+};
 
 class SocketStreamBuffer final : public std::streambuf {
 public:
@@ -390,6 +411,9 @@ Daemon::~Daemon() {
     cleanup_step("close runtime mutation admission", [this] {
         runtime_mutation_admission_.shutdown();
     });
+    cleanup_step("close routing test admission", [this] {
+        routing_test_admission_.shutdown();
+    });
     cleanup_step("stop SIGHUP reload coordinator", [this] {
         sighup_reload_coordinator_.stop();
     });
@@ -431,6 +455,9 @@ Daemon::~Daemon() {
     });
     cleanup_step("stop resolver I/O executor", [this] {
         resolver_io_executor_.shutdown();
+    });
+    cleanup_step("stop routing test executor", [this] {
+        routing_test_executor_.shutdown();
     });
     cleanup_step("stop blocking executor", [this] {
         blocking_executor_.shutdown();
@@ -690,29 +717,138 @@ void Daemon::handle_ipc_control_socket() {
                     throw ipc::ControlProtocolError(
                         "test-routing requires a target");
                 }
-                const auto result = compute_test_routing(
-                    config_store_.active_config(),
-                    list_service_.cache_manager(),
-                    target);
-                nlohmann::json entries = nlohmann::json::array();
-                for (const auto& entry : result.entries) {
-                    entries.push_back(
-                        {{"ip", entry.ip},
-                         {"expected_outbound", entry.expected_outbound},
-                         {"actual_outbound", entry.actual_outbound},
-                         {"ok", entry.ok}});
+                const RoutingTestDeadline operation_deadline =
+                    std::chrono::steady_clock::now() +
+                    kRoutingTestOperationTimeout;
+                auto admitted =
+                    routing_test_admission_.try_acquire();
+                if (!admitted.has_value()) {
+                    response = ipc::make_error_response(
+                        request,
+                        "busy",
+                        "too many routing tests are already running");
+                } else {
+                    auto snapshot = capture_routing_test_snapshot();
+                    const auto request_snapshot = request;
+                    const bool queued =
+                        routing_test_executor_.try_post(
+                            "ipc-test-routing",
+                            [this,
+                             client,
+                             request_snapshot,
+                             target,
+                             operation_deadline,
+                             snapshot = std::move(snapshot),
+                             lease = std::move(*admitted)]() mutable {
+                                UniqueSocketFd client_socket(client);
+                                (void)lease;
+                                nlohmann::json worker_response;
+                                try {
+                                    auto result = compute_test_routing(
+                                        snapshot.config,
+                                        list_service_.cache_manager(),
+                                        target,
+                                        &snapshot.realized_rules,
+                                        operation_deadline,
+                                        snapshot.firewall_backend);
+                                    result.unapplied_draft =
+                                        snapshot.unapplied_draft;
+                                    if (result.unapplied_draft) {
+                                        result.warnings.push_back(
+                                            "An unapplied draft exists; diagnostics use the active applied configuration.");
+                                    }
+
+                                    nlohmann::json entries =
+                                        nlohmann::json::array();
+                                    for (const auto& entry :
+                                         result.entries) {
+                                        nlohmann::json entry_json = {
+                                            {"ip", entry.ip},
+                                            {"expected_outbound",
+                                             entry.expected_outbound},
+                                            {"actual_outbound",
+                                             entry.actual_outbound},
+                                            {"ok", entry.ok},
+                                            {"evaluation",
+                                             routing_match_evaluation_code(
+                                                 entry.evaluation)},
+                                            {"unknown_conditions",
+                                             entry.unknown_conditions},
+                                        };
+                                        if (entry.list_match.has_value()) {
+                                            entry_json["list_match"] = {
+                                                {"list",
+                                                 entry.list_match->list_name},
+                                                {"via",
+                                                 entry.list_match->via},
+                                            };
+                                        }
+                                        entries.push_back(
+                                            std::move(entry_json));
+                                    }
+                                    worker_response = {
+                                        {"protocol_version",
+                                         ipc::kControlProtocolVersion},
+                                        {"request_id",
+                                         request_snapshot.at("request_id")},
+                                        {"ok", true},
+                                        {"result",
+                                         {{"target", result.target},
+                                          {"config_scope", "active"},
+                                          {"unapplied_draft",
+                                           result.unapplied_draft},
+                                          {"resolved_ips",
+                                           result.resolved_ips},
+                                          {"entries",
+                                           std::move(entries)},
+                                          {"warnings", result.warnings},
+                                          {"dns_error",
+                                           result.dns_error}}},
+                                    };
+                                } catch (const RoutingTestTimeoutError& error) {
+                                    worker_response =
+                                        ipc::make_error_response(
+                                            request_snapshot,
+                                            "timeout",
+                                            error.what());
+                                } catch (const std::exception& error) {
+                                    worker_response =
+                                        ipc::make_error_response(
+                                            request_snapshot,
+                                            "daemon_error",
+                                            error.what());
+                                } catch (...) {
+                                    worker_response =
+                                        ipc::make_error_response(
+                                            request_snapshot,
+                                            "daemon_error",
+                                            "routing test failed with an unknown error");
+                                }
+
+                                try {
+                                    const auto frame =
+                                        ipc::encode_message(
+                                            worker_response);
+                                    ipc::send_all_bounded_nonblocking(
+                                        client_socket.get(),
+                                        frame.data(),
+                                        frame.size(),
+                                        kRoutingTestResponseSendTimeout);
+                                } catch (const std::exception& error) {
+                                    Logger::instance().warn(
+                                        "test-routing control response failed: {}",
+                                        error.what());
+                                }
+                            });
+                    if (queued) {
+                        stream_dispatched = true;
+                    } else {
+                        response = ipc::make_error_response(
+                            request,
+                            "busy",
+                            "routing test executor queue is full");
+                    }
                 }
-                response = {
-                    {"protocol_version", ipc::kControlProtocolVersion},
-                    {"request_id", request.at("request_id")},
-                    {"ok", !result.dns_error.has_value()},
-                    {"result",
-                     {{"target", result.target},
-                      {"resolved_ips", result.resolved_ips},
-                      {"entries", std::move(entries)},
-                      {"warnings", result.warnings},
-                      {"dns_error", result.dns_error}}},
-                };
             } else if (operation == "generate-resolver-config") {
                 const RuntimeState runtime_state =
                     runtime_state_machine_.state();
@@ -1936,6 +2072,20 @@ void Daemon::schedule_netfilter_runtime_refresh(
         pending_netfilter_refresh_reasons_ = 0U;
         throw;
     }
+}
+
+Daemon::RoutingTestSnapshot Daemon::capture_routing_test_snapshot() {
+    if (!is_event_loop_thread()) {
+        throw std::logic_error(
+            "routing test snapshot must be captured on the control loop");
+    }
+    const auto active = config_store_.active_snapshot();
+    return RoutingTestSnapshot{
+        active.config,
+        firewall_state_.get_rules(),
+        firewall_->backend(),
+        config_store_.config_is_draft(),
+    };
 }
 
 void Daemon::schedule_netfilter_runtime_refresh_noexcept(
@@ -3344,6 +3494,7 @@ void Daemon::run() {
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
         runtime_mutation_admission_.shutdown();
+        routing_test_admission_.shutdown();
         sighup_reload_coordinator_.stop();
         cancel_resolver_reload_retry();
         resolver_stream_coordinator_.request_stop();
@@ -3382,6 +3533,7 @@ void Daemon::run() {
         }
         remove_remote_access_rules();
 #endif
+        routing_test_executor_.shutdown();
         try {
             unregister_interface_monitor_fd();
         } catch (const std::exception& cleanup_error) {
@@ -3466,6 +3618,7 @@ void Daemon::run() {
     cancel_idle_stall_observer();
     cancel_meta_udp443_activation_cleanup();
     runtime_mutation_admission_.shutdown();
+    routing_test_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     cancel_resolver_reload_retry();
     resolver_stream_coordinator_.request_stop();
@@ -3508,6 +3661,7 @@ void Daemon::run() {
     resolver_hook_executor_.shutdown();
     resolver_stream_executor_.shutdown();
     resolver_io_executor_.shutdown();
+    routing_test_executor_.shutdown();
     blocking_executor_.shutdown();
 
     teardown_dns_probe();
@@ -3530,6 +3684,7 @@ void Daemon::run() {
 void Daemon::stop() {
     list_refresh_tasks_.request_cancel_active();
     runtime_mutation_admission_.shutdown();
+    routing_test_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     resolver_stream_coordinator_.request_stop();
     running_.store(false, std::memory_order_release);

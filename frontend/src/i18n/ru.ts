@@ -1246,11 +1246,25 @@ export const ruTranslation = {
     routingDiagnostics: {
       noMatchingRule:
         "Для целевых списков не найдено подходящего правила маршрутизации.",
+      resultTitle: "Результат маршрутизации",
+      ruleDetailsTitle: "Диагностика правил",
+      ip: "IP",
+      resultListMatch: "Совпадение со списком",
+      resultListMatchVia: "{{list}} (через {{via}})",
+      expectedOutbound: "Ожидаемый маршрут",
+      actualOutbound: "Фактический маршрут",
+      status: "Статус",
+      statusUnknown: "Недостаточно данных",
       hostLabel: 'Хост "{{target}}"',
       inRuleLists: "Есть в доменных/IP-списках правила?",
       showAllRules: "Показывать все правила",
       listMatch: "{{list}}: {{via}}",
       noConditions: "Без дополнительных условий",
+      unappliedDraft:
+        "Есть неприменённый черновик. Результат рассчитан по применённой конфигурации и текущему состоянию firewall.",
+      insufficientContext:
+        "Одного адреса назначения недостаточно для правил с источником, входным интерфейсом, протоколом, портами или DSCP.",
+      packetContextRequired: "Нужны параметры пакета",
       conditions: {
         lists: "Списки",
         proto: "Протокол",
@@ -1258,6 +1272,7 @@ export const ruTranslation = {
         destinationIp: "IP назначения",
         sourcePort: "Порт источника",
         destinationPort: "Порт назначения",
+        dscp: "DSCP",
       },
     },
     routingLegend: {

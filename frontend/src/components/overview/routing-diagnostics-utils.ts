@@ -13,6 +13,7 @@ export type RuleCondition = {
     | "destinationIp"
     | "sourcePort"
     | "destinationPort"
+    | "dscp"
   value: string
 }
 
@@ -29,6 +30,17 @@ export function getVisibleRuleDiagnostics(
 
 export function isGrayRuleDiagnostic(rule: RoutingTestRuleDiagnostic) {
   if (rule.target_in_lists || rule.target_match) {
+    return false
+  }
+
+  if (
+    rule.ip_rows.some(
+      (ipRow) =>
+        ipRow.in_lists ||
+        ipRow.list_match != null ||
+        ipRow.evaluation !== "not_matched"
+    )
+  ) {
     return false
   }
 
@@ -61,6 +73,9 @@ export function getRuleConditions(
   }
   if (hasText(rule.dest_port)) {
     conditions.push({ key: "destinationPort", value: rule.dest_port })
+  }
+  if (rule.dscp != null) {
+    conditions.push({ key: "dscp", value: String(rule.dscp) })
   }
 
   return conditions

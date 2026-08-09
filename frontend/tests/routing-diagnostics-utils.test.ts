@@ -33,6 +33,31 @@ describe("routing diagnostics helpers", () => {
     expect(getVisibleRuleDiagnostics([rule], false)).toEqual([rule])
   })
 
+  test("keeps per-IP list matches and packet-context unknowns visible", () => {
+    const perIpMatch = buildRuleDiagnostic(0, {
+      inLists: true,
+      listMatch: { list: "work", via: "8.8.8.8" },
+    })
+    const insufficient = buildRuleDiagnostic(1, {
+      evaluation: "insufficient_context",
+      unknownConditions: ["source_address", "destination_port"],
+    })
+
+    expect(
+      getVisibleRuleDiagnostics([perIpMatch, insufficient], false)
+    ).toEqual([perIpMatch, insufficient])
+  })
+
+  test("keeps a list-free rule matched by destination semantics visible", () => {
+    const matched = buildRuleDiagnostic(0, {
+      evaluation: "matched",
+    })
+    matched.rule.list = undefined
+
+    expect(isGrayRuleDiagnostic(matched)).toBe(false)
+    expect(getVisibleRuleDiagnostics([matched], false)).toEqual([matched])
+  })
+
   test("showAllRules keeps every rule", () => {
     const rules = [
       buildRuleDiagnostic(0, { inIpset: false }),
@@ -49,11 +74,13 @@ describe("routing diagnostics helpers", () => {
         outbound: "vpn",
         proto: "tcp",
         dest_port: "443",
+        dscp: 10,
       })
     ).toEqual([
       { key: "lists", value: "work, media" },
       { key: "proto", value: "tcp" },
       { key: "destinationPort", value: "443" },
+      { key: "dscp", value: "10" },
     ])
   })
 
@@ -79,6 +106,10 @@ function buildRuleDiagnostic(
   ruleIndex: number,
   options: {
     inIpset?: boolean | null
+    inLists?: boolean
+    listMatch?: RoutingTestRuleDiagnostic["ip_rows"][number]["list_match"]
+    evaluation?: RoutingTestRuleDiagnostic["ip_rows"][number]["evaluation"]
+    unknownConditions?: RoutingTestRuleDiagnostic["ip_rows"][number]["unknown_conditions"]
     targetMatch?: RoutingTestRuleDiagnostic["target_match"]
   } = {}
 ): RoutingTestRuleDiagnostic {
@@ -95,7 +126,11 @@ function buildRuleDiagnostic(
     ip_rows: [
       {
         ip: "8.8.8.8",
+        in_lists: options.inLists ?? false,
+        list_match: options.listMatch,
         in_ipset: options.inIpset,
+        evaluation: options.evaluation ?? "not_matched",
+        unknown_conditions: options.unknownConditions ?? [],
       },
     ],
   }

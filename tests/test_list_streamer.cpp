@@ -164,6 +164,44 @@ TEST_CASE("ListStreamer snapshot remains on one cache generation") {
     CHECK(live_visitor.entries.front() == "newest.example");
 }
 
+TEST_CASE("shared routing snapshot keeps multiple lists on one cache view") {
+    ListTempDirectory temp;
+    auto transport = std::make_shared<ListSequenceHttpTransport>();
+    CacheManager cache(temp.path() / "cache", 1024, transport);
+    cache.ensure_dir();
+    constexpr const char* first_url =
+        "https://example.test/first.txt";
+    constexpr const char* second_url =
+        "https://example.test/second.txt";
+
+    transport->enqueue("old-first.example\n");
+    REQUIRE(cache.download("first", first_url).updated());
+    transport->enqueue("old-second.example\n");
+    REQUIRE(cache.download("second", second_url).updated());
+    const auto snapshot =
+        cache.capture_generation({"first", "second"});
+    ListStreamer streamer(cache, snapshot);
+
+    ListConfig first_config;
+    first_config.url = first_url;
+    CollectingListVisitor first_visitor;
+    streamer.stream_list("first", first_config, first_visitor);
+
+    // A refresh commits between list reads. Both reads must still use the
+    // cache view captured for the whole routing diagnostic.
+    transport->enqueue("new-second.example\n");
+    REQUIRE(cache.download("second", second_url).updated());
+    ListConfig second_config;
+    second_config.url = second_url;
+    CollectingListVisitor second_visitor;
+    streamer.stream_list("second", second_config, second_visitor);
+
+    REQUIRE(first_visitor.entries.size() == 1U);
+    CHECK(first_visitor.entries.front() == "old-first.example");
+    REQUIRE(second_visitor.entries.size() == 1U);
+    CHECK(second_visitor.entries.front() == "old-second.example");
+}
+
 TEST_CASE("ListStreamer snapshot keeps an explicitly missing cache missing") {
     ListTempDirectory temp;
     auto transport = std::make_shared<ListSequenceHttpTransport>();

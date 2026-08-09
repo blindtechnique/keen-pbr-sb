@@ -1230,11 +1230,25 @@ export const enTranslation = {
     },
     routingDiagnostics: {
       noMatchingRule: "No matching routing rule for the target lists.",
+      resultTitle: "Routing result",
+      ruleDetailsTitle: "Rule diagnostics",
+      ip: "IP",
+      resultListMatch: "List match",
+      resultListMatchVia: "{{list}} (via {{via}})",
+      expectedOutbound: "Expected outbound",
+      actualOutbound: "Actual outbound",
+      status: "Status",
+      statusUnknown: "Unknown",
       hostLabel: 'Host "{{target}}"',
       inRuleLists: "In rule domain/IP lists?",
       showAllRules: "Show all rules",
       listMatch: "{{list}}: {{via}}",
       noConditions: "No extra conditions",
+      unappliedDraft:
+        "An unapplied draft exists. This result uses the active configuration and live firewall state.",
+      insufficientContext:
+        "A destination alone is not enough to decide rules that also use source, interface, protocol, port, or DSCP conditions.",
+      packetContextRequired: "Packet details required",
       conditions: {
         lists: "Lists",
         proto: "Protocol",
@@ -1242,6 +1256,7 @@ export const enTranslation = {
         destinationIp: "Destination IP",
         sourcePort: "Source port",
         destinationPort: "Destination port",
+        dscp: "DSCP",
       },
     },
     routingLegend: {

@@ -2516,9 +2516,31 @@ components:
             "www.google.com").
           example: "google.com"
 
+    RoutingTestEvaluation:
+      type: string
+      enum: [matched, not_matched, insufficient_context]
+      description: >
+        Whether the target is known to match, known not to match, or cannot be
+        decided without packet fields that were not supplied to this test.
+
+    RoutingTestUnknownCondition:
+      type: string
+      enum:
+        - inbound_interface
+        - source_address
+        - protocol
+        - source_port
+        - destination_port
+        - dscp
+        - destination_address
+        - firewall_state
+        - firewall_set
+        - firewall_tool
+        - resolved_ip
+
     RoutingTestEntry:
       type: object
-      required: [ip, expected_outbound, actual_outbound, ok]
+      required: [ip, expected_outbound, actual_outbound, ok, evaluation, unknown_conditions]
       properties:
         ip:
           type: string
@@ -2531,34 +2553,53 @@ components:
         expected_outbound:
           type: string
           description: >
-            Outbound tag determined by scanning route rules against cached list
-            data. "(default)" when no rule matches.
+            Outbound tag determined from the active rules, cached list data,
+            and destination address. "(default)" when no rule matches and
+            "(unknown)" when packet context is required.
           example: "vpn"
         actual_outbound:
           type: string
           description: >
-            Outbound tag found in the live kernel firewall sets.
+            Outbound tag found from realized firewall rules and live set membership.
             "(default)" when the IP is not present in any set.
-            "(unknown)" when the firewall tool is unavailable.
+            "(unknown)" when the firewall tool, set state, or packet context is unavailable.
           example: "vpn"
         ok:
           type: boolean
           description: true when expected_outbound equals actual_outbound.
           example: true
+        evaluation:
+          $ref: "#/components/schemas/RoutingTestEvaluation"
+        unknown_conditions:
+          type: array
+          description: Packet or runtime fields required for a conclusive result.
+          items:
+            $ref: "#/components/schemas/RoutingTestUnknownCondition"
 
     RoutingTestRuleIpDiagnostic:
       type: object
-      required: [ip]
+      required: [ip, in_lists, evaluation, unknown_conditions]
       properties:
         ip:
           type: string
           description: Resolved IP represented by this matrix row.
+        in_lists:
+          type: boolean
+          description: Whether this IP or the queried domain matches a configured rule list.
+        list_match:
+          $ref: "#/components/schemas/RoutingTestListMatch"
         in_ipset:
           type: boolean
           nullable: true
           description: |
             Whether the IP exists in this rule's firewall set.
             null when firewall check is unavailable.
+        evaluation:
+          $ref: "#/components/schemas/RoutingTestEvaluation"
+        unknown_conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingTestUnknownCondition"
 
     RoutingTestRuleDiagnostic:
       type: object
@@ -2583,7 +2624,7 @@ components:
 
     RoutingTestResponse:
       type: object
-      required: [target, is_domain, resolved_ips, warnings, results, rule_diagnostics, no_matching_rule]
+      required: [target, is_domain, config_scope, unapplied_draft, resolved_ips, warnings, results, rule_diagnostics, no_matching_rule]
       properties:
         target:
           type: string
@@ -2593,6 +2634,13 @@ components:
           type: boolean
           description: true when the target was interpreted as a domain name.
           example: true
+        config_scope:
+          type: string
+          enum: [active]
+          description: Diagnostics always use the applied active configuration.
+        unapplied_draft:
+          type: boolean
+          description: true when a separate unapplied configuration draft exists.
         resolved_ips:
           type: array
           description: >

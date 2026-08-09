@@ -808,26 +808,38 @@ namespace api {
         std::vector<RouteTableCheck> route_tables;
     };
 
+    enum class Evaluation : int { INSUFFICIENT_CONTEXT, MATCHED, NOT_MATCHED };
+
     struct ListMatch {
         std::string list;
         std::string via;
     };
 
+    enum class RoutingTestUnknownConditionElement : int { DESTINATION_ADDRESS, DESTINATION_PORT, DSCP, FIREWALL_SET, FIREWALL_STATE, FIREWALL_TOOL, INBOUND_INTERFACE, PROTOCOL, RESOLVED_IP, SOURCE_ADDRESS, SOURCE_PORT };
+
     struct RoutingTestEntry {
         std::string actual_outbound;
+        Evaluation evaluation;
         std::string expected_outbound;
         std::string ip;
         std::optional<ListMatch> list_match;
         bool ok = false;
+        std::vector<RoutingTestUnknownConditionElement> unknown_conditions;
     };
 
     struct RoutingTestRequest {
         std::string target;
     };
 
+    enum class ConfigScope : int { ACTIVE };
+
     struct RoutingTestRuleIpDiagnosticElement {
+        Evaluation evaluation;
         std::optional<bool> in_ipset;
+        bool in_lists = false;
         std::string ip;
+        std::optional<ListMatch> list_match;
+        std::vector<RoutingTestUnknownConditionElement> unknown_conditions;
     };
 
     struct RoutingTestRuleDiagnosticElement {
@@ -841,6 +853,7 @@ namespace api {
     };
 
     struct RoutingTestResponse {
+        ConfigScope config_scope;
         std::optional<std::string> dns_error;
         bool is_domain = false;
         bool no_matching_rule = false;
@@ -848,6 +861,7 @@ namespace api {
         std::vector<RoutingTestEntry> results;
         std::vector<RoutingTestRuleDiagnosticElement> rule_diagnostics;
         std::string target;
+        bool unapplied_draft = false;
         std::vector<std::string> warnings;
     };
 
@@ -1195,11 +1209,13 @@ namespace api {
         std::optional<RoutingHealthErrorResponse> routing_health_error_response;
         std::optional<RoutingHealthResponse> routing_health_response;
         std::optional<RoutingTestEntry> routing_test_entry;
+        std::optional<Evaluation> routing_test_evaluation;
         std::optional<ListMatch> routing_test_list_match;
         std::optional<RoutingTestRequest> routing_test_request;
         std::optional<RoutingTestResponse> routing_test_response;
         std::optional<RoutingTestRuleDiagnosticElement> routing_test_rule_diagnostic;
         std::optional<RoutingTestRuleIpDiagnosticElement> routing_test_rule_ip_diagnostic;
+        std::optional<RoutingTestUnknownConditionElement> routing_test_unknown_condition;
         std::optional<RuntimeInterfaceInventoryEntry> runtime_interface_inventory_entry;
         std::optional<RuntimeInterfaceInventoryResponse> runtime_interface_inventory_response;
         std::optional<RuntimeInterfaceInventoryStatusEnum> runtime_interface_inventory_status;
@@ -1688,6 +1704,15 @@ namespace api {
 
     void from_json(const json & j, RoutingHealthResponseOverall & x);
     void to_json(json & j, const RoutingHealthResponseOverall & x);
+
+    void from_json(const json & j, Evaluation & x);
+    void to_json(json & j, const Evaluation & x);
+
+    void from_json(const json & j, RoutingTestUnknownConditionElement & x);
+    void to_json(json & j, const RoutingTestUnknownConditionElement & x);
+
+    void from_json(const json & j, ConfigScope & x);
+    void to_json(json & j, const ConfigScope & x);
 
     void from_json(const json & j, RuntimeInterfaceInventoryStatusEnum & x);
     void to_json(json & j, const RuntimeInterfaceInventoryStatusEnum & x);
@@ -3133,19 +3158,23 @@ namespace api {
 
     inline void from_json(const json & j, RoutingTestEntry& x) {
         x.actual_outbound = j.at("actual_outbound").get<std::string>();
+        x.evaluation = j.at("evaluation").get<Evaluation>();
         x.expected_outbound = j.at("expected_outbound").get<std::string>();
         x.ip = j.at("ip").get<std::string>();
         x.list_match = get_stack_optional<ListMatch>(j, "list_match");
         x.ok = j.at("ok").get<bool>();
+        x.unknown_conditions = j.at("unknown_conditions").get<std::vector<RoutingTestUnknownConditionElement>>();
     }
 
     inline void to_json(json & j, const RoutingTestEntry & x) {
         j = json::object();
         j["actual_outbound"] = x.actual_outbound;
+        j["evaluation"] = x.evaluation;
         j["expected_outbound"] = x.expected_outbound;
         j["ip"] = x.ip;
         j["list_match"] = x.list_match;
         j["ok"] = x.ok;
+        j["unknown_conditions"] = x.unknown_conditions;
     }
 
     inline void from_json(const json & j, RoutingTestRequest& x) {
@@ -3158,14 +3187,22 @@ namespace api {
     }
 
     inline void from_json(const json & j, RoutingTestRuleIpDiagnosticElement& x) {
+        x.evaluation = j.at("evaluation").get<Evaluation>();
         x.in_ipset = get_stack_optional<bool>(j, "in_ipset");
+        x.in_lists = j.at("in_lists").get<bool>();
         x.ip = j.at("ip").get<std::string>();
+        x.list_match = get_stack_optional<ListMatch>(j, "list_match");
+        x.unknown_conditions = j.at("unknown_conditions").get<std::vector<RoutingTestUnknownConditionElement>>();
     }
 
     inline void to_json(json & j, const RoutingTestRuleIpDiagnosticElement & x) {
         j = json::object();
+        j["evaluation"] = x.evaluation;
         j["in_ipset"] = x.in_ipset;
+        j["in_lists"] = x.in_lists;
         j["ip"] = x.ip;
+        j["list_match"] = x.list_match;
+        j["unknown_conditions"] = x.unknown_conditions;
     }
 
     inline void from_json(const json & j, RoutingTestRuleDiagnosticElement& x) {
@@ -3190,6 +3227,7 @@ namespace api {
     }
 
     inline void from_json(const json & j, RoutingTestResponse& x) {
+        x.config_scope = j.at("config_scope").get<ConfigScope>();
         x.dns_error = get_stack_optional<std::string>(j, "dns_error");
         x.is_domain = j.at("is_domain").get<bool>();
         x.no_matching_rule = j.at("no_matching_rule").get<bool>();
@@ -3197,11 +3235,13 @@ namespace api {
         x.results = j.at("results").get<std::vector<RoutingTestEntry>>();
         x.rule_diagnostics = j.at("rule_diagnostics").get<std::vector<RoutingTestRuleDiagnosticElement>>();
         x.target = j.at("target").get<std::string>();
+        x.unapplied_draft = j.at("unapplied_draft").get<bool>();
         x.warnings = j.at("warnings").get<std::vector<std::string>>();
     }
 
     inline void to_json(json & j, const RoutingTestResponse & x) {
         j = json::object();
+        j["config_scope"] = x.config_scope;
         j["dns_error"] = x.dns_error;
         j["is_domain"] = x.is_domain;
         j["no_matching_rule"] = x.no_matching_rule;
@@ -3209,6 +3249,7 @@ namespace api {
         j["results"] = x.results;
         j["rule_diagnostics"] = x.rule_diagnostics;
         j["target"] = x.target;
+        j["unapplied_draft"] = x.unapplied_draft;
         j["warnings"] = x.warnings;
     }
 
@@ -3739,11 +3780,13 @@ namespace api {
         x.routing_health_error_response = get_stack_optional<RoutingHealthErrorResponse>(j, "RoutingHealthErrorResponse");
         x.routing_health_response = get_stack_optional<RoutingHealthResponse>(j, "RoutingHealthResponse");
         x.routing_test_entry = get_stack_optional<RoutingTestEntry>(j, "RoutingTestEntry");
+        x.routing_test_evaluation = get_stack_optional<Evaluation>(j, "RoutingTestEvaluation");
         x.routing_test_list_match = get_stack_optional<ListMatch>(j, "RoutingTestListMatch");
         x.routing_test_request = get_stack_optional<RoutingTestRequest>(j, "RoutingTestRequest");
         x.routing_test_response = get_stack_optional<RoutingTestResponse>(j, "RoutingTestResponse");
         x.routing_test_rule_diagnostic = get_stack_optional<RoutingTestRuleDiagnosticElement>(j, "RoutingTestRuleDiagnostic");
         x.routing_test_rule_ip_diagnostic = get_stack_optional<RoutingTestRuleIpDiagnosticElement>(j, "RoutingTestRuleIpDiagnostic");
+        x.routing_test_unknown_condition = get_stack_optional<RoutingTestUnknownConditionElement>(j, "RoutingTestUnknownCondition");
         x.runtime_interface_inventory_entry = get_stack_optional<RuntimeInterfaceInventoryEntry>(j, "RuntimeInterfaceInventoryEntry");
         x.runtime_interface_inventory_response = get_stack_optional<RuntimeInterfaceInventoryResponse>(j, "RuntimeInterfaceInventoryResponse");
         x.runtime_interface_inventory_status = get_stack_optional<RuntimeInterfaceInventoryStatusEnum>(j, "RuntimeInterfaceInventoryStatus");
@@ -3876,11 +3919,13 @@ namespace api {
         j["RoutingHealthErrorResponse"] = x.routing_health_error_response;
         j["RoutingHealthResponse"] = x.routing_health_response;
         j["RoutingTestEntry"] = x.routing_test_entry;
+        j["RoutingTestEvaluation"] = x.routing_test_evaluation;
         j["RoutingTestListMatch"] = x.routing_test_list_match;
         j["RoutingTestRequest"] = x.routing_test_request;
         j["RoutingTestResponse"] = x.routing_test_response;
         j["RoutingTestRuleDiagnostic"] = x.routing_test_rule_diagnostic;
         j["RoutingTestRuleIpDiagnostic"] = x.routing_test_rule_ip_diagnostic;
+        j["RoutingTestUnknownCondition"] = x.routing_test_unknown_condition;
         j["RuntimeInterfaceInventoryEntry"] = x.runtime_interface_inventory_entry;
         j["RuntimeInterfaceInventoryResponse"] = x.runtime_interface_inventory_response;
         j["RuntimeInterfaceInventoryStatus"] = x.runtime_interface_inventory_status;
@@ -4577,6 +4622,66 @@ namespace api {
             case RoutingHealthResponseOverall::ERROR: j = "error"; break;
             case RoutingHealthResponseOverall::OK: j = "ok"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RoutingHealthResponseOverall\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, Evaluation & x) {
+        if (j == "insufficient_context") x = Evaluation::INSUFFICIENT_CONTEXT;
+        else if (j == "matched") x = Evaluation::MATCHED;
+        else if (j == "not_matched") x = Evaluation::NOT_MATCHED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"Evaluation\""); }
+    }
+
+    inline void to_json(json & j, const Evaluation & x) {
+        switch (x) {
+            case Evaluation::INSUFFICIENT_CONTEXT: j = "insufficient_context"; break;
+            case Evaluation::MATCHED: j = "matched"; break;
+            case Evaluation::NOT_MATCHED: j = "not_matched"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"Evaluation\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, RoutingTestUnknownConditionElement & x) {
+        if (j == "destination_address") x = RoutingTestUnknownConditionElement::DESTINATION_ADDRESS;
+        else if (j == "destination_port") x = RoutingTestUnknownConditionElement::DESTINATION_PORT;
+        else if (j == "dscp") x = RoutingTestUnknownConditionElement::DSCP;
+        else if (j == "firewall_set") x = RoutingTestUnknownConditionElement::FIREWALL_SET;
+        else if (j == "firewall_state") x = RoutingTestUnknownConditionElement::FIREWALL_STATE;
+        else if (j == "firewall_tool") x = RoutingTestUnknownConditionElement::FIREWALL_TOOL;
+        else if (j == "inbound_interface") x = RoutingTestUnknownConditionElement::INBOUND_INTERFACE;
+        else if (j == "protocol") x = RoutingTestUnknownConditionElement::PROTOCOL;
+        else if (j == "resolved_ip") x = RoutingTestUnknownConditionElement::RESOLVED_IP;
+        else if (j == "source_address") x = RoutingTestUnknownConditionElement::SOURCE_ADDRESS;
+        else if (j == "source_port") x = RoutingTestUnknownConditionElement::SOURCE_PORT;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"RoutingTestUnknownConditionElement\""); }
+    }
+
+    inline void to_json(json & j, const RoutingTestUnknownConditionElement & x) {
+        switch (x) {
+            case RoutingTestUnknownConditionElement::DESTINATION_ADDRESS: j = "destination_address"; break;
+            case RoutingTestUnknownConditionElement::DESTINATION_PORT: j = "destination_port"; break;
+            case RoutingTestUnknownConditionElement::DSCP: j = "dscp"; break;
+            case RoutingTestUnknownConditionElement::FIREWALL_SET: j = "firewall_set"; break;
+            case RoutingTestUnknownConditionElement::FIREWALL_STATE: j = "firewall_state"; break;
+            case RoutingTestUnknownConditionElement::FIREWALL_TOOL: j = "firewall_tool"; break;
+            case RoutingTestUnknownConditionElement::INBOUND_INTERFACE: j = "inbound_interface"; break;
+            case RoutingTestUnknownConditionElement::PROTOCOL: j = "protocol"; break;
+            case RoutingTestUnknownConditionElement::RESOLVED_IP: j = "resolved_ip"; break;
+            case RoutingTestUnknownConditionElement::SOURCE_ADDRESS: j = "source_address"; break;
+            case RoutingTestUnknownConditionElement::SOURCE_PORT: j = "source_port"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"RoutingTestUnknownConditionElement\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, ConfigScope & x) {
+        if (j == "active") x = ConfigScope::ACTIVE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"ConfigScope\""); }
+    }
+
+    inline void to_json(json & j, const ConfigScope & x) {
+        switch (x) {
+            case ConfigScope::ACTIVE: j = "active"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"ConfigScope\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

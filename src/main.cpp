@@ -20,6 +20,7 @@
 
 #include "cmd/recover_persistent_state.hpp"
 #include "cmd/status.hpp"
+#include "cmd/test_routing.hpp"
 #include "crash/crash_diagnostics.hpp"
 #include "log/file_sink.hpp"
 #ifdef WITH_API
@@ -427,7 +428,15 @@ int main(int argc, char* argv[]) {
             }
             auto response = keen_pbr3::ipc::request_control(
                 KEEN_PBR_CONTROL_SOCKET,
-                request);
+                request,
+                5000,
+                opts.run_test_routing
+                    ? static_cast<int>(
+                          std::chrono::duration_cast<
+                              std::chrono::milliseconds>(
+                              keen_pbr3::kRoutingTestClientResponseTimeout)
+                              .count())
+                    : -1);
             if (opts.download_lists) {
                 response = wait_for_list_refresh_task(
                     std::move(response));
@@ -450,6 +459,19 @@ int main(int argc, char* argv[]) {
                     << response.at("result").value(
                            "resolver_config_hash", "")
                     << '\n';
+            } else if (opts.run_test_routing) {
+                if (!response.value("ok", false)) {
+                    const auto& error = response.value(
+                        "error", nlohmann::json::object());
+                    std::cerr
+                        << "keen-pbr test-routing: "
+                        << error.value("code", "daemon_error") << ": "
+                        << error.value(
+                               "message", "routing test failed")
+                        << '\n';
+                    return 1;
+                }
+                return keen_pbr3::run_test_routing_command(response);
             } else {
                 std::cout << response.dump() << '\n';
             }

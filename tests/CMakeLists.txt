@@ -7,6 +7,7 @@ add_executable(keen-pbr-tests
   test_cron.cpp
   test_addr_spec.cpp
   test_base64.cpp
+  test_bounded_operation_admission.cpp
   test_dnsmasq_gen.cpp
   test_dnsmasq_access_policy.cpp
   test_dnsmasq_helper_packages.cpp
