@@ -59,6 +59,7 @@ add_executable(keen-pbr-tests
   test_scheduler.cpp
   test_daemon_link_contract.cpp
   test_api_status_events.cpp
+  test_api_dns_test.cpp
   test_api_logs.cpp
   test_api_remote_access.cpp
   test_api_transports.cpp
@@ -85,6 +86,7 @@ add_executable(keen-pbr-tests
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
   test_nfqws_strategy_assets.cpp
+  test_nfqws_validator.cpp
   test_safe_exec.cpp
   test_ndmc.cpp
   test_trace_logging.cpp
@@ -193,6 +195,7 @@ add_executable(keen-pbr-tests
   ../src/util/nfqws_config.cpp
   ../src/util/nfqws_file_writer.cpp
   ../src/util/nfqws_strategy_assets.cpp
+  ../src/util/nfqws_validator.cpp
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
   ../src/runtime/lifecycle_operation.cpp
@@ -636,6 +639,8 @@ if(WITH_API)
     test_api_reload.cpp
     test_api_lists_refresh.cpp
     test_api_catalog_setup.cpp
+    test_build_identity.cpp
+    test_api_nfqws.cpp
     test_runtime_outbound_state.cpp
     test_ndms_web_endpoint.cpp
     ../src/api/server.cpp

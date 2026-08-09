@@ -185,7 +185,7 @@ jobs:
 
   clang-thread-safety:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -268,9 +268,12 @@ jobs:
           set -e
           IPK=$(find build/packages -name 'keen-pbr_*.ipk' | head -1)
           test -n "$IPK"
+          EXPECTED_COMMIT=$(git rev-parse --short=12 HEAD)
           cp "$IPK" .
           IPK_NAME=$(basename "$IPK")
-          python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" --arch "${{ matrix.arch }}"
+          python3 build_scripts/validate-keenetic-ipk.py "$IPK_NAME" \
+            --arch "${{ matrix.arch }}" \
+            --expected-commit "$EXPECTED_COMMIT"
 
       - name: Test packaged maintainer-script lifecycle
         run: |

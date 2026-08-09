@@ -41,6 +41,59 @@ if(NOT KEEN_PBR_RELEASE MATCHES "^[0-9]+$")
   message(FATAL_ERROR "KEEN_PBR_RELEASE must contain only digits")
 endif()
 
+# Source identity is intentionally separate from version/release. Alpha
+# packages keep a stable package version, while operators still need to know
+# the exact source tree that produced an installed binary.
+if(NOT DEFINED KEEN_PBR_COMMIT OR KEEN_PBR_COMMIT STREQUAL "")
+  set(KEEN_PBR_COMMIT "$ENV{KEEN_PBR_COMMIT}")
+endif()
+if(KEEN_PBR_COMMIT STREQUAL "")
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+      OUTPUT_VARIABLE KEEN_PBR_COMMIT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE KEEN_PBR_GIT_REV_PARSE_RESULT
+      ERROR_QUIET)
+    if(NOT "${KEEN_PBR_GIT_REV_PARSE_RESULT}" STREQUAL "0")
+      set(KEEN_PBR_COMMIT "")
+    elseif(NOT KEEN_PBR_COMMIT STREQUAL "")
+      execute_process(
+        COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE KEEN_PBR_GIT_DIRTY
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE KEEN_PBR_GIT_STATUS_RESULT
+        ERROR_QUIET)
+      # An unreadable worktree cannot honestly be called clean.
+      if(NOT "${KEEN_PBR_GIT_STATUS_RESULT}" STREQUAL "0" OR
+         NOT KEEN_PBR_GIT_DIRTY STREQUAL "")
+        set(KEEN_PBR_COMMIT "${KEEN_PBR_COMMIT}-dirty")
+      endif()
+    endif()
+  endif()
+endif()
+if(KEEN_PBR_COMMIT STREQUAL "")
+  set(KEEN_PBR_COMMIT "unknown")
+endif()
+
+if(NOT KEEN_PBR_COMMIT STREQUAL "unknown")
+  string(REGEX REPLACE "-dirty$" "" KEEN_PBR_COMMIT_BASE "${KEEN_PBR_COMMIT}")
+  string(LENGTH "${KEEN_PBR_COMMIT_BASE}" KEEN_PBR_COMMIT_BASE_LENGTH)
+  if(NOT "${KEEN_PBR_COMMIT_BASE}" MATCHES "^[0-9a-f]+$" OR
+     KEEN_PBR_COMMIT_BASE_LENGTH LESS 12 OR
+     KEEN_PBR_COMMIT_BASE_LENGTH GREATER 64 OR
+     (NOT "${KEEN_PBR_COMMIT}" STREQUAL "${KEEN_PBR_COMMIT_BASE}" AND
+      NOT "${KEEN_PBR_COMMIT}" STREQUAL "${KEEN_PBR_COMMIT_BASE}-dirty"))
+    message(FATAL_ERROR
+      "KEEN_PBR_COMMIT must be 'unknown' or 12..64 lowercase hex characters, optionally followed by '-dirty'")
+  endif()
+endif()
+message(STATUS
+  "keen-pbr build identity: ${KEEN_PBR_VERSION}-${KEEN_PBR_RELEASE} (${KEEN_PBR_COMMIT})")
+
 project(keen-pbr VERSION ${KEEN_PBR_VERSION} LANGUAGES CXX)
 
 include(GNUInstallDirs)
@@ -292,6 +345,7 @@ if(ENABLE_THREAD_SAFETY_ANALYSIS)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(keen_pbr_project_options INTERFACE
       -Wthread-safety
+      -Werror=thread-safety
     )
   else()
     message(WARNING "ENABLE_THREAD_SAFETY_ANALYSIS is only supported with Clang; no extra diagnostics will be added.")
@@ -407,6 +461,7 @@ set(SOURCES
   src/util/nfqws_config.cpp
   src/util/nfqws_file_writer.cpp
   src/util/nfqws_strategy_assets.cpp
+  src/util/nfqws_validator.cpp
   src/util/system_info.cpp
   src/util/traced_mutex.cpp
   src/main.cpp
