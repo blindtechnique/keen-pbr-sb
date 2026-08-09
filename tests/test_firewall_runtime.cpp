@@ -7,13 +7,17 @@
 #include "../src/runtime/meta_udp_443_policy.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -139,6 +143,46 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+class FirewallScopedPath final {
+public:
+    explicit FirewallScopedPath(const std::filesystem::path& prepend) {
+        if (const char* current = std::getenv("PATH")) {
+            previous_ = current;
+        }
+
+        std::string value = prepend.string();
+        if (previous_.has_value() && !previous_->empty()) {
+            value += ":" + *previous_;
+        }
+        if (::setenv("PATH", value.c_str(), 1) != 0) {
+            throw std::runtime_error("setenv PATH failed");
+        }
+    }
+
+    ~FirewallScopedPath() {
+        if (previous_.has_value()) {
+            (void)::setenv("PATH", previous_->c_str(), 1);
+        } else {
+            (void)::unsetenv("PATH");
+        }
+    }
+
+private:
+    std::optional<std::string> previous_;
+};
+
+void write_successful_nft_probe(const std::filesystem::path& directory) {
+    const auto executable = directory / "nft";
+    std::ofstream output(executable, std::ios::binary | std::ios::trunc);
+    output << "#!/bin/sh\n"
+              "while IFS= read -r line; do :; done\n"
+              "exit 0\n";
+    output.close();
+    if (!output || ::chmod(executable.c_str(), 0700) != 0) {
+        throw std::runtime_error("failed to create fake nft executable");
+    }
+}
 
 class FirewallSequenceHttpTransport final : public HttpTransport {
 public:
@@ -642,6 +686,10 @@ TEST_CASE(
 
 TEST_CASE(
     "Meta UDP 443 messages-first rejects IPv6 without authoritative companion coverage") {
+    FirewallTempDirectory tools;
+    write_successful_nft_probe(tools.path());
+    FirewallScopedPath path(tools.path());
+
     const auto config = parse_config(R"json({
       "daemon": {
         "ipv6_enabled": true,
@@ -686,6 +734,10 @@ TEST_CASE(
 
 TEST_CASE(
     "Meta UDP 443 validates the family coverage actually streamed into pending sets") {
+    FirewallTempDirectory tools;
+    write_successful_nft_probe(tools.path());
+    FirewallScopedPath path(tools.path());
+
     constexpr const char* url = "https://example.test/whatsapp-ip.txt";
     constexpr const char* identity =
         "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
