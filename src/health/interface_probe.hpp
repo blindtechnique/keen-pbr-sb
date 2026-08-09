@@ -18,7 +18,9 @@
 
 #include "url_tester.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -47,7 +49,10 @@ class InterfaceProbe {
 public:
     InterfaceProbe() = default;
     // Lets a test drive the probe against a modelled transport instead of the
-    // host's own network.
+    // host's own network. A shared injected transport must support concurrent
+    // perform() calls; an injected clock may be invoked concurrently too.
+    // Configure this probe before starting a round: setters are not a
+    // concurrent mutation API.
     explicit InterfaceProbe(std::shared_ptr<HttpTransport> transport)
         : tester_(std::move(transport)) {}
 
@@ -84,6 +89,21 @@ public:
     // without waiting out the retry interval.
     void set_retry(RetryConfig retry) { retry_ = std::move(retry); }
 
+    // The production coordinator publishes results as they complete, but the
+    // router must never turn one health round into an unbounded TLS burst.
+    // Four is the hard ceiling; zero keeps the explicit sequential mode.
+    void set_max_parallel_probes(std::size_t width) noexcept {
+        const auto normalized = width == 0 ? std::size_t{1} : width;
+        max_parallel_probes_.store(
+            normalized > kMaxParallelProbes
+                ? kMaxParallelProbes
+                : normalized,
+            std::memory_order_relaxed);
+    }
+    std::size_t max_parallel_probes() const noexcept {
+        return max_parallel_probes_.load(std::memory_order_relaxed);
+    }
+
     // Runs one round of probes. Blocking: callers put it on the daemon's
     // blocking executor rather than the event loop. Returns tags whose
     // reachability changed since the previous completed probe; the first
@@ -98,9 +118,10 @@ public:
     // the runtime generation and target identity.
     Observation measure_one(const Target& target);
     std::vector<Observation> measure(const std::vector<Target>& targets);
-    // Measure sequentially but hand each result to the caller immediately.
-    // Returning false from the sink stops the round before another blocking
-    // request begins.
+    // Measure with bounded concurrency and hand each result to the caller on
+    // this coordinating thread, serialized in completion order. Returning
+    // false (or throwing) stops new target claims, joins the already in-flight
+    // probes, and prevents any later result publication.
     bool measure_each(
         const std::vector<Target>& targets,
         const std::function<bool(Observation)>& observation_sink);
@@ -113,6 +134,10 @@ public:
     // after the complete tag/identity/result candidate has been prepared but
     // before any published state is changed.
     void fail_next_commit_after_prepare_for_testing();
+    // One-shot partial pthread-create fault seam. Index one means one worker
+    // was created successfully and creation of the second must fail.
+    void fail_worker_creation_at_for_testing(
+        std::size_t worker_index) noexcept;
 #endif
 
     std::optional<InterfaceProbeResult> result_for(const std::string& tag) const;
@@ -127,6 +152,8 @@ public:
     void retain_only(const std::vector<Target>& targets);
 
 private:
+    static constexpr std::size_t kMaxParallelProbes{4};
+
     struct PublishedObservation {
         Target target;
         InterfaceProbeResult result;
@@ -151,10 +178,13 @@ private:
     RetryConfig retry_{default_retry()};
     std::function<std::chrono::steady_clock::time_point()> clock_{
         [] { return std::chrono::steady_clock::now(); }};
+    std::atomic<std::size_t> max_parallel_probes_{
+        kMaxParallelProbes};
     mutable std::mutex mutex_;
     PublishedObservations published_observations_;
 #ifdef KEEN_PBR3_TESTING
     bool fail_next_commit_after_prepare_{false};
+    std::atomic<std::ptrdiff_t> fail_worker_creation_at_{-1};
 #endif
     URLTester tester_;
 };

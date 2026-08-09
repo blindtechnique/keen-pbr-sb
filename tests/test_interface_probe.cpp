@@ -3,9 +3,19 @@
 #include "../src/health/interface_probe.hpp"
 #include "../src/health/runtime_outbound_state.hpp"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <functional>
+#include <initializer_list>
+#include <mutex>
 #include <new>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace keen_pbr3;
@@ -43,6 +53,134 @@ RetryConfig single_attempt() {
     retry.attempts = 1;
     retry.interval_ms = 0;
     return retry;
+}
+
+// A deterministic transport for concurrency tests. Every request announces
+// its start and then waits for the test to release that exact interface.
+class GatedInterfaceTransport final : public HttpTransport {
+public:
+    HttpTransportResponse perform(
+        const HttpTransportRequest& request) override {
+        const auto interface = request.bind_interface;
+        bool fail = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            started_.push_back(interface);
+            ++active_;
+            peak_active_ = std::max(peak_active_, active_);
+            condition_.notify_all();
+            condition_.wait(lock, [&]() {
+                return release_all_ || released_.count(interface) != 0;
+            });
+            fail = failures_.count(interface) != 0;
+            --active_;
+            completed_.push_back(interface);
+            condition_.notify_all();
+        }
+
+        if (fail) {
+            throw std::runtime_error(
+                "synthetic worker failure for " + interface);
+        }
+        HttpTransportResponse response;
+        response.status_code = 204;
+        response.elapsed = std::chrono::milliseconds{10};
+        return response;
+    }
+
+    void fail_when_released(const std::string& interface) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        failures_.insert(interface);
+    }
+
+    void release(const std::string& interface) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_.insert(interface);
+        condition_.notify_all();
+    }
+
+    void release_all() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_all_ = true;
+        condition_.notify_all();
+    }
+
+    bool wait_until_started(
+        const std::string& interface,
+        std::chrono::milliseconds timeout = std::chrono::seconds{5}) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, timeout, [&]() {
+            return std::find(
+                       started_.begin(), started_.end(), interface) !=
+                   started_.end();
+        });
+    }
+
+    bool wait_until_started_count(
+        std::size_t count,
+        std::chrono::milliseconds timeout = std::chrono::seconds{5}) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, timeout, [&]() {
+            return started_.size() >= count;
+        });
+    }
+
+    bool wait_until_idle(
+        std::chrono::milliseconds timeout = std::chrono::seconds{5}) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, timeout, [&]() {
+            return active_ == 0;
+        });
+    }
+
+    std::vector<std::string> started() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return started_;
+    }
+
+    std::size_t peak_active() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return peak_active_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::vector<std::string> started_;
+    std::vector<std::string> completed_;
+    std::set<std::string> released_;
+    std::set<std::string> failures_;
+    std::size_t active_{0};
+    std::size_t peak_active_{0};
+    bool release_all_{false};
+};
+
+class ReleaseGatedTransportOnExit {
+public:
+    explicit ReleaseGatedTransportOnExit(
+        std::shared_ptr<GatedInterfaceTransport> transport)
+        : transport_(std::move(transport)) {}
+
+    ~ReleaseGatedTransportOnExit() { transport_->release_all(); }
+
+private:
+    std::shared_ptr<GatedInterfaceTransport> transport_;
+};
+
+std::vector<InterfaceProbe::Target> interface_targets(
+    std::initializer_list<const char*> interfaces) {
+    std::vector<InterfaceProbe::Target> targets;
+    targets.reserve(interfaces.size());
+    std::uint32_t mark = 0x30000;
+    for (const auto* interface : interfaces) {
+        targets.push_back(InterfaceProbe::Target{
+            std::string{"target_"} + interface,
+            mark,
+            interface,
+        });
+        mark += 0x10000;
+    }
+    return targets;
 }
 
 } // namespace
@@ -245,6 +383,7 @@ TEST_CASE("interface probe publishes an early success before later timeouts expi
     auto transport = std::make_shared<RecordingTransport>();
     InterfaceProbe probe(transport);
     probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(1);
 
     auto now = std::chrono::steady_clock::time_point{
         std::chrono::seconds{1000}};
@@ -317,6 +456,8 @@ TEST_CASE("interface probe stops before another blocking target when publication
     auto transport = std::make_shared<RecordingTransport>();
     InterfaceProbe probe(transport);
     probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(0);
+    CHECK(probe.max_parallel_probes() == 1);
     const std::vector<InterfaceProbe::Target> targets{
         InterfaceProbe::Target{"first", 0x30000, "nwg1"},
         InterfaceProbe::Target{"must_not_run", 0x60000, "nwg3"},
@@ -332,6 +473,272 @@ TEST_CASE("interface probe stops before another blocking target when publication
     CHECK(publications == 1);
     REQUIRE(transport->requests.size() == 1);
     CHECK(transport->requests.front().bind_interface == "nwg1");
+}
+
+TEST_CASE("interface probe publishes prompt serialized completion order") {
+    auto transport = std::make_shared<GatedInterfaceTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(2);
+    const auto targets = interface_targets({"A", "B", "C"});
+
+    std::mutex published_mutex;
+    std::condition_variable published_condition;
+    std::vector<std::string> published;
+    std::optional<std::thread::id> publisher_thread;
+    bool one_publisher_thread = true;
+
+    auto round = std::async(std::launch::async, [&]() {
+        return probe.measure_each(
+            targets,
+            [&](InterfaceProbe::Observation observation) {
+                std::lock_guard<std::mutex> lock(published_mutex);
+                if (!publisher_thread) {
+                    publisher_thread = std::this_thread::get_id();
+                } else if (*publisher_thread != std::this_thread::get_id()) {
+                    one_publisher_thread = false;
+                }
+                published.push_back(observation.target.interface);
+                published_condition.notify_all();
+                return true;
+            });
+    });
+    ReleaseGatedTransportOnExit release_on_exit(transport);
+
+    REQUIRE(transport->wait_until_started("A"));
+    REQUIRE(transport->wait_until_started("B"));
+    transport->release("B");
+    {
+        std::unique_lock<std::mutex> lock(published_mutex);
+        REQUIRE(published_condition.wait_for(
+            lock, std::chrono::seconds{5}, [&]() {
+                return published.size() >= 1;
+            }));
+        CHECK(published == std::vector<std::string>{"B"});
+    }
+
+    // B's acknowledgement promptly frees that worker to start C even while A
+    // is still blocked, but C cannot overtake A until the test releases it.
+    REQUIRE(transport->wait_until_started("C"));
+    transport->release("A");
+    {
+        std::unique_lock<std::mutex> lock(published_mutex);
+        REQUIRE(published_condition.wait_for(
+            lock, std::chrono::seconds{5}, [&]() {
+                return published.size() >= 2;
+            }));
+        CHECK(published == std::vector<std::string>{"B", "A"});
+    }
+    transport->release("C");
+
+    REQUIRE(round.wait_for(std::chrono::seconds{5}) ==
+            std::future_status::ready);
+    CHECK(round.get());
+    CHECK(published == std::vector<std::string>{"B", "A", "C"});
+    CHECK(one_publisher_thread);
+    CHECK(transport->wait_until_idle());
+}
+
+TEST_CASE("interface probe sink rejection stops claims and joins in-flight workers") {
+    auto transport = std::make_shared<GatedInterfaceTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(2);
+    const auto targets = interface_targets({"A", "B", "C", "D"});
+
+    std::mutex sink_mutex;
+    std::condition_variable sink_condition;
+    bool sink_called = false;
+    std::atomic<int> publications{0};
+    auto round = std::async(std::launch::async, [&]() {
+        return probe.measure_each(
+            targets,
+            [&](InterfaceProbe::Observation) {
+                ++publications;
+                {
+                    std::lock_guard<std::mutex> lock(sink_mutex);
+                    sink_called = true;
+                }
+                sink_condition.notify_all();
+                return false;
+            });
+    });
+    ReleaseGatedTransportOnExit release_on_exit(transport);
+
+    REQUIRE(transport->wait_until_started("A"));
+    REQUIRE(transport->wait_until_started("B"));
+    transport->release("B");
+    {
+        std::unique_lock<std::mutex> lock(sink_mutex);
+        REQUIRE(sink_condition.wait_for(
+            lock, std::chrono::seconds{5}, [&]() {
+                return sink_called;
+            }));
+    }
+
+    CHECK(round.wait_for(std::chrono::milliseconds{50}) ==
+          std::future_status::timeout);
+    CHECK(transport->started().size() == 2);
+    transport->release("A");
+    REQUIRE(round.wait_for(std::chrono::seconds{5}) ==
+            std::future_status::ready);
+    CHECK_FALSE(round.get());
+    CHECK(publications.load() == 1);
+    CHECK(transport->started().size() == 2);
+    CHECK(transport->wait_until_idle());
+}
+
+TEST_CASE("interface probe sink exception stops claims and is rethrown after join") {
+    auto transport = std::make_shared<GatedInterfaceTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(2);
+    const auto targets = interface_targets({"A", "B", "C", "D"});
+
+    std::mutex sink_mutex;
+    std::condition_variable sink_condition;
+    bool sink_called = false;
+    auto round = std::async(std::launch::async, [&]() {
+        return probe.measure_each(
+            targets,
+            [&](InterfaceProbe::Observation) -> bool {
+                {
+                    std::lock_guard<std::mutex> lock(sink_mutex);
+                    sink_called = true;
+                }
+                sink_condition.notify_all();
+                throw std::runtime_error("synthetic sink failure");
+            });
+    });
+    ReleaseGatedTransportOnExit release_on_exit(transport);
+
+    REQUIRE(transport->wait_until_started("A"));
+    REQUIRE(transport->wait_until_started("B"));
+    transport->release("B");
+    {
+        std::unique_lock<std::mutex> lock(sink_mutex);
+        REQUIRE(sink_condition.wait_for(
+            lock, std::chrono::seconds{5}, [&]() {
+                return sink_called;
+            }));
+    }
+
+    CHECK(round.wait_for(std::chrono::milliseconds{50}) ==
+          std::future_status::timeout);
+    CHECK(transport->started().size() == 2);
+    transport->release("A");
+    REQUIRE(round.wait_for(std::chrono::seconds{5}) ==
+            std::future_status::ready);
+    CHECK_THROWS_WITH_AS(
+        round.get(), "synthetic sink failure", std::runtime_error);
+    CHECK(transport->started().size() == 2);
+    CHECK(transport->wait_until_idle());
+}
+
+TEST_CASE("interface probe worker exception fails the round without synthetic down") {
+    auto transport = std::make_shared<GatedInterfaceTransport>();
+    transport->fail_when_released("bad");
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(2);
+    const auto targets = interface_targets({"bad", "slow"});
+
+    std::vector<std::string> published;
+    auto round = std::async(std::launch::async, [&]() {
+        return probe.measure_each(
+            targets,
+            [&](InterfaceProbe::Observation observation) {
+                published.push_back(observation.target.interface);
+                return true;
+            });
+    });
+    ReleaseGatedTransportOnExit release_on_exit(transport);
+
+    REQUIRE(transport->wait_until_started("bad"));
+    REQUIRE(transport->wait_until_started("slow"));
+    transport->release("bad");
+    CHECK(round.wait_for(std::chrono::milliseconds{50}) ==
+          std::future_status::timeout);
+    CHECK(transport->started().size() == 2);
+    transport->release("slow");
+    REQUIRE(round.wait_for(std::chrono::seconds{5}) ==
+            std::future_status::ready);
+    CHECK_THROWS_WITH_AS(
+        round.get(),
+        "synthetic worker failure for bad",
+        std::runtime_error);
+    // A healthy result that linearized before the worker fault may be
+    // published, but the throwing target must never be synthesized as DOWN.
+    CHECK(std::find(published.begin(), published.end(), "bad") ==
+          published.end());
+    CHECK(published.size() <= 1);
+    CHECK(transport->started().size() == 2);
+    CHECK(transport->wait_until_idle());
+}
+
+TEST_CASE("interface probe partial worker creation publishes nothing and joins") {
+    auto transport = std::make_shared<GatedInterfaceTransport>();
+    transport->release_all();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(2);
+    const auto targets = interface_targets({"A", "B"});
+
+    std::atomic<int> publications{0};
+    probe.fail_worker_creation_at_for_testing(1);
+    CHECK_THROWS_WITH_AS(
+        probe.measure_each(
+            targets,
+            [&](InterfaceProbe::Observation) {
+                ++publications;
+                return true;
+            }),
+        "synthetic interface probe worker creation failure",
+        std::runtime_error);
+    CHECK(publications.load() == 0);
+    CHECK(transport->wait_until_idle());
+
+    // The fault is one-shot and a later round owns a fresh worker group.
+    CHECK(probe.measure_each(
+        targets,
+        [&](InterfaceProbe::Observation) {
+            ++publications;
+            return true;
+        }));
+    CHECK(publications.load() == 2);
+    CHECK(transport->wait_until_idle());
+}
+
+TEST_CASE("interface probe hard caps concurrent workers at four") {
+    auto transport = std::make_shared<GatedInterfaceTransport>();
+    InterfaceProbe probe(transport);
+    probe.set_retry(single_attempt());
+    probe.set_max_parallel_probes(99);
+    CHECK(probe.max_parallel_probes() == 4);
+    const auto targets =
+        interface_targets({"A", "B", "C", "D", "E", "F"});
+
+    std::atomic<int> publications{0};
+    auto round = std::async(std::launch::async, [&]() {
+        return probe.measure_each(
+            targets,
+            [&](InterfaceProbe::Observation) {
+                ++publications;
+                return true;
+            });
+    });
+    ReleaseGatedTransportOnExit release_on_exit(transport);
+
+    REQUIRE(transport->wait_until_started_count(4));
+    CHECK(transport->peak_active() == 4);
+    CHECK(transport->started().size() == 4);
+    transport->release_all();
+    REQUIRE(round.wait_for(std::chrono::seconds{5}) ==
+            std::future_status::ready);
+    CHECK(round.get());
+    CHECK(publications.load() == 6);
+    CHECK(transport->peak_active() == 4);
+    CHECK(transport->wait_until_idle());
 }
 
 TEST_CASE("interface probe snapshot fence rejects a reused tag") {

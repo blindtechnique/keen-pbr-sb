@@ -3,7 +3,17 @@
 #include "../log/logger.hpp"
 
 #include <algorithm>
+#include <condition_variable>
+#include <exception>
+#include <limits>
 #include <new>
+#include <optional>
+#include <pthread.h>
+#include <stdexcept>
+#include <system_error>
+#include <type_traits>
+#include <unistd.h>
+#include <vector>
 
 namespace keen_pbr3 {
 
@@ -18,6 +28,274 @@ bool same_target_identity(const InterfaceProbe::Target& left,
     return left.tag == right.tag && left.fwmark == right.fwmark &&
            left.interface == right.interface;
 }
+
+constexpr std::size_t kInterfaceProbeWorkerStackSize =
+    static_cast<std::size_t>(1024) * 1024;
+
+struct InterfaceProbeCompletion {
+    std::optional<InterfaceProbe::Observation> observation;
+    std::exception_ptr failure;
+    bool acknowledged{false};
+};
+
+static_assert(
+    std::is_nothrow_move_constructible_v<InterfaceProbe::Observation>,
+    "interface probe completion publication must not allocate");
+
+// Workers only measure. This coordinator owns target claims and a preallocated
+// completion FIFO; measure_each's calling thread is the sole sink publisher.
+// A successful worker waits for its sink acknowledgement before claiming
+// another target, which makes sink rejection a precise stop boundary.
+class InterfaceProbeMeasureState {
+public:
+    InterfaceProbeMeasureState(
+        InterfaceProbe& probe,
+        const std::vector<InterfaceProbe::Target>& targets,
+        std::size_t worker_count)
+        : probe_(probe),
+          targets_(targets),
+          worker_count_(worker_count),
+          completions_(targets.size()),
+          completion_order_(targets.size()) {}
+
+    bool claim(std::size_t& target_index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stop_requested_ || next_target_ >= targets_.size()) {
+            return false;
+        }
+        target_index = next_target_++;
+        return true;
+    }
+
+    bool publish_success(
+        std::size_t target_index,
+        InterfaceProbe::Observation observation) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (stop_requested_) {
+            return false;
+        }
+
+        auto& completion = completions_[target_index];
+        completion.observation.emplace(std::move(observation));
+        completion_order_[completion_count_++] = target_index;
+        cv_.notify_all();
+
+        cv_.wait(lock, [&]() {
+            return stop_requested_ || completion.acknowledged;
+        });
+        return !stop_requested_;
+    }
+
+    void publish_failure(
+        std::size_t target_index,
+        std::exception_ptr failure) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stop_requested_) {
+            return;
+        }
+
+        completions_[target_index].failure = std::move(failure);
+        completion_order_[completion_count_++] = target_index;
+        stop_requested_ = true;
+        cv_.notify_all();
+    }
+
+    void publish_coordinator_failure(std::exception_ptr failure) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!stop_requested_) {
+                coordinator_failure_ = std::move(failure);
+                stop_requested_ = true;
+            }
+            cv_.notify_all();
+        } catch (...) {
+            // A failed synchronization primitive offers no recoverable
+            // handoff. Keep the pthread entry noexcept; normal pthread mutexes
+            // do not take this path.
+        }
+    }
+
+    void worker_finished() noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++workers_finished_;
+            cv_.notify_all();
+        } catch (...) {
+        }
+    }
+
+    struct NextCompletion {
+        std::size_t target_index{0};
+        std::optional<InterfaceProbe::Observation> observation;
+        std::exception_ptr failure;
+        bool workers_finished_without_result{false};
+    };
+
+    NextCompletion wait_next(std::size_t consumed) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&]() {
+            return consumed < completion_count_ ||
+                   coordinator_failure_ != nullptr ||
+                   workers_finished_ == worker_count_;
+        });
+
+        NextCompletion next;
+        if (consumed < completion_count_) {
+            next.target_index = completion_order_[consumed];
+            auto& completion = completions_[next.target_index];
+            next.failure = completion.failure;
+            if (completion.observation) {
+                next.observation.emplace(
+                    std::move(*completion.observation));
+                completion.observation.reset();
+            }
+            return next;
+        }
+        if (coordinator_failure_) {
+            next.failure = coordinator_failure_;
+            return next;
+        }
+
+        next.workers_finished_without_result = true;
+        return next;
+    }
+
+    void acknowledge(std::size_t target_index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        completions_[target_index].acknowledged = true;
+        cv_.notify_all();
+    }
+
+    void request_stop() noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_requested_ = true;
+            cv_.notify_all();
+        } catch (...) {
+        }
+    }
+
+    void worker_loop() noexcept {
+        try {
+            std::size_t target_index = 0;
+            while (claim(target_index)) {
+                std::optional<InterfaceProbe::Observation> observation;
+                try {
+                    observation.emplace(
+                        probe_.measure_one(targets_[target_index]));
+                } catch (...) {
+                    publish_failure(
+                        target_index, std::current_exception());
+                    break;
+                }
+                if (!publish_success(
+                        target_index, std::move(*observation))) {
+                    break;
+                }
+            }
+        } catch (...) {
+            publish_coordinator_failure(std::current_exception());
+        }
+        worker_finished();
+    }
+
+private:
+    InterfaceProbe& probe_;
+    const std::vector<InterfaceProbe::Target>& targets_;
+    const std::size_t worker_count_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t next_target_{0};
+    std::size_t completion_count_{0};
+    std::size_t workers_finished_{0};
+    bool stop_requested_{false};
+    std::exception_ptr coordinator_failure_;
+    std::vector<InterfaceProbeCompletion> completions_;
+    std::vector<std::size_t> completion_order_;
+};
+
+struct InterfaceProbeWorkerStart {
+    InterfaceProbeMeasureState* state{nullptr};
+};
+
+void* interface_probe_worker_entry(void* argument) noexcept {
+    auto* start = static_cast<InterfaceProbeWorkerStart*>(argument);
+    start->state->worker_loop();
+    return nullptr;
+}
+
+class InterfaceProbeThreadGroup {
+public:
+    InterfaceProbeThreadGroup(
+        InterfaceProbeMeasureState& state,
+        std::size_t capacity)
+        : state_(state), threads_(capacity) {}
+
+    ~InterfaceProbeThreadGroup() {
+        state_.request_stop();
+        join();
+    }
+
+    void add(pthread_t thread) noexcept {
+        threads_[created_++] = thread;
+    }
+
+    void join() noexcept {
+        for (std::size_t index = 0; index < created_; ++index) {
+            (void)pthread_join(threads_[index], nullptr);
+        }
+        created_ = 0;
+    }
+
+private:
+    InterfaceProbeMeasureState& state_;
+    std::vector<pthread_t> threads_;
+    std::size_t created_{0};
+};
+
+class InterfaceProbePthreadAttributes {
+public:
+    InterfaceProbePthreadAttributes() {
+        const int init_rc = pthread_attr_init(&attributes_);
+        if (init_rc != 0) {
+            throw std::system_error(
+                init_rc, std::generic_category(),
+                "pthread_attr_init failed for interface probes");
+        }
+        initialized_ = true;
+
+        const long page_result = sysconf(_SC_PAGESIZE);
+        const std::size_t page_size = page_result > 0
+            ? static_cast<std::size_t>(page_result)
+            : static_cast<std::size_t>(4096);
+        const std::size_t minimum = std::max<std::size_t>(
+            kInterfaceProbeWorkerStackSize,
+            static_cast<std::size_t>(PTHREAD_STACK_MIN));
+        const std::size_t stack_size =
+            ((minimum + page_size - 1) / page_size) * page_size;
+        const int stack_rc =
+            pthread_attr_setstacksize(&attributes_, stack_size);
+        if (stack_rc != 0) {
+            (void)pthread_attr_destroy(&attributes_);
+            initialized_ = false;
+            throw std::system_error(
+                stack_rc, std::generic_category(),
+                "pthread_attr_setstacksize failed for interface probes");
+        }
+    }
+
+    ~InterfaceProbePthreadAttributes() {
+        if (initialized_) {
+            (void)pthread_attr_destroy(&attributes_);
+        }
+    }
+
+    pthread_attr_t* get() noexcept { return &attributes_; }
+
+private:
+    pthread_attr_t attributes_{};
+    bool initialized_{false};
+};
 
 } // namespace
 
@@ -74,11 +352,99 @@ bool InterfaceProbe::measure_each(
     if (!observation_sink) {
         return false;
     }
-    for (const auto& target : targets) {
-        if (!observation_sink(measure_one(target))) {
+    if (targets.empty()) {
+        return true;
+    }
+
+    const auto worker_count = std::min(
+        max_parallel_probes(), targets.size());
+    if (worker_count <= 1) {
+        for (const auto& target : targets) {
+            if (!observation_sink(measure_one(target))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Every allocation needed by the coordinator and pthread bookkeeping is
+    // complete before a worker can publish or before the sink is invoked.
+    InterfaceProbeMeasureState state(*this, targets, worker_count);
+    InterfaceProbeThreadGroup workers(state, worker_count);
+    std::vector<InterfaceProbeWorkerStart> starts(
+        worker_count, InterfaceProbeWorkerStart{&state});
+    InterfaceProbePthreadAttributes attributes;
+
+    try {
+        for (std::size_t index = 0; index < worker_count; ++index) {
+#ifdef KEEN_PBR3_TESTING
+            auto injected = static_cast<std::ptrdiff_t>(index);
+            if (fail_worker_creation_at_.compare_exchange_strong(
+                    injected,
+                    std::ptrdiff_t{-1},
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+                throw std::runtime_error(
+                    "synthetic interface probe worker creation failure");
+            }
+#endif
+            pthread_t worker{};
+            const int create_rc = pthread_create(
+                &worker,
+                attributes.get(),
+                interface_probe_worker_entry,
+                &starts[index]);
+            if (create_rc != 0) {
+                throw std::system_error(
+                    create_rc,
+                    std::generic_category(),
+                    "pthread_create failed for interface probe");
+            }
+            workers.add(worker);
+        }
+    } catch (...) {
+        // No sink publication starts until the complete worker set exists.
+        state.request_stop();
+        workers.join();
+        throw;
+    }
+
+    std::size_t consumed = 0;
+    while (consumed < targets.size()) {
+        auto completion = state.wait_next(consumed);
+        if (completion.failure) {
+            state.request_stop();
+            workers.join();
+            std::rethrow_exception(completion.failure);
+        }
+        if (completion.workers_finished_without_result ||
+            !completion.observation) {
+            state.request_stop();
+            workers.join();
+            throw std::runtime_error(
+                "interface probe workers ended before completing the round");
+        }
+
+        bool accepted = false;
+        try {
+            accepted = observation_sink(
+                std::move(*completion.observation));
+        } catch (...) {
+            state.request_stop();
+            workers.join();
+            throw;
+        }
+        if (!accepted) {
+            state.request_stop();
+            workers.join();
             return false;
         }
+
+        state.acknowledge(completion.target_index);
+        ++consumed;
     }
+
+    workers.join();
     return true;
 }
 
@@ -167,6 +533,19 @@ std::vector<std::string> InterfaceProbe::commit(
 void InterfaceProbe::fail_next_commit_after_prepare_for_testing() {
     std::lock_guard<std::mutex> lock(mutex_);
     fail_next_commit_after_prepare_ = true;
+}
+
+void InterfaceProbe::fail_worker_creation_at_for_testing(
+    std::size_t worker_index) noexcept {
+    if (worker_index >
+        static_cast<std::size_t>(
+            std::numeric_limits<std::ptrdiff_t>::max())) {
+        fail_worker_creation_at_.store(-1, std::memory_order_release);
+        return;
+    }
+    fail_worker_creation_at_.store(
+        static_cast<std::ptrdiff_t>(worker_index),
+        std::memory_order_release);
 }
 #endif
 
