@@ -134,6 +134,11 @@ jobs:
           docker run --rm \
             -v "$PWD:/workspace:ro" \
             busybox:1.37 \
+            sh /workspace/tests/package_it/run-keenetic-startup-dependencies.sh \
+              /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+          docker run --rm \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
             sh /workspace/tests/package_it/run-keenetic-meta-udp443-cleanup.sh \
               /workspace/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
           docker run --rm \

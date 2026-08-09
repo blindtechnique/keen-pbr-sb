@@ -533,6 +533,13 @@ add_test(
 )
 
 add_test(
+  NAME keen-pbr-keenetic-startup-dependencies
+  COMMAND /bin/sh
+    ${CMAKE_SOURCE_DIR}/tests/package_it/run-keenetic-startup-dependencies.sh
+    ${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr
+)
+
+add_test(
   NAME keen-pbr-keenetic-meta-udp443-cleanup
   COMMAND /bin/sh
     ${CMAKE_SOURCE_DIR}/tests/package_it/run-keenetic-meta-udp443-cleanup.sh
