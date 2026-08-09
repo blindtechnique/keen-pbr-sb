@@ -41,7 +41,11 @@ printf '\nsrc-link keenPbr %s/packages/keenetic\n' "$WORKSPACE" >> feeds.conf
 # resulting control file.
 ./scripts/feeds install conntrack
 ./scripts/feeds install -p keenPbr keen-pbr
-FEED_PKG_DIR=$(find package -type d -path '*/keen-pbr' | grep '/package/feeds/' | head -1)
+FEED_PKG_DIR="package/feeds/keenPbr/keen-pbr"
+if [ ! -d "$FEED_PKG_DIR" ]; then
+    echo "[build-keenetic-package] Feed installation did not create $FEED_PKG_DIR" >&2
+    exit 1
+fi
 cp "$WORKSPACE/version.mk" "$FEED_PKG_DIR/version.mk"
 cat "$WORKSPACE/packages/keenetic/packages.config" >> .config
 make defconfig
