@@ -2535,37 +2535,36 @@ void Daemon::normalize_urltest_selections() {
     firewall_state_.set_urltest_selections(std::move(normalized));
 }
 
-void Daemon::handle_urltest_selection_change(
+bool Daemon::handle_urltest_selection_change(
     const UrltestSelectionChange& change,
     std::uint64_t expected_runtime_generation) {
-    post_control_task([this, change, expected_runtime_generation]() {
+    if (!is_event_loop_thread()) {
+        try {
+            Logger::instance().error(
+                "Refusing urltest '{}' transition outside the control loop",
+                change.urltest_tag);
+        } catch (...) {
+        }
+        return false;
+    }
+
+    try {
         auto& log = Logger::instance();
         const auto current_runtime_generation =
             runtime_generation_.load(std::memory_order_acquire);
         if (expected_runtime_generation != current_runtime_generation) {
-            log.info(
-                "Ignoring stale urltest transition for '{}': runtime "
-                "generation changed from {} to {}",
-                change.urltest_tag,
-                expected_runtime_generation,
-                current_runtime_generation);
-            return;
+            try {
+                log.info(
+                    "Ignoring stale urltest transition for '{}': runtime "
+                    "generation changed from {} to {}",
+                    change.urltest_tag,
+                    expected_runtime_generation,
+                    current_runtime_generation);
+            } catch (...) {
+            }
+            return false;
         }
-        const auto reason =
-            change.reason == UrltestSelectionChangeReason::previous_unhealthy
-                ? "previous_unhealthy"
-                : (change.reason ==
-                           UrltestSelectionChangeReason::healthy_rebalance
-                       ? "healthy_rebalance"
-                       : "initial");
-        log.info(
-            "Urltest '{}' selected outbound: '{}' (previous='{}', reason={})",
-            change.urltest_tag,
-            change.new_child_tag,
-            change.previous_child_tag,
-            reason);
 
-        std::optional<uint32_t> retired_mark;
         const auto outbounds =
             config_.outbounds.value_or(std::vector<Outbound>{});
         const auto urltest_it = std::find_if(
@@ -2576,39 +2575,74 @@ void Daemon::handle_urltest_selection_change(
                        outbound.type == OutboundType::URLTEST;
             });
         if (urltest_it == outbounds.end() || !urltest_manager_) {
-            log.info(
-                "Ignoring stale urltest transition for '{}': selector is no "
-                "longer configured",
-                change.urltest_tag);
-            return;
+            try {
+                log.info(
+                    "Ignoring stale urltest transition for '{}': selector is "
+                    "no longer configured",
+                    change.urltest_tag);
+            } catch (...) {
+            }
+            return false;
         }
 
-        const auto previous_selections =
+        // Build both the candidate and rollback cursor before publishing
+        // anything. swap_urltest_selections() is noexcept; after its first
+        // call this local map owns the exact previously applied state.
+        auto candidate_selections =
             firewall_state_.get_urltest_selections();
-        const auto& selections = previous_selections;
-        const auto old_selection_it = selections.find(change.urltest_tag);
+        const auto old_selection_it =
+            candidate_selections.find(change.urltest_tag);
         const std::string applied_previous =
-            old_selection_it != selections.end()
+            old_selection_it != candidate_selections.end()
                 ? old_selection_it->second
                 : std::string{};
+
         if (applied_previous != change.previous_child_tag) {
-            log.info(
-                "Ignoring stale urltest transition for '{}': applied "
-                "selection is '{}', event expected '{}'",
-                change.urltest_tag,
-                applied_previous,
-                change.previous_child_tag);
-            return;
+            // The kernel/firewall cursor is authoritative. Resolve an already
+            // divergent manager to it without applying a stale transition;
+            // returning true tells the manager that the controller owns this
+            // resolution. The durable request below supplies the one fresh
+            // probe which can now retry the unapplied candidate.
+            const bool synchronized =
+                urltest_manager_->synchronize_selected_if_generation(
+                    change.urltest_tag,
+                    change.probe_generation,
+                    applied_previous);
+            if (synchronized) {
+                // This callback resolved the stale manager cursor, but it did
+                // not apply change.new_child_tag. Keep one durable follow-up
+                // pending while the current generation is still inflight so
+                // the freshly synchronized cursor is tested and converged
+                // without waiting for the normal URLTEST interval.
+                urltest_manager_->trigger_external_health_test(
+                    change.urltest_tag);
+            }
+            try {
+                if (synchronized) {
+                    log.info(
+                        "Resolved stale urltest transition for '{}': applied "
+                        "selection is '{}', event expected '{}'",
+                        change.urltest_tag,
+                        applied_previous,
+                        change.previous_child_tag);
+                } else {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "urltest applied selection is not a configured child");
+                    log.error(
+                        "Urltest '{}' applied selection '{}' is not a current "
+                        "child; routing requires attention",
+                        change.urltest_tag,
+                        applied_previous);
+                }
+            } catch (...) {
+            }
+            return synchronized;
         }
 
-        // Selection-change tasks preserve the order in which control-loop
-        // probe commits enqueue them. Do not compare this event with the
-        // manager's newest selection: a later probe can already have committed
-        // P -> B -> C while the queued P -> B transition is still waiting.
-        // Skipping P -> B in that case would also make B -> C fail its
-        // applied_previous guard and leave the kernel on P. The firewall
-        // selection is the transactional cursor for this ordered stream.
+        candidate_selections[change.urltest_tag] = change.new_child_tag;
 
+        std::optional<uint32_t> retired_mark;
         const auto cleanup_mode =
             urltest_it->conntrack_on_switch.value_or(
                 ConntrackOnSwitch::PRESERVE);
@@ -2629,119 +2663,124 @@ void Daemon::handle_urltest_selection_change(
 
         const auto list_cache_snapshot =
             capture_relevant_list_cache_generation(config_);
-        firewall_state_.set_urltest_selection(
-            change.urltest_tag, change.new_child_tag);
-        bool runtime_rebuilt = false;
+        firewall_state_.swap_urltest_selections(candidate_selections);
+
         try {
             reconcile_static_routing(RouteReconcileMode::Strict);
             apply_firewall(
                 FirewallApplyMode::PreserveSets,
                 list_cache_snapshot);
-            runtime_rebuilt = true;
-            urltest_apply_incidents_.reset(change.urltest_tag);
-            log.info("Routing and firewall rebuilt after urltest change.");
-        } catch (const std::exception& e) {
-            // A failed candidate switch is transactional: the previous
-            // selection stays authoritative until the kernel accepts the new
-            // generation. This recovery detail is useful in the journal but
-            // is not an actionable user notification.
-            log.info(
-                "Routing/firewall did not accept the urltest change: {}; "
-                "restoring the previously applied selection",
-                e.what());
-            firewall_state_.set_urltest_selections(previous_selections);
-            const bool manager_synchronized =
-                urltest_manager_->synchronize_selected(
-                    change.urltest_tag, applied_previous);
-            if (!manager_synchronized) {
-                log.info(
-                    "Failed to synchronize urltest '{}' with restored "
-                    "selection '{}'",
-                    change.urltest_tag,
-                    applied_previous);
-            }
-
+        } catch (const std::exception& apply_error) {
+            // Restore the in-memory cursor before diagnostics or any other
+            // fallible work, then restore the corresponding kernel state.
+            firewall_state_.swap_urltest_selections(candidate_selections);
+            bool rollback_verified = false;
             try {
                 reconcile_static_routing(RouteReconcileMode::Strict);
                 apply_firewall(
                     FirewallApplyMode::PreserveSets,
                     list_cache_snapshot);
-                log.info(
-                    "Urltest '{}' switch to '{}' was rolled back; the next "
-                    "probe may retry it",
-                    change.urltest_tag,
-                    change.new_child_tag);
-                const auto incident =
-                    urltest_apply_incidents_.record_failure(
-                        change.urltest_tag);
-                if (incident.notify) {
-                    log.error(
-                        "Urltest '{}' could not converge after {} consecutive "
-                        "probe rounds; the previous kernel route remains "
-                        "active{}",
-                        change.urltest_tag,
-                        incident.consecutive_failures,
-                        manager_synchronized
-                            ? ""
-                            : ", but the selector state also requires attention");
-                }
-            } catch (const std::exception& rollback_error) {
-                log.info(
-                    "Failed to restore routing/firewall after urltest '{}' "
-                    "switch failure: {}",
-                    change.urltest_tag,
-                    rollback_error.what());
+                rollback_verified = true;
+            } catch (...) {
                 try {
                     transition_runtime_or_throw(
                         RuntimeState::broken,
                         "urltest selection rollback failed");
-                } catch (const std::exception& state_error) {
-                    log.info(
-                        "Failed to publish broken state after urltest rollback "
-                        "failure: {}",
-                        state_error.what());
+                } catch (...) {
                 }
+            }
+
+            try {
                 const auto incident =
                     urltest_apply_incidents_.record_failure(
                         change.urltest_tag,
-                        /*notify_immediately=*/true);
+                        /*notify_immediately=*/!rollback_verified);
+                log.info(
+                    "Routing/firewall did not accept urltest '{}' change to "
+                    "'{}': {}. Previous intent '{}' was {}",
+                    change.urltest_tag,
+                    change.new_child_tag,
+                    apply_error.what(),
+                    applied_previous,
+                    rollback_verified ? "restored" : "left in broken state");
                 if (incident.notify) {
                     log.error(
-                        "Urltest '{}' could not restore the previously active "
-                        "kernel route after a failed switch; routing requires "
-                        "attention",
-                        change.urltest_tag);
+                        "Urltest '{}' could not converge after {} consecutive "
+                        "probe rounds; routing requires attention",
+                        change.urltest_tag,
+                        incident.consecutive_failures);
+                }
+            } catch (...) {
+            }
+            // The manager still owns this exact inflight generation and will
+            // restore previous_child_tag, clear it, and allow a later retry.
+            return false;
+        } catch (...) {
+            firewall_state_.swap_urltest_selections(candidate_selections);
+            try {
+                reconcile_static_routing(RouteReconcileMode::Strict);
+                apply_firewall(
+                    FirewallApplyMode::PreserveSets,
+                    list_cache_snapshot);
+            } catch (...) {
+                try {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "urltest selection rollback failed");
+                } catch (...) {
                 }
             }
+            return false;
         }
-        if (runtime_rebuilt && retired_mark.has_value()) {
-            const uint32_t owned_mask =
-                fwmark_mask_value(config_.fwmark.value_or(FwmarkConfig{}));
-            const auto cleanup =
-                conntrack_manager_.delete_mark(*retired_mark, owned_mask);
-            if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
-                warn_conntrack_unavailable_once();
-            } else if (cleanup == ConntrackCleanupResult::Failed) {
-                log.info(
-                    "Failed to remove conntrack entries for retired urltest "
-                    "mark {:#x}/{:#x}; existing flows may stay on the previous "
-                    "path until they expire",
-                    *retired_mark,
-                    owned_mask);
+
+        // The candidate is now the verified kernel and in-memory cursor.
+        // Everything below is post-commit follow-up: failures must not make
+        // the manager roll back a successfully applied selection.
+        try {
+            urltest_apply_incidents_.reset(change.urltest_tag);
+        } catch (...) {
+        }
+
+        if (retired_mark.has_value()) {
+            try {
+                const uint32_t owned_mask = fwmark_mask_value(
+                    config_.fwmark.value_or(FwmarkConfig{}));
+                const auto cleanup = conntrack_manager_.delete_mark(
+                    *retired_mark, owned_mask);
+                if (cleanup == ConntrackCleanupResult::CommandUnavailable) {
+                    warn_conntrack_unavailable_once();
+                } else if (cleanup == ConntrackCleanupResult::Failed) {
+                    log.info(
+                        "Failed to remove conntrack entries for retired "
+                        "urltest mark {:#x}/{:#x}",
+                        *retired_mark,
+                        owned_mask);
+                }
+            } catch (...) {
             }
         }
-        // Publish the best live kernel state. On success this exposes the new
-        // child; after a failed switch it exposes the restored applied child
-        // (or the broken state when even rollback could not converge).
-        publish_runtime_state();
-    }, "urltest-selection-change:" + change.urltest_tag);
+
+        return true;
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().error(
+                "Urltest '{}' transition preparation failed: {}",
+                change.urltest_tag,
+                error.what());
+        } catch (...) {
+        }
+        return false;
+    } catch (...) {
+        return false;
+    }
 }
 
-void Daemon::commit_urltest_probe_results(const std::string& urltest_tag,
-                                          std::uint64_t probe_generation,
-                                          std::map<std::string, URLTestResult> results,
-                                          TraceId trace_id) {
-    post_control_task(
+bool Daemon::commit_urltest_probe_results(
+    const std::string& urltest_tag,
+    std::uint64_t probe_generation,
+    std::map<std::string, URLTestResult> results,
+    TraceId trace_id) {
+    return post_control_task(
         [this,
          urltest_tag,
          probe_generation,
@@ -2759,12 +2798,12 @@ void Daemon::commit_urltest_probe_results(const std::string& urltest_tag,
                 urltest_manager_->commit_probe_results(urltest_tag,
                                                        probe_generation,
                                                        std::move(results));
-            // A changed selection has a dedicated control task which first
-            // reconciles the route and then publishes one coherent snapshot.
-            // Unchanged latency/health results can be published immediately.
-            if (!selection_changed) {
-                publish_runtime_state();
-            }
+            // The synchronous controller callback resolves the route while
+            // this exact probe remains single-flight. Publish only after the
+            // manager has committed or restored its cursor and cleared that
+            // ownership, for one coherent runtime snapshot.
+            (void)selection_changed;
+            publish_runtime_state();
         },
         "urltest-commit:" + urltest_tag);
 }
@@ -2777,7 +2816,7 @@ void Daemon::register_urltest_outbounds() {
             *scheduler_,
             blocking_executor_,
             [this](const UrltestSelectionChange& change) {
-                handle_urltest_selection_change(
+                return handle_urltest_selection_change(
                     change,
                     runtime_generation_.load(std::memory_order_acquire));
             },
@@ -2789,10 +2828,10 @@ void Daemon::register_urltest_outbounds() {
                                          "tag={} generation={}",
                                          urltest_tag,
                                          probe_generation);
-                commit_urltest_probe_results(urltest_tag,
-                                             probe_generation,
-                                             std::move(results),
-                                             trace_id);
+                return commit_urltest_probe_results(urltest_tag,
+                                                    probe_generation,
+                                                    std::move(results),
+                                                    trace_id);
             });
     }
 

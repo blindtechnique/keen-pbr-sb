@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 #include <sys/types.h>
 
@@ -119,6 +121,96 @@ public:
 
 // Callback for file descriptor events
 using FdCallback = std::function<void(uint32_t events)>;
+
+// Prepare the complete replacement bookkeeping before EPOLL_CTL_ADD. The
+// registrar must throw only when no kernel registration was published. Once
+// it returns successfully, the only remaining operation is a statically
+// no-throw vector swap, so a live epoll fd can never lack bookkeeping.
+//
+// EPOLL_CTL_ADD success is also the ownership proof that no currently live
+// registration can own the same descriptor number; only then may the prepared
+// candidate discard a stale record left by a failed removal before fd reuse.
+// The caller must hold the registration-vector lock across this function.
+template <typename Entry, typename EpollAdd>
+void publish_fd_entry_after_successful_epoll_add(
+    std::vector<Entry>& entries,
+    Entry replacement,
+    EpollAdd&& epoll_add) {
+    static_assert(
+        std::is_nothrow_destructible_v<Entry>,
+        "fd bookkeeping destruction after publication must not throw");
+
+    // Copying callbacks and growing the vector can allocate. Perform all of
+    // that against an unpublished candidate, before the kernel can observe
+    // the new descriptor.
+    auto candidate = entries;
+    const int fd = replacement.fd;
+    candidate.erase(
+        std::remove_if(
+            candidate.begin(),
+            candidate.end(),
+            [fd](const Entry& entry) { return entry.fd == fd; }),
+        candidate.end());
+    candidate.push_back(std::move(replacement));
+
+    std::forward<EpollAdd>(epoll_add)();
+
+    static_assert(
+        noexcept(entries.swap(candidate)),
+        "fd bookkeeping publication must not throw after epoll add");
+    entries.swap(candidate);
+}
+
+namespace daemon_detail {
+
+struct ControlTaskAdmissionToken final {};
+using ControlTaskAdmissionHandle =
+    std::shared_ptr<const ControlTaskAdmissionToken>;
+
+// Publish only while the caller holds the control-queue mutex and the same
+// admission gate observed by shutdown is still open. A false return means
+// ownership never entered the queue; a push allocation failure propagates
+// with the vector unchanged.
+template <typename Entry>
+bool publish_control_task_if_admitted(
+    std::vector<Entry>& entries,
+    bool admission_open,
+    Entry task) {
+    if (!admission_open) {
+        return false;
+    }
+    entries.push_back(std::move(task));
+    return true;
+}
+
+// Linearizes a failed control-loop wake against the queue consumer. The
+// unique shared token prevents label/callback equality and allocator address
+// reuse from cancelling another task. The caller holds the queue mutex.
+template <typename Entry>
+bool erase_exact_control_task_if_still_queued(
+    std::vector<Entry>& entries,
+    const ControlTaskAdmissionHandle& token,
+    ControlTaskAdmissionHandle Entry::* token_member) noexcept {
+    static_assert(
+        std::is_nothrow_move_assignable_v<Entry> &&
+            std::is_nothrow_destructible_v<Entry>,
+        "exact control-task rollback must not throw");
+
+    const auto* identity = token.get();
+    const auto found = std::find_if(
+        entries.begin(),
+        entries.end(),
+        [identity, token_member](const Entry& entry) noexcept {
+            return (entry.*token_member).get() == identity;
+        });
+    if (found == entries.end()) {
+        return false;
+    }
+    entries.erase(found);
+    return true;
+}
+
+} // namespace daemon_detail
 
 // Options controlling daemon runtime behavior
 struct DaemonOptions {
@@ -437,6 +529,8 @@ private:
     void handle_ipc_control_socket();
     void remove_ipc_control_socket() noexcept;
     void wake_control_loop();
+    bool cancel_control_task_if_still_queued(
+        const daemon_detail::ControlTaskAdmissionHandle& token) noexcept;
     bool is_event_loop_thread() const;
 
     // Signal handlers
@@ -523,10 +617,10 @@ private:
     void report_meta_udp443_degraded(const std::string& detail) noexcept;
     void normalize_urltest_selections();
     void register_urltest_outbounds();
-    void handle_urltest_selection_change(
+    bool handle_urltest_selection_change(
         const UrltestSelectionChange& change,
         std::uint64_t expected_runtime_generation);
-    void commit_urltest_probe_results(const std::string& urltest_tag,
+    bool commit_urltest_probe_results(const std::string& urltest_tag,
                                       std::uint64_t probe_generation,
                                       std::map<std::string, URLTestResult> results,
                                       TraceId trace_id);
@@ -854,6 +948,7 @@ private:
         std::function<void()> callback;
         std::string label;
         TraceId trace_id{0};
+        daemon_detail::ControlTaskAdmissionHandle admission_token;
     };
     TracedMutex control_tasks_mutex_;
     std::vector<ControlTask> control_tasks_ GUARDED_BY(control_tasks_mutex_);

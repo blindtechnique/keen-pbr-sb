@@ -24,27 +24,30 @@ void log_lock_event(std::string_view event,
                     const char* file,
                     int line,
                     const char* function,
-                    std::uint64_t duration_ms = 0) {
-    auto& log = Logger::instance();
-    if (duration_ms == 0) {
+                    std::uint64_t duration_ms = 0) noexcept {
+    try {
+        auto& log = Logger::instance();
+        if (duration_ms == 0) {
+            log.trace(event,
+                      "mutex={} mode={} site={}:{} func={}",
+                      mutex_name,
+                      mode,
+                      file,
+                      line,
+                      function);
+            return;
+        }
+
         log.trace(event,
-                  "mutex={} mode={} site={}:{} func={}",
+                  "mutex={} mode={} site={}:{} func={} duration_ms={}",
                   mutex_name,
                   mode,
                   file,
                   line,
-                  function);
-        return;
+                  function,
+                  duration_ms);
+    } catch (...) {
     }
-
-    log.trace(event,
-              "mutex={} mode={} site={}:{} func={} duration_ms={}",
-              mutex_name,
-              mode,
-              file,
-              line,
-              function,
-              duration_ms);
 }
 
 template<typename LockFn, typename TryLockFn, typename TimedTryLockFn>
@@ -56,7 +59,12 @@ void lock_with_trace(LockFn lock_fn,
                      const char* file,
                      int line,
                      const char* function) {
-    if (!Logger::instance().is_enabled(LogLevel::debug)) {
+    bool trace_enabled = false;
+    try {
+        trace_enabled = Logger::instance().is_enabled(LogLevel::debug);
+    } catch (...) {
+    }
+    if (!trace_enabled) {
         lock_fn();
         return;
     }
@@ -94,20 +102,23 @@ void log_lock_release(const char* mutex_name,
                       const char* file,
                       int line,
                       const char* function,
-                      std::uint64_t acquired_at_ms) {
-    if (acquired_at_ms == 0 ||
-        !Logger::instance().is_enabled(LogLevel::debug)) {
-        return;
-    }
-    const auto held_ms = mono_ms_now() - acquired_at_ms;
-    if (held_ms >= static_cast<std::uint64_t>(kSlowLockHold.count())) {
-        log_lock_event("lock_held_slow",
-                       mutex_name,
-                       mode,
-                       file,
-                       line,
-                       function,
-                       held_ms);
+                      std::uint64_t acquired_at_ms) noexcept {
+    try {
+        if (acquired_at_ms == 0 ||
+            !Logger::instance().is_enabled(LogLevel::debug)) {
+            return;
+        }
+        const auto held_ms = mono_ms_now() - acquired_at_ms;
+        if (held_ms >= static_cast<std::uint64_t>(kSlowLockHold.count())) {
+            log_lock_event("lock_held_slow",
+                           mutex_name,
+                           mode,
+                           file,
+                           line,
+                           function,
+                           held_ms);
+        }
+    } catch (...) {
     }
 }
 

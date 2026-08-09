@@ -122,10 +122,16 @@ bool BlockingExecutor::enqueue(std::string label,
         .callback = std::move(task),
         .trace_id = trace_id,
     });
-    Logger::instance().trace("executor_queue",
-                             "queue_size={} label={}",
-                             queue_.size(),
-                             queue_.back().label);
+    // Once queue_.push succeeds, ownership has transferred to the worker.
+    // Diagnostic logging must not turn that success into an exception that
+    // makes callers release the same external resource a second time.
+    try {
+        Logger::instance().trace("executor_queue",
+                                 "queue_size={} label={}",
+                                 queue_.size(),
+                                 queue_.back().label);
+    } catch (...) {
+    }
     lock.unlock();
     cv_.notify_one();
     return true;
@@ -149,36 +155,52 @@ void BlockingExecutor::worker_loop(std::size_t worker_index) {
 
         const auto started_at = std::chrono::steady_clock::now();
         ScopedTraceContext scope(task.trace_id);
-        Logger::instance().trace("executor_start",
-                                 "worker={} label={}",
-                                 worker_index,
-                                 task.label);
+        // Once dequeued, callback ownership is authoritative. Diagnostic
+        // logging must not suppress the callback or terminate the worker.
+        try {
+            Logger::instance().trace("executor_start",
+                                     "worker={} label={}",
+                                     worker_index,
+                                     task.label);
+        } catch (...) {
+        }
         try {
             task.callback();
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started_at).count();
-            Logger::instance().trace("executor_end",
-                                     "worker={} label={} duration_ms={}",
-                                     worker_index,
-                                     task.label,
-                                     duration_ms);
+            try {
+                Logger::instance().trace("executor_end",
+                                         "worker={} label={} duration_ms={}",
+                                         worker_index,
+                                         task.label,
+                                         duration_ms);
+            } catch (...) {
+            }
         } catch (const std::exception& e) {
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started_at).count();
-            Logger::instance().trace("executor_error",
-                                     "worker={} label={} duration_ms={} error={}",
-                                     worker_index,
-                                     task.label,
-                                     duration_ms,
-                                     e.what());
+            try {
+                Logger::instance().trace(
+                    "executor_error",
+                    "worker={} label={} duration_ms={} error={}",
+                    worker_index,
+                    task.label,
+                    duration_ms,
+                    e.what());
+            } catch (...) {
+            }
         } catch (...) {
             const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started_at).count();
-            Logger::instance().trace("executor_error",
-                                     "worker={} label={} duration_ms={} error=unknown",
-                                     worker_index,
-                                     task.label,
-                                     duration_ms);
+            try {
+                Logger::instance().trace(
+                    "executor_error",
+                    "worker={} label={} duration_ms={} error=unknown",
+                    worker_index,
+                    task.label,
+                    duration_ms);
+            } catch (...) {
+            }
         }
     }
 }

@@ -16,6 +16,11 @@ void FirewallState::set_urltest_selections(
     urltest_selections_ = std::move(selections);
 }
 
+void FirewallState::swap_urltest_selections(
+    std::map<std::string, std::string>& selections) noexcept {
+    urltest_selections_.swap(selections);
+}
+
 const std::vector<RuleState>& FirewallState::get_rules() const {
     return rules_;
 }

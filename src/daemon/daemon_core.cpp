@@ -1193,9 +1193,30 @@ void Daemon::handle_ipc_control_socket() {
 
 void Daemon::wake_control_loop() {
     const uint64_t inc = 1;
-    ssize_t n = write(control_fd_, &inc, sizeof(inc));
-    if (n < 0 && errno != EAGAIN) {
+    ssize_t n = -1;
+    do {
+        n = write(control_fd_, &inc, sizeof(inc));
+    } while (n < 0 && errno == EINTR);
+    // EAGAIN means the eventfd already contains a wake token, so the newly
+    // queued task is covered by an existing readable edge.
+    if (n < 0 && errno == EAGAIN) {
+        return;
+    }
+    if (n != static_cast<ssize_t>(sizeof(inc))) {
         throw DaemonError("eventfd write failed: " + std::string(strerror(errno)));
+    }
+}
+
+bool Daemon::cancel_control_task_if_still_queued(
+    const daemon_detail::ControlTaskAdmissionHandle& token) noexcept {
+    try {
+        KPBR_LOCK_GUARD(control_tasks_mutex_);
+        return daemon_detail::erase_exact_control_task_if_still_queued(
+            control_tasks_, token, &ControlTask::admission_token);
+    } catch (...) {
+        // If exact rollback cannot obtain queue authority, do not claim that
+        // the task was cancelled. The event loop may already own it.
+        return false;
     }
 }
 
@@ -1298,25 +1319,41 @@ void Daemon::enqueue_control_task(std::function<void()> task,
     auto run_inline = [task = std::move(task), effective_label, trace_id]() mutable {
         ScopedTraceContext trace_scope(trace_id);
         const auto started_at = std::chrono::steady_clock::now();
-        Logger::instance().trace("control_task_start", "label={} mode=inline", effective_label);
+        try {
+            Logger::instance().trace(
+                "control_task_start", "label={} mode=inline", effective_label);
+        } catch (...) {
+        }
         try {
             task();
-            Logger::instance().trace("control_task_end",
-                                     "label={} mode=inline duration_ms={}",
-                                     effective_label,
-                                     steady_duration_ms(started_at));
+            try {
+                Logger::instance().trace(
+                    "control_task_end",
+                    "label={} mode=inline duration_ms={}",
+                    effective_label,
+                    steady_duration_ms(started_at));
+            } catch (...) {
+            }
         } catch (const std::exception& e) {
-            Logger::instance().trace("control_task_error",
-                                     "label={} mode=inline duration_ms={} error={}",
-                                     effective_label,
-                                     steady_duration_ms(started_at),
-                                     e.what());
+            try {
+                Logger::instance().trace(
+                    "control_task_error",
+                    "label={} mode=inline duration_ms={} error={}",
+                    effective_label,
+                    steady_duration_ms(started_at),
+                    e.what());
+            } catch (...) {
+            }
             throw;
         } catch (...) {
-            Logger::instance().trace("control_task_error",
-                                     "label={} mode=inline duration_ms={} error=unknown",
-                                     effective_label,
-                                     steady_duration_ms(started_at));
+            try {
+                Logger::instance().trace(
+                    "control_task_error",
+                    "label={} mode=inline duration_ms={} error=unknown",
+                    effective_label,
+                    steady_duration_ms(started_at));
+            } catch (...) {
+            }
             throw;
         }
     };
@@ -1332,44 +1369,114 @@ void Daemon::enqueue_control_task(std::function<void()> task,
         return;
     }
 
-    if (wait_for_completion) {
-        auto done = std::make_shared<std::promise<void>>();
-        auto fut = done->get_future();
-        {
-            KPBR_LOCK_GUARD(control_tasks_mutex_);
-            control_tasks_.push_back(ControlTask{
-                .callback = [cmd = std::move(run_inline), done]() mutable {
-                try {
-                    cmd();
-                    done->set_value();
-                } catch (...) {
-                    done->set_exception(std::current_exception());
-                }
-                },
-                .label = effective_label,
-                .trace_id = trace_id,
-            });
-        }
-        Logger::instance().trace("control_task_enqueue",
-                                 "label={} wait=true",
-                                 effective_label);
-        wake_control_loop();
-        fut.get();
-        return;
+    // This optimistic check keeps shutdown rejection out of the allocation
+    // path. Shutdown closes the same gate under control_tasks_mutex_; the
+    // mandatory in-lock recheck below is the actual linearization point.
+    if (!accept_posted_control_tasks_.load(std::memory_order_acquire)) {
+        throw DaemonError("control task admission is closed");
     }
 
+    std::shared_ptr<std::promise<void>> completion;
+    std::future<void> completion_future;
+    std::function<void()> queued_callback;
+    if (wait_for_completion) {
+        completion = std::make_shared<std::promise<void>>();
+        completion_future = completion->get_future();
+        queued_callback =
+            [cmd = std::move(run_inline), completion]() mutable {
+                try {
+                    cmd();
+                    completion->set_value();
+                } catch (...) {
+                    completion->set_exception(std::current_exception());
+                }
+            };
+    } else {
+        queued_callback = std::move(run_inline);
+    }
+
+    const auto admission_token =
+        std::make_shared<const daemon_detail::ControlTaskAdmissionToken>();
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
-        control_tasks_.push_back(ControlTask{
-            .callback = std::move(run_inline),
-            .label = effective_label,
-            .trace_id = trace_id,
-        });
+        if (!daemon_detail::publish_control_task_if_admitted(
+                control_tasks_,
+                accept_posted_control_tasks_.load(
+                    std::memory_order_acquire),
+                ControlTask{
+                    .callback = std::move(queued_callback),
+                    .label = effective_label,
+                    .trace_id = trace_id,
+                    .admission_token = admission_token,
+                })) {
+            // The task never crossed the ownership boundary. In the waiting
+            // case stack unwinding destroys every promise owner, so the
+            // private future cannot become a stranded shutdown wait.
+            throw DaemonError("control task admission closed during shutdown");
+        }
     }
-    Logger::instance().trace("control_task_enqueue",
-                             "label={} wait=false",
-                             effective_label);
-    wake_control_loop();
+    try {
+        Logger::instance().trace("control_task_enqueue",
+                                 "label={} wait={}",
+                                 effective_label,
+                                 wait_for_completion ? "true" : "false");
+    } catch (...) {
+    }
+
+    try {
+        wake_control_loop();
+    } catch (const std::exception& error) {
+        const auto wake_failure = std::current_exception();
+        if (cancel_control_task_if_still_queued(admission_token)) {
+            // Exact rollback restored caller ownership. Complete the private
+            // promise as well, then report rejection; no queued callback can
+            // subsequently act on a descriptor the caller releases.
+            if (completion) {
+                try {
+                    completion->set_exception(wake_failure);
+                } catch (...) {
+                }
+            }
+            std::rethrow_exception(wake_failure);
+        }
+
+        // The event loop already swapped this exact token out of the queue.
+        // Its callback is authoritative; returning a wake error would cause
+        // callers such as Scheduler to release resources still owned by it.
+        try {
+            Logger::instance().error(
+                "Control task '{}' wake failed after the event loop claimed "
+                "the task: {}",
+                effective_label,
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        const auto wake_failure = std::current_exception();
+        if (cancel_control_task_if_still_queued(admission_token)) {
+            if (completion) {
+                try {
+                    completion->set_exception(wake_failure);
+                } catch (...) {
+                }
+            }
+            std::rethrow_exception(wake_failure);
+        }
+        try {
+            Logger::instance().error(
+                "Control task '{}' wake failed after the event loop claimed "
+                "the task: unknown error",
+                effective_label);
+        } catch (...) {
+        }
+    }
+
+    if (wait_for_completion) {
+        // A claimed callback settles this future with its actual result. In
+        // particular, task-body exceptions remain visible to the caller and
+        // are never mistaken for a wake failure.
+        completion_future.get();
+    }
 }
 
 bool Daemon::post_control_task(std::function<void()> task, const std::string& label) {
@@ -1386,25 +1493,44 @@ bool Daemon::post_control_task(std::function<void()> task, const std::string& la
     auto traced_task = [task = std::move(task), effective_label, trace_id]() mutable {
         ScopedTraceContext trace_scope(trace_id);
         const auto started_at = std::chrono::steady_clock::now();
-        Logger::instance().trace("control_task_start", "label={} mode=posted", effective_label);
+        // Diagnostic logging must never decide whether an already-admitted
+        // control task runs. In particular, an allocation failure while
+        // formatting a trace event must not strand asynchronous ownership.
+        try {
+            Logger::instance().trace(
+                "control_task_start", "label={} mode=posted", effective_label);
+        } catch (...) {
+        }
         try {
             task();
-            Logger::instance().trace("control_task_end",
-                                     "label={} mode=posted duration_ms={}",
-                                     effective_label,
-                                     steady_duration_ms(started_at));
+            try {
+                Logger::instance().trace(
+                    "control_task_end",
+                    "label={} mode=posted duration_ms={}",
+                    effective_label,
+                    steady_duration_ms(started_at));
+            } catch (...) {
+            }
         } catch (const std::exception& e) {
-            Logger::instance().trace("control_task_error",
-                                     "label={} mode=posted duration_ms={} error={}",
-                                     effective_label,
-                                     steady_duration_ms(started_at),
-                                     e.what());
+            try {
+                Logger::instance().trace(
+                    "control_task_error",
+                    "label={} mode=posted duration_ms={} error={}",
+                    effective_label,
+                    steady_duration_ms(started_at),
+                    e.what());
+            } catch (...) {
+            }
             throw;
         } catch (...) {
-            Logger::instance().trace("control_task_error",
-                                     "label={} mode=posted duration_ms={} error=unknown",
-                                     effective_label,
-                                     steady_duration_ms(started_at));
+            try {
+                Logger::instance().trace(
+                    "control_task_error",
+                    "label={} mode=posted duration_ms={} error=unknown",
+                    effective_label,
+                    steady_duration_ms(started_at));
+            } catch (...) {
+            }
             throw;
         }
     };
@@ -1422,11 +1548,15 @@ bool Daemon::post_control_task(std::function<void()> task, const std::string& la
             .callback = std::move(traced_task),
             .label = effective_label,
             .trace_id = trace_id,
+            .admission_token = {},
         });
     }
-    Logger::instance().trace("control_task_enqueue",
-                             "label={} wait=false mode=post",
-                             effective_label);
+    try {
+        Logger::instance().trace("control_task_enqueue",
+                                 "label={} wait=false mode=post",
+                                 effective_label);
+    } catch (...) {
+    }
     try {
         wake_control_loop();
     } catch (const std::exception& error) {
@@ -1435,11 +1565,17 @@ bool Daemon::post_control_task(std::function<void()> task, const std::string& la
         // lifetime while the queued callback still captures it. Keep the
         // enqueue authoritative; another epoll event or shutdown drain will
         // service the callback.
-        Logger::instance().error(
-            "Posted control task '{}' was queued but the control-loop wake "
-            "failed: {}",
-            effective_label,
-            error.what());
+        try {
+            Logger::instance().error(
+                "Posted control task '{}' was queued but the control-loop "
+                "wake failed: {}",
+                effective_label,
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        // The callback is already owned by control_tasks_. Keep the enqueue
+        // authoritative even when the wake or its diagnostics fail.
     }
     return true;
 }
@@ -1471,14 +1607,20 @@ void Daemon::handle_control_commands() {
             // One failed deferred callback must not discard the remaining
             // batch. Resolver and lifecycle completions may own single-flight
             // leases which are returned only by their callback.
-            Logger::instance().error(
-                "Control task '{}' failed: {}",
-                command.label.empty() ? "control-task" : command.label,
-                error.what());
+            try {
+                Logger::instance().error(
+                    "Control task '{}' failed: {}",
+                    command.label.empty() ? "control-task" : command.label,
+                    error.what());
+            } catch (...) {
+            }
         } catch (...) {
-            Logger::instance().error(
-                "Control task '{}' failed: unknown error",
-                command.label.empty() ? "control-task" : command.label);
+            try {
+                Logger::instance().error(
+                    "Control task '{}' failed: unknown error",
+                    command.label.empty() ? "control-task" : command.label);
+            } catch (...) {
+            }
         }
     }
 }
@@ -2892,15 +3034,25 @@ void Daemon::add_fd(int fd,
                     bool wait_for_completion,
                     const std::string& label) {
     enqueue_control_task([this, fd, events, cb = std::move(cb)]() mutable {
-        struct epoll_event ev{};
-        ev.events = events;
-        ev.data.fd = fd;
-        if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
-            throw DaemonError("epoll_ctl add fd failed: " + std::string(strerror(errno)));
-        }
-
         KPBR_LOCK_GUARD(fd_entries_mutex_);
-        fd_entries_.push_back({fd, std::move(cb)});
+        // Build the complete callback registry candidate before exposing the
+        // fd to epoll. After EPOLL_CTL_ADD succeeds, publication is one
+        // no-throw swap, so allocation failure cannot leave an untracked live
+        // registration or erase the stale callback prematurely.
+        publish_fd_entry_after_successful_epoll_add(
+            fd_entries_,
+            FdEntry{fd, std::move(cb)},
+            [this, fd, events]() {
+                struct epoll_event ev{};
+                ev.events = events;
+                ev.data.fd = fd;
+                if (epoll_ctl(
+                        epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0) {
+                    throw DaemonError(
+                        "epoll_ctl add fd failed: " +
+                        std::string(strerror(errno)));
+                }
+            });
     }, wait_for_completion, label.empty() ? "add-fd" : label);
 }
 

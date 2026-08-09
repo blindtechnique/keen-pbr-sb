@@ -48,6 +48,12 @@ public:
     void set_urltest_selections(
         std::map<std::string, std::string> selections);
 
+    // Exchange the complete selector cursor without allocation. The caller's
+    // map receives the previously published state and can be used for a
+    // transactional rollback.
+    void swap_urltest_selections(
+        std::map<std::string, std::string>& selections) noexcept;
+
     // Get current rule state
     const std::vector<RuleState>& get_rules() const;
 

@@ -55,6 +55,7 @@ add_executable(keen-pbr-tests
   test_udp_call_affinity.cpp
   test_interface_traffic_sampler.cpp
   test_periodic_task_metrics.cpp
+  test_scheduler.cpp
   test_daemon_link_contract.cpp
   test_api_status_events.cpp
   test_api_logs.cpp
