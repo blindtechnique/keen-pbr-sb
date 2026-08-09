@@ -4,6 +4,7 @@ import type { ComponentProps } from "react"
 import { LayoutGridIcon, ShieldIcon, WaypointsIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import { DocumentationLink } from "@/components/documentation-link"
 import { SidebarToggleButton } from "@/components/layout/sidebar-toggle-button"
 import { MobileMenuControls } from "@/components/layout/top-bar-controls"
 import { NavMain } from "@/components/nav-main"
@@ -91,6 +92,11 @@ export function AppSidebar(props: ComponentProps<typeof Sidebar>) {
           it floating in the middle of the column. */}
       <SidebarContent className="keen-sidebar-divider px-0 py-0">
         <NavMain items={data.navMain} />
+        {!collapsed ? (
+          <div className="mt-auto px-4 py-4">
+            <DocumentationLink className="border-sidebar-border bg-sidebar text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" />
+          </div>
+        ) : null}
       </SidebarContent>
       {/* The footer is the button: padding here would leave a pale margin
           around the hover fill instead of letting it reach the edges. */}

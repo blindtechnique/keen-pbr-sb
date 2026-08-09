@@ -11,6 +11,7 @@ import {
 import { useTranslation } from "react-i18next"
 
 import logoUrl from "@/assets/logo.png"
+import { DocumentationLink } from "@/components/documentation-link"
 import { useLanguage } from "@/components/language-provider"
 import { Button } from "@/components/ui/button"
 import {
@@ -156,6 +157,7 @@ function AuthPage({ children }: { children: ReactNode }) {
             <AuthBrand />
           </div>
           {children}
+          <DocumentationLink className="mt-6 h-12 bg-card px-3 text-[15px] lg:h-10 lg:text-sm" />
         </div>
       </section>
       <aside className="relative hidden min-h-svh overflow-hidden bg-primary text-primary-foreground lg:block">

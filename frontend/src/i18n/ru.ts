@@ -317,6 +317,8 @@ export const ruTranslation = {
     help: {
       about: "Об этом разделе",
     },
+    documentation: "Документация",
+    documentationUrl: "https://keen-pbr.fyi/ru/docs/",
     moreControls: "Ещё",
     expandable: {
       more: "Читать далее",

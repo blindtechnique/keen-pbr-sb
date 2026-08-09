@@ -317,6 +317,8 @@ export const enTranslation = {
     help: {
       about: "About this section",
     },
+    documentation: "Documentation",
+    documentationUrl: "https://keen-pbr.fyi/docs/",
     moreControls: "More",
     expandable: {
       more: "Read more",
