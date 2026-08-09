@@ -1547,6 +1547,18 @@ function LoadedGeneralConfigPage({
                           "pages.settings.advanced.metaUdp443PolicyHint"
                         )}
                       />
+                      <Alert className="mt-2">
+                        <AlertTitle>
+                          {t(
+                            "pages.settings.advanced.metaUdp443AndroidBackgroundTitle"
+                          )}
+                        </AlertTitle>
+                        <AlertDescription>
+                          {t(
+                            "pages.settings.advanced.metaUdp443AndroidBackgroundDescription"
+                          )}
+                        </AlertDescription>
+                      </Alert>
                       {field.state.value === "messages_first" ? (
                         <Alert className="mt-2" variant="warning">
                           <AlertTitle>

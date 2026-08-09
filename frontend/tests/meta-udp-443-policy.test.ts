@@ -53,6 +53,9 @@ describe("Meta UDP/443 policy", () => {
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("UDP/5349")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("P2P")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("IPv6")
+      expect(advanced.metaUdp443AndroidBackgroundDescription).toContain(
+        "WhatsApp"
+      )
     }
 
     expect(
@@ -63,10 +66,28 @@ describe("Meta UDP/443 policy", () => {
     ).toContain("may then use TCP")
     expect(
       enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
-    ).toContain("may improve")
+    ).toContain("may improve initial")
+    expect(
+      enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("sessions stalling")
+    expect(
+      enTranslation.pages.settings.advanced.metaUdp443PolicyWarningTitle
+    ).toContain("Experimental")
     expect(
       enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
     ).toContain("disable IPv6 routing")
+    expect(
+      enTranslation.pages.settings.advanced
+        .metaUdp443AndroidBackgroundDescription
+    ).toContain("Unrestricted")
+    expect(
+      enTranslation.pages.settings.advanced
+        .metaUdp443AndroidBackgroundDescription
+    ).toContain("Sleeping")
+    expect(
+      enTranslation.pages.settings.advanced
+        .metaUdp443AndroidBackgroundDescription
+    ).toContain("Balanced")
 
     expect(
       ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
@@ -76,9 +97,27 @@ describe("Meta UDP/443 policy", () => {
     ).toContain("может использовать TCP")
     expect(
       ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
-    ).toContain("может повысить")
+    ).toContain("может ускорить первую")
+    expect(
+      ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("последующее зависание")
+    expect(
+      ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningTitle
+    ).toContain("Экспериментальный")
     expect(
       ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
     ).toContain("отключить IPv6-маршрутизацию")
+    expect(
+      ruTranslation.pages.settings.advanced
+        .metaUdp443AndroidBackgroundDescription
+    ).toContain("Без ограничений")
+    expect(
+      ruTranslation.pages.settings.advanced
+        .metaUdp443AndroidBackgroundDescription
+    ).toContain("спящих")
+    expect(
+      ruTranslation.pages.settings.advanced
+        .metaUdp443AndroidBackgroundDescription
+    ).toContain("Сбалансированный")
   })
 })

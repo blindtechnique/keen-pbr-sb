@@ -1831,13 +1831,18 @@ export const enTranslation = {
         metaUdp443PolicyLabel: "Meta and WhatsApp transport",
         metaUdp443PolicyHint:
           "Applies only to traffic routed through keen-pbr-sb and covered by the packaged Meta/WhatsApp IP companion.",
+        metaUdp443AndroidBackgroundTitle:
+          "Messages arrive only after opening WhatsApp?",
+        metaUdp443AndroidBackgroundDescription:
+          "On Samsung/Android, set WhatsApp battery use to Unrestricted, allow background data (including while Data Saver is on), and remove it from Sleeping and Deep sleeping apps. Keep Balanced selected: router transport settings cannot wake an app suspended by Android.",
         metaUdp443PolicyOptions: {
           balanced: "Balanced (recommended)",
           messagesFirst: "Messages first (TCP)",
         },
-        metaUdp443PolicyWarningTitle: "Calls may take longer to connect",
+        metaUdp443PolicyWarningTitle:
+          "Experimental: message delivery may also become less reliable",
         metaUdp443PolicyWarningDescription:
-          "This mode rejects only UDP/443 to the packaged Meta/WhatsApp IP companion on one unambiguous active keen-pbr-sb route. Affected clients may then use TCP for messages and media, which may improve message reliability. Instagram and other Meta services in the same IP ranges are also affected. The call notification may appear immediately, but audio may take 10–20 seconds to start. This policy does not block UDP/3478, UDP/5349, or P2P/high-port media. For now, disable IPv6 routing before enabling this mode because the packaged companion has no verified authoritative IPv6 coverage.",
+          "This experimental mode rejects only UDP/443 to the packaged Meta/WhatsApp IP companion on one unambiguous active keen-pbr-sb route. Affected clients may then use TCP for messages and media. This may improve initial delivery, but live Android testing also showed later WhatsApp sessions stalling without sending message data. Balanced remains recommended; return to it if messages stay at zero ticks. Instagram and other Meta services in the same IP ranges are also affected. The call notification may appear immediately, but audio may take 10–20 seconds to start. This policy does not block UDP/3478, UDP/5349, or P2P/high-port media. For now, disable IPv6 routing before enabling this mode because the packaged companion has no verified authoritative IPv6 coverage.",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
           "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",
