@@ -14,10 +14,11 @@ nfqws2."
   7. реальная глубина пула каждого протокола либо точный opt-out;
   8. отсутствие известных диалоговых фрагментов и опечаток в именах.
 
-Чего гейт намеренно НЕ делает: не переименовывает и не удаляет блобы. Правдивость
-имени и происхождение — вопрос источника и лицензии, его решает владелец, а не
-скрипт. Подтверждённые расхождения живут в `nfqws-assets.known-issues`: сборка
-из-за них не падает, но новое расхождение падает, и список не может тихо расти.
+Гейт не исправляет файлы сам. Он сверяет package manifest, независимый origin
+manifest, pinned provenance/license, CRLF-критичный HTTP packet fixture и
+byte-for-byte вывод генератора. Подтверждённый legacy-долг живёт в
+`nfqws-assets.known-issues`: новое расхождение падает, а список не может тихо
+расти.
 """
 
 from __future__ import annotations
@@ -26,7 +27,9 @@ import argparse
 import hashlib
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -35,14 +38,19 @@ SHARE = Path()
 BLOBS = Path()
 STRATEGIES = Path()
 MANIFEST = Path()
+ORIGIN_MANIFEST = Path()
 REQUIRED_BLOBS = Path()
 KNOWN_ISSUES = Path()
+GENERATOR = Path()
+SOURCE_PROVENANCE = Path()
+SOURCE_LICENSE = Path()
 
 
 def configure_repo_root(repo_root: Path) -> None:
     """Select the tree explicitly; production never consults ambient env."""
-    global REPO_ROOT, SHARE, BLOBS, STRATEGIES, MANIFEST, REQUIRED_BLOBS
-    global KNOWN_ISSUES
+    global REPO_ROOT, SHARE, BLOBS, STRATEGIES, MANIFEST, ORIGIN_MANIFEST
+    global REQUIRED_BLOBS, KNOWN_ISSUES, GENERATOR, SOURCE_PROVENANCE
+    global SOURCE_LICENSE
     REPO_ROOT = repo_root.resolve()
     SHARE = (
         REPO_ROOT
@@ -51,8 +59,12 @@ def configure_repo_root(repo_root: Path) -> None:
     BLOBS = SHARE / "nfqws-blobs"
     STRATEGIES = SHARE / "nfqws-strategies"
     MANIFEST = BLOBS / "SHA256SUMS"
+    ORIGIN_MANIFEST = BLOBS / "ORIGIN_SHA256SUMS"
     REQUIRED_BLOBS = SHARE / "nfqws-required-blobs"
     KNOWN_ISSUES = REPO_ROOT / "build_scripts" / "nfqws-assets.known-issues"
+    GENERATOR = REPO_ROOT / "build_scripts" / "build-nfqws-strategies.py"
+    SOURCE_PROVENANCE = BLOBS / "third_party" / "z2k" / "SOURCE.md"
+    SOURCE_LICENSE = BLOBS / "third_party" / "z2k" / "LICENSE.MIT"
 
 
 configure_repo_root(DEFAULT_REPO_ROOT)
@@ -65,6 +77,8 @@ FORBIDDEN_NEW_IN = (
     "NFQWS_ARGS_IPSET",
 )
 
+PORT_FILTER_VARS = FORBIDDEN_NEW_IN + ("NFQWS_ARGS_CUSTOM",)
+
 STRATEGY_POOLS = (
     ("tcp", "NFQWS_ARGS", "ROTATION_UNAVAILABLE_TCP"),
     ("quic", "NFQWS_ARGS_QUIC", "ROTATION_UNAVAILABLE_QUIC"),
@@ -72,6 +86,12 @@ STRATEGY_POOLS = (
 )
 
 MIN_POOL_DEPTH = 2
+
+GENERATED_PROFILES = ("01 safe", "02 balanced", "03 max")
+Z2K_SOURCE_COMMIT = "ee2d04a5554dea26bbded45416e13e590bb71c6c"
+HTTP_IANA_SHA256 = (
+    "3e4fb49b1323ddf2f8e691b1cbe804207b4e849711d76f79ebf2b54247a9285e"
+)
 
 # Список намеренно узкий. Каждому точному фрагменту нужна своя waiver-строка,
 # поэтому новый фрагмент в уже известном профиле всё равно уронит gate.
@@ -135,6 +155,64 @@ def load_known_issues() -> set[str]:
         if line:
             issues.add(line)
     return issues
+
+
+def parse_checksum_manifest(path: Path, label: str) -> dict[str, str]:
+    if not path.exists():
+        fail(f"нет {label} {path.relative_to(REPO_ROOT)}")
+        return {}
+    result: dict[str, str] = {}
+    for line_number, raw in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not raw:
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", raw)
+        if match is None:
+            fail(f"{label}:{line_number}: неверный формат строки")
+            continue
+        digest, name = match.groups()
+        if name in result:
+            fail(f"{label}:{line_number}: повтор имени {name}")
+            continue
+        result[name] = digest
+    return result
+
+
+def check_generated_profile_parity() -> None:
+    """The generator is the byte-for-byte source of the three new profiles."""
+    if not GENERATOR.is_file():
+        fail(f"нет генератора {GENERATOR.relative_to(REPO_ROOT)}")
+        return
+    with tempfile.TemporaryDirectory(prefix="keen-pbr-nfqws-generator-") as raw:
+        generated = Path(raw)
+        result = subprocess.run(
+            [sys.executable, str(GENERATOR), str(generated)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if result.returncode != 0:
+            fail(
+                "генератор новых nfqws-профилей завершился с ошибкой: "
+                + (result.stderr.strip() or result.stdout.strip())
+            )
+            return
+        for profile in GENERATED_PROFILES:
+            checked_in = STRATEGIES / profile
+            rendered = generated / profile
+            for filename in ("nfqws2.conf", "required-blobs.txt"):
+                expected = checked_in / filename
+                actual = rendered / filename
+                if not expected.is_file():
+                    fail(f"{profile}: нет checked-in {filename}")
+                    continue
+                if not actual.is_file() or actual.read_bytes() != expected.read_bytes():
+                    fail(
+                        f"{profile}/{filename}: checked-in bytes расходятся с "
+                        f"{GENERATOR.name}"
+                    )
 
 
 def issue_key(kind: str, *parts: str) -> str:
@@ -278,8 +356,10 @@ def main() -> int:
         return 2
 
     digests: dict[str, list[str]] = {}
+    actual_digests: dict[str, str] = {}
     for blob in shipped:
         digest = hashlib.sha256(blob.read_bytes()).hexdigest()
+        actual_digests[blob.name] = digest
         digests.setdefault(digest, []).append(blob.name)
 
     # 1. Уникальность содержимого.
@@ -305,6 +385,51 @@ def main() -> int:
             "пересоберите его"
         )
 
+    # The regular manifest describes the package. The origin manifest is an
+    # independent review pin: regenerating SHA256SUMS from accidentally
+    # converted bytes must not make that conversion look valid.
+    origin = parse_checksum_manifest(ORIGIN_MANIFEST, "origin manifest")
+    if set(origin) != set(actual_digests):
+        missing = sorted(set(actual_digests) - set(origin))
+        extra = sorted(set(origin) - set(actual_digests))
+        fail(
+            "origin manifest не покрывает пакет точно: "
+            f"missing={missing}, extra={extra}"
+        )
+    for name in sorted(set(origin) & set(actual_digests)):
+        if origin[name] != actual_digests[name]:
+            fail(
+                f"{name}: SHA-256 {actual_digests[name]} расходится с "
+                f"origin pin {origin[name]}"
+            )
+
+    if not SOURCE_LICENSE.is_file():
+        fail(f"нет лицензии источника {SOURCE_LICENSE.relative_to(REPO_ROOT)}")
+    if not SOURCE_PROVENANCE.is_file():
+        fail(
+            f"нет описания происхождения "
+            f"{SOURCE_PROVENANCE.relative_to(REPO_ROOT)}"
+        )
+    elif Z2K_SOURCE_COMMIT not in SOURCE_PROVENANCE.read_text(encoding="utf-8"):
+        fail("описание происхождения не содержит pinned z2k commit")
+
+    http_fixture = BLOBS / "http_iana_org.bin"
+    if http_fixture.exists():
+        payload = http_fixture.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        bare_lf = b"\n" in payload.replace(b"\r\n", b"")
+        if digest != HTTP_IANA_SHA256 or payload.count(b"\r\n") != 9 or bare_lf:
+            fail(
+                "http_iana_org.bin повреждён нормализацией строк: нужны "
+                "427 bytes, 9 CRLF, 0 bare LF и pinned SHA-256 "
+                f"{HTTP_IANA_SHA256}"
+            )
+
+    if GENERATOR.exists() or any(
+        (STRATEGIES / profile).exists() for profile in GENERATED_PROFILES
+    ):
+        check_generated_profile_parity()
+
     # 3-5. Разбор стратегий.
     declared_external = set()
     if REQUIRED_BLOBS.exists():
@@ -326,6 +451,41 @@ def main() -> int:
         text = conf.read_text(encoding="utf-8")
         values = parse_shell_assignments(text)
         profiles[label] = values
+
+        profile_manifest = conf.parent / "required-blobs.txt"
+        if label in GENERATED_PROFILES and not profile_manifest.is_file():
+            fail(f"{label}: нет required-blobs.txt")
+        if profile_manifest.is_file():
+            manifest_entries = [
+                line.strip()
+                for line in profile_manifest.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            invalid_entries = [
+                name
+                for name in manifest_entries
+                if Path(name).name != name
+                or re.fullmatch(r"[A-Za-z0-9_.-]+\.bin", name) is None
+            ]
+            if invalid_entries:
+                fail(
+                    f"{label}: небезопасные имена в required-blobs.txt: "
+                    f"{invalid_entries}"
+                )
+            if manifest_entries != sorted(set(manifest_entries)):
+                fail(
+                    f"{label}: required-blobs.txt должен быть отсортирован "
+                    "и не содержать дублей"
+                )
+            referenced = set(re.findall(r"[A-Za-z0-9_.-]+\.bin", text))
+            expected_required = sorted(
+                name for name in referenced if name in shipped_names
+            )
+            if manifest_entries != expected_required:
+                fail(
+                    f"{label}: required-blobs.txt расходится с конфигом; "
+                    f"expected={expected_required}, actual={manifest_entries}"
+                )
 
         # 7. A pool either has at least two distinct circular choices or says
         # exactly `=1` that rotation is unavailable. Garbage values cannot
@@ -414,8 +574,41 @@ def main() -> int:
 
         for name in FORBIDDEN_NEW_IN:
             value = values.get(name)
-            if value and re.search(r"(^|\s)--new(\s|$)", value):
-                fail(f"{label}: `--new` внутри {name}")
+            if not value:
+                continue
+            try:
+                tokens = shlex.split(value, comments=False, posix=True)
+            except ValueError:
+                tokens = [value]
+            if any(token == "--new" or token.startswith("--new=") for token in tokens):
+                fail(f"{label}: `--new` или `--new=имя` внутри {name}")
+
+        custom = values.get("NFQWS_ARGS_CUSTOM", "")
+        if custom:
+            try:
+                custom_tokens = shlex.split(custom, comments=False, posix=True)
+            except ValueError:
+                custom_tokens = []
+                fail(f"{label}: NFQWS_ARGS_CUSTOM не разбирается как shell argv")
+            boundaries = [
+                index
+                for index, token in enumerate(custom_tokens)
+                if token == "--new" or token.startswith("--new=")
+            ]
+            if boundaries and (
+                boundaries[0] == 0
+                or boundaries[-1] == len(custom_tokens) - 1
+                or any(
+                    right == left + 1
+                    for left, right in zip(boundaries, boundaries[1:])
+                )
+            ):
+                fail(
+                    f"{label}: --new в NFQWS_ARGS_CUSTOM должен разделять "
+                    "два непустых профиля"
+                )
+            if "--new=" in custom_tokens:
+                fail(f"{label}: пустое имя в --new= внутри NFQWS_ARGS_CUSTOM")
 
         for blob_name in sorted(set(re.findall(r"[A-Za-z0-9_.-]+\.bin", text))):
             if blob_name in shipped_names or blob_name in declared_external:
@@ -427,7 +620,7 @@ def main() -> int:
 
         tcp_allowed = expand_ports(values.get("TCP_PORTS", ""), ":-")
         udp_allowed = expand_ports(values.get("UDP_PORTS", ""), ":-")
-        for arg_name in FORBIDDEN_NEW_IN:
+        for arg_name in PORT_FILTER_VARS:
             value = values.get(arg_name)
             if not value:
                 continue

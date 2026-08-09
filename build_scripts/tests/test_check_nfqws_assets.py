@@ -33,14 +33,32 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
 
         blob = self.blobs / "fixture.bin"
         blob.write_bytes(b"fixture\0blob")
-        digest = hashlib.sha256(blob.read_bytes()).hexdigest()
-        (self.blobs / "SHA256SUMS").write_text(
-            f"{digest}  {blob.name}\n", encoding="utf-8"
+        self.manifest = self.blobs / "SHA256SUMS"
+        self.origin_manifest = self.blobs / "ORIGIN_SHA256SUMS"
+        self.write_manifests()
+        provenance = self.blobs / "third_party" / "z2k"
+        provenance.mkdir(parents=True)
+        (provenance / "SOURCE.md").write_text(
+            "https://github.com/Necronicle/z2k\n"
+            "ee2d04a5554dea26bbded45416e13e590bb71c6c\n",
+            encoding="utf-8",
+        )
+        (provenance / "LICENSE.MIT").write_text(
+            "MIT fixture\n", encoding="utf-8"
         )
         (self.share / "nfqws-required-blobs").write_text("", encoding="utf-8")
         self.known = self.build_scripts / "nfqws-assets.known-issues"
         self.known.write_text("", encoding="utf-8")
         self.write_profile()
+
+    def write_manifests(self, *, update_origin: bool = True) -> None:
+        text = "".join(
+            f"{hashlib.sha256(blob.read_bytes()).hexdigest()}  {blob.name}\n"
+            for blob in sorted(self.blobs.glob("*.bin"))
+        )
+        self.manifest.write_text(text, encoding="utf-8")
+        if update_origin:
+            self.origin_manifest.write_text(text, encoding="utf-8")
 
     @staticmethod
     def rotating_pool(proto: str) -> str:
@@ -109,6 +127,149 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
     def test_valid_fixture_passes(self) -> None:
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_origin_pin_catches_blob_changed_with_package_manifest(self) -> None:
+        (self.blobs / "fixture.bin").write_bytes(b"changed fixture")
+        self.write_manifests(update_origin=False)
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("origin pin", result.stdout)
+
+    def test_http_fixture_requires_origin_crlf_bytes(self) -> None:
+        (self.blobs / "http_iana_org.bin").write_bytes(
+            b"GET / HTTP/1.1\nHost: www.iana.org\n\n"
+        )
+        self.write_manifests()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("повреждён нормализацией строк", result.stdout)
+
+    def test_profile_manifest_must_match_referenced_shipped_blobs(self) -> None:
+        manifest = self.strategies / "default" / "required-blobs.txt"
+        manifest.write_text("fixture.bin\n", encoding="utf-8")
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("required-blobs.txt расходится", result.stdout)
+
+    def test_named_new_boundary_is_rejected_outside_custom(self) -> None:
+        config = self.strategies / "default" / "nfqws2.conf"
+        content = config.read_text(encoding="utf-8")
+        config.write_text(
+            content.replace(
+                'NFQWS_BASE_ARGS=""',
+                'NFQWS_BASE_ARGS="--new=hidden"',
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--new=имя", result.stdout)
+
+    def test_generated_profiles_match_source_generator_byte_for_byte(self) -> None:
+        generator = REPO_ROOT / "build_scripts" / "build-nfqws-strategies.py"
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            result = subprocess.run(
+                [sys.executable, str(generator), str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for profile in ("01 safe", "02 balanced", "03 max"):
+                for filename in ("nfqws2.conf", "required-blobs.txt"):
+                    generated = (output / profile / filename).read_bytes()
+                    checked_in = (
+                        REPO_ROOT
+                        / "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr"
+                        / "nfqws-strategies"
+                        / profile
+                        / filename
+                    ).read_bytes()
+                    self.assertEqual(generated, checked_in)
+                    self.assertNotIn(b"\r\n", generated)
+
+    def test_git_attributes_keep_http_packet_bytes_binary(self) -> None:
+        relative = Path(
+            "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/"
+            "nfqws-blobs/http_iana_org.bin"
+        )
+        source = REPO_ROOT / relative
+        expected = source.read_bytes()
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw)
+            target = repository / relative
+            target.parent.mkdir(parents=True)
+            target.write_bytes(expected)
+            (repository / ".gitattributes").write_bytes(
+                (REPO_ROOT / ".gitattributes").read_bytes()
+            )
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=repository, check=True
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.autocrlf=true",
+                    "add",
+                    ".gitattributes",
+                    relative.as_posix(),
+                ],
+                cwd=repository,
+                check=True,
+            )
+            indexed = subprocess.run(
+                ["git", "show", f":{relative.as_posix()}"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            ).stdout
+        self.assertEqual(len(indexed), 427)
+        self.assertEqual(indexed.count(b"\r\n"), 9)
+        self.assertNotIn(b"\n", indexed.replace(b"\r\n", b""))
+        self.assertEqual(
+            hashlib.sha256(indexed).hexdigest(),
+            "3e4fb49b1323ddf2f8e691b1cbe804207b4e849711d76f79ebf2b54247a9285e",
+        )
+
+    def test_legacy_alias_cleanup_preserves_previous_blob_bytes(self) -> None:
+        share = (
+            REPO_ROOT
+            / "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr"
+        )
+        blobs = share / "nfqws-blobs"
+        self.assertEqual(
+            hashlib.sha256(
+                (blobs / "quic_initial_steamcommunity_com.bin").read_bytes()
+            ).hexdigest(),
+            "2fe18b3bd20807d36704d0b072092ee49ae84edca907a4420ab9a0f0f28fddcf",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                (blobs / "tls_clienthello_www_onetrust_com.bin").read_bytes()
+            ).hexdigest(),
+            "4ee0870abe0a0128600b0095189987ba1d210dae8bf963bc725aff49cf922624",
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                (blobs / "tls_clienthello_max_ru.bin").read_bytes()
+            ).hexdigest(),
+            "741bf7660081fe572f93582735d2c36ffbb93a0e59ff8bd7a6bced05ca8ade49",
+        )
+        for profile in ("ver9 E max plus", "ver10 H2 hybrid plus"):
+            directory = share / "nfqws-strategies" / profile
+            config = (directory / "nfqws2.conf").read_text(encoding="utf-8")
+            required = (directory / "required-blobs.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("ACTIVE_DISCORD_UDP.bin", config + required)
+            self.assertNotIn("tls_clienthello_max_ru.bin", config + required)
+            self.assertEqual(
+                config.count("quic_initial_steamcommunity_com.bin"), 2
+            )
+            self.assertIn("tls_clienthello_www_onetrust_com.bin", config)
 
     def test_only_exact_one_disables_rotation_check(self) -> None:
         self.write_profile(quic="", quic_opt_out="yes")
