@@ -146,14 +146,23 @@ void write_meta_udp443_test_tools(
       "    echo \"-A KeenPbrMeta443 -j $active\"\n"
       "    if [ \"$state\" = wrong-rule ]; then\n"
       "      echo \"-A $active -p tcp --dport 443 -j REJECT\"\n"
+      "    elif [ \"$state\" = B-keenetic-1.4.21 ]; then\n"
+      // Exact managed-rule serialization captured from Keenetic iptables
+      // v1.4.21 after publishing the messages-first B generation.
+      "      echo '-A KeenPbrMeta443_B -p udp -m mark --mark "
+      "0x30000/0xff0000 -m udp --dport 443 -m set --match-set "
+      "kpbr4S_meta_whatsapp_ip dst -j REJECT --reject-with "
+      "icmp-port-unreachable'\n"
       "    else\n"
-      "      echo \"-A $active -m mark --mark 0x70000/0xff0000 "
-      "-p udp --dport 443 -m set --match-set "
+      // Match the real iptables 1.4.x `-S` serialization: protocol options
+      // precede extension matches and the implicit UDP matcher is explicit.
+      "      echo \"-A $active -p udp -m mark --mark 0x70000/0xff0000 "
+      "-m udp --dport 443 -m set --match-set "
       "kpbr4s_meta_whatsapp_ip dst -j REJECT --reject-with "
       "icmp-port-unreachable\"\n"
       "      [ \"$state\" = duplicate-rule ] && "
-      "echo \"-A $active -m mark --mark 0x70000/0xff0000 "
-      "-p udp --dport 443 -m set --match-set "
+      "echo \"-A $active -p udp -m mark --mark 0x70000/0xff0000 "
+      "-m udp --dport 443 -m set --match-set "
       "kpbr4s_meta_whatsapp_ip dst -j REJECT --reject-with "
       "icmp-port-unreachable\"\n"
       "    fi ;;\n"
@@ -660,6 +669,37 @@ public:
     return {false, fw.forward_reject_v4_created_};
   }
 
+  static std::pair<OwnedForwardUdpRejectState,
+                   OwnedForwardUdpRejectState>
+  exercise_keenetic_meta_policy_lifecycle() {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset("kpbr4S_meta_whatsapp_ip", AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00030000U, "kpbr4S_meta_whatsapp_ip", 443U);
+
+    fw.stage_forward_reject_generation(
+        /*ipv6=*/false, FirewallSetGeneration::B);
+    fw.publish_and_verify_forward_reject_generation(
+        /*ipv6=*/false, FirewallSetGeneration::B);
+
+    // Mirror the ownership snapshot committed by apply() after verification.
+    fw.last_applied_forward_reject_v4_expected_ = true;
+    fw.last_applied_forward_reject_v4_generation_ =
+        FirewallSetGeneration::B;
+    fw.last_applied_forward_udp_rejects_ =
+        fw.pending_forward_udp_rejects_;
+    const auto enabled = fw.inspect_forward_udp_reject_state();
+
+    fw.disable_forward_reject_scaffold(/*ipv6=*/false);
+    fw.forward_reject_v4_created_ = false;
+    fw.last_applied_forward_reject_v4_expected_ = false;
+    fw.last_applied_forward_udp_rejects_.clear();
+    const auto balanced = fw.inspect_forward_udp_reject_state();
+    return {enabled, balanced};
+  }
+
   static void apply_preserve_with_existing_nat_and_raw_hook_failure() {
     IptablesFirewall fw(/*use_raw_prerouting=*/true);
     fw.set_ipv6_enabled(false);
@@ -800,6 +840,57 @@ TEST_CASE("Meta UDP 443 iptables publishes independent A B generations") {
   transactions = read_iptables_test_file(scripts);
   CHECK(transactions.find(
             "-A KeenPbrMeta443 -j KeenPbrMeta443_B") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE(
+    "Meta UDP 443 accepts Keenetic 1.4.21 save form and removes balanced policy") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment publish_state("KPBR_META_PUBLISH_STATE");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  publish_state.set("B-keenetic-1.4.21");
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  {
+    std::ofstream out(state);
+    // The live failure switched from the previously active A slot to B.
+    out << "A";
+  }
+  testing::reset_restore_wait_option_probe_for_test();
+
+  const auto [enabled, balanced] =
+      T::exercise_keenetic_meta_policy_lifecycle();
+  CHECK(enabled == OwnedForwardUdpRejectState::healthy);
+  CHECK(balanced == OwnedForwardUdpRejectState::healthy);
+  CHECK(read_iptables_test_file(state).find("missing") !=
+        std::string::npos);
+
+  const auto transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find(
+            "-A KeenPbrMeta443_B -m mark --mark 0x30000/0xff0000 "
+            "-p udp --dport 443 -m set --match-set "
+            "kpbr4S_meta_whatsapp_ip dst -j REJECT") !=
+        std::string::npos);
+  CHECK(transactions.find("-I FORWARD 1 -j KeenPbrMeta443") !=
+        std::string::npos);
+  CHECK(transactions.find("-D FORWARD -j KeenPbrMeta443") !=
+        std::string::npos);
+  CHECK(transactions.find("-X KeenPbrMeta443_B") !=
         std::string::npos);
   testing::reset_restore_wait_option_probe_for_test();
 }

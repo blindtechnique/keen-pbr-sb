@@ -1970,7 +1970,12 @@ void IptablesFirewall::verify_forward_reject_generation(
             continue;
         }
         expected_rule_lines.insert(keen_pbr3::format(
-            "-A {} -m mark --mark {:#x}/{:#x} -p udp --dport {} "
+            // `iptables -S` prints the protocol before extension matches and
+            // materializes the implicit UDP matcher used by `--dport`.
+            // Compare with that stable save form rather than the accepted
+            // iptables-restore input order emitted by the staging script.
+            "-A {} -p udp -m mark --mark {:#x}/{:#x} "
+            "-m udp --dport {} "
             "-m set --match-set {} dst -j REJECT --reject-with {}",
             generation_chain,
             rule.fwmark,
@@ -2116,7 +2121,8 @@ IptablesFirewall::inspect_forward_udp_reject_state() const {
                 continue;
             }
             expected_rules.insert(keen_pbr3::format(
-                "-A {} -m mark --mark {:#x}/{:#x} -p udp --dport {} "
+                "-A {} -p udp -m mark --mark {:#x}/{:#x} "
+                "-m udp --dport {} "
                 "-m set --match-set {} dst -j REJECT --reject-with {}",
                 active_chain,
                 rule.fwmark,
