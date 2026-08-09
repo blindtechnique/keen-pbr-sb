@@ -17,6 +17,12 @@ export interface HealthResponse {
   version: string;
   /** Daemon build string (git commit UTC timestamp). */
   build: string;
+  /**
+     * Source commit used for this binary: 12 to 64 lowercase hexadecimal characters, optionally suffixed with `-dirty`, or `unknown` when provenance was unavailable. This field is additive and optional for compatibility with older daemons.
+
+     * @pattern ^(unknown|[0-9a-f]{12,64}(-dirty)?)$
+     */
+  commit?: string;
   status: HealthResponseStatus;
   /** Detailed lifecycle state of the routing runtime. */
   runtime_state: HealthResponseRuntimeState;

@@ -153,6 +153,8 @@ def make_ipk(
     data_root_name: str | None = None,
     control_depends: str = "conntrack, dnsmasq",
     catalog: bytes | None = None,
+    binary_commit: str | None = None,
+    control_commit: str | None = None,
 ) -> None:
     executable = 0o755
     config = json.dumps(
@@ -166,7 +168,10 @@ def make_ipk(
         name: (b"#!/bin/sh\n", executable)
         for name in VALIDATOR.REQUIRED_EXECUTABLES
     }
-    files["opt/usr/bin/keen-pbr"] = (elf(), executable)
+    files["opt/usr/bin/keen-pbr"] = (
+        elf() + (binary_commit.encode("ascii") if binary_commit else b""),
+        executable,
+    )
     files["opt/usr/bin/transport-manager"] = (
         transport_binary if transport_binary is not None else elf(),
         executable,
@@ -223,6 +228,12 @@ def make_ipk(
                     "Package: keen-pbr\n"
                     "Version: 1\n"
                     f"Depends: {control_depends}\n"
+                    + (
+                        "Description: Policy-based routing daemon\n"
+                        f" Built from source commit {control_commit}.\n"
+                        if control_commit
+                        else ""
+                    )
                 ).encode(),
                 0o644,
             ),
@@ -259,6 +270,39 @@ class ValidateKeeneticIpkTest(unittest.TestCase):
             package = Path(directory) / "keen-pbr.ipk"
             make_ipk(package)
             VALIDATOR.validate(package, "aarch64")
+
+    def test_accepts_matching_build_identity_in_binary_and_control(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            commit = "0123456789ab-dirty"
+            make_ipk(
+                package,
+                binary_commit=commit,
+                control_commit=commit,
+            )
+            VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_rejects_missing_binary_build_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            commit = "0123456789ab"
+            make_ipk(package, control_commit=commit)
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "binary does not contain the expected build commit",
+            ):
+                VALIDATOR.validate(package, "aarch64", commit)
+
+    def test_rejects_missing_control_build_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "keen-pbr.ipk"
+            commit = "0123456789ab"
+            make_ipk(package, binary_commit=commit)
+            with self.assertRaisesRegex(
+                VALIDATOR.ValidationError,
+                "package description does not contain",
+            ):
+                VALIDATOR.validate(package, "aarch64", commit)
 
     def test_accepts_standard_data_archive_root_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

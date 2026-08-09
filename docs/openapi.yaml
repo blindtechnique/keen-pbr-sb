@@ -2739,6 +2739,15 @@ components:
           type: string
           description: Daemon build string (git commit UTC timestamp).
           example: "20260424231043"
+        commit:
+          type: string
+          pattern: '^(unknown|[0-9a-f]{12,64}(-dirty)?)$'
+          description: >
+            Source commit used for this binary: 12 to 64 lowercase hexadecimal
+            characters, optionally suffixed with `-dirty`, or `unknown` when
+            provenance was unavailable. This field is additive and optional
+            for compatibility with older daemons.
+          example: "51126910d9bb"
         status:
           type: string
           enum: [running, stopped]

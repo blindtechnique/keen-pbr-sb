@@ -18,6 +18,7 @@ deb-packages: ## Build Debian packages inside Docker container
 	mkdir -p build/packages
 	docker run --rm \
 	  -e KEEN_PBR_RELEASE_OVERRIDE="$(KEEN_PBR_RELEASE)" \
+	  -e KEEN_PBR_COMMIT_OVERRIDE="$(KEEN_PBR_COMMIT)" \
 	  -v "$(abspath .):/workspace" \
 	  "$(DEBIAN_DOCKER_IMAGE)" \
 	  bash -c 'set -e; \

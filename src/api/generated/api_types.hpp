@@ -594,6 +594,7 @@ namespace api {
         std::optional<int64_t> apply_started_ts;
         std::string build;
         std::string build_variant;
+        std::optional<std::string> commit;
         bool config_is_draft = false;
         std::optional<LifecycleOperation> lifecycle_operation;
         std::string os_type;
@@ -2740,6 +2741,7 @@ namespace api {
         x.apply_started_ts = get_stack_optional<int64_t>(j, "apply_started_ts");
         x.build = j.at("build").get<std::string>();
         x.build_variant = j.at("build_variant").get<std::string>();
+        x.commit = get_stack_optional<std::string>(j, "commit");
         x.config_is_draft = j.at("config_is_draft").get<bool>();
         x.lifecycle_operation = get_stack_optional<LifecycleOperation>(j, "lifecycle_operation");
         x.os_type = j.at("os_type").get<std::string>();
@@ -2762,6 +2764,7 @@ namespace api {
         j["apply_started_ts"] = x.apply_started_ts;
         j["build"] = x.build;
         j["build_variant"] = x.build_variant;
+        j["commit"] = x.commit;
         j["config_is_draft"] = x.config_is_draft;
         j["lifecycle_operation"] = x.lifecycle_operation;
         j["os_type"] = x.os_type;

@@ -326,7 +326,12 @@ def validate_elf(member: tarfile.TarInfo, content: bytes, arch: str) -> None:
         )
 
 
-def validate(path: Path, arch: str) -> None:
+def validate(path: Path, arch: str, expected_commit: str | None = None) -> None:
+    if expected_commit is not None and re.fullmatch(
+        r"(?:unknown|[0-9a-f]{12,64}(?:-dirty)?)", expected_commit
+    ) is None:
+        raise ValidationError("invalid expected build commit identity")
+
     members = read_ipk(path)
     if set(members) != EXPECTED_OUTER_MEMBERS:
         raise ValidationError(
@@ -349,7 +354,16 @@ def validate(path: Path, arch: str) -> None:
             stream = data_tar.extractfile(entries[binary])
             if stream is None:
                 raise ValidationError(f"cannot read {binary}")
-            validate_elf(entries[binary], stream.read(64), arch)
+            binary_content = stream.read()
+            validate_elf(entries[binary], binary_content[:64], arch)
+            if (
+                expected_commit is not None
+                and binary == "opt/usr/bin/keen-pbr"
+                and expected_commit.encode("ascii") not in binary_content
+            ):
+                raise ValidationError(
+                    "keen-pbr binary does not contain the expected build commit"
+                )
 
         config_stream = data_tar.extractfile(entries["opt/etc/keen-pbr/transports.json"])
         if config_stream is None:
@@ -392,6 +406,12 @@ def validate(path: Path, arch: str) -> None:
         ):
             raise ValidationError("cannot read package control files")
         control = control_stream.read().decode()
+        if expected_commit is not None and (
+            f"Built from source commit {expected_commit}." not in control
+        ):
+            raise ValidationError(
+                "package description does not contain the expected build commit"
+            )
         depends_match = re.search(
             r"^Depends:\s*(.*(?:\n[ \t].*)*)$",
             control,
@@ -430,9 +450,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("ipk", type=Path)
     parser.add_argument("--arch", choices=sorted(ELF_MACHINES), required=True)
+    parser.add_argument("--expected-commit")
     args = parser.parse_args()
     try:
-        validate(args.ipk, args.arch)
+        validate(args.ipk, args.arch, args.expected_commit)
     except (OSError, ValueError, ValidationError) as error:
         print(f"IPK validation failed: {error}", file=sys.stderr)
         return 1

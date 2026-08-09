@@ -2,6 +2,11 @@ include version.mk
 
 VERSION_RESOLVER := $(abspath build_scripts/resolve-version.sh)
 KEEN_PBR_RELEASE := $(shell bash $(VERSION_RESOLVER) release "$(CURDIR)")
+override KEEN_PBR_COMMIT_RESOLVED := $(shell bash $(VERSION_RESOLVER) commit "$(CURDIR)")
+ifeq ($(strip $(KEEN_PBR_COMMIT_RESOLVED)),)
+  $(error Failed to resolve a valid KEEN_PBR_COMMIT)
+endif
+override KEEN_PBR_COMMIT := $(KEEN_PBR_COMMIT_RESOLVED)
 GCC_BUILD_DIR := cmake-build-gcc
 CLANG_BUILD_DIR := cmake-build-clang
 BUILD_JOBS ?= $(shell nproc)
@@ -15,7 +20,7 @@ KEEN_PBR_VERSION_RELEASE := $(KEEN_PBR_VERSION)-$(KEEN_PBR_RELEASE)
 # Prefer an explicitly installed compiler when available; C++17 is required.
 GCC_CXX ?= $(shell command -v g++-13 2>/dev/null || command -v g++-12 2>/dev/null || command -v g++ 2>/dev/null || echo g++)
 CLANG_CXX ?= clang++
-COMMON_CMAKE_FLAGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DKEEN_PBR_RELEASE=$(KEEN_PBR_RELEASE)
+COMMON_CMAKE_FLAGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DKEEN_PBR_RELEASE=$(KEEN_PBR_RELEASE) -DKEEN_PBR_COMMIT:STRING=$(KEEN_PBR_COMMIT)
 GCC_CMAKE_FLAGS := -DCMAKE_CXX_COMPILER=$(GCC_CXX) $(COMMON_CMAKE_FLAGS)
 CLANG_CMAKE_FLAGS := -DCMAKE_CXX_COMPILER=$(CLANG_CXX) $(COMMON_CMAKE_FLAGS)
 CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
@@ -122,9 +127,12 @@ NARROW_TEST_TARGETS := \
 
 test: ## Build and run unit tests (doctest)
 	sh -n install.sh
+	python3 -m unittest build_scripts.tests.test_build_identity -v
 	cmake -S . -B $(GCC_BUILD_DIR) $(GCC_CMAKE_FLAGS) -DBUILD_TESTS=ON \
 		-DWITH_API=ON -DUSE_KEENETIC_API=ON $(TEST_CMAKE_FLAGS)
-	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
+	cmake --build $(GCC_BUILD_DIR) --parallel $(BUILD_JOBS) --target keen-pbr keen-pbr-tests crash-diagnostics-smoke $(NARROW_TEST_TARGETS)
+	@test "$$($(GCC_BUILD_DIR)/keen-pbr --version)" = \
+	  "keen-pbr $(KEEN_PBR_VERSION) (build $(KEEN_PBR_RELEASE), commit $(KEEN_PBR_COMMIT))"
 	$(GCC_BUILD_DIR)/tests/keen-pbr-tests
 	$(GCC_BUILD_DIR)/tests/crash-diagnostics-smoke
 	@for target in $(NARROW_TEST_TARGETS); do \
@@ -234,6 +242,7 @@ $(CROSS_TOOLCHAIN_STAMP):
 cross-build: $(CROSS_TOOLCHAIN_STAMP) ## Cross-compile for aarch64_cortex-a53 directly (fast, no Docker)
 	STAGING_DIR=$(CROSS_STAGING_DIR) cmake -S . -B $(CROSS_BUILD_DIR) \
 		-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-openwrt.cmake \
+		-DKEEN_PBR_COMMIT:STRING=$(KEEN_PBR_COMMIT) \
 		-DCMAKE_BUILD_TYPE=MinSizeRel \
 		-DCMAKE_CXX_FLAGS_MINSIZEREL="-Os -DNDEBUG -g1" \
 		-DWITH_API=ON

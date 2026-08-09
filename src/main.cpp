@@ -307,8 +307,8 @@ int main(int argc, char* argv[]) {
         }
 
         if (opts.show_version) {
-            std::cout << "keen-pbr " << KEEN_PBR3_VERSION_STRING << " (build "
-                      << KEEN_PBR3_VERSION_RELEASE << ")" << "\n";
+            std::cout << "keen-pbr " << KEEN_PBR3_VERSION_IDENTITY_STRING
+                      << '\n';
             return 0;
         }
 
@@ -487,9 +487,8 @@ int main(int argc, char* argv[]) {
         if (opts.run_service && !opts.log_file.empty()) {
             std::string log_file_error;
             if (keen_pbr3::install_file_log_sink(opts.log_file, &log_file_error)) {
-                logger.info("keen-pbr {} (build {}) starting, log file: {}",
-                            KEEN_PBR3_VERSION_STRING,
-                            KEEN_PBR3_VERSION_RELEASE,
+                logger.info("keen-pbr {} starting, log file: {}",
+                            KEEN_PBR3_VERSION_IDENTITY_STRING,
                             opts.log_file);
 #ifdef WITH_API
                 // Preferences stored on the router win over the defaults, but
@@ -515,7 +514,8 @@ int main(int argc, char* argv[]) {
 
         // Construct Daemon with all subsystems and run
         if (opts.run_service) {
-            logger.info("keen-pbr {} starting...", KEEN_PBR3_VERSION_STRING);
+            logger.info("keen-pbr {} starting...",
+                        KEEN_PBR3_VERSION_IDENTITY_STRING);
             keen_pbr3::DaemonOptions daemon_opts;
             daemon_opts.no_api = opts.no_api;
             daemon_opts.use_raw_prerouting = opts.use_raw_prerouting;

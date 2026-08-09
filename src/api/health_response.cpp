@@ -48,6 +48,7 @@ api::HealthResponse build_health_response(
     api::HealthResponse response;
     response.version = KEEN_PBR3_VERSION_STRING;
     response.build = KEEN_PBR3_VERSION_RELEASE_STRING;
+    response.commit = KEEN_PBR3_VERSION_COMMIT;
     response.status = service_health.status;
     response.runtime_state =
         to_api_runtime_state(service_health.runtime_state);
