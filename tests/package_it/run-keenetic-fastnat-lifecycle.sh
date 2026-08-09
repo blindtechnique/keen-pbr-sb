@@ -317,6 +317,9 @@ stop_keen_pbr() {
     STOP_KEEN_PBR_SAFE=yes
 }
 restore_hwnat_if_safe() { printf '%s\n' restore >> "$order"; }
+cleanup_stale_meta_udp443_firewall() {
+    printf '%s\n' cleanup-meta-udp443 >> "$order"
+}
 
 FASTNAT_RESTORE_ON_START_FAILURE=no
 : > "$order"
@@ -330,12 +333,14 @@ restore_fastnat_after_failed_start
 : > "$order"
 stop_service_for_action stop no
 [ "$(cat "$order")" = "prepare
-stop:stop" ]
+stop:stop
+cleanup-meta-udp443" ]
 
 : > "$order"
 stop_service_for_action stop yes
 [ "$(cat "$order")" = "prepare
 stop:stop
+cleanup-meta-udp443
 restore" ]
 
 # Package replacement must not briefly restore FastNAT between the old and new
@@ -402,10 +407,13 @@ PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
 [ "$(sed -n '1p' "$prerm_log")" = 'keen-pbr:stop' ]
 
 : > "$prerm_log"
-PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
+if PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
     PKG_UPGRADE=1 PRERM_TEST_STOP_STATUS=1 PRERM_TEST_PID_ALIVE=no \
-    /bin/sh "$prerm_root/prerm"
-[ "$(sed -n '2p' "$prerm_log")" = 'transport:stop' ]
+    /bin/sh "$prerm_root/prerm"; then
+    echo "upgrade prerm ignored failed lifecycle cleanup" >&2
+    exit 1
+fi
+[ "$(wc -l < "$prerm_log" | tr -d ' ')" = 1 ]
 
 : > "$prerm_log"
 if PATH="$prerm_root/bin:$PATH" PRERM_TEST_LOG="$prerm_log" \
@@ -430,4 +438,5 @@ fi
 # while still allowing this lifecycle test to run on the actual target shell.
 if /bin/sh -n -c ':' >/dev/null 2>&1; then
     /bin/sh -n "$init_script"
+    /bin/sh -n "$prerm_script"
 fi

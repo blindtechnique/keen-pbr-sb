@@ -64,7 +64,11 @@ IPSET_UDP_PEER_PROBE_SET="kpbr_probe_udp_peer_$$"
 IPTABLES_UDP_PEER_PROBE_CHAIN="KpbrUdpProbe$$"
 IPSET_COMPONENTS_MESSAGE="ipset kernel modules are not available. Make sure that you followed the installation process and installed all required components: Netfilter Subsystem Kernel Modules and Xtables-addons Extension Package for Netfilter."
 IPTABLES_WAIT_MODE=""
+IP6TABLES_WAIT_MODE=""
 IPTABLES_BARE_WAIT_SECONDS="${IPTABLES_BARE_WAIT_SECONDS:-10}"
+META_XTABLES_RESTORE_FILE="${META_XTABLES_RESTORE_FILE:-/opt/var/run/keen-pbr.meta-udp443-restore.$$}"
+META_UDP443_OWNERSHIP_FILE="${META_UDP443_OWNERSHIP_FILE:-/opt/var/run/keen-pbr.meta-udp443-backends}"
+META_UDP443_OWNERSHIP_TMP="${META_UDP443_OWNERSHIP_TMP:-${META_UDP443_OWNERSHIP_FILE}.$$}"
 case "$IPTABLES_BARE_WAIT_SECONDS" in
     ''|*[!0-9]*|0) IPTABLES_BARE_WAIT_SECONDS=10 ;;
 esac
@@ -85,6 +89,39 @@ run_bounded_command() {
 
     shift
     "$@" &
+    command_pid=$!
+    (
+        elapsed=0
+        while [ "$elapsed" -lt "$limit" ]; do
+            sleep 1
+            kill -0 "$command_pid" >/dev/null 2>&1 || exit 0
+            elapsed=$((elapsed + 1))
+        done
+        kill -TERM "$command_pid" >/dev/null 2>&1 || exit 0
+        sleep 1
+        kill -KILL "$command_pid" >/dev/null 2>&1 || true
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+
+    if wait "$command_pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    kill "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_bounded_command_with_stdin() {
+    local limit="$1"
+    local input_file="$2"
+    local command_pid
+    local watchdog_pid
+    local status
+
+    shift 2
+    "$@" < "$input_file" &
     command_pid=$!
     (
         elapsed=0
@@ -135,6 +172,17 @@ iptables_wait_probe_is_lock_failure() {
     return 1
 }
 
+iptables_wait_probe_is_table_unavailable() {
+    local normalized
+
+    normalized=$(printf '%s\n' "$IPTABLES_WAIT_PROBE_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"table does not exist"*) return 0 ;;
+    esac
+    return 1
+}
+
 iptables_wait_value_is_unsupported() {
     local attempted_value="$1"
 
@@ -150,8 +198,12 @@ iptables_wait_option_is_unsupported() {
         grep -Eiq '(unknown option|unrecognized option|invalid option|illegal option|not supported)'
 }
 
-detect_iptables_wait_mode() {
-    case "$IPTABLES_WAIT_MODE" in
+detect_xtables_wait_mode() {
+    local tool="$1"
+    local cached_mode="$2"
+
+    XTABLES_WAIT_MODE_RESULT="$cached_mode"
+    case "$cached_mode" in
         timeout|flag|none) return 0 ;;
         error) return 1 ;;
     esac
@@ -164,52 +216,491 @@ detect_iptables_wait_mode() {
     # rejection may select a weaker form; timeouts and unrelated failures are
     # operational errors and must never authorize unguarded mutations.
     run_iptables_wait_probe "$((IPTABLES_BARE_WAIT_SECONDS + 2))" \
-        iptables -w 10 -S
+        "$tool" -w 10 -S
     if [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 0 ] ||
-       iptables_wait_probe_is_lock_failure; then
-        IPTABLES_WAIT_MODE=timeout
+       iptables_wait_probe_is_lock_failure ||
+       iptables_wait_probe_is_table_unavailable; then
+        XTABLES_WAIT_MODE_RESULT=timeout
         return 0
     fi
 
     if ! iptables_wait_value_is_unsupported 10; then
         if iptables_wait_option_is_unsupported; then
-            IPTABLES_WAIT_MODE=none
+            XTABLES_WAIT_MODE_RESULT=none
             return 0
         fi
-        IPTABLES_WAIT_MODE=error
+        XTABLES_WAIT_MODE_RESULT=error
         return 1
     fi
 
-    run_iptables_wait_probe "$IPTABLES_BARE_WAIT_SECONDS" iptables -w -S
+    run_iptables_wait_probe "$IPTABLES_BARE_WAIT_SECONDS" "$tool" -w -S
     if [ "$IPTABLES_WAIT_PROBE_STATUS" -eq 0 ] ||
-       iptables_wait_probe_is_lock_failure; then
-        IPTABLES_WAIT_MODE=flag
+       iptables_wait_probe_is_lock_failure ||
+       iptables_wait_probe_is_table_unavailable; then
+        XTABLES_WAIT_MODE_RESULT=flag
         return 0
     fi
     if iptables_wait_option_is_unsupported; then
-        IPTABLES_WAIT_MODE=none
+        XTABLES_WAIT_MODE_RESULT=none
         return 0
     fi
 
+    XTABLES_WAIT_MODE_RESULT=error
+    return 1
+}
+
+detect_iptables_wait_mode() {
+    if detect_xtables_wait_mode iptables "$IPTABLES_WAIT_MODE"; then
+        IPTABLES_WAIT_MODE="$XTABLES_WAIT_MODE_RESULT"
+        return 0
+    fi
     IPTABLES_WAIT_MODE=error
     return 1
 }
 
-iptables_with_wait() {
-    detect_iptables_wait_mode || return 1
+detect_ip6tables_wait_mode() {
+    if detect_xtables_wait_mode ip6tables "$IP6TABLES_WAIT_MODE"; then
+        IP6TABLES_WAIT_MODE="$XTABLES_WAIT_MODE_RESULT"
+        return 0
+    fi
+    IP6TABLES_WAIT_MODE=error
+    return 1
+}
 
-    case "$IPTABLES_WAIT_MODE" in
+xtables_with_wait_mode() {
+    local tool="$1"
+    local mode="$2"
+
+    shift 2
+
+    case "$mode" in
         timeout)
-            iptables -w 10 "$@"
+            "$tool" -w 10 "$@"
             ;;
         flag)
             run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
-                iptables -w "$@"
+                "$tool" -w "$@"
             ;;
         *)
-            iptables "$@"
+            "$tool" "$@"
             ;;
     esac
+}
+
+iptables_with_wait() {
+    detect_iptables_wait_mode || return 1
+    xtables_with_wait_mode iptables "$IPTABLES_WAIT_MODE" "$@"
+}
+
+ip6tables_with_wait() {
+    detect_ip6tables_wait_mode || return 1
+    xtables_with_wait_mode ip6tables "$IP6TABLES_WAIT_MODE" "$@"
+}
+
+meta_xtables_with_wait() {
+    local tool="$1"
+
+    shift
+    case "$tool" in
+        iptables) iptables_with_wait "$@" ;;
+        ip6tables) ip6tables_with_wait "$@" ;;
+        *) return 1 ;;
+    esac
+}
+
+meta_xtables_restore_transaction() {
+    local tool="$1"
+    local script="$2"
+    local restore_program
+    local error_file="${META_XTABLES_RESTORE_FILE}.err"
+    local attempt=0
+    local status=0
+    local normalized
+
+    restore_program="${tool}-restore"
+    command -v "$restore_program" >/dev/null 2>&1 || return 1
+    case "$tool" in iptables|ip6tables) ;; *) return 1 ;; esac
+
+    if ! (umask 077; printf '%s' "$script" > "$META_XTABLES_RESTORE_FILE"); then
+        rm -f "$META_XTABLES_RESTORE_FILE" 2>/dev/null || true
+        return 1
+    fi
+
+    # Keenetic 1.4.21 accepts bare -w in iptables but its paired restore tool
+    # does not implement -w at all. Keep the restore transaction independently
+    # portable: run plain --noflush under the watchdog and retry once only for
+    # an explicit pre-transaction xtables-lock diagnostic.
+    while [ "$attempt" -lt 2 ]; do
+        : > "$error_file" || {
+            status=1
+            break
+        }
+        if run_bounded_command_with_stdin 2 \
+            "$META_XTABLES_RESTORE_FILE" \
+            "$restore_program" --noflush 2>"$error_file"; then
+            status=0
+            break
+        else
+            status=$?
+        fi
+        normalized=$(tr '[:upper:]' '[:lower:]' < "$error_file")
+        case "$normalized" in
+            *"xtables lock"*|*"holding the xtables lock"*|\
+            *"another app is currently holding"*) ;;
+            *) break ;;
+        esac
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 2 ] || break
+        sleep 1
+    done
+    rm -f "$META_XTABLES_RESTORE_FILE" "$error_file" 2>/dev/null || status=1
+    return "$status"
+}
+
+meta_xtables_filter_is_unavailable() {
+    local normalized
+
+    normalized=$(printf '%s\n' "$META_XTABLES_COMMAND_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"table does not exist"*) return 0 ;;
+    esac
+    return 1
+}
+
+meta_xtables_snapshot() {
+    local tool="$1"
+
+    META_XTABLES_COMMAND_OUTPUT=""
+    if META_XTABLES_COMMAND_OUTPUT=$(
+        meta_xtables_with_wait "$tool" -t filter -S 2>&1
+    ); then
+        META_XTABLES_SNAPSHOT="$META_XTABLES_COMMAND_OUTPUT"
+        return 0
+    fi
+    if meta_xtables_filter_is_unavailable; then
+        META_XTABLES_SNAPSHOT=""
+        return 0
+    fi
+    return 1
+}
+
+meta_xtables_snapshot_has_artifacts() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -Eq -- '(^-N (KeenPbrMeta443|KeenPbrMeta443_A|KeenPbrMeta443_B)$)|([[:space:]](-j|-g|--jump|--goto)[[:space:]]+(KeenPbrMeta443|KeenPbrMeta443_A|KeenPbrMeta443_B)([[:space:]]|$))'
+}
+
+meta_xtables_references_are_owned() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" | awk '
+        $1 == "-A" {
+            origin = $2
+            for (i = 3; i < NF; ++i) {
+                if ($i != "-j" && $i != "-g" &&
+                    $i != "--jump" && $i != "--goto") {
+                    continue
+                }
+                target = $(i + 1)
+                target_owned =
+                    target == "KeenPbrMeta443" ||
+                    target == "KeenPbrMeta443_A" ||
+                    target == "KeenPbrMeta443_B"
+                if (!target_owned) {
+                    continue
+                }
+                origin_owned =
+                    origin == "KeenPbrMeta443" ||
+                    origin == "KeenPbrMeta443_A" ||
+                    origin == "KeenPbrMeta443_B"
+                if (origin_owned) {
+                    continue
+                }
+                if (origin == "FORWARD" && target == "KeenPbrMeta443" &&
+                    NF == 4 && $3 == "-j") {
+                    continue
+                }
+                exit 1
+            }
+        }
+    '
+}
+
+meta_xtables_chain_exists() {
+    printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -F -x -q -- "-N $1"
+}
+
+load_meta_udp443_backend_ownership() {
+    local backend
+
+    META_UDP443_REQUIRED_BACKENDS=""
+    if [ -L "$META_UDP443_OWNERSHIP_FILE" ]; then
+        log_error "Meta UDP/443 backend marker is a symbolic link"
+        return 1
+    fi
+    if [ ! -e "$META_UDP443_OWNERSHIP_FILE" ]; then
+        return 0
+    fi
+    if [ ! -f "$META_UDP443_OWNERSHIP_FILE" ]; then
+        log_error "Meta UDP/443 backend marker is not a regular file"
+        return 1
+    fi
+
+    while IFS= read -r backend || [ -n "$backend" ]; do
+        case "$backend" in
+            iptables|ip6tables|nftables) ;;
+            *)
+                log_error "Meta UDP/443 backend marker is invalid"
+                return 1
+                ;;
+        esac
+        case " $META_UDP443_REQUIRED_BACKENDS " in
+            *" $backend "*) ;;
+            *) META_UDP443_REQUIRED_BACKENDS="$META_UDP443_REQUIRED_BACKENDS $backend" ;;
+        esac
+    done < "$META_UDP443_OWNERSHIP_FILE"
+
+    if [ -z "$META_UDP443_REQUIRED_BACKENDS" ]; then
+        log_error "Meta UDP/443 backend marker is empty"
+        return 1
+    fi
+    return 0
+}
+
+meta_udp443_backend_was_possible_owner() {
+    case " $META_UDP443_REQUIRED_BACKENDS " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+verify_recorded_meta_udp443_backend_tools() {
+    local backend
+    local tool
+
+    for backend in $META_UDP443_REQUIRED_BACKENDS; do
+        case "$backend" in
+            iptables|ip6tables)
+                if ! command -v "$backend" >/dev/null 2>&1; then
+                    log_error "Previously possible Meta UDP/443 owner $backend is missing"
+                    return 1
+                fi
+                ;;
+            nftables)
+                if ! command -v nft >/dev/null 2>&1; then
+                    log_error "Previously possible Meta UDP/443 owner nft is missing"
+                    return 1
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
+record_meta_udp443_possible_backends() {
+    local backends
+    local backend
+
+    # The daemon chooses its backend after rc.func starts it. Record every
+    # backend it could select before that publication boundary, merging any
+    # marker left by an earlier crash. This is deliberately conservative when
+    # both tools are installed and remains valid across daemon/API failure.
+    load_meta_udp443_backend_ownership || return 1
+    verify_recorded_meta_udp443_backend_tools || return 1
+    backends="$META_UDP443_REQUIRED_BACKENDS"
+    for backend in nftables iptables ip6tables; do
+        case "$backend" in
+            nftables) command -v nft >/dev/null 2>&1 || continue ;;
+            iptables) command -v iptables >/dev/null 2>&1 || continue ;;
+            ip6tables)
+                case " $backends " in
+                    *" iptables "*) ;;
+                    *) continue ;;
+                esac
+                command -v ip6tables >/dev/null 2>&1 || continue
+                ;;
+        esac
+        case " $backends " in
+            *" $backend "*) ;;
+            *) backends="$backends $backend" ;;
+        esac
+    done
+    if [ -z "$backends" ]; then
+        log_error "Cannot record a possible Meta UDP/443 firewall backend"
+        return 1
+    fi
+
+    rm -f "$META_UDP443_OWNERSHIP_TMP" 2>/dev/null || return 1
+    if ! (
+        umask 077
+        for backend in $backends; do
+            printf '%s\n' "$backend"
+        done > "$META_UDP443_OWNERSHIP_TMP"
+    ); then
+        rm -f "$META_UDP443_OWNERSHIP_TMP" 2>/dev/null || true
+        log_error "Cannot write the Meta UDP/443 backend marker"
+        return 1
+    fi
+    if ! mv -f "$META_UDP443_OWNERSHIP_TMP" \
+        "$META_UDP443_OWNERSHIP_FILE"; then
+        rm -f "$META_UDP443_OWNERSHIP_TMP" 2>/dev/null || true
+        log_error "Cannot publish the Meta UDP/443 backend marker"
+        return 1
+    fi
+    return 0
+}
+
+guard_meta_udp443_start_ownership() {
+    # An ordinary `start` is also the recovery path after an unclean daemon
+    # death. Never launch a new backend beside stale exact reject state from a
+    # previous backend. Conversely, an already-running daemon still owns its
+    # live chain, so only validate/refresh its marker without mutating rules.
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        if record_meta_udp443_possible_backends; then
+            return 0
+        fi
+    elif cleanup_stale_meta_udp443_firewall &&
+         record_meta_udp443_possible_backends; then
+        return 0
+    fi
+    STOP_KEEN_PBR_SAFE=no
+    : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+    log_error "keen-pbr start refused because Meta UDP/443 cleanup ownership could not be recorded"
+    return 1
+}
+
+cleanup_meta_udp443_xtables_family() {
+    local tool="$1"
+    local hooks
+    local chain
+    local script
+
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        if meta_udp443_backend_was_possible_owner "$tool"; then
+            log_error "Required Meta UDP/443 cleanup tool $tool is missing"
+            return 1
+        fi
+        return 0
+    fi
+    if ! meta_xtables_snapshot "$tool"; then
+        log_error "Failed to inspect stale Meta UDP/443 artifacts with $tool"
+        return 1
+    fi
+    meta_xtables_snapshot_has_artifacts || return 0
+    if ! meta_xtables_references_are_owned; then
+        log_error "Refusing to remove Meta UDP/443 $tool chains referenced by foreign rules"
+        return 1
+    fi
+
+    hooks=$(printf '%s\n' "$META_XTABLES_SNAPSHOT" |
+        grep -F -x -c -- '-A FORWARD -j KeenPbrMeta443' || true)
+    script='*filter
+'
+    while [ "$hooks" -gt 0 ]; do
+        script="${script}-D FORWARD -j KeenPbrMeta443
+"
+        hooks=$((hooks - 1))
+    done
+
+    for chain in KeenPbrMeta443 KeenPbrMeta443_A KeenPbrMeta443_B; do
+        meta_xtables_chain_exists "$chain" || continue
+        script="${script}-F $chain
+-X $chain
+"
+    done
+    script="${script}COMMIT
+"
+
+    if ! meta_xtables_restore_transaction "$tool" "$script" \
+        >/dev/null 2>&1; then
+        log_error "Atomic Meta UDP/443 cleanup failed with ${tool}-restore"
+        return 1
+    fi
+
+    if ! meta_xtables_snapshot "$tool" ||
+       meta_xtables_snapshot_has_artifacts; then
+        log_error "Stale Meta UDP/443 $tool artifacts remained after cleanup"
+        return 1
+    fi
+    return 0
+}
+
+nft_meta_udp443_chain_state() {
+    local normalized
+
+    NFT_META_COMMAND_OUTPUT=""
+    if NFT_META_COMMAND_OUTPUT=$(
+        run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
+            nft list chain inet KeenPbrTable meta_udp_443 2>&1
+    ); then
+        NFT_META_CHAIN_STATE=present
+        return 0
+    fi
+
+    normalized=$(printf '%s\n' "$NFT_META_COMMAND_OUTPUT" |
+        tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        *"could not process rule: no such file or directory"*|\
+        *"no such file or directory"*"list chain inet keenpbrtable meta_udp_443"*|\
+        *"chain inet keenpbrtable meta_udp_443"*"does not exist"*)
+            NFT_META_CHAIN_STATE=absent
+            return 0
+            ;;
+    esac
+    NFT_META_CHAIN_STATE=unknown
+    return 1
+}
+
+cleanup_meta_udp443_nft() {
+    if ! command -v nft >/dev/null 2>&1; then
+        if meta_udp443_backend_was_possible_owner nftables; then
+            log_error "Required Meta UDP/443 cleanup tool nft is missing"
+            return 1
+        fi
+        return 0
+    fi
+    if ! nft_meta_udp443_chain_state; then
+        log_error "Failed to inspect stale nft Meta UDP/443 artifacts"
+        return 1
+    fi
+    [ "$NFT_META_CHAIN_STATE" = present ] || return 0
+
+    if ! run_bounded_command "$IPTABLES_BARE_WAIT_SECONDS" \
+        nft delete chain inet KeenPbrTable meta_udp_443 >/dev/null 2>&1; then
+        log_error "Failed to remove stale nft Meta UDP/443 chain"
+        return 1
+    fi
+    if ! nft_meta_udp443_chain_state ||
+       [ "$NFT_META_CHAIN_STATE" != absent ]; then
+        log_error "Stale nft Meta UDP/443 chain remained after cleanup"
+        return 1
+    fi
+    return 0
+}
+
+cleanup_stale_meta_udp443_firewall() {
+    local failed=no
+
+    if ! load_meta_udp443_backend_ownership; then
+        failed=yes
+    fi
+    cleanup_meta_udp443_xtables_family iptables || failed=yes
+    cleanup_meta_udp443_xtables_family ip6tables || failed=yes
+    cleanup_meta_udp443_nft || failed=yes
+    if [ "$failed" = yes ]; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Stale Meta UDP/443 firewall cleanup could not be verified"
+        return 1
+    fi
+    if ! rm -f "$META_UDP443_OWNERSHIP_FILE" 2>/dev/null ||
+       [ -e "$META_UDP443_OWNERSHIP_FILE" ] ||
+       [ -L "$META_UDP443_OWNERSHIP_FILE" ]; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Verified Meta UDP/443 backend marker could not be cleared"
+        return 1
+    fi
+    return 0
 }
 
 is_module_loaded() {
@@ -816,6 +1307,11 @@ stop_service_for_action() {
 
     prepare_stop
     stop_keen_pbr "$mode" || return $?
+    # The daemon normally removes its firewall state during graceful
+    # shutdown.  A crashed/already-stopped daemon cannot do that, so verify
+    # and remove only the exact Meta UDP/443 objects owned by keen-pbr before
+    # declaring the stop safe or allowing FastNAT to be restored.
+    cleanup_stale_meta_udp443_firewall || return 1
     if [ "$final_stop" = yes ] &&
        [ "${STOP_KEEN_PBR_SAFE:-no}" = yes ]; then
         restore_hwnat_if_safe || return 1
@@ -902,6 +1398,10 @@ case "$1" in
 esac
 
 FASTNAT_DISPATCH_ACTION="$1"
+if [ "$FASTNAT_DISPATCH_ACTION" = start ] &&
+   ! guard_meta_udp443_start_ownership; then
+    exit 1
+fi
 . /opt/etc/init.d/rc.func
 status=$?
 if [ "$FASTNAT_DISPATCH_ACTION" = start ] && [ "$status" -ne 0 ]; then
