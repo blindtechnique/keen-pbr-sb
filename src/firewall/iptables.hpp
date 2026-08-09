@@ -2,6 +2,7 @@
 
 #include "firewall.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -50,6 +51,10 @@ public:
                       const std::string& source,
                       std::uint16_t destination_port,
                       const std::string& destination) override;
+    FirewallExactTcpResetResult install_exact_tcp_reset(
+        const FirewallExactTcpResetRule& rule) override;
+    bool remove_exact_tcp_reset(
+        const FirewallExactTcpResetRule& rule) override;
 
     // Buffer an iptables/ip6tables -j MARK --set-mark rule for the given ipset.
     void create_mark_rule(uint32_t fwmark,
@@ -105,6 +110,8 @@ private:
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
     static constexpr const char* META_UDP_443_CHAIN_NAME =
         "KeenPbrMeta443";
+    static constexpr const char* EXACT_TCP_RESET_CHAIN_NAME =
+        "KeenPbrTcpRst";
     static constexpr const char* DNS_NAT_VALIDATION_CHAIN_NAME =
         "KeenPbrDnsValidate";
     static constexpr const char* SNAT_VALIDATION_CHAIN_NAME =
@@ -201,6 +208,20 @@ private:
         bool ipv6,
         const std::string& generation_chain,
         const std::vector<PendingForwardUdpReject>& rules);
+    static std::string build_exact_tcp_reset_rule_line(
+        const FirewallExactTcpResetRule& rule);
+    static std::vector<std::string> build_exact_tcp_reset_rule_spec(
+        const FirewallExactTcpResetRule& rule);
+    static bool exact_tcp_reset_rules_match(
+        const std::string& rendered_rules,
+        const std::vector<FirewallExactTcpResetRule>& expected_rules);
+    static std::string build_exact_tcp_reset_script(
+        bool chain_exists,
+        std::size_t hook_count,
+        const std::vector<FirewallExactTcpResetRule>& rules);
+    FirewallExactTcpResetResult replace_exact_tcp_reset_rules_locked(
+        const std::vector<FirewallExactTcpResetRule>& rules,
+        bool cleanup_on_verification_failure = true);
     void stage_forward_reject_generation(
         bool ipv6,
         FirewallSetGeneration generation) const;
@@ -383,6 +404,12 @@ private:
     bool chain_v6_created_ = false;
     bool forward_reject_v4_created_ = false;
     bool forward_reject_v6_created_ = false;
+    bool exact_tcp_reset_chain_created_ = false;
+    // A restore command can time out after the kernel accepted COMMIT. Keep
+    // this separate from the last verified snapshot so callers never mistake
+    // an indeterminate publication for an absent short-lived reset chain.
+    bool exact_tcp_reset_publication_uncertain_ = false;
+    std::vector<FirewallExactTcpResetRule> installed_exact_tcp_resets_;
     static const char* generation_prerouting_chain(FirewallSetGeneration generation);
     static const char* generation_output_chain(FirewallSetGeneration generation);
     static const char* raw_generation_prerouting_chain(

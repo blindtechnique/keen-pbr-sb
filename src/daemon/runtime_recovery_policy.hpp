@@ -52,6 +52,60 @@ reconnect_owned_flows_on_routing_change_list_names(
     return recommended;
 }
 
+inline std::set<std::string>
+experimental_whatsapp_tcp_reset_sources(const Config& config) {
+    const auto daemon = config.daemon.value_or(DaemonConfig{});
+    if (!daemon.experimental_whatsapp_tcp_reset_sources.has_value()) {
+        return {};
+    }
+    return {
+        daemon.experimental_whatsapp_tcp_reset_sources->begin(),
+        daemon.experimental_whatsapp_tcp_reset_sources->end()};
+}
+
+// Immutable provenance selector used by the independent experimental
+// preventive observer. Unlike UDP call affinity, this does not inherit the
+// strong-reconnect enable/selection switches: the new per-device opt-in is
+// its own authority and still cannot admit copied or manually named lists.
+inline std::set<std::string>
+packaged_whatsapp_ip_companion_list_names(const Config& config) {
+    std::set<std::string> selected;
+    for (const auto& [list_name, list] :
+         config.lists.value_or(std::map<std::string, ListConfig>{})) {
+        if (list.catalog_identity == kWhatsappIpCatalogIdentity) {
+            selected.insert(list_name);
+        }
+    }
+    return selected;
+}
+
+// Preventive rotation also needs the packaged call-affinity observer. Its
+// source-wide high-port UDP view is a read-only safety guard: without it an
+// ongoing P2P call could become invisible after the short companion-media
+// hold and allow signalling TCP to be reset. This authority exists only when
+// at least one device explicitly opted in.
+inline std::set<std::string>
+preventive_whatsapp_media_guard_list_names(const Config& config) {
+    if (experimental_whatsapp_tcp_reset_sources(config).empty()) {
+        return {};
+    }
+    return packaged_whatsapp_ip_companion_list_names(config);
+}
+
+inline bool preventive_whatsapp_media_guard_available(
+    FirewallBackend backend,
+    bool iptables_pair_set_available) noexcept {
+    return backend == FirewallBackend::iptables &&
+           iptables_pair_set_available;
+}
+
+inline bool idle_stall_observer_requested(const Config& config) {
+    return !experimental_whatsapp_tcp_reset_sources(config).empty() ||
+           (reconnect_unmarked_flows_on_routing_change_enabled(config) &&
+            !reconnect_owned_flows_on_routing_change_list_names(config)
+                 .empty());
+}
+
 namespace runtime_recovery_detail {
 
 inline bool firewall_criteria_equal(

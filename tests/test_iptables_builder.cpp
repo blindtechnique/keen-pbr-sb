@@ -258,6 +258,26 @@ public:
         fw.pending_forward_udp_rejects_);
   }
 
+  static std::string build_exact_tcp_reset_rule_line(
+      const FirewallExactTcpResetRule& rule) {
+    return IptablesFirewall::build_exact_tcp_reset_rule_line(rule);
+  }
+
+  static std::string build_exact_tcp_reset_script(
+      bool chain_exists,
+      std::size_t hook_count,
+      const std::vector<FirewallExactTcpResetRule>& rules) {
+    return IptablesFirewall::build_exact_tcp_reset_script(
+        chain_exists, hook_count, rules);
+  }
+
+  static bool exact_tcp_reset_rules_match(
+      const std::string& rendered_rules,
+      const std::vector<FirewallExactTcpResetRule>& expected_rules) {
+    return IptablesFirewall::exact_tcp_reset_rules_match(
+        rendered_rules, expected_rules);
+  }
+
   static bool is_dynamic_set_name(const std::string& name) {
     return IptablesFirewall::is_dynamic_set_name(name);
   }
@@ -771,6 +791,77 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("exact TCP reset builder is tuple-scoped ACK-guarded and hook-first") {
+  const FirewallExactTcpResetRule first{
+      "192.168.1.44", "31.13.72.53", 49152U, 443U, 0x00070000U};
+  const FirewallExactTcpResetRule second{
+      "192.168.1.45", "157.240.241.60", 49153U, 443U, 0x00030000U};
+
+  CHECK(T::build_exact_tcp_reset_rule_line(first) ==
+        "-A KeenPbrTcpRst -s 192.168.1.44 -d 31.13.72.53 "
+        "-p tcp -m tcp --sport 49152 --dport 443 "
+        "-m mark --mark 0x70000/0xffffffff "
+        "--tcp-flags SYN,RST,ACK ACK "
+        "-j REJECT --reject-with tcp-reset\n");
+
+  const auto script = T::build_exact_tcp_reset_script(
+      /*chain_exists=*/true,
+      /*hook_count=*/2U,
+      {first, second});
+  CHECK(script.find("-F KeenPbrTcpRst\n") != std::string::npos);
+  CHECK(script.find(
+            "-A KeenPbrTcpRst -s 192.168.1.44 -d 31.13.72.53") !=
+        std::string::npos);
+  CHECK(script.find(
+            "-A KeenPbrTcpRst -s 192.168.1.45 -d 157.240.241.60") !=
+        std::string::npos);
+  CHECK(script.find(
+            "-D FORWARD -j KeenPbrTcpRst\n"
+            "-D FORWARD -j KeenPbrTcpRst\n"
+            "-I FORWARD 1 -j KeenPbrTcpRst\n") != std::string::npos);
+  CHECK(script.find("--ctstate") == std::string::npos);
+
+  CHECK(T::build_exact_tcp_reset_script(
+            /*chain_exists=*/true,
+            /*hook_count=*/1U,
+            {}) ==
+        "*filter\n"
+        "-F KeenPbrTcpRst\n"
+        "-D FORWARD -j KeenPbrTcpRst\n"
+        "-X KeenPbrTcpRst\n"
+        "COMMIT\n");
+
+  const std::string keenetic_rendered =
+      "-N KeenPbrTcpRst\n"
+      "-A FORWARD -j KeenPbrTcpRst\n"
+      "-A KeenPbrTcpRst -s 192.168.1.44/32 -d 31.13.72.53/32 "
+      "-p tcp -m tcp --sport 49152 --dport 443 "
+      "-m mark --mark 0x70000/0xffffffff "
+      "--tcp-flags 0x16 0x10 -j REJECT --reject-with tcp-reset\n"
+      "-A KeenPbrTcpRst -s 192.168.1.45/32 "
+      "-d 157.240.241.60/32 -p tcp -m tcp --sport 49153 "
+      "--dport 443 -m mark --mark 0x30000/0xffffffff "
+      "--tcp-flags SYN,RST,ACK ACK -j REJECT "
+      "--reject-with tcp-reset\n";
+  CHECK(T::exact_tcp_reset_rules_match(
+      keenetic_rendered, {first, second}));
+
+  auto wrong_mark = keenetic_rendered;
+  const auto mark = wrong_mark.find("0x70000/0xffffffff");
+  REQUIRE(mark != std::string::npos);
+  wrong_mark.replace(mark, std::string{"0x70000"}.size(), "0x60000");
+  CHECK_FALSE(T::exact_tcp_reset_rules_match(
+      wrong_mark, {first, second}));
+
+  auto broadened = keenetic_rendered;
+  const auto destination = broadened.find("-d 31.13.72.53/32 ");
+  REQUIRE(destination != std::string::npos);
+  broadened.erase(
+      destination, std::string{"-d 31.13.72.53/32 "}.size());
+  CHECK_FALSE(T::exact_tcp_reset_rules_match(
+      broadened, {first, second}));
+}
 
 TEST_CASE("Meta UDP 443 iptables rule has exact narrow transport scope") {
   const auto script = T::build_forward_udp_reject_script(

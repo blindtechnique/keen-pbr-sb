@@ -275,6 +275,32 @@ enum class OwnedForwardUdpRejectState : uint8_t {
     unknown,
 };
 
+// Exact, short-lived TCP flow selected by a higher-level runtime observer for
+// one opt-in IPv4 client.  The backend must match every field, including the
+// complete packet mark, so this primitive can never degrade into a host-wide
+// or destination-wide reset policy.
+struct FirewallExactTcpResetRule {
+    std::string source;
+    std::string destination;
+    std::uint16_t source_port{0U};
+    std::uint16_t destination_port{0U};
+    std::uint32_t full_mark{0U};
+
+    bool operator==(const FirewallExactTcpResetRule& other) const {
+        return source == other.source &&
+               destination == other.destination &&
+               source_port == other.source_port &&
+               destination_port == other.destination_port &&
+               full_mark == other.full_mark;
+    }
+};
+
+enum class FirewallExactTcpResetResult : uint8_t {
+    installed,
+    unsupported,
+    failed,
+};
+
 // Abstract firewall interface for managing IP sets and packet marking rules.
 // Both iptables and nftables backends implement this interface.
 //
@@ -332,6 +358,21 @@ public:
                               const std::string& source,
                               std::uint16_t destination_port,
                               const std::string& destination) = 0;
+
+    // Arm one short-lived TCP reset window for an exact observed IPv4 flow.
+    // Backends that cannot provide the complete match contract fail closed.
+    // The default deliberately keeps this experimental actuator unavailable
+    // to nftables until it has an equally narrow, tested implementation.
+    virtual FirewallExactTcpResetResult install_exact_tcp_reset(
+        const FirewallExactTcpResetRule& rule) {
+        (void)rule;
+        return FirewallExactTcpResetResult::unsupported;
+    }
+    virtual bool remove_exact_tcp_reset(
+        const FirewallExactTcpResetRule& rule) {
+        (void)rule;
+        return false;
+    }
 
     // Create a firewall rule that marks packets matching the given criteria
     // with the specified firewall mark (fwmark).

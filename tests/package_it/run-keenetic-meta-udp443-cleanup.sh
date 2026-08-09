@@ -88,6 +88,31 @@ RULES
 RULES
             exit 0
             ;;
+        tcp-stale|tcp-fail-restore|tcp-remains)
+            cat <<'RULES'
+-N KeenPbrTcpRst
+-A FORWARD -j KeenPbrTcpRst
+-A KeenPbrTcpRst -s 192.168.1.44/32 -d 31.13.72.53/32 -p tcp -m tcp --sport 51000 --dport 443 -m mark --mark 0x30000/0xffffffff -m tcp --tcp-flags ACK ACK -j REJECT --reject-with tcp-reset
+RULES
+            exit 0
+            ;;
+        tcp-duplicate)
+            cat <<'RULES'
+-N KeenPbrTcpRst
+-A FORWARD -j KeenPbrTcpRst
+-A FORWARD -j KeenPbrTcpRst
+-A KeenPbrTcpRst -s 192.168.1.44/32 -d 31.13.72.53/32 -p tcp -m tcp --sport 51000 --dport 443 -m mark --mark 0x30000/0xffffffff -m tcp --tcp-flags ACK ACK -j REJECT --reject-with tcp-reset
+RULES
+            exit 0
+            ;;
+        tcp-foreign)
+            cat <<'RULES'
+-N KeenPbrTcpRst
+-A FORWARD -j KeenPbrTcpRst
+-A ForeignChain -j KeenPbrTcpRst
+RULES
+            exit 0
+            ;;
     esac
 fi
 
@@ -112,7 +137,23 @@ printf '%s\n' "$payload" | sed "s/^/$restore stdin: /" >> "$META_TEST_LOG"
     exit 93
 }
 
-expected='*filter
+case "$state" in
+    tcp-stale|tcp-fail-restore|tcp-remains)
+        expected='*filter
+-D FORWARD -j KeenPbrTcpRst
+-F KeenPbrTcpRst
+-X KeenPbrTcpRst
+COMMIT'
+        ;;
+    tcp-duplicate)
+        expected='*filter
+-D FORWARD -j KeenPbrTcpRst
+-D FORWARD -j KeenPbrTcpRst
+-F KeenPbrTcpRst
+-X KeenPbrTcpRst
+COMMIT'
+        ;;
+    *) expected='*filter
 -D FORWARD -j KeenPbrMeta443
 -F KeenPbrMeta443
 -X KeenPbrMeta443
@@ -120,7 +161,8 @@ expected='*filter
 -X KeenPbrMeta443_A
 -F KeenPbrMeta443_B
 -X KeenPbrMeta443_B
-COMMIT'
+COMMIT' ;;
+esac
 [ "$payload" = "$expected" ] || {
     echo "unexpected $restore transaction" >&2
     printf '%s\n' "$payload" >&2
@@ -141,6 +183,17 @@ case "$state" in
         # validation rejects the transaction, leaving the owned graph intact.
         printf '%s\n' foreign > "$state_file"
         exit 4
+        ;;
+    tcp-stale|tcp-duplicate)
+        printf '%s\n' absent > "$state_file"
+        exit 0
+        ;;
+    tcp-fail-restore)
+        exit 4
+        ;;
+    tcp-remains)
+        # Model a restore that returned success without the requested state.
+        exit 0
         ;;
 esac
 
@@ -466,7 +519,7 @@ run_ipv4_only_start_and_clean_stop_case() (
 )
 
 run_crash_reconciles_before_new_start_case() (
-    reset_case absent unavailable stale
+    reset_case tcp-stale unavailable stale
     printf '%s\n' nftables > "$META_UDP443_OWNERSHIP_FILE"
     PATH="$work/bin:$PATH"
     META_TEST_STATE="$work/state"
@@ -481,7 +534,10 @@ run_crash_reconciles_before_new_start_case() (
     . "$work/functions.sh"
 
     guard_meta_udp443_start_ownership
+    assert_state absent iptables
     assert_state absent nft
+    grep -F -x -q -- \
+        'iptables-restore --noflush' "$work/calls"
     grep -F -x -q -- \
         'nft delete chain inet KeenPbrTable meta_udp_443' "$work/calls"
     [ "$(cat "$META_UDP443_OWNERSHIP_FILE")" = "nftables
@@ -490,7 +546,7 @@ ip6tables" ]
 )
 
 run_live_daemon_start_does_not_cleanup_case() (
-    reset_case absent unavailable stale
+    reset_case tcp-stale unavailable stale
     printf '%s\n' nftables > "$META_UDP443_OWNERSHIP_FILE"
     META_TEST_DAEMON_LIVE=yes
     PATH="$work/bin:$PATH"
@@ -503,12 +559,88 @@ run_live_daemon_start_does_not_cleanup_case() (
     . "$work/functions.sh"
 
     guard_meta_udp443_start_ownership
+    assert_state tcp-stale iptables
     assert_state stale nft
     if grep -Eq -- 'tables-restore|nft delete chain' "$work/calls"; then
         echo "already-running start mutated active Meta UDP/443 state" >&2
         cat "$work/calls" >&2
         exit 1
     fi
+)
+
+run_tcp_rst_duplicate_stop_cleanup_case() (
+    reset_case tcp-duplicate unavailable absent
+    PATH="$work/bin-ipv4-only:/bin:/usr/bin"
+    META_TEST_STATE="$work/state"
+    META_TEST_LOG="$work/calls"
+    FASTNAT_UNSAFE_STOP_FILE="$work/unsafe"
+    IPTABLES_WAIT_MODE=""
+    STOP_KEEN_PBR_SAFE=yes
+    export PATH META_TEST_STATE META_TEST_LOG
+    log_error() { printf 'error: %s\n' "$1" >&2; }
+    . "$work/functions.sh"
+    prepare_stop() { :; }
+    stop_keen_pbr() { STOP_KEEN_PBR_SAFE=yes; return 0; }
+    restore_hwnat_if_safe() { : > "$work/restored"; }
+
+    stop_service_for_action stop yes
+    assert_state absent iptables
+    [ -e "$work/restored" ]
+    [ ! -e "$FASTNAT_UNSAFE_STOP_FILE" ]
+    [ "$(grep -F -c -- \
+        'iptables-restore stdin: -D FORWARD -j KeenPbrTcpRst' \
+        "$work/calls")" -eq 2 ]
+    grep -F -x -q -- \
+        'iptables-restore stdin: -F KeenPbrTcpRst' "$work/calls"
+    grep -F -x -q -- \
+        'iptables-restore stdin: -X KeenPbrTcpRst' "$work/calls"
+)
+
+run_tcp_rst_foreign_reference_case() (
+    reset_case tcp-foreign unavailable absent
+    PATH="$work/bin-ipv4-only:/bin:/usr/bin"
+    META_TEST_STATE="$work/state"
+    META_TEST_LOG="$work/calls"
+    FASTNAT_UNSAFE_STOP_FILE="$work/unsafe"
+    IPTABLES_WAIT_MODE=""
+    STOP_KEEN_PBR_SAFE=yes
+    export PATH META_TEST_STATE META_TEST_LOG
+    log_error() { :; }
+    . "$work/functions.sh"
+
+    if cleanup_stale_tcp_rst_firewall; then
+        echo "TCP reset cleanup accepted a foreign chain reference" >&2
+        exit 1
+    fi
+    [ -e "$FASTNAT_UNSAFE_STOP_FILE" ]
+    [ "$STOP_KEEN_PBR_SAFE" = no ]
+    assert_state tcp-foreign iptables
+    if grep -F -q -- 'iptables-restore ' "$work/calls"; then
+        echo "foreign TCP reset reference triggered a mutation" >&2
+        cat "$work/calls" >&2
+        exit 1
+    fi
+)
+
+run_tcp_rst_post_cleanup_verification_case() (
+    reset_case tcp-remains unavailable absent
+    PATH="$work/bin-ipv4-only:/bin:/usr/bin"
+    META_TEST_STATE="$work/state"
+    META_TEST_LOG="$work/calls"
+    FASTNAT_UNSAFE_STOP_FILE="$work/unsafe"
+    IPTABLES_WAIT_MODE=""
+    STOP_KEEN_PBR_SAFE=yes
+    export PATH META_TEST_STATE META_TEST_LOG
+    log_error() { :; }
+    . "$work/functions.sh"
+
+    if cleanup_stale_tcp_rst_firewall; then
+        echo "TCP reset cleanup accepted stale post-restore state" >&2
+        exit 1
+    fi
+    [ -e "$FASTNAT_UNSAFE_STOP_FILE" ]
+    [ "$STOP_KEEN_PBR_SAFE" = no ]
+    assert_state tcp-remains iptables
 )
 
 run_foreign_reference_case() (
@@ -693,6 +825,9 @@ run_restart_with_missing_prior_owner_case nftables
 run_ipv4_only_start_and_clean_stop_case
 run_crash_reconciles_before_new_start_case
 run_live_daemon_start_does_not_cleanup_case
+run_tcp_rst_duplicate_stop_cleanup_case
+run_tcp_rst_foreign_reference_case
+run_tcp_rst_post_cleanup_verification_case
 run_foreign_reference_case
 run_failure_propagation_case
 run_concurrent_reference_case

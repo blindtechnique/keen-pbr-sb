@@ -2818,6 +2818,64 @@ TEST_CASE(
         "daemon.reconnect_owned_flows_on_routing_change_lists[1]");
 }
 
+TEST_CASE(
+    "daemon experimental WhatsApp TCP reset accepts explicit unique IPv4 sources") {
+    const auto cfg = parse_test_config(R"({
+        "daemon":{
+            "experimental_whatsapp_tcp_reset_sources":[
+                "192.168.1.117", "10.8.0.2"
+            ]
+        }
+    })");
+    REQUIRE(cfg.daemon.has_value());
+    REQUIRE(
+        cfg.daemon->experimental_whatsapp_tcp_reset_sources.has_value());
+    CHECK(*cfg.daemon->experimental_whatsapp_tcp_reset_sources ==
+          std::vector<std::string>{"192.168.1.117", "10.8.0.2"});
+}
+
+TEST_CASE(
+    "daemon experimental WhatsApp TCP reset rejects malformed arrays") {
+    const auto wrong_type = parse_issues(R"({
+        "daemon":{"experimental_whatsapp_tcp_reset_sources":"all"}
+    })");
+    REQUIRE(wrong_type.size() == 1U);
+    CHECK(wrong_type.front().path ==
+          "daemon.experimental_whatsapp_tcp_reset_sources");
+
+    const auto non_string = parse_issues(R"({
+        "daemon":{"experimental_whatsapp_tcp_reset_sources":[7]}
+    })");
+    REQUIRE(non_string.size() == 1U);
+    CHECK(non_string.front().path ==
+          "daemon.experimental_whatsapp_tcp_reset_sources[0]");
+}
+
+TEST_CASE(
+    "daemon experimental WhatsApp TCP reset rejects unsafe or duplicate sources") {
+    for (const auto* source : {
+             "0.0.0.0", "255.255.255.255", "224.0.0.1",
+             "240.0.0.1", "192.168.1.0/24", "not-an-address"}) {
+        const auto issues = validate_issues(
+            std::string{R"({"daemon":{"experimental_whatsapp_tcp_reset_sources":[")"} +
+            source + R"("]}})");
+        REQUIRE(issues.size() == 1U);
+        CHECK(issues.front().path ==
+              "daemon.experimental_whatsapp_tcp_reset_sources[0]");
+    }
+
+    const auto duplicate = validate_issues(R"({
+        "daemon":{
+            "experimental_whatsapp_tcp_reset_sources":[
+                "192.168.1.117", "192.168.1.117"
+            ]
+        }
+    })");
+    REQUIRE(duplicate.size() == 1U);
+    CHECK(duplicate.front().path ==
+          "daemon.experimental_whatsapp_tcp_reset_sources[1]");
+}
+
 TEST_CASE("daemon.ipv6_enabled: defaults to true behavior when absent") {
     auto cfg = parse_test_config(R"({"daemon":{}})");
     REQUIRE(cfg.daemon.has_value());

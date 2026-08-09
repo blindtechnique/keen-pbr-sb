@@ -126,11 +126,16 @@ struct IdleStallScan {
     std::uint32_t owned_mark_mask{0};
     IdleStallScanStatus status;
     std::vector<IdleStallFlowSample> flows;
+    // Explicit per-device opt-in for the experimental exact TCP-reset
+    // actuator. An empty set is the default and cannot change ordinary
+    // recovery behavior.
+    std::set<std::string> preventive_tcp_reset_sources;
 };
 
 enum class IdleStallDecisionReason : std::uint8_t {
     idle_request_without_reply,
     idle_fastnat_rotation,
+    idle_opt_in_tcp_reset_rotation,
 };
 
 struct IdleStallDeleteDecision {
@@ -166,6 +171,13 @@ struct IdleStallDetectorOptions {
     // application flow look healthy. A direction has application progress
     // only when its byte delta for one complete scan exceeds this threshold.
     std::uint64_t tiny_keepalive_max_bytes_per_direction{256};
+    // A long-lived established TCP tuple that never grew beyond its initial
+    // tiny handshake is the live WhatsApp failure mode seen on opted-in
+    // Android senders. Absolute lifetime bounds prevent the preventive path
+    // from rotating ordinary signalling or content transfers merely because
+    // one observation interval was quiet.
+    std::uint64_t preventive_tcp_reset_max_packets_per_direction{4};
+    std::uint64_t preventive_tcp_reset_max_bytes_per_direction{512};
     std::size_t max_tracked_flows{256};
     std::size_t max_decisions_per_scan{2};
     std::size_t max_decisions_per_rate_window{8};
@@ -232,6 +244,7 @@ public:
             bool original_application_progress{false};
             bool reply_application_progress{false};
             bool was_idle{false};
+            bool counters_unchanged_for_idle{false};
         };
 
         std::vector<PreparedSample> prepared;
@@ -247,6 +260,7 @@ public:
                 sample.key,
                 FlowState{sample.counters,
                           now,
+                          now,
                           std::nullopt,
                           sample.recovery_policy});
             auto& state = iterator->second;
@@ -256,11 +270,12 @@ public:
                 pending_attempts_.erase(sample.key);
                 state = FlowState{sample.counters,
                                   now,
+                                  now,
                                   std::nullopt,
                                   sample.recovery_policy};
                 prepared.push_back(
                     PreparedSample{&sample, &state, true, false, false,
-                                   false, false, false});
+                                   false, false, false, false});
                 continue;
             }
 
@@ -288,7 +303,9 @@ public:
                     options_.tiny_keepalive_max_bytes_per_direction,
                 reply_byte_delta >
                     options_.tiny_keepalive_max_bytes_per_direction,
-                now - state.last_activity_at >= options_.idle_threshold});
+                now - state.last_activity_at >= options_.idle_threshold,
+                now - state.last_counter_change_at >=
+                    options_.idle_threshold});
         }
 
         for (auto iterator = states_.begin(); iterator != states_.end();) {
@@ -352,6 +369,38 @@ public:
                         packaged_whatsapp_ip_companion) {
                     whatsapp_fast_followup_requested_ = true;
                 }
+            } else if (state.recovery_policy ==
+                           IdleStallRecoveryPolicy::
+                               packaged_whatsapp_ip_companion &&
+                       scan.preventive_tcp_reset_sources.count(
+                           current.sample->key.source) != 0U &&
+                       current.sample->key.protocol ==
+                           IdleStallProtocol::tcp &&
+                       current.sample->key.destination_port == 443U &&
+                       current.sample->key.full_mark != 0U &&
+                       current.counters_unchanged_for_idle &&
+                       !current.original_grew && !current.reply_grew &&
+                       current.sample->counters.original_packets <=
+                           options_.preventive_tcp_reset_max_packets_per_direction &&
+                       current.sample->counters.reply_packets <=
+                           options_.preventive_tcp_reset_max_packets_per_direction &&
+                       current.sample->counters.original_bytes <=
+                           options_.preventive_tcp_reset_max_bytes_per_direction &&
+                       current.sample->counters.reply_bytes <=
+                           options_.preventive_tcp_reset_max_bytes_per_direction &&
+                       !current.original_application_progress &&
+                       !current.reply_application_progress) {
+                // This is deliberately narrower than FASTNAT rotation: only
+                // an explicitly opted-in device and the immutable packaged
+                // WhatsApp companion may request the one-shot TCP reset.
+                // A tuple must remain byte-for-byte unchanged for the full
+                // threshold and stay within the tiny lifetime envelope. The
+                // exact 2/2 handshake-only live failure qualifies; ordinary
+                // dormant application flows and one-way activity do not.
+                candidates.push_back(Candidate{
+                    current.sample->key,
+                    IdleStallDecisionReason::
+                        idle_opt_in_tcp_reset_rotation});
             } else if (options_.rotate_idle_fastnat_tcp &&
                        current.sample->fastnat &&
                        current.sample->key.protocol ==
@@ -370,6 +419,9 @@ public:
             if (current.original_application_progress ||
                 current.reply_application_progress) {
                 state.last_activity_at = now;
+            }
+            if (current.original_grew || current.reply_grew) {
+                state.last_counter_change_at = now;
             }
             state.counters = current.sample->counters;
         }
@@ -539,6 +591,7 @@ private:
     struct FlowState {
         IdleStallFlowCounters counters;
         TimePoint last_activity_at;
+        TimePoint last_counter_change_at;
         std::optional<TimePoint> suspect_since;
         IdleStallRecoveryPolicy recovery_policy{
             IdleStallRecoveryPolicy::standard};
@@ -649,6 +702,8 @@ private:
             options_.active_media_hold <= std::chrono::seconds::zero() ||
             options_.source_cooldown <= std::chrono::seconds::zero() ||
             options_.global_rate_window <= std::chrono::seconds::zero() ||
+            options_.preventive_tcp_reset_max_packets_per_direction == 0U ||
+            options_.preventive_tcp_reset_max_bytes_per_direction == 0U ||
             options_.max_tracked_flows == 0U ||
             options_.max_decisions_per_scan == 0U ||
             options_.max_decisions_per_rate_window == 0U) {

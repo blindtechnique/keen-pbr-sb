@@ -35,6 +35,12 @@ export interface DaemonConfig {
      * @maxItems 128
      */
   reconnect_owned_flows_on_routing_change_lists?: string[] | null;
+  /**
+     * Experimental, per-device opt-in for preventive WhatsApp TCP rotation. Each item must be one exact IPv4 source address of a LAN device. Omission or an empty array disables the feature. When the immutable packaged WhatsApp IP companion observes an idle, keepalive-only exact TCP flow for an opted-in device, keen-pbr may install one short-lived TCP reset window for that exact 5-tuple and full conntrack mark before retiring only that conntrack entry. The rule is never created for a CIDR, all Meta destinations, an unlisted device, an unverified companion, or while active UDP media protects the source. This experimental actuator is supported only by the iptables backend and remains disabled by default.
+
+     * @maxItems 8
+     */
+  experimental_whatsapp_tcp_reset_sources?: string[] | null;
   /** WhatsApp/Meta transport preference for the authoritative packaged Meta/WhatsApp IP companion. `balanced` is the recommended default and keeps UDP/443 available. `messages_first` is experimental and rejects forwarded UDP/443 packets only when the companion is selected by one unambiguous active broad route. Affected clients may then fall back to TCP. This may improve initial message delivery, but live Android testing also showed later WhatsApp sessions stalling without sending message data; return to `balanced` if messages remain at zero ticks. Call audio may take 10-20 seconds longer to connect. This policy does not block UDP/3478, UDP/5349, or P2P/high-port media. It also affects Instagram and other Meta traffic inside the authoritative companion ranges. `messages_first` currently requires `ipv6_enabled: false` because the packaged companion has no verified authoritative IPv6 coverage; apply is rejected while IPv6 routing is enabled. Omitting the field or setting it to `null` uses `balanced`.
    */
   meta_udp443_policy?: DaemonConfigMetaUdp443Policy;

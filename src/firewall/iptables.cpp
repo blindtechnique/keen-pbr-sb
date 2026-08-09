@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -100,6 +101,26 @@ static bool exact_udp_peer_matches_family(const std::string& source,
     return ::inet_pton(family, source.c_str(), source_bytes.data()) == 1 &&
            ::inet_pton(
                family, destination.c_str(), destination_bytes.data()) == 1;
+}
+
+static bool valid_exact_tcp_reset_rule(
+    const FirewallExactTcpResetRule& rule) {
+    if (rule.source.empty() || rule.destination.empty() ||
+        rule.source_port == 0U || rule.destination_port == 0U ||
+        rule.full_mark == 0U ||
+        rule.source.find('/') != std::string::npos ||
+        rule.destination.find('/') != std::string::npos) {
+        return false;
+    }
+
+    std::array<unsigned char, 4> source_bytes{};
+    std::array<unsigned char, 4> destination_bytes{};
+    return ::inet_pton(
+               AF_INET, rule.source.c_str(), source_bytes.data()) == 1 &&
+           ::inet_pton(
+               AF_INET,
+               rule.destination.c_str(),
+               destination_bytes.data()) == 1;
 }
 
 const char* IptablesFirewall::generation_prerouting_chain(
@@ -1706,7 +1727,444 @@ std::size_t jump_reference_count(
     return count;
 }
 
+bool parse_rendered_uint32(std::string_view text, std::uint32_t& value) {
+    int base = 10;
+    if (text.size() > 2U && text[0] == '0' &&
+        (text[1] == 'x' || text[1] == 'X')) {
+        text.remove_prefix(2U);
+        base = 16;
+    }
+    if (text.empty()) {
+        return false;
+    }
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto parsed = std::from_chars(begin, end, value, base);
+    return parsed.ec == std::errc{} && parsed.ptr == end;
+}
+
+bool rendered_ipv4_equals(
+    const std::string& rendered,
+    const std::string& expected) {
+    return rendered == expected || rendered == expected + "/32";
+}
+
+bool rendered_mark_equals(
+    const std::string& rendered,
+    std::uint32_t expected) {
+    const auto separator = rendered.find('/');
+    if (separator == std::string::npos) {
+        return false;
+    }
+    std::uint32_t value = 0U;
+    std::uint32_t mask = 0U;
+    return parse_rendered_uint32(
+               std::string_view{rendered}.substr(0U, separator), value) &&
+           parse_rendered_uint32(
+               std::string_view{rendered}.substr(separator + 1U), mask) &&
+           value == expected && mask == 0xFFFFFFFFU;
+}
+
+std::optional<std::uint8_t> rendered_tcp_flags(
+    const std::string& rendered) {
+    std::uint32_t numeric = 0U;
+    if (parse_rendered_uint32(rendered, numeric)) {
+        if (numeric <= 0xFFU) {
+            return static_cast<std::uint8_t>(numeric);
+        }
+        return std::nullopt;
+    }
+
+    std::uint8_t flags = 0U;
+    std::size_t begin = 0U;
+    while (begin <= rendered.size()) {
+        const auto end = rendered.find(',', begin);
+        const std::string_view flag{
+            rendered.data() + begin,
+            (end == std::string::npos ? rendered.size() : end) - begin};
+        if (flag == "FIN") {
+            flags |= 0x01U;
+        } else if (flag == "SYN") {
+            flags |= 0x02U;
+        } else if (flag == "RST") {
+            flags |= 0x04U;
+        } else if (flag == "PSH") {
+            flags |= 0x08U;
+        } else if (flag == "ACK") {
+            flags |= 0x10U;
+        } else if (flag == "URG") {
+            flags |= 0x20U;
+        } else {
+            return std::nullopt;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1U;
+    }
+    return flags;
+}
+
+bool rendered_exact_tcp_reset_rule_matches(
+    const std::string& line,
+    const FirewallExactTcpResetRule& expected) {
+    std::istringstream input(line);
+    std::vector<std::string> tokens{
+        std::istream_iterator<std::string>{input},
+        std::istream_iterator<std::string>{}};
+    if (tokens.size() < 3U || tokens[0] != "-A" ||
+        tokens[1] != "KeenPbrTcpRst") {
+        return false;
+    }
+
+    bool source = false;
+    bool destination = false;
+    bool protocol = false;
+    bool tcp_match = false;
+    bool mark_match = false;
+    bool source_port = false;
+    bool destination_port = false;
+    bool mark = false;
+    bool tcp_flags = false;
+    bool jump = false;
+    bool reject = false;
+    for (std::size_t index = 2U; index < tokens.size();) {
+        const auto& option = tokens[index++];
+        if (index >= tokens.size()) {
+            return false;
+        }
+        const auto& value = tokens[index++];
+        if (option == "-s") {
+            if (source || !rendered_ipv4_equals(value, expected.source)) {
+                return false;
+            }
+            source = true;
+        } else if (option == "-d") {
+            if (destination ||
+                !rendered_ipv4_equals(value, expected.destination)) {
+                return false;
+            }
+            destination = true;
+        } else if (option == "-p") {
+            if (protocol || value != "tcp") {
+                return false;
+            }
+            protocol = true;
+        } else if (option == "-m") {
+            if (value == "tcp" && !tcp_match) {
+                tcp_match = true;
+            } else if (value == "mark" && !mark_match) {
+                mark_match = true;
+            } else {
+                return false;
+            }
+        } else if (option == "--sport" ||
+                   option == "--source-port") {
+            std::uint32_t parsed = 0U;
+            if (source_port ||
+                !parse_rendered_uint32(value, parsed) ||
+                parsed != expected.source_port) {
+                return false;
+            }
+            source_port = true;
+        } else if (option == "--dport" ||
+                   option == "--destination-port") {
+            std::uint32_t parsed = 0U;
+            if (destination_port ||
+                !parse_rendered_uint32(value, parsed) ||
+                parsed != expected.destination_port) {
+                return false;
+            }
+            destination_port = true;
+        } else if (option == "--mark") {
+            if (mark || !rendered_mark_equals(value, expected.full_mark)) {
+                return false;
+            }
+            mark = true;
+        } else if (option == "--tcp-flags") {
+            if (tcp_flags || index >= tokens.size()) {
+                return false;
+            }
+            const auto mask = rendered_tcp_flags(value);
+            const auto comparison = rendered_tcp_flags(tokens[index++]);
+            if (!mask.has_value() || !comparison.has_value() ||
+                *mask != 0x16U || *comparison != 0x10U) {
+                return false;
+            }
+            tcp_flags = true;
+        } else if (option == "-j") {
+            if (jump || value != "REJECT") {
+                return false;
+            }
+            jump = true;
+        } else if (option == "--reject-with") {
+            if (reject || value != "tcp-reset") {
+                return false;
+            }
+            reject = true;
+        } else {
+            return false;
+        }
+    }
+
+    return source && destination && protocol && tcp_match && mark_match &&
+           source_port && destination_port && mark && tcp_flags && jump &&
+           reject;
+}
+
 } // namespace
+
+bool IptablesFirewall::exact_tcp_reset_rules_match(
+    const std::string& rendered_rules,
+    const std::vector<FirewallExactTcpResetRule>& expected_rules) {
+    std::vector<std::string> live_rules;
+    const std::string prefix =
+        std::string{"-A "} + EXACT_TCP_RESET_CHAIN_NAME + " ";
+    std::istringstream input(rendered_rules);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind(prefix, 0U) == 0U) {
+            live_rules.push_back(line);
+        }
+    }
+    if (live_rules.size() != expected_rules.size()) {
+        return false;
+    }
+
+    std::vector<bool> matched(expected_rules.size(), false);
+    for (const auto& live : live_rules) {
+        bool found = false;
+        for (std::size_t index = 0U; index < expected_rules.size(); ++index) {
+            if (!matched[index] &&
+                rendered_exact_tcp_reset_rule_matches(
+                    live, expected_rules[index])) {
+                matched[index] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}
+
+FirewallExactTcpResetResult
+IptablesFirewall::replace_exact_tcp_reset_rules_locked(
+    const std::vector<FirewallExactTcpResetRule>& rules,
+    bool cleanup_on_verification_failure) {
+    const std::vector<std::string> inspect_args{
+        "iptables", "-t", "filter", "-S"};
+    ExecCaptureResult before;
+    for (std::size_t attempt = 0U;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        before = run_iptables_control(inspect_args);
+        if (before.exit_code == 127 && !before.timed_out) {
+            return FirewallExactTcpResetResult::unsupported;
+        }
+        if (command_reports_table_unavailable(before)) {
+            return FirewallExactTcpResetResult::unsupported;
+        }
+        const auto outcome = classify_iptables_command(before);
+        if (outcome == IptablesCommandOutcome::Success) {
+            break;
+        }
+        if (outcome == IptablesCommandOutcome::PermanentFailure ||
+            before.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            record_iptables_control_failure(inspect_args, before);
+            return FirewallExactTcpResetResult::failed;
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
+    }
+
+    const bool chain_exists = chain_declared(
+        before.stdout_output, EXACT_TCP_RESET_CHAIN_NAME);
+    const auto hooks = exact_jump_positions(
+        before.stdout_output, "FORWARD", EXACT_TCP_RESET_CHAIN_NAME);
+    if (jump_reference_count(
+            before.stdout_output, EXACT_TCP_RESET_CHAIN_NAME) !=
+            hooks.size() ||
+        (!chain_exists && !hooks.empty())) {
+        Logger::instance().warn(
+            "iptables exact TCP reset chain has an unexpected reference; "
+            "refusing to replace it");
+        return FirewallExactTcpResetResult::failed;
+    }
+
+    // A fresh firewall object may discover an owned chain left by a crashed
+    // daemon. Retain that observed ownership before probing restore support:
+    // a transient probe failure must not make later cleanup forget live RSTs.
+    if (chain_exists || !hooks.empty()) {
+        exact_tcp_reset_chain_created_ = true;
+        exact_tcp_reset_publication_uncertain_ = true;
+    }
+
+    if (rules.empty() && !chain_exists && hooks.empty()) {
+        exact_tcp_reset_chain_created_ = false;
+        exact_tcp_reset_publication_uncertain_ = false;
+        installed_exact_tcp_resets_.clear();
+        return FirewallExactTcpResetResult::installed;
+    }
+
+    const auto restore_probe = run_iptables_control(
+        {"iptables-restore", "--version"});
+    if (restore_probe.exit_code == 127 && !restore_probe.timed_out) {
+        return FirewallExactTcpResetResult::unsupported;
+    }
+    if (classify_iptables_command(restore_probe) !=
+        IptablesCommandOutcome::Success) {
+        record_iptables_control_failure(
+            {"iptables-restore", "--version"}, restore_probe);
+        return FirewallExactTcpResetResult::failed;
+    }
+
+    // From this point onward the next restore may reach COMMIT even if the
+    // parent observes a timeout or another execution error. Record potential
+    // ownership before publication so every failure path remains fail-closed.
+    exact_tcp_reset_chain_created_ = true;
+    exact_tcp_reset_publication_uncertain_ = true;
+    try {
+        pipe_to_cmd(
+            {"iptables-restore", "--noflush", "--counters"},
+            build_exact_tcp_reset_script(
+                chain_exists, hooks.size(), rules));
+    } catch (const std::exception& error) {
+        Logger::instance().warn(
+            "failed to publish exact TCP reset rule: {}", error.what());
+        if (!rules.empty()) {
+            // A timed-out restore can have committed just before the parent
+            // lost its result. Immediately attempt a separately verified
+            // teardown. If absence cannot be proved, retain uncertain
+            // ownership so remove/stop/startup cleanup will retry it.
+            const auto cleanup = replace_exact_tcp_reset_rules_locked(
+                {}, /*cleanup_on_verification_failure=*/false);
+            if (cleanup != FirewallExactTcpResetResult::installed) {
+                exact_tcp_reset_chain_created_ = true;
+                exact_tcp_reset_publication_uncertain_ = true;
+            }
+        }
+        return FirewallExactTcpResetResult::failed;
+    }
+
+    const auto after = run_iptables_control(inspect_args);
+    const auto after_outcome = classify_iptables_command(after);
+    const auto after_hooks = after_outcome == IptablesCommandOutcome::Success
+        ? exact_jump_positions(
+              after.stdout_output, "FORWARD", EXACT_TCP_RESET_CHAIN_NAME)
+        : std::vector<std::size_t>{};
+    bool verified = rules.empty()
+        ? after_outcome == IptablesCommandOutcome::Success &&
+              !chain_declared(
+                  after.stdout_output, EXACT_TCP_RESET_CHAIN_NAME) &&
+              after_hooks.empty() &&
+              jump_reference_count(
+                  after.stdout_output, EXACT_TCP_RESET_CHAIN_NAME) == 0U
+        : after_outcome == IptablesCommandOutcome::Success &&
+              chain_declared(
+                  after.stdout_output, EXACT_TCP_RESET_CHAIN_NAME) &&
+              after_hooks.size() == 1U && after_hooks.front() == 1U &&
+              jump_reference_count(
+                  after.stdout_output, EXACT_TCP_RESET_CHAIN_NAME) == 1U &&
+              exact_tcp_reset_rules_match(
+                  after.stdout_output, rules);
+    if (!verified) {
+        record_iptables_control_failure(
+            inspect_args, after, "exact_tcp_reset_verification_failed");
+        if (cleanup_on_verification_failure && !rules.empty()) {
+            const auto cleanup = replace_exact_tcp_reset_rules_locked(
+                {}, /*cleanup_on_verification_failure=*/false);
+            if (cleanup == FirewallExactTcpResetResult::installed) {
+                installed_exact_tcp_resets_.clear();
+                exact_tcp_reset_chain_created_ = false;
+                exact_tcp_reset_publication_uncertain_ = false;
+            } else {
+                exact_tcp_reset_chain_created_ = true;
+                exact_tcp_reset_publication_uncertain_ = true;
+            }
+        }
+        return FirewallExactTcpResetResult::failed;
+    }
+
+    exact_tcp_reset_chain_created_ = !rules.empty();
+    exact_tcp_reset_publication_uncertain_ = false;
+    if (rules.empty()) {
+        installed_exact_tcp_resets_.clear();
+    }
+    return FirewallExactTcpResetResult::installed;
+}
+
+FirewallExactTcpResetResult IptablesFirewall::install_exact_tcp_reset(
+    const FirewallExactTcpResetRule& rule) {
+    if (!valid_exact_tcp_reset_rule(rule)) {
+        return FirewallExactTcpResetResult::failed;
+    }
+
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    auto replacement = installed_exact_tcp_resets_;
+    if (std::find(replacement.begin(), replacement.end(), rule) ==
+        replacement.end()) {
+        replacement.push_back(rule);
+    }
+    std::sort(
+        replacement.begin(),
+        replacement.end(),
+        [](const auto& lhs, const auto& rhs) {
+            if (lhs.source != rhs.source) {
+                return lhs.source < rhs.source;
+            }
+            if (lhs.destination != rhs.destination) {
+                return lhs.destination < rhs.destination;
+            }
+            if (lhs.source_port != rhs.source_port) {
+                return lhs.source_port < rhs.source_port;
+            }
+            if (lhs.destination_port != rhs.destination_port) {
+                return lhs.destination_port < rhs.destination_port;
+            }
+            return lhs.full_mark < rhs.full_mark;
+        });
+
+    const auto result = replace_exact_tcp_reset_rules_locked(replacement);
+    if (result == FirewallExactTcpResetResult::installed) {
+        installed_exact_tcp_resets_ = std::move(replacement);
+    }
+    return result;
+}
+
+bool IptablesFirewall::remove_exact_tcp_reset(
+    const FirewallExactTcpResetRule& rule) {
+    if (!valid_exact_tcp_reset_rule(rule)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    auto replacement = installed_exact_tcp_resets_;
+    const auto found = std::find(
+        replacement.begin(), replacement.end(), rule);
+    if (found == replacement.end()) {
+        if (!exact_tcp_reset_publication_uncertain_ &&
+            (!replacement.empty() || !exact_tcp_reset_chain_created_)) {
+            return true;
+        }
+        const bool removed = replace_exact_tcp_reset_rules_locked({}) ==
+            FirewallExactTcpResetResult::installed;
+        if (removed) {
+            installed_exact_tcp_resets_.clear();
+        }
+        return removed;
+    }
+    replacement.erase(found);
+    const auto result = replace_exact_tcp_reset_rules_locked(replacement);
+    if (result != FirewallExactTcpResetResult::installed) {
+        return false;
+    }
+    installed_exact_tcp_resets_ = std::move(replacement);
+    return true;
+}
 
 bool IptablesFirewall::forward_reject_generation_references_are_owned(
     const std::string& rules,
@@ -3689,6 +4147,82 @@ std::string IptablesFirewall::build_forward_udp_reject_script(
     return script;
 }
 
+std::string IptablesFirewall::build_exact_tcp_reset_rule_line(
+    const FirewallExactTcpResetRule& rule) {
+    std::string line = keen_pbr3::format(
+        "-A {}", EXACT_TCP_RESET_CHAIN_NAME);
+    for (const auto& argument : build_exact_tcp_reset_rule_spec(rule)) {
+        line += " " + argument;
+    }
+    line.push_back('\n');
+    return line;
+}
+
+std::vector<std::string>
+IptablesFirewall::build_exact_tcp_reset_rule_spec(
+    const FirewallExactTcpResetRule& rule) {
+    return {
+        "-s",
+        rule.source,
+        "-d",
+        rule.destination,
+        "-p",
+        "tcp",
+        "-m",
+        "tcp",
+        "--sport",
+        std::to_string(rule.source_port),
+        "--dport",
+        std::to_string(rule.destination_port),
+        "-m",
+        "mark",
+        "--mark",
+        keen_pbr3::format("{:#x}/0xffffffff", rule.full_mark),
+        "--tcp-flags",
+        "SYN,RST,ACK",
+        "ACK",
+        "-j",
+        "REJECT",
+        "--reject-with",
+        "tcp-reset",
+    };
+}
+
+std::string IptablesFirewall::build_exact_tcp_reset_script(
+    bool chain_exists,
+    std::size_t hook_count,
+    const std::vector<FirewallExactTcpResetRule>& rules) {
+    std::string script = "*filter\n";
+    if (!chain_exists && !rules.empty()) {
+        script += keen_pbr3::format(
+            ":{} - [0:0]\n", EXACT_TCP_RESET_CHAIN_NAME);
+    }
+    if (chain_exists) {
+        script += keen_pbr3::format(
+            "-F {}\n", EXACT_TCP_RESET_CHAIN_NAME);
+    }
+    for (const auto& rule : rules) {
+        script += build_exact_tcp_reset_rule_line(rule);
+    }
+    for (std::size_t index = 0U; index < hook_count; ++index) {
+        script += keen_pbr3::format(
+            "-D FORWARD -j {}\n", EXACT_TCP_RESET_CHAIN_NAME);
+    }
+    if (rules.empty()) {
+        if (chain_exists) {
+            script += keen_pbr3::format(
+                "-X {}\n", EXACT_TCP_RESET_CHAIN_NAME);
+        }
+    } else {
+        // Rule one is deliberate: firmware commonly accepts ESTABLISHED TCP
+        // later in FORWARD, which would otherwise hide the exact reset rule.
+        script += keen_pbr3::format(
+            "-I FORWARD 1 -j {}\n", EXACT_TCP_RESET_CHAIN_NAME);
+    }
+    script += "COMMIT\n";
+    return script;
+}
+
 void IptablesFirewall::stage_forward_reject_generation(
     bool ipv6,
     FirewallSetGeneration generation) const {
@@ -4420,6 +4954,22 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
         safe_exec({command, "-t", table, "-X", chain},
                   /*suppress_output=*/true);
     };
+
+    if (exact_tcp_reset_chain_created_ ||
+        exact_tcp_reset_publication_uncertain_ || sweep_live_state) {
+        // A daemon restart can outlive the short runtime timer. Sweep the
+        // dedicated chain by its owned name before rebuilding normal policy;
+        // no system chain is ever flushed.
+        const auto exact_cleanup = replace_exact_tcp_reset_rules_locked(
+            {}, /*cleanup_on_verification_failure=*/false);
+        if (exact_cleanup != FirewallExactTcpResetResult::installed &&
+            (exact_tcp_reset_chain_created_ ||
+             exact_tcp_reset_publication_uncertain_)) {
+            log.warn(
+                "iptables cleanup could not prove the exact TCP reset "
+                "chain absent; retaining ownership for retry");
+        }
+    }
 
     if (forward_reject_v4_created_ || sweep_live_state) {
         // Unlike legacy best-effort teardown, a still-live messages-first

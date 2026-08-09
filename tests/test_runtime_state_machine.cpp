@@ -1164,6 +1164,41 @@ TEST_CASE("strong reconnect catalogue recommendation remains opt-out") {
             .empty());
 }
 
+TEST_CASE(
+    "experimental WhatsApp TCP reset requests observation independently of strong reconnect") {
+    Config config;
+    config.daemon = DaemonConfig{};
+    ListConfig packaged;
+    packaged.catalog_identity = kWhatsappIpCatalogIdentity;
+    ListConfig spoofed;
+    config.lists = std::map<std::string, ListConfig>{
+        {"catalog_entry", packaged}, {"whatsapp_copy", spoofed}};
+    config.daemon->reconnect_unmarked_flows_on_routing_change = false;
+    config.daemon->reconnect_owned_flows_on_routing_change_lists =
+        std::vector<std::string>{};
+    CHECK_FALSE(idle_stall_observer_requested(config));
+
+    config.daemon->experimental_whatsapp_tcp_reset_sources =
+        std::vector<std::string>{"192.168.1.117"};
+    CHECK(idle_stall_observer_requested(config));
+    CHECK(experimental_whatsapp_tcp_reset_sources(config) ==
+          std::set<std::string>{"192.168.1.117"});
+    CHECK(packaged_whatsapp_ip_companion_list_names(config) ==
+          std::set<std::string>{"catalog_entry"});
+    CHECK(preventive_whatsapp_media_guard_list_names(config) ==
+          std::set<std::string>{"catalog_entry"});
+    CHECK(preventive_whatsapp_media_guard_available(
+        FirewallBackend::iptables, true));
+    CHECK_FALSE(preventive_whatsapp_media_guard_available(
+        FirewallBackend::iptables, false));
+    CHECK_FALSE(preventive_whatsapp_media_guard_available(
+        FirewallBackend::nftables, true));
+
+    config.daemon->experimental_whatsapp_tcp_reset_sources =
+        std::vector<std::string>{};
+    CHECK(preventive_whatsapp_media_guard_list_names(config).empty());
+}
+
 TEST_CASE("strong reconnect coverage merges old and new list addresses") {
     AppliedListContentState previous;
     previous.static_destinations = {

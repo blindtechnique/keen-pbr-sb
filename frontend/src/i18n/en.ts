@@ -1893,6 +1893,21 @@ export const enTranslation = {
           "Experimental: message delivery may also become less reliable",
         metaUdp443PolicyWarningDescription:
           "This experimental mode rejects only UDP/443 to the packaged Meta/WhatsApp IP companion on one unambiguous active keen-pbr-sb route. Affected clients may then use TCP for messages and media. This may improve initial delivery, but live Android testing also showed later WhatsApp sessions stalling without sending message data. Balanced remains recommended; return to it if messages stay at zero ticks. Instagram and other Meta services in the same IP ranges are also affected. The call notification may appear immediately, but audio may take 10–20 seconds to start. This policy does not block UDP/3478, UDP/5349, or P2P/high-port media. For now, disable IPv6 routing before enabling this mode because the packaged companion has no verified authoritative IPv6 coverage.",
+        whatsappTcpResetSourcesLabel:
+          "Experimental WhatsApp TCP rotation devices",
+        whatsappTcpResetSourcesPlaceholder: "192.168.1.44\n192.168.1.45",
+        whatsappTcpResetSourcesHint:
+          "Enter up to {{max}} exact device IPv4 addresses, separated by commas or new lines. Reserve these addresses for the devices in DHCP, or protection will stop matching a phone after its IP changes. An empty list keeps rotation off. CIDRs, ranges, and an all-devices mode are intentionally unavailable.",
+        whatsappTcpResetSourcesWarningTitle:
+          "May also interrupt Instagram; iptables only",
+        whatsappTcpResetSourcesWarningDescription:
+          "The router cannot identify the Android app inside shared Meta address ranges. It applies a one-shot reset only to an exact idle TCP flow from a listed device, but that flow may belong to Instagram or another Meta service. This feature runs only with the iptables backend and stays disabled for unlisted devices.",
+        whatsappTcpResetSourcesValidationInvalid:
+          "{{value}} is not an exact unicast IPv4 address. CIDRs and ranges are not allowed.",
+        whatsappTcpResetSourcesValidationDuplicate:
+          "{{value}} is listed more than once.",
+        whatsappTcpResetSourcesValidationTooMany:
+          "Enter no more than {{max}} devices (currently {{count}}).",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
           "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",

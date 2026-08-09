@@ -90,6 +90,15 @@ IdleStallScan scan(
         std::move(flows)};
 }
 
+IdleStallScan preventive_scan(
+    std::vector<IdleStallFlowSample> flows,
+    std::string opted_in_source) {
+    auto result = scan(std::move(flows));
+    result.preventive_tcp_reset_sources.insert(
+        std::move(opted_in_source));
+    return result;
+}
+
 bool contains_source(
     const std::vector<IdleStallDeleteDecision>& decisions,
     const std::string& source) {
@@ -203,6 +212,114 @@ TEST_CASE(
         scan({ordinary}), at(35s + 999ms)).empty());
     REQUIRE(ordinary_detector.observe(scan({ordinary}), at(36s)).size() ==
             1U);
+}
+
+TEST_CASE(
+    "IdleStallDetector rotates an opted-in packaged WhatsApp 2/2 tuple after a full quiet threshold") {
+    const auto whatsapp_policy =
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
+    const auto frozen = tcp_sample(
+        "192.168.1.117",
+        "157.240.241.60",
+        52341,
+        2,
+        141,
+        2,
+        145,
+        0x00030000U,
+        false,
+        whatsapp_policy);
+    IdleStallDetector detector;
+
+    CHECK(detector.observe(
+        preventive_scan({frozen}, frozen.key.source), at(0s)).empty());
+    CHECK(detector.observe(
+        preventive_scan({frozen}, frozen.key.source), at(29s)).empty());
+    const auto decisions = detector.observe(
+        preventive_scan({frozen}, frozen.key.source), at(30s));
+    REQUIRE(decisions.size() == 1U);
+    CHECK(decisions.front().flow == frozen.key);
+    CHECK(decisions.front().reason ==
+          IdleStallDecisionReason::idle_opt_in_tcp_reset_rotation);
+}
+
+TEST_CASE(
+    "IdleStallDetector keeps preventive WhatsApp rotation explicit and tiny") {
+    const auto whatsapp_policy =
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
+    const auto opted_in_source = std::string{"192.168.1.117"};
+    const auto unlisted = tcp_sample(
+        "192.168.1.118", "157.240.241.60", 52342,
+        2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
+    const auto ordinary = tcp_sample(
+        opted_in_source, "157.240.241.61", 52343,
+        2, 141, 2, 145, 0x00030000U);
+    const auto large = tcp_sample(
+        opted_in_source, "157.240.241.62", 52344,
+        5, 513, 2, 145, 0x00030000U, false, whatsapp_policy);
+    const auto markless = tcp_sample(
+        opted_in_source, "157.240.241.63", 52345,
+        2, 141, 2, 145, 0U, false, whatsapp_policy);
+    auto other_port = tcp_sample(
+        opted_in_source, "157.240.241.64", 52346,
+        2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
+    other_port.key.destination_port = 5222U;
+
+    for (const auto& flow :
+         {unlisted, ordinary, large, markless, other_port}) {
+        IdleStallDetector detector;
+        CHECK(detector.observe(
+            preventive_scan({flow}, opted_in_source), at(0s)).empty());
+        CHECK(detector.observe(
+            preventive_scan({flow}, opted_in_source), at(30s)).empty());
+    }
+}
+
+TEST_CASE(
+    "IdleStallDetector restarts the preventive quiet age on any counter change") {
+    const auto whatsapp_policy =
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
+    auto flow = tcp_sample(
+        "192.168.1.117", "157.240.241.60", 52341,
+        2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
+    IdleStallDetector detector;
+    CHECK(detector.observe(
+        preventive_scan({flow}, flow.key.source), at(0s)).empty());
+
+    ++flow.counters.original_packets;
+    flow.counters.original_bytes += 20;
+    CHECK(detector.observe(
+        preventive_scan({flow}, flow.key.source), at(20s)).empty());
+    CHECK(detector.observe(
+        preventive_scan({flow}, flow.key.source), at(30s)).empty());
+    REQUIRE(detector.observe(
+        preventive_scan({flow}, flow.key.source), at(50s)).size() == 1U);
+}
+
+TEST_CASE(
+    "IdleStallDetector blocks preventive reset while the source has active UDP media") {
+    const auto whatsapp_policy =
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
+    const auto signalling = tcp_sample(
+        "192.168.1.117", "157.240.241.60", 52341,
+        2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
+    auto media = udp_sample(
+        signalling.key.source, "157.240.241.61", 40000,
+        100, 10000, 100, 10000, 0x00030000U);
+    IdleStallDetector detector;
+    CHECK(detector.observe(
+        preventive_scan(
+            {signalling, media}, signalling.key.source),
+        at(0s)).empty());
+
+    ++media.counters.original_packets;
+    media.counters.original_bytes += 120;
+    ++media.counters.reply_packets;
+    media.counters.reply_bytes += 120;
+    CHECK(detector.observe(
+        preventive_scan(
+            {signalling, media}, signalling.key.source),
+        at(30s)).empty());
 }
 
 TEST_CASE(

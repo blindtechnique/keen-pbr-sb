@@ -300,6 +300,14 @@ struct PendingMetaUdp443ActivationCleanup {
     bool worker_inflight{false};
 };
 
+struct PendingExactTcpResetCleanup {
+    FirewallExactTcpResetRule rule;
+    std::uint64_t runtime_generation{0U};
+    std::size_t attempt{0U};
+    std::uint64_t schedule_serial{0U};
+    int task_id{-1};
+};
+
 enum class RemoteListPreparationMode {
     None,
     MissingOrInvalid,
@@ -650,6 +658,17 @@ private:
     void cancel_idle_stall_observer() noexcept;
     void schedule_idle_stall_observer_after(
         std::chrono::seconds delay) noexcept;
+    bool schedule_exact_tcp_reset_cleanup(
+        const FirewallExactTcpResetRule& rule,
+        std::uint64_t expected_runtime_generation,
+        std::size_t attempt) noexcept;
+    void run_exact_tcp_reset_cleanup(
+        std::uint64_t schedule_serial) noexcept;
+    void forget_exact_tcp_reset_cleanup(
+        const FirewallExactTcpResetRule& rule) noexcept;
+    void resume_exact_tcp_reset_cleanups() noexcept;
+    bool drain_exact_tcp_reset_cleanups_before_generation_change() noexcept;
+    void clear_exact_tcp_reset_cleanup_ownership() noexcept;
     void run_idle_stall_observer() noexcept;
     void commit_idle_stall_observation(
         std::uint64_t expected_runtime_generation,
@@ -937,6 +956,12 @@ private:
     // whether queued work is still eligible after acquiring this barrier.
     TracedMutex udp_call_affinity_mutation_mutex_;
     std::atomic<std::uint64_t> idle_stall_coverage_generation_{1};
+    // Every published exact reset owns a generation- and rule-fenced timer.
+    // A transient removal failure is retried without allowing an older timer
+    // to retire a later window for the same five-tuple.
+    std::vector<PendingExactTcpResetCleanup>
+        pending_exact_tcp_reset_cleanups_;
+    std::uint64_t exact_tcp_reset_cleanup_schedule_serial_{0U};
 
     // Epoll state
     int epoll_fd_{-1};

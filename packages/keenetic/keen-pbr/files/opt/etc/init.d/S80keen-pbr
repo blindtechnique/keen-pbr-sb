@@ -587,13 +587,14 @@ guard_meta_udp443_start_ownership() {
         if record_meta_udp443_possible_backends; then
             return 0
         fi
-    elif cleanup_stale_meta_udp443_firewall &&
+    elif cleanup_stale_tcp_rst_firewall &&
+         cleanup_stale_meta_udp443_firewall &&
          record_meta_udp443_possible_backends; then
         return 0
     fi
     STOP_KEEN_PBR_SAFE=no
     : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
-    log_error "keen-pbr start refused because Meta UDP/443 cleanup ownership could not be recorded"
+    log_error "keen-pbr start refused because stale firewall cleanup ownership could not be verified"
     return 1
 }
 
@@ -727,6 +728,117 @@ cleanup_stale_meta_udp443_firewall() {
         STOP_KEEN_PBR_SAFE=no
         : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
         log_error "Verified Meta UDP/443 backend marker could not be cleared"
+        return 1
+    fi
+    return 0
+}
+
+tcp_rst_xtables_snapshot() {
+    TCP_RST_XTABLES_COMMAND_OUTPUT=""
+    if TCP_RST_XTABLES_COMMAND_OUTPUT=$(
+        iptables_with_wait -t filter -S 2>&1
+    ); then
+        TCP_RST_XTABLES_SNAPSHOT="$TCP_RST_XTABLES_COMMAND_OUTPUT"
+        return 0
+    fi
+    META_XTABLES_COMMAND_OUTPUT="$TCP_RST_XTABLES_COMMAND_OUTPUT"
+    if meta_xtables_filter_is_unavailable; then
+        TCP_RST_XTABLES_SNAPSHOT=""
+        return 0
+    fi
+    return 1
+}
+
+tcp_rst_xtables_snapshot_has_artifacts() {
+    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
+        grep -Eq -- '(^-N KeenPbrTcpRst$)|([[:space:]](-j|-g|--jump|--goto)[[:space:]]+KeenPbrTcpRst([[:space:]]|$))'
+}
+
+tcp_rst_xtables_references_are_owned() {
+    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" | awk '
+        $1 == "-A" {
+            origin = $2
+            for (i = 3; i < NF; ++i) {
+                if ($i != "-j" && $i != "-g" &&
+                    $i != "--jump" && $i != "--goto") {
+                    continue
+                }
+                if ($(i + 1) != "KeenPbrTcpRst") {
+                    continue
+                }
+                if (origin == "FORWARD" && NF == 4 && $3 == "-j") {
+                    continue
+                }
+                exit 1
+            }
+        }
+    '
+}
+
+tcp_rst_xtables_chain_exists() {
+    printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
+        grep -F -x -q -- '-N KeenPbrTcpRst'
+}
+
+cleanup_stale_tcp_rst_firewall() {
+    local hooks
+    local script
+
+    # This chain is process-owned and has a short daemon-managed lifetime.
+    # Mutating it while the daemon is alive would race its expiry task, so this
+    # recovery helper is deliberately restricted to a verified stopped state.
+    if [ -n "$(pidof "$PROCS" 2>/dev/null || true)" ]; then
+        log_error "Refusing to remove KeenPbrTcpRst while keen-pbr is running"
+        return 1
+    fi
+
+    # KeenPbrTcpRst is IPv4-only and can only be published by the iptables
+    # backend. A system without the iptables tool cannot have acquired a new
+    # chain during this boot; keep nft-only installations startable.
+    command -v iptables >/dev/null 2>&1 || return 0
+    if ! tcp_rst_xtables_snapshot; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Failed to inspect stale KeenPbrTcpRst artifacts with iptables"
+        return 1
+    fi
+    tcp_rst_xtables_snapshot_has_artifacts || return 0
+    if ! tcp_rst_xtables_references_are_owned; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Refusing to remove KeenPbrTcpRst referenced by foreign rules"
+        return 1
+    fi
+
+    hooks=$(printf '%s\n' "$TCP_RST_XTABLES_SNAPSHOT" |
+        grep -F -x -c -- '-A FORWARD -j KeenPbrTcpRst' || true)
+    script='*filter
+'
+    while [ "$hooks" -gt 0 ]; do
+        script="${script}-D FORWARD -j KeenPbrTcpRst
+"
+        hooks=$((hooks - 1))
+    done
+    if tcp_rst_xtables_chain_exists; then
+        script="${script}-F KeenPbrTcpRst
+-X KeenPbrTcpRst
+"
+    fi
+    script="${script}COMMIT
+"
+
+    if ! meta_xtables_restore_transaction iptables "$script" \
+        >/dev/null 2>&1; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Atomic KeenPbrTcpRst cleanup failed with iptables-restore"
+        return 1
+    fi
+    if ! tcp_rst_xtables_snapshot ||
+       tcp_rst_xtables_snapshot_has_artifacts; then
+        STOP_KEEN_PBR_SAFE=no
+        : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
+        log_error "Stale KeenPbrTcpRst artifacts remained after cleanup"
         return 1
     fi
     return 0
@@ -1380,9 +1492,10 @@ stop_service_for_action() {
     prepare_stop
     stop_keen_pbr "$mode" || return $?
     # The daemon normally removes its firewall state during graceful
-    # shutdown.  A crashed/already-stopped daemon cannot do that, so verify
-    # and remove only the exact Meta UDP/443 objects owned by keen-pbr before
+    # shutdown. A crashed/already-stopped daemon cannot do that, so verify and
+    # remove only the exact transient firewall objects owned by keen-pbr before
     # declaring the stop safe or allowing FastNAT to be restored.
+    cleanup_stale_tcp_rst_firewall || return 1
     cleanup_stale_meta_udp443_firewall || return 1
     if [ "$final_stop" = yes ] &&
        [ "${STOP_KEEN_PBR_SAFE:-no}" = yes ]; then

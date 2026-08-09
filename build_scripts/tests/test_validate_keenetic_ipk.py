@@ -185,8 +185,9 @@ def make_ipk(
                 0o644,
             ),
             "opt/usr/share/keen-pbr/frontend/index.html": (b"<!doctype html>", 0o644),
-            "opt/usr/share/keen-pbr/nfqws-blobs/ACTIVE_DISCORD_UDP.bin": (
-                b"discord",
+            "opt/usr/share/keen-pbr/nfqws-blobs/SHA256SUMS": (b"", 0o644),
+            "opt/usr/share/keen-pbr/nfqws-blobs/ORIGIN_SHA256SUMS": (
+                b"",
                 0o644,
             ),
             "opt/usr/share/keen-pbr/nfqws-blobs/quic_initial_steamcommunity_com.bin": (
@@ -200,6 +201,30 @@ def make_ipk(
             ),
             "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_max_ru.bin": (
                 b"max",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/01 safe/nfqws2.conf": (
+                b"NFQWS_ARGS=\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/01 safe/required-blobs.txt": (
+                b"stun.bin\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/02 balanced/nfqws2.conf": (
+                b"NFQWS_ARGS=\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/02 balanced/required-blobs.txt": (
+                b"stun.bin\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/03 max/nfqws2.conf": (
+                b"NFQWS_ARGS=\n",
+                0o644,
+            ),
+            "opt/usr/share/keen-pbr/nfqws-strategies/03 max/required-blobs.txt": (
+                b"stun.bin\n",
                 0o644,
             ),
             "opt/usr/share/keen-pbr/nfqws-strategies/ver9 E max plus/nfqws2.conf": (
