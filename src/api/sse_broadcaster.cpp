@@ -193,15 +193,23 @@ SseSubscriptionWaitResult wait_for_sse_subscription(
             }
 
             const auto wake_at = std::min(heartbeat_deadline, next_probe_at);
-            subscription->cv.wait_until(lock, wake_at, [&] {
-                return subscription->closed || !subscription->messages.empty();
-            });
+            // The publisher and close path mutate the guarded state while
+            // holding the same mutex, then notify this condition variable.
+            // A plain wait keeps the unlock-and-block transition atomic and
+            // lets the guarded checks below stay in the lock-aware scope.
+            const auto wait_status =
+                subscription->cv.wait_until(lock, wake_at);
 
             if (!subscription->messages.empty() || subscription->closed) {
                 continue;
             }
             if (Clock::now() >= heartbeat_deadline) {
                 return {SseSubscriptionWaitStatus::HEARTBEAT, {}};
+            }
+            if (wait_status == std::cv_status::no_timeout) {
+                // Preserve predicate-wait semantics: an unrelated or
+                // spurious notification must not run the peer probe early.
+                continue;
             }
         }
 

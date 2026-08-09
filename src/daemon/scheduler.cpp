@@ -255,41 +255,32 @@ void Scheduler::on_timer(int timer_fd, uint32_t /*events*/) noexcept {
     TaskCallback cb;
     std::string label;
     const char* preparation_failure = nullptr;
-    bool locked = false;
     try {
-        entries_mutex_.lock(
-            "entries_mutex_", __FILE__, __LINE__, __func__);
-        locked = true;
-        for (const auto& entry : entries_) {
-            if (entry.timer_fd != timer_fd) {
-                continue;
-            }
-            found = true;
-            repeating = entry.repeating;
-            try {
-                cb = entry.callback;
-            } catch (...) {
-                preparation_failure = "callback snapshot";
-            }
-            try {
-                label = entry.label;
-            } catch (...) {
-                if (preparation_failure == nullptr) {
-                    preparation_failure = "label snapshot";
+        {
+            KPBR_LOCK_GUARD(entries_mutex_);
+            for (const auto& entry : entries_) {
+                if (entry.timer_fd != timer_fd) {
+                    continue;
                 }
+                found = true;
+                repeating = entry.repeating;
+                try {
+                    cb = entry.callback;
+                } catch (...) {
+                    preparation_failure = "callback snapshot";
+                }
+                try {
+                    label = entry.label;
+                } catch (...) {
+                    if (preparation_failure == nullptr) {
+                        preparation_failure = "label snapshot";
+                    }
+                }
+                break;
             }
-            break;
         }
     } catch (...) {
         preparation_failure = "entry lookup";
-    }
-    if (locked) {
-        try {
-            entries_mutex_.unlock();
-        } catch (...) {
-            preparation_failure = "entry unlock";
-            found = false;
-        }
     }
 
     if (!found) {

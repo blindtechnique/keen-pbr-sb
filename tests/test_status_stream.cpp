@@ -367,6 +367,41 @@ TEST_CASE("SSE wait observes closed subscriptions without probing the peer") {
     CHECK(probes == 0);
 }
 
+TEST_CASE("SSE wait wakes when a message is published") {
+    using namespace std::chrono_literals;
+
+    SseBroadcaster broadcaster;
+    auto subscription = broadcaster.subscribe();
+    REQUIRE(subscription);
+
+    auto waiter = std::async(std::launch::async, [subscription] {
+        return wait_for_sse_subscription(subscription, 5s, 5s);
+    });
+    broadcaster.publish("published-after-wait-started");
+
+    REQUIRE(waiter.wait_for(2s) == std::future_status::ready);
+    const auto result = waiter.get();
+    CHECK(result.status == SseSubscriptionWaitStatus::MESSAGE);
+    CHECK(result.message == "published-after-wait-started");
+}
+
+TEST_CASE("SSE wait wakes when subscriptions close") {
+    using namespace std::chrono_literals;
+
+    SseBroadcaster broadcaster;
+    auto subscription = broadcaster.subscribe();
+    REQUIRE(subscription);
+
+    auto waiter = std::async(std::launch::async, [subscription] {
+        return wait_for_sse_subscription(subscription, 5s, 5s);
+    });
+    broadcaster.close_all();
+
+    REQUIRE(waiter.wait_for(2s) == std::future_status::ready);
+    const auto result = waiter.get();
+    CHECK(result.status == SseSubscriptionWaitStatus::CLOSED);
+}
+
 TEST_CASE("SSE wait rejects a dead peer and rechecks subscription state") {
     using namespace std::chrono_literals;
 
