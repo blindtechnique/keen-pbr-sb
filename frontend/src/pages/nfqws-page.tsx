@@ -18,12 +18,14 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import { StrategyBreakdown } from "@/components/nfqws/strategy-breakdown"
 import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 import { PageActionBar } from "@/components/shared/page-action-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { HelpHint } from "@/components/shared/help-hint"
 import { SectionHeading } from "@/components/shared/section-heading"
+import { SegmentedControl } from "@/components/shared/segmented-control"
 import { TableSkeleton } from "@/components/shared/table-skeleton"
 import { Skeleton } from "@/components/ui/skeleton"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
@@ -1293,6 +1295,11 @@ function StrategiesEditor({
     (item) => item.name === effectiveSelected
   )
   const content = draftContent[effectiveSelected] ?? strategy?.content ?? ""
+  const [editorViewChoice, setEditorViewChoice] = useState<"breakdown" | "raw">(
+    "breakdown"
+  )
+  const rawOnly = effectiveSelected.toLowerCase().endsWith(".list")
+  const editorView = rawOnly ? "raw" : editorViewChoice
   const [creating, setCreating] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [applying, setApplying] = useState<string | null>(null)
@@ -1552,22 +1559,54 @@ function StrategiesEditor({
 
       {effectiveSelected ? (
         <div className="space-y-3">
-          <SectionHeading
-            description={t("nfqws.strategyEditorDescription")}
-            size="compact"
-            title={t("nfqws.strategyEditorTitle", { name: effectiveSelected })}
-          />
-          <CodeEditor
-            className="h-[50vh] max-h-[40rem] min-h-[18rem]"
-            onChange={(next) =>
-              setDraftContent((current) => ({
-                ...current,
-                [effectiveSelected]: next,
-              }))
-            }
-            syntax={effectiveSelected.endsWith(".list") ? "list" : "nfqws"}
-            value={content}
-          />
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <SectionHeading
+              description={
+                editorView === "breakdown"
+                  ? t("nfqws.strategyBreakdownDescription")
+                  : t("nfqws.strategyEditorDescription")
+              }
+              size="compact"
+              title={
+                editorView === "breakdown"
+                  ? t("nfqws.strategyBreakdownTitle", {
+                      name: effectiveSelected,
+                    })
+                  : t("nfqws.strategyEditorTitle", {
+                      name: effectiveSelected,
+                    })
+              }
+            />
+            {!rawOnly ? (
+              <SegmentedControl
+                ariaLabel={t("nfqws.editorView.ariaLabel")}
+                onChange={setEditorViewChoice}
+                options={[
+                  {
+                    value: "breakdown",
+                    label: t("nfqws.editorView.breakdown"),
+                  },
+                  { value: "raw", label: t("nfqws.editorView.raw") },
+                ]}
+                value={editorView}
+              />
+            ) : null}
+          </div>
+          {editorView === "breakdown" ? (
+            <StrategyBreakdown content={content} />
+          ) : (
+            <CodeEditor
+              className="h-[50vh] max-h-[40rem] min-h-[18rem]"
+              onChange={(next) =>
+                setDraftContent((current) => ({
+                  ...current,
+                  [effectiveSelected]: next,
+                }))
+              }
+              syntax={rawOnly ? "list" : "nfqws"}
+              value={content}
+            />
+          )}
           <div className="flex flex-wrap justify-end gap-2">
             <Button
               onClick={() => void run("save_strategy", effectiveSelected)}

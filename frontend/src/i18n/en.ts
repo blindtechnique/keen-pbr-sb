@@ -69,6 +69,39 @@ export const enTranslation = {
     strategyEditorTitle: "Editing: {{name}}",
     strategyEditorDescription:
       "Each line is a set of nfqws arguments for one kind of traffic. Save writes the strategy to disk; Apply also restarts the service with it.",
+    strategyBreakdownTitle: "Strategy: {{name}}",
+    strategyBreakdownDescription:
+      "Read-only explanation of the saved text. Open Text to make changes.",
+    editorView: {
+      ariaLabel: "Strategy view",
+      breakdown: "Breakdown",
+      raw: "Text",
+    },
+    breakdown: {
+      unparseable:
+        "This strategy cannot be safely broken down. Open Text to see it as is.",
+      partial:
+        "Only the safely recognised parts are shown. Open Text for the complete strategy.",
+      poolCount: "Traffic pools: {{count}}",
+      blobCount: "Decoy blobs: {{count}}",
+      domains: "Domains",
+      domainsMore: "and {{count}} more",
+      tcpPorts: "TCP ports: {{ports}}",
+      udpPorts: "UDP ports: {{ports}}",
+      unknownTransport: "Transport not inferred",
+      rotation: "Strategies in rotation: {{count}}",
+      switchAfter: "switches after {{count}} failures in a row",
+      inseq: "stream threshold {{value}}",
+      noRotation: "No rotation — one fixed strategy.",
+      passthrough: "Pass-through",
+      passthroughDescription:
+        "This WebRTC segment only filters STUN on UDP ports 49152–65535; it does not modify packets.",
+      pools: {
+        main: "Main traffic",
+        quic: "QUIC",
+        udp: "UDP services",
+      },
+    },
     strategyNameDescription:
       "The name is only for you - it changes nothing except how the strategy is listed.",
     strategySaveBeforeApply: "Save the strategy first",

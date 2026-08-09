@@ -69,6 +69,39 @@ export const ruTranslation = {
     strategyEditorTitle: "Правка: {{name}}",
     strategyEditorDescription:
       "Каждая строка — аргументы nfqws для своей группы трафика. «Сохранить» записывает стратегию на диск, «Применить» ещё и перезапускает службу с ней.",
+    strategyBreakdownTitle: "Стратегия: {{name}}",
+    strategyBreakdownDescription:
+      "Разбор сохранённого текста без возможности изменения. Для правки откройте «Текст».",
+    editorView: {
+      ariaLabel: "Вид стратегии",
+      breakdown: "Разбор",
+      raw: "Текст",
+    },
+    breakdown: {
+      unparseable:
+        "Эту стратегию нельзя безопасно разобрать. Откройте «Текст», чтобы увидеть её как есть.",
+      partial:
+        "Показаны только безопасно распознанные части. Полная стратегия доступна в разделе «Текст».",
+      poolCount: "Пулов трафика: {{count}}",
+      blobCount: "Фейков-блобов: {{count}}",
+      domains: "Домены",
+      domainsMore: "и ещё {{count}}",
+      tcpPorts: "Порты TCP: {{ports}}",
+      udpPorts: "Порты UDP: {{ports}}",
+      unknownTransport: "Транспорт не определён",
+      rotation: "Стратегий в ротации: {{count}}",
+      switchAfter: "переключение после {{count}} неудач подряд",
+      inseq: "порог потока {{value}}",
+      noRotation: "Ротации нет — одна фиксированная стратегия.",
+      passthrough: "Без изменения",
+      passthroughDescription:
+        "Этот сегмент WebRTC только фильтрует STUN на UDP-портах 49152–65535 и не изменяет пакеты.",
+      pools: {
+        main: "Основной трафик",
+        quic: "QUIC",
+        udp: "UDP-сервисы",
+      },
+    },
     strategyNameDescription:
       "Имя увидите только вы — оно ни на что не влияет, кроме того, как стратегия называется в списке.",
     strategySaveBeforeApply: "Сначала сохраните стратегию",
