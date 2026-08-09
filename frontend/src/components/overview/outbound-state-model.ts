@@ -4,22 +4,24 @@ import type {
   RuntimeOutboundState,
 } from "@/api/generated/model"
 
-export type OutboundRuntimeIssue =
-  Readonly<{
-    code:
-      | "interfaceUnreachable"
-      | "routeMissing"
-      | "selectionMismatch"
-      | "probeTimeout"
-      | "connectionRefused"
-      | "networkUnreachable"
-      | "dnsFailed"
-      | "permissionDenied"
-      | "cannotVerify"
-      | "degraded"
-      | "unavailable"
-    memberTag?: string
-  }>
+export type OutboundRuntimeIssue = Readonly<{
+  code:
+    | "interfaceUnreachable"
+    | "routeMissing"
+    | "selectionMismatch"
+    | "probeTimeout"
+    | "connectionRefused"
+    | "networkUnreachable"
+    | "dnsFailed"
+    | "permissionDenied"
+    | "verificationPending"
+    | "verificationStale"
+    | "cannotVerify"
+    | "degraded"
+    | "unavailable"
+  memberTag?: string
+  tone: "warning" | "error"
+}>
 
 export function outboundTrafficBucket(
   outbound: Pick<Outbound, "type">,
@@ -68,6 +70,7 @@ export function outboundRuntimeIssues(
   if (runtime.detail?.trim()) {
     issues.push({
       code: runtimeDetailCode(runtime.detail, runtime.status),
+      tone: issueTone(runtime.status),
     })
   }
 
@@ -82,6 +85,7 @@ export function outboundRuntimeIssues(
     issues.push({
       code: runtimeDetailCode(member.detail, member.status),
       memberTag: member.outbound_tag,
+      tone: issueTone(member.status),
     })
   }
 
@@ -98,16 +102,26 @@ export function outboundRuntimeIssues(
     return []
   }
 
-  return [{ code: fallbackIssueCode(runtime.status) }]
+  return [
+    {
+      code: fallbackIssueCode(runtime.status),
+      tone: issueTone(runtime.status),
+    },
+  ]
 }
 
-function fallbackIssueCode(
-  status: string
-): OutboundRuntimeIssue["code"] {
+function fallbackIssueCode(status: string): OutboundRuntimeIssue["code"] {
   if (status === "unavailable") return "unavailable"
-  // A member the daemon could not attribute a measurement to.
-  if (status === "unknown") return "cannotVerify"
+  // UNKNOWN is deliberately not a failure. Older daemons collapse a pending,
+  // stale and genuinely unattributable probe into the same state, so the
+  // dashboard must use neutral wording unless the detail proves which one it
+  // was.
+  if (status === "unknown") return "verificationPending"
   return "degraded"
+}
+
+function issueTone(status: string): OutboundRuntimeIssue["tone"] {
+  return status === "unknown" ? "warning" : "error"
 }
 
 function runtimeDetailCode(
@@ -115,10 +129,29 @@ function runtimeDetailCode(
   fallbackStatus: "degraded" | "unavailable" | string
 ): OutboundRuntimeIssue["code"] {
   const normalized = detail?.trim().toLocaleLowerCase("en-US") ?? ""
-  // Checked before the transport-error patterns: this detail says no usable
-  // measurement exists, which is not the same as a measured failure.
-  if (normalized.includes("cannot verify")) {
+  // Newer daemons can distinguish why there is no current measurement. Keep
+  // the binding-specific warning for an explicitly unattributed result only.
+  // The legacy "no attributable probe result" text is intentionally handled
+  // as pending below: that backend phrase also covered missing and stale data.
+  if (
+    normalized.includes("probe result is unattributed") ||
+    normalized.includes("probe could not be bound to outbound interface")
+  ) {
     return "cannotVerify"
+  }
+  if (
+    normalized.includes("probe result is stale") ||
+    normalized.includes("stale probe result") ||
+    normalized.includes("last attributable measurement is too old")
+  ) {
+    return "verificationStale"
+  }
+  if (
+    normalized.includes("probe pending") ||
+    normalized.includes("no probe result") ||
+    normalized.includes("cannot verify")
+  ) {
+    return "verificationPending"
   }
   if (
     normalized.includes(

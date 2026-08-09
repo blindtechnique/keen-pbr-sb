@@ -3,10 +3,17 @@ import { useQueryClient } from "@tanstack/react-query"
 
 import { applyStatusEvent } from "@/api/status-event-cache"
 import {
+  getGetHealthServiceQueryKey,
+  getGetRuntimeInterfacesQueryKey,
+  getGetRuntimeOutboundsQueryKey,
+} from "@/api/generated/keen-api"
+import {
   hasStatusEventKeepAliveLease,
   setStatusEventConnectionState,
   subscribeStatusEventKeepAliveLease,
+  type StatusEventConnectionState,
 } from "@/api/status-event-connection"
+import { createStatusQueryResilience } from "@/api/status-event-resilience"
 import { applyDnsProbeStatusEvent } from "@/api/dns-probe-events"
 import { applyListRefreshStatusEvent } from "@/api/list-refresh-events"
 
@@ -28,13 +35,42 @@ export function StatusEventBridge() {
   useEffect(() => {
     let source: EventSource | null = null
     let hiddenTimer: ReturnType<typeof setTimeout> | null = null
+    const runtimeQueryKeys = [
+      getGetHealthServiceQueryKey(),
+      getGetRuntimeOutboundsQueryKey(),
+      getGetRuntimeInterfacesQueryKey(),
+    ]
+    const resilience = createStatusQueryResilience({
+      refresh: async () => {
+        for (const queryKey of runtimeQueryKeys) {
+          await queryClient.invalidateQueries({
+            exact: true,
+            queryKey,
+            refetchType: "none",
+          })
+        }
+        await Promise.all(
+          runtimeQueryKeys.map((queryKey) =>
+            queryClient.refetchQueries({
+              exact: true,
+              queryKey,
+              type: "active",
+            })
+          )
+        )
+      },
+    })
+    const setConnectionState = (state: StatusEventConnectionState) => {
+      setStatusEventConnectionState(state)
+      resilience.transition(state)
+    }
 
     const connect = () => {
       if (source !== null) return
-      setStatusEventConnectionState("connecting")
+      setConnectionState("connecting")
       source = new EventSource("/api/status/events")
-      source.onopen = () => setStatusEventConnectionState("connected")
-      source.onerror = () => setStatusEventConnectionState("disconnected")
+      source.onopen = () => setConnectionState("connected")
+      source.onerror = () => setConnectionState("disconnected")
       for (const eventName of STATUS_EVENT_NAMES) {
         source.addEventListener(eventName, (event) => {
           const data = (event as MessageEvent<string>).data
@@ -52,7 +88,7 @@ export function StatusEventBridge() {
     const disconnect = (state: "disconnected" | "paused") => {
       source?.close()
       source = null
-      setStatusEventConnectionState(state)
+      setConnectionState(state)
     }
 
     const reconcileVisibility = () => {
@@ -80,6 +116,7 @@ export function StatusEventBridge() {
       document.removeEventListener("visibilitychange", reconcileVisibility)
       unsubscribeKeepAlive()
       if (hiddenTimer !== null) clearTimeout(hiddenTimer)
+      resilience.dispose()
       disconnect("disconnected")
     }
   }, [queryClient])

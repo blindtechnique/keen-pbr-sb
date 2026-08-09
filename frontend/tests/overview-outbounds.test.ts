@@ -50,7 +50,7 @@ describe("dashboard outbound traffic classification", () => {
         detail: "live route selection differs from urltest manager selection",
         interfaces: [],
       })
-    ).toEqual({ code: "selectionMismatch" })
+    ).toEqual({ code: "selectionMismatch", tone: "error" })
 
     expect(
       outboundRuntimeIssue({
@@ -65,12 +65,17 @@ describe("dashboard outbound traffic classification", () => {
           },
         ],
       })
-    ).toEqual({ code: "interfaceUnreachable", memberTag: "vpn" })
+    ).toEqual({
+      code: "interfaceUnreachable",
+      memberTag: "vpn",
+      tone: "error",
+    })
   })
 
-  // An outbound the daemon could not attribute a measurement to must not read
-  // as settled. Staying silent here is what let a dead tunnel look fine.
-  test("surfaces cannot-verify instead of leaving an unknown route silent", () => {
+  // Older daemons used the same detail for a probe that had not run, a stale
+  // result and a genuinely unbound result. Do not turn that ambiguity into a
+  // red tunnel failure or claim that binding itself failed.
+  test("surfaces legacy unknown probe state as a non-destructive pending check", () => {
     expect(
       outboundRuntimeIssue({
         tag: "dead_tunnel",
@@ -85,7 +90,11 @@ describe("dashboard outbound traffic classification", () => {
           },
         ],
       })
-    ).toEqual({ code: "cannotVerify", memberTag: "dead_tunnel" })
+    ).toEqual({
+      code: "verificationPending",
+      memberTag: "dead_tunnel",
+      tone: "warning",
+    })
   })
 
   // The daemon reports UNKNOWN for shapes it never probes at all: a table
@@ -126,7 +135,51 @@ describe("dashboard outbound traffic classification", () => {
           },
         ],
       })
-    ).toEqual({ code: "cannotVerify", memberTag: "dead_tunnel" })
+    ).toEqual({
+      code: "verificationPending",
+      memberTag: "dead_tunnel",
+      tone: "warning",
+    })
+  })
+
+  test("uses binding-specific wording only for an explicitly unattributed probe", () => {
+    expect(
+      outboundRuntimeIssue({
+        tag: "tunnel",
+        type: "interface",
+        status: "unknown",
+        interfaces: [
+          {
+            outbound_tag: "tunnel",
+            status: "unknown",
+            detail: "probe result is unattributed",
+          },
+        ],
+      })
+    ).toEqual({
+      code: "cannotVerify",
+      memberTag: "tunnel",
+      tone: "warning",
+    })
+
+    expect(
+      outboundRuntimeIssue({
+        tag: "tunnel",
+        type: "interface",
+        status: "unknown",
+        interfaces: [
+          {
+            outbound_tag: "tunnel",
+            status: "unknown",
+            detail: "probe result is stale",
+          },
+        ],
+      })
+    ).toEqual({
+      code: "verificationStale",
+      memberTag: "tunnel",
+      tone: "warning",
+    })
   })
 
   test("keeps a verified healthy outbound free of issues", () => {
@@ -159,6 +212,7 @@ describe("dashboard outbound traffic classification", () => {
     ).toEqual({
       code: "probeTimeout",
       memberTag: "vpn",
+      tone: "error",
     })
 
     expect(
@@ -192,9 +246,9 @@ describe("dashboard outbound traffic classification", () => {
         ],
       })
     ).toEqual([
-      { code: "selectionMismatch" },
-      { code: "connectionRefused", memberTag: "primary" },
-      { code: "degraded", memberTag: "backup" },
+      { code: "selectionMismatch", tone: "error" },
+      { code: "connectionRefused", memberTag: "primary", tone: "error" },
+      { code: "degraded", memberTag: "backup", tone: "error" },
     ])
   })
 })

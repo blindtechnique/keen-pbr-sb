@@ -180,7 +180,7 @@ export function OutboundStateList({
               <p className="pl-4 text-xs text-muted-foreground">{hint}</p>
             ) : null}
             {issues.length > 0 ? (
-              <div className="space-y-0.5 pt-0.5 pl-4 text-xs text-destructive">
+              <div className="space-y-0.5 pt-0.5 pl-4 text-xs">
                 {issues.map((issue) => {
                   const reason = t(`overview.outbounds.issue.${issue.code}`)
                   const memberName = issue.memberTag
@@ -189,7 +189,12 @@ export function OutboundStateList({
                     : undefined
                   return (
                     <p
-                      className="flex items-start gap-1.5"
+                      className={cn(
+                        "flex items-start gap-1.5",
+                        issue.tone === "error"
+                          ? "text-destructive"
+                          : "text-warning-foreground"
+                      )}
                       key={`${issue.memberTag ?? "group"}:${issue.code}`}
                     >
                       <CircleAlert
