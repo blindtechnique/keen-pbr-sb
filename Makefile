@@ -93,8 +93,9 @@ check-shell: ## Parse every shipped shell script with the target BusyBox and sca
 check-openapi-parity: ## Fail when a registered API route is missing from docs/openapi.yaml
 	python3 build_scripts/check-openapi-parity.py
 
-check-nfqws-assets: ## Verify nfqws2 preset and blob invariants (uniqueness, manifest, --new, port coverage)
+check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiver contract
 	python3 build_scripts/check-nfqws-assets.py
+	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
 
 # Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
 sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer

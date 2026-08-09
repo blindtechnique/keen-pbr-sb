@@ -5,11 +5,42 @@
 # названный `tls_clienthello_max_ru.bin` только после фиксации источника,
 # лицензии и новых хешей."
 #
-# Поэтому строка здесь — не «разрешено», а «известно и ждёт источника». Новый
-# дубль гейт уронит: список не может тихо расти.
-#
-# Формат: duplicate <имя> <имя> ...  (имена по алфавиту)
+# Поэтому строка здесь — не «разрешено», а точный отпечаток уже известного
+# долга. Gate требует полного совпадения формы проблемы и падает на любой
+# неизвестной или устаревшей строке: waiver не может тихо скрыть ухудшение.
+# Поля разделены `|`, чтобы имена профилей с пробелами оставались однозначными.
 
-# Побайтово один и тот же файл под двумя именами, sha256 2fe18b3bd20807d3…
-# Одно из имён заведомо неправдиво; какое именно — решается по источнику.
-duplicate ACTIVE_DISCORD_UDP.bin quic_initial_steamcommunity_com.bin
+# Побайтово один и тот же файл под двумя именами. В ключ включён полный digest:
+# если содержимое изменится, старое исключение перестанет действовать.
+duplicate|2fe18b3bd20807d36704d0b072092ee49ae84edca907a4420ab9a0f0f28fddcf|ACTIVE_DISCORD_UDP.bin|quic_initial_steamcommunity_com.bin
+
+# Пулы без реальной circular-ротации. Точная форма (наличие circular и число
+# вариантов) входит в ключ, поэтому переход от нуля к одному варианту потребует
+# нового решения, а не будет скрыт старой waiver-строкой.
+shallow-pool|default|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+shallow-pool|ver1|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+shallow-pool|ver1 (alt)|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+shallow-pool|ver1 (alt)|udp|present=1|sha256=93e45c069f4b2eb2d5b76f41e13b58504b8b34c6ee925ba1e2424cebd1c6a8f4|circular=0|ids=0|bodies=0
+shallow-pool|ver2|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+shallow-pool|ver2|udp|present=1|sha256=2b0b4c8178f45a4f0ad2b93cc60d632c1690b78828243da3733b47974687b252|circular=0|ids=0|bodies=0
+shallow-pool|ver3 safe|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+shallow-pool|ver3 safe|udp|present=1|sha256=2b0b4c8178f45a4f0ad2b93cc60d632c1690b78828243da3733b47974687b252|circular=0|ids=0|bodies=0
+shallow-pool|ver4|quic|present=1|sha256=bbfd8a3e63516763132900afab2f226997bc50b8364339ef5399334aec7353ca|circular=0|ids=0|bodies=0
+shallow-pool|ver4|udp|present=1|sha256=2b0b4c8178f45a4f0ad2b93cc60d632c1690b78828243da3733b47974687b252|circular=0|ids=0|bodies=0
+
+# Остатки переписки автора с ассистентом. Каждый точный marker учитывается
+# отдельно, поэтому второй фрагмент в уже известном профиле остаётся новым долгом.
+dialogue|ver2|your previous|count=1|sha256=3f38a05cd1f040e2277b12edb8e0f916b0aa8fe9e373e7183723292ba870cdd0
+dialogue|ver2|your file|count=1|sha256=7ba4d8a4d71d67484c67e9c516c99a0174bd61a3c09ff6cd92c77434e46ae6d9
+dialogue|ver3 safe|rollback baseline|count=1|sha256=a26e4219cdc2ab1654f9730f54f96e6913529f659c450610c0b45c3d491bdd78
+dialogue|ver3 safe|your file|count=1|sha256=a26e4219cdc2ab1654f9730f54f96e6913529f659c450610c0b45c3d491bdd78
+
+# Опечатки являются частью пользовательского имени и URL API; переименование
+# требует отдельной миграции сохранённого выбора.
+typo|ver5 aggresive|aggresive|aggressive
+typo|ver7 more aggresive|aggresive|aggressive
+typo|ver8 max aggresive|aggresive|aggressive
+
+# Сейчас только default имеет IPV6_ENABLED=1, остальные двенадцать — 0. Ключ
+# фиксирует обе стороны, поэтому изменение majority не будет принято молча.
+ipv6-exception|default|value=1|baseline=0
