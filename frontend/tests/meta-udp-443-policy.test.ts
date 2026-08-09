@@ -49,9 +49,36 @@ describe("Meta UDP/443 policy", () => {
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("TCP")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("10–20")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("Instagram")
-      expect(advanced.metaUdp443PolicyWarningDescription).toContain("STUN")
-      expect(advanced.metaUdp443PolicyWarningDescription).toContain("ICE")
+      expect(advanced.metaUdp443PolicyWarningDescription).toContain("UDP/3478")
+      expect(advanced.metaUdp443PolicyWarningDescription).toContain("UDP/5349")
       expect(advanced.metaUdp443PolicyWarningDescription).toContain("P2P")
+      expect(advanced.metaUdp443PolicyWarningDescription).toContain("IPv6")
     }
+
+    expect(
+      enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("rejects only UDP/443")
+    expect(
+      enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("may then use TCP")
+    expect(
+      enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("may improve")
+    expect(
+      enTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("disable IPv6 routing")
+
+    expect(
+      ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("отклоняет только UDP/443")
+    expect(
+      ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("может использовать TCP")
+    expect(
+      ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("может повысить")
+    expect(
+      ruTranslation.pages.settings.advanced.metaUdp443PolicyWarningDescription
+    ).toContain("отключить IPv6-маршрутизацию")
   })
 })

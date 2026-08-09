@@ -1833,7 +1833,7 @@ export const enTranslation = {
         },
         metaUdp443PolicyWarningTitle: "Calls may take longer to connect",
         metaUdp443PolicyWarningDescription:
-          "This mode blocks Meta/WhatsApp QUIC over UDP/443 only on the keen-pbr-sb route covered by the packaged IP companion, forcing messages and media to TCP. It also affects Instagram and other Meta services in those IP ranges. This improves message reliability, but call audio may start 10–20 seconds after the immediate call notification. STUN, ICE, P2P, and all other call UDP remain allowed.",
+          "This mode rejects only UDP/443 to the packaged Meta/WhatsApp IP companion on one unambiguous active keen-pbr-sb route. Affected clients may then use TCP for messages and media, which may improve message reliability. Instagram and other Meta services in the same IP ranges are also affected. The call notification may appear immediately, but audio may take 10–20 seconds to start. This policy does not block UDP/3478, UDP/5349, or P2P/high-port media. For now, disable IPv6 routing before enabling this mode because the packaged companion has no verified authoritative IPv6 coverage.",
         fwmarkStartLabel: "Firewall mark starting value",
         fwmarkStartHint:
           "The starting fwmark assigned to your first route. Each additional route gets the next value in the range.",
