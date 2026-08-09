@@ -453,17 +453,18 @@ bool InterfaceProbe::commit_observation(
     // Prepare every allocation-bearing field before taking publication
     // authority. An allocation failure here leaves the previous exact
     // identity/result pair untouched.
-    PublishedObservation prepared{
-        observation.target,
-        observation.result,
-    };
+    auto prepared = std::make_shared<const PublishedObservation>(
+        PublishedObservation{
+            observation.target,
+            observation.result,
+        });
     std::string tag = observation.target.tag;
 
     std::lock_guard<std::mutex> lock(mutex_);
     const auto previous = published_observations_.find(tag);
     const bool transitioned =
         previous != published_observations_.end() &&
-        verified_reachable(previous->second.result) !=
+        verified_reachable(previous->second->result) !=
             verified_reachable(observation.result);
 
 #ifdef KEEN_PBR3_TESTING
@@ -474,10 +475,10 @@ bool InterfaceProbe::commit_observation(
 #endif
 
     if (previous != published_observations_.end()) {
-        // PublishedObservation is statically nothrow-swappable, so readers
-        // can observe only the complete old pair or the complete new pair.
-        using std::swap;
-        swap(previous->second, prepared);
+        // The immutable observation pointer is statically nothrow-swappable,
+        // so readers can observe only the complete old pair or complete new
+        // pair. This also avoids relying on old libstdc++ string swap traits.
+        previous->second.swap(prepared);
     } else {
         // std::map insertion has the strong guarantee. The fully prepared
         // key/value are not visible unless node publication succeeds.
@@ -503,18 +504,18 @@ std::vector<std::string> InterfaceProbe::commit(
         // failover group must stop trusting the previous green.
         const auto previous = candidate.find(observation.target.tag);
         if (previous != candidate.end() &&
-            verified_reachable(previous->second.result) !=
+            verified_reachable(previous->second->result) !=
                 verified_reachable(observation.result)) {
             transitioned_tags.push_back(observation.target.tag);
         }
 
-        PublishedObservation prepared{
-            observation.target,
-            observation.result,
-        };
+        auto prepared = std::make_shared<const PublishedObservation>(
+            PublishedObservation{
+                observation.target,
+                observation.result,
+            });
         if (previous != candidate.end()) {
-            using std::swap;
-            swap(previous->second, prepared);
+            previous->second.swap(prepared);
         } else {
             candidate.emplace(
                 observation.target.tag, std::move(prepared));
@@ -556,7 +557,7 @@ std::optional<InterfaceProbeResult> InterfaceProbe::result_for(
     if (it == published_observations_.end()) {
         return std::nullopt;
     }
-    return it->second.result;
+    return it->second->result;
 }
 
 std::optional<InterfaceProbeResult> InterfaceProbe::result_for(
@@ -566,10 +567,10 @@ std::optional<InterfaceProbeResult> InterfaceProbe::result_for(
         published_observations_.find(expected_target.tag);
     if (observation == published_observations_.end() ||
         !same_target_identity(
-            observation->second.target, expected_target)) {
+            observation->second->target, expected_target)) {
         return std::nullopt;
     }
-    return observation->second.result;
+    return observation->second->result;
 }
 
 void InterfaceProbe::retain_only(const std::vector<Target>& targets) {
@@ -589,7 +590,7 @@ void InterfaceProbe::retain_only(const std::vector<Target>& targets) {
             current = &target;
         }
         if (current == nullptr || duplicate_tag ||
-            !same_target_identity(it->second.target, *current)) {
+            !same_target_identity(it->second->target, *current)) {
             it = published_observations_.erase(it);
         } else {
             ++it;

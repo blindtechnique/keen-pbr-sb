@@ -159,12 +159,15 @@ private:
         InterfaceProbeResult result;
     };
 
+    using PublishedObservationPtr =
+        std::shared_ptr<const PublishedObservation>;
+
     static_assert(
-        std::is_nothrow_swappable_v<PublishedObservation>,
-        "published interface observations must support atomic replacement");
+        std::is_nothrow_swappable_v<PublishedObservationPtr>,
+        "published interface observation pointers must support atomic replacement");
 
     using PublishedObservations =
-        std::map<std::string, PublishedObservation>;
+        std::map<std::string, PublishedObservationPtr>;
 
     static RetryConfig default_retry() {
         RetryConfig retry;
