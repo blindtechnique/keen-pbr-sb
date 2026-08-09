@@ -83,13 +83,10 @@ export function OverviewPage() {
   const dashboardRuntimeOutbounds = useMemo(
     () =>
       selectDashboardRuntimeOutbounds({
-        // A visible draft is not necessarily the configuration that owns the
-        // live runtime. Stay conservative until it is applied.
-        config: configIsDraft ? undefined : loadedConfig,
         runtimeOutbounds,
         transports: transportStatuses,
       }),
-    [configIsDraft, loadedConfig, runtimeOutbounds, transportStatuses]
+    [runtimeOutbounds, transportStatuses]
   )
   const runtimeOutboundByTag = useMemo(
     () =>

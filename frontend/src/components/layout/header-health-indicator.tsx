@@ -2,12 +2,10 @@ import { CircleAlertIcon, CircleCheckBigIcon, CircleXIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import {
-  useGetConfig,
   useGetHealthService,
   useGetRuntimeOutbounds,
   useGetTransports,
 } from "@/api/queries"
-import { selectConfig } from "@/api/selectors"
 import { useStatusEventConnectionState } from "@/api/status-event-connection"
 import {
   getHeaderHealthTone,
@@ -26,7 +24,6 @@ export function HeaderHealthIndicator() {
   const { t } = useTranslation()
   const healthQuery = useGetHealthService()
   const outboundsQuery = useGetRuntimeOutbounds()
-  const configQuery = useGetConfig()
   const transportsQuery = useGetTransports()
   const statusEvents = useStatusEventConnectionState()
   const service =
@@ -35,14 +32,10 @@ export function HeaderHealthIndicator() {
     outboundsQuery.data?.status === 200
       ? outboundsQuery.data.data.outbounds
       : undefined
-  const visibleConfig = selectConfig(configQuery.data)
-  const configIsDraft =
-    configQuery.data?.status === 200 && configQuery.data.data.is_draft
   const transports =
     transportsQuery.data?.status === 200 ? transportsQuery.data.data : undefined
   const outbounds = rawOutbounds
     ? selectDashboardRuntimeOutbounds({
-        config: configIsDraft ? undefined : visibleConfig,
         runtimeOutbounds: rawOutbounds,
         transports,
       })

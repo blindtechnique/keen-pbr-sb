@@ -7,7 +7,6 @@ import type {
   TransportStatus,
 } from "@/api/generated/model"
 import {
-  collectRequiredOutboundTags,
   countEnabledRouteRuleListsByOutbound,
   selectDashboardRuntimeOutbounds,
 } from "@/components/overview/dashboard-outbound-relevance"
@@ -41,20 +40,16 @@ const stoppedTransport: TransportStatus = {
   desired_up: false,
 }
 
-function select(
-  config: ConfigObject,
-  transports: readonly TransportStatus[] = [stoppedTransport]
-) {
+function select(transports: readonly TransportStatus[] = [stoppedTransport]) {
   return selectDashboardRuntimeOutbounds({
-    config,
     runtimeOutbounds: [unavailableRuntime],
     transports,
   })
 }
 
 describe("dashboard outbound relevance", () => {
-  test("suppresses a stopped managed transport that has no active dependency", () => {
-    expect(select({ outbounds: [tunnelOutbound] })).toEqual([])
+  test("suppresses an intentionally stopped managed transport", () => {
+    expect(select()).toEqual([])
   })
 
   test("a disabled route neither uses nor protects the stopped outbound", () => {
@@ -71,13 +66,13 @@ describe("dashboard outbound relevance", () => {
       },
     }
 
-    expect(select(config)).toEqual([])
+    expect(select()).toEqual([])
     expect(
       countEnabledRouteRuleListsByOutbound(config.route?.rules ?? [])
     ).toEqual(new Map())
   })
 
-  test("keeps the failure when an enabled route uses the stopped transport", () => {
+  test("an explicit manual stop stays neutral when a route still references it", () => {
     const config: ConfigObject = {
       outbounds: [tunnelOutbound],
       route: {
@@ -91,77 +86,101 @@ describe("dashboard outbound relevance", () => {
       },
     }
 
-    expect(select(config)).toEqual([unavailableRuntime])
+    expect(select()).toEqual([])
     expect(
       countEnabledRouteRuleListsByOutbound(config.route?.rules ?? [])
     ).toEqual(new Map([[tunnelOutbound.tag, 1]]))
   })
 
-  test("keeps active DNS and list-refresh detour failures truthful", () => {
-    const dnsConfig: ConfigObject = {
-      outbounds: [tunnelOutbound],
-      dns: {
-        servers: [
-          { tag: "dns_vpn", address: "8.8.8.8", detour: tunnelOutbound.tag },
-        ],
-        rules: [{ enabled: true, list: ["instagram"], server: "dns_vpn" }],
-      },
-    }
-    expect(select(dnsConfig)).toEqual([unavailableRuntime])
-
-    const refreshConfig: ConfigObject = {
-      outbounds: [tunnelOutbound],
-      lists: {
-        instagram: {
-          url: "https://example.invalid/instagram.srs",
-          refresh_detour_mode: "inherit",
-        },
-      },
-      list_refresh: { detour: tunnelOutbound.tag },
-    }
-    expect(select(refreshConfig)).toEqual([unavailableRuntime])
+  test("does not hide native or expected-running failures", () => {
+    expect(select([{ ...stoppedTransport, type: "native" }])).toEqual([
+      unavailableRuntime,
+    ])
+    expect(select([{ ...stoppedTransport, desired_up: true }])).toEqual([
+      unavailableRuntime,
+    ])
   })
 
-  test("expands an active failover dependency to its stopped child", () => {
-    const group: Outbound = {
+  test("keeps a selector visible while any matching managed child is expected up", () => {
+    const selectorRuntime: RuntimeOutboundState = {
       tag: "vless_group",
       type: "urltest",
-      outbound_groups: [{ weight: 1, outbounds: [tunnelOutbound.tag] }],
+      status: "degraded",
+      interfaces: [
+        {
+          outbound_tag: tunnelOutbound.tag,
+          interface_name: tunnelOutbound.interface,
+          status: "unavailable",
+        },
+        {
+          outbound_tag: "backup_vless",
+          interface_name: "vless2",
+          status: "active",
+        },
+      ],
     }
-    const config: ConfigObject = {
-      outbounds: [group, tunnelOutbound],
-      route: { rules: [{ outbound: group.tag, list: ["instagram"] }] },
+    const runningBackup: TransportStatus = {
+      ...stoppedTransport,
+      tag: "backup_vless",
+      interface: "vless2",
+      state: "up",
+      desired_up: true,
     }
 
-    expect(collectRequiredOutboundTags(config)).toEqual(
-      new Set([group.tag, tunnelOutbound.tag])
-    )
-    expect(select(config)).toEqual([unavailableRuntime])
+    expect(
+      selectDashboardRuntimeOutbounds({
+        runtimeOutbounds: [selectorRuntime],
+        transports: [stoppedTransport, runningBackup],
+      })
+    ).toEqual([selectorRuntime])
   })
 
-  test("does not hide native or expected-running failures", () => {
+  test("keeps a mixed selector visible when its native child is failing", () => {
+    const selectorRuntime: RuntimeOutboundState = {
+      tag: "mixed_group",
+      type: "urltest",
+      status: "degraded",
+      interfaces: [
+        {
+          outbound_tag: tunnelOutbound.tag,
+          interface_name: tunnelOutbound.interface,
+          status: "unavailable",
+        },
+        {
+          outbound_tag: "native_awg",
+          interface_name: "nwg7",
+          status: "unavailable",
+        },
+      ],
+    }
+    const failingNative: TransportStatus = {
+      ...stoppedTransport,
+      tag: "native_awg",
+      type: "native",
+      interface: "nwg7",
+      desired_up: false,
+    }
+
     expect(
-      select({ outbounds: [tunnelOutbound] }, [
-        { ...stoppedTransport, type: "native" },
-      ])
-    ).toEqual([unavailableRuntime])
-    expect(
-      select({ outbounds: [tunnelOutbound] }, [
-        { ...stoppedTransport, desired_up: true },
-      ])
-    ).toEqual([unavailableRuntime])
+      selectDashboardRuntimeOutbounds({
+        runtimeOutbounds: [selectorRuntime],
+        transports: [stoppedTransport, failingNative],
+      })
+    ).toEqual([selectorRuntime])
   })
 
-  test("stays conservative while config or transport inventory is missing", () => {
+  test("manual intent remains authoritative during a draft or failed apply", () => {
     expect(
       selectDashboardRuntimeOutbounds({
         runtimeOutbounds: [unavailableRuntime],
         transports: [stoppedTransport],
       })
-    ).toEqual([unavailableRuntime])
+    ).toEqual([])
+  })
+
+  test("stays conservative while transport inventory is missing", () => {
     expect(
       selectDashboardRuntimeOutbounds({
-        config: { outbounds: [tunnelOutbound] },
         runtimeOutbounds: [unavailableRuntime],
       })
     ).toEqual([unavailableRuntime])
