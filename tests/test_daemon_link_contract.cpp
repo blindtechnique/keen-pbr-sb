@@ -57,6 +57,10 @@ daemon_detail::ControlTaskAdmissionHandle make_control_task_token() {
         const daemon_detail::ControlTaskAdmissionToken>();
 }
 
+std::unique_ptr<TestControlTask> own_control_task(TestControlTask task) {
+    return std::make_unique<TestControlTask>(std::move(task));
+}
+
 TEST_CASE("daemon production translation units link into the test binary") {
     using RunMethod = void (Daemon::*)();
     using RunningMethod = bool (Daemon::*)() const;
@@ -152,7 +156,8 @@ TEST_CASE("wake failure cancels an exact queued fd task before caller release") 
     bool caller_released_fd = false;
     bool registered_reused_fd = false;
     int calls = 0;
-    std::vector<TestControlTask> queued{
+    std::vector<std::unique_ptr<TestControlTask>> queued;
+    queued.push_back(own_control_task(
         TestControlTask{
             [&]() {
                 ++calls;
@@ -160,8 +165,7 @@ TEST_CASE("wake failure cancels an exact queued fd task before caller release") 
             },
             "scheduler-add-fd",
             token,
-        },
-    };
+        }));
 
     // Linearization outcome when wake failed before the event loop claimed
     // the vector entry: rollback is exact and the caller may now close fd.
@@ -169,7 +173,7 @@ TEST_CASE("wake failure cancels an exact queued fd task before caller release") 
         queued, token, &TestControlTask::admission_token));
     caller_released_fd = true;
     for (auto& task : queued) {
-        task.callback();
+        task->callback();
     }
 
     CHECK(queued.empty());
@@ -187,18 +191,18 @@ TEST_CASE("shutdown gate rejects a waiting task that loses the locked admission 
     auto completion = std::make_shared<std::promise<void>>();
     auto future = completion->get_future();
     int calls = 0;
-    std::vector<TestControlTask> queued;
+    std::vector<std::unique_ptr<TestControlTask>> queued;
 
     admission_open = false;
     {
-        TestControlTask candidate{
+        auto candidate = own_control_task(TestControlTask{
             [completion, &calls]() {
                 ++calls;
                 completion->set_value();
             },
             "scheduler-add-fd",
             make_control_task_token(),
-        };
+        });
         CHECK_FALSE(daemon_detail::publish_control_task_if_admitted(
             queued, admission_open, std::move(candidate)));
     }
@@ -219,7 +223,8 @@ TEST_CASE("wake failure preserves a task already claimed by the control loop") {
     bool caller_released_fd = false;
     bool registered_reused_fd = false;
     int calls = 0;
-    std::vector<TestControlTask> queued{
+    std::vector<std::unique_ptr<TestControlTask>> queued;
+    queued.push_back(own_control_task(
         TestControlTask{
             [&]() {
                 ++calls;
@@ -227,9 +232,8 @@ TEST_CASE("wake failure preserves a task already claimed by the control loop") {
             },
             "scheduler-add-fd",
             token,
-        },
-    };
-    std::vector<TestControlTask> claimed;
+        }));
+    std::vector<std::unique_ptr<TestControlTask>> claimed;
     claimed.swap(queued);
 
     CHECK_FALSE(
@@ -238,7 +242,7 @@ TEST_CASE("wake failure preserves a task already claimed by the control loop") {
     // The caller observes authoritative admission and therefore retains fd
     // ownership until the claimed callback completes.
     for (auto& task : claimed) {
-        task.callback();
+        task->callback();
     }
 
     CHECK(calls == 1);
@@ -251,24 +255,25 @@ TEST_CASE("wake rollback never cancels a different task with the same label") {
     const auto second_token = make_control_task_token();
     int first_calls = 0;
     int second_calls = 0;
-    std::vector<TestControlTask> queued{
+    std::vector<std::unique_ptr<TestControlTask>> queued;
+    queued.push_back(own_control_task(
         TestControlTask{
             [&first_calls]() { ++first_calls; },
             "same-label",
             first_token,
-        },
+        }));
+    queued.push_back(own_control_task(
         TestControlTask{
             [&second_calls]() { ++second_calls; },
             "same-label",
             second_token,
-        },
-    };
+        }));
 
     CHECK(daemon_detail::erase_exact_control_task_if_still_queued(
         queued, second_token, &TestControlTask::admission_token));
     REQUIRE(queued.size() == 1);
-    CHECK(queued.front().admission_token.get() == first_token.get());
-    queued.front().callback();
+    CHECK(queued.front()->admission_token.get() == first_token.get());
+    queued.front()->callback();
     CHECK(first_calls == 1);
     CHECK(second_calls == 0);
 }
@@ -277,7 +282,8 @@ TEST_CASE("claimed waiting task preserves its body exception after wake failure"
     const auto token = make_control_task_token();
     auto completion = std::make_shared<std::promise<void>>();
     auto future = completion->get_future();
-    std::vector<TestControlTask> queued{
+    std::vector<std::unique_ptr<TestControlTask>> queued;
+    queued.push_back(own_control_task(
         TestControlTask{
             [completion]() {
                 try {
@@ -288,16 +294,15 @@ TEST_CASE("claimed waiting task preserves its body exception after wake failure"
             },
             "same-label",
             token,
-        },
-    };
-    std::vector<TestControlTask> claimed;
+        }));
+    std::vector<std::unique_ptr<TestControlTask>> claimed;
     claimed.swap(queued);
 
     CHECK_FALSE(
         daemon_detail::erase_exact_control_task_if_still_queued(
             queued, token, &TestControlTask::admission_token));
     REQUIRE(claimed.size() == 1);
-    CHECK_NOTHROW(claimed.front().callback());
+    CHECK_NOTHROW(claimed.front()->callback());
     CHECK_THROWS_WITH_AS(
         future.get(),
         "claimed task body failed",

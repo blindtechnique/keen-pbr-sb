@@ -1533,18 +1533,19 @@ void Daemon::enqueue_control_task(std::function<void()> task,
 
     const auto admission_token =
         std::make_shared<const daemon_detail::ControlTaskAdmissionToken>();
+    auto queued_task = std::make_unique<ControlTask>(ControlTask{
+        .callback = std::move(queued_callback),
+        .label = effective_label,
+        .trace_id = trace_id,
+        .admission_token = admission_token,
+    });
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
         if (!daemon_detail::publish_control_task_if_admitted(
                 control_tasks_,
                 accept_posted_control_tasks_.load(
                     std::memory_order_acquire),
-                ControlTask{
-                    .callback = std::move(queued_callback),
-                    .label = effective_label,
-                    .trace_id = trace_id,
-                    .admission_token = admission_token,
-                })) {
+                std::move(queued_task))) {
             // The task never crossed the ownership boundary. In the waiting
             // case stack unwinding destroys every promise owner, so the
             // private future cannot become a stranded shutdown wait.
@@ -1671,6 +1672,12 @@ bool Daemon::post_control_task(std::function<void()> task, const std::string& la
         }
     };
 
+    auto queued_task = std::make_unique<ControlTask>(ControlTask{
+        .callback = std::move(traced_task),
+        .label = effective_label,
+        .trace_id = trace_id,
+        .admission_token = {},
+    });
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
         // Serialize admission with shutdown. The optimistic check above keeps
@@ -1680,12 +1687,7 @@ bool Daemon::post_control_task(std::function<void()> task, const std::string& la
                 std::memory_order_acquire)) {
             return false;
         }
-        control_tasks_.push_back(ControlTask{
-            .callback = std::move(traced_task),
-            .label = effective_label,
-            .trace_id = trace_id,
-            .admission_token = {},
-        });
+        control_tasks_.push_back(std::move(queued_task));
     }
     try {
         Logger::instance().trace("control_task_enqueue",
@@ -1730,7 +1732,7 @@ void Daemon::handle_control_commands() {
         throw DaemonError("eventfd read failed: " + std::string(strerror(errno)));
     }
 
-    std::vector<ControlTask> commands;
+    std::vector<ControlTaskOwner> commands;
     {
         KPBR_LOCK_GUARD(control_tasks_mutex_);
         commands.swap(control_tasks_);
@@ -1738,7 +1740,7 @@ void Daemon::handle_control_commands() {
 
     for (auto& command : commands) {
         try {
-            command.callback();
+            command->callback();
         } catch (const std::exception& error) {
             // One failed deferred callback must not discard the remaining
             // batch. Resolver and lifecycle completions may own single-flight
@@ -1746,7 +1748,9 @@ void Daemon::handle_control_commands() {
             try {
                 Logger::instance().error(
                     "Control task '{}' failed: {}",
-                    command.label.empty() ? "control-task" : command.label,
+                    command->label.empty()
+                        ? "control-task"
+                        : command->label,
                     error.what());
             } catch (...) {
             }
@@ -1754,7 +1758,9 @@ void Daemon::handle_control_commands() {
             try {
                 Logger::instance().error(
                     "Control task '{}' failed: unknown error",
-                    command.label.empty() ? "control-task" : command.label);
+                    command->label.empty()
+                        ? "control-task"
+                        : command->label);
             } catch (...) {
             }
         }

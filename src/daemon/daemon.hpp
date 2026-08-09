@@ -190,21 +190,24 @@ bool publish_control_task_if_admitted(
 // reuse from cancelling another task. The caller holds the queue mutex.
 template <typename Entry>
 bool erase_exact_control_task_if_still_queued(
-    std::vector<Entry>& entries,
+    std::vector<std::unique_ptr<Entry>>& entries,
     const ControlTaskAdmissionHandle& token,
     ControlTaskAdmissionHandle Entry::* token_member) noexcept {
+    using Owner = std::unique_ptr<Entry>;
     static_assert(
-        std::is_nothrow_move_assignable_v<Entry> &&
-            std::is_nothrow_destructible_v<Entry>,
+        std::is_nothrow_move_assignable_v<Owner> &&
+            std::is_nothrow_destructible_v<Owner>,
         "exact control-task rollback must not throw");
 
     const auto* identity = token.get();
-    const auto found = std::find_if(
-        entries.begin(),
-        entries.end(),
-        [identity, token_member](const Entry& entry) noexcept {
-            return (entry.*token_member).get() == identity;
-        });
+    auto found = entries.end();
+    for (auto current = entries.begin(); current != entries.end(); ++current) {
+        if (*current != nullptr &&
+            (((**current).*token_member).get() == identity)) {
+            found = current;
+            break;
+        }
+    }
     if (found == entries.end()) {
         return false;
     }
@@ -961,8 +964,10 @@ private:
         TraceId trace_id{0};
         daemon_detail::ControlTaskAdmissionHandle admission_token;
     };
+    using ControlTaskOwner = std::unique_ptr<ControlTask>;
     TracedMutex control_tasks_mutex_;
-    std::vector<ControlTask> control_tasks_ GUARDED_BY(control_tasks_mutex_);
+    std::vector<ControlTaskOwner> control_tasks_
+        GUARDED_BY(control_tasks_mutex_);
 
     // Snapshot stores
     ConfigStore config_store_;
