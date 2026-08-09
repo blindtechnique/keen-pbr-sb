@@ -4,6 +4,7 @@
 #include "../src/config/config.hpp"
 #include "../src/dns/keenetic_dns.hpp"
 #include "../src/lists/list_entry_visitor.hpp"
+#include "../src/runtime/meta_udp_443_policy.hpp"
 
 #include <algorithm>
 #include <deque>
@@ -74,6 +75,14 @@ public:
         events.push_back(
             "drop:" + criteria.dst_port.to_config_string());
     }
+    void create_forward_udp_reject_rule(
+        uint32_t expected_fwmark,
+        const std::string& dst_set_name,
+        std::uint16_t destination_port) override {
+        events.push_back(
+            "forward-reject:" + std::to_string(destination_port) + ":" +
+            dst_set_name + ":" + std::to_string(expected_fwmark));
+    }
     void create_dns_redirect_rules() override {
         events.push_back("dns-redirect");
     }
@@ -83,6 +92,10 @@ public:
         const std::vector<FirewallSourceEgressSnatSelector>&) override {}
     OwnedSnatState inspect_owned_snat_state() const override {
         return OwnedSnatState::healthy;
+    }
+    OwnedForwardUdpRejectState
+    inspect_forward_udp_reject_state() const override {
+        return OwnedForwardUdpRejectState::healthy;
     }
     void create_pass_rule(const FirewallRuleCriteria&) override {
         events.push_back("pass");
@@ -505,6 +518,339 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "Meta UDP 443 messages-first policy requires packaged provenance and an active broad route") {
+    constexpr const char* identity =
+        "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
+    const auto config = parse_config(std::string{R"json({
+      "daemon": {
+        "ipv6_enabled": false,
+        "meta_udp443_policy": "messages_first"
+      },
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "meta_domains": {"domains": ["whatsapp.com"]},
+        "renamed_companion": {
+          "catalog_identity": ")json"} + identity + R"json(",
+          "ip_cidrs": ["31.13.64.0/18"]
+        },
+        "spoofed_whatsapp_ip": {"ip_cidrs": ["157.240.0.0/16"]}
+      },
+      "route": {
+        "rules": [
+          {
+            "list": ["meta_domains", "renamed_companion", "spoofed_whatsapp_ip"],
+            "outbound": "vpn"
+          }
+        ]
+      }
+    })json");
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    firewall.set_fwmark_mask(0x00FF0000U);
+
+    apply_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets);
+
+    const std::string expected =
+        "forward-reject:443:kpbr4_renamed_companion:458752";
+    CHECK(std::count(
+              firewall.events.begin(), firewall.events.end(), expected) == 1);
+    CHECK(std::none_of(
+        firewall.events.begin(), firewall.events.end(),
+        [](const std::string& event) {
+            return event.find("spoofed_whatsapp_ip") != std::string::npos ||
+                   event.find("meta_domains") != std::string::npos;
+        }));
+
+    RuleState pass;
+    pass.rule_index = 0U;
+    pass.action_type = RuleActionType::Pass;
+    RuleState authoritative_mark;
+    authoritative_mark.rule_index = 1U;
+    authoritative_mark.list_names = {"renamed_companion"};
+    authoritative_mark.set_names = {"kpbr4s_renamed_companion"};
+    authoritative_mark.outbound_tag = "vpn";
+    authoritative_mark.action_type = RuleActionType::Mark;
+    authoritative_mark.fwmark = 0x00070000U;
+    const auto ordered_selection = resolve_meta_udp_443_policy_selection(
+        config,
+        {pass, authoritative_mark},
+        0x00FF0000U);
+    REQUIRE(ordered_selection.active());
+    CHECK_FALSE(ordered_selection.allow_unmarked_cleanup);
+}
+
+TEST_CASE(
+    "Meta UDP 443 policy is off by default and ignores an installed unused companion") {
+    const auto make_config = [](bool messages_first,
+                                const std::string& active_list) {
+        return parse_config(std::string{R"json({
+      "daemon": {"ipv6_enabled": false)json"} +
+            (messages_first
+                 ? ", \"meta_udp443_policy\": \"messages_first\""
+                 : "") + R"json(},
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "companion": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["31.13.64.0/18"]
+        },
+        "ordinary": {"ip_cidrs": ["203.0.113.0/24"]}
+      },
+      "route": {"rules": [{"list": [")json" + active_list +
+            R"json("], "outbound": "vpn"}]}
+    })json");
+    };
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+
+    SUBCASE("omitted policy remains balanced") {
+        const auto config = make_config(false, "companion");
+        RecordingFirewall firewall;
+        apply_runtime_firewall(
+            config, {{"vpn", 0x00070000U}}, {}, cache, firewall,
+            FirewallApplyMode::PreserveSets);
+        CHECK(std::none_of(
+            firewall.events.begin(), firewall.events.end(),
+            [](const std::string& event) {
+                return event.rfind("forward-reject:", 0U) == 0U;
+            }));
+    }
+
+    SUBCASE("unused companion does not authorize an ordinary active list") {
+        const auto config = make_config(true, "ordinary");
+        RecordingFirewall firewall;
+        apply_runtime_firewall(
+            config, {{"vpn", 0x00070000U}}, {}, cache, firewall,
+            FirewallApplyMode::PreserveSets);
+        CHECK(std::none_of(
+            firewall.events.begin(), firewall.events.end(),
+            [](const std::string& event) {
+                return event.rfind("forward-reject:", 0U) == 0U;
+            }));
+    }
+}
+
+TEST_CASE(
+    "Meta UDP 443 messages-first rejects IPv6 without authoritative companion coverage") {
+    const auto config = parse_config(R"json({
+      "daemon": {
+        "ipv6_enabled": true,
+        "meta_udp443_policy": "messages_first"
+      },
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "companion": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["31.13.64.0/18"]
+        }
+      },
+      "route": {
+        "rules": [{"list": ["companion"], "outbound": "vpn"}]
+      }
+    })json");
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    firewall.set_fwmark_mask(0x00FF0000U);
+
+    CHECK_THROWS_WITH(
+        stage_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::PreserveSets),
+        "daemon.meta_udp443_policy=messages_first cannot be enabled while "
+        "IPv6 is active because the packaged Meta/WhatsApp companion has no "
+        "authoritative IPv6 coverage; use balanced mode or disable IPv6");
+    CHECK(firewall.applied_modes.empty());
+    CHECK(std::none_of(
+        firewall.events.begin(), firewall.events.end(),
+        [](const std::string& event) {
+            return event.rfind("forward-reject:", 0U) == 0U;
+        }));
+}
+
+TEST_CASE(
+    "Meta UDP 443 validates the family coverage actually streamed into pending sets") {
+    constexpr const char* url = "https://example.test/whatsapp-ip.txt";
+    constexpr const char* identity =
+        "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe";
+    const auto config = parse_config(std::string{R"json({
+      "daemon": {
+        "ipv6_enabled": true,
+        "meta_udp443_policy": "messages_first"
+      },
+      "outbounds": [
+        {"tag": "vpn", "type": "interface", "interface": "nwg0"}
+      ],
+      "lists": {
+        "companion": {
+          "catalog_identity": ")json"} + identity + R"json(",
+          "url": ")json" + url + R"json("
+        }
+      },
+      "route": {
+        "rules": [{"list": ["companion"], "outbound": "vpn"}]
+      }
+    })json");
+    FirewallTempDirectory temporary;
+    auto transport = std::make_shared<FirewallSequenceHttpTransport>();
+    CacheManager cache(temporary.path(), 1024, transport);
+    cache.ensure_dir();
+    transport->enqueue("31.13.64.0/18\n2a03:2880::/32\n");
+    REQUIRE(cache.download("companion", url).updated());
+
+    RecordingFirewall firewall;
+    firewall.set_fwmark_mask(0x00FF0000U);
+    firewall.before_first_ipset = [&]() {
+        // Simulate the atomic URL-cache replacement that can happen between
+        // the planning pass and the actual set-loader pass.
+        transport->enqueue("31.13.64.0/18\n");
+        REQUIRE(cache.download("companion", url).updated());
+    };
+
+    CHECK_THROWS_WITH(
+        stage_runtime_firewall(
+            config,
+            {{"vpn", 0x00070000U}},
+            {},
+            cache,
+            firewall,
+            FirewallApplyMode::PreserveSets),
+        "daemon.meta_udp443_policy=messages_first cannot be enabled while "
+        "IPv6 is active because the packaged Meta/WhatsApp companion has no "
+        "authoritative IPv6 coverage; use balanced mode or disable IPv6");
+    CHECK(std::none_of(
+        firewall.events.begin(), firewall.events.end(),
+        [](const std::string& event) {
+            return event.rfind("forward-reject:", 0U) == 0U;
+        }));
+    CHECK(firewall.applied_modes.empty());
+}
+
+TEST_CASE(
+    "Meta UDP 443 policy fails closed when authoritative companions resolve to different marks") {
+    const auto config = parse_config(R"json({
+      "daemon": {
+        "ipv6_enabled": false,
+        "meta_udp443_policy": "messages_first"
+      },
+      "outbounds": [
+        {"tag": "first", "type": "interface", "interface": "nwg0"},
+        {"tag": "second", "type": "interface", "interface": "nwg1"}
+      ],
+      "lists": {
+        "first_companion": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["31.13.64.0/18"]
+        },
+        "second_companion": {
+          "catalog_identity":
+            "0475c85d06ea258343fdda22ee85bfd0a3e1fb2fa88751ab39ee0ffb64efedbe",
+          "ip_cidrs": ["157.240.0.0/16"]
+        }
+      },
+      "route": {"rules": [
+        {"list": ["first_companion"], "outbound": "first"},
+        {"list": ["second_companion"], "outbound": "second"}
+      ]}
+    })json");
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall;
+    firewall.set_fwmark_mask(0x00FF0000U);
+
+    CHECK_THROWS_WITH(
+        stage_runtime_firewall(
+            config,
+            {{"first", 0x00070000U}, {"second", 0x00080000U}},
+            {}, cache, firewall, FirewallApplyMode::PreserveSets),
+        "daemon.meta_udp443_policy=messages_first requires the authoritative "
+        "Meta/WhatsApp IP companion to resolve to one unambiguous active broad route");
+    CHECK(firewall.applied_modes.empty());
+}
+
+TEST_CASE(
+    "Meta UDP 443 activation cleanup selects only exact UDP 443 zero or expected owned marks") {
+    const auto flow = [](ConntrackFlowProtocol protocol,
+                         std::uint16_t destination_port,
+                         std::uint32_t mark,
+                         std::uint16_t source_port) {
+        ConntrackExactForwardedFlow value;
+        value.family = ConntrackFlowFamily::Ipv4;
+        value.protocol = protocol;
+        value.source = "192.168.1.44";
+        value.destination = "31.13.66.10";
+        value.source_port = source_port;
+        value.destination_port = destination_port;
+        value.mark = mark;
+        if (protocol == ConntrackFlowProtocol::Tcp) {
+            value.tcp_state = ConntrackTcpState::Established;
+        }
+        return value;
+    };
+    ConntrackFlowObservation observation;
+    observation.media_seed_flows = {
+        flow(ConntrackFlowProtocol::Udp, 443U, 0U, 50000U),
+        // Expected owned mark plus foreign QoS bits remains exact and safe.
+        flow(ConntrackFlowProtocol::Udp, 443U, 0xA0070000U, 50001U),
+        // A foreign-only mark is an intentional skip_marked_packets bypass.
+        flow(ConntrackFlowProtocol::Udp, 443U, 0xA0000000U, 50005U),
+        // A previously committed messages-first route mark is eligible only
+        // when the transition explicitly carries that exact authority.
+        flow(ConntrackFlowProtocol::Udp, 443U, 0x00060000U, 50006U),
+        flow(ConntrackFlowProtocol::Udp, 443U, 0x00080000U, 50002U),
+        flow(ConntrackFlowProtocol::Udp, 3478U, 0x00070000U, 50003U),
+        flow(ConntrackFlowProtocol::Tcp, 443U, 0x00070000U, 50004U),
+    };
+
+    const auto candidates = select_meta_udp_443_cleanup_candidates(
+        observation, {0x00070000U}, 0x00FF0000U);
+    REQUIRE(candidates.complete);
+    REQUIRE(candidates.flows.size() == 2U);
+    CHECK(candidates.flows[0].source_port == 50000U);
+    CHECK(candidates.flows[1].source_port == 50001U);
+
+    const auto route_mark_transition =
+        select_meta_udp_443_cleanup_candidates(
+            observation,
+            {0x00060000U, 0x00070000U},
+            0x00FF0000U);
+    REQUIRE(route_mark_transition.complete);
+    REQUIRE(route_mark_transition.flows.size() == 3U);
+    CHECK(route_mark_transition.flows[2].source_port == 50006U);
+
+    const auto marked_only = select_meta_udp_443_cleanup_candidates(
+        observation,
+        {0x00070000U},
+        0x00FF0000U,
+        /*allow_unmarked_cleanup=*/false);
+    REQUIRE(marked_only.complete);
+    REQUIRE(marked_only.flows.size() == 1U);
+    CHECK(marked_only.flows.front().source_port == 50001U);
+
+    observation.snapshot_truncated = true;
+    const auto incomplete = select_meta_udp_443_cleanup_candidates(
+        observation, {0x00070000U}, 0x00FF0000U);
+    CHECK_FALSE(incomplete.complete);
+    CHECK(incomplete.flows.empty());
+}
+
+TEST_CASE(
     "Native VPN direct egress IDs are strict and leave stable paths out") {
     const auto ikev2 = service_target(
         "ndms-crypto-map:ikev2:VirtualIPServerIKE2",
@@ -634,11 +980,11 @@ TEST_CASE(
 
 // --- Seam between staging and commit -----------------------------------
 //
-// Staging reads daemon state and touches nothing outside this process; the
-// commit is the one step that spawns `ipset restore`, `iptables-restore` or
-// `nft -f -`, each with a multi-second timeout and its own bounded retry.
-// These cases pin that boundary so the commit can later be moved off the
-// control loop without the staging silently following it.
+// Staging primarily reads daemon state and fills backend buffers. A legacy
+// iptables prepare path may repair its ordinary mangle dispatcher, but Meta
+// UDP/443 filter publication and exact conntrack deletion remain behind the
+// specialized preflight/commit boundary. These cases keep the broader staged
+// transaction seam explicit without overstating it as process-local only.
 
 namespace {
 

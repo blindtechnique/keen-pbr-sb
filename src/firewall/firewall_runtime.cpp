@@ -1,5 +1,7 @@
 #include "firewall_runtime.hpp"
 
+#include "../runtime/meta_udp_443_policy.hpp"
+
 #include "../config/routing_state.hpp"
 #include "../dns/dns_router.hpp"
 #include "../lists/list_entry_visitor.hpp"
@@ -177,6 +179,11 @@ StagedRuntimeFirewall stage_runtime_firewall(
     const auto& lists_map = config.lists ? *config.lists : empty_lists;
     const auto& route_rules = route_config.rules.value_or(std::vector<RouteRule>{});
     std::map<std::string, ListSetUsage> list_usage_cache;
+    // Unlike list_usage_cache (the first planning pass), this map describes
+    // the bytes actually streamed into the pending kernel sets. Remote cache
+    // files may be atomically replaced between the two passes, so security
+    // policy must authorize family coverage only from this second view.
+    std::map<std::string, ListSetUsage> applied_list_usage;
     AppliedListContentState candidate_list_content_state;
 
     for (size_t rule_idx = 0; rule_idx < route_rules.size(); ++rule_idx) {
@@ -240,6 +247,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
                     // must never be based on the stale first observation.
                     applied_usage.has_static_entries = false;
                     applied_usage.has_domain_entries = false;
+                    applied_usage.has_static_ipv4_entries = false;
+                    applied_usage.has_static_ipv6_entries = false;
                     applied_usage.static_destinations.clear();
                     applied_usage.static_destinations_truncated = false;
                     firewall.create_ipset(set4, AF_INET, 0);
@@ -266,6 +275,11 @@ StagedRuntimeFirewall stage_runtime_firewall(
                             applied_usage.static_destinations_truncated = true;
                         }
                         const bool is_ipv6 = entry.find(':') != std::string_view::npos;
+                        if (is_ipv6) {
+                            applied_usage.has_static_ipv6_entries = true;
+                        } else {
+                            applied_usage.has_static_ipv4_entries = true;
+                        }
                         if (is_ipv6) {
                             if (loader6) {
                                 loader6->on_entry(type, entry);
@@ -300,6 +314,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
                     candidate_list_content_state
                         .truncated_static_destination_lists.insert(list_name);
                 }
+                applied_list_usage.insert_or_assign(
+                    list_name, applied_usage);
 
                 if (usage.has_domain_entries) {
                     firewall.create_ipset(set4d, AF_INET, usage.dynamic_timeout);
@@ -422,6 +438,54 @@ StagedRuntimeFirewall stage_runtime_firewall(
         firewall.create_source_egress_snat_rules(
             select_native_vpn_direct_egress_snat_selectors(
                 *effective_internal_vpn_targets));
+    }
+
+    const auto meta_udp_443_selection =
+        resolve_meta_udp_443_policy_selection(
+            config, rule_states, firewall.fwmark_mask());
+    if (meta_udp_443_selection.status ==
+        MetaUdp443PolicySelectionStatus::ambiguous) {
+        throw FirewallError(
+            "daemon.meta_udp443_policy=messages_first requires the "
+            "authoritative Meta/WhatsApp IP companion to resolve to one "
+            "unambiguous active broad route");
+    }
+    if (meta_udp_443_selection.active()) {
+        for (const auto& list_name : meta_udp_443_selection.list_names) {
+            const auto usage = applied_list_usage.find(list_name);
+            if (usage == applied_list_usage.end() ||
+                !usage->second.has_static_entries) {
+                throw FirewallError(
+                    "daemon.meta_udp443_policy=messages_first requires "
+                    "static IP coverage from the authoritative packaged "
+                    "Meta/WhatsApp companion list '" + list_name + "'");
+            }
+            if (!usage->second.has_static_ipv4_entries) {
+                throw FirewallError(
+                    "daemon.meta_udp443_policy=messages_first requires "
+                    "authoritative IPv4 coverage from the packaged "
+                    "Meta/WhatsApp companion list '" + list_name + "'");
+            }
+            if (ipv6_decision.enabled &&
+                !usage->second.has_static_ipv6_entries) {
+                throw FirewallError(
+                    "daemon.meta_udp443_policy=messages_first cannot be "
+                    "enabled while IPv6 is active because the packaged "
+                    "Meta/WhatsApp companion has no authoritative IPv6 "
+                    "coverage; use balanced mode or disable IPv6");
+            }
+
+            firewall.create_forward_udp_reject_rule(
+                meta_udp_443_selection.fwmark,
+                firewall.static_set_name(list_name, AF_INET),
+                443U);
+            if (ipv6_decision.enabled) {
+                firewall.create_forward_udp_reject_rule(
+                    meta_udp_443_selection.fwmark,
+                    firewall.static_set_name(list_name, AF_INET6),
+                    443U);
+            }
+        }
     }
 
     // User rules and generated DNS mark/drop rules retain priority. The empty

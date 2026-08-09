@@ -45,6 +45,10 @@ public:
                                  const FirewallRuleCriteria& criteria = {}) override;
     // Buffer a drop verdict rule that matches the given criteria.
     void create_drop_rule(const FirewallRuleCriteria& criteria = {}) override;
+    void create_forward_udp_reject_rule(
+        uint32_t expected_fwmark,
+        const std::string& dst_set_name,
+        std::uint16_t destination_port) override;
     // Buffer NAT redirect rules that force LAN plain-DNS to the local resolver.
     void create_dns_redirect_rules() override;
     void create_tunnel_snat_rules(
@@ -52,6 +56,8 @@ public:
     void create_source_egress_snat_rules(
         const std::vector<FirewallSourceEgressSnatSelector>& selectors) override;
     OwnedSnatState inspect_owned_snat_state() const override;
+    OwnedForwardUdpRejectState
+    inspect_forward_udp_reject_state() const override;
     // Buffer a pass-through verdict rule that matches the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -80,16 +86,19 @@ private:
     static constexpr const char* TABLE_NAME = "KeenPbrTable";
     static constexpr const char* CHAIN_NAME = "prerouting";
     static constexpr const char* OUTPUT_CHAIN_NAME = "output";
+    static constexpr const char* FORWARD_UDP_REJECT_CHAIN_NAME =
+        "meta_udp_443";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "dns_redirect";
     static constexpr const char* SNAT_CHAIN_NAME = "router_origin_snat";
-    void cleanup_live_impl();
-    void cleanup_impl();
+    void cleanup_live_impl(bool verification_required = true);
+    void cleanup_impl(bool verification_required = true);
     bool table_exists() const;
 
     struct LiveTableState {
         bool table_exists{false};
         bool chain_exists{false};
         bool output_chain_exists{false};
+        bool forward_udp_reject_chain_exists{false};
         bool dns_nat_chain_exists{false};
         bool snat_chain_exists{false};
         std::set<std::string> set_names;
@@ -128,6 +137,14 @@ private:
         nlohmann::json expected_expr;
     };
 
+    struct PendingForwardUdpReject {
+        int family{AF_INET};
+        uint32_t expected_fwmark{0};
+        uint32_t fwmark_mask{0};
+        std::string dst_set_name;
+        std::uint16_t destination_port{0};
+    };
+
     // Build the nftables JSON object for creating the inet KeenPbrTable table.
     static nlohmann::json build_table_json();
     // Build the JSON object for a named set with type and optional timeout.
@@ -140,6 +157,23 @@ private:
     static nlohmann::json build_delete_chain_json();
     // Build the JSON object for deleting the output chain.
     static nlohmann::json build_delete_output_chain_json();
+    static nlohmann::json build_forward_udp_reject_chain_json();
+    static nlohmann::json build_delete_forward_udp_reject_chain_json();
+    static nlohmann::json build_forward_udp_reject_rule_json(
+        const PendingForwardUdpReject& rule);
+    static std::optional<nlohmann::json>
+    normalize_forward_udp_reject_rule_expr(nlohmann::json expr);
+    static OwnedForwardUdpRejectState parse_forward_udp_reject_state(
+        const std::string& document,
+        const std::vector<PendingForwardUdpReject>& expected_rules);
+    static OwnedForwardUdpRejectState classify_forward_udp_reject_inspection(
+        const std::string& output,
+        int exit_code,
+        bool timed_out,
+        bool truncated,
+        const std::vector<PendingForwardUdpReject>& expected_rules);
+    OwnedForwardUdpRejectState inspect_forward_udp_reject_state(
+        const std::vector<PendingForwardUdpReject>& expected_rules) const;
     static nlohmann::json build_flush_set_json(const std::string& set_name);
     static nlohmann::json build_delete_set_json(const std::string& set_name);
     static bool is_dynamic_set_name(const std::string& set_name);
@@ -244,6 +278,7 @@ private:
     std::map<std::string, nlohmann::json> pending_elements_;
     // Rules queued for insertion into the prerouting chain, flushed by apply().
     std::vector<PendingRule> pending_rules_;
+    std::vector<PendingForwardUdpReject> pending_forward_udp_rejects_;
 
     // Track created sets for family lookup: set_name -> family (AF_INET/AF_INET6)
     std::map<std::string, int> created_sets_;
@@ -269,6 +304,10 @@ private:
     std::vector<FirewallSourceEgressSnatSelector>
         last_applied_source_egress_snat_selectors_;
     uint32_t last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
+    // The monitor must inspect the last verified generation, not an
+    // in-progress replacement assembled between prepare_apply() and apply().
+    std::vector<PendingForwardUdpReject>
+        last_applied_forward_udp_rejects_;
     CapabilityProbe mark_merge_capability_probe_;
     std::optional<MarkMergeMode> mark_merge_mode_;
 

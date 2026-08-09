@@ -181,6 +181,28 @@ struct PreparedRuntimeInputs {
     bool remote_lists_refreshed{false};
 };
 
+struct MetaUdp443ActivationPlan {
+    std::uint32_t expected_fwmark{0U};
+    std::uint32_t owned_mask{0U};
+    // The current authoritative mark plus, during an in-process route-mark
+    // transition, the one previously committed messages-first mark. No other
+    // owned mark is eligible for destructive cleanup.
+    std::set<std::uint32_t> cleanup_owned_marks;
+    std::vector<std::string> destination_selectors;
+    bool ipv6_enabled{false};
+    bool allow_unmarked_cleanup{false};
+    std::vector<ConntrackExactForwardedFlow> exact_flows;
+};
+
+struct PendingMetaUdp443ActivationCleanup {
+    MetaUdp443ActivationPlan plan;
+    std::uint64_t runtime_generation{0U};
+    std::uint64_t cleanup_epoch{0U};
+    std::size_t attempt{0U};
+    std::uint64_t schedule_serial{0U};
+    bool worker_inflight{false};
+};
+
 enum class RemoteListPreparationMode {
     None,
     MissingOrInvalid,
@@ -421,6 +443,9 @@ private:
     void handle_sigusr1();
     void handle_sigusr2();
     void schedule_netfilter_runtime_refresh(NetfilterRefreshReason reason);
+    void schedule_netfilter_runtime_refresh_noexcept(
+        NetfilterRefreshReason reason,
+        const char* failure_detail) noexcept;
     void schedule_owned_snat_health_check();
     void cancel_owned_snat_health_check();
     void check_owned_snat_health();
@@ -473,6 +498,29 @@ private:
         FirewallApplyMode mode,
         std::shared_ptr<const ListCacheGenerationSnapshot>
             list_cache_snapshot = nullptr);
+    std::optional<MetaUdp443ActivationPlan>
+    prepare_meta_udp443_activation_or_throw(
+        const std::vector<RuleState>& candidate_rules,
+        const AppliedListContentState& candidate_list_content_state,
+        bool forwarded_scope_allows_unmarked_cleanup);
+    static bool fastnat_is_disabled_or_unavailable();
+    void cancel_meta_udp443_activation_cleanup() noexcept;
+    void dispatch_meta_udp443_activation_cleanup(
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t cleanup_epoch,
+        std::size_t attempt,
+        std::uint64_t schedule_serial) noexcept;
+    void schedule_meta_udp443_activation_cleanup_retry(
+        const MetaUdp443ActivationPlan& plan,
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t cleanup_epoch,
+        std::size_t attempt) noexcept;
+    void schedule_meta_udp443_activation_cleanup_retry(
+        MetaUdp443ActivationPlan&& plan,
+        std::uint64_t expected_runtime_generation,
+        std::uint64_t cleanup_epoch,
+        std::size_t attempt) noexcept;
+    void report_meta_udp443_degraded(const std::string& detail) noexcept;
     void normalize_urltest_selections();
     void register_urltest_outbounds();
     void handle_urltest_selection_change(
@@ -732,6 +780,11 @@ private:
     // One debounce window coalesces firmware mangle/full and nat-only events.
     int netfilter_refresh_task_id_{-1};
     std::uint8_t pending_netfilter_refresh_reasons_{0};
+    // Invalidates a callback before cancelling its timer. Scheduler::cancel()
+    // may remove the entry and still throw while unregistering its fd; an
+    // explicit serial keeps that half-completed cancellation from wedging or
+    // running a stale refresh later.
+    std::uint64_t netfilter_refresh_schedule_serial_{0U};
     // Low-frequency fallback for firmware NAT rebuilds that do not invoke the
     // netfilter hook. The callback runs on the control/event-loop thread.
     int owned_snat_health_task_id_{-1};
@@ -837,6 +890,18 @@ private:
     AppliedListContentState applied_list_content_state_;
     ConntrackManager conntrack_manager_;
     bool conntrack_unavailable_warning_emitted_{false};
+    std::atomic<std::uint64_t> meta_udp443_cleanup_epoch_{1U};
+    // Schedule serial whose worker could not hand completion back to the
+    // control loop. A scalar token (not a bool) prevents an old worker from
+    // clearing the in-flight state of a newer plan after apply/cancel.
+    std::atomic<std::uint64_t>
+        meta_udp443_cleanup_completion_admission_failed_serial_{0U};
+    int meta_udp443_cleanup_retry_task_id_{-1};
+    std::uint64_t meta_udp443_cleanup_schedule_serial_{0U};
+    std::optional<PendingMetaUdp443ActivationCleanup>
+        pending_meta_udp443_cleanup_;
+    std::optional<std::uint32_t> committed_meta_udp443_fwmark_;
+    std::uint32_t committed_meta_udp443_owned_mask_{0U};
     URLTester url_tester_;
     // Latency for every interface outbound, including native tunnels the
     // firmware owns and standalone outbounds urltest never looks at.
@@ -879,6 +944,7 @@ private:
     // the existing generation-fenced retry state machines; these latches only
     // prevent transient or repeated failures from flooding the WebUI bell.
     RuntimeIncidentLatch runtime_firewall_incidents_{1};
+    RuntimeIncidentLatch meta_udp443_incidents_{1};
     RuntimeIncidentLatch internal_vpn_catalog_incidents_{5};
     BlockingExecutor blocking_executor_{2, 64};
     // Resolver hooks can synchronously request a generated configuration.

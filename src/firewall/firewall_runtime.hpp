@@ -20,10 +20,13 @@ namespace keen_pbr3 {
 //
 // The split exists because the commit step is the only part that spawns child
 // processes - `ipset restore`, `iptables-restore`, `nft -f -` - each with a
-// multi-second timeout and its own bounded retry. Staging reads daemon state
-// and touches nothing outside this process, so it belongs on the thread that
-// owns that state; the commit does not. Naming the boundary is what lets the
-// commit later move off the control loop without the staging following it.
+// multi-second timeout and its own bounded retry. Staging primarily reads
+// daemon state and fills backend buffers, although a legacy iptables prepare
+// path may repair its ordinary mangle dispatcher. The strict Meta boundary is
+// narrower: staging never publishes the Meta UDP/443 filter and never deletes
+// conntrack tuples before the caller completes specialized preflight. Naming
+// the boundary is what lets the commit later move off the control loop without
+// the staging following it.
 struct StagedRuntimeFirewall {
     // The realized rule-state snapshot to store for verification and status.
     std::vector<RuleState> rule_states;
@@ -36,7 +39,8 @@ struct StagedRuntimeFirewall {
     FirewallApplyMode mode{FirewallApplyMode::Destructive};
 };
 
-// Build the complete backend transaction in memory. Spawns no process.
+// Build the complete backend transaction. It does not publish the Meta
+// UDP/443 filter or delete conntrack tuples; see the staging note above.
 StagedRuntimeFirewall stage_runtime_firewall(
     const Config& config,
     const OutboundMarkMap& outbound_marks,

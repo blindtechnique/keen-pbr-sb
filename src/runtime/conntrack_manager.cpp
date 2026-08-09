@@ -1389,6 +1389,103 @@ ConntrackManager::observe_forwarded_destination_flows(
 
         const auto parsed = parse_exact_conntrack_flow(line);
         if (!parsed.has_value()) {
+            if (options.media_seed_udp_destination_port.has_value()) {
+                // Fail closed only when the malformed record can still be
+                // identified as an original-direction UDP flow to the
+                // authoritative destination scope and requested port. A
+                // malformed UDP/443 record for Google, or a reply tuple whose
+                // dport happens to be 443, must not disable this narrow Meta
+                // policy for the whole router.
+                std::istringstream partial_stream(std::string{line});
+                std::string family_token;
+                std::string family_number;
+                std::string protocol_token;
+                std::string protocol_number;
+                partial_stream >> family_token >> family_number >>
+                    protocol_token >> protocol_number;
+                std::optional<NormalizedHostAddress> partial_source;
+                std::optional<NormalizedHostAddress> partial_destination;
+                std::optional<std::uint16_t> partial_destination_port;
+                bool saw_original_source_token = false;
+                bool saw_original_destination_token = false;
+                bool saw_original_field_before_source = false;
+                std::string token;
+                while (partial_stream >> token) {
+                    if (token.rfind("src=", 0U) == 0U) {
+                        if (saw_original_source_token ||
+                            saw_original_field_before_source) {
+                            // The second src= starts the reply tuple. Never
+                            // borrow its dst/dport to prove the malformed
+                            // original tuple harmless. If dst=/sport=/dport=
+                            // appeared before the first src=, the original
+                            // source itself is missing and this first src=
+                            // already belongs to the reply tuple.
+                            break;
+                        }
+                        saw_original_source_token = true;
+                        partial_source = normalize_host_address(
+                            std::string_view{token}.substr(4U));
+                        continue;
+                    }
+                    if (!saw_original_destination_token &&
+                        token.rfind("dst=", 0U) == 0U) {
+                        if (!saw_original_source_token) {
+                            saw_original_field_before_source = true;
+                        }
+                        saw_original_destination_token = true;
+                        partial_destination = normalize_host_address(
+                            std::string_view{token}.substr(4U));
+                        continue;
+                    }
+                    if (!partial_destination_port.has_value() &&
+                        token.rfind("dport=", 0U) == 0U) {
+                        if (!saw_original_source_token) {
+                            saw_original_field_before_source = true;
+                        }
+                        partial_destination_port =
+                            parse_unsigned_decimal<std::uint16_t>(
+                                std::string_view{token}.substr(6U));
+                        continue;
+                    }
+                    if (!saw_original_source_token &&
+                        (token.rfind("sport=", 0U) == 0U ||
+                         token.rfind("packets=", 0U) == 0U ||
+                         token.rfind("bytes=", 0U) == 0U)) {
+                        saw_original_field_before_source = true;
+                    }
+                }
+                const bool destination_matches =
+                    partial_destination.has_value() && std::any_of(
+                        media_seed_selectors.begin(),
+                        media_seed_selectors.end(),
+                        [&partial_destination](
+                            const NormalizedTargetCidr& selector) {
+                            return cidr_contains(
+                                selector, *partial_destination);
+                        });
+                const bool destination_proven_outside_scope =
+                    partial_destination.has_value() &&
+                    !destination_matches;
+                const bool router_originated =
+                    partial_source.has_value() &&
+                    local_addresses.count(
+                        (partial_source->family ==
+                                 TargetAddressFamily::Ipv6
+                             ? "6:"
+                                 : "4:") +
+                        partial_source->value) != 0U;
+                const bool requested_port_possible =
+                    partial_destination_port ==
+                        options.media_seed_udp_destination_port ||
+                    (destination_matches &&
+                     !partial_destination_port.has_value());
+                if (protocol_token == "udp" &&
+                    !destination_proven_outside_scope &&
+                    !router_originated &&
+                    requested_port_possible) {
+                    ++observation.invalid_media_seed_candidate_records;
+                }
+            }
             continue;
         }
         if (parsed->family == ConntrackFlowFamily::Ipv6 &&
@@ -1471,7 +1568,8 @@ ConntrackManager::observe_forwarded_destination_flows(
             [&parsed](const NormalizedTargetCidr& selector) {
                 return cidr_contains(selector, parsed->original.destination);
             });
-        if (ordinary_mark_eligible &&
+        if (options.include_ordinary_destination_flows &&
+            ordinary_mark_eligible &&
             seen_flows.insert(identity).second) {
             if (!claim_flow_budget(identity)) {
                 observation.flow_limit_reached = true;
@@ -1479,7 +1577,12 @@ ConntrackManager::observe_forwarded_destination_flows(
             }
             observation.flows.push_back(observed_flow);
         }
-        if (media_seed_matches &&
+        const bool media_seed_transport_matches =
+            !options.media_seed_udp_destination_port.has_value() ||
+            (parsed->protocol == ConntrackFlowProtocol::Udp &&
+             parsed->original.destination_port ==
+                 *options.media_seed_udp_destination_port);
+        if (media_seed_matches && media_seed_transport_matches &&
             seen_media_seed_flows.insert(identity).second) {
             if (!claim_flow_budget(identity)) {
                 observation.flow_limit_reached = true;
@@ -1690,6 +1793,117 @@ ConntrackCleanupResult ConntrackManager::delete_exact_forwarded_flow(
     return result.exit_code == 0 || is_empty_delete_result(result)
         ? ConntrackCleanupResult::Succeeded
         : ConntrackCleanupResult::Failed;
+}
+
+ConntrackCleanupResult
+ConntrackManager::probe_exact_cleanup_capability(bool ipv6_enabled) const {
+    // Parse the exact selector syntax used by deletion through a read-only
+    // list query. Generic `conntrack -h` omits protocol-specific port aliases
+    // on Keenetic's conntrack-tools 1.4.8, while this proves family, protocol,
+    // full original 5-tuple, and full-width mark-mask support without mutating
+    // any state.
+    const auto probe_family = [this](const char* family,
+                                     const char* zero_address) {
+        const auto result = runner_({
+            "conntrack", "-L", "-f", family, "-p", "udp",
+            "-s", zero_address, "--sport", "0",
+            "-d", zero_address, "--dport", "0",
+            "--mark", "0/4294967295"});
+        if (result.exit_code == 127) {
+            return ConntrackCleanupResult::CommandUnavailable;
+        }
+        const bool empty_read_only_result =
+            result.exit_code == 1 &&
+            result.output.find("0 flow entries") != std::string::npos;
+        return result.exit_code == 0 || empty_read_only_result
+            ? ConntrackCleanupResult::Succeeded
+            : ConntrackCleanupResult::Failed;
+    };
+    const auto ipv4 = probe_family("ipv4", "0.0.0.0");
+    if (ipv4 != ConntrackCleanupResult::Succeeded || !ipv6_enabled) {
+        return ipv4;
+    }
+    return probe_family("ipv6", "::");
+}
+
+ConntrackExactFlowCleanupSummary
+ConntrackManager::delete_exact_forwarded_flows(
+    const std::vector<ConntrackExactForwardedFlow>& flows,
+    uint32_t owned_mask,
+    const std::set<std::uint32_t>& expected_owned_marks,
+    ConntrackExactFlowCleanupOptions options,
+    std::function<bool()> generation_is_current) const {
+    ConntrackExactFlowCleanupSummary summary;
+    std::vector<ConntrackExactForwardedFlow> failed_flows;
+    const auto started = std::chrono::steady_clock::now();
+    const auto budget = std::max(
+        options.budget, std::chrono::milliseconds{0});
+    const auto retain_from = [
+        &summary, &flows, &failed_flows](std::size_t index) {
+        summary.remaining_flows.insert(
+            summary.remaining_flows.end(),
+            flows.begin() + static_cast<std::ptrdiff_t>(index),
+            flows.end());
+        summary.remaining_flows.insert(
+            summary.remaining_flows.end(),
+            failed_flows.begin(), failed_flows.end());
+        failed_flows.clear();
+    };
+
+    for (std::size_t index = 0U; index < flows.size(); ++index) {
+        if (generation_is_current && !generation_is_current()) {
+            summary.generation_changed = true;
+            retain_from(index);
+            break;
+        }
+        if (summary.attempted >= options.max_flows) {
+            summary.budget_exhausted = true;
+            summary.batch_limit_reached = true;
+            retain_from(index);
+            break;
+        }
+        if (std::chrono::steady_clock::now() - started >= budget) {
+            summary.budget_exhausted = true;
+            retain_from(index);
+            break;
+        }
+
+        const auto live_owned_mark = flows[index].mark & owned_mask;
+        const bool exact_mark_authorized =
+            (live_owned_mark == 0U && flows[index].mark == 0U) ||
+            expected_owned_marks.count(live_owned_mark) != 0U;
+        const bool mark_contract_valid =
+            owned_mask != 0U && !expected_owned_marks.empty() &&
+            std::all_of(
+                expected_owned_marks.begin(),
+                expected_owned_marks.end(),
+                [owned_mask](std::uint32_t mark) {
+                    return mark != 0U && (mark & ~owned_mask) == 0U;
+                });
+        const auto result = exact_mark_authorized && mark_contract_valid
+            ? delete_exact_forwarded_flow(
+                  flows[index],
+                  owned_mask,
+                  live_owned_mark == 0U
+                      ? std::optional<std::uint32_t>{
+                            *expected_owned_marks.begin()}
+                      : std::optional<std::uint32_t>{live_owned_mark})
+            : ConntrackCleanupResult::Failed;
+        ++summary.attempted;
+        if (result == ConntrackCleanupResult::CommandUnavailable) {
+            summary.command_unavailable = true;
+            retain_from(index);
+            break;
+        }
+        if (result != ConntrackCleanupResult::Succeeded) {
+            ++summary.failed;
+            failed_flows.push_back(flows[index]);
+        }
+    }
+    summary.remaining_flows.insert(
+        summary.remaining_flows.end(),
+        failed_flows.begin(), failed_flows.end());
+    return summary;
 }
 
 ConntrackForwardedFlowCleanupSummary

@@ -87,6 +87,116 @@ public:
     return NftablesFirewall::build_delete_chain_json();
   }
 
+  static nlohmann::json build_forward_udp_reject_chain_json() {
+    return NftablesFirewall::build_forward_udp_reject_chain_json();
+  }
+
+  static nlohmann::json build_forward_udp_reject_rule_json(
+      int family, uint32_t expected_fwmark, uint32_t fwmark_mask,
+      const std::string& dst_set_name, std::uint16_t destination_port) {
+    return NftablesFirewall::build_forward_udp_reject_rule_json(
+        NftablesFirewall::PendingForwardUdpReject{
+            family, expected_fwmark, fwmark_mask, dst_set_name,
+            destination_port});
+  }
+
+  static OwnedForwardUdpRejectState parse_forward_udp_reject_state(
+      const nlohmann::json& document, bool expected) {
+    std::vector<NftablesFirewall::PendingForwardUdpReject> rules;
+    if (expected) {
+      rules.push_back(NftablesFirewall::PendingForwardUdpReject{
+          AF_INET, 0x00030000U, 0x00FF0000U,
+          "kpbr4s_meta_whatsapp_ip", 443U});
+    }
+    return NftablesFirewall::parse_forward_udp_reject_state(
+        document.dump(), rules);
+  }
+
+  static OwnedForwardUdpRejectState classify_forward_udp_reject_inspection(
+      const std::string& output, int exit_code, bool timed_out,
+      bool truncated, bool expected) {
+    std::vector<NftablesFirewall::PendingForwardUdpReject> rules;
+    if (expected) {
+      rules.push_back(NftablesFirewall::PendingForwardUdpReject{
+          AF_INET, 0x00030000U, 0x00FF0000U,
+          "kpbr4s_meta_whatsapp_ip", 443U});
+    }
+    return NftablesFirewall::classify_forward_udp_reject_inspection(
+        output, exit_code, timed_out, truncated, rules);
+  }
+
+  static nlohmann::json build_forward_udp_reject_document(
+      bool queue_rule, bool live_forward_chain, int family = AF_INET,
+      const std::string& dst_set_name = "kpbr4s_meta_whatsapp_ip",
+      uint32_t expected_fwmark = 0x00030000U,
+      uint32_t fwmark_mask = 0x00FF0000U,
+      std::uint16_t destination_port = 443U) {
+    NftablesFirewall fw;
+    fw.pending_sets_.push_back(NftablesFirewall::PendingSet{
+        dst_set_name,
+        family == AF_INET6 ? "ipv6_addr" : "ipv4_addr",
+        0U});
+    fw.created_sets_[dst_set_name] = family;
+    fw.set_fwmark_mask(fwmark_mask);
+    if (queue_rule) {
+      fw.create_forward_udp_reject_rule(
+          expected_fwmark, dst_set_name, destination_port);
+    }
+
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = true;
+    live.chain_exists = true;
+    live.output_chain_exists = true;
+    live.forward_udp_reject_chain_exists = live_forward_chain;
+    live.set_names.insert(dst_set_name);
+    live.set_schemas[dst_set_name] =
+        std::string(family == AF_INET6 ? "ipv6_addr" : "ipv4_addr") +
+        ":0";
+    return fw.build_apply_document(
+        live,
+        /*emit_full_table=*/false,
+        /*destructive_apply=*/false,
+        /*clear_dynamic_sets=*/false,
+        NftablesFirewall::MarkMergeMode::LegacyConstant);
+  }
+
+  static nlohmann::json build_forward_udp_reject_disable_after_prepare() {
+    NftablesFirewall fw;
+    constexpr const char* set_name = "kpbr4s_meta_whatsapp_ip";
+    fw.pending_sets_.push_back(NftablesFirewall::PendingSet{
+        set_name, "ipv4_addr", 0U});
+    fw.created_sets_[set_name] = AF_INET;
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_forward_udp_reject_rule(0x00030000U, set_name, 443U);
+    fw.prepare_apply(FirewallApplyMode::PreserveSets);
+
+    NftablesFirewall::LiveTableState live;
+    live.table_exists = true;
+    live.chain_exists = true;
+    live.output_chain_exists = true;
+    live.forward_udp_reject_chain_exists = true;
+    live.set_names.insert(set_name);
+    live.set_schemas[set_name] = "ipv4_addr:0";
+    return fw.build_apply_document(
+        live,
+        /*emit_full_table=*/false,
+        /*destructive_apply=*/false,
+        /*clear_dynamic_sets=*/false,
+        NftablesFirewall::MarkMergeMode::LegacyConstant);
+  }
+
+  static void validate_forward_udp_reject_request(
+      int family, uint32_t expected_fwmark, uint32_t fwmark_mask,
+      const std::string& declared_set_name,
+      const std::string& requested_set_name,
+      std::uint16_t destination_port) {
+    NftablesFirewall fw;
+    fw.created_sets_[declared_set_name] = family;
+    fw.set_fwmark_mask(fwmark_mask);
+    fw.create_forward_udp_reject_rule(
+        expected_fwmark, requested_set_name, destination_port);
+  }
+
   static nlohmann::json build_refresh_document(bool destructive_apply,
                                                 bool clear_dynamic_sets) {
     NftablesFirewall fw;
@@ -495,6 +605,227 @@ TEST_CASE("build_chain_json: correct fields") {
   CHECK(chain["hook"] == "prerouting");
   CHECK(chain["prio"] == -150);
   CHECK(chain["policy"] == "accept");
+}
+
+TEST_CASE("nft Meta UDP reject uses an early owned forward hook") {
+  const auto command = T::build_forward_udp_reject_chain_json();
+  const auto& chain = command.at("add").at("chain");
+  CHECK(chain.at("family") == "inet");
+  CHECK(chain.at("table") == "KeenPbrTable");
+  CHECK(chain.at("name") == "meta_udp_443");
+  CHECK(chain.at("type") == "filter");
+  CHECK(chain.at("hook") == "forward");
+  CHECK(chain.at("prio") == -150);
+  CHECK(chain.at("policy") == "accept");
+}
+
+TEST_CASE("nft Meta IPv4 UDP reject is exact by set mark mask and port") {
+  const auto command = T::build_forward_udp_reject_rule_json(
+      AF_INET, 0x00030000U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", 443U);
+  const auto& rule = command.at("add").at("rule");
+  CHECK(rule.at("chain") == "meta_udp_443");
+
+  const auto& expr = rule.at("expr");
+  REQUIRE(expr.size() == 6U);
+  CHECK(expr[0]["match"]["left"]["payload"]["protocol"] == "ip");
+  CHECK(expr[0]["match"]["left"]["payload"]["field"] == "daddr");
+  CHECK(expr[0]["match"]["right"] == "@kpbr4s_meta_whatsapp_ip");
+
+  CHECK(expr[1]["match"]["left"]["&"][0]["meta"]["key"] == "mark");
+  CHECK(expr[1]["match"]["left"]["&"][1] == 0x00FF0000U);
+  CHECK(expr[1]["match"]["right"] == 0x00030000U);
+
+  CHECK(expr[2]["match"]["left"]["meta"]["key"] == "l4proto");
+  CHECK(expr[2]["match"]["right"] == "udp");
+  CHECK(expr[3]["match"]["left"]["payload"]["protocol"] == "udp");
+  CHECK(expr[3]["match"]["left"]["payload"]["field"] == "dport");
+  CHECK(expr[3]["match"]["right"] == 443U);
+  CHECK(expr[4].contains("counter"));
+  CHECK(expr[5]["reject"]["type"] == "icmpx");
+  CHECK(expr[5]["reject"]["expr"] == "port-unreachable");
+
+  // Every selector is conjoined before the sole reject verdict: TCP, another
+  // port such as STUN/3478, another mark, or another destination set passes.
+  const std::string serialized = command.dump();
+  CHECK(serialized.find("tcp") == std::string::npos);
+  CHECK(serialized.find("3478") == std::string::npos);
+  CHECK(serialized.find("kpbr4s_other") == std::string::npos);
+}
+
+TEST_CASE("nft Meta IPv6 UDP reject uses the exact IPv6 companion set") {
+  const auto command = T::build_forward_udp_reject_rule_json(
+      AF_INET6, 0x00070000U, 0x00FF0000U,
+      "kpbr6s_meta_whatsapp_ip", 443U);
+  const auto& expr = command.at("add").at("rule").at("expr");
+  REQUIRE(expr.size() == 6U);
+  CHECK(expr[0]["match"]["left"]["payload"]["protocol"] == "ip6");
+  CHECK(expr[0]["match"]["right"] == "@kpbr6s_meta_whatsapp_ip");
+  CHECK(expr[1]["match"]["right"] == 0x00070000U);
+  CHECK(expr[3]["match"]["right"] == 443U);
+  CHECK(expr[5]["reject"]["type"] == "icmpx");
+  CHECK(expr[5]["reject"]["expr"] == "port-unreachable");
+}
+
+TEST_CASE("nft Meta messages-first replacement is one atomic JSON document") {
+  const auto document = T::build_forward_udp_reject_document(
+      /*queue_rule=*/true, /*live_forward_chain=*/true);
+  int deletes = 0;
+  int chains = 0;
+  int rules = 0;
+  for (const auto& command : document.at("nftables")) {
+    if (command.contains("delete") && command["delete"].contains("chain") &&
+        command["delete"]["chain"].value("name", "") == "meta_udp_443") {
+      ++deletes;
+    }
+    if (command.contains("add") && command["add"].contains("chain") &&
+        command["add"]["chain"].value("name", "") == "meta_udp_443") {
+      ++chains;
+    }
+    if (command.contains("add") && command["add"].contains("rule") &&
+        command["add"]["rule"].value("chain", "") == "meta_udp_443") {
+      ++rules;
+    }
+  }
+  CHECK(deletes == 1);
+  CHECK(chains == 1);
+  CHECK(rules == 1);
+}
+
+TEST_CASE("nft Meta balanced mode removes and omits the owned forward chain") {
+  const auto disable = T::build_forward_udp_reject_disable_after_prepare();
+  int deletes = 0;
+  int additions = 0;
+  for (const auto& command : disable.at("nftables")) {
+    if (command.contains("delete") && command["delete"].contains("chain") &&
+        command["delete"]["chain"].value("name", "") == "meta_udp_443") {
+      ++deletes;
+    }
+    if (command.contains("add") &&
+        ((command["add"].contains("chain") &&
+          command["add"]["chain"].value("name", "") == "meta_udp_443") ||
+         (command["add"].contains("rule") &&
+          command["add"]["rule"].value("chain", "") == "meta_udp_443"))) {
+      ++additions;
+    }
+  }
+  CHECK(deletes == 1);
+  CHECK(additions == 0);
+
+  const auto already_balanced = T::build_forward_udp_reject_document(
+      /*queue_rule=*/false, /*live_forward_chain=*/false);
+  CHECK(already_balanced.dump().find("meta_udp_443") == std::string::npos);
+}
+
+TEST_CASE("nft Meta UDP reject rejects unsafe requests before publication") {
+  CHECK_NOTHROW(T::validate_forward_udp_reject_request(
+      AF_INET, 0x00030000U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", "kpbr4s_meta_whatsapp_ip", 443U));
+  CHECK_THROWS_AS(T::validate_forward_udp_reject_request(
+      AF_INET, 0x00030000U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", "kpbr4s_spoof", 443U), FirewallError);
+  CHECK_THROWS_AS(T::validate_forward_udp_reject_request(
+      AF_INET, 0U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", "kpbr4s_meta_whatsapp_ip", 443U),
+      FirewallError);
+  CHECK_THROWS_AS(T::validate_forward_udp_reject_request(
+      AF_INET, 0x01030000U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", "kpbr4s_meta_whatsapp_ip", 443U),
+      FirewallError);
+  CHECK_THROWS_AS(T::validate_forward_udp_reject_request(
+      AF_INET, 0x00030000U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", "kpbr4s_meta_whatsapp_ip", 0U),
+      FirewallError);
+}
+
+TEST_CASE("nft Meta UDP reject inspection tracks the verified contract") {
+  auto live_expr = T::build_forward_udp_reject_rule_json(
+      AF_INET, 0x00030000U, 0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip", 443U)["add"]["rule"]["expr"];
+  REQUIRE(live_expr.is_array());
+  REQUIRE(live_expr.size() == 6U);
+  // `nft list` canonicalizes away this redundant expression because matching
+  // udp.dport already proves the transport protocol.
+  live_expr.erase(live_expr.begin() + 2);
+  for (auto& expression : live_expr) {
+    if (expression.contains("counter")) {
+      expression["counter"] = {{"packets", 17U}, {"bytes", 4096U}};
+    }
+  }
+
+  const auto table_only = nlohmann::json{{
+      "nftables", nlohmann::json::array({
+          {{"metainfo", {{"json_schema_version", 1}}}},
+          {{"table", {
+              {"family", "inet"}, {"name", "KeenPbrTable"}}}},
+      })}};
+  auto exact = table_only;
+  exact["nftables"].push_back({{"chain", {
+      {"family", "inet"}, {"table", "KeenPbrTable"},
+      {"name", "meta_udp_443"}, {"type", "filter"},
+      {"hook", "forward"}, {"prio", -150}, {"policy", "accept"}}}});
+  exact["nftables"].push_back({{"rule", {
+      {"family", "inet"}, {"table", "KeenPbrTable"},
+      {"chain", "meta_udp_443"}, {"expr", live_expr}}}});
+
+  CHECK(T::parse_forward_udp_reject_state(
+            exact, /*expected=*/true) ==
+        OwnedForwardUdpRejectState::healthy);
+
+  // The last successfully applied messages-first contract is now absent.
+  CHECK(T::parse_forward_udp_reject_state(
+            table_only, /*expected=*/true) ==
+        OwnedForwardUdpRejectState::missing);
+
+  CHECK(T::parse_forward_udp_reject_state(
+            table_only, /*expected=*/false) ==
+        OwnedForwardUdpRejectState::healthy);
+  CHECK(T::parse_forward_udp_reject_state(
+            exact, /*expected=*/false) ==
+        OwnedForwardUdpRejectState::stale);
+
+  SUBCASE("a changed rule is stale rather than healthy") {
+    auto drift = exact;
+    drift["nftables"].back()["rule"]["expr"][2]["match"]["right"] =
+        3478U;
+    CHECK(T::parse_forward_udp_reject_state(
+              drift, /*expected=*/true) ==
+          OwnedForwardUdpRejectState::stale);
+  }
+}
+
+TEST_CASE("nft Meta UDP reject inspection failures remain unknown") {
+  CHECK(T::classify_forward_udp_reject_inspection(
+            "{malformed", 0, false, false, /*expected=*/true) ==
+        OwnedForwardUdpRejectState::unknown);
+  CHECK(T::classify_forward_udp_reject_inspection(
+            "permission denied", 1, false, false, /*expected=*/true) ==
+        OwnedForwardUdpRejectState::unknown);
+  CHECK(T::classify_forward_udp_reject_inspection(
+            "", -1, true, false, /*expected=*/false) ==
+        OwnedForwardUdpRejectState::unknown);
+
+  const nlohmann::json wrong_typed_chain = {{
+      "nftables", nlohmann::json::array({
+          {{"table", {
+              {"family", "inet"}, {"name", "KeenPbrTable"}}}},
+          {{"chain", {
+              {"family", "inet"}, {"table", "KeenPbrTable"},
+              {"name", "meta_udp_443"}, {"type", "filter"},
+              {"hook", 42}, {"prio", -150}, {"policy", "accept"}}}},
+      })}};
+  CHECK(T::parse_forward_udp_reject_state(
+            wrong_typed_chain, /*expected=*/false) ==
+        OwnedForwardUdpRejectState::unknown);
+
+  const std::string absent =
+      "Error: Could not process rule: No such file or directory";
+  CHECK(T::classify_forward_udp_reject_inspection(
+            absent, 1, false, false, /*expected=*/true) ==
+        OwnedForwardUdpRejectState::missing);
+  CHECK(T::classify_forward_udp_reject_inspection(
+            absent, 1, false, false, /*expected=*/false) ==
+        OwnedForwardUdpRejectState::healthy);
 }
 
 TEST_CASE("build_rule_add_commands: prefilter rules lead the prerouting chain") {

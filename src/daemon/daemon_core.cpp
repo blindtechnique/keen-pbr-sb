@@ -46,6 +46,7 @@
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../lists/list_streamer.hpp"
 #include "../log/logger.hpp"
+#include "../runtime/meta_udp_443_policy.hpp"
 #include "../util/daemon_signals.hpp"
 #include "../util/ipv6_support.hpp"
 #include "../util/time_utils.hpp"
@@ -1556,6 +1557,20 @@ void Daemon::cancel_owned_snat_health_check() {
 }
 
 void Daemon::check_owned_snat_health() {
+    const std::uint64_t failed_completion_serial =
+        meta_udp443_cleanup_completion_admission_failed_serial_.exchange(
+            0U, std::memory_order_acq_rel);
+    if (failed_completion_serial != 0U) {
+        if (pending_meta_udp443_cleanup_.has_value() &&
+            meta_udp443_failed_completion_matches_pending(
+                failed_completion_serial,
+                pending_meta_udp443_cleanup_->schedule_serial)) {
+            pending_meta_udp443_cleanup_->worker_inflight = false;
+            report_meta_udp443_degraded(
+                "an exact-cleanup worker completion could not be admitted to "
+                "the control loop; the durable plan will be retried");
+        }
+    }
     const bool recovery_pending =
         runtime_firewall_retry_.retry_pending() ||
         runtime_firewall_retry_.owned_snat_recovery_pending();
@@ -1576,8 +1591,11 @@ void Daemon::check_owned_snat_health() {
     auto task_metrics =
         periodic_task_metrics_.begin("owned-snat-health");
     OwnedSnatState state = OwnedSnatState::unknown;
+    OwnedForwardUdpRejectState meta_state =
+        OwnedForwardUdpRejectState::unknown;
     try {
         state = firewall_->inspect_owned_snat_state();
+        meta_state = firewall_->inspect_forward_udp_reject_state();
     } catch (const std::exception& error) {
         // This is a fallback guard, not an alert source. An inspection error
         // must neither disrupt the event loop nor emit one message per tick.
@@ -1587,26 +1605,88 @@ void Daemon::check_owned_snat_health() {
         task_metrics.failure("owned SNAT inspection failed");
         return;
     }
-    if (!should_run_periodic_snat_repair(
+    const auto meta_selection = resolve_meta_udp_443_policy_selection(
+        config_,
+        firewall_state_.get_rules(),
+        firewall_state_.get_fwmark_mask());
+    const bool messages_first_active = meta_selection.active();
+    const bool fastnat_disabled =
+        !messages_first_active || fastnat_is_disabled_or_unavailable();
+    const bool repair_snat = should_run_periodic_snat_repair(
             routing_runtime_active_,
             recovery_pending,
             netfilter_refresh_pending,
-            state)) {
+            state);
+    const bool repair_meta =
+        should_run_periodic_forward_udp_reject_repair(
+            routing_runtime_active_,
+            recovery_pending,
+            netfilter_refresh_pending,
+            messages_first_active,
+            fastnat_disabled,
+            meta_state);
+    if (should_resume_pending_meta_udp443_cleanup(
+            messages_first_active,
+            fastnat_disabled,
+            meta_state,
+            meta_udp443_cleanup_retry_task_id_,
+            pending_meta_udp443_cleanup_.has_value(),
+            pending_meta_udp443_cleanup_.has_value() &&
+                pending_meta_udp443_cleanup_->worker_inflight)) {
+        const auto& pending = *pending_meta_udp443_cleanup_;
+        schedule_meta_udp443_activation_cleanup_retry(
+            pending.plan,
+            pending.runtime_generation,
+            pending.cleanup_epoch,
+            pending.attempt);
+        if (meta_udp443_cleanup_retry_task_id_ < 0) {
+            task_metrics.failure(
+                "Meta UDP/443 exact cleanup retry could not be scheduled");
+            return;
+        }
+    }
+    if (messages_first_active && !fastnat_disabled) {
+        // Reapplying the filter cannot repair a bypass outside netfilter and
+        // would discard the durable exact-cleanup plan at apply entry. Keep
+        // the current committed policy and pending plan intact until the init
+        // layer or firmware restores verified FastNAT-off traversal.
+        report_meta_udp443_degraded(
+            "FastNAT is enabled while messages-first is active");
+        task_metrics.failure(
+            "Meta UDP/443 policy requires FastNAT to remain disabled");
+        return;
+    }
+    if (!repair_snat && !repair_meta) {
+        if (meta_state == OwnedForwardUdpRejectState::unknown) {
+            task_metrics.failure(
+                "Meta UDP/443 policy health could not be inspected");
+            return;
+        }
         task_metrics.noop();
         return;
     }
 
+    if (repair_meta) {
+        report_meta_udp443_degraded(
+            !fastnat_disabled
+                ? "FastNAT is enabled while messages-first is active"
+                : (meta_state == OwnedForwardUdpRejectState::missing
+                       ? "the owned first FORWARD hook or rule is missing"
+                       : "owned UDP/443 blocking artifacts are stale"));
+    }
     Logger::instance().info(
-        "Periodic SNAT health check detected a {} owned scaffold; "
-        "repairing it.",
-        state == OwnedSnatState::missing ? "missing" : "stale");
+        "Periodic owned-firewall health check detected drift; repairing {}{}.",
+        repair_snat ? "SNAT" : "",
+        repair_meta
+            ? (repair_snat ? " and Meta UDP/443" : "Meta UDP/443")
+            : "");
     const bool repaired = refresh_iproute_and_firewall_runtime(
         0,
         std::nullopt,
         std::nullopt,
         /*schedule_catalog_refresh=*/false,
         OwnedSnatRecovery{
-            /*requested=*/true,
+            /*requested=*/repair_snat,
             /*missing_observed=*/false});
     if (repaired) {
         task_metrics.success();
@@ -1619,14 +1699,27 @@ void Daemon::schedule_netfilter_runtime_refresh(
     NetfilterRefreshReason reason) {
     pending_netfilter_refresh_reasons_ |=
         static_cast<std::uint8_t>(reason);
-    if (netfilter_refresh_task_id_ >= 0) {
-        scheduler_->cancel(netfilter_refresh_task_id_);
-        netfilter_refresh_task_id_ = -1;
-    }
+    const std::uint64_t schedule_serial =
+        ++netfilter_refresh_schedule_serial_;
+    try {
+        if (netfilter_refresh_task_id_ >= 0) {
+            // Invalidate the callback and relinquish the id before cancel().
+            // Scheduler::cancel can erase its entry and then throw while
+            // removing the fd; retaining that id would wedge every later
+            // health check behind a timer that no longer exists.
+            const int stale_task_id = netfilter_refresh_task_id_;
+            netfilter_refresh_task_id_ = -1;
+            scheduler_->cancel(stale_task_id);
+        }
 
-    netfilter_refresh_task_id_ = scheduler_->schedule_oneshot(
+        netfilter_refresh_task_id_ = scheduler_->schedule_oneshot(
         NETFILTER_REFRESH_DEBOUNCE_DELAY,
-        [this]() {
+        [this, schedule_serial]() {
+            if (!netfilter_refresh_callback_is_current(
+                    schedule_serial,
+                    netfilter_refresh_schedule_serial_)) {
+                return;
+            }
             netfilter_refresh_task_id_ = -1;
             const std::uint8_t reasons =
                 pending_netfilter_refresh_reasons_;
@@ -1692,6 +1785,31 @@ void Daemon::schedule_netfilter_runtime_refresh(
             }
         },
         "netfilter-runtime-refresh");
+    } catch (...) {
+        // No callback with this serial owns the coalesced work. Older
+        // callbacks are fenced by the increment above, so expose an idle
+        // state that the periodic health task can retry instead of remaining
+        // permanently 'pending'.
+        netfilter_refresh_task_id_ = -1;
+        pending_netfilter_refresh_reasons_ = 0U;
+        throw;
+    }
+}
+
+void Daemon::schedule_netfilter_runtime_refresh_noexcept(
+    NetfilterRefreshReason reason,
+    const char* failure_detail) noexcept {
+    try {
+        schedule_netfilter_runtime_refresh(reason);
+    } catch (...) {
+        // This helper is used only after a firewall generation has committed.
+        // Scheduler allocation/fd failure must not make callers claim that an
+        // old generation stayed active. The repeating health check remains
+        // the durable repair authority.
+        // schedule_netfilter_runtime_refresh() has strong exception state:
+        // no id and no coalesced bits remain when no callback owns the work.
+        report_meta_udp443_degraded(failure_detail);
+    }
 }
 
 void Daemon::handle_sighup() {
@@ -3079,6 +3197,7 @@ void Daemon::run() {
         resolver_stream_coordinator_.request_stop();
         keenetic_dns_refresh_coordinator_.stop();
         cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
         cancel_owned_conntrack_cleanup_retry();
         list_refresh_tasks_.request_cancel_active();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
@@ -3146,6 +3265,8 @@ void Daemon::run() {
         try {
             KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
             firewall_->cleanup();
+            committed_meta_udp443_fwmark_.reset();
+            committed_meta_udp443_owned_mask_ = 0U;
         } catch (const std::exception& cleanup_error) {
             log.error("Startup rollback: firewall cleanup failed: {}",
                       cleanup_error.what());
@@ -3191,6 +3312,7 @@ void Daemon::run() {
     // observation is generation-fenced, but disabling it here also prevents a
     // late exact delete from racing normal shutdown.
     cancel_idle_stall_observer();
+    cancel_meta_udp443_activation_cleanup();
     runtime_mutation_admission_.shutdown();
     sighup_reload_coordinator_.stop();
     cancel_resolver_reload_retry();
@@ -3246,6 +3368,8 @@ void Daemon::run() {
     policy_rules_.clear();
     route_table_.clear();
     firewall_->cleanup();
+    committed_meta_udp443_fwmark_.reset();
+    committed_meta_udp443_owned_mask_ = 0U;
     routing_runtime_active_ = false;
     transition_runtime_or_throw(RuntimeState::stopped, "daemon shutdown complete");
     remove_pid_file();

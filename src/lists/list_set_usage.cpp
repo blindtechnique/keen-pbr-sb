@@ -16,6 +16,11 @@ ListSetUsage analyze_list_set_usage(const std::string& list_name,
                 return;
             }
             usage.has_static_entries = true;
+            if (entry.find(':') == std::string_view::npos) {
+                usage.has_static_ipv4_entries = true;
+            } else {
+                usage.has_static_ipv6_entries = true;
+            }
             if (usage.static_destinations.size() <
                 ListSetUsage::kMaxTrackedStaticDestinations) {
                 usage.static_destinations.emplace_back(entry);

@@ -263,6 +263,18 @@ enum class OwnedSnatState : uint8_t {
     unknown,
 };
 
+// Read-only health of the opt-in Meta UDP/443 FORWARD policy. `missing`
+// means messages-first was the last successfully applied contract but its
+// first hook/chain/rules vanished. `stale` means balanced was committed while
+// owned blocking artifacts remain, or the live contract differs from the
+// exact committed one. Inspection failures are never mutation authority.
+enum class OwnedForwardUdpRejectState : uint8_t {
+    healthy,
+    missing,
+    stale,
+    unknown,
+};
+
 // Abstract firewall interface for managing IP sets and packet marking rules.
 // Both iptables and nftables backends implement this interface.
 //
@@ -339,6 +351,17 @@ public:
     // Used for blackhole outbounds that don't need routing tables or fwmarks.
     virtual void create_drop_rule(const FirewallRuleCriteria& criteria = {}) = 0;
 
+    // Reject forwarded UDP for one already-realized destination route. This
+    // deliberately lives in filter/FORWARD (not mangle PREROUTING) so the
+    // client receives an ICMP port-unreachable and can fall back immediately.
+    // Backends must match the exact keen-pbr-owned mark/mask and destination
+    // set, publish the hook before ordinary ESTABLISHED acceptance, and leave
+    // every other UDP port and destination untouched.
+    virtual void create_forward_udp_reject_rule(
+        uint32_t expected_fwmark,
+        const std::string& dst_set_name,
+        std::uint16_t destination_port) = 0;
+
     // Redirect plain DNS (tcp/udp dport 53) arriving from the configured
     // inbound interfaces to the router's local resolver (client DNS
     // enforcement). Backends implement this with a NAT REDIRECT chain.
@@ -357,6 +380,8 @@ public:
     virtual void create_source_egress_snat_rules(
         const std::vector<FirewallSourceEgressSnatSelector>& selectors) = 0;
     virtual OwnedSnatState inspect_owned_snat_state() const = 0;
+    virtual OwnedForwardUdpRejectState
+    inspect_forward_udp_reject_state() const = 0;
 
     // Create a firewall rule that stops keen-pbr processing for matching packets
     // and leaves them unmodified for normal system routing.

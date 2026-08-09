@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1286,6 +1287,367 @@ TEST_CASE(
               flow, 0x00FF0000U, 0x00070000U) ==
           ConntrackCleanupResult::Failed);
     CHECK(commands.size() == 2U);
+}
+
+TEST_CASE(
+    "ConntrackManager specialized Meta preflight budgets only exact UDP 443 candidates") {
+    const auto record = [](const char* protocol,
+                           int protocol_number,
+                           std::uint16_t source_port,
+                           std::uint16_t destination_port) {
+        return std::string{"ipv4 2 "} + protocol + " " +
+            std::to_string(protocol_number) + " 120 " +
+            (protocol_number == 6 ? "ESTABLISHED " : "") +
+            "src=192.168.1.44 dst=31.13.66.10 sport=" +
+            std::to_string(source_port) + " dport=" +
+            std::to_string(destination_port) +
+            " packets=2 bytes=200 src=31.13.66.10 "
+            "dst=192.168.1.44 sport=" +
+            std::to_string(destination_port) + " dport=" +
+            std::to_string(source_port) +
+            " packets=1 bytes=100 [ASSURED] [SEEN_REPLY] "
+            "mark=458752 zone=0 use=2\n";
+    };
+    std::string snapshot;
+    for (std::uint16_t index = 0U; index < 70U; ++index) {
+        snapshot += record("tcp", 6, 40000U + index, 443U);
+        snapshot += record("udp", 17, 50000U + index, 3478U);
+        snapshot += record("udp", 17, 55000U + index, 50000U);
+    }
+    snapshot += record("udp", 17, 60000U, 443U);
+
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    ConntrackFlowObservationOptions options;
+    options.max_flows = 1U;
+    options.max_snapshot_bytes = 512U * 1024U;
+    options.max_snapshot_lines = 512U;
+    options.allow_foreign_mark_bits_for_media = true;
+    options.include_ordinary_destination_flows = false;
+    options.media_seed_udp_destination_port = 443U;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        options,
+        {},
+        {"31.13.64.0/18"});
+
+    CHECK(observation.flows.empty());
+    CHECK_FALSE(observation.flow_limit_reached);
+    CHECK(observation.invalid_media_seed_candidate_records == 0U);
+    REQUIRE(observation.media_seed_flows.size() == 1U);
+    CHECK(observation.media_seed_flows.front().protocol ==
+          ConntrackFlowProtocol::Udp);
+    CHECK(observation.media_seed_flows.front().destination_port == 443U);
+}
+
+TEST_CASE(
+    "ConntrackManager specialized Meta preflight flags malformed relevant records") {
+    const std::string relevant =
+        "ipv4 2 udp 17 120 src=192.168.1.44 dst=31.13.66.10 "
+        "sport=60000 dport=443 malformed-original-tuple\n";
+    const std::string unrelated =
+        "ipv4 2 udp 17 120 src=192.168.1.44 dst=8.8.8.8 "
+        "sport=60001 dport=443 malformed-original-tuple\n";
+    const std::string unknown_destination =
+        "ipv4 2 udp 17 120 src=192.168.1.44 "
+        "sport=60002 dport=443 malformed-original-tuple\n";
+    const std::string router_originated =
+        "ipv4 2 udp 17 120 src=192.168.1.1 dst=31.13.66.10 "
+        "sport=60003 dport=443 malformed-original-tuple\n";
+    const std::string missing_original_destination_with_reply =
+        "ipv4 2 udp 17 120 src=192.168.1.44 sport=60004 dport=443 "
+        "packets=2 bytes=200 src=31.13.66.10 dst=192.168.1.44 "
+        "sport=443 dport=60004 packets=1 bytes=100 mark=0\n";
+    const std::string missing_original_source_with_reply =
+        "ipv4 2 udp 17 120 dst=31.13.66.10 sport=60005 dport=443 "
+        "packets=2 bytes=200 src=31.13.66.10 dst=192.168.1.44 "
+        "sport=443 dport=60005 packets=1 bytes=100 mark=0\n";
+    const std::string missing_original_dport =
+        "ipv4 2 udp 17 120 src=192.168.1.44 dst=31.13.66.10 "
+        "sport=60006 packets=2 bytes=200 malformed-original-tuple\n";
+    const std::string invalid_original_dport =
+        "ipv4 2 udp 17 120 src=192.168.1.44 dst=31.13.66.10 "
+        "sport=60007 dport=not-a-port packets=2 bytes=200 "
+        "malformed-original-tuple\n";
+    std::string snapshot = relevant + unrelated + unknown_destination +
+        router_originated + missing_original_destination_with_reply +
+        missing_original_source_with_reply + missing_original_dport +
+        invalid_original_dport;
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    ConntrackFlowObservationOptions options;
+    options.include_ordinary_destination_flows = false;
+    options.media_seed_udp_destination_port = 443U;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        options,
+        {},
+        {"31.13.64.0/18"});
+    CHECK(observation.invalid_media_seed_candidate_records == 6U);
+    CHECK(observation.media_seed_flows.empty());
+}
+
+TEST_CASE(
+    "ConntrackManager specialized Meta preflight reports relevant candidate overflow") {
+    const auto record = [](std::uint16_t source_port) {
+        return std::string{
+            "ipv4 2 udp 17 120 src=192.168.1.44 dst=31.13.66.10 sport="} +
+            std::to_string(source_port) +
+            " dport=443 packets=2 bytes=200 src=31.13.66.10 "
+            "dst=192.168.1.44 sport=443 dport=" +
+            std::to_string(source_port) +
+            " packets=1 bytes=100 [ASSURED] [SEEN_REPLY] "
+            "mark=458752 zone=0 use=2\n";
+    };
+    const std::string snapshot = record(60000U) + record(60001U);
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    ConntrackFlowObservationOptions options;
+    options.max_flows = 1U;
+    options.include_ordinary_destination_flows = false;
+    options.media_seed_udp_destination_port = 443U;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        options,
+        {},
+        {"31.13.64.0/18"});
+    CHECK(observation.flow_limit_reached);
+    CHECK(observation.media_seed_flows.size() == 1U);
+}
+
+TEST_CASE(
+    "ConntrackManager exact cleanup batch is capped fenced and retry friendly") {
+    const auto flow = [](std::uint16_t source_port) {
+        ConntrackExactForwardedFlow value;
+        value.family = ConntrackFlowFamily::Ipv4;
+        value.protocol = ConntrackFlowProtocol::Udp;
+        value.source = "192.168.1.44";
+        value.destination = "31.13.66.10";
+        value.source_port = source_port;
+        value.destination_port = 443U;
+        value.mark = 0xA0070000U;
+        return value;
+    };
+    const std::vector<ConntrackExactForwardedFlow> flows{
+        flow(50000U), flow(50001U), flow(50002U),
+        flow(50003U), flow(50004U), flow(50005U)};
+
+    SUBCASE("attempt cap retains unattempted tuples before failed tuples") {
+        ConntrackManager manager([](const std::vector<std::string>& args) {
+            const auto source_port = std::find(
+                args.begin(), args.end(), "--sport");
+            const bool fail = source_port != args.end() &&
+                std::next(source_port) != args.end() &&
+                *std::next(source_port) == "50000";
+            return ConntrackManager::CommandResult{
+                fail ? 1 : 0,
+                fail ? "Operation not permitted" : ""};
+        });
+        const auto summary = manager.delete_exact_forwarded_flows(
+            flows,
+            0x00FF0000U,
+            {0x00070000U},
+            ConntrackExactFlowCleanupOptions{
+                std::chrono::seconds{4}, 4U});
+        CHECK(summary.attempted == 4U);
+        CHECK(summary.failed == 1U);
+        CHECK(summary.budget_exhausted);
+        CHECK(summary.batch_limit_reached);
+        REQUIRE(summary.remaining_flows.size() == 3U);
+        CHECK(summary.remaining_flows[0].source_port == 50004U);
+        CHECK(summary.remaining_flows[1].source_port == 50005U);
+        CHECK(summary.remaining_flows[2].source_port == 50000U);
+    }
+
+    SUBCASE("zero budget performs no command") {
+        std::size_t calls = 0U;
+        ConntrackManager manager(
+            [&calls](const std::vector<std::string>&) {
+                ++calls;
+                return ConntrackManager::CommandResult{0, {}};
+            });
+        const auto summary = manager.delete_exact_forwarded_flows(
+            flows,
+            0x00FF0000U,
+            {0x00070000U},
+            ConntrackExactFlowCleanupOptions{
+                std::chrono::milliseconds{0}, 4U});
+        CHECK(summary.budget_exhausted);
+        CHECK_FALSE(summary.batch_limit_reached);
+        CHECK(summary.attempted == 0U);
+        CHECK(summary.remaining_flows == flows);
+        CHECK(calls == 0U);
+    }
+
+    SUBCASE("generation fence stops before the next exact command") {
+        std::size_t calls = 0U;
+        std::size_t fences = 0U;
+        ConntrackManager manager(
+            [&calls](const std::vector<std::string>&) {
+                ++calls;
+                return ConntrackManager::CommandResult{0, {}};
+            });
+        const auto summary = manager.delete_exact_forwarded_flows(
+            flows,
+            0x00FF0000U,
+            {0x00070000U},
+            {},
+            [&fences]() { return fences++ == 0U; });
+        CHECK(summary.generation_changed);
+        CHECK(summary.attempted == 1U);
+        CHECK(summary.remaining_flows.size() == flows.size() - 1U);
+        CHECK(calls == 1U);
+    }
+
+    SUBCASE("missing command retains the complete exact retry set") {
+        ConntrackManager manager([](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{127, {}};
+        });
+        CHECK(manager.probe_exact_cleanup_capability() ==
+              ConntrackCleanupResult::CommandUnavailable);
+        const auto summary = manager.delete_exact_forwarded_flows(
+            flows, 0x00FF0000U, {0x00070000U});
+        CHECK(summary.command_unavailable);
+        CHECK(summary.attempted == 1U);
+        CHECK(summary.remaining_flows == flows);
+    }
+
+    SUBCASE("already-empty exact tuples count as successful progress") {
+        ConntrackManager manager([](const std::vector<std::string>& args) {
+            if (args.size() > 1U && args[1] == "-L") {
+                return ConntrackManager::CommandResult{
+                    1, "0 flow entries have been shown.\n"};
+            }
+            return ConntrackManager::CommandResult{
+                1, "0 flow entries have been deleted.\n"};
+        });
+        CHECK(manager.probe_exact_cleanup_capability() ==
+              ConntrackCleanupResult::Succeeded);
+        const auto summary = manager.delete_exact_forwarded_flows(
+            {flows.front()}, 0x00FF0000U, {0x00070000U});
+        CHECK(summary.complete());
+        CHECK(summary.attempted == 1U);
+    }
+
+    SUBCASE("read-only capability probe rejects reduced selector syntax") {
+        std::vector<std::vector<std::string>> commands;
+        ConntrackManager manager(
+            [&commands](const std::vector<std::string>& args) {
+                commands.push_back(args);
+                return ConntrackManager::CommandResult{
+                    2, "conntrack: unknown option --sport"};
+            });
+        CHECK(manager.probe_exact_cleanup_capability() ==
+              ConntrackCleanupResult::Failed);
+        REQUIRE(commands.size() == 1U);
+        CHECK(commands[0] == std::vector<std::string>{
+            "conntrack", "-L", "-f", "ipv4", "-p", "udp",
+            "-s", "0.0.0.0", "--sport", "0",
+            "-d", "0.0.0.0", "--dport", "0",
+            "--mark", "0/4294967295"});
+        CHECK(std::none_of(
+            commands.begin(),
+            commands.end(),
+            [](const auto& command) {
+                return std::find(
+                           command.begin(), command.end(), "-D") !=
+                       command.end();
+            }));
+    }
+
+    SUBCASE("IPv6 activation also proves the exact IPv6 selector syntax") {
+        std::vector<std::vector<std::string>> commands;
+        ConntrackManager manager(
+            [&commands](const std::vector<std::string>& args) {
+                commands.push_back(args);
+                const auto family = std::find(
+                    args.begin(), args.end(), "-f");
+                const bool ipv6 = family != args.end() &&
+                    std::next(family) != args.end() &&
+                    *std::next(family) == "ipv6";
+                return ConntrackManager::CommandResult{
+                    ipv6 ? 2 : 0,
+                    ipv6 ? "conntrack: unsupported family" : ""};
+            });
+        CHECK(manager.probe_exact_cleanup_capability(true) ==
+              ConntrackCleanupResult::Failed);
+        REQUIRE(commands.size() == 2U);
+        CHECK(std::find(
+                  commands[0].begin(), commands[0].end(), "ipv4") !=
+              commands[0].end());
+        CHECK(std::find(
+                  commands[1].begin(), commands[1].end(), "ipv6") !=
+              commands[1].end());
+        CHECK(std::find(
+                  commands[1].begin(), commands[1].end(), "::") !=
+              commands[1].end());
+        CHECK(std::none_of(
+            commands.begin(),
+            commands.end(),
+            [](const auto& command) {
+                return std::find(
+                           command.begin(), command.end(), "-D") !=
+                       command.end();
+            }));
+    }
+
+    SUBCASE("route-mark transition authorizes only current and proven previous marks") {
+        std::vector<std::vector<std::string>> commands;
+        ConntrackManager manager(
+            [&commands](const std::vector<std::string>& args) {
+                commands.push_back(args);
+                return ConntrackManager::CommandResult{0, {}};
+            });
+        auto current = flows.front();
+        current.mark = 0xA0070000U;
+        auto previous = flows[1];
+        previous.mark = 0xA0060000U;
+        auto unrelated = flows[2];
+        unrelated.mark = 0xA0080000U;
+        auto foreign_only = flows[3];
+        foreign_only.mark = 0xA0000000U;
+        const auto summary = manager.delete_exact_forwarded_flows(
+            {current, previous, unrelated, foreign_only},
+            0x00FF0000U,
+            {0x00060000U, 0x00070000U},
+            ConntrackExactFlowCleanupOptions{
+                std::chrono::seconds{4}, 8U});
+        CHECK(summary.attempted == 4U);
+        CHECK(summary.failed == 2U);
+        REQUIRE(summary.remaining_flows.size() == 2U);
+        CHECK(summary.remaining_flows[0].mark == unrelated.mark);
+        CHECK(summary.remaining_flows[1].mark == foreign_only.mark);
+        REQUIRE(commands.size() == 2U);
+        CHECK(commands[0].back() == "2684813312/4294967295");
+        CHECK(commands[1].back() == "2684747776/4294967295");
+    }
 }
 
 TEST_CASE("ConntrackManager preserves foreign bits while restoring and saving marks") {

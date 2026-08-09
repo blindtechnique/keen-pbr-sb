@@ -114,6 +114,85 @@ void use_iptables_test_path(
   guard.set(directory.string() + ":" + (current == nullptr ? "" : current));
 }
 
+void write_meta_udp443_test_tools(
+    const std::filesystem::path& directory) {
+  const std::string inspector =
+      "#!/bin/sh\n"
+      "state=$(cat \"$KPBR_META_STATE\" 2>/dev/null)\n"
+      "[ \"$*\" = '-t filter -S' ] || exit 0\n"
+      "case \"$state\" in\n"
+      "  missing|'') exit 0 ;;\n"
+      "  unknown) echo 'bad argument' >&2; exit 2 ;;\n"
+      "  conditional)\n"
+      "    printf '%s\\n' '-N KeenPbrMeta443' "
+      "'-N KeenPbrMeta443_A' '-N KeenPbrMeta443_B' "
+      "'-A FORWARD -p tcp -j KeenPbrMeta443' "
+      "'-A KeenPbrMeta443 -j KeenPbrMeta443_A' ;;\n"
+      "  *)\n"
+      "    generation=A\n"
+      "    case \"$state\" in B*) generation=B ;; esac\n"
+      "    active=KeenPbrMeta443_$generation\n"
+      "    printf '%s\\n' '-N KeenPbrMeta443' "
+      "'-N KeenPbrMeta443_A' '-N KeenPbrMeta443_B'\n"
+      "    [ \"$state\" = A-reordered ] && "
+      "echo '-A FORWARD -j ACCEPT'\n"
+      "    echo '-A FORWARD -j KeenPbrMeta443'\n"
+      "    [ \"$state\" = A-duplicate ] && "
+      "echo '-A FORWARD -j KeenPbrMeta443'\n"
+      "    [ \"$state\" = direct-B ] && "
+      "echo '-A FORWARD -p udp -g KeenPbrMeta443_B'\n"
+      "    [ \"$state\" = direct-A ] && "
+      "echo '-A FORWARD -p udp -g KeenPbrMeta443_A'\n"
+      "    echo \"-A KeenPbrMeta443 -j $active\"\n"
+      "    if [ \"$state\" = wrong-rule ]; then\n"
+      "      echo \"-A $active -p tcp --dport 443 -j REJECT\"\n"
+      "    else\n"
+      "      echo \"-A $active -m mark --mark 0x70000/0xff0000 "
+      "-p udp --dport 443 -m set --match-set "
+      "kpbr4s_meta_whatsapp_ip dst -j REJECT --reject-with "
+      "icmp-port-unreachable\"\n"
+      "      [ \"$state\" = duplicate-rule ] && "
+      "echo \"-A $active -m mark --mark 0x70000/0xff0000 "
+      "-p udp --dport 443 -m set --match-set "
+      "kpbr4s_meta_whatsapp_ip dst -j REJECT --reject-with "
+      "icmp-port-unreachable\"\n"
+      "    fi ;;\n"
+      "esac\n"
+      "exit 0\n";
+  write_iptables_test_executable(directory / "iptables", inspector);
+  write_iptables_test_executable(directory / "ip6tables", inspector);
+
+  const std::string restore =
+      "#!/bin/sh\n"
+      "if [ \"$1\" = -w ] && [ \"$2\" = 0 ]; then exit 0; fi\n"
+      "cat > \"$KPBR_META_LAST_SCRIPT\"\n"
+      "{ echo '=== transaction ==='; "
+      "cat \"$KPBR_META_LAST_SCRIPT\"; } >> \"$KPBR_META_SCRIPTS\"\n"
+      "if [ \"$KPBR_META_FAIL_STAGE\" = 1 ] && "
+      "grep -q '^-F KeenPbrMeta443_B$' \"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo 'stage failed at line 3' >&2\n"
+      "  exit 2\n"
+      "fi\n"
+      "if [ \"$KPBR_META_FAIL_DISABLE\" = 1 ] && "
+      "grep -q '^-X KeenPbrMeta443_A$' \"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo 'disable failed at line 3' >&2\n"
+      "  exit 2\n"
+      "fi\n"
+      "if grep -q '^-X KeenPbrMeta443_A$' "
+      "\"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo missing > \"$KPBR_META_STATE\"\n"
+      "elif grep -q '^-A KeenPbrMeta443 -j KeenPbrMeta443_B$' "
+      "\"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo \"${KPBR_META_PUBLISH_STATE:-B}\" > \"$KPBR_META_STATE\"\n"
+      "elif grep -q '^-A KeenPbrMeta443 -j KeenPbrMeta443_A$' "
+      "\"$KPBR_META_LAST_SCRIPT\"; then\n"
+      "  echo \"${KPBR_META_PUBLISH_STATE:-A}\" > \"$KPBR_META_STATE\"\n"
+      "fi\n"
+      "exit 0\n";
+  write_iptables_test_executable(directory / "iptables-restore", restore);
+  write_iptables_test_executable(directory / "ip6tables-restore", restore);
+}
+
 } // namespace
 
 TEST_CASE("raw prerouting selection does not perform a racy constructor probe") {
@@ -151,6 +230,23 @@ public:
     ps.timeout = timeout;
     ps.source_udp_peer = source_udp_peer;
     return IptablesFirewall::build_ipset_create_line(ps);
+  }
+
+  static std::string build_forward_udp_reject_script(
+      bool ipv6,
+      uint32_t fwmark,
+      uint32_t fwmark_mask,
+      const std::string& set_name,
+      std::uint16_t destination_port) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(fwmark_mask);
+    fw.create_ipset(set_name, ipv6 ? AF_INET6 : AF_INET);
+    fw.create_forward_udp_reject_rule(
+        fwmark, set_name, destination_port);
+    return IptablesFirewall::build_forward_udp_reject_script(
+        ipv6,
+        ipv6 ? "KeenPbrMeta443_B" : "KeenPbrMeta443_A",
+        fw.pending_forward_udp_rejects_);
   }
 
   static bool is_dynamic_set_name(const std::string& name) {
@@ -458,6 +554,112 @@ public:
     fw.verify_applied_generation(false, generation);
   }
 
+  static State inspect_forward_reject_generation(bool ipv6 = false) {
+    IptablesFirewall fw;
+    return fw.inspect_forward_reject_generation(ipv6);
+  }
+
+  static FirewallSetGeneration
+  select_forward_reject_target_generation(bool ipv6 = false) {
+    IptablesFirewall fw;
+    return fw.select_forward_reject_target_generation(ipv6);
+  }
+
+  static void publish_forward_reject_dispatcher(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.publish_forward_reject_dispatcher(ipv6, generation);
+  }
+
+  static void stage_then_publish_forward_reject(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset(
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        ipv6 ? AF_INET6 : AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00070000U,
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        443U);
+    fw.stage_forward_reject_generation(ipv6, generation);
+    fw.publish_forward_reject_dispatcher(ipv6, generation);
+  }
+
+  static void verify_forward_reject_generation(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset(
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        ipv6 ? AF_INET6 : AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00070000U,
+        ipv6 ? "kpbr6s_meta_whatsapp_ip" :
+               "kpbr4s_meta_whatsapp_ip",
+        443U);
+    fw.verify_forward_reject_generation(ipv6, generation);
+  }
+
+  static OwnedForwardUdpRejectState inspect_forward_reject_state(
+      bool expected,
+      FirewallSetGeneration generation = FirewallSetGeneration::A) {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.last_applied_forward_reject_v4_expected_ = expected;
+    fw.last_applied_forward_reject_v4_generation_ = generation;
+    if (expected) {
+      fw.create_ipset("kpbr4s_meta_whatsapp_ip", AF_INET);
+      fw.create_forward_udp_reject_rule(
+          0x00070000U, "kpbr4s_meta_whatsapp_ip", 443U);
+      fw.last_applied_forward_udp_rejects_ =
+          fw.pending_forward_udp_rejects_;
+    }
+    return fw.inspect_forward_udp_reject_state();
+  }
+
+  static void disable_forward_reject_scaffold(bool ipv6 = false) {
+    IptablesFirewall fw;
+    fw.disable_forward_reject_scaffold(ipv6);
+  }
+
+  static bool cleanup_forward_reject_failure_is_loud() {
+    IptablesFirewall fw;
+    fw.forward_reject_v4_created_ = true;
+    try {
+      fw.cleanup_rules_impl();
+    } catch (const FirewallError&) {
+      return true;
+    }
+    return false;
+  }
+
+  static std::pair<bool, bool>
+  publish_verify_failure_then_cleanup() {
+    IptablesFirewall fw;
+    fw.set_ipv6_enabled(false);
+    fw.set_fwmark_mask(0x00FF0000U);
+    fw.create_ipset("kpbr4s_meta_whatsapp_ip", AF_INET);
+    fw.create_forward_udp_reject_rule(
+        0x00070000U, "kpbr4s_meta_whatsapp_ip", 443U);
+    try {
+      fw.publish_and_verify_forward_reject_generation(
+          /*ipv6=*/false, FirewallSetGeneration::A);
+    } catch (const FirewallError&) {
+      const bool owned_after_publish = fw.forward_reject_v4_created_;
+      fw.cleanup_rules_impl();
+      return {true, owned_after_publish};
+    }
+    return {false, fw.forward_reject_v4_created_};
+  }
+
   static void apply_preserve_with_existing_nat_and_raw_hook_failure() {
     IptablesFirewall fw(/*use_raw_prerouting=*/true);
     fw.set_ipv6_enabled(false);
@@ -529,6 +731,315 @@ public:
 using namespace keen_pbr3;
 using T = IptablesBuilderTest;
 using Rule = IptablesBuilderTest::RuleDesc;
+
+TEST_CASE("Meta UDP 443 iptables rule has exact narrow transport scope") {
+  const auto script = T::build_forward_udp_reject_script(
+      /*ipv6=*/false,
+      0x00070000U,
+      0x00FF0000U,
+      "kpbr4s_meta_whatsapp_ip",
+      443U);
+  CHECK(script.find(
+            "-m mark --mark 0x70000/0xff0000 -p udp --dport 443 "
+            "-m set --match-set kpbr4s_meta_whatsapp_ip dst -j REJECT") !=
+        std::string::npos);
+  CHECK(script.find("-p tcp") == std::string::npos);
+  CHECK(script.find("--dport 3478") == std::string::npos);
+  CHECK(script.find("--dport 5349") == std::string::npos);
+}
+
+TEST_CASE("Meta UDP 443 iptables publishes independent A B generations") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  {
+    std::ofstream out(state);
+    out << "missing";
+  }
+  CHECK(T::select_forward_reject_target_generation() ==
+        FirewallSetGeneration::A);
+  CHECK_NOTHROW(T::publish_forward_reject_dispatcher(
+      FirewallSetGeneration::A));
+  CHECK_NOTHROW(T::verify_forward_reject_generation(
+      FirewallSetGeneration::A));
+  CHECK(T::inspect_forward_reject_state(
+            /*expected=*/true,
+            FirewallSetGeneration::A) ==
+        OwnedForwardUdpRejectState::healthy);
+  auto transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find("-I FORWARD 1 -j KeenPbrMeta443") !=
+        std::string::npos);
+
+  CHECK(T::select_forward_reject_target_generation() ==
+        FirewallSetGeneration::B);
+  CHECK_NOTHROW(T::publish_forward_reject_dispatcher(
+      FirewallSetGeneration::B));
+  CHECK_NOTHROW(T::verify_forward_reject_generation(
+      FirewallSetGeneration::B));
+  CHECK(T::inspect_forward_reject_state(
+            /*expected=*/true,
+            FirewallSetGeneration::B) ==
+        OwnedForwardUdpRejectState::healthy);
+  transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find(
+            "-A KeenPbrMeta443 -j KeenPbrMeta443_B") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 iptables publication repairs exact hook order") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  for (const auto* drift : {"A-duplicate", "A-reordered"}) {
+    {
+      std::ofstream out(state);
+      out << drift;
+    }
+    CHECK_NOTHROW(T::publish_forward_reject_dispatcher(
+        FirewallSetGeneration::B));
+    CHECK_NOTHROW(T::verify_forward_reject_generation(
+        FirewallSetGeneration::B));
+  }
+  const auto transactions = read_iptables_test_file(scripts);
+  CHECK(transactions.find(
+            "-D FORWARD -j KeenPbrMeta443\n"
+            "-D FORWARD -j KeenPbrMeta443\n") !=
+        std::string::npos);
+  CHECK(transactions.find("-I FORWARD 1 -j KeenPbrMeta443") !=
+        std::string::npos);
+
+  {
+    std::ofstream out(state);
+    out << "conditional";
+  }
+  const auto before = read_iptables_test_file(scripts);
+  CHECK_THROWS_AS(
+      T::publish_forward_reject_dispatcher(FirewallSetGeneration::B),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(scripts) == before);
+
+  {
+    std::ofstream out(state);
+    out << "direct-A";
+  }
+  CHECK_THROWS_AS(
+      T::publish_forward_reject_dispatcher(FirewallSetGeneration::B),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(scripts) == before);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 failed staging preserves the active generation") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("1");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  {
+    std::ofstream out(state);
+    out << "A";
+  }
+  testing::reset_restore_wait_option_probe_for_test();
+
+  CHECK_THROWS_AS(
+      T::stage_then_publish_forward_reject(FirewallSetGeneration::B),
+      FirewallError);
+  CHECK(read_iptables_test_file(state).find('A') != std::string::npos);
+  CHECK(read_iptables_test_file(scripts).find(
+            "-A KeenPbrMeta443 -j KeenPbrMeta443_B") ==
+        std::string::npos);
+
+  fail_stage.set("0");
+  {
+    std::ofstream out(state);
+    out << "direct-B";
+  }
+  const auto before_direct_reference =
+      read_iptables_test_file(scripts);
+  CHECK_THROWS_AS(
+      T::stage_then_publish_forward_reject(FirewallSetGeneration::B),
+      TransientFirewallError);
+  CHECK(read_iptables_test_file(scripts) == before_direct_reference);
+  CHECK(read_iptables_test_file(state).find("direct-B") !=
+        std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 balanced disable is atomic and cleanup fails loudly") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  {
+    std::ofstream out(state);
+    out << "A-duplicate";
+  }
+  CHECK_NOTHROW(T::disable_forward_reject_scaffold());
+  CHECK(T::inspect_forward_reject_state(/*expected=*/false) ==
+        OwnedForwardUdpRejectState::healthy);
+  const auto disabled_transactions = read_iptables_test_file(scripts);
+  CHECK(disabled_transactions.find(
+            "-D FORWARD -j KeenPbrMeta443\n"
+            "-D FORWARD -j KeenPbrMeta443\n") !=
+        std::string::npos);
+  CHECK(disabled_transactions.find("-X KeenPbrMeta443_A") !=
+        std::string::npos);
+  const auto before_already_balanced =
+      read_iptables_test_file(scripts);
+  CHECK_NOTHROW(T::disable_forward_reject_scaffold());
+  CHECK(read_iptables_test_file(scripts) == before_already_balanced);
+
+  {
+    std::ofstream out(state);
+    out << "A";
+  }
+  fail_disable.set("1");
+  CHECK(T::cleanup_forward_reject_failure_is_loud());
+  CHECK(read_iptables_test_file(state).find('A') != std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE("Meta UDP 443 iptables inspector distinguishes drift and errors") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+
+  const auto set_state = [&state](const char* value) {
+    std::ofstream out(state);
+    out << value;
+  };
+  set_state("missing");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::missing);
+  CHECK(T::inspect_forward_reject_state(/*expected=*/false) ==
+        OwnedForwardUdpRejectState::healthy);
+  set_state("A-reordered");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("direct-A");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("wrong-rule");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("duplicate-rule");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("A");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/false) ==
+        OwnedForwardUdpRejectState::stale);
+  set_state("unknown");
+  CHECK(T::inspect_forward_reject_state(/*expected=*/true) ==
+        OwnedForwardUdpRejectState::unknown);
+}
+
+TEST_CASE(
+    "Meta UDP 443 published ownership survives verification failure for cleanup") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment publish_state("KPBR_META_PUBLISH_STATE");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  publish_state.set("wrong-rule");
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  {
+    std::ofstream out(state);
+    out << "missing";
+  }
+  testing::reset_restore_wait_option_probe_for_test();
+
+  const auto [verification_failed, owned_after_publish] =
+      T::publish_verify_failure_then_cleanup();
+  CHECK(verification_failed);
+  CHECK(owned_after_publish);
+  CHECK(read_iptables_test_file(state).find("missing") !=
+        std::string::npos);
+  CHECK(read_iptables_test_file(scripts).find(
+            "-X KeenPbrMeta443_A") != std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
 
 TEST_CASE("preserve apply keeps existing NAT when raw companion hook fails") {
   IptablesTestTempDir temp;

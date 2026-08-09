@@ -579,6 +579,98 @@ TEST_CASE("single-flight refresh hands one pending request to an immediate rerun
     CHECK_FALSE(gate.complete());
 }
 
+TEST_CASE("periodic Meta UDP 443 repair is drift and FastNAT aware") {
+    using S = OwnedForwardUdpRejectState;
+    CHECK(should_run_periodic_forward_udp_reject_repair(
+        true, false, false, true, true, S::missing));
+    CHECK(should_run_periodic_forward_udp_reject_repair(
+        true, false, false, false, true, S::stale));
+    CHECK(should_run_periodic_forward_udp_reject_repair(
+        true, false, false, true, false, S::healthy));
+    CHECK_FALSE(should_run_periodic_forward_udp_reject_repair(
+        true, false, false, false, true, S::healthy));
+    CHECK_FALSE(should_run_periodic_forward_udp_reject_repair(
+        true, false, false, true, true, S::unknown));
+    CHECK_FALSE(should_run_periodic_forward_udp_reject_repair(
+        false, false, false, true, false, S::missing));
+    CHECK_FALSE(should_run_periodic_forward_udp_reject_repair(
+        true, true, false, true, false, S::missing));
+    CHECK_FALSE(should_run_periodic_forward_udp_reject_repair(
+        true, false, true, true, false, S::missing));
+}
+
+TEST_CASE("Meta UDP 443 deferred cleanup is nonzero and rollback fenced") {
+    CHECK(meta_udp443_initial_cleanup_delay().count() > 0);
+    CHECK(meta_udp443_cleanup_authority_matches(7U, 7U, 11U, 11U));
+    CHECK_FALSE(meta_udp443_cleanup_authority_matches(7U, 8U, 11U, 11U));
+    CHECK_FALSE(meta_udp443_cleanup_authority_matches(7U, 7U, 11U, 12U));
+    CHECK(should_resume_pending_meta_udp443_cleanup(
+        true,
+        true,
+        OwnedForwardUdpRejectState::healthy,
+        -1,
+        true));
+    CHECK_FALSE(should_resume_pending_meta_udp443_cleanup(
+        true,
+        true,
+        OwnedForwardUdpRejectState::healthy,
+        42,
+        true));
+    CHECK_FALSE(should_resume_pending_meta_udp443_cleanup(
+        true,
+        false,
+        OwnedForwardUdpRejectState::healthy,
+        -1,
+        true));
+    CHECK_FALSE(should_resume_pending_meta_udp443_cleanup(
+        true,
+        true,
+        OwnedForwardUdpRejectState::missing,
+        -1,
+        true));
+    CHECK_FALSE(should_resume_pending_meta_udp443_cleanup(
+        true,
+        true,
+        OwnedForwardUdpRejectState::healthy,
+        -1,
+        true,
+        true));
+    CHECK(should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+        true, 17U, 17U, false));
+    CHECK_FALSE(
+        should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+            true, 16U, 17U, false));
+    CHECK_FALSE(
+        should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+            false, 17U, 17U, false));
+    CHECK_FALSE(
+        should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+            true, 17U, 17U, true));
+    CHECK(should_retain_candidate_meta_udp443_cleanup_after_apply_failure(
+        true, true));
+    CHECK_FALSE(
+        should_retain_candidate_meta_udp443_cleanup_after_apply_failure(
+            false, true));
+    CHECK_FALSE(
+        should_retain_candidate_meta_udp443_cleanup_after_apply_failure(
+            true, false));
+
+    CHECK(netfilter_refresh_callback_is_current(9U, 9U));
+    CHECK_FALSE(netfilter_refresh_callback_is_current(8U, 9U));
+    CHECK(meta_udp443_failed_completion_matches_pending(12U, 12U));
+    CHECK_FALSE(meta_udp443_failed_completion_matches_pending(11U, 12U));
+    CHECK_FALSE(meta_udp443_failed_completion_matches_pending(0U, 0U));
+    CHECK(newest_meta_udp443_failed_completion_serial(11U, 12U) == 12U);
+    CHECK(newest_meta_udp443_failed_completion_serial(13U, 12U) == 13U);
+    std::atomic<std::uint64_t> failed_completion_serial{13U};
+    publish_newest_meta_udp443_failed_completion_serial(
+        failed_completion_serial, 12U);
+    CHECK(failed_completion_serial.load() == 13U);
+    publish_newest_meta_udp443_failed_completion_serial(
+        failed_completion_serial, 14U);
+    CHECK(failed_completion_serial.load() == 14U);
+}
+
 TEST_CASE("manual single-flight stays active through its coalesced trailing run") {
     CoalescedManualSingleFlightGate gate;
 

@@ -869,6 +869,101 @@ inline bool should_run_periodic_snat_repair(
             state == OwnedSnatState::stale);
 }
 
+inline bool should_run_periodic_forward_udp_reject_repair(
+    bool routing_runtime_active,
+    bool recovery_pending,
+    bool netfilter_refresh_pending,
+    bool messages_first_active,
+    bool fastnat_disabled,
+    OwnedForwardUdpRejectState state) noexcept {
+    return routing_runtime_active &&
+           !recovery_pending &&
+           !netfilter_refresh_pending &&
+           (state == OwnedForwardUdpRejectState::missing ||
+            state == OwnedForwardUdpRejectState::stale ||
+            (messages_first_active && !fastnat_disabled));
+}
+
+// Exact conntrack retirement is irreversible. Both the committed runtime
+// generation and the policy-cleanup epoch must still match at every async
+// boundary; a rollback or disable changes at least one of them. The initial
+// delay is deliberately non-zero because timerfd interprets {0,0} as disarm.
+inline bool meta_udp443_cleanup_authority_matches(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t current_runtime_generation,
+    std::uint64_t expected_cleanup_epoch,
+    std::uint64_t current_cleanup_epoch) noexcept {
+    return expected_runtime_generation == current_runtime_generation &&
+           expected_cleanup_epoch == current_cleanup_epoch;
+}
+
+inline bool should_resume_pending_meta_udp443_cleanup(
+    bool messages_first_active,
+    bool fastnat_disabled,
+    OwnedForwardUdpRejectState filter_state,
+    int scheduled_task_id,
+    bool pending_plan_available,
+    bool worker_inflight = false) noexcept {
+    return messages_first_active && fastnat_disabled &&
+           filter_state == OwnedForwardUdpRejectState::healthy &&
+           scheduled_task_id < 0 && pending_plan_available &&
+           !worker_inflight;
+}
+
+inline bool should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+    bool pending_plan_available,
+    std::uint64_t pending_runtime_generation,
+    std::uint64_t current_runtime_generation,
+    bool replacement_meta_policy_may_have_changed) noexcept {
+    return !replacement_meta_policy_may_have_changed &&
+           pending_plan_available &&
+           pending_runtime_generation == current_runtime_generation;
+}
+
+inline bool should_retain_candidate_meta_udp443_cleanup_after_apply_failure(
+    bool replacement_meta_policy_committed,
+    bool candidate_plan_available) noexcept {
+    return replacement_meta_policy_committed && candidate_plan_available;
+}
+
+inline bool netfilter_refresh_callback_is_current(
+    std::uint64_t callback_serial,
+    std::uint64_t current_serial) noexcept {
+    return callback_serial == current_serial;
+}
+
+inline bool meta_udp443_failed_completion_matches_pending(
+    std::uint64_t failed_schedule_serial,
+    std::uint64_t pending_schedule_serial) noexcept {
+    return failed_schedule_serial != 0U &&
+           failed_schedule_serial == pending_schedule_serial;
+}
+
+inline std::uint64_t newest_meta_udp443_failed_completion_serial(
+    std::uint64_t published_serial,
+    std::uint64_t candidate_serial) noexcept {
+    return std::max(published_serial, candidate_serial);
+}
+
+inline void publish_newest_meta_udp443_failed_completion_serial(
+    std::atomic<std::uint64_t>& published,
+    std::uint64_t candidate_serial) noexcept {
+    auto observed = published.load(std::memory_order_acquire);
+    while (observed < candidate_serial &&
+           !published.compare_exchange_weak(
+               observed,
+               newest_meta_udp443_failed_completion_serial(
+                   observed, candidate_serial),
+               std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
+    }
+}
+
+inline constexpr std::chrono::milliseconds
+meta_udp443_initial_cleanup_delay() noexcept {
+    return std::chrono::milliseconds{1};
+}
+
 template <typename InvalidateCatalog,
           typename CancelRetry,
           typename ReconcileRuntime,

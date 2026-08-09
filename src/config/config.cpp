@@ -113,6 +113,30 @@ void validate_optional_boolean_field(const json& root,
     }
 }
 
+void validate_meta_udp443_policy_field(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto daemon_it = root.find("daemon");
+    if (daemon_it == root.end() || !daemon_it->is_object()) return;
+
+    const auto policy_it = daemon_it->find("meta_udp443_policy");
+    if (policy_it == daemon_it->end() || policy_it->is_null()) return;
+
+    constexpr const char* path = "daemon.meta_udp443_policy";
+    if (!policy_it->is_string()) {
+        add_issue(issues, path, std::string(path) + " must be a string");
+        return;
+    }
+
+    const auto& policy = policy_it->get_ref<const std::string&>();
+    if (policy != "balanced" && policy != "messages_first") {
+        add_issue(
+            issues,
+            path,
+            std::string(path) + " must be one of: balanced, messages_first");
+    }
+}
+
 void validate_optional_hex_string_field(const json& root,
                                         const char* parent_key,
                                         const char* child_key,
@@ -983,6 +1007,7 @@ Config parse_config(const std::string& json_str) {
         parsed_json, "daemon", "max_file_size_bytes", "daemon.max_file_size_bytes", issues);
     validate_optional_string_field(
         parsed_json, "daemon", "firewall_backend", "daemon.firewall_backend", issues);
+    validate_meta_udp443_policy_field(parsed_json, issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "skip_marked_packets", "daemon.skip_marked_packets", issues);
     validate_optional_boolean_field(

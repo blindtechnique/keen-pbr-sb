@@ -420,6 +420,7 @@ void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
     udp_peer_sets_.clear();
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
@@ -429,7 +430,7 @@ void NftablesFirewall::prepare_apply(FirewallApplyMode /*mode*/) {
 
 NftablesFirewall::~NftablesFirewall() {
     try {
-        cleanup_impl();
+        cleanup_impl(/*verification_required=*/false);
     } catch (const std::exception& e) {
         Logger::instance().error("NftablesFirewall cleanup failed during destruction: {}",
                                  e.what());
@@ -701,6 +702,51 @@ void NftablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
     append_rules_for_family(AF_INET6, PendingRule::Drop, 0, criteria);
 }
 
+void NftablesFirewall::create_forward_udp_reject_rule(
+    uint32_t expected_fwmark,
+    const std::string& dst_set_name,
+    std::uint16_t destination_port) {
+    const uint32_t mask = fwmark_mask();
+    if (destination_port == 0U) {
+        throw FirewallError(
+            "forward UDP reject rule requires a non-zero destination port");
+    }
+    if (expected_fwmark == 0U || mask == 0U ||
+        (expected_fwmark & ~mask) != 0U) {
+        throw FirewallError(
+            "forward UDP reject rule requires a non-zero owned fwmark");
+    }
+
+    const auto set = created_sets_.find(dst_set_name);
+    if (set == created_sets_.end() ||
+        (set->second != AF_INET && set->second != AF_INET6)) {
+        throw FirewallError(
+            "forward UDP reject rule references an unknown destination set: " +
+            dst_set_name);
+    }
+
+    PendingForwardUdpReject pending{
+        set->second,
+        expected_fwmark,
+        mask,
+        dst_set_name,
+        destination_port,
+    };
+    const auto duplicate = std::find_if(
+        pending_forward_udp_rejects_.begin(),
+        pending_forward_udp_rejects_.end(),
+        [&pending](const PendingForwardUdpReject& existing) {
+            return existing.family == pending.family &&
+                   existing.expected_fwmark == pending.expected_fwmark &&
+                   existing.fwmark_mask == pending.fwmark_mask &&
+                   existing.dst_set_name == pending.dst_set_name &&
+                   existing.destination_port == pending.destination_port;
+        });
+    if (duplicate == pending_forward_udp_rejects_.end()) {
+        pending_forward_udp_rejects_.push_back(std::move(pending));
+    }
+}
+
 void NftablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
     if (criteria.dst_set_name.has_value() &&
         criteria.src_udp_peer_set_name.has_value()) {
@@ -834,6 +880,73 @@ nlohmann::json NftablesFirewall::build_delete_output_chain_json() {
         {"family", "inet"},
         {"table", TABLE_NAME},
         {"name", OUTPUT_CHAIN_NAME}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_forward_udp_reject_chain_json() {
+    return {{"add", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", FORWARD_UDP_REJECT_CHAIN_NAME},
+        {"type", "filter"},
+        {"hook", "forward"},
+        {"prio", -150},
+        {"policy", "accept"}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_delete_forward_udp_reject_chain_json() {
+    return {{"delete", {{"chain", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"name", FORWARD_UDP_REJECT_CHAIN_NAME}
+    }}}}};
+}
+
+nlohmann::json NftablesFirewall::build_forward_udp_reject_rule_json(
+    const PendingForwardUdpReject& rule) {
+    const char* ip_proto = rule.family == AF_INET6 ? "ip6" : "ip";
+    nlohmann::json expr = nlohmann::json::array();
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"payload", {
+            {"protocol", ip_proto},
+            {"field", "daddr"}
+        }}}},
+        {"right", "@" + rule.dst_set_name}
+    }}});
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"&", nlohmann::json::array({
+            {{"meta", {{"key", "mark"}}}},
+            rule.fwmark_mask
+        })}}},
+        {"right", rule.expected_fwmark}
+    }}});
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"meta", {{"key", "l4proto"}}}}},
+        {"right", "udp"}
+    }}});
+    expr.push_back({{"match", {
+        {"op", "=="},
+        {"left", {{"payload", {
+            {"protocol", "udp"},
+            {"field", "dport"}
+        }}}},
+        {"right", rule.destination_port}
+    }}});
+    expr.push_back({{"counter", nullptr}});
+    expr.push_back({{"reject", {
+        {"type", "icmpx"},
+        {"expr", "port-unreachable"}
+    }}});
+
+    return {{"add", {{"rule", {
+        {"family", "inet"},
+        {"table", TABLE_NAME},
+        {"chain", FORWARD_UDP_REJECT_CHAIN_NAME},
+        {"expr", expr}
     }}}}};
 }
 
@@ -1661,6 +1774,74 @@ std::optional<nlohmann::json> NftablesFirewall::normalize_rule_expr(
     return expr;
 }
 
+std::optional<nlohmann::json>
+NftablesFirewall::normalize_forward_udp_reject_rule_expr(
+    nlohmann::json expr) {
+    auto normalized = normalize_rule_expr(std::move(expr));
+    if (!normalized.has_value()) {
+        return std::nullopt;
+    }
+
+    size_t udp_l4proto_matches = 0U;
+    bool has_udp_destination_port = false;
+    for (const auto& expression : *normalized) {
+        const auto match_it = expression.find("match");
+        if (match_it == expression.end() || !match_it->is_object() ||
+            match_it->value("op", "") != "==") {
+            continue;
+        }
+        const auto left_it = match_it->find("left");
+        const auto right_it = match_it->find("right");
+        if (left_it == match_it->end() || right_it == match_it->end()) {
+            continue;
+        }
+        if (*right_it == "udp" && left_it->is_object() &&
+            left_it->contains("meta") && (*left_it)["meta"].is_object() &&
+            (*left_it)["meta"].value("key", "") == "l4proto") {
+            ++udp_l4proto_matches;
+        }
+        if (left_it->is_object() && left_it->contains("payload") &&
+            (*left_it)["payload"].is_object() &&
+            (*left_it)["payload"].value("protocol", "") == "udp" &&
+            (*left_it)["payload"].value("field", "") == "dport") {
+            has_udp_destination_port = true;
+        }
+    }
+    if (udp_l4proto_matches > 1U) {
+        return std::nullopt;
+    }
+
+    // nft may omit the redundant `meta l4proto udp` expression when a UDP
+    // header field is matched. Canonicalize both builder and live forms while
+    // retaining the exact UDP destination-port selector.
+    if (udp_l4proto_matches == 1U && has_udp_destination_port) {
+        normalized->erase(
+            std::remove_if(
+                normalized->begin(), normalized->end(),
+                [](const nlohmann::json& expression) {
+                    const auto match_it = expression.find("match");
+                    if (match_it == expression.end() ||
+                        !match_it->is_object() ||
+                        match_it->value("op", "") != "==") {
+                        return false;
+                    }
+                    const auto left_it = match_it->find("left");
+                    const auto right_it = match_it->find("right");
+                    return right_it != match_it->end() &&
+                           right_it->is_string() &&
+                           right_it->get<std::string>() == "udp" &&
+                           left_it != match_it->end() &&
+                           left_it->is_object() &&
+                           left_it->contains("meta") &&
+                           (*left_it)["meta"].is_object() &&
+                           (*left_it)["meta"].value("key", "") ==
+                               "l4proto";
+                }),
+            normalized->end());
+    }
+    return normalized;
+}
+
 bool NftablesFirewall::udp_peer_classifier_document_matches(
     const std::string& document,
     const std::string& set_name,
@@ -2118,6 +2299,170 @@ OwnedSnatState NftablesFirewall::inspect_owned_snat_state() const {
         last_applied_snat_fwmark_mask_);
 }
 
+OwnedForwardUdpRejectState
+NftablesFirewall::parse_forward_udp_reject_state(
+    const std::string& document,
+    const std::vector<PendingForwardUdpReject>& expected_rules) {
+    nlohmann::json doc;
+    try {
+        doc = nlohmann::json::parse(document);
+    } catch (...) {
+        return OwnedForwardUdpRejectState::unknown;
+    }
+    const auto nftables = doc.find("nftables");
+    if (nftables == doc.end() || !nftables->is_array()) {
+        return OwnedForwardUdpRejectState::unknown;
+    }
+
+    size_t table_count = 0U;
+    size_t chain_count = 0U;
+    bool chain_valid = false;
+    bool rule_invalid = false;
+    std::vector<nlohmann::json> observed_rule_exprs;
+    try {
+        for (const auto& item : *nftables) {
+            if (!item.is_object()) {
+                continue;
+            }
+            if (const auto table = item.find("table");
+                table != item.end() && table->is_object()) {
+                if (table->value("family", "") == "inet" &&
+                    table->value("name", "") == TABLE_NAME) {
+                    ++table_count;
+                }
+                continue;
+            }
+            if (const auto chain = item.find("chain");
+                chain != item.end() && chain->is_object()) {
+                if (chain->value("family", "") == "inet" &&
+                    chain->value("table", "") == TABLE_NAME &&
+                    chain->value("name", "") ==
+                        FORWARD_UDP_REJECT_CHAIN_NAME) {
+                    ++chain_count;
+                    chain_valid =
+                        chain_count == 1U &&
+                        chain->value("type", "") == "filter" &&
+                        chain->value("hook", "") == "forward" &&
+                        chain->value(
+                            "prio", std::numeric_limits<int>::min()) ==
+                            -150 &&
+                        chain->value("policy", "") == "accept";
+                }
+                continue;
+            }
+            if (const auto rule = item.find("rule");
+                rule != item.end() && rule->is_object()) {
+                if (rule->value("family", "") != "inet" ||
+                    rule->value("table", "") != TABLE_NAME ||
+                    rule->value("chain", "") !=
+                        FORWARD_UDP_REJECT_CHAIN_NAME) {
+                    continue;
+                }
+                const auto expr = rule->find("expr");
+                if (expr == rule->end()) {
+                    rule_invalid = true;
+                    continue;
+                }
+                const auto normalized =
+                    normalize_forward_udp_reject_rule_expr(*expr);
+                if (!normalized.has_value()) {
+                    rule_invalid = true;
+                    continue;
+                }
+                observed_rule_exprs.push_back(*normalized);
+            }
+        }
+
+        if (table_count != 1U) {
+            return OwnedForwardUdpRejectState::unknown;
+        }
+        if (expected_rules.empty()) {
+            return chain_count == 0U && observed_rule_exprs.empty() &&
+                   !rule_invalid
+                ? OwnedForwardUdpRejectState::healthy
+                : OwnedForwardUdpRejectState::stale;
+        }
+
+        std::vector<nlohmann::json> expected_rule_exprs;
+        expected_rule_exprs.reserve(expected_rules.size());
+        for (const auto& expected : expected_rules) {
+            const auto command = build_forward_udp_reject_rule_json(expected);
+            const auto normalized = normalize_forward_udp_reject_rule_expr(
+                command["add"]["rule"]["expr"]);
+            if (!normalized.has_value()) {
+                return OwnedForwardUdpRejectState::unknown;
+            }
+            expected_rule_exprs.push_back(*normalized);
+        }
+
+        if (chain_count == 1U && chain_valid && !rule_invalid &&
+            observed_rule_exprs == expected_rule_exprs) {
+            return OwnedForwardUdpRejectState::healthy;
+        }
+        if (chain_count == 0U && observed_rule_exprs.empty() &&
+            !rule_invalid) {
+            return OwnedForwardUdpRejectState::missing;
+        }
+        return OwnedForwardUdpRejectState::stale;
+    } catch (...) {
+        return OwnedForwardUdpRejectState::unknown;
+    }
+}
+
+OwnedForwardUdpRejectState
+NftablesFirewall::classify_forward_udp_reject_inspection(
+    const std::string& output,
+    int exit_code,
+    bool timed_out,
+    bool truncated,
+    const std::vector<PendingForwardUdpReject>& expected_rules) {
+    if (timed_out || truncated) {
+        return OwnedForwardUdpRejectState::unknown;
+    }
+    if (exit_code != 0) {
+        const bool absent =
+            output.find("No such file or directory") !=
+                std::string::npos ||
+            output.find("does not exist") != std::string::npos ||
+            output.find("not found") != std::string::npos;
+        if (!absent) {
+            return OwnedForwardUdpRejectState::unknown;
+        }
+        return expected_rules.empty()
+            ? OwnedForwardUdpRejectState::healthy
+            : OwnedForwardUdpRejectState::missing;
+    }
+    return parse_forward_udp_reject_state(output, expected_rules);
+}
+
+OwnedForwardUdpRejectState
+NftablesFirewall::inspect_forward_udp_reject_state(
+    const std::vector<PendingForwardUdpReject>& expected_rules) const {
+    const auto result = safe_exec_capture(
+        {"nft", "-j", "-t", "list", "table", "inet",
+         std::string(TABLE_NAME)},
+        /*suppress_stderr=*/false,
+        /*max_bytes=*/256U * 1024U,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::DiagnosticOnly,
+        SafeExecTimeouts{
+            owned_snat_inspect_timeout(),
+            owned_snat_inspect_kill_grace()});
+    return classify_forward_udp_reject_inspection(
+        result.stdout_output,
+        result.exit_code,
+        result.timed_out,
+        result.truncated,
+        expected_rules);
+}
+
+OwnedForwardUdpRejectState
+NftablesFirewall::inspect_forward_udp_reject_state() const {
+    return inspect_forward_udp_reject_state(
+        last_applied_forward_udp_rejects_);
+}
+
 NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const {
     LiveTableState state;
     const auto result = safe_exec_capture(
@@ -2167,6 +2512,12 @@ NftablesFirewall::LiveTableState NftablesFirewall::read_live_table_state() const
                 && chain.value("table", "") == TABLE_NAME
                 && chain.value("name", "") == OUTPUT_CHAIN_NAME) {
                 state.output_chain_exists = true;
+            }
+            if (chain.value("family", "") == "inet"
+                && chain.value("table", "") == TABLE_NAME
+                && chain.value("name", "") ==
+                    FORWARD_UDP_REJECT_CHAIN_NAME) {
+                state.forward_udp_reject_chain_exists = true;
             }
             if (chain.value("family", "") == "inet"
                 && chain.value("table", "") == TABLE_NAME
@@ -2241,6 +2592,9 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     if (!emit_full_table && live_state.output_chain_exists) {
         arr.push_back(build_delete_output_chain_json());
     }
+    if (!emit_full_table && live_state.forward_udp_reject_chain_exists) {
+        arr.push_back(build_delete_forward_udp_reject_chain_json());
+    }
     if (!emit_full_table && live_state.dns_nat_chain_exists) {
         arr.push_back(build_delete_dns_nat_chain_json());
     }
@@ -2296,6 +2650,13 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
     // Chain with output hook (router-originated traffic, e.g. DNS detour)
     arr.push_back(build_output_chain_json());
 
+    // Optional filter/FORWARD hook for an explicitly selected latency policy.
+    // Keeping it absent when no rule is queued makes the balanced mode a
+    // complete removal of the owned policy, not a dormant broad hook.
+    if (!pending_forward_udp_rejects_.empty()) {
+        arr.push_back(build_forward_udp_reject_chain_json());
+    }
+
     // An exact bridge-port equivalent of xt_physdev is not available in our
     // inet/prerouting nftables pipeline. `ibrname` is a bridge-family-only
     // expression and `sdifname` is not a safe replacement at this hook.
@@ -2337,6 +2698,9 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
              effective_prefilter, pending_rules_, mark_merge_mode)) {
         arr.push_back(cmd);
     }
+    for (const auto& rule : pending_forward_udp_rejects_) {
+        arr.push_back(build_forward_udp_reject_rule_json(rule));
+    }
 
     // Elements
     for (const auto& [set_name, elems] : pending_elements_) {
@@ -2374,6 +2738,8 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     const MarkMergeMode active_mark_merge_mode = mark_merge_mode();
     const auto candidate_udp_peer_classifiers =
         build_pending_udp_peer_classifiers(active_mark_merge_mode);
+    const auto candidate_forward_udp_rejects =
+        pending_forward_udp_rejects_;
     if (!global_prefilter_.bypass_bridge_source_selectors_v4.empty() ||
         !global_prefilter_.bypass_bridge_source_selectors_v6.empty()) {
         Logger::instance().verbose(
@@ -2450,16 +2816,30 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
             "nftables SNAT state could not be inspected after apply");
     }
 
+    const auto forward_udp_reject_state =
+        inspect_forward_udp_reject_state(candidate_forward_udp_rejects);
+    if (forward_udp_reject_state !=
+        OwnedForwardUdpRejectState::healthy) {
+        throw TransientFirewallError(
+            forward_udp_reject_state ==
+                    OwnedForwardUdpRejectState::unknown
+                ? "nftables forward UDP reject state could not be inspected after apply"
+                : "nftables forward UDP reject state does not match the applied contract");
+    }
+
     last_applied_snat_expected_ = snat_expected;
     last_applied_snat_interfaces_ = expected_snat_interfaces;
     last_applied_source_egress_snat_selectors_ =
         expected_source_egress_snat_selectors;
     last_applied_snat_fwmark_mask_ = expected_snat_fwmark_mask;
+    last_applied_forward_udp_rejects_ =
+        candidate_forward_udp_rejects;
     published_udp_peer_classifiers_ = candidate_udp_peer_classifiers;
     // Clear pending buffers
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
     snat_interfaces_.clear();
@@ -2467,33 +2847,90 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     table_created_ = true;
 }
 
-void NftablesFirewall::cleanup_live_impl() {
-    if (table_created_ || table_exists()) {
-        Logger::instance().verbose("nft delete table inet {}", TABLE_NAME);
-        safe_exec({"nft", "delete", "table", "inet", std::string(TABLE_NAME)}, /*suppress_output=*/true);
+void NftablesFirewall::cleanup_live_impl(bool verification_required) {
+    const auto inspect_table = [] {
+        return safe_exec_capture(
+            {"nft", "-j", "-t", "list", "table", "inet",
+             std::string(TABLE_NAME)},
+            /*suppress_stderr=*/false,
+            /*max_bytes=*/256U * 1024U,
+            /*capture_stderr=*/true,
+            /*drain_after_limit=*/true,
+            SafeExecFailureLog::DiagnosticOnly,
+            SafeExecTimeouts{
+                owned_snat_inspect_timeout(),
+                owned_snat_inspect_kill_grace()});
+    };
+    const auto proves_absence = [](const ExecCaptureResult& result) {
+        if (result.exit_code == 0 || result.timed_out || result.truncated) {
+            return false;
+        }
+        return result.stdout_output.find("No such file or directory") !=
+                   std::string::npos ||
+               result.stdout_output.find("does not exist") !=
+                   std::string::npos ||
+               result.stdout_output.find("not found") !=
+                   std::string::npos;
+    };
+
+    const auto before = inspect_table();
+    if (proves_absence(before)) {
         table_created_ = false;
+        return;
     }
+    if (before.exit_code != 0 || before.timed_out || before.truncated) {
+        if (!verification_required && !table_created_) {
+            return;
+        }
+        if (!verification_required) {
+            Logger::instance().warn(
+                "nft cleanup could not inspect the owned table before best-effort deletion");
+        } else {
+            throw FirewallError(
+                "nft cleanup could not inspect the owned table before deletion");
+        }
+    }
+    Logger::instance().verbose("nft delete table inet {}", TABLE_NAME);
+    (void)safe_exec(
+        {"nft", "delete", "table", "inet", std::string(TABLE_NAME)},
+        /*suppress_output=*/true);
+    const auto after = inspect_table();
+    if (!proves_absence(after)) {
+        if (!verification_required) {
+            Logger::instance().warn(
+                "nft best-effort cleanup could not verify owned table deletion");
+            table_created_ = false;
+            return;
+        }
+        throw FirewallError(
+            after.exit_code == 0
+                ? "nft cleanup left the owned table present"
+                : "nft cleanup could not verify owned table deletion");
+    }
+    table_created_ = false;
 }
 
-void NftablesFirewall::cleanup_impl() {
-    cleanup_live_impl();
+void NftablesFirewall::cleanup_impl(bool verification_required) {
+    cleanup_live_impl(verification_required);
 
     last_applied_snat_expected_ = false;
     last_applied_snat_interfaces_.clear();
     last_applied_source_egress_snat_selectors_.clear();
     last_applied_snat_fwmark_mask_ = 0xFFFFFFFFu;
+    last_applied_forward_udp_rejects_.clear();
     created_sets_.clear();
     udp_peer_sets_.clear();
     published_udp_peer_classifiers_.clear();
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
     source_egress_snat_selectors_.clear();
 }
 
 void NftablesFirewall::cleanup() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
-    cleanup_impl();
+    cleanup_impl(/*verification_required=*/true);
 }
 
 FirewallBackend NftablesFirewall::backend() const {

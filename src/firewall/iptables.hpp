@@ -60,6 +60,10 @@ public:
                                  const FirewallRuleCriteria& criteria = {}) override;
     // Buffer an iptables/ip6tables -j DROP rule for the given criteria.
     void create_drop_rule(const FirewallRuleCriteria& criteria = {}) override;
+    void create_forward_udp_reject_rule(
+        uint32_t expected_fwmark,
+        const std::string& dst_set_name,
+        std::uint16_t destination_port) override;
     // Buffer NAT REDIRECT rules that force LAN plain-DNS to the local resolver.
     void create_dns_redirect_rules() override;
     // Buffer NAT MASQUERADE rules for traffic leaving via tunnel interfaces.
@@ -68,6 +72,8 @@ public:
     void create_source_egress_snat_rules(
         const std::vector<FirewallSourceEgressSnatSelector>& selectors) override;
     OwnedSnatState inspect_owned_snat_state() const override;
+    OwnedForwardUdpRejectState
+    inspect_forward_udp_reject_state() const override;
     // Buffer an iptables/ip6tables -j RETURN rule for the given criteria.
     void create_pass_rule(const FirewallRuleCriteria& criteria = {}) override;
 
@@ -97,6 +103,8 @@ private:
     static constexpr const char* OUTPUT_CHAIN_NAME = "KeenPbrOutput";
     static constexpr const char* DNS_NAT_CHAIN_NAME = "KeenPbrDnsRdr";
     static constexpr const char* SNAT_CHAIN_NAME = "KeenPbrSnat";
+    static constexpr const char* META_UDP_443_CHAIN_NAME =
+        "KeenPbrMeta443";
     static constexpr const char* DNS_NAT_VALIDATION_CHAIN_NAME =
         "KeenPbrDnsValidate";
     static constexpr const char* SNAT_VALIDATION_CHAIN_NAME =
@@ -131,6 +139,14 @@ private:
         uint32_t fwmark_mask{0xFFFFFFFFu}; // only for Mark
         FirewallRuleCriteria criteria; // optional packet match criteria
         bool output{false}; // true → KeenPbrOutput (mangle OUTPUT), false → KeenPbrTable (PREROUTING)
+    };
+
+    struct PendingForwardUdpReject {
+        std::string set_name;
+        bool ipv6{false};
+        uint32_t fwmark{0U};
+        uint32_t fwmark_mask{0U};
+        std::uint16_t destination_port{0U};
     };
 
     struct PublishedUdpPeerClassifier {
@@ -181,6 +197,13 @@ private:
         bool replace_active_chain,
         const FirewallGlobalPrefilter& prefilter = {},
         const std::vector<PendingRule>& rules = {});
+    static std::string build_forward_udp_reject_script(
+        bool ipv6,
+        const std::string& generation_chain,
+        const std::vector<PendingForwardUdpReject>& rules);
+    void stage_forward_reject_generation(
+        bool ipv6,
+        FirewallSetGeneration generation) const;
     static std::string build_conntrack_prefilter_lines(
         const FirewallGlobalPrefilter& prefilter,
         const std::string& chain);
@@ -240,6 +263,11 @@ private:
         const std::string& dispatcher,
         const std::string& generation_a,
         const std::string& generation_b);
+    static bool forward_reject_generation_references_are_owned(
+        const std::string& rules,
+        LiveGenerationState state,
+        const std::string& generation_a,
+        const std::string& generation_b);
     static FirewallSetGeneration target_generation_for_states(
         LiveGenerationState primary,
         LiveGenerationState secondary);
@@ -271,6 +299,25 @@ private:
         const char* table,
         const char* builtin_chain,
         const char* target_chain);
+    static const char* forward_reject_generation_chain(
+        FirewallSetGeneration generation);
+    LiveGenerationState inspect_forward_reject_generation(
+        bool ipv6) const;
+    FirewallSetGeneration select_forward_reject_target_generation(
+        bool ipv6) const;
+    void ensure_forward_reject_target_generation_inactive(
+        bool ipv6,
+        FirewallSetGeneration target) const;
+    void publish_forward_reject_dispatcher(
+        bool ipv6,
+        FirewallSetGeneration generation) const;
+    void publish_and_verify_forward_reject_generation(
+        bool ipv6,
+        FirewallSetGeneration generation);
+    void verify_forward_reject_generation(
+        bool ipv6,
+        FirewallSetGeneration generation) const;
+    void disable_forward_reject_scaffold(bool ipv6) const;
     static OwnedSnatState inspect_owned_snat_state(
         const char* command,
         bool expected,
@@ -319,6 +366,7 @@ private:
     std::map<std::string, std::ostringstream> pending_elements_;
     // Rules queued for insertion into KeenPbrTable, flushed by apply().
     std::vector<PendingRule> pending_rules_;
+    std::vector<PendingForwardUdpReject> pending_forward_udp_rejects_;
 
     // Track created ipsets: set_name -> family (AF_INET/AF_INET6)
     std::map<std::string, int> created_sets_;
@@ -333,12 +381,27 @@ private:
     // Track whether chain + jump rule exist for each protocol
     bool chain_v4_created_ = false;
     bool chain_v6_created_ = false;
+    bool forward_reject_v4_created_ = false;
+    bool forward_reject_v6_created_ = false;
     static const char* generation_prerouting_chain(FirewallSetGeneration generation);
     static const char* generation_output_chain(FirewallSetGeneration generation);
     static const char* raw_generation_prerouting_chain(
         FirewallSetGeneration generation);
     FirewallSetGeneration target_v4_generation_{FirewallSetGeneration::A};
     FirewallSetGeneration target_v6_generation_{FirewallSetGeneration::A};
+    FirewallSetGeneration target_forward_reject_v4_generation_{
+        FirewallSetGeneration::A};
+    FirewallSetGeneration target_forward_reject_v6_generation_{
+        FirewallSetGeneration::A};
+    bool last_applied_forward_reject_v4_expected_{false};
+    bool last_applied_forward_reject_v6_expected_{false};
+    bool last_applied_forward_reject_v6_managed_{false};
+    FirewallSetGeneration last_applied_forward_reject_v4_generation_{
+        FirewallSetGeneration::A};
+    FirewallSetGeneration last_applied_forward_reject_v6_generation_{
+        FirewallSetGeneration::A};
+    std::vector<PendingForwardUdpReject>
+        last_applied_forward_udp_rejects_;
     bool apply_prepared_{false};
     bool use_raw_prerouting_{false};
 

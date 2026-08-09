@@ -183,6 +183,32 @@ struct ConntrackFlowObservationOptions {
     // Call-affinity media views may retain unrelated mark bits owned by QoS
     // or another service. The ordinary destination-flow view remains strict.
     bool allow_foreign_mark_bits_for_media{false};
+    // Specialized activation preflights can suppress the ordinary broad view
+    // so unrelated Meta TCP/STUN/media flows do not consume the exact-flow
+    // budget needed for one narrow signalling transport.
+    bool include_ordinary_destination_flows{true};
+    std::optional<std::uint16_t> media_seed_udp_destination_port;
+};
+
+struct ConntrackExactFlowCleanupSummary {
+    std::size_t attempted{0};
+    std::size_t failed{0};
+    bool command_unavailable{false};
+    bool budget_exhausted{false};
+    bool batch_limit_reached{false};
+    bool generation_changed{false};
+    std::vector<ConntrackExactForwardedFlow> remaining_flows;
+
+    bool complete() const noexcept {
+        return failed == 0U && !command_unavailable &&
+               !budget_exhausted && !generation_changed &&
+               remaining_flows.empty();
+    }
+};
+
+struct ConntrackExactFlowCleanupOptions {
+    std::chrono::milliseconds budget{std::chrono::seconds{4}};
+    std::size_t max_flows{4U};
 };
 
 struct ConntrackFlowObservation {
@@ -199,6 +225,10 @@ struct ConntrackFlowObservation {
     std::size_t invalid_destination_selectors{0};
     std::size_t invalid_media_seed_destination_selectors{0};
     std::size_t invalid_media_guard_sources{0};
+    // A specialized UDP-port preflight saw a record that advertised the
+    // relevant transport/port but could not be parsed into an exact tuple.
+    // Such kernel-format drift makes activation authority incomplete.
+    std::size_t invalid_media_seed_candidate_records{0};
     std::size_t skipped_destination_selectors{0};
     bool invalid_owned_mask{false};
     bool destination_input_truncated{false};
@@ -332,6 +362,23 @@ public:
         const ConntrackExactForwardedFlow& flow,
         uint32_t owned_mask,
         std::optional<std::uint32_t> expected_owned_mark = std::nullopt) const;
+
+    // Read-only capability preflight used before publishing a policy whose
+    // activation aid requires exact tuple deletion.
+    ConntrackCleanupResult probe_exact_cleanup_capability(
+        bool ipv6_enabled = false) const;
+
+    // Delete only the supplied exact tuples under one total deadline and
+    // attempt cap. An owned component must match one of the explicitly proven
+    // current/previous policy marks; full mark zero remains eligible, while a
+    // foreign-only mark never is. Unattempted/failed tuples are retained in
+    // retry order, and the generation fence is checked before every command.
+    ConntrackExactFlowCleanupSummary delete_exact_forwarded_flows(
+        const std::vector<ConntrackExactForwardedFlow>& flows,
+        uint32_t owned_mask,
+        const std::set<std::uint32_t>& expected_owned_marks,
+        ConntrackExactFlowCleanupOptions options = {},
+        std::function<bool()> generation_is_current = {}) const;
 
 private:
     ConntrackPolicy active_;

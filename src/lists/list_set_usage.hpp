@@ -17,6 +17,8 @@ struct ListSetUsage {
 
     bool has_static_entries{false};
     bool has_domain_entries{false};
+    bool has_static_ipv4_entries{false};
+    bool has_static_ipv6_entries{false};
     uint32_t dynamic_timeout{0};
     // A bounded sample of static destination selectors supports immediate,
     // targeted retirement when traffic changes from direct to managed. The

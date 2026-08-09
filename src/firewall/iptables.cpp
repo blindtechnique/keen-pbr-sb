@@ -123,11 +123,19 @@ const char* IptablesFirewall::raw_generation_prerouting_chain(
         : "KeenPbrRaw_B";
 }
 
+const char* IptablesFirewall::forward_reject_generation_chain(
+    FirewallSetGeneration generation) {
+    return generation == FirewallSetGeneration::A
+        ? "KeenPbrMeta443_A"
+        : "KeenPbrMeta443_B";
+}
+
 void IptablesFirewall::prepare_apply(FirewallApplyMode mode) {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
     udp_peer_sets_.clear();
     dns_redirect_requested_ = false;
     router_origin_snat_requested_ = false;
@@ -346,6 +354,30 @@ void IptablesFirewall::create_drop_rule(const FirewallRuleCriteria& criteria) {
     }
     append_rules_for_family(false, PendingRule::Drop, 0, criteria);
     append_rules_for_family(true, PendingRule::Drop, 0, criteria);
+}
+
+void IptablesFirewall::create_forward_udp_reject_rule(
+    uint32_t expected_fwmark,
+    const std::string& dst_set_name,
+    std::uint16_t destination_port) {
+    const auto set = created_sets_.find(dst_set_name);
+    const uint32_t owned_mask = fwmark_mask();
+    if (set == created_sets_.end()) {
+        throw FirewallError(
+            "forward UDP reject references an undeclared destination set: " +
+            dst_set_name);
+    }
+    if (destination_port == 0U || owned_mask == 0U ||
+        expected_fwmark == 0U || (expected_fwmark & ~owned_mask) != 0U) {
+        throw FirewallError("invalid forward UDP reject mark/port contract");
+    }
+    PendingForwardUdpReject pending;
+    pending.set_name = dst_set_name;
+    pending.ipv6 = set->second == AF_INET6;
+    pending.fwmark = expected_fwmark;
+    pending.fwmark_mask = owned_mask;
+    pending.destination_port = destination_port;
+    pending_forward_udp_rejects_.push_back(std::move(pending));
 }
 
 void IptablesFirewall::create_pass_rule(const FirewallRuleCriteria& criteria) {
@@ -1612,6 +1644,233 @@ void IptablesFirewall::publish_dispatcher(
     pipe_to_cmd({restore, "--noflush", "--counters"}, script);
 }
 
+namespace {
+
+std::vector<std::size_t> exact_jump_positions(
+    const std::string& rules,
+    const std::string& source_chain,
+    const std::string& target_chain) {
+    const std::string rule_prefix = "-A " + source_chain + " ";
+    const std::string expected =
+        rule_prefix + "-j " + target_chain;
+    std::vector<std::size_t> positions;
+    std::size_t position = 0U;
+    std::istringstream input(rules);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.rfind(rule_prefix, 0U) != 0U) {
+            continue;
+        }
+        ++position;
+        if (line == expected) {
+            positions.push_back(position);
+        }
+    }
+    return positions;
+}
+
+bool chain_declared(const std::string& rules, const std::string& chain) {
+    const std::string expected = "-N " + chain;
+    std::istringstream input(rules);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line == expected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::size_t jump_reference_count(
+    const std::string& rules,
+    const std::string& target_chain) {
+    std::size_t count = 0U;
+    std::istringstream input(rules);
+    std::string line;
+    while (std::getline(input, line)) {
+        for (const auto* option : {" -j ", " -g ",
+                                   " --jump ", " --goto "}) {
+            const std::string needle =
+                std::string{option} + target_chain;
+            const auto position = line.find(needle);
+            if (position == std::string::npos) {
+                continue;
+            }
+            const auto end = position + needle.size();
+            if (end == line.size() || line[end] == ' ') {
+                ++count;
+                break;
+            }
+        }
+    }
+    return count;
+}
+
+} // namespace
+
+bool IptablesFirewall::forward_reject_generation_references_are_owned(
+    const std::string& rules,
+    LiveGenerationState state,
+    const std::string& generation_a,
+    const std::string& generation_b) {
+    const auto a_references = jump_reference_count(rules, generation_a);
+    const auto b_references = jump_reference_count(rules, generation_b);
+    switch (state) {
+    case LiveGenerationState::Missing:
+        return a_references == 0U && b_references == 0U;
+    case LiveGenerationState::A:
+        // The dispatcher owns the only live generation reference.
+        return a_references == 1U && b_references == 0U;
+    case LiveGenerationState::B:
+        return a_references == 0U && b_references == 1U;
+    case LiveGenerationState::Invalid:
+        return false;
+    }
+    return false;
+}
+
+IptablesFirewall::LiveGenerationState
+IptablesFirewall::inspect_forward_reject_generation(bool ipv6) const {
+    return inspect_dispatcher(
+        ipv6 ? "ip6tables" : "iptables",
+        "filter",
+        META_UDP_443_CHAIN_NAME,
+        forward_reject_generation_chain(FirewallSetGeneration::A),
+        forward_reject_generation_chain(FirewallSetGeneration::B));
+}
+
+FirewallSetGeneration
+IptablesFirewall::select_forward_reject_target_generation(bool ipv6) const {
+    const auto state = inspect_forward_reject_generation(ipv6);
+    if (state == LiveGenerationState::A) {
+        return FirewallSetGeneration::B;
+    }
+    if (state == LiveGenerationState::B) {
+        return FirewallSetGeneration::A;
+    }
+    if (state == LiveGenerationState::Missing) {
+        return FirewallSetGeneration::A;
+    }
+    throw TransientFirewallError(
+        "no authoritative live Meta UDP/443 filter generation");
+}
+
+void IptablesFirewall::ensure_forward_reject_target_generation_inactive(
+    bool ipv6,
+    FirewallSetGeneration target) const {
+    const auto state = inspect_forward_reject_generation(ipv6);
+    if (state == LiveGenerationState::Invalid) {
+        throw TransientFirewallError(
+            "invalid live Meta UDP/443 filter dispatcher");
+    }
+    const auto target_state = target == FirewallSetGeneration::A
+        ? LiveGenerationState::A
+        : LiveGenerationState::B;
+    if (state == target_state) {
+        throw TransientFirewallError(
+            "live Meta UDP/443 filter generation changed while preparing apply");
+    }
+}
+
+void IptablesFirewall::publish_forward_reject_dispatcher(
+    bool ipv6,
+    FirewallSetGeneration generation) const {
+    const char* command = ipv6 ? "ip6tables" : "iptables";
+    const char* restore = ipv6
+        ? "ip6tables-restore"
+        : "iptables-restore";
+    const char* target = forward_reject_generation_chain(generation);
+    const std::vector<std::string> inspect_args{
+        command, "-t", "filter", "-S"};
+    ExecCaptureResult before;
+    for (std::size_t attempt = 0U;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        before = run_iptables_control(inspect_args);
+        const auto outcome = classify_iptables_command(before);
+        if (outcome == IptablesCommandOutcome::Success) {
+            break;
+        }
+        if (outcome == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(inspect_args, before);
+            throw FirewallError(
+                "failed to inspect Meta UDP/443 filter before publication");
+        }
+        if (before.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            record_iptables_control_failure(inspect_args, before);
+            throw TransientFirewallError(
+                "temporarily failed to inspect Meta UDP/443 filter before publication");
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
+    }
+
+    const auto live = parse_live_generation(
+        before.stdout_output,
+        META_UDP_443_CHAIN_NAME,
+        forward_reject_generation_chain(FirewallSetGeneration::A),
+        forward_reject_generation_chain(FirewallSetGeneration::B));
+    if (live == LiveGenerationState::Invalid) {
+        throw TransientFirewallError(
+            "invalid live Meta UDP/443 filter dispatcher before publication");
+    }
+    const auto target_state = generation == FirewallSetGeneration::A
+        ? LiveGenerationState::A
+        : LiveGenerationState::B;
+    if (live == target_state) {
+        throw TransientFirewallError(
+            "Meta UDP/443 filter target became active before publication");
+    }
+
+    const auto hooks = exact_jump_positions(
+        before.stdout_output, "FORWARD", META_UDP_443_CHAIN_NAME);
+    if (jump_reference_count(
+            before.stdout_output, META_UDP_443_CHAIN_NAME) != hooks.size() ||
+        !forward_reject_generation_references_are_owned(
+            before.stdout_output,
+            live,
+            forward_reject_generation_chain(FirewallSetGeneration::A),
+            forward_reject_generation_chain(FirewallSetGeneration::B))) {
+        throw TransientFirewallError(
+            "unexpected Meta UDP/443 filter graph reference");
+    }
+
+    std::string script = "*filter\n";
+    script += keen_pbr3::format(
+        ":{} - [0:0]\n-F {}\n-A {} -j {}\n",
+        META_UDP_443_CHAIN_NAME,
+        META_UDP_443_CHAIN_NAME,
+        META_UDP_443_CHAIN_NAME,
+        target);
+    // Rebuild the owned hook and dispatcher in one kernel transaction. If
+    // insertion at rule 1 or the target-chain reference fails, the previous
+    // generation and hook order remain unchanged.
+    for (std::size_t index = 0U; index < hooks.size(); ++index) {
+        script += keen_pbr3::format(
+            "-D FORWARD -j {}\n", META_UDP_443_CHAIN_NAME);
+    }
+    script += keen_pbr3::format(
+        "-I FORWARD 1 -j {}\nCOMMIT\n",
+        META_UDP_443_CHAIN_NAME);
+    pipe_to_cmd({restore, "--noflush", "--counters"}, script);
+}
+
+void IptablesFirewall::publish_and_verify_forward_reject_generation(
+    bool ipv6,
+    FirewallSetGeneration generation) {
+    publish_forward_reject_dispatcher(ipv6, generation);
+    // The restore COMMIT above is the publication boundary. Record ownership
+    // before post-COMMIT verification so stop/retry cannot skip a blocking
+    // hook merely because the firmware changed it immediately afterward.
+    if (ipv6) {
+        forward_reject_v6_created_ = true;
+    } else {
+        forward_reject_v4_created_ = true;
+    }
+    verify_forward_reject_generation(ipv6, generation);
+}
+
 IptablesFirewall::LiveGenerationState
 IptablesFirewall::parse_live_generation(
     const std::string& rules,
@@ -1694,6 +1953,315 @@ size_t IptablesFirewall::count_exact_jump(
         }
     }
     return count;
+}
+
+void IptablesFirewall::verify_forward_reject_generation(
+    bool ipv6,
+    FirewallSetGeneration generation) const {
+    const char* command = ipv6 ? "ip6tables" : "iptables";
+    const auto expected = generation == FirewallSetGeneration::A
+        ? LiveGenerationState::A
+        : LiveGenerationState::B;
+    const std::string generation_chain =
+        forward_reject_generation_chain(generation);
+    std::multiset<std::string> expected_rule_lines;
+    for (const auto& rule : pending_forward_udp_rejects_) {
+        if (rule.ipv6 != ipv6) {
+            continue;
+        }
+        expected_rule_lines.insert(keen_pbr3::format(
+            "-A {} -m mark --mark {:#x}/{:#x} -p udp --dport {} "
+            "-m set --match-set {} dst -j REJECT --reject-with {}",
+            generation_chain,
+            rule.fwmark,
+            rule.fwmark_mask,
+            rule.destination_port,
+            rule.set_name,
+            ipv6 ? "icmp6-port-unreachable" : "icmp-port-unreachable"));
+    }
+    const std::vector<std::string> inspect_args{
+        command, "-t", "filter", "-S"};
+    ExecCaptureResult last_result;
+    for (std::size_t attempt = 0U;
+         attempt <= iptables_control_retry_delays.size();
+         ++attempt) {
+        last_result = run_iptables_control(inspect_args);
+        const auto outcome = classify_iptables_command(last_result);
+        if (outcome == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(inspect_args, last_result);
+            throw FirewallError(
+                "Meta UDP/443 filter generation verification failed");
+        }
+        if (outcome == IptablesCommandOutcome::Success &&
+            parse_live_generation(
+                last_result.stdout_output,
+                META_UDP_443_CHAIN_NAME,
+                forward_reject_generation_chain(
+                    FirewallSetGeneration::A),
+                forward_reject_generation_chain(
+                    FirewallSetGeneration::B)) == expected) {
+            const auto hook_positions = exact_jump_positions(
+                last_result.stdout_output,
+                "FORWARD",
+                META_UDP_443_CHAIN_NAME);
+            std::multiset<std::string> observed_rule_lines;
+            std::istringstream rule_input(last_result.stdout_output);
+            std::string line;
+            const std::string prefix = "-A " + generation_chain + " ";
+            while (std::getline(rule_input, line)) {
+                if (line.rfind(prefix, 0U) == 0U) {
+                    observed_rule_lines.insert(line);
+                }
+            }
+            if (hook_positions.size() == 1U &&
+                hook_positions.front() == 1U &&
+                jump_reference_count(
+                    last_result.stdout_output,
+                    META_UDP_443_CHAIN_NAME) == 1U &&
+                forward_reject_generation_references_are_owned(
+                    last_result.stdout_output,
+                    expected,
+                    forward_reject_generation_chain(
+                        FirewallSetGeneration::A),
+                    forward_reject_generation_chain(
+                        FirewallSetGeneration::B)) &&
+                observed_rule_lines == expected_rule_lines) {
+                return;
+            }
+        }
+        if (last_result.timed_out ||
+            attempt == iptables_control_retry_delays.size()) {
+            break;
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[attempt]);
+    }
+    record_iptables_control_failure(inspect_args, last_result);
+    throw TransientFirewallError(
+        "Meta UDP/443 filter generation did not remain published");
+}
+
+OwnedForwardUdpRejectState
+IptablesFirewall::inspect_forward_udp_reject_state() const {
+    const auto inspect_family = [this](
+        bool ipv6,
+        bool managed,
+        bool expected,
+        FirewallSetGeneration generation) {
+        if (ipv6 && !managed) {
+            return OwnedForwardUdpRejectState::healthy;
+        }
+        const char* command = ipv6 ? "ip6tables" : "iptables";
+        const std::vector<std::string> args{
+            command, "-t", "filter", "-S"};
+        const auto live = run_iptables_control(args);
+        if ((ipv6 && live.exit_code == 127 && !live.timed_out) ||
+            command_reports_table_unavailable(live)) {
+            return expected
+                ? OwnedForwardUdpRejectState::missing
+                : OwnedForwardUdpRejectState::healthy;
+        }
+        if (classify_iptables_command(live) !=
+            IptablesCommandOutcome::Success) {
+            return OwnedForwardUdpRejectState::unknown;
+        }
+
+        const std::string generation_a =
+            forward_reject_generation_chain(FirewallSetGeneration::A);
+        const std::string generation_b =
+            forward_reject_generation_chain(FirewallSetGeneration::B);
+        const auto state = parse_live_generation(
+            live.stdout_output,
+            META_UDP_443_CHAIN_NAME,
+            generation_a,
+            generation_b);
+        const auto hooks = exact_jump_positions(
+            live.stdout_output, "FORWARD", META_UDP_443_CHAIN_NAME);
+        const bool any_owned_artifact =
+            chain_declared(live.stdout_output, META_UDP_443_CHAIN_NAME) ||
+            chain_declared(live.stdout_output, generation_a) ||
+            chain_declared(live.stdout_output, generation_b) ||
+            jump_reference_count(
+                live.stdout_output, META_UDP_443_CHAIN_NAME) != 0U;
+        if (!expected) {
+            return any_owned_artifact
+                ? OwnedForwardUdpRejectState::stale
+                : OwnedForwardUdpRejectState::healthy;
+        }
+
+        const auto expected_state = generation == FirewallSetGeneration::A
+            ? LiveGenerationState::A
+            : LiveGenerationState::B;
+        if (!any_owned_artifact || state == LiveGenerationState::Missing ||
+            hooks.empty()) {
+            return OwnedForwardUdpRejectState::missing;
+        }
+        if (state != expected_state || hooks.size() != 1U ||
+            hooks.front() != 1U ||
+            jump_reference_count(
+                live.stdout_output, META_UDP_443_CHAIN_NAME) != 1U ||
+            !forward_reject_generation_references_are_owned(
+                live.stdout_output,
+                state,
+                generation_a,
+                generation_b)) {
+            return OwnedForwardUdpRejectState::stale;
+        }
+
+        const std::string active_chain =
+            forward_reject_generation_chain(generation);
+        std::multiset<std::string> expected_rules;
+        for (const auto& rule : last_applied_forward_udp_rejects_) {
+            if (rule.ipv6 != ipv6) {
+                continue;
+            }
+            expected_rules.insert(keen_pbr3::format(
+                "-A {} -m mark --mark {:#x}/{:#x} -p udp --dport {} "
+                "-m set --match-set {} dst -j REJECT --reject-with {}",
+                active_chain,
+                rule.fwmark,
+                rule.fwmark_mask,
+                rule.destination_port,
+                rule.set_name,
+                ipv6 ? "icmp6-port-unreachable" :
+                       "icmp-port-unreachable"));
+        }
+        std::multiset<std::string> observed_rules;
+        const std::string prefix = "-A " + active_chain + " ";
+        std::istringstream input(live.stdout_output);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.rfind(prefix, 0U) == 0U) {
+                observed_rules.insert(line);
+            }
+        }
+        return !expected_rules.empty() && observed_rules == expected_rules
+            ? OwnedForwardUdpRejectState::healthy
+            : OwnedForwardUdpRejectState::stale;
+    };
+
+    const auto ipv4 = inspect_family(
+        /*ipv6=*/false,
+        /*managed=*/true,
+        last_applied_forward_reject_v4_expected_,
+        last_applied_forward_reject_v4_generation_);
+    const auto ipv6 = inspect_family(
+        /*ipv6=*/true,
+        last_applied_forward_reject_v6_managed_,
+        last_applied_forward_reject_v6_expected_,
+        last_applied_forward_reject_v6_generation_);
+    if (ipv4 == OwnedForwardUdpRejectState::unknown ||
+        ipv6 == OwnedForwardUdpRejectState::unknown) {
+        return OwnedForwardUdpRejectState::unknown;
+    }
+    if (ipv4 == OwnedForwardUdpRejectState::missing ||
+        ipv6 == OwnedForwardUdpRejectState::missing) {
+        return OwnedForwardUdpRejectState::missing;
+    }
+    if (ipv4 == OwnedForwardUdpRejectState::stale ||
+        ipv6 == OwnedForwardUdpRejectState::stale) {
+        return OwnedForwardUdpRejectState::stale;
+    }
+    return OwnedForwardUdpRejectState::healthy;
+}
+
+void IptablesFirewall::disable_forward_reject_scaffold(bool ipv6) const {
+    const char* command = ipv6 ? "ip6tables" : "iptables";
+    const char* restore = ipv6
+        ? "ip6tables-restore"
+        : "iptables-restore";
+    const std::vector<std::string> inspect_args{
+        command, "-t", "filter", "-S"};
+    const auto before = run_iptables_control(inspect_args);
+    if (ipv6 && before.exit_code == 127 && !before.timed_out) {
+        if (forward_reject_v6_created_) {
+            throw FirewallError(
+                "ip6tables disappeared while the Meta UDP/443 filter was owned");
+        }
+        return;
+    }
+    if (command_reports_table_unavailable(before)) {
+        if (ipv6 && forward_reject_v6_created_) {
+            throw FirewallError(
+                "IPv6 filter table disappeared while the Meta UDP/443 filter was owned");
+        }
+        return;
+    }
+    if (classify_iptables_command(before) !=
+        IptablesCommandOutcome::Success) {
+        record_iptables_control_failure(inspect_args, before);
+        throw TransientFirewallError(
+            "could not inspect Meta UDP/443 filter before disabling it");
+    }
+
+    const auto hook_positions = exact_jump_positions(
+        before.stdout_output, "FORWARD", META_UDP_443_CHAIN_NAME);
+    const bool dispatcher_exists = chain_declared(
+        before.stdout_output, META_UDP_443_CHAIN_NAME);
+    const std::string generation_a =
+        forward_reject_generation_chain(FirewallSetGeneration::A);
+    const std::string generation_b =
+        forward_reject_generation_chain(FirewallSetGeneration::B);
+    const bool generation_a_exists =
+        chain_declared(before.stdout_output, generation_a);
+    const bool generation_b_exists =
+        chain_declared(before.stdout_output, generation_b);
+
+    if (hook_positions.empty() && !dispatcher_exists &&
+        !generation_a_exists && !generation_b_exists) {
+        return;
+    }
+    const auto live = parse_live_generation(
+        before.stdout_output,
+        META_UDP_443_CHAIN_NAME,
+        generation_a,
+        generation_b);
+    if (live == LiveGenerationState::Invalid ||
+        jump_reference_count(
+            before.stdout_output, META_UDP_443_CHAIN_NAME) !=
+            hook_positions.size()) {
+        throw TransientFirewallError(
+            "Meta UDP/443 filter scaffold is inconsistent; refusing partial disable");
+    }
+
+    std::string script = "*filter\n";
+    for (std::size_t index = 0U; index < hook_positions.size(); ++index) {
+        script += keen_pbr3::format(
+            "-D FORWARD -j {}\n", META_UDP_443_CHAIN_NAME);
+    }
+    if (dispatcher_exists) {
+        script += keen_pbr3::format(
+            "-F {}\n-X {}\n",
+            META_UDP_443_CHAIN_NAME,
+            META_UDP_443_CHAIN_NAME);
+    }
+    if (generation_a_exists) {
+        script += keen_pbr3::format(
+            "-F {}\n-X {}\n", generation_a, generation_a);
+    }
+    if (generation_b_exists) {
+        script += keen_pbr3::format(
+            "-F {}\n-X {}\n", generation_b, generation_b);
+    }
+    script += "COMMIT\n";
+    // iptables-restore commits the hook and all owned-chain removals as one
+    // transaction. A failed cleanup therefore leaves messages_first fully
+    // authoritative instead of producing a half-disabled policy.
+    pipe_to_cmd({restore, "--noflush", "--counters"}, script);
+
+    const auto after = run_iptables_control(inspect_args);
+    if (classify_iptables_command(after) !=
+            IptablesCommandOutcome::Success ||
+        !exact_jump_positions(
+             after.stdout_output, "FORWARD", META_UDP_443_CHAIN_NAME)
+             .empty() ||
+        chain_declared(after.stdout_output, META_UDP_443_CHAIN_NAME) ||
+        chain_declared(after.stdout_output, generation_a) ||
+        chain_declared(after.stdout_output, generation_b)) {
+        record_iptables_control_failure(inspect_args, after);
+        throw TransientFirewallError(
+            "Meta UDP/443 filter scaffold remained after atomic disable");
+    }
 }
 
 OwnedSnatState IptablesFirewall::inspect_owned_snat_state(
@@ -3088,6 +3656,84 @@ std::string IptablesFirewall::build_ipt_script(bool ipv6,
     return s;
 }
 
+std::string IptablesFirewall::build_forward_udp_reject_script(
+    bool ipv6,
+    const std::string& generation_chain,
+    const std::vector<PendingForwardUdpReject>& rules) {
+    std::string script = "*filter\n";
+    script += keen_pbr3::format(
+        ":{} - [0:0]\n-F {}\n",
+        generation_chain,
+        generation_chain);
+    for (const auto& rule : rules) {
+        if (rule.ipv6 != ipv6) {
+            continue;
+        }
+        script += keen_pbr3::format(
+            "-A {} -m mark --mark {:#x}/{:#x} -p udp --dport {} "
+            "-m set --match-set {} dst -j REJECT --reject-with {}\n",
+            generation_chain,
+            rule.fwmark,
+            rule.fwmark_mask,
+            rule.destination_port,
+            rule.set_name,
+            ipv6 ? "icmp6-port-unreachable" : "icmp-port-unreachable");
+    }
+    script += "COMMIT\n";
+    return script;
+}
+
+void IptablesFirewall::stage_forward_reject_generation(
+    bool ipv6,
+    FirewallSetGeneration generation) const {
+    const char* command = ipv6 ? "ip6tables" : "iptables";
+    const std::vector<std::string> inspect_args{
+        command, "-t", "filter", "-S"};
+    const auto live = run_iptables_control(inspect_args);
+    if (classify_iptables_command(live) !=
+        IptablesCommandOutcome::Success) {
+        record_iptables_control_failure(inspect_args, live);
+        throw TransientFirewallError(
+            "could not inspect the inactive Meta UDP/443 generation "
+            "immediately before staging");
+    }
+    const char* target = forward_reject_generation_chain(generation);
+    const auto dispatcher_state = parse_live_generation(
+        live.stdout_output,
+        META_UDP_443_CHAIN_NAME,
+        forward_reject_generation_chain(FirewallSetGeneration::A),
+        forward_reject_generation_chain(FirewallSetGeneration::B));
+    const auto target_state = generation == FirewallSetGeneration::A
+        ? LiveGenerationState::A
+        : LiveGenerationState::B;
+    if (dispatcher_state == LiveGenerationState::Invalid ||
+        dispatcher_state == target_state ||
+        jump_reference_count(live.stdout_output, target) != 0U ||
+        jump_reference_count(
+            live.stdout_output, META_UDP_443_CHAIN_NAME) !=
+            exact_jump_positions(
+                live.stdout_output,
+                "FORWARD",
+                META_UDP_443_CHAIN_NAME).size() ||
+        !forward_reject_generation_references_are_owned(
+            live.stdout_output,
+            dispatcher_state,
+            forward_reject_generation_chain(FirewallSetGeneration::A),
+            forward_reject_generation_chain(FirewallSetGeneration::B))) {
+        throw TransientFirewallError(
+            "the inactive Meta UDP/443 generation has an unexpected live "
+            "reference; refusing to flush it");
+    }
+    pipe_to_cmd(
+        {ipv6 ? "ip6tables-restore" : "iptables-restore",
+         "--noflush",
+         "--counters"},
+        build_forward_udp_reject_script(
+            ipv6,
+            forward_reject_generation_chain(generation),
+            pending_forward_udp_rejects_));
+}
+
 std::string IptablesFirewall::build_generation_ipt_script(
     bool ipv6,
     const std::string& prerouting_chain,
@@ -3503,6 +4149,26 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     const auto candidate_udp_peer_classifiers =
         build_pending_udp_peer_classifiers(
             effective_prefilter, effective_ipv6);
+    const bool forward_reject_v4_requested = std::any_of(
+        pending_forward_udp_rejects_.begin(),
+        pending_forward_udp_rejects_.end(),
+        [](const PendingForwardUdpReject& rule) { return !rule.ipv6; });
+    const bool forward_reject_v6_requested = effective_ipv6 && std::any_of(
+        pending_forward_udp_rejects_.begin(),
+        pending_forward_udp_rejects_.end(),
+        [](const PendingForwardUdpReject& rule) { return rule.ipv6; });
+    if (forward_reject_v4_requested) {
+        target_forward_reject_v4_generation_ =
+            mode == FirewallApplyMode::Destructive
+                ? FirewallSetGeneration::A
+                : select_forward_reject_target_generation(false);
+    }
+    if (forward_reject_v6_requested) {
+        target_forward_reject_v6_generation_ =
+            mode == FirewallApplyMode::Destructive
+                ? FirewallSetGeneration::A
+                : select_forward_reject_target_generation(true);
+    }
 
     // `create -exist` rejects incompatible existing set schemas. Detect a
     // dnsmasq-owned mismatch before cleanup or inactive-slot staging mutates
@@ -3521,6 +4187,14 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         ensure_target_generation_inactive(false, target_v4_generation_);
         if (effective_ipv6) {
             ensure_target_generation_inactive(true, target_v6_generation_);
+        }
+        if (forward_reject_v4_requested) {
+            ensure_forward_reject_target_generation_inactive(
+                false, target_forward_reject_v4_generation_);
+        }
+        if (forward_reject_v6_requested) {
+            ensure_forward_reject_target_generation_inactive(
+                true, target_forward_reject_v6_generation_);
         }
     }
 
@@ -3565,6 +4239,20 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         if (!ipset_script.empty()) {
             pipe_to_cmd({"ipset", "restore", "-exist"}, ipset_script);
         }
+    }
+
+    // Stage only requested inactive filter generations while the previously
+    // published dispatcher remains authoritative. Balanced first install
+    // performs no filter mutation at all.
+    if (forward_reject_v4_requested) {
+        stage_forward_reject_generation(
+            /*ipv6=*/false,
+            target_forward_reject_v4_generation_);
+    }
+    if (forward_reject_v6_requested) {
+        stage_forward_reject_generation(
+            /*ipv6=*/true,
+            target_forward_reject_v6_generation_);
     }
 
     // Phase 2: iptables rules via iptables-restore / ip6tables-restore.
@@ -3648,14 +4336,58 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     // the replacement first and only then remove the active NAT generation.
     apply_nat_rules(effective_ipv6, mode, effective_prefilter);
 
+    // Phase 4: publish the staged Meta UDP/443 policy only after mangle and
+    // NAT have converged. Dispatcher replacement and first-hook placement are
+    // one atomic filter transaction, so a restore failure leaves the previous
+    // policy authoritative. Disabling similarly removes the hook and every
+    // owned filter chain in one verified transaction.
+    if (forward_reject_v4_requested) {
+        ensure_forward_reject_target_generation_inactive(
+            false, target_forward_reject_v4_generation_);
+        publish_and_verify_forward_reject_generation(
+            false, target_forward_reject_v4_generation_);
+    } else if (mode != FirewallApplyMode::Destructive) {
+        disable_forward_reject_scaffold(false);
+        forward_reject_v4_created_ = false;
+    }
+    if (forward_reject_v6_requested) {
+        ensure_forward_reject_target_generation_inactive(
+            true, target_forward_reject_v6_generation_);
+        publish_and_verify_forward_reject_generation(
+            true, target_forward_reject_v6_generation_);
+    } else if (mode != FirewallApplyMode::Destructive &&
+               (effective_ipv6 || forward_reject_v6_created_ ||
+                ipv6_backend_available())) {
+        disable_forward_reject_scaffold(true);
+        forward_reject_v6_created_ = false;
+    }
+
     // Pending declarations become live authority only after rules, hooks, and
     // the independent NAT contract have all converged successfully.
     published_udp_peer_classifiers_ = candidate_udp_peer_classifiers;
+    last_applied_forward_reject_v4_expected_ =
+        forward_reject_v4_requested;
+    last_applied_forward_reject_v6_expected_ =
+        forward_reject_v6_requested;
+    last_applied_forward_reject_v6_managed_ =
+        last_applied_forward_reject_v6_managed_ || effective_ipv6 ||
+        forward_reject_v6_requested;
+    if (forward_reject_v4_requested) {
+        last_applied_forward_reject_v4_generation_ =
+            target_forward_reject_v4_generation_;
+    }
+    if (forward_reject_v6_requested) {
+        last_applied_forward_reject_v6_generation_ =
+            target_forward_reject_v6_generation_;
+    }
+    last_applied_forward_udp_rejects_ =
+        pending_forward_udp_rejects_;
 
     // Clear pending buffers
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
 }
 
 void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
@@ -3682,6 +4414,23 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
         safe_exec({command, "-t", table, "-X", chain},
                   /*suppress_output=*/true);
     };
+
+    if (forward_reject_v4_created_ || sweep_live_state) {
+        // Unlike legacy best-effort teardown, a still-live messages-first
+        // hook is user-visible packet blocking. Remove its first hook,
+        // dispatcher and both A/B generations in one checked transaction;
+        // stop/prerm must fail loudly if that contract cannot be proved gone.
+        disable_forward_reject_scaffold(/*ipv6=*/false);
+        forward_reject_v4_created_ = false;
+    }
+    if (forward_reject_v6_created_ ||
+        (sweep_live_state && ipv6_backend_available())) {
+        disable_forward_reject_scaffold(/*ipv6=*/true);
+        forward_reject_v6_created_ = false;
+    }
+    last_applied_forward_reject_v4_expected_ = false;
+    last_applied_forward_reject_v6_expected_ = false;
+    last_applied_forward_udp_rejects_.clear();
 
     if (owned_v4 || sweep_live_state) {
         log.verbose(
@@ -3924,6 +4673,7 @@ void IptablesFirewall::cleanup_impl() {
     pending_sets_.clear();
     pending_elements_.clear();
     pending_rules_.clear();
+    pending_forward_udp_rejects_.clear();
     source_egress_snat_selectors_.clear();
 }
 

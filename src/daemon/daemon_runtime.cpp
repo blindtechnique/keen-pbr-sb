@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <fstream>
 #include <future>
 #include <iterator>
 #include <map>
 #include <set>
 #include <thread>
+#include <unistd.h>
 
 #include "../config/routing_state.hpp"
 #include "../firewall/firewall.hpp"
@@ -19,6 +21,7 @@
 #include "../keenetic/ndms_vpn_server_service_cache.hpp"
 #include "../log/logger.hpp"
 #include "../routing/urltest_manager.hpp"
+#include "../runtime/meta_udp_443_policy.hpp"
 #ifdef WITH_API
 #include "../api/handler_catalog.hpp"
 #include "../api/handler_remote_access.hpp"
@@ -84,6 +87,33 @@ constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_BYTES =
     2U * 1024U * 1024U;
 constexpr std::size_t IDLE_STALL_MAX_SNAPSHOT_LINES = 8192U;
 constexpr std::uint64_t IDLE_STALL_APPLICATION_REPLY_BYTES = 256U;
+constexpr std::size_t META_UDP443_ACTIVATION_MAX_FLOWS = 256U;
+constexpr std::size_t META_UDP443_ACTIVATION_BATCH_SIZE = 4U;
+constexpr auto META_UDP443_ACTIVATION_BATCH_BUDGET =
+    std::chrono::seconds{4};
+constexpr std::array<std::chrono::seconds, 3>
+    META_UDP443_ACTIVATION_RETRY_DELAYS{
+        std::chrono::seconds{1},
+        std::chrono::seconds{2},
+        std::chrono::seconds{5},
+    };
+constexpr auto META_UDP443_ACTIVATION_MAINTENANCE_RETRY_DELAY =
+    std::chrono::minutes{1};
+
+ConntrackFlowObservationOptions meta_udp443_observation_options(
+    bool ipv6_enabled) {
+    ConntrackFlowObservationOptions options;
+    options.ipv6_enabled = ipv6_enabled;
+    options.max_flows = META_UDP443_ACTIVATION_MAX_FLOWS;
+    options.max_destination_input_cidrs =
+        IDLE_STALL_MAX_DESTINATION_CIDRS;
+    options.max_snapshot_bytes = IDLE_STALL_MAX_SNAPSHOT_BYTES;
+    options.max_snapshot_lines = IDLE_STALL_MAX_SNAPSHOT_LINES;
+    options.allow_foreign_mark_bits_for_media = true;
+    options.include_ordinary_destination_flows = false;
+    options.media_seed_udp_destination_port = 443U;
+    return options;
+}
 
 std::vector<InterfaceProbe::Target> collect_interface_probe_targets(
     const Config& config,
@@ -343,6 +373,30 @@ bool same_internal_vpn_runtime_targets(
 }
 
 } // namespace
+
+bool Daemon::fastnat_is_disabled_or_unavailable() {
+    constexpr std::array<const char*, 2> paths{
+        "/proc/sys/net/netfilter/nf_conntrack_fastnat",
+        "/proc/sys/net/ipv4/netfilter/ip_conntrack_fastnat",
+    };
+    for (const char* path : paths) {
+        std::ifstream input(path);
+        if (!input) {
+            if (::access(path, F_OK) == 0) {
+                return false;
+            }
+            continue;
+        }
+        std::string value;
+        std::string extra;
+        if (!(input >> value) || (input >> extra) || value != "0") {
+            return false;
+        }
+    }
+    // Kernels without either control do not provide Keenetic FastNAT and are
+    // therefore already on the ordinary netfilter path.
+    return true;
+}
 
 bool Daemon::run_system_resolver_hook(std::string_view action,
                                       bool manage_ipc_gate,
@@ -1196,6 +1250,7 @@ void Daemon::complete_pending_snat_recovery_before_generation_change() {
 void Daemon::stop_routing_runtime() {
     auto& log = Logger::instance();
     cancel_idle_stall_observer();
+    cancel_meta_udp443_activation_cleanup();
     cancel_owned_snat_health_check();
     cancel_owned_conntrack_cleanup_retry();
     cancel_runtime_firewall_retry();
@@ -1223,6 +1278,8 @@ void Daemon::stop_routing_runtime() {
         policy_rules_.clear();
         route_table_.clear();
         firewall_->cleanup();
+        committed_meta_udp443_fwmark_.reset();
+        committed_meta_udp443_owned_mask_ = 0U;
     }
     if (keenetic_dns_refresh_task_id_ >= 0) {
         scheduler_->cancel(keenetic_dns_refresh_task_id_);
@@ -1358,6 +1415,10 @@ void Daemon::start_routing_runtime() {
         // A start failure may happen at any point after routes or firewall
         // state were installed. Roll every owned subsystem back, not only the
         // resolver hook, so health and the kernel cannot disagree.
+        // Invalidate the deferred Meta cleanup before removing its filter:
+        // the timer may otherwise become runnable after this catch and delete
+        // exact tuples for a runtime which never reached the started state.
+        cancel_meta_udp443_activation_cleanup();
         if (urltest_manager_) {
             try {
                 urltest_manager_->clear();
@@ -1381,6 +1442,8 @@ void Daemon::start_routing_runtime() {
         try {
             KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
             firewall_->cleanup();
+            committed_meta_udp443_fwmark_.reset();
+            committed_meta_udp443_owned_mask_ = 0U;
         } catch (const std::exception& cleanup_error) {
             log.error("Failed to clean firewall after start failure: {}",
                       cleanup_error.what());
@@ -1632,6 +1695,581 @@ void Daemon::reconcile_static_routing(RouteReconcileMode mode) {
         mode);
 }
 
+std::optional<MetaUdp443ActivationPlan>
+Daemon::prepare_meta_udp443_activation_or_throw(
+    const std::vector<RuleState>& candidate_rules,
+    const AppliedListContentState& candidate_list_content_state,
+    bool forwarded_scope_allows_unmarked_cleanup) {
+    const auto owned_mask = fwmark_mask_value(
+        config_.fwmark.value_or(FwmarkConfig{}));
+    const auto selection = resolve_meta_udp_443_policy_selection(
+        config_, candidate_rules, owned_mask);
+    if (!selection.active()) {
+        return std::nullopt;
+    }
+    if (!fastnat_is_disabled_or_unavailable()) {
+        throw DaemonError(
+            "daemon.meta_udp443_policy=messages_first requires verified "
+            "FastNAT-off packet traversal");
+    }
+
+    std::set<std::uint32_t> cleanup_owned_marks{selection.fwmark};
+    if (committed_meta_udp443_fwmark_.has_value()) {
+        if (committed_meta_udp443_owned_mask_ != owned_mask) {
+            throw DaemonError(
+                "Meta UDP/443 messages-first cannot change the fwmark mask "
+                "while the policy is active; switch to balanced first");
+        }
+        if (*committed_meta_udp443_fwmark_ == 0U ||
+            (*committed_meta_udp443_fwmark_ & ~owned_mask) != 0U) {
+            throw DaemonError(
+                "Meta UDP/443 messages-first cannot prove the previously "
+                "committed route mark for exact activation cleanup");
+        }
+        cleanup_owned_marks.insert(*committed_meta_udp443_fwmark_);
+    }
+    const bool ipv6_enabled = resolve_ipv6_support(config_).enabled;
+    const auto capability =
+        conntrack_manager_.probe_exact_cleanup_capability(ipv6_enabled);
+    if (capability == ConntrackCleanupResult::CommandUnavailable) {
+        throw DaemonError(
+            "daemon.meta_udp443_policy=messages_first requires the "
+            "conntrack utility for exact activation cleanup");
+    }
+    if (capability != ConntrackCleanupResult::Succeeded) {
+        throw DaemonError(
+            "daemon.meta_udp443_policy=messages_first could not verify "
+            "the exact conntrack cleanup capability");
+    }
+
+    const std::set<std::string> list_names(
+        selection.list_names.begin(), selection.list_names.end());
+    auto coverage = collect_conntrack_destination_retirement_coverage(
+        destination_retirement_plan_for_lists(list_names),
+        candidate_list_content_state);
+    std::sort(
+        coverage.destination_selectors.begin(),
+        coverage.destination_selectors.end());
+    coverage.destination_selectors.erase(
+        std::unique(
+            coverage.destination_selectors.begin(),
+            coverage.destination_selectors.end()),
+        coverage.destination_selectors.end());
+    if (coverage.partial() || coverage.destination_selectors.empty() ||
+        runtime_recovery_detail::contains_global_destination_selector(
+            coverage)) {
+        throw DaemonError(
+            "Meta UDP/443 messages-first policy requires complete "
+            "authoritative activation cleanup coverage before publication");
+    }
+
+    const auto local_addresses = local_interface_addresses_from(
+        netlink_.dump_interfaces());
+    const auto observation_options =
+        meta_udp443_observation_options(ipv6_enabled);
+    const auto observation =
+        conntrack_manager_.observe_forwarded_destination_flows(
+            coverage.destination_selectors,
+            local_addresses,
+            owned_mask,
+            observation_options,
+            {},
+            coverage.destination_selectors,
+            {});
+    const auto candidates = select_meta_udp_443_cleanup_candidates(
+        observation,
+        cleanup_owned_marks,
+        owned_mask,
+        selection.allow_unmarked_cleanup &&
+            forwarded_scope_allows_unmarked_cleanup);
+    if (!candidates.complete) {
+        throw DaemonError(
+            "Meta UDP/443 messages-first policy requires a complete exact "
+            "conntrack activation snapshot before publication");
+    }
+
+    return MetaUdp443ActivationPlan{
+        selection.fwmark,
+        owned_mask,
+        std::move(cleanup_owned_marks),
+        std::move(coverage.destination_selectors),
+        ipv6_enabled,
+        selection.allow_unmarked_cleanup &&
+            forwarded_scope_allows_unmarked_cleanup,
+        std::move(candidates.flows)};
+}
+
+void Daemon::report_meta_udp443_degraded(
+    const std::string& detail) noexcept {
+    try {
+        const auto incident = meta_udp443_incidents_.record_failure(
+            "meta-udp443-activation", /*notify_immediately=*/true);
+        if (incident.notify) {
+            Logger::instance().error(
+                "Meta/WhatsApp UDP/443 policy state is degraded: {}. "
+                "The service will perform a bounded recovery without "
+                "broadening the affected traffic scope.",
+                detail);
+        } else {
+            Logger::instance().info(
+                "Meta/WhatsApp messages-first recovery remains degraded: {}",
+                detail);
+        }
+    } catch (...) {
+    }
+}
+
+void Daemon::cancel_meta_udp443_activation_cleanup() noexcept {
+    meta_udp443_cleanup_epoch_.fetch_add(1U, std::memory_order_acq_rel);
+    ++meta_udp443_cleanup_schedule_serial_;
+    pending_meta_udp443_cleanup_.reset();
+    meta_udp443_cleanup_completion_admission_failed_serial_.store(
+        0U, std::memory_order_release);
+    try {
+        if (meta_udp443_cleanup_retry_task_id_ >= 0 && scheduler_) {
+            scheduler_->cancel(meta_udp443_cleanup_retry_task_id_);
+            meta_udp443_cleanup_retry_task_id_ = -1;
+        }
+    } catch (...) {
+        // The epoch is the deletion authority. Even if timer cancellation
+        // itself fails during shutdown, the queued callback is stale and its
+        // worker fence prevents every exact mutation.
+        meta_udp443_cleanup_retry_task_id_ = -1;
+    }
+}
+
+void Daemon::schedule_meta_udp443_activation_cleanup_retry(
+    const MetaUdp443ActivationPlan& plan,
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t cleanup_epoch,
+    std::size_t attempt) noexcept {
+    try {
+        MetaUdp443ActivationPlan durable_copy = plan;
+        schedule_meta_udp443_activation_cleanup_retry(
+            std::move(durable_copy),
+            expected_runtime_generation,
+            cleanup_epoch,
+            attempt);
+    } catch (...) {
+        // An existing pending plan remains authoritative when this is a retry.
+        // Initial publication always transfers its already-allocated plan via
+        // the rvalue overload below, so it never depends on a post-COMMIT copy.
+        report_meta_udp443_degraded(
+            "could not copy the bounded exact-cleanup plan for retry");
+    }
+}
+
+void Daemon::schedule_meta_udp443_activation_cleanup_retry(
+    MetaUdp443ActivationPlan&& plan,
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t cleanup_epoch,
+    std::size_t attempt) noexcept {
+    if (!scheduler_ || !meta_udp443_cleanup_authority_matches(
+            expected_runtime_generation,
+            runtime_generation_.load(std::memory_order_acquire),
+            cleanup_epoch,
+            meta_udp443_cleanup_epoch_.load(std::memory_order_acquire))) {
+        return;
+    }
+    try {
+        const bool maintenance =
+            attempt > META_UDP443_ACTIVATION_RETRY_DELAYS.size();
+        if (maintenance) {
+            report_meta_udp443_degraded(
+                "bounded exact cleanup retries made no progress; remaining "
+                "exact tuples are retained for a quiet generation-fenced "
+                "maintenance retry");
+        }
+        const auto delay = maintenance
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                  META_UDP443_ACTIVATION_MAINTENANCE_RETRY_DELAY)
+            : (attempt == 0U
+                   ? meta_udp443_initial_cleanup_delay()
+                   : std::chrono::duration_cast<std::chrono::milliseconds>(
+                         META_UDP443_ACTIVATION_RETRY_DELAYS[std::min(
+                             attempt - 1U,
+                             META_UDP443_ACTIVATION_RETRY_DELAYS.size() -
+                                 1U)]));
+        const std::size_t dispatch_attempt = maintenance ? 0U : attempt;
+        const std::uint64_t schedule_serial =
+            ++meta_udp443_cleanup_schedule_serial_;
+        // Build the replacement before invalidating the old timer, then keep
+        // it as the sole durable event-loop-owned plan through timer and
+        // worker admission. The timer captures only scalar authority; a lost
+        // completion post therefore leaves this bounded plan available to the
+        // periodic health task instead of losing it.
+        PendingMetaUdp443ActivationCleanup replacement{
+            std::move(plan),
+            expected_runtime_generation,
+            cleanup_epoch,
+            attempt,
+            schedule_serial,
+            false};
+        pending_meta_udp443_cleanup_ = std::move(replacement);
+        if (meta_udp443_cleanup_retry_task_id_ >= 0) {
+            const int stale_task_id =
+                meta_udp443_cleanup_retry_task_id_;
+            meta_udp443_cleanup_retry_task_id_ = -1;
+            scheduler_->cancel(stale_task_id);
+        }
+        meta_udp443_cleanup_retry_task_id_ = scheduler_->schedule_oneshot(
+            delay,
+            [this,
+             expected_runtime_generation,
+             cleanup_epoch,
+             dispatch_attempt,
+             schedule_serial]() mutable {
+                if (schedule_serial !=
+                        meta_udp443_cleanup_schedule_serial_ ||
+                    !pending_meta_udp443_cleanup_.has_value() ||
+                    pending_meta_udp443_cleanup_->schedule_serial !=
+                        schedule_serial) {
+                    return;
+                }
+                meta_udp443_cleanup_retry_task_id_ = -1;
+                pending_meta_udp443_cleanup_->worker_inflight = true;
+                dispatch_meta_udp443_activation_cleanup(
+                    expected_runtime_generation,
+                    cleanup_epoch,
+                    dispatch_attempt,
+                    schedule_serial);
+            },
+            maintenance
+                ? "meta-udp443-exact-cleanup-maintenance"
+                : "meta-udp443-exact-cleanup-retry");
+    } catch (const std::exception& error) {
+        (void)error;
+        meta_udp443_cleanup_retry_task_id_ = -1;
+        report_meta_udp443_degraded(
+            "could not schedule exact cleanup retry");
+    } catch (...) {
+        meta_udp443_cleanup_retry_task_id_ = -1;
+        report_meta_udp443_degraded(
+            "could not schedule exact cleanup retry");
+    }
+}
+
+void Daemon::dispatch_meta_udp443_activation_cleanup(
+    std::uint64_t expected_runtime_generation,
+    std::uint64_t cleanup_epoch,
+    std::size_t attempt,
+    std::uint64_t schedule_serial) noexcept {
+    const auto generation_is_current = [this,
+                                        expected_runtime_generation,
+                                        cleanup_epoch]() {
+        return meta_udp443_cleanup_authority_matches(
+            expected_runtime_generation,
+            runtime_generation_.load(std::memory_order_acquire),
+            cleanup_epoch,
+            meta_udp443_cleanup_epoch_.load(
+                std::memory_order_acquire));
+    };
+    if (!generation_is_current()) {
+        if (pending_meta_udp443_cleanup_.has_value() &&
+            pending_meta_udp443_cleanup_->schedule_serial ==
+                schedule_serial) {
+            pending_meta_udp443_cleanup_.reset();
+        }
+        return;
+    }
+    MetaUdp443ActivationPlan plan;
+    try {
+        if (!pending_meta_udp443_cleanup_.has_value() ||
+            pending_meta_udp443_cleanup_->schedule_serial !=
+                schedule_serial) {
+            return;
+        }
+        plan = pending_meta_udp443_cleanup_->plan;
+    } catch (...) {
+        // The durable event-loop-owned plan remains intact. A later periodic
+        // health tick can retry after transient allocation pressure clears.
+        report_meta_udp443_degraded(
+            "could not admit the bounded exact-cleanup plan to the worker");
+        if (pending_meta_udp443_cleanup_.has_value() &&
+            pending_meta_udp443_cleanup_->schedule_serial ==
+                schedule_serial) {
+            pending_meta_udp443_cleanup_->worker_inflight = false;
+        }
+        return;
+    }
+    bool queued = false;
+    try {
+        queued = blocking_executor_.try_post(
+        "meta-udp443-exact-cleanup",
+        [this,
+         plan = std::move(plan),
+         expected_runtime_generation,
+         cleanup_epoch,
+         attempt,
+         schedule_serial]() mutable {
+            struct CompletionAdmissionFailureGuard {
+                std::atomic<std::uint64_t>& failed_serial;
+                std::uint64_t schedule_serial;
+                bool armed{true};
+
+                ~CompletionAdmissionFailureGuard() noexcept {
+                    if (armed) {
+                        publish_newest_meta_udp443_failed_completion_serial(
+                            failed_serial, schedule_serial);
+                    }
+                }
+            } completion_admission_guard{
+                meta_udp443_cleanup_completion_admission_failed_serial_,
+                schedule_serial};
+            ConntrackExactFlowCleanupSummary cleanup;
+            OwnedForwardUdpRejectState before =
+                OwnedForwardUdpRejectState::unknown;
+            OwnedForwardUdpRejectState after =
+                OwnedForwardUdpRejectState::unknown;
+            bool fastnat_before = false;
+            bool fastnat_after = false;
+            std::string worker_failure;
+            const auto still_current = [this,
+                                        expected_runtime_generation,
+                                        cleanup_epoch]() {
+                return meta_udp443_cleanup_authority_matches(
+                    expected_runtime_generation,
+                    runtime_generation_.load(std::memory_order_acquire),
+                    cleanup_epoch,
+                    meta_udp443_cleanup_epoch_.load(
+                        std::memory_order_acquire));
+            };
+
+            try {
+                // Apply/stop cancels the epoch before taking this barrier.
+                // At most four exact commands can delay that lifecycle path,
+                // while no firewall fields race with an in-flight rebuild.
+                KPBR_LOCK_GUARD(udp_call_affinity_mutation_mutex_);
+                if (still_current()) {
+                    before = firewall_->inspect_forward_udp_reject_state();
+                    fastnat_before =
+                        fastnat_is_disabled_or_unavailable();
+                }
+                if (still_current() && fastnat_before &&
+                    before == OwnedForwardUdpRejectState::healthy) {
+                    const auto post_publication_local_addresses =
+                        local_interface_addresses_from(
+                            netlink_.dump_interfaces());
+                    const auto post_publication_observation =
+                        conntrack_manager_.observe_forwarded_destination_flows(
+                            plan.destination_selectors,
+                            post_publication_local_addresses,
+                            plan.owned_mask,
+                            meta_udp443_observation_options(
+                                plan.ipv6_enabled),
+                            {},
+                            plan.destination_selectors,
+                            {});
+                    const auto post_publication_candidates =
+                        select_meta_udp_443_cleanup_candidates(
+                            post_publication_observation,
+                            plan.cleanup_owned_marks,
+                            plan.owned_mask,
+                            plan.allow_unmarked_cleanup);
+                    if (!post_publication_candidates.complete) {
+                        worker_failure =
+                            "post-publication exact UDP/443 snapshot is "
+                            "incomplete";
+                        cleanup.remaining_flows = plan.exact_flows;
+                    } else {
+                        // A complete fresh snapshot is authoritative for all
+                        // currently live exact candidates. Replacing the
+                        // retained plan prevents permanent delete failures
+                        // plus connection churn from growing it without
+                        // bound; the observer itself caps this set at 256.
+                        plan.exact_flows =
+                            post_publication_candidates.flows;
+                        cleanup = conntrack_manager_.
+                            delete_exact_forwarded_flows(
+                            plan.exact_flows,
+                            plan.owned_mask,
+                            plan.cleanup_owned_marks,
+                            ConntrackExactFlowCleanupOptions{
+                                META_UDP443_ACTIVATION_BATCH_BUDGET,
+                                META_UDP443_ACTIVATION_BATCH_SIZE},
+                            still_current);
+                    }
+                } else {
+                    cleanup.remaining_flows = plan.exact_flows;
+                    cleanup.generation_changed = !still_current();
+                }
+                if (still_current()) {
+                    after = firewall_->inspect_forward_udp_reject_state();
+                    fastnat_after =
+                        fastnat_is_disabled_or_unavailable();
+                }
+            } catch (const std::exception& error) {
+                worker_failure = error.what();
+                cleanup.remaining_flows = plan.exact_flows;
+            } catch (...) {
+                worker_failure = "unknown exact cleanup worker failure";
+                cleanup.remaining_flows = plan.exact_flows;
+            }
+
+            bool posted = false;
+            try {
+                posted = post_control_task(
+                [this,
+                 plan = std::move(plan),
+                 cleanup = std::move(cleanup),
+                 worker_failure = std::move(worker_failure),
+                 before,
+                 after,
+                 fastnat_before,
+                 fastnat_after,
+                 expected_runtime_generation,
+                 cleanup_epoch,
+                 attempt,
+                 schedule_serial]() mutable {
+                    if (!pending_meta_udp443_cleanup_.has_value() ||
+                        pending_meta_udp443_cleanup_->schedule_serial !=
+                            schedule_serial) {
+                        return;
+                    }
+                    pending_meta_udp443_cleanup_->worker_inflight = false;
+                    std::uint64_t failed_serial = schedule_serial;
+                    (void)meta_udp443_cleanup_completion_admission_failed_serial_
+                        .compare_exchange_strong(
+                            failed_serial,
+                            0U,
+                            std::memory_order_acq_rel,
+                            std::memory_order_acquire);
+                    if (!meta_udp443_cleanup_authority_matches(
+                            expected_runtime_generation,
+                            runtime_generation_.load(
+                                std::memory_order_acquire),
+                            cleanup_epoch,
+                            meta_udp443_cleanup_epoch_.load(
+                                std::memory_order_acquire)) ||
+                        cleanup.generation_changed) {
+                        pending_meta_udp443_cleanup_.reset();
+                        return;
+                    }
+                    if (!worker_failure.empty()) {
+                        report_meta_udp443_degraded(
+                            "exact activation cleanup failed: " +
+                            worker_failure);
+                        plan.exact_flows =
+                            std::move(cleanup.remaining_flows);
+                        schedule_meta_udp443_activation_cleanup_retry(
+                            std::move(plan),
+                            expected_runtime_generation,
+                            cleanup_epoch,
+                            attempt + 1U);
+                        return;
+                    }
+                    if (!fastnat_before || !fastnat_after ||
+                        before != OwnedForwardUdpRejectState::healthy ||
+                        after != OwnedForwardUdpRejectState::healthy) {
+                        report_meta_udp443_degraded(
+                            !fastnat_before || !fastnat_after
+                                ? "FastNAT is no longer verified disabled"
+                                : "the owned first FORWARD hook or exact rule "
+                                  "contract changed during activation");
+                        plan.exact_flows =
+                            std::move(cleanup.remaining_flows);
+                        if (!fastnat_before || !fastnat_after) {
+                            // A firewall rebuild cannot make FastNAT traverse
+                            // FORWARD and would cancel this durable exact plan.
+                            // Retain it until init/firmware restores FastNAT
+                            // off, then retry under the same generation fence.
+                            schedule_meta_udp443_activation_cleanup_retry(
+                                std::move(plan),
+                                expected_runtime_generation,
+                                cleanup_epoch,
+                                attempt + 1U);
+                        } else {
+                            schedule_meta_udp443_activation_cleanup_retry(
+                                std::move(plan),
+                                expected_runtime_generation,
+                                cleanup_epoch,
+                                attempt + 1U);
+                            schedule_netfilter_runtime_refresh_noexcept(
+                                NetfilterRefreshReason::full,
+                                "could not schedule repair of the owned "
+                                "Meta UDP/443 filter contract");
+                        }
+                        return;
+                    }
+                    if (cleanup.complete()) {
+                        pending_meta_udp443_cleanup_.reset();
+                        meta_udp443_incidents_.reset(
+                            "meta-udp443-activation");
+                        if (cleanup.attempted != 0U) {
+                            Logger::instance().info(
+                                "Meta/WhatsApp messages-first policy retired "
+                                "{} exact pre-existing UDP/443 flow(s)",
+                                cleanup.attempted);
+                        }
+                        return;
+                    }
+
+                    plan.exact_flows =
+                        std::move(cleanup.remaining_flows);
+                    const std::size_t unavailable_attempts =
+                        cleanup.command_unavailable ? 1U : 0U;
+                    const bool made_progress =
+                        cleanup.attempted >
+                        cleanup.failed + unavailable_attempts;
+                    const bool clean_batch_continuation =
+                        cleanup.batch_limit_reached &&
+                        cleanup.failed == 0U &&
+                        !cleanup.command_unavailable &&
+                        !cleanup.generation_changed && made_progress;
+                    if (!clean_batch_continuation) {
+                        report_meta_udp443_degraded(
+                            cleanup.command_unavailable
+                                ? "the conntrack utility became unavailable"
+                                : (cleanup.budget_exhausted
+                                       ? "the bounded exact cleanup time "
+                                         "budget was exhausted"
+                                       : "one or more exact UDP/443 tuples "
+                                         "could not be retired"));
+                    }
+                    schedule_meta_udp443_activation_cleanup_retry(
+                        std::move(plan),
+                        expected_runtime_generation,
+                        cleanup_epoch,
+                        made_progress ? 0U : attempt + 1U);
+                },
+                    "meta-udp443-exact-cleanup-complete");
+            } catch (...) {
+                posted = false;
+            }
+            if (posted) {
+                completion_admission_guard.armed = false;
+            }
+            if (!posted) {
+                Logger::instance().info(
+                    "Meta UDP/443 cleanup completion was not admitted; the "
+                    "durable bounded plan remains pending for retry");
+            }
+        });
+    } catch (const std::exception& error) {
+        (void)error;
+        report_meta_udp443_degraded(
+            "could not queue exact cleanup");
+    } catch (...) {
+        report_meta_udp443_degraded(
+            "could not queue exact cleanup");
+    }
+    if (!queued) {
+        report_meta_udp443_degraded(
+            "the blocking executor queue is full");
+        if (pending_meta_udp443_cleanup_.has_value() &&
+            pending_meta_udp443_cleanup_->schedule_serial ==
+                schedule_serial) {
+            pending_meta_udp443_cleanup_->worker_inflight = false;
+            const auto& pending = *pending_meta_udp443_cleanup_;
+            schedule_meta_udp443_activation_cleanup_retry(
+                pending.plan,
+                expected_runtime_generation,
+                cleanup_epoch,
+                attempt + 1U);
+        }
+    }
+}
+
 void Daemon::apply_firewall(
     FirewallApplyMode mode,
     std::shared_ptr<const ListCacheGenerationSnapshot>
@@ -1640,6 +2278,18 @@ void Daemon::apply_firewall(
     // observer epoch before touching live chains so an outstanding worker can
     // never acknowledge an old pair after a URLTest or recovery rebuild.
     cancel_idle_stall_observer();
+    auto previous_meta_cleanup =
+        pending_meta_udp443_cleanup_;
+    cancel_meta_udp443_activation_cleanup();
+    // Once Firewall::apply() is entered, a backend exception can be
+    // ambiguous: iptables/nft may already have published the Meta filter and
+    // then failed its post-COMMIT verification. Never restore deletion
+    // authority carrying selectors from the old list after that boundary.
+    bool meta_publication_may_have_changed = false;
+    bool meta_policy_committed = false;
+    std::optional<MetaUdp443ActivationPlan> meta_activation;
+
+    try {
 
     KPBR_UNIQUE_LOCK(
         affinity_mutation_lock,
@@ -1669,8 +2319,7 @@ void Daemon::apply_firewall(
         list_cache_snapshot =
             capture_relevant_list_cache_generation(config_);
     }
-    AppliedListContentState candidate_list_content_state;
-    auto candidate_rules = apply_runtime_firewall(
+    auto staged = stage_runtime_firewall(
         config_,
         outbound_marks_,
         firewall_state_.get_urltest_selections(),
@@ -1680,10 +2329,64 @@ void Daemon::apply_firewall(
         &effective_interface_servers,
         &runtime_targets,
         &native_vpn_direct_egress_snat_selectors,
-        &candidate_list_content_state,
         opts_.udp_call_affinity_ipset_available,
         active_keenetic_dns_.snapshot,
         std::move(list_cache_snapshot));
+    // The backend may already have repaired its ordinary mangle dispatcher
+    // during prepare_apply(). Meta-specific preflight still completes before
+    // any Meta filter publication or exact conntrack deletion, so failure
+    // leaves the previously committed Meta policy authoritative.
+    const auto route_config = config_.route.value_or(RouteConfig{});
+    const bool has_explicit_inbound_scope =
+        route_config.inbound_interfaces.has_value() &&
+        !route_config.inbound_interfaces->empty();
+    const bool has_native_vpn_bypass = std::any_of(
+        effective_interface_servers.begin(),
+        effective_interface_servers.end(),
+        [](const InternalVpnServer& server) {
+            return !server.process_clients;
+        }) || std::any_of(
+        runtime_targets.begin(),
+        runtime_targets.end(),
+        [](const InternalVpnRuntimeTarget& target) {
+            return !target.process_clients;
+        });
+    meta_activation = prepare_meta_udp443_activation_or_throw(
+        staged.rule_states,
+        staged.list_content_state,
+        !has_explicit_inbound_scope && !has_native_vpn_bypass);
+
+    meta_publication_may_have_changed = true;
+    commit_runtime_firewall(*firewall_, staged);
+    meta_policy_committed = true;
+    if (meta_activation.has_value()) {
+        committed_meta_udp443_fwmark_ =
+            meta_activation->expected_fwmark;
+        committed_meta_udp443_owned_mask_ =
+            meta_activation->owned_mask;
+    } else {
+        committed_meta_udp443_fwmark_.reset();
+        committed_meta_udp443_owned_mask_ = 0U;
+    }
+    OwnedForwardUdpRejectState meta_filter_health =
+        OwnedForwardUdpRejectState::unknown;
+    try {
+        meta_filter_health =
+            firewall_->inspect_forward_udp_reject_state();
+    } catch (...) {
+        // The filter generation already committed. Treat an inspection fault
+        // as degraded post-commit state and let the durable repair path
+        // converge; never throw an "old generation retained" lie.
+        report_meta_udp443_degraded(
+            "post-publication Meta UDP/443 inspection failed");
+    }
+    const bool meta_fastnat_healthy =
+        !meta_activation.has_value() ||
+        fastnat_is_disabled_or_unavailable();
+
+    auto candidate_rules = std::move(staged.rule_states);
+    auto candidate_list_content_state =
+        std::move(staged.list_content_state);
     firewall_state_.set_rules(std::move(candidate_rules));
     applied_list_content_state_ =
         std::move(candidate_list_content_state);
@@ -1701,9 +2404,107 @@ void Daemon::apply_firewall(
     affinity_mutation_lock.unlock();
 
     // Re-arm only after the replacement firewall transaction and its remote
-    // access companion have committed successfully. A failed apply remains
-    // fail-closed and its caller may retry the whole transaction.
+    // access companion have committed successfully, but before transferring
+    // the already-allocated exact-cleanup plan into durable scheduler state.
+    // A failure here reaches the post-COMMIT catch with the candidate plan
+    // still intact.
     reset_idle_stall_observer(/*schedule_if_eligible=*/true);
+
+    const auto current_runtime_generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    const auto cleanup_epoch = meta_udp443_cleanup_epoch_.load(
+        std::memory_order_acquire);
+    if (meta_activation.has_value() && meta_fastnat_healthy &&
+        meta_filter_health == OwnedForwardUdpRejectState::healthy) {
+        // The exact deletion is irreversible. Queue even the initial attempt
+        // through the scheduler so it cannot run until the enclosing
+        // config/resolver/persistence transaction has returned to the event
+        // loop. A later rollback re-enters apply_firewall(), cancels this
+        // epoch and leaves every old tuple intact.
+        schedule_meta_udp443_activation_cleanup_retry(
+            std::move(*meta_activation),
+            current_runtime_generation,
+            cleanup_epoch,
+            /*attempt=*/0U);
+    } else if (meta_activation.has_value()) {
+        report_meta_udp443_degraded(
+            !meta_fastnat_healthy
+                ? "FastNAT was re-enabled during firewall publication"
+                : "the exact owned first FORWARD hook could not be reverified");
+        schedule_meta_udp443_activation_cleanup_retry(
+            std::move(*meta_activation),
+            current_runtime_generation,
+            cleanup_epoch,
+            /*attempt=*/1U);
+        if (meta_fastnat_healthy) {
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "could not schedule repair after Meta UDP/443 "
+                "post-publication verification failed");
+        }
+    } else if (meta_filter_health ==
+               OwnedForwardUdpRejectState::healthy) {
+        meta_udp443_incidents_.reset("meta-udp443-activation");
+    } else {
+        report_meta_udp443_degraded(
+            "balanced mode could not verify absence of owned UDP/443 "
+            "blocking artifacts");
+        schedule_netfilter_runtime_refresh_noexcept(
+            NetfilterRefreshReason::full,
+            "could not schedule cleanup of stale balanced-mode Meta "
+            "UDP/443 artifacts");
+    }
+
+    } catch (...) {
+        // Same-generation repair/restart must not lose a durable activation
+        // plan merely because staging failed before Firewall::apply(). Once
+        // that ambiguous boundary was entered, however, old selectors are no
+        // longer deletion authority: a backend can publish and then throw
+        // during post-COMMIT verification.
+        const auto current_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        if (should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+                previous_meta_cleanup.has_value(),
+                previous_meta_cleanup.has_value()
+                    ? previous_meta_cleanup->runtime_generation
+                    : 0U,
+                current_generation,
+                meta_publication_may_have_changed)) {
+            schedule_meta_udp443_activation_cleanup_retry(
+                std::move(previous_meta_cleanup->plan),
+                current_generation,
+                meta_udp443_cleanup_epoch_.load(
+                    std::memory_order_acquire),
+                previous_meta_cleanup->attempt);
+        } else if (
+            should_retain_candidate_meta_udp443_cleanup_after_apply_failure(
+                meta_policy_committed,
+                meta_activation.has_value())) {
+            // A later companion step failed after candidate publication. Keep
+            // only the freshly preflighted candidate selectors; the deferred
+            // timer remains behind the enclosing transaction boundary and a
+            // rollback invalidates its epoch before it can delete anything.
+            schedule_meta_udp443_activation_cleanup_retry(
+                std::move(*meta_activation),
+                current_generation,
+                meta_udp443_cleanup_epoch_.load(
+                    std::memory_order_acquire),
+                /*attempt=*/1U);
+        } else if (meta_publication_may_have_changed &&
+                   !meta_policy_committed) {
+            // Publication outcome is unknown. Do not delete under either old
+            // or candidate selectors; a fresh full apply must rebuild and
+            // verify authority before producing a new exact-cleanup plan.
+            report_meta_udp443_degraded(
+                "firewall apply failed after entering the Meta UDP/443 "
+                "publication boundary; exact cleanup authority was discarded");
+            schedule_netfilter_runtime_refresh_noexcept(
+                NetfilterRefreshReason::full,
+                "could not schedule fresh Meta UDP/443 reconciliation after "
+                "an ambiguous firewall publication failure");
+        }
+        throw;
+    }
 }
 
 void Daemon::normalize_urltest_selections() {
@@ -5779,6 +6580,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     } catch (...) {
         routing_runtime_active_ = false;
         cancel_idle_stall_observer();
+        cancel_meta_udp443_activation_cleanup();
         try {
             transition_runtime_or_throw(RuntimeState::broken, "configuration apply failed");
             publish_runtime_state();
