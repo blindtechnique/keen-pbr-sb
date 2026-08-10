@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { RotateCw } from "lucide-react"
+import { useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -23,6 +24,14 @@ import { Switch } from "@/components/ui/switch"
 import { SectionCard } from "@/components/shared/section-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { waitForRuntimeReadiness } from "@/lib/runtime-readiness"
 import {
   parseServiceCommandResult,
@@ -82,8 +91,25 @@ const errorMessage = (error: unknown) => {
  * glance: the sing-box transports keen-pbr routes through and the optional
  * nfqws2 daemon that handles traffic staying on the direct route.
  */
+/**
+ * The terminal outcome of a restart, kept so it can be shown in full.
+ *
+ * Only services restarted through an init script have real command output. The
+ * routing runtime is restarted in-process and has none, so it keeps its toast
+ * rather than being given an empty panel that implies output was captured.
+ */
+type RestartOutcome = {
+  readonly service: string
+  readonly ok: boolean
+  readonly exitCode: number | undefined
+  readonly output: string
+}
+
 export function ServicesStatusCard() {
   const { t } = useTranslation()
+  const [restartOutcome, setRestartOutcome] = useState<RestartOutcome | null>(
+    null
+  )
 
   const transportsQuery = useGetTransports({
     query: { refetchInterval: 5_000 },
@@ -174,9 +200,12 @@ export function ServicesStatusCard() {
       }
       return result
     },
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
       toast.success(t("overview.services.restartComplete"))
+      if (result.output.trim().length > 0) {
+        setRestartOutcome({ service: "nfqws2", ...result })
+      }
     },
     onError: async (error) => {
       // Refresh regardless: a failed restart still moved the service, and a
@@ -187,6 +216,11 @@ export function ServicesStatusCard() {
           error: errorMessage(error),
         })
       )
+      // A failure is exactly when the full output matters, so open it rather
+      // than leaving the user with a single truncated line.
+      if (error instanceof ServiceRestartFailure) {
+        setRestartOutcome({ service: "nfqws2", ...error.result })
+      }
     },
   })
 
@@ -450,6 +484,75 @@ export function ServicesStatusCard() {
           </div>
         ))}
       </div>
+      <ServiceRestartOutcomeDialog
+        onClose={() => setRestartOutcome(null)}
+        outcome={restartOutcome}
+      />
     </SectionCard>
+  )
+}
+
+/**
+ * Shows what the init script actually printed.
+ *
+ * A toast can carry one line, which is enough to say a restart failed and not
+ * nearly enough to say why. The output is the difference between "restart
+ * failed" and "address already in use" - the second one a user can act on
+ * without opening an SSH session.
+ */
+function ServiceRestartOutcomeDialog({
+  onClose,
+  outcome,
+}: {
+  readonly onClose: () => void
+  readonly outcome: RestartOutcome | null
+}) {
+  const { t } = useTranslation()
+  if (!outcome) {
+    return null
+  }
+
+  return (
+    <Dialog
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+      open
+    >
+      <DialogContent className="overflow-hidden sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>
+            {outcome.ok
+              ? t("overview.services.outcomeSucceeded", {
+                  service: outcome.service,
+                })
+              : t("overview.services.outcomeFailed", {
+                  service: outcome.service,
+                })}
+          </DialogTitle>
+          <DialogDescription>
+            {outcome.exitCode === undefined
+              ? t("overview.services.outcomeNoExitCode")
+              : t("overview.services.outcomeExitCode", {
+                  code: outcome.exitCode,
+                })}
+          </DialogDescription>
+        </DialogHeader>
+        {outcome.output.trim().length > 0 ? (
+          <pre className="max-h-72 overflow-auto rounded-[4px] border bg-muted/40 p-3 text-xs whitespace-pre-wrap">
+            {outcome.output}
+          </pre>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {t("overview.services.outcomeNoOutput")}
+          </p>
+        )}
+        <DialogFooter>
+          <Button onClick={onClose} variant="outline">
+            {t("common.chrome.close")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

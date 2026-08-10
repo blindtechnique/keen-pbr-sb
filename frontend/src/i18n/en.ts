@@ -1099,6 +1099,13 @@ export const enTranslation = {
       restart: "Restart",
       restartRequested: "Restart requested",
       restartComplete: "Restart complete: routing and DNS are ready",
+      // The command's terminal result. A toast holds one line - enough to say
+      // a restart failed, nowhere near enough to say why.
+      outcomeSucceeded: "{{service}}: restart succeeded",
+      outcomeFailed: "{{service}}: restart failed",
+      outcomeExitCode: "Exit code: {{code}}",
+      outcomeNoExitCode: "No exit code reported",
+      outcomeNoOutput: "The command produced no output.",
       restartFailed: "Restart failed",
       restartFailedDetail: "Restart failed: {{error}}",
       switchFailed: "Could not switch the service",

@@ -466,14 +466,55 @@ bool wait_for_nfqws_exit(std::chrono::milliseconds timeout) {
     return nfqws_processes().empty() && !nfqueue_active(configured_nfqueue_num());
 }
 
+// Runs the nfqws2 init script under a deadline.
+//
+// The generic run_command() above uses popen/pclose, and pclose waits for the
+// child with no deadline at all. A hung init script therefore blocked the HTTP
+// worker forever - while holding nfqws_operation_mutex, so every subsequent
+// nfqws request piled up behind it and the whole section of the UI froze with
+// no way back short of restarting the daemon.
+//
+// safe_exec_capture takes argv rather than a shell string, which this path
+// does not need anyway: the arguments are a fixed script path and a fixed
+// verb, neither of which is caller-controlled.
+std::string run_nfqws_init_script(const std::string& action, int& status) {
+    constexpr size_t kMaxOutputBytes = 128U * 1024U;
+    // Generous on purpose. Stopping nfqws2 can legitimately take seconds while
+    // connections drain, and a deadline that fires during ordinary work would
+    // be worse than the hang it guards against.
+    constexpr auto kInitScriptTimeout = std::chrono::seconds{60};
+
+    auto result = safe_exec_capture(
+        {std::string(kInit), action},
+        /*suppress_stderr=*/false,
+        kMaxOutputBytes,
+        /*capture_stderr=*/true,
+        /*drain_after_limit=*/true,
+        SafeExecFailureLog::Enabled,
+        SafeExecTimeouts{kInitScriptTimeout, std::chrono::seconds{2}});
+
+    auto output = std::move(result.stdout_output);
+    status = result.exit_code;
+    if (result.timed_out) {
+        output += "nfqws2 init script timed out and was terminated.\n";
+        // A killed script is never a success, whatever exit status the kill
+        // happened to produce.
+        if (status == 0) status = 1;
+    }
+    if (result.truncated) {
+        output += "(output truncated)\n";
+    }
+    return output;
+}
+
 std::string run_nfqws_service_command(const std::string& command, int& status) {
     if (command == "reload") {
         repair_nfqws_pidfile();
-        return run_command(std::string(kInit) + " reload", status);
+        return run_nfqws_init_script("reload", status);
     }
 
     if (command == "start") {
-        auto output = run_command(std::string(kInit) + " start", status);
+        auto output = run_nfqws_init_script("start", status);
         for (int attempt = 0;
              attempt < 30 && (nfqws_processes().empty() || !nfqueue_active(configured_nfqueue_num()));
              ++attempt)
@@ -485,7 +526,7 @@ std::string run_nfqws_service_command(const std::string& command, int& status) {
 
     repair_nfqws_pidfile();
     int stop_status = 0;
-    auto output = run_command(std::string(kInit) + " stop", stop_status);
+    auto output = run_nfqws_init_script("stop", stop_status);
     if (!wait_for_nfqws_exit(std::chrono::seconds(3))) {
         output += "nfqws2 did not stop in time; terminating the stale process.\n";
         for (const auto pid : nfqws_processes()) ::kill(pid, SIGKILL);
@@ -498,7 +539,7 @@ std::string run_nfqws_service_command(const std::string& command, int& status) {
     }
 
     int start_status = 0;
-    output += run_command(std::string(kInit) + " start", start_status);
+    output += run_nfqws_init_script("start", start_status);
     for (int attempt = 0;
          attempt < 30 && (nfqws_processes().empty() || !nfqueue_active(configured_nfqueue_num()));
          ++attempt)

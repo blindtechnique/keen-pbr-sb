@@ -1109,6 +1109,14 @@ export const ruTranslation = {
       restart: "Перезапустить",
       restartRequested: "Перезапуск запрошен",
       restartComplete: "Перезапуск завершён: маршрутизация и DNS готовы",
+      // Терминальный результат команды. Тост вмещает одну строку — этого
+      // хватает, чтобы сказать «не удалось», и совершенно не хватает, чтобы
+      // сказать почему.
+      outcomeSucceeded: "{{service}}: перезапуск выполнен",
+      outcomeFailed: "{{service}}: перезапуск не удался",
+      outcomeExitCode: "Код возврата: {{code}}",
+      outcomeNoExitCode: "Код возврата не сообщён",
+      outcomeNoOutput: "Команда ничего не вывела.",
       restartFailed: "Не удалось перезапустить",
       restartFailedDetail: "Перезапуск завершился ошибкой: {{error}}",
       switchFailed: "Не удалось переключить",
