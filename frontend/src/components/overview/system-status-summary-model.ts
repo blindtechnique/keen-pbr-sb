@@ -1,7 +1,9 @@
 import type {
   HealthResponse,
+  RouteRule,
   RuntimeOutboundState,
 } from "@/api/generated/model"
+import { countOrphanedLists } from "@/components/overview/dashboard-outbound-relevance"
 
 export const dashboardSectionIds = {
   service: "dashboard-services",
@@ -20,12 +22,15 @@ export type DashboardAttentionItem = Readonly<{
 export function collectDashboardAttentionItems({
   outbounds,
   outboundsQueryFailed = false,
+  routeRules,
   routingOverall,
   service,
   serviceQueryFailed = false,
 }: {
   outbounds?: readonly RuntimeOutboundState[]
   outboundsQueryFailed?: boolean
+  /** Без правил безобидность упавшего маршрута доказать нечем — см. ниже. */
+  routeRules?: readonly RouteRule[]
   routingOverall?: string
   service?: HealthResponse
   serviceQueryFailed?: boolean
@@ -100,11 +105,19 @@ export function collectDashboardAttentionItems({
         outbound.status === "degraded" || outbound.status === "unknown"
     ).length
     const count = unavailable + degraded
+    // Красным — только когда упавший маршрут везёт список включённого правила
+    // (список осиротел). Упавший туннель, к которому не привязан ни один
+    // список, и участник группы, которого группа уже заменила, — жёлтые:
+    // посмотреть стоит, но ничего не сломалось.
+    const orphanedLists = routeRules
+      ? countOrphanedLists({ rules: routeRules, outbounds })
+      : undefined
+    const broken = orphanedLists === undefined ? unavailable > 0 : orphanedLists > 0
     if (count > 0) {
       items.push({
         id: "outbounds",
         targetId: dashboardSectionIds.outbounds,
-        tone: unavailable > 0 ? "error" : "warning",
+        tone: broken ? "error" : "warning",
         count,
       })
     }

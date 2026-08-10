@@ -40,6 +40,42 @@ export function selectDashboardRuntimeOutbounds({
   )
 }
 
+/**
+ * Списки, которым больше некуда идти.
+ *
+ * Красный на дашборде должен значить, что у человека действительно что-то не
+ * работает, а не что где-то в конфигурации лежит нерабочий туннель. Упавший
+ * маршрут ломает трафик ровно тогда, когда на нём висит хотя бы один список
+ * включённого правила: этот список осиротел. Туннель без списков и участник
+ * группы, которого группа уже заменила, ничего не ломают — это замечание.
+ *
+ * Маршрут, которого в переданном списке нет вовсе, сиротой НЕ считается:
+ * этот список уже отфильтрован `selectDashboardRuntimeOutbounds`, и
+ * намеренно остановленный транспорт из него исчезает. Считать исчезновение
+ * поломкой значило бы вернуть красный ровно тем, кто сам выключил туннель.
+ * Правило, ссылающееся на несуществующий маршрут, — ошибка конфигурации,
+ * и о ней сообщает свой блок «отсутствующие ссылки».
+ */
+export function countOrphanedLists({
+  rules,
+  outbounds,
+}: {
+  rules: readonly RouteRule[]
+  outbounds: readonly Pick<RuntimeOutboundState, "status" | "tag">[]
+}): number {
+  const statusByTag = new Map(
+    outbounds.map((outbound) => [outbound.tag, outbound.status])
+  )
+  let orphaned = 0
+  for (const [tag, listCount] of countEnabledRouteRuleListsByOutbound(rules)) {
+    if (listCount === 0) continue
+    if (statusByTag.get(tag) === "unavailable") {
+      orphaned += listCount
+    }
+  }
+  return orphaned
+}
+
 /** Enabled rules only: a disabled rule must not make an outbound look used. */
 export function countEnabledRouteRuleListsByOutbound(
   rules: readonly RouteRule[]

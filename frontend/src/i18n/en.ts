@@ -1006,9 +1006,15 @@ export const enTranslation = {
         description:
           "Services are being queried; current state will appear automatically.",
       },
-      degraded: {
+      warning: {
         title: "Attention required",
-        description: "A routing, DNS, or service health check has failed.",
+        description:
+          "Services are running and traffic flows. One thing is worth a look: a stopped tunnel, a group failover, or an unsaved draft.",
+      },
+      degraded: {
+        title: "Something is broken",
+        description:
+          "A service, DNS, or routing is down — or a list has no working route left.",
       },
       routing: "Routing",
       configuration: "Lists: {{lists}} · Rules: {{rules}}",

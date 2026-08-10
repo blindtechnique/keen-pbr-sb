@@ -2,10 +2,12 @@ import { CircleAlertIcon, CircleCheckBigIcon, CircleXIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import {
+  useGetConfig,
   useGetHealthService,
   useGetRuntimeOutbounds,
   useGetTransports,
 } from "@/api/queries"
+import { selectConfig } from "@/api/selectors"
 import { useStatusEventConnectionState } from "@/api/status-event-connection"
 import {
   getHeaderHealthTone,
@@ -25,6 +27,10 @@ export function HeaderHealthIndicator() {
   const healthQuery = useGetHealthService()
   const outboundsQuery = useGetRuntimeOutbounds()
   const transportsQuery = useGetTransports()
+  // Тот же запрос, что уже держат страницы, — react-query отдаёт его из кэша.
+  // Без правил индикатор не отличает упавший туннель со списками от упавшего
+  // туннеля, которым никто не пользуется, и краснеет на обоих.
+  const configQuery = useGetConfig()
   const statusEvents = useStatusEventConnectionState()
   const service =
     healthQuery.data?.status === 200 ? healthQuery.data.data : undefined
@@ -43,6 +49,7 @@ export function HeaderHealthIndicator() {
   const tone = getHeaderHealthTone({
     outbounds,
     outboundsQueryFailed: outboundsQuery.isError,
+    routeRules: selectConfig(configQuery.data)?.route?.rules,
     service,
     serviceQueryFailed: healthQuery.isError,
     statusEvents,

@@ -147,6 +147,7 @@ export function OverviewPage() {
         listCount={Object.keys(loadedConfig?.lists ?? {}).length}
         outbounds={dashboardRuntimeOutbounds}
         outboundsQueryFailed={runtimeOutboundsQuery.isError}
+        routeRules={loadedConfig?.route?.rules}
         routingOverall={routingHealth?.overall}
         ruleCount={loadedConfig?.route?.rules?.length ?? 0}
         service={serviceHealth}
