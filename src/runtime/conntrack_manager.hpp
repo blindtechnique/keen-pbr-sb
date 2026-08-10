@@ -188,6 +188,15 @@ struct ConntrackFlowObservationOptions {
     // budget needed for one narrow signalling transport.
     bool include_ordinary_destination_flows{true};
     std::optional<std::uint16_t> media_seed_udp_destination_port;
+    // When present, filter the ordinary view to this exact TCP destination
+    // port before claiming the shared observation budget. Media views remain
+    // independently controlled by their selectors and UDP-port filter.
+    std::optional<std::uint16_t> ordinary_tcp_destination_port;
+    // Generic seed filter used by the preventive observer: both an
+    // established TCP signalling flow and UDP/QUIC on the exact port may
+    // establish the source-wide read-only media guard. The UDP-only option
+    // above remains reserved for Meta policy activation preflights.
+    std::optional<std::uint16_t> media_seed_destination_port;
 };
 
 struct ConntrackExactFlowCleanupSummary {

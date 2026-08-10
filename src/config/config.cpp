@@ -1022,12 +1022,6 @@ Config parse_config(const std::string& json_str) {
         "reconnect_owned_flows_on_routing_change_lists",
         "daemon.reconnect_owned_flows_on_routing_change_lists",
         issues);
-    validate_optional_string_array_field(
-        parsed_json,
-        "daemon",
-        "experimental_whatsapp_tcp_reset_sources",
-        "daemon.experimental_whatsapp_tcp_reset_sources",
-        issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "ipv6_enabled", "daemon.ipv6_enabled", issues);
     validate_route_rule_specs(parsed_json, issues);
@@ -1513,53 +1507,6 @@ void validate_config(const Config& cfg) {
         *cfg.daemon->max_file_size_bytes <= 0) {
         add_issue(issues, "daemon.max_file_size_bytes",
                   "daemon.max_file_size_bytes must be greater than 0");
-    }
-
-    if (cfg.daemon &&
-        cfg.daemon->experimental_whatsapp_tcp_reset_sources.has_value()) {
-        const auto& sources =
-            *cfg.daemon->experimental_whatsapp_tcp_reset_sources;
-        constexpr std::size_t max_sources = 8U;
-        if (sources.size() > max_sources) {
-            add_issue(
-                issues,
-                "daemon.experimental_whatsapp_tcp_reset_sources",
-                "daemon.experimental_whatsapp_tcp_reset_sources must not "
-                "contain more than 8 entries");
-        }
-
-        std::set<std::string> seen;
-        for (std::size_t index = 0; index < sources.size(); ++index) {
-            const auto& source = sources[index];
-            const std::string path =
-                "daemon.experimental_whatsapp_tcp_reset_sources[" +
-                std::to_string(index) + "]";
-            if (!is_valid_ipv4_address(source) ||
-                source == "0.0.0.0" || source == "255.255.255.255") {
-                add_issue(
-                    issues,
-                    path,
-                    path + " must be one exact unicast IPv4 host address");
-                continue;
-            }
-            in_addr parsed{};
-            (void)::inet_pton(AF_INET, source.c_str(), &parsed);
-            const auto host = ntohl(parsed.s_addr);
-            if ((host & 0xF0000000U) == 0xE0000000U ||
-                (host & 0xF0000000U) == 0xF0000000U) {
-                add_issue(
-                    issues,
-                    path,
-                    path + " must be one exact unicast IPv4 host address");
-                continue;
-            }
-            if (!seen.insert(source).second) {
-                add_issue(
-                    issues,
-                    path,
-                    path + " duplicates source '" + source + "'");
-            }
-        }
     }
 
     if (cfg.lists_autoupdate) {

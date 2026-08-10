@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "runtime/conntrack_manager.hpp"
+#include "runtime/udp_call_affinity.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1290,6 +1291,77 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "packaged TCP 443 seed keeps active high-port UDP media protected") {
+    const auto snapshot = [](std::uint64_t media_packets,
+                             std::uint64_t media_bytes) {
+        return std::string{
+            "ipv4 2 tcp 6 120 ESTABLISHED "
+            "src=192.168.1.44 dst=31.13.66.10 sport=50000 dport=443 "
+            "packets=2 bytes=141 src=31.13.66.10 dst=192.168.1.44 "
+            "sport=443 dport=50000 packets=2 bytes=145 "
+            "[ASSURED] [SEEN_REPLY] mark=196608 zone=0 use=2\n"
+            "ipv4 2 udp 17 120 "
+            "src=192.168.1.44 dst=64.176.66.4 sport=51000 dport=50000 "
+            "packets="} +
+            std::to_string(media_packets) + " bytes=" +
+            std::to_string(media_bytes) +
+            " src=64.176.66.4 dst=192.168.1.44 sport=50000 "
+            "dport=51000 packets=" + std::to_string(media_packets) +
+            " bytes=" + std::to_string(media_bytes) +
+            " [ASSURED] [SEEN_REPLY] mark=0 zone=0 use=2\n";
+    };
+    auto observe = [&snapshot](std::uint64_t media_packets,
+                               std::uint64_t media_bytes) {
+        const auto content = snapshot(media_packets, media_bytes);
+        ConntrackManager manager(
+            [](const std::vector<std::string>&) {
+                return ConntrackManager::CommandResult{0, {}};
+            },
+            [content](std::size_t) {
+                return std::optional<ConntrackManager::Snapshot>{
+                    ConntrackManager::Snapshot{content, false}};
+            });
+        ConntrackFlowObservationOptions options;
+        options.max_flows = 8U;
+        options.ordinary_tcp_destination_port = 443U;
+        options.media_seed_destination_port = 443U;
+        return manager.observe_forwarded_destination_flows(
+            {"31.13.64.0/18"},
+            {"192.168.1.1/24"},
+            0x00FF0000U,
+            options,
+            {},
+            {"31.13.64.0/18"},
+            {0x00030000U});
+    };
+
+    const auto baseline = observe(10U, 1000U);
+    const auto current = observe(11U, 1200U);
+    REQUIRE(baseline.flows.size() == 1U);
+    REQUIRE(baseline.media_seed_flows.size() == 1U);
+    CHECK(baseline.media_seed_flows.front().protocol ==
+          ConntrackFlowProtocol::Tcp);
+    REQUIRE(baseline.source_wide_udp_flows.size() == 1U);
+    REQUIRE(current.source_wide_udp_flows.size() == 1U);
+
+    const UdpCallAffinityGuardPeer retained_peer{
+        ConntrackFlowFamily::Ipv4,
+        "192.168.1.44",
+        "64.176.66.4",
+        50000U,
+        0x00030000U};
+    const auto protected_sources = active_udp_media_guard_sources(
+        baseline.source_wide_udp_flows,
+        current.media_seed_flows,
+        current.source_wide_udp_flows,
+        {retained_peer},
+        0x00FF0000U,
+        {0x00030000U});
+    CHECK(protected_sources.count(
+              {ConntrackFlowFamily::Ipv4, "192.168.1.44"}) == 1U);
+}
+
+TEST_CASE(
     "ConntrackManager specialized Meta preflight budgets only exact UDP 443 candidates") {
     const auto record = [](const char* protocol,
                            int protocol_number,
@@ -1350,6 +1422,89 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "ConntrackManager filters ordinary TCP 443 before the office flow budget") {
+    const auto record = [](std::uint16_t source_port,
+                           std::uint16_t destination_port) {
+        return std::string{
+            "ipv4 2 tcp 6 120 ESTABLISHED src=192.168.1.44 "
+            "dst=31.13.66.10 sport="} +
+            std::to_string(source_port) + " dport=" +
+            std::to_string(destination_port) +
+            " packets=2 bytes=141 src=31.13.66.10 "
+            "dst=192.168.1.44 sport=" +
+            std::to_string(destination_port) + " dport=" +
+            std::to_string(source_port) +
+            " packets=2 bytes=145 [ASSURED] [SEEN_REPLY] "
+            "mark=196608 zone=0 use=2\n";
+    };
+    std::string snapshot;
+    for (std::uint16_t index = 0U; index < 70U; ++index) {
+        snapshot += record(40000U + index, 5222U);
+    }
+    snapshot += record(50000U, 443U);
+
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    ConntrackFlowObservationOptions options;
+    options.max_flows = 1U;
+    options.max_snapshot_bytes = 512U * 1024U;
+    options.max_snapshot_lines = 512U;
+    options.ordinary_tcp_destination_port = 443U;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        options);
+
+    CHECK_FALSE(observation.flow_limit_reached);
+    REQUIRE(observation.flows.size() == 1U);
+    CHECK(observation.flows.front().destination_port == 443U);
+}
+
+TEST_CASE(
+    "ConntrackManager reports TCP 443 candidate overflow instead of first-N authority") {
+    const auto record = [](std::uint16_t source_port) {
+        return std::string{
+            "ipv4 2 tcp 6 120 ESTABLISHED src=192.168.1.44 "
+            "dst=31.13.66.10 sport="} +
+            std::to_string(source_port) +
+            " dport=443 packets=2 bytes=141 src=31.13.66.10 "
+            "dst=192.168.1.44 sport=443 dport=" +
+            std::to_string(source_port) +
+            " packets=2 bytes=145 [ASSURED] [SEEN_REPLY] "
+            "mark=196608 zone=0 use=2\n";
+    };
+    const std::string snapshot = record(50000U) + record(50001U);
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    ConntrackFlowObservationOptions options;
+    options.max_flows = 1U;
+    options.ordinary_tcp_destination_port = 443U;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        options);
+
+    CHECK(observation.flow_limit_reached);
+    CHECK(observation.flows.size() == 1U);
+}
+
+TEST_CASE(
     "ConntrackManager specialized Meta preflight flags malformed relevant records") {
     const std::string relevant =
         "ipv4 2 udp 17 120 src=192.168.1.44 dst=31.13.66.10 "
@@ -1402,6 +1557,40 @@ TEST_CASE(
         {},
         {"31.13.64.0/18"});
     CHECK(observation.invalid_media_seed_candidate_records == 6U);
+    CHECK(observation.media_seed_flows.empty());
+}
+
+TEST_CASE(
+    "ConntrackManager generic port seed fails closed on malformed TCP and UDP") {
+    const std::string snapshot =
+        "ipv4 2 tcp 6 120 ESTABLISHED src=192.168.1.44 "
+        "dst=31.13.66.10 sport=50000 dport=443 malformed-original\n"
+        "ipv4 2 udp 17 120 src=192.168.1.45 dst=31.13.66.11 "
+        "sport=50001 dport=443 malformed-original\n"
+        "ipv4 2 tcp 6 120 ESTABLISHED src=192.168.1.46 "
+        "dst=8.8.8.8 sport=50002 dport=443 malformed-original\n";
+    ConntrackManager manager(
+        [](const std::vector<std::string>&) {
+            return ConntrackManager::CommandResult{0, {}};
+        },
+        [&snapshot](std::size_t) {
+            return std::optional<ConntrackManager::Snapshot>{
+                ConntrackManager::Snapshot{snapshot, false}};
+        });
+    ConntrackFlowObservationOptions options;
+    options.ordinary_tcp_destination_port = 443U;
+    options.media_seed_destination_port = 443U;
+
+    const auto observation = manager.observe_forwarded_destination_flows(
+        {"31.13.64.0/18"},
+        {"192.168.1.1/24"},
+        0x00FF0000U,
+        options,
+        {},
+        {"31.13.64.0/18"},
+        {0x00030000U});
+
+    CHECK(observation.invalid_media_seed_candidate_records == 2U);
     CHECK(observation.media_seed_flows.empty());
 }
 

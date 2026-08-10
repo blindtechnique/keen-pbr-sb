@@ -601,6 +601,23 @@ public:
     fw.publish_forward_reject_dispatcher(ipv6, generation);
   }
 
+  static std::pair<bool, std::uint64_t>
+  observe_forward_reject_publication_boundary(
+      FirewallSetGeneration generation,
+      bool ipv6 = false) {
+    IptablesFirewall fw;
+    const auto before = fw.meta_udp443_publication_epoch();
+    bool failed = false;
+    try {
+      fw.publish_forward_reject_dispatcher(ipv6, generation);
+    } catch (const FirewallError&) {
+      failed = true;
+    }
+    return {
+        failed,
+        fw.meta_udp443_publication_epoch() - before};
+  }
+
   static void stage_then_publish_forward_reject(
       FirewallSetGeneration generation,
       bool ipv6 = false) {
@@ -932,6 +949,51 @@ TEST_CASE("Meta UDP 443 iptables publishes independent A B generations") {
   CHECK(transactions.find(
             "-A KeenPbrMeta443 -j KeenPbrMeta443_B") !=
         std::string::npos);
+  testing::reset_restore_wait_option_probe_for_test();
+}
+
+TEST_CASE(
+    "Meta UDP 443 publication epoch changes only at the restore boundary") {
+  IptablesTestTempDir temp;
+  write_meta_udp443_test_tools(temp.path());
+  const auto state = temp.path() / "state";
+  const auto scripts = temp.path() / "scripts";
+  const auto last_script = temp.path() / "last-script";
+  IptablesTestEnvironment path("PATH");
+  IptablesTestEnvironment state_env("KPBR_META_STATE");
+  IptablesTestEnvironment scripts_env("KPBR_META_SCRIPTS");
+  IptablesTestEnvironment last_env("KPBR_META_LAST_SCRIPT");
+  IptablesTestEnvironment fail_stage("KPBR_META_FAIL_STAGE");
+  IptablesTestEnvironment fail_disable("KPBR_META_FAIL_DISABLE");
+  use_iptables_test_path(path, temp.path());
+  state_env.set(state.string());
+  scripts_env.set(scripts.string());
+  last_env.set(last_script.string());
+  fail_stage.set("0");
+  fail_disable.set("0");
+  IptablesFailurePathGuard failure_path(temp.path() / "last-failure");
+  testing::reset_restore_wait_option_probe_for_test();
+
+  {
+    std::ofstream out(state);
+    // The unexpected foreign reference is rejected by read-only preflight.
+    out << "conditional";
+  }
+  const auto [preflight_failed, preflight_epoch_delta] =
+      T::observe_forward_reject_publication_boundary(
+          FirewallSetGeneration::B);
+  CHECK(preflight_failed);
+  CHECK(preflight_epoch_delta == 0U);
+
+  {
+    std::ofstream out(state);
+    out << "missing";
+  }
+  const auto [publication_failed, publication_epoch_delta] =
+      T::observe_forward_reject_publication_boundary(
+          FirewallSetGeneration::A);
+  CHECK_FALSE(publication_failed);
+  CHECK(publication_epoch_delta == 1U);
   testing::reset_restore_wait_option_probe_for_test();
 }
 

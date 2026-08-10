@@ -1389,13 +1389,18 @@ ConntrackManager::observe_forwarded_destination_flows(
 
         const auto parsed = parse_exact_conntrack_flow(line);
         if (!parsed.has_value()) {
-            if (options.media_seed_udp_destination_port.has_value()) {
+            const auto requested_media_seed_port =
+                options.media_seed_destination_port.has_value()
+                ? options.media_seed_destination_port
+                : options.media_seed_udp_destination_port;
+            if (requested_media_seed_port.has_value()) {
                 // Fail closed only when the malformed record can still be
-                // identified as an original-direction UDP flow to the
-                // authoritative destination scope and requested port. A
-                // malformed UDP/443 record for Google, or a reply tuple whose
-                // dport happens to be 443, must not disable this narrow Meta
-                // policy for the whole router.
+                // identified as an original-direction seed transport to the
+                // authoritative destination scope and requested port. The
+                // generic preventive view admits TCP or UDP; the activation
+                // preflight remains UDP-only. An unrelated destination or a
+                // reply tuple whose dport happens to match must not disable
+                // the narrow policy for the whole router.
                 std::istringstream partial_stream(std::string{line});
                 std::string family_token;
                 std::string family_number;
@@ -1476,10 +1481,14 @@ ConntrackManager::observe_forwarded_destination_flows(
                         partial_source->value) != 0U;
                 const bool requested_port_possible =
                     partial_destination_port ==
-                        options.media_seed_udp_destination_port ||
+                        requested_media_seed_port ||
                     (destination_matches &&
                      !partial_destination_port.has_value());
-                if (protocol_token == "udp" &&
+                const bool requested_protocol_possible =
+                    options.media_seed_destination_port.has_value()
+                    ? protocol_token == "tcp" || protocol_token == "udp"
+                    : protocol_token == "udp";
+                if (requested_protocol_possible &&
                     !destination_proven_outside_scope &&
                     !router_originated &&
                     requested_port_possible) {
@@ -1568,8 +1577,14 @@ ConntrackManager::observe_forwarded_destination_flows(
             [&parsed](const NormalizedTargetCidr& selector) {
                 return cidr_contains(selector, parsed->original.destination);
             });
+        const bool ordinary_transport_matches =
+            !options.ordinary_tcp_destination_port.has_value() ||
+            (parsed->protocol == ConntrackFlowProtocol::Tcp &&
+             parsed->original.destination_port ==
+                 *options.ordinary_tcp_destination_port);
         if (options.include_ordinary_destination_flows &&
             ordinary_mark_eligible &&
+            ordinary_transport_matches &&
             seen_flows.insert(identity).second) {
             if (!claim_flow_budget(identity)) {
                 observation.flow_limit_reached = true;
@@ -1578,10 +1593,13 @@ ConntrackManager::observe_forwarded_destination_flows(
             observation.flows.push_back(observed_flow);
         }
         const bool media_seed_transport_matches =
-            !options.media_seed_udp_destination_port.has_value() ||
-            (parsed->protocol == ConntrackFlowProtocol::Udp &&
-             parsed->original.destination_port ==
-                 *options.media_seed_udp_destination_port);
+            options.media_seed_destination_port.has_value()
+            ? parsed->original.destination_port ==
+                  *options.media_seed_destination_port
+            : (!options.media_seed_udp_destination_port.has_value() ||
+               (parsed->protocol == ConntrackFlowProtocol::Udp &&
+                parsed->original.destination_port ==
+                    *options.media_seed_udp_destination_port));
         if (media_seed_matches && media_seed_transport_matches &&
             seen_media_seed_flows.insert(identity).second) {
             if (!claim_flow_budget(identity)) {

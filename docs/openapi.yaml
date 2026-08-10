@@ -1560,28 +1560,6 @@ components:
           items:
             type: string
           example: [meta_whatsapp_ip]
-        experimental_whatsapp_tcp_reset_sources:
-          type: array
-          nullable: true
-          maxItems: 8
-          uniqueItems: true
-          description: >
-            Experimental, per-device opt-in for preventive WhatsApp TCP
-            rotation. Each item must be one exact IPv4 source address of a LAN
-            device. Omission or an empty array disables the feature. When the
-            immutable packaged WhatsApp IP companion observes an idle,
-            keepalive-only exact TCP flow for an opted-in device, keen-pbr may
-            install one short-lived TCP reset window for that exact 5-tuple
-            and full conntrack mark before retiring only that conntrack entry.
-            The rule is never created for a CIDR, all Meta destinations, an
-            unlisted device, an unverified companion, or while active UDP media
-            protects the source. This experimental actuator is supported only
-            by the iptables backend and remains disabled by default.
-          items:
-            type: string
-            format: ipv4
-          default: []
-          example: [192.168.1.44]
         meta_udp443_policy:
           type: string
           nullable: true

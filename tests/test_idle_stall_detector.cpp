@@ -92,10 +92,9 @@ IdleStallScan scan(
 
 IdleStallScan preventive_scan(
     std::vector<IdleStallFlowSample> flows,
-    std::string opted_in_source) {
+    std::uint32_t trusted_mark = 0x00030000U) {
     auto result = scan(std::move(flows));
-    result.preventive_tcp_reset_sources.insert(
-        std::move(opted_in_source));
+    result.preventive_tcp_reset_owned_mark = trusted_mark;
     return result;
 }
 
@@ -215,7 +214,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "IdleStallDetector rotates an opted-in packaged WhatsApp 2/2 tuple after a full quiet threshold") {
+    "IdleStallDetector automatically rotates a packaged WhatsApp 2/2 tuple after a full quiet threshold") {
     const auto whatsapp_policy =
         IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
     const auto frozen = tcp_sample(
@@ -232,47 +231,70 @@ TEST_CASE(
     IdleStallDetector detector;
 
     CHECK(detector.observe(
-        preventive_scan({frozen}, frozen.key.source), at(0s)).empty());
+        preventive_scan({frozen}), at(0s)).empty());
     CHECK(detector.observe(
-        preventive_scan({frozen}, frozen.key.source), at(29s)).empty());
+        preventive_scan({frozen}), at(29s)).empty());
     const auto decisions = detector.observe(
-        preventive_scan({frozen}, frozen.key.source), at(30s));
+        preventive_scan({frozen}), at(30s));
     REQUIRE(decisions.size() == 1U);
     CHECK(decisions.front().flow == frozen.key);
     CHECK(decisions.front().reason ==
-          IdleStallDecisionReason::idle_opt_in_tcp_reset_rotation);
+          IdleStallDecisionReason::
+              idle_packaged_whatsapp_tcp_reset_rotation);
 }
 
 TEST_CASE(
-    "IdleStallDetector keeps preventive WhatsApp rotation explicit and tiny") {
+    "IdleStallDetector establishes a fresh baseline when preventive authority appears") {
+    const auto frozen = tcp_sample(
+        "192.168.1.117", "157.240.241.60", 52341,
+        2, 141, 2, 145, 0x00030000U, false,
+        IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion);
+    IdleStallDetector detector;
+
+    CHECK(detector.observe(scan({frozen}), at(0s)).empty());
+    CHECK(detector.observe(scan({frozen}), at(30s)).empty());
+    CHECK(detector.observe(preventive_scan({frozen}), at(31s)).empty());
+    CHECK(detector.observe(preventive_scan({frozen}), at(60s)).empty());
+    REQUIRE(
+        detector.observe(preventive_scan({frozen}), at(61s)).size() == 1U);
+}
+
+TEST_CASE(
+    "IdleStallDetector keeps automatic WhatsApp rotation exact and tiny") {
     const auto whatsapp_policy =
         IdleStallRecoveryPolicy::packaged_whatsapp_ip_companion;
-    const auto opted_in_source = std::string{"192.168.1.117"};
-    const auto unlisted = tcp_sample(
-        "192.168.1.118", "157.240.241.60", 52342,
-        2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
     const auto ordinary = tcp_sample(
-        opted_in_source, "157.240.241.61", 52343,
+        "192.168.1.117", "157.240.241.61", 52343,
         2, 141, 2, 145, 0x00030000U);
     const auto large = tcp_sample(
-        opted_in_source, "157.240.241.62", 52344,
+        "192.168.1.118", "157.240.241.62", 52344,
         5, 513, 2, 145, 0x00030000U, false, whatsapp_policy);
     const auto markless = tcp_sample(
-        opted_in_source, "157.240.241.63", 52345,
+        "192.168.1.119", "157.240.241.63", 52345,
         2, 141, 2, 145, 0U, false, whatsapp_policy);
+    const auto wrong_mark = tcp_sample(
+        "192.168.1.120", "157.240.241.64", 52346,
+        2, 141, 2, 145, 0x00040000U, false, whatsapp_policy);
     auto other_port = tcp_sample(
-        opted_in_source, "157.240.241.64", 52346,
+        "192.168.1.121", "157.240.241.65", 52347,
         2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
     other_port.key.destination_port = 5222U;
 
     for (const auto& flow :
-         {unlisted, ordinary, large, markless, other_port}) {
+         {ordinary, large, markless, wrong_mark, other_port}) {
         IdleStallDetector detector;
         CHECK(detector.observe(
-            preventive_scan({flow}, opted_in_source), at(0s)).empty());
+            preventive_scan({flow}), at(0s)).empty());
         CHECK(detector.observe(
-            preventive_scan({flow}, opted_in_source), at(30s)).empty());
+            preventive_scan({flow}), at(30s)).empty());
     }
+
+    const auto valid = tcp_sample(
+        "192.168.1.122", "157.240.241.66", 52348,
+        2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
+    IdleStallDetector no_authority;
+    CHECK(no_authority.observe(scan({valid}), at(0s)).empty());
+    CHECK(no_authority.observe(scan({valid}), at(30s)).empty());
 }
 
 TEST_CASE(
@@ -284,16 +306,16 @@ TEST_CASE(
         2, 141, 2, 145, 0x00030000U, false, whatsapp_policy);
     IdleStallDetector detector;
     CHECK(detector.observe(
-        preventive_scan({flow}, flow.key.source), at(0s)).empty());
+        preventive_scan({flow}), at(0s)).empty());
 
     ++flow.counters.original_packets;
     flow.counters.original_bytes += 20;
     CHECK(detector.observe(
-        preventive_scan({flow}, flow.key.source), at(20s)).empty());
+        preventive_scan({flow}), at(20s)).empty());
     CHECK(detector.observe(
-        preventive_scan({flow}, flow.key.source), at(30s)).empty());
+        preventive_scan({flow}), at(30s)).empty());
     REQUIRE(detector.observe(
-        preventive_scan({flow}, flow.key.source), at(50s)).size() == 1U);
+        preventive_scan({flow}), at(50s)).size() == 1U);
 }
 
 TEST_CASE(
@@ -308,8 +330,7 @@ TEST_CASE(
         100, 10000, 100, 10000, 0x00030000U);
     IdleStallDetector detector;
     CHECK(detector.observe(
-        preventive_scan(
-            {signalling, media}, signalling.key.source),
+        preventive_scan({signalling, media}),
         at(0s)).empty());
 
     ++media.counters.original_packets;
@@ -317,8 +338,7 @@ TEST_CASE(
     ++media.counters.reply_packets;
     media.counters.reply_bytes += 120;
     CHECK(detector.observe(
-        preventive_scan(
-            {signalling, media}, signalling.key.source),
+        preventive_scan({signalling, media}),
         at(30s)).empty());
 }
 

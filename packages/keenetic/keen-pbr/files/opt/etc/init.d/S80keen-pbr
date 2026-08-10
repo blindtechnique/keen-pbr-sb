@@ -1401,7 +1401,7 @@ stop_keen_pbr() {
     local mode="${1:-stop}"
     local pids
     local counter=0
-    local limit=15
+    local limit=45
     local forced=no
     local term_failed=no
 

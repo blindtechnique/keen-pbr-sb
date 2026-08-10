@@ -646,6 +646,31 @@ TEST_CASE("Meta UDP 443 deferred cleanup is nonzero and rollback fenced") {
     CHECK_FALSE(
         should_restore_pending_meta_udp443_cleanup_after_apply_failure(
             true, 17U, 17U, true));
+    // An ordinary firewall failure before the independently tracked Meta
+    // publication boundary retains the prior exact-cleanup plan and must not
+    // raise an ambiguous Meta incident.
+    CHECK_FALSE(meta_udp443_publication_may_have_changed(41U, 41U));
+    CHECK(should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+        true,
+        17U,
+        17U,
+        meta_udp443_publication_may_have_changed(41U, 41U)));
+    CHECK_FALSE(should_report_ambiguous_meta_udp443_publication_failure(
+        false, 41U, 41U));
+    // A failure after the backend crossed the publication boundary keeps the
+    // existing fail-closed behavior: old deletion authority is discarded and
+    // bounded reconciliation is requested.
+    CHECK(meta_udp443_publication_may_have_changed(41U, 42U));
+    CHECK_FALSE(
+        should_restore_pending_meta_udp443_cleanup_after_apply_failure(
+            true,
+            17U,
+            17U,
+            meta_udp443_publication_may_have_changed(41U, 42U)));
+    CHECK(should_report_ambiguous_meta_udp443_publication_failure(
+        false, 41U, 42U));
+    CHECK_FALSE(should_report_ambiguous_meta_udp443_publication_failure(
+        true, 41U, 42U));
     CHECK(should_retain_candidate_meta_udp443_cleanup_after_apply_failure(
         true, true));
     CHECK_FALSE(
@@ -1165,7 +1190,7 @@ TEST_CASE("strong reconnect catalogue recommendation remains opt-out") {
 }
 
 TEST_CASE(
-    "experimental WhatsApp TCP reset requests observation independently of strong reconnect") {
+    "packaged WhatsApp prevention requests observation independently of strong reconnect") {
     Config config;
     config.daemon = DaemonConfig{};
     ListConfig packaged;
@@ -1176,13 +1201,7 @@ TEST_CASE(
     config.daemon->reconnect_unmarked_flows_on_routing_change = false;
     config.daemon->reconnect_owned_flows_on_routing_change_lists =
         std::vector<std::string>{};
-    CHECK_FALSE(idle_stall_observer_requested(config));
-
-    config.daemon->experimental_whatsapp_tcp_reset_sources =
-        std::vector<std::string>{"192.168.1.117"};
     CHECK(idle_stall_observer_requested(config));
-    CHECK(experimental_whatsapp_tcp_reset_sources(config) ==
-          std::set<std::string>{"192.168.1.117"});
     CHECK(packaged_whatsapp_ip_companion_list_names(config) ==
           std::set<std::string>{"catalog_entry"});
     CHECK(preventive_whatsapp_media_guard_list_names(config) ==
@@ -1194,8 +1213,9 @@ TEST_CASE(
     CHECK_FALSE(preventive_whatsapp_media_guard_available(
         FirewallBackend::nftables, true));
 
-    config.daemon->experimental_whatsapp_tcp_reset_sources =
-        std::vector<std::string>{};
+    config.lists = std::map<std::string, ListConfig>{
+        {"whatsapp_copy", spoofed}};
+    CHECK_FALSE(idle_stall_observer_requested(config));
     CHECK(preventive_whatsapp_media_guard_list_names(config).empty());
 }
 

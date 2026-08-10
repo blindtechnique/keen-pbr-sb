@@ -52,21 +52,10 @@ reconnect_owned_flows_on_routing_change_list_names(
     return recommended;
 }
 
-inline std::set<std::string>
-experimental_whatsapp_tcp_reset_sources(const Config& config) {
-    const auto daemon = config.daemon.value_or(DaemonConfig{});
-    if (!daemon.experimental_whatsapp_tcp_reset_sources.has_value()) {
-        return {};
-    }
-    return {
-        daemon.experimental_whatsapp_tcp_reset_sources->begin(),
-        daemon.experimental_whatsapp_tcp_reset_sources->end()};
-}
-
-// Immutable provenance selector used by the independent experimental
-// preventive observer. Unlike UDP call affinity, this does not inherit the
-// strong-reconnect enable/selection switches: the new per-device opt-in is
-// its own authority and still cannot admit copied or manually named lists.
+// Immutable provenance selector used by the independent preventive observer.
+// Unlike UDP call affinity, this does not inherit the strong-reconnect
+// enable/selection switches: an active packaged companion route is its own
+// authority and copied or manually named lists cannot enable the actuator.
 inline std::set<std::string>
 packaged_whatsapp_ip_companion_list_names(const Config& config) {
     std::set<std::string> selected;
@@ -82,13 +71,9 @@ packaged_whatsapp_ip_companion_list_names(const Config& config) {
 // Preventive rotation also needs the packaged call-affinity observer. Its
 // source-wide high-port UDP view is a read-only safety guard: without it an
 // ongoing P2P call could become invisible after the short companion-media
-// hold and allow signalling TCP to be reset. This authority exists only when
-// at least one device explicitly opted in.
+// hold and allow signalling TCP to be reset.
 inline std::set<std::string>
 preventive_whatsapp_media_guard_list_names(const Config& config) {
-    if (experimental_whatsapp_tcp_reset_sources(config).empty()) {
-        return {};
-    }
     return packaged_whatsapp_ip_companion_list_names(config);
 }
 
@@ -100,7 +85,7 @@ inline bool preventive_whatsapp_media_guard_available(
 }
 
 inline bool idle_stall_observer_requested(const Config& config) {
-    return !experimental_whatsapp_tcp_reset_sources(config).empty() ||
+    return !packaged_whatsapp_ip_companion_list_names(config).empty() ||
            (reconnect_unmarked_flows_on_routing_change_enabled(config) &&
             !reconnect_owned_flows_on_routing_change_list_names(config)
                  .empty());
@@ -972,6 +957,21 @@ inline bool should_restore_pending_meta_udp443_cleanup_after_apply_failure(
     return !replacement_meta_policy_may_have_changed &&
            pending_plan_available &&
            pending_runtime_generation == current_runtime_generation;
+}
+
+inline bool meta_udp443_publication_may_have_changed(
+    std::uint64_t epoch_before_apply,
+    std::uint64_t epoch_after_failure) noexcept {
+    return epoch_before_apply != epoch_after_failure;
+}
+
+inline bool should_report_ambiguous_meta_udp443_publication_failure(
+    bool replacement_meta_policy_committed,
+    std::uint64_t epoch_before_apply,
+    std::uint64_t epoch_after_failure) noexcept {
+    return !replacement_meta_policy_committed &&
+           meta_udp443_publication_may_have_changed(
+               epoch_before_apply, epoch_after_failure);
 }
 
 inline bool should_retain_candidate_meta_udp443_cleanup_after_apply_failure(

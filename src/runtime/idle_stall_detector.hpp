@@ -126,16 +126,16 @@ struct IdleStallScan {
     std::uint32_t owned_mark_mask{0};
     IdleStallScanStatus status;
     std::vector<IdleStallFlowSample> flows;
-    // Explicit per-device opt-in for the experimental exact TCP-reset
-    // actuator. An empty set is the default and cannot change ordinary
-    // recovery behavior.
-    std::set<std::string> preventive_tcp_reset_sources;
+    // Exactly one realized, trusted mark owned by the immutable packaged
+    // WhatsApp companion route may enable the preventive exact TCP-reset
+    // actuator. Absence or ambiguity keeps it disabled for every client.
+    std::optional<std::uint32_t> preventive_tcp_reset_owned_mark;
 };
 
 enum class IdleStallDecisionReason : std::uint8_t {
     idle_request_without_reply,
     idle_fastnat_rotation,
-    idle_opt_in_tcp_reset_rotation,
+    idle_packaged_whatsapp_tcp_reset_rotation,
 };
 
 struct IdleStallDeleteDecision {
@@ -207,14 +207,23 @@ public:
         whatsapp_fast_followup_requested_ = false;
         prune_limits(now);
 
+        const bool preventive_authority_valid =
+            !scan.preventive_tcp_reset_owned_mark.has_value() ||
+            (*scan.preventive_tcp_reset_owned_mark != 0U &&
+             (*scan.preventive_tcp_reset_owned_mark &
+              ~scan.owned_mark_mask) == 0U);
         if (!scan.epoch.valid() || scan.owned_mark_mask == 0U ||
+            !preventive_authority_valid ||
             !scan.status.trustworthy() ||
             scan.flows.size() > options_.max_tracked_flows) {
             reset_observation_continuity();
             if (scan.epoch.valid()) {
                 active_epoch_ = scan.epoch;
+                active_preventive_tcp_reset_owned_mark_ =
+                    scan.preventive_tcp_reset_owned_mark;
             } else {
                 active_epoch_.reset();
+                active_preventive_tcp_reset_owned_mark_.reset();
             }
             return {};
         }
@@ -223,6 +232,16 @@ public:
             *active_epoch_ != scan.epoch) {
             reset_observation_continuity();
             active_epoch_ = scan.epoch;
+            active_preventive_tcp_reset_owned_mark_ =
+                scan.preventive_tcp_reset_owned_mark;
+        } else if (active_preventive_tcp_reset_owned_mark_ !=
+                   scan.preventive_tcp_reset_owned_mark) {
+            // Authority is part of the observation identity. Enabling,
+            // disabling or changing the realized mark on unchanged CIDRs must
+            // establish a fresh full quiet baseline before any exact reset.
+            reset_observation_continuity();
+            active_preventive_tcp_reset_owned_mark_ =
+                scan.preventive_tcp_reset_owned_mark;
         }
 
         std::set<IdleStallFlowKey> unique_keys;
@@ -372,8 +391,9 @@ public:
             } else if (state.recovery_policy ==
                            IdleStallRecoveryPolicy::
                                packaged_whatsapp_ip_companion &&
-                       scan.preventive_tcp_reset_sources.count(
-                           current.sample->key.source) != 0U &&
+                       scan.preventive_tcp_reset_owned_mark.has_value() &&
+                       current.sample->key.full_mark ==
+                           *scan.preventive_tcp_reset_owned_mark &&
                        current.sample->key.protocol ==
                            IdleStallProtocol::tcp &&
                        current.sample->key.destination_port == 443U &&
@@ -391,8 +411,8 @@ public:
                        !current.original_application_progress &&
                        !current.reply_application_progress) {
                 // This is deliberately narrower than FASTNAT rotation: only
-                // an explicitly opted-in device and the immutable packaged
-                // WhatsApp companion may request the one-shot TCP reset.
+                // an exact realized mark from the immutable packaged WhatsApp
+                // companion may request the one-shot TCP reset.
                 // A tuple must remain byte-for-byte unchanged for the full
                 // threshold and stay within the tiny lifetime envelope. The
                 // exact 2/2 handshake-only live failure qualifies; ordinary
@@ -400,7 +420,7 @@ public:
                 candidates.push_back(Candidate{
                     current.sample->key,
                     IdleStallDecisionReason::
-                        idle_opt_in_tcp_reset_rotation});
+                        idle_packaged_whatsapp_tcp_reset_rotation});
             } else if (options_.rotate_idle_fastnat_tcp &&
                        current.sample->fastnat &&
                        current.sample->key.protocol ==
@@ -552,6 +572,7 @@ public:
 
     void reset() noexcept {
         active_epoch_.reset();
+        active_preventive_tcp_reset_owned_mark_.reset();
         states_.clear();
         active_media_until_.clear();
         pending_attempts_.clear();
@@ -714,6 +735,8 @@ private:
 
     IdleStallDetectorOptions options_;
     std::optional<IdleStallEpoch> active_epoch_;
+    std::optional<std::uint32_t>
+        active_preventive_tcp_reset_owned_mark_;
     std::map<IdleStallFlowKey, FlowState> states_;
     std::map<SourceKey, TimePoint> active_media_until_;
     std::map<IdleStallFlowKey, PendingAttempt> pending_attempts_;

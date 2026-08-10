@@ -53,6 +53,47 @@ void BlockingExecutor::shutdown() {
     worker_starts_.clear();
 }
 
+void BlockingExecutor::cancel_pending() {
+    // Destroy abandoned callbacks outside mutex_: their captured RAII state
+    // may wake another coordinator or release an admission lease.
+    std::queue<Task> abandoned;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutdown_complete_) {
+            return;
+        }
+        queue_.swap(abandoned);
+    }
+    space_cv_.notify_all();
+}
+
+void BlockingExecutor::cancel_pending_and_shutdown() {
+    // Destroy abandoned callbacks outside mutex_: their captured RAII state
+    // may wake another coordinator or release an admission lease.
+    std::queue<Task> abandoned;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutdown_complete_) {
+            return;
+        }
+        stopping_ = true;
+        shutdown_complete_ = true;
+        queue_.swap(abandoned);
+    }
+    cv_.notify_all();
+    space_cv_.notify_all();
+
+    // Release queued promises/leases before waiting for the tasks which were
+    // already claimed by a worker. No queued callback can start after the
+    // swap, while an active callback retains its ordinary completion contract.
+    abandoned = {};
+    for (auto& worker : workers_) {
+        pthread_join(worker, nullptr);
+    }
+    workers_.clear();
+    worker_starts_.clear();
+}
+
 void* BlockingExecutor::worker_entry(void* arg) noexcept {
     auto* start = static_cast<WorkerStart*>(arg);
     start->executor->worker_loop(start->index);

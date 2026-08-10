@@ -27,6 +27,11 @@
     "packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/uci.sh"
 #endif
 
+#ifndef KEEN_PBR_KEENETIC_INIT_PATH
+#define KEEN_PBR_KEENETIC_INIT_PATH \
+    "packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr"
+#endif
+
 namespace {
 
 std::string read_helper(const std::string& path) {
@@ -104,4 +109,11 @@ TEST_CASE("OpenWrt dnsmasq jail can execute and persist the managed helper") {
     CHECK(package_makefile.find(
               "-DKEEN_PBR_CONTROL_SOCKET:STRING=/var/run/dnsmasq/keen-pbr/control.sock") !=
           std::string::npos);
+}
+
+TEST_CASE("Keenetic service stop guard exceeds one bounded probe generation") {
+    const auto init = read_helper(KEEN_PBR_KEENETIC_INIT_PATH);
+
+    CHECK(init.find("local limit=45") != std::string::npos);
+    CHECK(init.find("local limit=15") == std::string::npos);
 }

@@ -2760,6 +2760,16 @@ void NftablesFirewall::apply(FirewallApplyMode mode) {
     Logger::instance().verbose("nft json:\n{}", json_str);
 
     // Apply atomically via nft -j -f -
+    const bool meta_udp443_publication_requested =
+        live_state.forward_udp_reject_chain_exists ||
+        !candidate_forward_udp_rejects.empty();
+    if (meta_udp443_publication_requested) {
+        // The Meta chain shares nft's atomic table transaction. Only batches
+        // which actually add, replace, or remove that chain enter its
+        // publication boundary; an already-balanced ordinary refresh does
+        // not.
+        enter_meta_udp443_publication_boundary();
+    }
     std::string error_output;
     int status = safe_exec_pipe_stdin(
         {"nft", "-j", "-f", "-"},

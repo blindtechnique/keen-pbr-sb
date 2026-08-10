@@ -149,6 +149,56 @@ TEST_CASE("blocking executor shutdown drains queued tasks before joining") {
     CHECK_THROWS(future.get());
 }
 
+TEST_CASE("blocking executor service shutdown cancels queued tasks and joins active work") {
+    BlockingExecutor executor(1, 2);
+    std::atomic<int> active_runs{0};
+    std::atomic<int> queued_runs{0};
+    std::promise<void> active_started_promise;
+    auto active_started = active_started_promise.get_future();
+    std::promise<void> release_active_promise;
+    auto release_active = release_active_promise.get_future().share();
+
+    auto active = executor.submit("active-service-task", [&]() {
+        ++active_runs;
+        active_started_promise.set_value();
+        release_active.wait();
+    });
+    active_started.wait();
+
+    auto queued_before_quiesce = executor.submit("queued-before-quiesce", [&]() {
+        ++queued_runs;
+    });
+    executor.cancel_pending();
+    CHECK(queued_runs.load() == 0);
+    CHECK_THROWS(queued_before_quiesce.get());
+
+    // The pool remains live during coordinator quiescence. Final shutdown
+    // must also discard any later task which no worker has claimed.
+    auto queued_at_shutdown = executor.submit("queued-at-shutdown", [&]() {
+        ++queued_runs;
+    });
+
+    std::promise<void> shutdown_complete_promise;
+    auto shutdown_complete = shutdown_complete_promise.get_future();
+    std::thread shutdown_thread([&]() {
+        executor.cancel_pending_and_shutdown();
+        shutdown_complete_promise.set_value();
+    });
+
+    CHECK(shutdown_complete.wait_for(std::chrono::milliseconds(25)) ==
+          std::future_status::timeout);
+    CHECK(queued_runs.load() == 0);
+    CHECK_THROWS(queued_at_shutdown.get());
+
+    release_active_promise.set_value();
+    shutdown_thread.join();
+
+    CHECK_NOTHROW(active.get());
+    CHECK(active_runs.load() == 1);
+    CHECK(queued_runs.load() == 0);
+    CHECK_FALSE(executor.try_post("late-service-task", []() {}));
+}
+
 TEST_CASE("blocking executor workers inherit daemon-managed signal mask") {
     ScopedDaemonSignalMask signal_mask;
     BlockingExecutor executor(1, 4);

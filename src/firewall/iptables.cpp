@@ -2311,6 +2311,11 @@ void IptablesFirewall::publish_forward_reject_dispatcher(
     script += keen_pbr3::format(
         "-I FORWARD 1 -j {}\nCOMMIT\n",
         META_UDP_443_CHAIN_NAME);
+    // This is the first operation in the iptables apply which can mutate the
+    // independently owned Meta filter. Everything above is read-only
+    // preflight; ordinary mangle/NAT publication earlier in apply() must not
+    // be misreported as a Meta boundary failure.
+    enter_meta_udp443_publication_boundary();
     pipe_to_cmd({restore, "--noflush", "--counters"}, script);
 }
 
@@ -2711,6 +2716,7 @@ void IptablesFirewall::disable_forward_reject_scaffold(bool ipv6) const {
     // iptables-restore commits the hook and all owned-chain removals as one
     // transaction. A failed cleanup therefore leaves messages_first fully
     // authoritative instead of producing a half-disabled policy.
+    enter_meta_udp443_publication_boundary();
     pipe_to_cmd({restore, "--noflush", "--counters"}, script);
 
     const auto after = run_iptables_control(inspect_args);

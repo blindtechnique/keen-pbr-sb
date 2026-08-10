@@ -128,6 +128,28 @@ ConntrackFlowObservationOptions meta_udp443_observation_options(
     return options;
 }
 
+ConntrackFlowObservationOptions idle_stall_observation_options(
+    bool ipv6_enabled,
+    bool packaged_whatsapp_only) {
+    ConntrackFlowObservationOptions options;
+    options.ipv6_enabled = ipv6_enabled;
+    options.max_flows = IDLE_STALL_MAX_FLOWS;
+    options.max_destination_input_cidrs =
+        IDLE_STALL_MAX_DESTINATION_CIDRS;
+    options.max_snapshot_bytes = IDLE_STALL_MAX_SNAPSHOT_BYTES;
+    options.max_snapshot_lines = IDLE_STALL_MAX_SNAPSHOT_LINES;
+    options.allow_foreign_mark_bits_for_media = true;
+    if (packaged_whatsapp_only) {
+        // Filter both views before they claim the shared flow budget. This is
+        // the common office path: unrelated Meta sessions cannot make the
+        // exact TCP/443 candidate first-N dependent, while UDP/443 and the
+        // derived source-wide view still protect active media.
+        options.ordinary_tcp_destination_port = 443U;
+        options.media_seed_destination_port = 443U;
+    }
+    return options;
+}
+
 std::vector<InterfaceProbe::Target> collect_interface_probe_targets(
     const Config& config,
     const OutboundMarkMap& outbound_marks,
@@ -2302,11 +2324,12 @@ void Daemon::apply_firewall(
     auto previous_meta_cleanup =
         pending_meta_udp443_cleanup_;
     cancel_meta_udp443_activation_cleanup();
-    // Once Firewall::apply() is entered, a backend exception can be
-    // ambiguous: iptables/nft may already have published the Meta filter and
-    // then failed its post-COMMIT verification. Never restore deletion
-    // authority carrying selectors from the old list after that boundary.
-    bool meta_publication_may_have_changed = false;
+    // Snapshot the backend's exact Meta publication boundary independently
+    // from ordinary mangle/NAT work. A changed epoch after an exception is
+    // deliberately ambiguous: the filter may have committed before its
+    // command result or post-COMMIT verification failed.
+    const auto meta_publication_epoch_before =
+        firewall_->meta_udp443_publication_epoch();
     bool meta_policy_committed = false;
     std::optional<MetaUdp443ActivationPlan> meta_activation;
 
@@ -2377,7 +2400,6 @@ void Daemon::apply_firewall(
         staged.list_content_state,
         !has_explicit_inbound_scope && !has_native_vpn_bypass);
 
-    meta_publication_may_have_changed = true;
     commit_runtime_firewall(*firewall_, staged);
     meta_policy_committed = true;
     if (meta_activation.has_value()) {
@@ -2437,6 +2459,10 @@ void Daemon::apply_firewall(
         std::memory_order_acquire);
     if (meta_activation.has_value() && meta_fastnat_healthy &&
         meta_filter_health == OwnedForwardUdpRejectState::healthy) {
+        // A successful retry has replaced and reverified the filter
+        // generation. Clear a prior publication incident now; any later
+        // exact-cleanup failure records a fresh incident with its own detail.
+        meta_udp443_incidents_.reset("meta-udp443-activation");
         // The exact deletion is irreversible. Queue even the initial attempt
         // through the scheduler so it cannot run until the enclosing
         // config/resolver/persistence transaction has returned to the event
@@ -2477,6 +2503,17 @@ void Daemon::apply_firewall(
     }
 
     } catch (...) {
+        std::string firewall_failure_detail{
+            "unknown non-standard firewall exception"};
+        try {
+            throw;
+        } catch (const std::exception& error) {
+            try {
+                firewall_failure_detail = error.what();
+            } catch (...) {
+            }
+        } catch (...) {
+        }
         // Same-generation repair/restart must not lose a durable activation
         // plan merely because staging failed before Firewall::apply(). Once
         // that ambiguous boundary was entered, however, old selectors are no
@@ -2484,6 +2521,12 @@ void Daemon::apply_firewall(
         // during post-COMMIT verification.
         const auto current_generation =
             runtime_generation_.load(std::memory_order_acquire);
+        const auto meta_publication_epoch_after =
+            firewall_->meta_udp443_publication_epoch();
+        const bool meta_publication_may_have_changed =
+            keen_pbr3::meta_udp443_publication_may_have_changed(
+                meta_publication_epoch_before,
+                meta_publication_epoch_after);
         if (should_restore_pending_meta_udp443_cleanup_after_apply_failure(
                 previous_meta_cleanup.has_value(),
                 previous_meta_cleanup.has_value()
@@ -2511,14 +2554,27 @@ void Daemon::apply_firewall(
                 meta_udp443_cleanup_epoch_.load(
                     std::memory_order_acquire),
                 /*attempt=*/1U);
-        } else if (meta_publication_may_have_changed &&
-                   !meta_policy_committed) {
+        } else if (
+            should_report_ambiguous_meta_udp443_publication_failure(
+                meta_policy_committed,
+                meta_publication_epoch_before,
+                meta_publication_epoch_after)) {
             // Publication outcome is unknown. Do not delete under either old
             // or candidate selectors; a fresh full apply must rebuild and
             // verify authority before producing a new exact-cleanup plan.
-            report_meta_udp443_degraded(
-                "firewall apply failed after entering the Meta UDP/443 "
-                "publication boundary; exact cleanup authority was discarded");
+            try {
+                report_meta_udp443_degraded(keen_pbr3::format(
+                    "firewall apply failed after entering the Meta UDP/443 "
+                    "publication boundary; exact cleanup authority was "
+                    "discarded; underlying firewall error: {}",
+                    firewall_failure_detail));
+            } catch (...) {
+                report_meta_udp443_degraded(
+                    "firewall apply failed after entering the Meta UDP/443 "
+                    "publication boundary; exact cleanup authority was "
+                    "discarded; underlying firewall error could not be "
+                    "recorded");
+            }
             schedule_netfilter_runtime_refresh_noexcept(
                 NetfilterRefreshReason::full,
                 "could not schedule fresh Meta UDP/443 reconciliation after "
@@ -4855,6 +4911,8 @@ void Daemon::cancel_idle_stall_observer() noexcept {
     udp_call_affinity_detector_.reset();
     idle_stall_destination_selectors_.clear();
     udp_call_affinity_destination_selectors_.clear();
+    idle_stall_preventive_owned_mark_.reset();
+    idle_stall_packaged_whatsapp_only_observation_ = false;
     idle_stall_coverage_generation_.fetch_add(
         1U, std::memory_order_acq_rel);
 }
@@ -4887,6 +4945,8 @@ void Daemon::schedule_idle_stall_observer_after(
         udp_call_affinity_detector_.reset();
         idle_stall_destination_selectors_.clear();
         udp_call_affinity_destination_selectors_.clear();
+        idle_stall_preventive_owned_mark_.reset();
+        idle_stall_packaged_whatsapp_only_observation_ = false;
         idle_stall_coverage_generation_.fetch_add(
             1U, std::memory_order_acq_rel);
         try {
@@ -4903,6 +4963,8 @@ void Daemon::schedule_idle_stall_observer_after(
         udp_call_affinity_detector_.reset();
         idle_stall_destination_selectors_.clear();
         udp_call_affinity_destination_selectors_.clear();
+        idle_stall_preventive_owned_mark_.reset();
+        idle_stall_packaged_whatsapp_only_observation_ = false;
         idle_stall_coverage_generation_.fetch_add(
             1U, std::memory_order_acq_rel);
     }
@@ -5186,20 +5248,19 @@ void Daemon::run_idle_stall_observer() noexcept {
             configured_list_names =
                 reconnect_owned_flows_on_routing_change_list_names(config_);
         }
-        const auto preventive_sources =
-            experimental_whatsapp_tcp_reset_sources(config_);
         const bool preventive_guard_available =
             preventive_whatsapp_media_guard_available(
                 firewall_->backend(),
                 opts_.udp_call_affinity_ipset_available);
-        // The experimental actuator is deliberately iptables-only. On nft it
-        // contributes no observation scope, so a config that requests only
-        // this feature remains inert instead of falling back to broad delete.
-        if (!preventive_sources.empty() && preventive_guard_available) {
-            const auto whatsapp_lists =
-                packaged_whatsapp_ip_companion_list_names(config_);
+        const auto preventive_guard_lists =
+            preventive_whatsapp_media_guard_list_names(config_);
+        // The preventive actuator is deliberately iptables-only. On nft the
+        // packaged list contributes no automatic observation scope, so it
+        // remains inert instead of falling back to a broad delete.
+        if (preventive_guard_available) {
             configured_list_names.insert(
-                whatsapp_lists.begin(), whatsapp_lists.end());
+                preventive_guard_lists.begin(),
+                preventive_guard_lists.end());
         }
         const auto selected_list_names =
             active_destination_only_reconnect_list_names(
@@ -5211,9 +5272,7 @@ void Daemon::run_idle_stall_observer() noexcept {
         }
         auto whatsapp_call_affinity_lists =
             whatsapp_call_affinity_list_names(config_);
-        if (!preventive_sources.empty() && preventive_guard_available) {
-            const auto preventive_guard_lists =
-                preventive_whatsapp_media_guard_list_names(config_);
+        if (preventive_guard_available) {
             whatsapp_call_affinity_lists.insert(
                 preventive_guard_lists.begin(),
                 preventive_guard_lists.end());
@@ -5235,6 +5294,14 @@ void Daemon::run_idle_stall_observer() noexcept {
                 ++iterator;
             }
         }
+        std::set<std::string> active_preventive_guard_lists;
+        std::set_intersection(
+            preventive_guard_lists.begin(),
+            preventive_guard_lists.end(),
+            selected_list_names.begin(),
+            selected_list_names.end(),
+            std::inserter(active_preventive_guard_lists,
+                          active_preventive_guard_lists.end()));
         const auto trusted_whatsapp_targets =
             active_udp_call_affinity_targets(
                 whatsapp_latency_list_names,
@@ -5314,16 +5381,37 @@ void Daemon::run_idle_stall_observer() noexcept {
                 udp_call_affinity_detector_.reset();
             }
         }
+        const auto owned_mask = firewall_state_.get_fwmark_mask();
+        const bool preventive_whatsapp_authorized =
+            preventive_guard_available &&
+            !active_preventive_guard_lists.empty() &&
+            trusted_whatsapp_marks.size() == 1U && owned_mask != 0U &&
+            *trusted_whatsapp_marks.begin() != 0U &&
+            (*trusted_whatsapp_marks.begin() & ~owned_mask) == 0U;
+        const bool packaged_whatsapp_only_observation =
+            preventive_whatsapp_authorized &&
+            selected_list_names == active_preventive_guard_lists;
+        const std::optional<std::uint32_t> preventive_owned_mark =
+            preventive_whatsapp_authorized
+            ? std::optional<std::uint32_t>{
+                  *trusted_whatsapp_marks.begin()}
+            : std::nullopt;
         const bool idle_observation_scope_changed =
             destination_selectors != idle_stall_destination_selectors_ ||
             whatsapp_destination_selectors !=
-                udp_call_affinity_destination_selectors_;
+                udp_call_affinity_destination_selectors_ ||
+            preventive_owned_mark != idle_stall_preventive_owned_mark_ ||
+            packaged_whatsapp_only_observation !=
+                idle_stall_packaged_whatsapp_only_observation_;
         if (idle_observation_scope_changed) {
             idle_stall_detector_.reset();
             udp_call_affinity_detector_.reset();
             idle_stall_destination_selectors_ = destination_selectors;
             udp_call_affinity_destination_selectors_ =
                 whatsapp_destination_selectors;
+            idle_stall_preventive_owned_mark_ = preventive_owned_mark;
+            idle_stall_packaged_whatsapp_only_observation_ =
+                packaged_whatsapp_only_observation;
             idle_stall_coverage_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
         }
@@ -5339,7 +5427,6 @@ void Daemon::run_idle_stall_observer() noexcept {
         const auto coverage_generation =
             idle_stall_coverage_generation_.load(
                 std::memory_order_acquire);
-        const auto owned_mask = firewall_state_.get_fwmark_mask();
         const bool ipv6_enabled = resolve_ipv6_support(config_).enabled;
         if (runtime_generation == 0U || coverage_generation == 0U ||
             owned_mask == 0U) {
@@ -5370,6 +5457,8 @@ void Daemon::run_idle_stall_observer() noexcept {
              call_affinity_targets,
              retained_affinity_sources,
              trusted_whatsapp_marks,
+             preventive_whatsapp_authorized,
+             packaged_whatsapp_only_observation,
              whatsapp_destination_selectors,
              destination_selectors =
                  std::move(destination_selectors)]() mutable {
@@ -5405,13 +5494,9 @@ void Daemon::run_idle_stall_observer() noexcept {
                                 destination_selectors,
                                 local_interface_addresses,
                                 owned_mask,
-                                ConntrackFlowObservationOptions{
+                                idle_stall_observation_options(
                                     ipv6_enabled,
-                                    IDLE_STALL_MAX_FLOWS,
-                                    IDLE_STALL_MAX_DESTINATION_CIDRS,
-                                    IDLE_STALL_MAX_SNAPSHOT_BYTES,
-                                    IDLE_STALL_MAX_SNAPSHOT_LINES,
-                                    /*allow_foreign_mark_bits_for_media=*/true},
+                                    packaged_whatsapp_only_observation),
                                 retained_affinity_sources,
                                 whatsapp_destination_selectors,
                                 trusted_whatsapp_marks);
@@ -5440,6 +5525,8 @@ void Daemon::run_idle_stall_observer() noexcept {
                           std::move(call_affinity_targets),
                       trusted_whatsapp_marks =
                           std::move(trusted_whatsapp_marks),
+                      preventive_whatsapp_authorized,
+                      packaged_whatsapp_only_observation,
                       ipv6_enabled,
                      coverage_complete,
                      failure_detail =
@@ -5455,6 +5542,8 @@ void Daemon::run_idle_stall_observer() noexcept {
                                 std::move(whatsapp_destination_selectors),
                                 std::move(call_affinity_targets),
                                 std::move(trusted_whatsapp_marks),
+                                preventive_whatsapp_authorized,
+                                packaged_whatsapp_only_observation,
                                 ipv6_enabled,
                                 coverage_complete,
                                 std::move(failure_detail));
@@ -6060,6 +6149,8 @@ void Daemon::commit_idle_stall_observation(
     std::vector<std::string> whatsapp_destination_selectors,
     std::vector<UdpCallAffinityTarget> call_affinity_targets,
     std::set<std::uint32_t> trusted_whatsapp_marks,
+    bool preventive_whatsapp_authorized,
+    bool packaged_whatsapp_only_observation,
     bool ipv6_enabled,
     bool coverage_complete,
     std::string failure_detail) {
@@ -6108,14 +6199,20 @@ void Daemon::commit_idle_stall_observation(
         !observation.destination_input_truncated &&
         observation.invalid_destination_selectors == 0U &&
         observation.invalid_media_seed_destination_selectors == 0U &&
+        observation.invalid_media_seed_candidate_records == 0U &&
         !observation.media_seed_destination_input_truncated &&
         observation.invalid_media_guard_sources == 0U &&
         !observation.invalid_owned_mask;
-    if (preventive_whatsapp_media_guard_available(
+    if (preventive_whatsapp_authorized &&
+        preventive_whatsapp_media_guard_available(
             firewall_->backend(),
-            opts_.udp_call_affinity_ipset_available)) {
-        scan.preventive_tcp_reset_sources =
-            experimental_whatsapp_tcp_reset_sources(config_);
+            opts_.udp_call_affinity_ipset_available) &&
+        trusted_whatsapp_marks.size() == 1U) {
+        const auto trusted_mark = *trusted_whatsapp_marks.begin();
+        if (trusted_mark != 0U && owned_mask != 0U &&
+            (trusted_mark & ~owned_mask) == 0U) {
+            scan.preventive_tcp_reset_owned_mark = trusted_mark;
+        }
     }
     std::set<IdleStallFlowKey> whatsapp_latency_flow_keys;
     for (const auto& flow : observation.media_seed_flows) {
@@ -6126,7 +6223,8 @@ void Daemon::commit_idle_stall_observation(
         const auto key = idle_stall_key_from(flow);
         scan.flows.push_back(idle_stall_sample_from(
             flow,
-            whatsapp_latency_flow_keys.count(key) != 0U
+            (packaged_whatsapp_only_observation ||
+             whatsapp_latency_flow_keys.count(key) != 0U)
                 ? IdleStallRecoveryPolicy::
                       packaged_whatsapp_ip_companion
                 : IdleStallRecoveryPolicy::standard));
@@ -6306,6 +6404,7 @@ void Daemon::commit_idle_stall_observation(
          whatsapp_destination_selectors =
              std::move(whatsapp_destination_selectors),
          trusted_whatsapp_marks = std::move(trusted_whatsapp_marks),
+         packaged_whatsapp_only_observation,
          ipv6_enabled,
          observed_local_interface_addresses =
              std::move(observed_local_interface_addresses)]() mutable {
@@ -6350,13 +6449,9 @@ void Daemon::commit_idle_stall_observation(
                                 destination_selectors,
                                 current_local_interface_addresses,
                                 owned_mask,
-                                ConntrackFlowObservationOptions{
+                                idle_stall_observation_options(
                                     ipv6_enabled,
-                                    IDLE_STALL_MAX_FLOWS,
-                                    IDLE_STALL_MAX_DESTINATION_CIDRS,
-                                    IDLE_STALL_MAX_SNAPSHOT_BYTES,
-                                    IDLE_STALL_MAX_SNAPSHOT_LINES,
-                                    /*allow_foreign_mark_bits_for_media=*/true},
+                                    packaged_whatsapp_only_observation),
                                 media_guard_sources,
                                 whatsapp_destination_selectors,
                                 trusted_whatsapp_marks);
@@ -6376,6 +6471,9 @@ void Daemon::commit_idle_stall_observation(
                                     invalid_destination_selectors != 0U ||
                             current_observation.
                                     invalid_media_seed_destination_selectors !=
+                                0U ||
+                            current_observation.
+                                    invalid_media_seed_candidate_records !=
                                 0U;
 
                         std::set<std::pair<ConntrackFlowFamily, std::string>>
@@ -6434,7 +6532,7 @@ void Daemon::commit_idle_stall_observation(
                                 const bool preventive_tuple_still_frozen =
                                     pending.decision.reason !=
                                         IdleStallDecisionReason::
-                                            idle_opt_in_tcp_reset_rotation ||
+                                            idle_packaged_whatsapp_tcp_reset_rotation ||
                                     (current !=
                                          current_observation.flows.end() &&
                                      current->family ==
@@ -6563,7 +6661,7 @@ void Daemon::commit_idle_stall_observation(
                                 installed_reset_rule;
                             if (pending.decision.reason ==
                                 IdleStallDecisionReason::
-                                    idle_opt_in_tcp_reset_rotation) {
+                                    idle_packaged_whatsapp_tcp_reset_rotation) {
                                 if (pending.flow.family !=
                                         ConntrackFlowFamily::Ipv4 ||
                                     pending.flow.protocol !=
@@ -6684,7 +6782,7 @@ void Daemon::commit_idle_stall_observation(
                     if (succeeded != 0U) {
                         if (preventive_resets != 0U) {
                             Logger::instance().info(
-                                "Rotated {} opted-in frozen WhatsApp TCP "
+                                "Rotated {} frozen WhatsApp TCP "
                                 "tuple(s) with exact short-lived reset; {} "
                                 "total idle flow(s) recovered",
                                 preventive_resets,

@@ -65,7 +65,6 @@ import {
 } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -106,12 +105,6 @@ import {
   type MetaUdp443Policy,
   withMetaUdp443Policy,
 } from "@/lib/meta-udp-443-policy"
-import {
-  getWhatsAppTcpResetSourcesInput,
-  getWhatsAppTcpResetSourcesIssue,
-  MAX_WHATSAPP_TCP_RESET_SOURCES,
-  withWhatsAppTcpResetSources,
-} from "@/lib/whatsapp-tcp-reset-sources"
 
 type StrictEnforcementOption = "automatic" | "enabled" | "disabled"
 
@@ -124,7 +117,6 @@ type SettingsDraft = {
   clearDynamicSetsOnApply: boolean
   reconnectUnmarkedFlowsOnRoutingChange: boolean
   reconnectOwnedFlowsOnRoutingChangeLists: string[] | undefined
-  whatsappTcpResetSources: string
   metaUdp443Policy: MetaUdp443Policy
   ipv6Enabled: boolean
   clientDnsEnforcement: boolean
@@ -146,7 +138,6 @@ const fallbackDraft: SettingsDraft = {
   clearDynamicSetsOnApply: true,
   reconnectUnmarkedFlowsOnRoutingChange: true,
   reconnectOwnedFlowsOnRoutingChangeLists: undefined,
-  whatsappTcpResetSources: "",
   metaUdp443Policy: "balanced",
   ipv6Enabled: true,
   clientDnsEnforcement: false,
@@ -168,7 +159,6 @@ const SETTINGS_FIELD_NAMES = {
     "reconnectUnmarkedFlowsOnRoutingChange",
   reconnectOwnedFlowsOnRoutingChangeLists:
     "reconnectOwnedFlowsOnRoutingChangeLists",
-  whatsappTcpResetSources: "whatsappTcpResetSources",
   metaUdp443Policy: "metaUdp443Policy",
   ipv6Enabled: "ipv6Enabled",
   clientDnsEnforcement: "clientDnsEnforcement",
@@ -294,34 +284,6 @@ function LoadedGeneralConfigPage({
       label: t("pages.settings.tabs.maintenance"),
     },
   ]
-
-  const getWhatsappTcpResetSourcesError = (value: string) => {
-    const issue = getWhatsAppTcpResetSourcesIssue(value)
-    if (!issue) {
-      return undefined
-    }
-
-    switch (issue.kind) {
-      case "invalid":
-        return t(
-          "pages.settings.advanced.whatsappTcpResetSourcesValidationInvalid",
-          { value: issue.value }
-        )
-      case "duplicate":
-        return t(
-          "pages.settings.advanced.whatsappTcpResetSourcesValidationDuplicate",
-          { value: issue.value }
-        )
-      case "too_many":
-        return t(
-          "pages.settings.advanced.whatsappTcpResetSourcesValidationTooMany",
-          {
-            count: issue.count,
-            max: MAX_WHATSAPP_TCP_RESET_SOURCES,
-          }
-        )
-    }
-  }
 
   const form = useForm({
     defaultValues: getDraftFromConfig(loadedConfig),
@@ -1618,69 +1580,6 @@ function LoadedGeneralConfigPage({
 
               <FieldSeparator />
 
-              <form.Field
-                name={SETTINGS_FIELD_NAMES.whatsappTcpResetSources}
-                validators={{
-                  onMount: ({ value }) =>
-                    getWhatsappTcpResetSourcesError(value),
-                  onChange: ({ value }) =>
-                    getWhatsappTcpResetSourcesError(value),
-                }}
-              >
-                {(field) => {
-                  const error = getFirstFieldError(field.state.meta.errors)
-
-                  return (
-                    <Field width="short" invalid={Boolean(error)}>
-                      <FieldLabel htmlFor="whatsapp-tcp-reset-sources">
-                        {t(
-                          "pages.settings.advanced.whatsappTcpResetSourcesLabel"
-                        )}
-                      </FieldLabel>
-                      <FieldContent>
-                        <Textarea
-                          aria-invalid={Boolean(error)}
-                          autoCapitalize="none"
-                          id="whatsapp-tcp-reset-sources"
-                          inputMode="decimal"
-                          onBlur={field.handleBlur}
-                          onChange={(event) =>
-                            field.handleChange(event.target.value)
-                          }
-                          placeholder={t(
-                            "pages.settings.advanced.whatsappTcpResetSourcesPlaceholder"
-                          )}
-                          rows={4}
-                          spellCheck={false}
-                          value={field.state.value}
-                        />
-                        <FieldHint
-                          description={t(
-                            "pages.settings.advanced.whatsappTcpResetSourcesHint",
-                            { max: MAX_WHATSAPP_TCP_RESET_SOURCES }
-                          )}
-                          error={error ?? null}
-                        />
-                        <Alert className="mt-2" variant="warning">
-                          <AlertTitle>
-                            {t(
-                              "pages.settings.advanced.whatsappTcpResetSourcesWarningTitle"
-                            )}
-                          </AlertTitle>
-                          <AlertDescription>
-                            {t(
-                              "pages.settings.advanced.whatsappTcpResetSourcesWarningDescription"
-                            )}
-                          </AlertDescription>
-                        </Alert>
-                      </FieldContent>
-                    </Field>
-                  )
-                }}
-              </form.Field>
-
-              <FieldSeparator />
-
               <form.Field name={SETTINGS_FIELD_NAMES.fwmarkStart}>
                 {(field) => {
                   const error = getFirstFieldError(field.state.meta.errors)
@@ -1944,7 +1843,6 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     reconnectOwnedFlowsOnRoutingChangeLists:
       config.daemon?.reconnect_owned_flows_on_routing_change_lists ??
       fallbackDraft.reconnectOwnedFlowsOnRoutingChangeLists,
-    whatsappTcpResetSources: getWhatsAppTcpResetSourcesInput(config.daemon),
     metaUdp443Policy: getMetaUdp443Policy(config.daemon),
     ipv6Enabled: config.daemon?.ipv6_enabled ?? fallbackDraft.ipv6Enabled,
     clientDnsEnforcement:
@@ -1989,23 +1887,20 @@ function buildUpdatedConfig(
   const updatedConfig: ConfigObject = {
     ...config,
     daemon: withMetaUdp443Policy(
-      withWhatsAppTcpResetSources(
-        {
-          ...config.daemon,
-          strict_enforcement:
-            draft.strictEnforcement === "automatic"
-              ? undefined
-              : draft.strictEnforcement === "enabled",
-          skip_marked_packets: draft.skipMarkedPackets,
-          clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
-          reconnect_unmarked_flows_on_routing_change:
-            draft.reconnectUnmarkedFlowsOnRoutingChange,
-          reconnect_owned_flows_on_routing_change_lists:
-            draft.reconnectOwnedFlowsOnRoutingChangeLists,
-          ipv6_enabled: draft.ipv6Enabled,
-        },
-        draft.whatsappTcpResetSources
-      ),
+      {
+        ...config.daemon,
+        strict_enforcement:
+          draft.strictEnforcement === "automatic"
+            ? undefined
+            : draft.strictEnforcement === "enabled",
+        skip_marked_packets: draft.skipMarkedPackets,
+        clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
+        reconnect_unmarked_flows_on_routing_change:
+          draft.reconnectUnmarkedFlowsOnRoutingChange,
+        reconnect_owned_flows_on_routing_change_lists:
+          draft.reconnectOwnedFlowsOnRoutingChangeLists,
+        ipv6_enabled: draft.ipv6Enabled,
+      },
       draft.metaUdp443Policy
     ),
     route: {
@@ -2121,13 +2016,6 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
     path.startsWith("daemon.reconnect_owned_flows_on_routing_change_lists[")
   ) {
     return SETTINGS_FIELD_NAMES.reconnectOwnedFlowsOnRoutingChangeLists
-  }
-
-  if (
-    path === "daemon.experimental_whatsapp_tcp_reset_sources" ||
-    path.startsWith("daemon.experimental_whatsapp_tcp_reset_sources[")
-  ) {
-    return SETTINGS_FIELD_NAMES.whatsappTcpResetSources
   }
 
   switch (path) {

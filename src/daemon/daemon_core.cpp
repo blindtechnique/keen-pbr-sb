@@ -429,6 +429,18 @@ Daemon::~Daemon() {
     cleanup_step("cancel active list refresh", [this] {
         list_refresh_tasks_.request_cancel_active();
     });
+    cleanup_step("invalidate URLTEST work", [this] {
+        if (urltest_manager_) {
+            urltest_manager_->clear();
+        }
+    });
+    cleanup_step("cancel scheduled work", [this] {
+        cancel_owned_conntrack_cleanup_retry();
+        scheduler_->cancel_all();
+    });
+    cleanup_step("discard queued blocking work", [this] {
+        blocking_executor_.cancel_pending();
+    });
     cleanup_step("drain resolver stream recovery", [this] {
         quiesce_resolver_stream_recovery();
     });
@@ -448,19 +460,19 @@ Daemon::~Daemon() {
         }
     });
     cleanup_step("stop resolver hook executor", [this] {
-        resolver_hook_executor_.shutdown();
+        resolver_hook_executor_.cancel_pending_and_shutdown();
     });
     cleanup_step("stop resolver stream executor", [this] {
-        resolver_stream_executor_.shutdown();
+        resolver_stream_executor_.cancel_pending_and_shutdown();
     });
     cleanup_step("stop resolver I/O executor", [this] {
-        resolver_io_executor_.shutdown();
+        resolver_io_executor_.cancel_pending_and_shutdown();
     });
     cleanup_step("stop routing test executor", [this] {
-        routing_test_executor_.shutdown();
+        routing_test_executor_.cancel_pending_and_shutdown();
     });
     cleanup_step("stop blocking executor", [this] {
-        blocking_executor_.shutdown();
+        blocking_executor_.cancel_pending_and_shutdown();
     });
     cleanup_step("close control channel", [this] {
         if (control_fd_ >= 0) {
@@ -3510,7 +3522,19 @@ void Daemon::run() {
         cancel_owned_conntrack_cleanup_retry();
         list_refresh_tasks_.request_cancel_active();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
+        if (urltest_manager_) {
+            try {
+                urltest_manager_->clear();
+            } catch (const std::exception& cleanup_error) {
+                log.error("Startup rollback: urltest cleanup failed: {}",
+                          cleanup_error.what());
+            }
+        }
         scheduler_->cancel_all();
+        // A queued SIGHUP preparation already owns its mutation lease. Drop
+        // queued callbacks before waiting for that lease, while active workers
+        // can still publish their ordinary completion through the control loop.
+        blocking_executor_.cancel_pending();
         quiesce_resolver_stream_recovery();
         quiesce_runtime_mutations();
         {
@@ -3539,7 +3563,8 @@ void Daemon::run() {
         }
         remove_remote_access_rules();
 #endif
-        routing_test_executor_.shutdown();
+        routing_test_executor_.cancel_pending_and_shutdown();
+        blocking_executor_.cancel_pending_and_shutdown();
         try {
             unregister_interface_monitor_fd();
         } catch (const std::exception& cleanup_error) {
@@ -3551,14 +3576,6 @@ void Daemon::run() {
         } catch (const std::exception& cleanup_error) {
             log.error("Startup rollback: DNS probe cleanup failed: {}",
                       cleanup_error.what());
-        }
-        if (urltest_manager_) {
-            try {
-                urltest_manager_->clear();
-            } catch (const std::exception& cleanup_error) {
-                log.error("Startup rollback: urltest cleanup failed: {}",
-                          cleanup_error.what());
-            }
         }
         try {
             policy_rules_.clear();
@@ -3630,6 +3647,15 @@ void Daemon::run() {
     resolver_stream_coordinator_.request_stop();
     keenetic_dns_refresh_coordinator_.stop();
     list_refresh_tasks_.request_cancel_active();
+    // Invalidate timer/probe generations before coordinator quiescence. A
+    // queued SIGHUP preparation can already own the mutation lease, so discard
+    // unclaimed blocking work before waiting for that lease to return.
+    if (urltest_manager_) {
+        urltest_manager_->clear();
+    }
+    cancel_owned_conntrack_cleanup_retry();
+    scheduler_->cancel_all();
+    blocking_executor_.cancel_pending();
     // Admission is closed before quiescence, so new HTTP/SIGHUP writers are
     // rejected. Existing owners keep their token and may finish through the
     // control queue while this thread still owns the event-loop state.
@@ -3662,21 +3688,16 @@ void Daemon::run() {
     remove_remote_access_rules();
 #endif
 
-    // Stop accepting API work before draining workers. Otherwise a handler can
+    // Stop accepting API work before retiring workers. Otherwise a handler can
     // enqueue against an executor that has already been shut down.
-    resolver_hook_executor_.shutdown();
-    resolver_stream_executor_.shutdown();
-    resolver_io_executor_.shutdown();
-    routing_test_executor_.shutdown();
-    blocking_executor_.shutdown();
+    resolver_hook_executor_.cancel_pending_and_shutdown();
+    resolver_stream_executor_.cancel_pending_and_shutdown();
+    resolver_io_executor_.cancel_pending_and_shutdown();
+    routing_test_executor_.cancel_pending_and_shutdown();
+    blocking_executor_.cancel_pending_and_shutdown();
 
     teardown_dns_probe();
 
-    if (urltest_manager_) {
-        urltest_manager_->clear();
-    }
-    cancel_owned_conntrack_cleanup_retry();
-    scheduler_->cancel_all();
     policy_rules_.clear();
     route_table_.clear();
     firewall_->cleanup();

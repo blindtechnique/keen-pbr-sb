@@ -569,6 +569,7 @@ target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR_POSTINST_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postinst"
   KEEN_PBR_POSTRM_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/postrm"
   KEEN_PBR_KEENETIC_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.sh"
+  KEEN_PBR_KEENETIC_INIT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/etc/init.d/S80keen-pbr"
   KEEN_PBR_OPENWRT_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/dnsmasq.sh"
   KEEN_PBR_OPENWRT_UCI_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/openwrt/keen-pbr/files/usr/lib/keen-pbr/uci.sh"
   KEEN_PBR_DEBIAN_DNSMASQ_HELPER_PATH="${CMAKE_SOURCE_DIR}/packages/debian/files/usr/lib/keen-pbr/dnsmasq.sh"

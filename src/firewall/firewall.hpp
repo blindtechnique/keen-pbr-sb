@@ -2,6 +2,7 @@
 
 #include "port_spec_util.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -424,6 +425,18 @@ public:
     virtual OwnedForwardUdpRejectState
     inspect_forward_udp_reject_state() const = 0;
 
+    // Monotonic publication boundary for the independently owned
+    // Meta/WhatsApp UDP/443 filter. Callers snapshot this before apply() and
+    // compare it after an exception: an unchanged value proves the failure
+    // happened in ordinary mangle/NAT work before any Meta filter mutation
+    // was attempted. A changed value deliberately remains conservative,
+    // because a restore/batch command may have committed before its result
+    // became observable.
+    std::uint64_t meta_udp443_publication_epoch() const noexcept {
+        return meta_udp443_publication_epoch_.load(
+            std::memory_order_acquire);
+    }
+
     // Create a firewall rule that stops keen-pbr processing for matching packets
     // and leaves them unmodified for normal system routing.
     virtual void create_pass_rule(const FirewallRuleCriteria& criteria = {}) = 0;
@@ -487,10 +500,19 @@ public:
 protected:
     Firewall() = default;
 
+    void enter_meta_udp443_publication_boundary() const noexcept {
+        meta_udp443_publication_epoch_.fetch_add(
+            1U, std::memory_order_acq_rel);
+    }
+
     FirewallGlobalPrefilter global_prefilter_;
     uint32_t fwmark_mask_{0xFFFFFFFFu};
     bool ipv6_enabled_{true};
     bool clear_dynamic_sets_on_apply_{true};
+
+private:
+    mutable std::atomic<std::uint64_t>
+        meta_udp443_publication_epoch_{0U};
 };
 
 // Return the stable config/CLI label for a concrete backend.

@@ -680,6 +680,8 @@ private:
         std::vector<std::string> whatsapp_destination_selectors,
         std::vector<UdpCallAffinityTarget> call_affinity_targets,
         std::set<std::uint32_t> trusted_whatsapp_marks,
+        bool preventive_whatsapp_authorized,
+        bool packaged_whatsapp_only_observation,
         bool ipv6_enabled,
         bool coverage_complete,
         std::string failure_detail);
@@ -945,6 +947,8 @@ private:
     UdpCallAffinityDetector udp_call_affinity_detector_;
     std::vector<std::string> idle_stall_destination_selectors_;
     std::vector<std::string> udp_call_affinity_destination_selectors_;
+    std::optional<std::uint32_t> idle_stall_preventive_owned_mark_;
+    bool idle_stall_packaged_whatsapp_only_observation_{false};
     std::atomic<bool> idle_stall_observer_enabled_{false};
     std::atomic<bool> idle_stall_observer_inflight_{false};
     // Pair publication and exact conntrack retirement execute on the bounded
