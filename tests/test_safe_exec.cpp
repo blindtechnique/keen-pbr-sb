@@ -455,6 +455,33 @@ TEST_CASE("safe_exec_capture: suppressed timeout stays out of user log") {
     CHECK(log.find("exceeded") == std::string::npos);
 }
 
+TEST_CASE("safe_exec: diagnostic-only timeout stays out of user log") {
+    LoggerSinkGuard logger_sink_guard;
+    TempDir temp_dir;
+    LastCommandFailurePathGuard failure_path_guard(
+        temp_dir.path() / "last-command-failure.log");
+    std::string log;
+    Logger::instance().set_sink([&log](const std::string& line) {
+        log += line;
+        log += '\n';
+    });
+
+    const int status = safe_exec_with_timeouts(
+        {"/bin/sh", "-c", "sleep 2"},
+        /*suppress_output=*/true,
+        {std::chrono::milliseconds{50}, std::chrono::milliseconds{25}},
+        {},
+        SafeExecFailureLog::DiagnosticOnly);
+
+    CHECK(status == -1);
+    CHECK(log.find("[E] ") == std::string::npos);
+    CHECK(log.find("exceeded") == std::string::npos);
+    const auto failure = read_last_command_failure();
+    REQUIRE(failure.has_value());
+    CHECK(failure->find("reason: timeout timeout_ms=50") !=
+          std::string::npos);
+}
+
 TEST_CASE("last command failure: writes one private atomic snapshot") {
     TempDir temp_dir;
     const auto path = temp_dir.path() / "last-command-failure.log";

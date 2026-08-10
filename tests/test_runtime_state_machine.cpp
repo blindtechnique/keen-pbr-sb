@@ -232,6 +232,90 @@ TEST_CASE("periodic SNAT repair runs only for confirmed drift") {
         true, false, true, OwnedSnatState::stale));
 }
 
+TEST_CASE("periodic health owns URLTEST recovery when its timer is missing") {
+    CHECK(should_run_periodic_urltest_firewall_recovery(
+        true, true, false, false));
+    CHECK_FALSE(should_run_periodic_urltest_firewall_recovery(
+        false, true, false, false));
+    CHECK_FALSE(should_run_periodic_urltest_firewall_recovery(
+        true, false, false, false));
+    CHECK_FALSE(should_run_periodic_urltest_firewall_recovery(
+        true, true, true, false));
+    CHECK_FALSE(should_run_periodic_urltest_firewall_recovery(
+        true, true, false, true));
+
+    CHECK(should_run_periodic_netfilter_refresh(
+        /*retry_timer_armed=*/false,
+        /*refresh_reason_pending=*/true));
+    CHECK_FALSE(should_run_periodic_netfilter_refresh(
+        /*retry_timer_armed=*/true,
+        /*refresh_reason_pending=*/true));
+    CHECK_FALSE(should_run_periodic_netfilter_refresh(
+        /*retry_timer_armed=*/false,
+        /*refresh_reason_pending=*/false));
+}
+
+TEST_CASE("remote-access runtime events preserve an armed retry backoff") {
+    CHECK(should_coalesce_remote_access_runtime_refresh(
+        /*retry_timer_armed=*/true,
+        /*locally_unscheduled_retry=*/false,
+        /*desired_generation_present=*/true,
+        /*pending_or_degraded=*/true,
+        /*recovery_owned=*/true));
+    CHECK(should_coalesce_remote_access_runtime_refresh(
+        /*retry_timer_armed=*/false,
+        /*locally_unscheduled_retry=*/false,
+        /*desired_generation_present=*/true,
+        /*pending_or_degraded=*/true,
+        /*recovery_owned=*/true));
+    CHECK_FALSE(should_coalesce_remote_access_runtime_refresh(
+        /*retry_timer_armed=*/true,
+        /*locally_unscheduled_retry=*/false,
+        /*desired_generation_present=*/false,
+        /*pending_or_degraded=*/true,
+        /*recovery_owned=*/true));
+    CHECK_FALSE(should_coalesce_remote_access_runtime_refresh(
+        /*retry_timer_armed=*/false,
+        /*locally_unscheduled_retry=*/false,
+        /*desired_generation_present=*/true,
+        /*pending_or_degraded=*/true,
+        /*recovery_owned=*/false));
+
+    CHECK(should_run_periodic_remote_access_recovery(
+        false, false, true, true));
+    CHECK(should_run_periodic_remote_access_recovery(
+        false, true, true, false));
+    CHECK_FALSE(should_run_periodic_remote_access_recovery(
+        false, false, true, false));
+    CHECK_FALSE(should_run_periodic_remote_access_recovery(
+        true, true, true, true));
+}
+
+TEST_CASE("remote-access recovery owner is independent of routing Stop") {
+    // The service-lifetime watchdog calls this policy even after the routing
+    // runtime's SNAT health timer has been canceled.  Recovery truth comes
+    // from the handler, not from an attempt counter or routing-active flag.
+    CHECK(should_run_periodic_remote_access_recovery(
+        /*retry_timer_armed=*/false,
+        /*locally_unscheduled_retry=*/false,
+        /*desired_generation_present=*/true,
+        /*recovery_owned=*/true));
+    CHECK_FALSE(should_run_periodic_remote_access_recovery(
+        false, false, true, /*recovery_owned=*/false));
+}
+
+TEST_CASE("terminal signal wins over non-signal events in one epoll batch") {
+    CHECK(event_batch_allows_non_signal_dispatch(
+        /*signal_event_present=*/false,
+        /*daemon_running_after_signal_dispatch=*/true));
+    CHECK(event_batch_allows_non_signal_dispatch(
+        /*signal_event_present=*/true,
+        /*daemon_running_after_signal_dispatch=*/true));
+    CHECK_FALSE(event_batch_allows_non_signal_dispatch(
+        /*signal_event_present=*/true,
+        /*daemon_running_after_signal_dispatch=*/false));
+}
+
 TEST_CASE("conntrack cleanup retry cannot cross a runtime generation") {
     OwnedConntrackCleanupRetry retry{
         OwnedConntrackCleanupSnapshot{
@@ -338,6 +422,96 @@ TEST_CASE("runtime firewall retry becomes quiet SNAT maintenance after exhaustio
     CHECK(snat_maintenance.schedule);
     CHECK(snat_maintenance.maintenance);
     CHECK(snat_maintenance.next_attempt == 0U);
+
+    const auto urltest_maintenance = plan_runtime_firewall_retry(
+        6,
+        6,
+        /*snat_recovery_requested=*/false,
+        /*persistent_recovery_requested=*/true);
+    CHECK(urltest_maintenance.schedule);
+    CHECK(urltest_maintenance.maintenance);
+    CHECK(urltest_maintenance.next_attempt == 0U);
+}
+
+TEST_CASE("urltest firewall recovery gate retains exact tags and fences generations") {
+    UrltestAfterFirewallRecoveryGate gate;
+
+    gate.wait_for(17, "pool-a");
+    gate.wait_for(17, "pool-b");
+    gate.wait_for(17, "pool-a");
+    CHECK(gate.waiting_for(17));
+    CHECK(gate.pending_tags(17) ==
+          std::set<std::string>{"pool-a", "pool-b"});
+    CHECK_FALSE(gate.waiting_for(18));
+    CHECK(gate.pending_tags(18).empty());
+    CHECK(gate.release(18).empty());
+
+    const auto released = gate.release(17);
+    CHECK(released == std::set<std::string>{"pool-a", "pool-b"});
+    CHECK_FALSE(gate.waiting_for(17));
+
+    gate.wait_for(18, "pool-c");
+    gate.wait_for(19, "pool-new");
+    CHECK_FALSE(gate.waiting_for(18));
+    CHECK(gate.release(19) == std::set<std::string>{"pool-new"});
+}
+
+TEST_CASE("URLTEST transient exhaustion and permanent escalation share one bell") {
+    UrltestAfterFirewallRecoveryGate gate;
+    RuntimeIncidentLatch incidents(3);
+
+    // Transient admission records only durable recovery intent.
+    gate.wait_for(41, "office-pool");
+    CHECK(gate.pending_tags(41) ==
+          std::set<std::string>{"office-pool"});
+
+    // The first failure recorded by the notification owner is the bounded
+    // chain exhaustion, and it must still be able to raise exactly one bell.
+    const auto exhausted = incidents.record_failure(
+        "office-pool", /*notify_immediately=*/true);
+    CHECK(exhausted.notify);
+    CHECK(exhausted.consecutive_failures == 1U);
+    std::size_t notifications = exhausted.notify ? 1U : 0U;
+
+    // A later non-transient maintenance pass uses the same per-tag latch,
+    // updates runtime state, and cannot raise a generic second notification.
+    const auto permanent = incidents.record_failure(
+        "office-pool", /*notify_immediately=*/true);
+    notifications += permanent.notify ? 1U : 0U;
+    CHECK_FALSE(permanent.notify);
+    CHECK(permanent.consecutive_failures == 2U);
+    CHECK(notifications == 1U);
+}
+
+TEST_CASE("resolver streams committed LKG only while routing is active") {
+    CHECK(resolver_lkg_stream_available(
+        RuntimeState::running, true, true));
+    CHECK(resolver_lkg_stream_available(
+        RuntimeState::broken, true, true));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::broken, false, true));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::running, true, false));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::stopped, true, true));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::shutting_down, true, true));
+    CHECK(resolver_lkg_stream_available(
+        RuntimeState::starting,
+        /*routing_runtime_active=*/false,
+        /*committed_snapshot_available=*/true,
+        /*exact_activation_stream_authorized=*/true));
+    CHECK(resolver_lkg_stream_available(
+        RuntimeState::applying,
+        /*routing_runtime_active=*/false,
+        /*committed_snapshot_available=*/true,
+        /*exact_activation_stream_authorized=*/true));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::stopped, false, true, true));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::starting, false, true, false));
+    CHECK_FALSE(resolver_lkg_stream_available(
+        RuntimeState::starting, false, false, true));
 }
 
 TEST_CASE("runtime firewall retry merges owned recovery before coalescing") {
@@ -447,6 +621,84 @@ TEST_CASE("runtime firewall retry releases its slot before a reentrant successor
     CHECK(successor.next_attempt == 2U);
     CHECK(coordinator.retry_pending());
     CHECK(scheduler.callbacks.size() == 2U);
+}
+
+TEST_CASE("runtime firewall cancel pre-invalidates an erased timer that throws") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    const OwnedSnatRecovery owned{
+        /*requested=*/true,
+        /*missing_observed=*/true};
+    const auto retry = coordinator.schedule(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        owned,
+        [&scheduler](const RuntimeFirewallRetryPlan& plan, auto callback) {
+            return scheduler.schedule(plan, std::move(callback));
+        },
+        [](std::uint64_t) { return true; },
+        [](std::size_t, OwnedSnatRecovery) {});
+    REQUIRE(retry.schedule);
+    REQUIRE(coordinator.retry_pending());
+
+    CHECK_THROWS_AS(
+        coordinator.cancel([&](int) {
+            // Scheduler already erased its entry before unregister failed.
+            CHECK_FALSE(coordinator.retry_pending());
+            throw std::runtime_error("injected unregister failure");
+        }),
+        std::runtime_error);
+    CHECK_FALSE(coordinator.retry_pending());
+    CHECK(coordinator.owned_snat_recovery_pending());
+    CHECK(coordinator.pending_owned_snat_recovery().missing_observed);
+}
+
+TEST_CASE("canceled runtime firewall callback cannot release its successor") {
+    RuntimeFirewallRetryCoordinator coordinator;
+    FakeRuntimeFirewallRetryScheduler scheduler;
+    std::size_t old_attempts = 0;
+    std::size_t successor_attempts = 0;
+
+    const auto schedule = [&scheduler](
+                              const RuntimeFirewallRetryPlan& plan,
+                              auto callback) {
+        return scheduler.schedule(plan, std::move(callback));
+    };
+    REQUIRE(coordinator.schedule(
+        0,
+        /*runtime_generation=*/17,
+        /*bounded_retry_count=*/6,
+        {},
+        schedule,
+        [](std::uint64_t) { return true; },
+        [&](std::size_t, OwnedSnatRecovery) { ++old_attempts; }).schedule);
+    REQUIRE(scheduler.callbacks.size() == 1U);
+    const auto stale_callback = scheduler.callbacks.front();
+
+    coordinator.cancel([](int) {});
+    REQUIRE_FALSE(coordinator.retry_pending());
+    REQUIRE(coordinator.schedule(
+        0,
+        /*runtime_generation=*/18,
+        /*bounded_retry_count=*/6,
+        {},
+        schedule,
+        [](std::uint64_t generation) { return generation == 18U; },
+        [&](std::size_t attempt, OwnedSnatRecovery) {
+            CHECK(attempt == 1U);
+            ++successor_attempts;
+        }).schedule);
+    REQUIRE(coordinator.retry_pending());
+    REQUIRE(scheduler.callbacks.size() == 2U);
+
+    stale_callback();
+    CHECK(old_attempts == 0U);
+    CHECK(coordinator.retry_pending());
+
+    scheduler.callbacks.back()();
+    CHECK(successor_attempts == 1U);
+    CHECK_FALSE(coordinator.retry_pending());
 }
 
 TEST_CASE(
@@ -682,6 +934,38 @@ TEST_CASE("Meta UDP 443 deferred cleanup is nonzero and rollback fenced") {
 
     CHECK(netfilter_refresh_callback_is_current(9U, 9U));
     CHECK_FALSE(netfilter_refresh_callback_is_current(8U, 9U));
+    CHECK(should_trigger_broad_urltest_probe_after_netfilter_refresh(
+        true, true, false));
+    CHECK_FALSE(should_trigger_broad_urltest_probe_after_netfilter_refresh(
+        true, true, true));
+    CHECK_FALSE(should_trigger_broad_urltest_probe_after_netfilter_refresh(
+        true, false, false));
+
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point started{};
+    const auto nat_window = plan_netfilter_refresh(
+        started, std::nullopt, /*full_refresh_pending=*/false);
+    CHECK(nat_window.batch_started_at == started);
+    CHECK(nat_window.delay == std::chrono::milliseconds{250});
+
+    const auto full_extension = plan_netfilter_refresh(
+        started + std::chrono::milliseconds{500},
+        nat_window.batch_started_at,
+        /*full_refresh_pending=*/true);
+    CHECK(full_extension.batch_started_at == started);
+    CHECK(full_extension.delay == std::chrono::milliseconds{750});
+
+    const auto capped = plan_netfilter_refresh(
+        started + std::chrono::milliseconds{1900},
+        nat_window.batch_started_at,
+        /*full_refresh_pending=*/true);
+    CHECK(capped.due_at == started + std::chrono::milliseconds{2000});
+    CHECK(capped.delay == std::chrono::milliseconds{100});
+    const auto deadline_elapsed = plan_netfilter_refresh(
+        started + std::chrono::milliseconds{2000},
+        nat_window.batch_started_at,
+        /*full_refresh_pending=*/true);
+    CHECK(deadline_elapsed.delay == std::chrono::milliseconds{1});
     CHECK(meta_udp443_failed_completion_matches_pending(12U, 12U));
     CHECK_FALSE(meta_udp443_failed_completion_matches_pending(11U, 12U));
     CHECK_FALSE(meta_udp443_failed_completion_matches_pending(0U, 0U));

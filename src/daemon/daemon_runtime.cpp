@@ -499,7 +499,8 @@ bool Daemon::run_system_resolver_hook_stream(
 
 bool Daemon::run_system_resolver_hook_stream_prepared(
     std::string_view action,
-    bool rebuild_snapshot) {
+    bool rebuild_snapshot,
+    bool inactive_activation_authority) {
     if (build_system_resolver_hook_args(config_, action).empty()) {
         return true;
     }
@@ -527,6 +528,7 @@ bool Daemon::run_system_resolver_hook_stream_prepared(
             if (active_resolver_stream_attempt_id_ == attempt_id) {
                 active_resolver_stream_attempt_id_.clear();
                 active_resolver_stream_generation_.reset();
+                inactive_resolver_activation_generation_.reset();
             }
         });
     resolver_generation_snapshot_ = generation;
@@ -534,6 +536,8 @@ bool Daemon::run_system_resolver_hook_stream_prepared(
         KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
         active_resolver_stream_attempt_id_ = attempt_id;
         active_resolver_stream_generation_ = generation;
+        inactive_resolver_activation_generation_ =
+            inactive_activation_authority ? generation : nullptr;
     }
     if (!run_system_resolver_hook(action, false, attempt_id)) {
         return false;
@@ -1297,6 +1301,7 @@ void Daemon::stop_routing_runtime() {
     cancel_owned_conntrack_cleanup_retry();
     cancel_runtime_firewall_retry();
     runtime_firewall_retry_.clear_owned_snat_recovery();
+    urltest_after_firewall_gate_.reset();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
     if (!routing_runtime_active_) {
@@ -1368,6 +1373,7 @@ void Daemon::start_routing_runtime() {
 
     try {
         cancel_owned_conntrack_cleanup_retry();
+        urltest_after_firewall_gate_.reset();
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel);
 
         const auto internal_vpn_resolution =
@@ -1428,7 +1434,8 @@ void Daemon::start_routing_runtime() {
             make_resolver_generation_snapshot(list_cache_snapshot));
         if (!run_system_resolver_hook_stream_prepared(
                 runtime_start_resolver_action(),
-                /*rebuild_snapshot=*/false)) {
+                /*rebuild_snapshot=*/false,
+                /*inactive_activation_authority=*/true)) {
             throw DaemonError("System resolver activation hook failed");
         }
 
@@ -1450,6 +1457,9 @@ void Daemon::start_routing_runtime() {
         // hidden from the WebUI bell.
         runtime_firewall_incidents_.clear();
         transition_runtime_or_throw(RuntimeState::running, "runtime start complete");
+#ifdef WITH_API
+        request_remote_access_reconcile_from_control("runtime start");
+#endif
         schedule_keenetic_dns_refresh();
         refresh_resolver_config_hash_actual_async();
         publish_runtime_state();
@@ -2436,18 +2446,10 @@ void Daemon::apply_firewall(
     reconcile_native_vpn_direct_egress_conntrack(
         native_vpn_direct_egress_snat_selectors);
 
-#ifdef WITH_API
-    // The firmware reapplies its own firewall on every network event and drops
-    // rules it does not own, so the remote access hole has to be restored
-    // alongside ours rather than only once at startup.
-    apply_remote_access_rules(config_.api.has_value()
-                                  ? config_.api->listen.value_or(std::string{})
-                                  : std::string{});
-#endif
     affinity_mutation_lock.unlock();
 
-    // Re-arm only after the replacement firewall transaction and its remote
-    // access companion have committed successfully, but before transferring
+    // Re-arm only after the replacement firewall transaction has committed
+    // successfully, but before transferring
     // the already-allocated exact-cleanup plan into durable scheduler state.
     // A failure here reaches the post-COMMIT catch with the candidate plan
     // still intact.
@@ -2612,6 +2614,92 @@ void Daemon::normalize_urltest_selections() {
     firewall_state_.set_urltest_selections(std::move(normalized));
 }
 
+void Daemon::defer_urltest_switch_to_firewall_recovery(
+    const UrltestSelectionChange& change,
+    std::uint64_t runtime_generation,
+    std::string_view phase,
+    std::string_view detail) noexcept {
+    try {
+        urltest_after_firewall_gate_.wait_for(
+            runtime_generation, change.urltest_tag);
+        // Admission is not an incident attempt.  The central bounded retry
+        // chain owns the only notification decision; consuming the latch here
+        // could reach its threshold while discarding Decision::notify and
+        // leave a permanently gated selector silent forever.
+        Logger::instance().info(
+            "Urltest '{}' {} hit transient firmware churn: {}. The previous "
+            "cursor is restored; the central firewall reconciler now owns "
+            "recovery.",
+            change.urltest_tag,
+            phase,
+            detail);
+    } catch (const std::exception& error) {
+        try {
+            transition_runtime_or_throw(
+                RuntimeState::broken,
+                "urltest firewall recovery admission failed");
+            publish_runtime_state();
+            Logger::instance().error(
+                "Urltest '{}' recovery could not be admitted: {}",
+                change.urltest_tag,
+                error.what());
+        } catch (...) {
+        }
+        return;
+    } catch (...) {
+        try {
+            transition_runtime_or_throw(
+                RuntimeState::broken,
+                "urltest firewall recovery admission failed");
+            publish_runtime_state();
+        } catch (...) {
+        }
+        return;
+    }
+
+    try {
+        (void)refresh_iproute_and_firewall_runtime(
+            0,
+            std::nullopt,
+            std::nullopt,
+            /*schedule_catalog_refresh=*/false);
+    } catch (const std::exception& error) {
+        // The gate remains closed. A later netfilter event can retry without
+        // admitting another URLTEST switch; a successfully installed central
+        // timer would already own the normal persistent path.
+        try {
+            Logger::instance().info(
+                "Urltest '{}' central firewall recovery could not be "
+                "scheduled: {}",
+                change.urltest_tag,
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+    }
+}
+
+void Daemon::release_urltest_firewall_recovery(
+    std::uint64_t runtime_generation) noexcept {
+    auto urltest_tags =
+        urltest_after_firewall_gate_.release(runtime_generation);
+    if (urltest_tags.empty()) {
+        return;
+    }
+    for (const auto& urltest_tag : urltest_tags) {
+        try {
+            urltest_apply_incidents_.reset(urltest_tag);
+            if (urltest_manager_) {
+                // External-health requests are durable and coalesce with an
+                // inflight probe, giving this selector exactly one trailing
+                // convergence pass after the firewall proof succeeds.
+                urltest_manager_->trigger_external_health_test(urltest_tag);
+            }
+        } catch (...) {
+        }
+    }
+}
+
 bool Daemon::handle_urltest_selection_change(
     const UrltestSelectionChange& change,
     std::uint64_t expected_runtime_generation) {
@@ -2636,6 +2724,24 @@ bool Daemon::handle_urltest_selection_change(
                     "generation changed from {} to {}",
                     change.urltest_tag,
                     expected_runtime_generation,
+                    current_runtime_generation);
+            } catch (...) {
+            }
+            return false;
+        }
+
+        if (urltest_after_firewall_gate_.waiting_for(
+                current_runtime_generation)) {
+            // Preserve every affected selector in the recovery payload, but
+            // do not let this probe publish while the restored generation is
+            // still awaiting a complete routing/firewall proof.
+            urltest_after_firewall_gate_.wait_for(
+                current_runtime_generation, change.urltest_tag);
+            try {
+                log.info(
+                    "Holding urltest '{}' transition until central firewall "
+                    "recovery verifies generation {}",
+                    change.urltest_tag,
                     current_runtime_generation);
             } catch (...) {
             }
@@ -2742,11 +2848,34 @@ bool Daemon::handle_urltest_selection_change(
             capture_relevant_list_cache_generation(config_);
         firewall_state_.swap_urltest_selections(candidate_selections);
 
+        const auto mark_permanent_rollback_failure =
+            [this](std::string_view) noexcept {
+                urltest_after_firewall_gate_.reset();
+                try {
+                    transition_runtime_or_throw(
+                        RuntimeState::broken,
+                        "urltest selection rollback failed");
+                    publish_runtime_state();
+                } catch (...) {
+                }
+            };
+
         try {
             reconcile_static_routing(RouteReconcileMode::Strict);
             apply_firewall(
                 FirewallApplyMode::PreserveSets,
                 list_cache_snapshot);
+        } catch (const TransientFirewallError& apply_error) {
+            // The candidate may have been partially published. Restore the
+            // authoritative in-memory cursor first; only the central full
+            // reconciler may now prove and release this generation.
+            firewall_state_.swap_urltest_selections(candidate_selections);
+            defer_urltest_switch_to_firewall_recovery(
+                change,
+                current_runtime_generation,
+                "candidate apply",
+                apply_error.what());
+            return false;
         } catch (const std::exception& apply_error) {
             // Restore the in-memory cursor before diagnostics or any other
             // fallible work, then restore the corresponding kernel state.
@@ -2758,13 +2887,17 @@ bool Daemon::handle_urltest_selection_change(
                     FirewallApplyMode::PreserveSets,
                     list_cache_snapshot);
                 rollback_verified = true;
+            } catch (const TransientFirewallError& rollback_error) {
+                defer_urltest_switch_to_firewall_recovery(
+                    change,
+                    current_runtime_generation,
+                    "rollback",
+                    rollback_error.what());
+                return false;
+            } catch (const std::exception& rollback_error) {
+                mark_permanent_rollback_failure(rollback_error.what());
             } catch (...) {
-                try {
-                    transition_runtime_or_throw(
-                        RuntimeState::broken,
-                        "urltest selection rollback failed");
-                } catch (...) {
-                }
+                mark_permanent_rollback_failure("unknown error");
             }
 
             try {
@@ -2794,18 +2927,54 @@ bool Daemon::handle_urltest_selection_change(
             return false;
         } catch (...) {
             firewall_state_.swap_urltest_selections(candidate_selections);
+            bool rollback_verified = false;
+            std::string rollback_detail;
             try {
                 reconcile_static_routing(RouteReconcileMode::Strict);
                 apply_firewall(
                     FirewallApplyMode::PreserveSets,
                     list_cache_snapshot);
+                rollback_verified = true;
+            } catch (const TransientFirewallError& rollback_error) {
+                defer_urltest_switch_to_firewall_recovery(
+                    change,
+                    current_runtime_generation,
+                    "rollback after unknown candidate failure",
+                    rollback_error.what());
+                return false;
+            } catch (const std::exception& rollback_error) {
+                rollback_detail = rollback_error.what();
+                mark_permanent_rollback_failure(rollback_error.what());
             } catch (...) {
-                try {
-                    transition_runtime_or_throw(
-                        RuntimeState::broken,
-                        "urltest selection rollback failed");
-                } catch (...) {
+                rollback_detail = "unknown rollback error";
+                mark_permanent_rollback_failure("unknown error");
+            }
+            try {
+                const auto incident =
+                    urltest_apply_incidents_.record_failure(
+                        change.urltest_tag,
+                        /*notify_immediately=*/!rollback_verified);
+                if (incident.notify) {
+                    if (rollback_verified) {
+                        log.error(
+                            "Urltest '{}' candidate apply failed with an "
+                            "unknown error; the previous intent was restored",
+                            change.urltest_tag);
+                    } else {
+                        log.error(
+                            "Urltest '{}' candidate apply and rollback "
+                            "failed permanently: {}",
+                            change.urltest_tag,
+                            rollback_detail);
+                    }
+                } else {
+                    log.info(
+                        "Urltest '{}' candidate apply failed with an unknown "
+                        "error; the previous intent was {}",
+                        change.urltest_tag,
+                        rollback_verified ? "restored" : "left broken");
                 }
+            } catch (...) {
             }
             return false;
         }
@@ -3435,6 +3604,10 @@ void Daemon::schedule_startup_firewall_retry(
                     internal_vpn_resolution);
                 update_internal_vpn_service_verified_includes_lkg(
                     internal_vpn_service_resolution);
+#ifdef WITH_API
+                request_remote_access_reconcile_from_control(
+                    "startup firewall recovery");
+#endif
                 log.info("Firewall rules and routing applied on retry {}.", attempt);
             } catch (const TransientFirewallError& e) {
                 if (attempt >= kMaxAttempts) {
@@ -7132,6 +7305,7 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
     const auto applying_runtime_generation =
         runtime_generation_.fetch_add(1, std::memory_order_acq_rel) + 1U;
     resolver_after_firewall_gate_.reset();
+    urltest_after_firewall_gate_.reset();
     cancel_runtime_firewall_retry();
     cancel_resolver_reload_retry();
     cancel_internal_vpn_catalog_refresh_retry();
@@ -7215,7 +7389,10 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
                                  resolver_snapshot.actual_hash,
                                  resolver_snapshot.live_status)) {
         if (!run_system_resolver_hook_stream_prepared(
-                "reload", /*rebuild_snapshot=*/false)) {
+                "reload",
+                /*rebuild_snapshot=*/false,
+                /*inactive_activation_authority=*/
+                    !previous_runtime_active)) {
             throw DaemonError(
                 "system resolver reload did not complete its configuration stream");
         }
@@ -7240,6 +7417,9 @@ void Daemon::apply_prepared_runtime_inputs(PreparedRuntimeInputs prepared) {
         internal_vpn_lkg_update.state,
         internal_vpn_service_lkg_update.state);
     transition_runtime_or_throw(RuntimeState::running, "configuration apply complete");
+#ifdef WITH_API
+    request_remote_access_reconcile_from_control("configuration apply");
+#endif
     publish_runtime_state();
     if (runtime_firewall_retry_.owned_snat_recovery_pending()) {
         // The transactional save may have replaced the firewall while a

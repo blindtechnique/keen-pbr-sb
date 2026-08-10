@@ -5,14 +5,17 @@
 #include <nlohmann/json.hpp>
 
 #include "../src/api/auth_runtime.hpp"
+#include "../src/api/handler_remote_access.hpp"
 #include "../src/api/keenetic_auth.hpp"
 #include "../src/api/server.hpp"
+#include "../src/log/logger.hpp"
 
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
@@ -83,6 +86,57 @@ public:
 private:
     std::string name_;
     std::optional<std::string> previous_;
+};
+
+class VerifiedClosedRemoteAccessGuard {
+public:
+    VerifiedClosedRemoteAccessGuard()
+        : wait_mode_("KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout") {
+        reset_remote_access_reconciler_for_testing();
+        reset_remote_access_command_runner_for_testing();
+        // A missing owned chain is the exact verified-closed result needed by
+        // these auth-only tests; no real firewall command is executed.
+        set_remote_access_command_runner_for_testing(
+            [](const std::vector<std::string>&) { return 1; });
+        const auto result =
+            refresh_remote_access_reconcile("0.0.0.0:12121");
+        REQUIRE(result.apply.applied);
+        REQUIRE(result.status.state == RemoteAccessRuntimeState::closed);
+        REQUIRE(result.status.desired_generation != 0U);
+        REQUIRE(result.status.applied_generation ==
+                result.status.desired_generation);
+    }
+
+    ~VerifiedClosedRemoteAccessGuard() {
+        reset_remote_access_reconciler_for_testing();
+        reset_remote_access_command_runner_for_testing();
+    }
+
+private:
+    EnvironmentVariableGuard wait_mode_;
+};
+
+class ThrowingPostCommitAuthLogger {
+public:
+    ThrowingPostCommitAuthLogger()
+        : previous_level_(Logger::instance().level()) {
+        Logger::instance().set_level(LogLevel::debug);
+        Logger::instance().set_sink([](const std::string& line) {
+            if (line.find("auth.json was published") !=
+                std::string::npos) {
+                throw std::runtime_error(
+                    "synthetic post-commit auth logging failure");
+            }
+        });
+    }
+
+    ~ThrowingPostCommitAuthLogger() {
+        Logger::instance().clear_sink();
+        Logger::instance().set_level(previous_level_);
+    }
+
+private:
+    LogLevel previous_level_;
 };
 
 class BoundHttpServer {
@@ -283,6 +337,54 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
             .get<bool>());
 }
 
+TEST_CASE("authentication cannot be disabled while remote access is desired") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})");
+    write_text(remote_path, R"({"enabled":true,"port":15443})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers headers{
+        {"Cookie", session_cookie(*login)},
+    };
+    const auto disable = client.Post(
+        "/api/auth/settings",
+        headers,
+        R"({"enabled":false,"provider":"local"})",
+        "application/json");
+
+    REQUIRE(disable != nullptr);
+    CHECK(disable->status == 409);
+    CHECK(nlohmann::json::parse(disable->body).at("error") ==
+          "remote_access_enabled");
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("enabled").get<bool>());
+
+    // Rejection neither replaces auth nor clears the administrator's session.
+    const auto status = client.Get("/api/auth/status", headers);
+    REQUIRE(status != nullptr);
+    CHECK(nlohmann::json::parse(status->body)
+              .at("authenticated")
+              .get<bool>());
+}
+
 TEST_CASE(
     "post-commit auth durability failure reloads the visible settings") {
     AuthTempDir directory;
@@ -346,11 +448,64 @@ TEST_CASE(
     CHECK(new_login->status == 200);
 }
 
+TEST_CASE(
+    "post-commit logging exception leaves auth publication fail closed") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"old","password":"old-secret"})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard write_fault(
+        "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "directory_fsync");
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"old","password":"old-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers headers{
+        {"Cookie", session_cookie(*login)},
+    };
+
+    int settings_status = 0;
+    {
+        ThrowingPostCommitAuthLogger throwing_logger;
+        const auto response = client.Post(
+            "/api/auth/settings", headers,
+            R"({"enabled":true,"provider":"local","username":"new","password":"new-secret"})",
+            "application/json");
+        REQUIRE(response != nullptr);
+        settings_status = response->status;
+    }
+    CHECK(settings_status == 400);
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("username") == "new");
+
+    // The rename was visible but runtime publication did not finish. The
+    // application layer must remain closed instead of reverting to the old
+    // in-memory authentication snapshot.
+    const auto status = client.Get("/api/auth/status");
+    REQUIRE(status != nullptr);
+    CHECK(status->status == 503);
+}
+
 TEST_CASE("pre-commit auth write failure preserves disk and memory") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "missing-auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    write_text(remote_path, R"({"enabled":false,"port":12121})");
     EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+    VerifiedClosedRemoteAccessGuard remote_access_closed;
     EnvironmentVariableGuard write_fault(
         "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "write");
 
@@ -378,8 +533,13 @@ TEST_CASE("pre-commit auth write failure preserves disk and memory") {
 TEST_CASE("concurrent auth settings writes leave disk and memory consistent") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    write_text(remote_path, R"({"enabled":false,"port":12121})");
     EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+    VerifiedClosedRemoteAccessGuard remote_access_closed;
 
     const auto config = auth_api_config();
     ApiServer server(config);
@@ -572,8 +732,12 @@ TEST_CASE("manual Keenetic auth rejects an invalid local endpoint") {
 TEST_CASE("auth settings reject a non-loopback Keenetic endpoint") {
     AuthTempDir directory;
     const auto auth_path = directory.path / "missing-auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    write_text(remote_path, R"({"enabled":false,"port":12121})");
     EnvironmentVariableGuard auth_file(
         "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
 
     const auto config = auth_api_config();
     ApiServer server(config);

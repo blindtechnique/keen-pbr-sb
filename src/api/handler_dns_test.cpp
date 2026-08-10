@@ -7,6 +7,7 @@
 #include <chrono>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -26,8 +27,15 @@ std::string make_hello_payload() {
 } // namespace
 
 void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
+    server.on_auth_sessions_revoked(
+        [broadcaster = &ctx.dns_test_broadcaster] {
+            broadcaster->revoke_active_subscriptions();
+        });
     server.get_stream("/api/dns/test",
-                      [&ctx](const httplib::Request&, httplib::Response& res) {
+                      [&ctx, &server](const httplib::Request& req,
+                                      httplib::Response& res) {
+        auto authorization_is_current =
+            server.make_stream_authorization_probe(req);
         auto subscription = ctx.dns_test_broadcaster.subscribe();
         if (!subscription) {
             res.status = 503;
@@ -43,7 +51,14 @@ void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
         res.set_header("X-Accel-Buffering", "no");
         res.set_chunked_content_provider(
             "text/event-stream",
-            [subscription, hello_sent = false](size_t, httplib::DataSink& sink) mutable -> bool {
+            [subscription,
+             authorization_is_current =
+                 std::move(authorization_is_current),
+             hello_sent = false](size_t, httplib::DataSink& sink) mutable -> bool {
+                if (!authorization_is_current()) {
+                    sink.done();
+                    return true;
+                }
                 if (!hello_sent) {
                     hello_sent = true;
                     const auto hello = make_sse_frame(make_hello_payload());
@@ -60,7 +75,8 @@ void register_dns_test_handler(ApiServer& server, ApiContext& ctx) {
                     std::chrono::seconds(1),
                     [&sink] {
                         return !sink.is_writable || sink.is_writable();
-                    });
+                    },
+                    authorization_is_current);
                 switch (result.status) {
                     case SseSubscriptionWaitStatus::CLOSED:
                         Logger::instance().trace("sse_done", "path=/api/dns/test");

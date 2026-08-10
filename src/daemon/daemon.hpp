@@ -12,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -78,6 +79,7 @@ class StatusStream;
 struct ConfigApplyResult;
 struct TestRoutingResult;
 struct ListRefreshOperationResult;
+struct RemoteAccessRetryHint;
 
 struct InterfaceTrafficTargetPlan {
     std::set<std::string> reported;
@@ -556,7 +558,9 @@ private:
     // Signal handlers
     void handle_sigusr1();
     void handle_sigusr2();
-    void schedule_netfilter_runtime_refresh(NetfilterRefreshReason reason);
+    void schedule_netfilter_runtime_refresh(
+        NetfilterRefreshReason reason) noexcept;
+    void reconcile_pending_netfilter_runtime_refresh() noexcept;
     void schedule_netfilter_runtime_refresh_noexcept(
         NetfilterRefreshReason reason,
         const char* failure_detail) noexcept;
@@ -640,6 +644,13 @@ private:
     bool handle_urltest_selection_change(
         const UrltestSelectionChange& change,
         std::uint64_t expected_runtime_generation);
+    void defer_urltest_switch_to_firewall_recovery(
+        const UrltestSelectionChange& change,
+        std::uint64_t runtime_generation,
+        std::string_view phase,
+        std::string_view detail) noexcept;
+    void release_urltest_firewall_recovery(
+        std::uint64_t runtime_generation) noexcept;
     bool commit_urltest_probe_results(const std::string& urltest_tag,
                                       std::uint64_t probe_generation,
                                       std::map<std::string, URLTestResult> results,
@@ -779,7 +790,8 @@ private:
     // have completed, without holding a daemon lock across the IPC wait.
     bool run_system_resolver_hook_stream_prepared(
         std::string_view action,
-        bool rebuild_snapshot);
+        bool rebuild_snapshot,
+        bool inactive_activation_authority = false);
     bool run_system_resolver_hook_reload();
     bool wait_for_resolver_stream_epoch(std::uint64_t expected_epoch,
                                         std::chrono::milliseconds timeout);
@@ -865,6 +877,15 @@ private:
         std::string source,
         std::vector<std::string> interface_names);
     void refresh_interface_traffic_config_targets(const Config& config);
+    void setup_remote_access_retry_bridge();
+    void reset_remote_access_retry_bridge() noexcept;
+    void schedule_remote_access_recovery_watchdog();
+    void cancel_remote_access_recovery_watchdog() noexcept;
+    void schedule_remote_access_retry(
+        const RemoteAccessRetryHint& hint);
+    void resume_unscheduled_remote_access_retry() noexcept;
+    void request_remote_access_reconcile_from_control(
+        std::string_view source) noexcept;
 #endif
 
     // DNS probe integration
@@ -906,9 +927,12 @@ private:
     int resolver_config_hash_actual_task_id_{-1};
     // Exponential retry step for resolver convergence probes.
     std::uint32_t resolver_config_hash_actual_retry_attempt_{0};
-    // One debounce window coalesces firmware mangle/full and nat-only events.
+    // One source-aware quiet window coalesces firmware mangle/full and
+    // nat-only events, capped by a hard batch deadline.
     int netfilter_refresh_task_id_{-1};
     std::uint8_t pending_netfilter_refresh_reasons_{0};
+    std::optional<std::chrono::steady_clock::time_point>
+        netfilter_refresh_batch_started_at_;
     // Invalidates a callback before cancelling its timer. Scheduler::cancel()
     // may remove the entry and still throw while unregistering its fd; an
     // explicit serial keeps that half-completed cancellation from wedging or
@@ -936,6 +960,11 @@ private:
     // set after bounded firewall retries are exhausted and is released only by
     // a verified successful firewall reconciliation or a new runtime generation.
     ResolverAfterFirewallRecoveryGate resolver_after_firewall_gate_;
+    // A transient URLTEST candidate/rollback publication restores the old
+    // cursor immediately, then delegates the complete kernel proof to the
+    // central firewall reconciler. Until that generation succeeds, every
+    // affected selector remains blocked and receives one trailing probe.
+    UrltestAfterFirewallRecoveryGate urltest_after_firewall_gate_;
     // Retry task for interface monitor netlink reconnect after failure.
     int interface_monitor_reconnect_task_id_{-1};
     // Bounded one-shot observer for a client reusing a long-idle forwarded
@@ -1105,6 +1134,12 @@ private:
     std::shared_ptr<const ResolverGenerationSnapshot>
         active_resolver_stream_generation_
             GUARDED_BY(resolver_stream_attempt_mutex_);
+    // Non-null only for the exact committed stream that is activating a
+    // previously stopped runtime.  It is pointer-bound to the active attempt
+    // and cleared with that attempt's lifetime.
+    std::shared_ptr<const ResolverGenerationSnapshot>
+        inactive_resolver_activation_generation_
+            GUARDED_BY(resolver_stream_attempt_mutex_);
     std::atomic<bool> resolver_hash_refresh_inflight_{false};
     // Control-loop-owned coalescing bit. A changed periodic Keenetic DNS
     // observation is retried once after an active resolver stream retires.
@@ -1149,6 +1184,14 @@ private:
     bool traffic_sampling_active_{false};
     std::uint64_t conntrack_revision_{0};
     int conntrack_publish_task_id_{-1};
+    int remote_access_retry_task_id_{-1};
+    // Service-lifetime fallback.  It is deliberately independent from the
+    // routing-runtime/SNAT health timer, which is canceled by Stop.
+    int remote_access_recovery_watchdog_task_id_{-1};
+    std::uint64_t remote_access_retry_schedule_serial_{0U};
+    std::atomic<std::uint64_t> remote_access_retry_bridge_epoch_{0U};
+    std::optional<std::uint64_t>
+        unscheduled_remote_access_retry_generation_;
 #endif
 
     std::unique_ptr<DnsProbeServer> dns_probe_server_;

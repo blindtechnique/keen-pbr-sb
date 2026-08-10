@@ -19,6 +19,21 @@ trap 'rm -rf "$work"' 0 HUP INT TERM
     sed -n '/^stop_service_for_action()/,/^restore_fastnat_after_failed_start()/p' \
         "$init_script" | sed '$d'
 } > "$work/functions.sh"
+cat >> "$work/functions.sh" <<'EOF'
+# These cases exercise exact Meta firewall cleanup. The stop lease itself has
+# a dedicated contract suite, so model one uniquely owned lifecycle action.
+acquire_control_lease() {
+    STOPPING_CONTROL_OWNER_ROLE=stop
+    return 0
+}
+release_control_lease() { return 0; }
+control_lease_owned_by_self() { return 0; }
+begin_stopping_marker() { return 0; }
+mark_stopping_mutation_started() { return 0; }
+discard_control_mailbox_after_successful_stop() { return 0; }
+finish_stopping_marker() { return 0; }
+drain_control_runtime() { return 0; }
+EOF
 
 mkdir -p "$work/bin" "$work/state"
 cat > "$work/bin/iptables" <<'EOF'

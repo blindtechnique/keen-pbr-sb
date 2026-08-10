@@ -68,10 +68,12 @@ namespace keen_pbr3 {
 
 namespace {
 
-constexpr auto NETFILTER_REFRESH_DEBOUNCE_DELAY =
-    std::chrono::milliseconds{400};
 constexpr auto OWNED_SNAT_HEALTH_INTERVAL =
     std::chrono::seconds{60};
+#ifdef WITH_API
+constexpr auto REMOTE_ACCESS_RECOVERY_WATCHDOG_INTERVAL =
+    std::chrono::seconds{60};
+#endif
 constexpr auto INTERFACE_MONITOR_RECONNECT_RETRY_DELAY = std::chrono::seconds{5};
 constexpr std::size_t kResolverStreamChunkBytes = 16U * 1024U;
 constexpr std::array<std::chrono::seconds, 6>
@@ -408,6 +410,14 @@ Daemon::~Daemon() {
     // diagnostic close must never skip the coordinator drain and executor
     // shutdown that protect callbacks from observing partially destroyed
     // Daemon members.
+#ifdef WITH_API
+    cleanup_step("cancel remote-access recovery watchdog", [this] {
+        cancel_remote_access_recovery_watchdog();
+    });
+    cleanup_step("reset remote-access retry bridge", [this] {
+        reset_remote_access_retry_bridge();
+    });
+#endif
     cleanup_step("close runtime mutation admission", [this] {
         runtime_mutation_admission_.shutdown();
     });
@@ -864,11 +874,38 @@ void Daemon::handle_ipc_control_socket() {
             } else if (operation == "generate-resolver-config") {
                 const RuntimeState runtime_state =
                     runtime_state_machine_.state();
+                // This pointer is immutable and is captured on the control
+                // loop before any stream admission. A visibly broken runtime
+                // may still serve its committed LKG only while routing is
+                // genuinely active; stopped/shutdown and missing snapshots
+                // stay fail-closed.
+                const auto committed_resolver_generation =
+                    resolver_generation_snapshot_;
+                const bool committed_snapshot_available =
+                    committed_resolver_generation &&
+                    committed_resolver_generation->list_cache_snapshot;
+                const std::string resolver_attempt_id =
+                    request.value("resolver_attempt_id", "");
+                bool exact_activation_stream_authorized = false;
+                if (!resolver_attempt_id.empty() &&
+                    is_valid_resolver_attempt_id(resolver_attempt_id)) {
+                    KPBR_LOCK_GUARD(resolver_stream_attempt_mutex_);
+                    exact_activation_stream_authorized =
+                        active_resolver_stream_attempt_id_ ==
+                            resolver_attempt_id &&
+                        active_resolver_stream_generation_ &&
+                        active_resolver_stream_generation_ ==
+                            committed_resolver_generation &&
+                        inactive_resolver_activation_generation_ ==
+                            committed_resolver_generation &&
+                        committed_resolver_generation->stream_epoch != 0U;
+                }
                 const bool resolver_generation_available =
-                    runtime_state == RuntimeState::starting ||
-                    runtime_state == RuntimeState::running ||
-                    runtime_state == RuntimeState::restart_required ||
-                    runtime_state == RuntimeState::applying;
+                    resolver_lkg_stream_available(
+                        runtime_state,
+                        routing_runtime_active_,
+                        committed_snapshot_available,
+                        exact_activation_stream_authorized);
                 if (!resolver_generation_available) {
                     const auto runtime_snapshot =
                         runtime_state_store_.snapshot();
@@ -877,8 +914,6 @@ void Daemon::handle_ipc_control_socket() {
                         resolver_runtime_reason(runtime_snapshot),
                         "resolver runtime is not active");
                 } else {
-                    const std::string resolver_attempt_id =
-                        request.value("resolver_attempt_id", "");
                     std::shared_ptr<const ResolverGenerationSnapshot>
                         generation;
                     bool correlated_attempt = false;
@@ -902,14 +937,21 @@ void Daemon::handle_ipc_control_socket() {
                             } else {
                                 generation =
                                     active_resolver_stream_generation_;
-                                correlated_attempt = true;
+                                if (!generation ||
+                                    generation !=
+                                        committed_resolver_generation) {
+                                    selection_error =
+                                        "resolver_generation_unavailable";
+                                } else {
+                                    correlated_attempt = true;
+                                }
                             }
                         } else {
                             // A valid token left in tmpfs by an older helper
                             // is an ordinary manual stream after the matching
                             // attempt has ended. It may read the current
                             // generation, but cannot acknowledge any hook.
-                            generation = resolver_generation_snapshot_;
+                            generation = committed_resolver_generation;
                         }
                     }
                     if (!selection_error.empty()) {
@@ -918,7 +960,12 @@ void Daemon::handle_ipc_control_socket() {
                             selection_error,
                             selection_error == "resolver_stream_busy"
                                 ? "a resolver stream is already in progress"
-                                : "resolver attempt does not match the active stream");
+                                : (selection_error ==
+                                           "resolver_generation_unavailable"
+                                       ? "the committed resolver generation "
+                                         "is no longer current"
+                                       : "resolver attempt does not match "
+                                         "the active stream"));
                     } else if (!generation) {
                         response = ipc::make_error_response(
                             request,
@@ -1797,28 +1844,65 @@ void Daemon::setup_signals() {
 }
 
 void Daemon::handle_signal() {
-    struct signalfd_siginfo info{};
-    ssize_t n = read(signal_fd_, &info, sizeof(info));
-    if (n != sizeof(info)) {
-        return;
+    bool terminate_requested = false;
+    bool full_refresh_requested = false;
+    bool nat_refresh_requested = false;
+    bool reload_requested = false;
+
+    // signalfd is nonblocking. Inspect the complete queued batch before
+    // dispatching any non-terminal work so SIGUSR1/2 queued beside SIGTERM
+    // cannot reopen runtime work during shutdown.
+    for (;;) {
+        struct signalfd_siginfo info{};
+        const ssize_t n = read(signal_fd_, &info, sizeof(info));
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            break;
+        }
+        if (n != sizeof(info)) {
+            break;
+        }
+        switch (info.ssi_signo) {
+        case SIGTERM:
+        case SIGINT:
+            terminate_requested = true;
+            break;
+        case SIGUSR1:
+            full_refresh_requested = true;
+            break;
+        case SIGUSR2:
+            nat_refresh_requested = true;
+            break;
+        case SIGHUP:
+            reload_requested = true;
+            break;
+        default:
+            break;
+        }
     }
 
-    switch (info.ssi_signo) {
-    case SIGTERM:
-    case SIGINT:
+    if (terminate_requested) {
+        // Close writer admission at the terminal signal boundary, not later
+        // in the shutdown tail. Events already returned in this epoll batch
+        // must not begin a new config or routing-test operation.
+        runtime_mutation_admission_.shutdown();
+        routing_test_admission_.shutdown();
         running_.store(false, std::memory_order_release);
-        break;
-    case SIGUSR1:
+        return;
+    }
+    if (!running_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (full_refresh_requested) {
         handle_sigusr1();
-        break;
-    case SIGUSR2:
+    }
+    if (nat_refresh_requested) {
         handle_sigusr2();
-        break;
-    case SIGHUP:
+    }
+    if (reload_requested) {
         handle_sighup();
-        break;
-    default:
-        break;
     }
 }
 
@@ -1853,6 +1937,15 @@ void Daemon::cancel_owned_snat_health_check() {
 }
 
 void Daemon::check_owned_snat_health() {
+    if (should_run_periodic_netfilter_refresh(
+            netfilter_refresh_task_id_ >= 0,
+            pending_netfilter_refresh_reasons_ != 0U)) {
+        // A failed timer installation retains the exact full/NAT reason bits.
+        // Repair the main firewall generation before any companion subsystem;
+        // a verified central refresh will then request remote-access recovery.
+        reconcile_pending_netfilter_runtime_refresh();
+        return;
+    }
     const std::uint64_t failed_completion_serial =
         meta_udp443_cleanup_completion_admission_failed_serial_.exchange(
             0U, std::memory_order_acq_rel);
@@ -1867,12 +1960,57 @@ void Daemon::check_owned_snat_health() {
                 "the control loop; the durable plan will be retried");
         }
     }
-    const bool recovery_pending =
-        runtime_firewall_retry_.retry_pending() ||
-        runtime_firewall_retry_.owned_snat_recovery_pending();
+    const bool runtime_retry_pending =
+        runtime_firewall_retry_.retry_pending();
     const bool netfilter_refresh_pending =
         netfilter_refresh_task_id_ >= 0 ||
         pending_netfilter_refresh_reasons_ != 0;
+    const auto current_runtime_generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    const bool urltest_recovery_without_timer =
+        should_run_periodic_urltest_firewall_recovery(
+            routing_runtime_active_,
+            urltest_after_firewall_gate_.waiting_for(
+                current_runtime_generation),
+            runtime_retry_pending,
+            netfilter_refresh_pending);
+    if (urltest_recovery_without_timer) {
+        // Scheduler admission itself can fail after a transient URLTEST
+        // publication. This repeating control-loop task is the independent
+        // durable owner: a closed gate can therefore never wait forever for
+        // another external netfilter event.
+        auto task_metrics =
+            periodic_task_metrics_.begin("owned-snat-health");
+        try {
+            const bool recovered =
+                refresh_iproute_and_firewall_runtime(
+                    0,
+                    std::nullopt,
+                    std::nullopt,
+                    /*schedule_catalog_refresh=*/false,
+                    runtime_firewall_retry_
+                        .pending_owned_snat_recovery());
+            if (recovered) {
+                task_metrics.success();
+            } else {
+                task_metrics.failure(
+                    "URLTEST firewall recovery did not converge");
+            }
+        } catch (const std::exception& error) {
+            task_metrics.failure(error.what());
+            Logger::instance().info(
+                "Periodic URLTEST firewall recovery could not install its "
+                "next retry owner: {}",
+                error.what());
+        } catch (...) {
+            task_metrics.failure(
+                "URLTEST firewall recovery failed with an unknown error");
+        }
+        return;
+    }
+    const bool recovery_pending =
+        runtime_retry_pending ||
+        runtime_firewall_retry_.owned_snat_recovery_pending();
     if (!routing_runtime_active_ ||
         recovery_pending ||
         netfilter_refresh_pending) {
@@ -1991,10 +2129,106 @@ void Daemon::check_owned_snat_health() {
     }
 }
 
+void Daemon::reconcile_pending_netfilter_runtime_refresh() noexcept {
+    const std::uint8_t reasons = pending_netfilter_refresh_reasons_;
+    if (reasons == 0U) {
+        netfilter_refresh_batch_started_at_.reset();
+        return;
+    }
+    pending_netfilter_refresh_reasons_ = 0U;
+    netfilter_refresh_batch_started_at_.reset();
+
+    try {
+        const bool full_refresh =
+            (reasons &
+             static_cast<std::uint8_t>(NetfilterRefreshReason::full)) != 0U;
+        const bool nat_refresh =
+            (reasons &
+             static_cast<std::uint8_t>(NetfilterRefreshReason::nat_only)) != 0U;
+        const bool snat_health_check = full_refresh || nat_refresh;
+        const char* reason_label =
+            full_refresh && nat_refresh
+                ? "full+nat"
+                : (full_refresh ? "full" : "nat");
+
+        Logger::instance().info(
+            "Netfilter event: applying {} runtime refresh...",
+            reason_label);
+        if (nat_refresh && runtime_firewall_retry_.retry_pending()) {
+            // Do not coalesce away a confirmed firmware NAT rebuild behind an
+            // older generic recovery. Replace that retry with an immediate
+            // attempt whose bounded chain verifies SNAT health.
+            cancel_runtime_firewall_retry();
+        }
+        const bool targeted_urltest_recovery_pending =
+            urltest_after_firewall_gate_.waiting_for(
+                runtime_generation_.load(std::memory_order_acquire));
+        const bool runtime_refreshed =
+            refresh_iproute_and_firewall_runtime(
+                0,
+                std::nullopt,
+                std::nullopt,
+                /*schedule_catalog_refresh=*/true,
+                OwnedSnatRecovery{
+                    /*requested=*/snat_health_check,
+                    /*missing_observed=*/false});
+
+        // A nat-only repair must not turn one firmware table rebuild into a
+        // burst of remote health probes. Full/mangle refreshes preserve the
+        // historical SIGUSR1 behaviour, but only after reconciliation.
+        if (should_trigger_broad_urltest_probe_after_netfilter_refresh(
+                runtime_refreshed,
+                full_refresh,
+                targeted_urltest_recovery_pending) &&
+            urltest_manager_) {
+            Logger::instance().info(
+                "Netfilter event: probing urltest endpoints...");
+            for (const auto& ob :
+                 config_.outbounds.value_or(std::vector<Outbound>{})) {
+                if (ob.type == OutboundType::URLTEST) {
+                    urltest_manager_->trigger_immediate_test(ob.tag);
+                }
+            }
+        }
+        if (runtime_refreshed) {
+            Logger::instance().info(
+                "Netfilter event: {} runtime refresh complete.",
+                reason_label);
+        } else {
+            Logger::instance().info(
+                "Netfilter event: {} runtime refresh deferred or coalesced "
+                "with recovery.",
+                reason_label);
+        }
+    } catch (const std::exception& error) {
+        // Scheduler/fd/allocation faults in a secondary recovery path must not
+        // escape the signal callback and terminate the daemon. Retain the exact
+        // source bits; the independent periodic health owner will retry them.
+        pending_netfilter_refresh_reasons_ |= reasons;
+        try {
+            Logger::instance().info(
+                "Netfilter runtime refresh remains pending after an internal "
+                "recovery error: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        pending_netfilter_refresh_reasons_ |= reasons;
+    }
+}
+
 void Daemon::schedule_netfilter_runtime_refresh(
-    NetfilterRefreshReason reason) {
+    NetfilterRefreshReason reason) noexcept {
     pending_netfilter_refresh_reasons_ |=
         static_cast<std::uint8_t>(reason);
+    const bool full_refresh_pending =
+        (pending_netfilter_refresh_reasons_ &
+         static_cast<std::uint8_t>(NetfilterRefreshReason::full)) != 0U;
+    const auto schedule = plan_netfilter_refresh(
+        std::chrono::steady_clock::now(),
+        netfilter_refresh_batch_started_at_,
+        full_refresh_pending);
+    netfilter_refresh_batch_started_at_ = schedule.batch_started_at;
     const std::uint64_t schedule_serial =
         ++netfilter_refresh_schedule_serial_;
     try {
@@ -2009,88 +2243,296 @@ void Daemon::schedule_netfilter_runtime_refresh(
         }
 
         netfilter_refresh_task_id_ = scheduler_->schedule_oneshot(
-        NETFILTER_REFRESH_DEBOUNCE_DELAY,
-        [this, schedule_serial]() {
-            if (!netfilter_refresh_callback_is_current(
+            schedule.delay,
+            [this, schedule_serial]() {
+                if (!netfilter_refresh_callback_is_current(
                     schedule_serial,
                     netfilter_refresh_schedule_serial_)) {
-                return;
-            }
-            netfilter_refresh_task_id_ = -1;
-            const std::uint8_t reasons =
-                pending_netfilter_refresh_reasons_;
-            pending_netfilter_refresh_reasons_ = 0;
-            const bool full_refresh =
-                (reasons &
-                 static_cast<std::uint8_t>(
-                     NetfilterRefreshReason::full)) != 0;
-            const bool nat_refresh =
-                (reasons &
-                 static_cast<std::uint8_t>(
-                     NetfilterRefreshReason::nat_only)) != 0;
-            const bool snat_health_check =
-                full_refresh || nat_refresh;
-            const char* reason_label =
-                full_refresh && nat_refresh
-                    ? "full+nat"
-                    : (full_refresh ? "full" : "nat");
-
-            Logger::instance().info(
-                "Netfilter event: applying {} runtime refresh...",
-                reason_label);
-            if (nat_refresh &&
-                runtime_firewall_retry_.retry_pending()) {
-                // Do not coalesce away a confirmed firmware NAT rebuild behind
-                // an older generic recovery. Replace that retry with an
-                // immediate attempt whose bounded retry chain remembers that
-                // SNAT health must be verified.
-                cancel_runtime_firewall_retry();
-            }
-            const bool runtime_refreshed =
-                refresh_iproute_and_firewall_runtime(
-                    0,
-                    std::nullopt,
-                    std::nullopt,
-                    /*schedule_catalog_refresh=*/true,
-                    OwnedSnatRecovery{
-                        /*requested=*/snat_health_check,
-                        /*missing_observed=*/false});
-
-            // A nat-only repair must not turn one firmware table rebuild into
-            // a burst of remote health probes. Full/mangle refreshes preserve
-            // the historical SIGUSR1 behaviour, but only after the runtime
-            // generation was actually reconciled.
-            if (runtime_refreshed && full_refresh && urltest_manager_) {
-                Logger::instance().info(
-                    "Netfilter event: probing urltest endpoints...");
-                for (const auto& ob : config_.outbounds.value_or(std::vector<Outbound>{})) {
-                    if (ob.type == OutboundType::URLTEST) {
-                        urltest_manager_->trigger_immediate_test(ob.tag);
-                    }
+                    return;
                 }
-            }
-            if (runtime_refreshed) {
-                Logger::instance().info(
-                    "Netfilter event: {} runtime refresh complete.",
-                    reason_label);
-            } else {
-                Logger::instance().info(
-                    "Netfilter event: {} runtime refresh deferred or "
-                    "coalesced with recovery.",
-                    reason_label);
-            }
-        },
-        "netfilter-runtime-refresh");
-    } catch (...) {
-        // No callback with this serial owns the coalesced work. Older
-        // callbacks are fenced by the increment above, so expose an idle
-        // state that the periodic health task can retry instead of remaining
-        // permanently 'pending'.
+                netfilter_refresh_task_id_ = -1;
+                reconcile_pending_netfilter_runtime_refresh();
+            },
+            "netfilter-runtime-refresh");
+    } catch (const std::exception& error) {
+        // No callback with this serial owns the work. Keep its exact reason
+        // bits for the independent periodic owner. Do not reconcile inline:
+        // post-publication callers can still hold the main firewall mutation
+        // lock, and recursive apply would deadlock that safety boundary.
         netfilter_refresh_task_id_ = -1;
-        pending_netfilter_refresh_reasons_ = 0U;
-        throw;
+        netfilter_refresh_batch_started_at_.reset();
+        try {
+            Logger::instance().info(
+                "Netfilter refresh timer could not be installed: {}. "
+                "The periodic runtime health owner retained the refresh.",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        netfilter_refresh_task_id_ = -1;
+        netfilter_refresh_batch_started_at_.reset();
     }
 }
+
+#ifdef WITH_API
+void Daemon::schedule_remote_access_recovery_watchdog() {
+    if (remote_access_recovery_watchdog_task_id_ >= 0) return;
+    if (!scheduler_) {
+        throw std::logic_error(
+            "remote-access recovery watchdog requires a scheduler");
+    }
+    remote_access_recovery_watchdog_task_id_ =
+        scheduler_->schedule_repeating(
+            REMOTE_ACCESS_RECOVERY_WATCHDOG_INTERVAL,
+            [this]() { resume_unscheduled_remote_access_retry(); },
+            "remote-access-recovery-watchdog");
+}
+
+void Daemon::cancel_remote_access_recovery_watchdog() noexcept {
+    if (remote_access_recovery_watchdog_task_id_ < 0) return;
+    const int task_id = remote_access_recovery_watchdog_task_id_;
+    remote_access_recovery_watchdog_task_id_ = -1;
+    if (!scheduler_) return;
+    try {
+        scheduler_->cancel(task_id);
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().info(
+                "Remote-access recovery watchdog cancellation failed: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+    }
+}
+
+void Daemon::setup_remote_access_retry_bridge() {
+    const auto bridge_epoch =
+        remote_access_retry_bridge_epoch_.fetch_add(
+            1U, std::memory_order_acq_rel) + 1U;
+    set_remote_access_retry_scheduler(
+        [this, bridge_epoch](const RemoteAccessRetryHint& hint) {
+            const bool posted = post_control_task(
+                [this, hint, bridge_epoch]() {
+                    if (remote_access_retry_bridge_epoch_.load(
+                            std::memory_order_acquire) != bridge_epoch) {
+                        return;
+                    }
+                    schedule_remote_access_retry(hint);
+                },
+                "remote-access-retry-hint");
+            if (!posted) {
+                throw std::runtime_error(
+                    "daemon control loop is not accepting remote-access "
+                    "recovery work");
+            }
+        });
+}
+
+void Daemon::reset_remote_access_retry_bridge() noexcept {
+    remote_access_retry_bridge_epoch_.fetch_add(
+        1U, std::memory_order_acq_rel);
+    try {
+        reset_remote_access_retry_scheduler();
+    } catch (...) {
+    }
+    ++remote_access_retry_schedule_serial_;
+    unscheduled_remote_access_retry_generation_.reset();
+    if (remote_access_retry_task_id_ < 0 || !scheduler_) {
+        remote_access_retry_task_id_ = -1;
+        return;
+    }
+    const int task_id = remote_access_retry_task_id_;
+    remote_access_retry_task_id_ = -1;
+    try {
+        scheduler_->cancel(task_id);
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().info(
+                "Remote-access retry cancellation failed: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+    }
+}
+
+void Daemon::schedule_remote_access_retry(
+    const RemoteAccessRetryHint& hint) {
+    if (!hint.schedule || hint.generation == 0U || !scheduler_) {
+        return;
+    }
+    const auto status = remote_access_runtime_status();
+    if (status.desired_generation != hint.generation) {
+        if (unscheduled_remote_access_retry_generation_ ==
+            hint.generation) {
+            unscheduled_remote_access_retry_generation_.reset();
+        }
+        return;
+    }
+
+    const std::uint64_t schedule_serial =
+        ++remote_access_retry_schedule_serial_;
+    if (remote_access_retry_task_id_ >= 0) {
+        const int stale_task_id = remote_access_retry_task_id_;
+        remote_access_retry_task_id_ = -1;
+        try {
+            scheduler_->cancel(stale_task_id);
+        } catch (const std::exception& error) {
+            try {
+                Logger::instance().info(
+                    "Replacing remote-access retry after timer cancellation "
+                    "reported an error: {}",
+                    error.what());
+            } catch (...) {
+            }
+        } catch (...) {
+        }
+    }
+
+    if (hint.delay <= std::chrono::milliseconds{0}) {
+        // A zero timerfd interval is disarmed on Linux. The bridge callback
+        // has already posted us onto the control loop, so execute this
+        // deferred/trailing generation directly and let its result publish
+        // the next non-zero retry hint when needed.
+        const std::string listen =
+            config_.api.has_value()
+                ? config_.api->listen.value_or(std::string{})
+                : std::string{};
+        unscheduled_remote_access_retry_generation_.reset();
+        try {
+            (void)retry_remote_access_reconcile(
+                hint.generation, listen);
+        } catch (...) {
+            unscheduled_remote_access_retry_generation_ =
+                hint.generation;
+        }
+        return;
+    }
+
+    unscheduled_remote_access_retry_generation_ = hint.generation;
+    try {
+        remote_access_retry_task_id_ = scheduler_->schedule_oneshot(
+            hint.delay,
+            [this, hint, schedule_serial]() {
+                if (schedule_serial !=
+                    remote_access_retry_schedule_serial_) {
+                    return;
+                }
+                remote_access_retry_task_id_ = -1;
+                if (!running_.load(std::memory_order_acquire)) {
+                    return;
+                }
+                const std::string listen =
+                    config_.api.has_value()
+                        ? config_.api->listen.value_or(std::string{})
+                        : std::string{};
+                try {
+                    (void)retry_remote_access_reconcile(
+                        hint.generation, listen);
+                } catch (...) {
+                    unscheduled_remote_access_retry_generation_ =
+                        hint.generation;
+                }
+            },
+            hint.maintenance
+                ? "remote-access-maintenance-retry"
+                : "remote-access-retry");
+    } catch (const std::exception& error) {
+        remote_access_retry_task_id_ = -1;
+        try {
+            Logger::instance().info(
+                "Remote-access recovery timer could not be installed: {}. "
+                "The periodic runtime health owner will retry it.",
+                error.what());
+        } catch (...) {
+        }
+        return;
+    }
+    if (remote_access_retry_task_id_ >= 0) {
+        unscheduled_remote_access_retry_generation_.reset();
+    }
+}
+
+void Daemon::resume_unscheduled_remote_access_retry() noexcept {
+    std::optional<std::uint64_t> generation =
+        unscheduled_remote_access_retry_generation_;
+    try {
+        const auto status = remote_access_runtime_status();
+        if (generation.has_value() &&
+            status.desired_generation != *generation) {
+            unscheduled_remote_access_retry_generation_.reset();
+            generation.reset();
+        }
+        if (!should_run_periodic_remote_access_recovery(
+                remote_access_retry_task_id_ >= 0,
+                generation.has_value(),
+                status.desired_generation != 0U,
+                status.recovery_owned)) {
+            return;
+        }
+        generation = status.desired_generation;
+        const std::string listen =
+            config_.api.has_value()
+                ? config_.api->listen.value_or(std::string{})
+                : std::string{};
+        unscheduled_remote_access_retry_generation_.reset();
+        (void)retry_remote_access_reconcile(*generation, listen);
+    } catch (const std::exception& error) {
+        if (generation.has_value()) {
+            unscheduled_remote_access_retry_generation_ = *generation;
+        }
+        try {
+            Logger::instance().info(
+                "Periodic remote-access recovery remains deferred: {}",
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        if (generation.has_value()) {
+            unscheduled_remote_access_retry_generation_ = *generation;
+        }
+    }
+}
+
+void Daemon::request_remote_access_reconcile_from_control(
+    std::string_view source) noexcept {
+    try {
+        const auto status = remote_access_runtime_status();
+        const bool retry_owns_next_attempt =
+            should_coalesce_remote_access_runtime_refresh(
+                remote_access_retry_task_id_ >= 0,
+                unscheduled_remote_access_retry_generation_.has_value(),
+                status.desired_generation != 0U,
+                status.state == RemoteAccessRuntimeState::pending ||
+                    status.state == RemoteAccessRuntimeState::degraded,
+                status.recovery_owned);
+        if (retry_owns_next_attempt) {
+            Logger::instance().trace(
+                "remote_access_refresh_coalesced",
+                "source={} generation={} reason=recovery_already_owned",
+                source,
+                status.desired_generation);
+            return;
+        }
+        const std::string listen =
+            config_.api.has_value()
+                ? config_.api->listen.value_or(std::string{})
+                : std::string{};
+        (void)refresh_remote_access_reconcile(listen);
+    } catch (const std::exception& error) {
+        try {
+            Logger::instance().error(
+                "Cannot request remote-access firewall reconciliation after "
+                "{}: {}",
+                source,
+                error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+    }
+}
+#endif
 
 Daemon::RoutingTestSnapshot Daemon::capture_routing_test_snapshot() {
     if (!is_event_loop_thread()) {
@@ -2109,17 +2551,8 @@ Daemon::RoutingTestSnapshot Daemon::capture_routing_test_snapshot() {
 void Daemon::schedule_netfilter_runtime_refresh_noexcept(
     NetfilterRefreshReason reason,
     const char* failure_detail) noexcept {
-    try {
-        schedule_netfilter_runtime_refresh(reason);
-    } catch (...) {
-        // This helper is used only after a firewall generation has committed.
-        // Scheduler allocation/fd failure must not make callers claim that an
-        // old generation stayed active. The repeating health check remains
-        // the durable repair authority.
-        // schedule_netfilter_runtime_refresh() has strong exception state:
-        // no id and no coalesced bits remain when no callback owns the work.
-        report_meta_udp443_degraded(failure_detail);
-    }
+    (void)failure_detail;
+    schedule_netfilter_runtime_refresh(reason);
 }
 
 void Daemon::handle_sighup() {
@@ -2785,12 +3218,18 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         }
         runtime_firewall_retry_.complete_attempt(
             /*succeeded=*/true, snat_recovery);
+        release_urltest_firewall_recovery(
+            current_runtime_generation);
         if (resolver_after_firewall_gate_.release(
                 current_runtime_generation)) {
             schedule_resolver_reload_retry(
                 0, current_runtime_generation);
         }
         runtime_firewall_incidents_.clear();
+#ifdef WITH_API
+        request_remote_access_reconcile_from_control(
+            "verified firewall refresh");
+#endif
         publish_runtime_state();
         log.info("Runtime iproute and firewall refresh complete.");
         return true;
@@ -2808,10 +3247,36 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
             e.what());
         runtime_firewall_retry_.complete_attempt(
             /*succeeded=*/false, snat_recovery);
-        if (runtime_firewall_retry_.route_unavailable_retry_required()) {
+        const auto current_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const bool urltest_recovery_pending =
+            urltest_after_firewall_gate_.waiting_for(
+                current_runtime_generation);
+        if (urltest_recovery_pending &&
+            retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
+            for (const auto& tag :
+                 urltest_after_firewall_gate_.pending_tags(
+                     current_runtime_generation)) {
+                const auto incident =
+                    urltest_apply_incidents_.record_failure(
+                        tag, /*notify_immediately=*/true);
+                if (incident.notify) {
+                    log.error(
+                        "Urltest '{}' firewall recovery is still waiting for "
+                        "a route after {} bounded retries: {}. The previous "
+                        "cursor remains active and quiet maintenance will "
+                        "continue in the background.",
+                        tag,
+                        retry_attempt,
+                        e.what());
+                }
+            }
+        }
+        if (runtime_firewall_retry_.route_unavailable_retry_required() ||
+            urltest_recovery_pending) {
             schedule_runtime_firewall_retry(
                 retry_attempt,
-                runtime_generation_.load(std::memory_order_acquire),
+                current_runtime_generation,
                 snat_recovery);
         }
         return false;
@@ -2819,11 +3284,38 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         runtime_firewall_retry_.complete_attempt(
             /*succeeded=*/false, snat_recovery);
         if (retry_attempt >= RUNTIME_FIREWALL_RETRY_DELAYS.size()) {
-            if (snat_recovery.requested) {
+            const auto current_runtime_generation =
+                runtime_generation_.load(std::memory_order_acquire);
+            const bool urltest_recovery_pending =
+                urltest_after_firewall_gate_.waiting_for(
+                    current_runtime_generation);
+            if (snat_recovery.requested || urltest_recovery_pending) {
+                if (urltest_recovery_pending) {
+                    // This bounded-chain boundary is the sole owner of the
+                    // URLTEST bell.  Initial deferral must not advance or
+                    // consume the per-selector notification latch.
+                    for (const auto& tag :
+                         urltest_after_firewall_gate_.pending_tags(
+                             current_runtime_generation)) {
+                        const auto incident =
+                            urltest_apply_incidents_.record_failure(
+                                tag, /*notify_immediately=*/true);
+                        if (incident.notify) {
+                            log.error(
+                                "Urltest '{}' firewall recovery failed after "
+                                "{} bounded retries: {}. The previous cursor "
+                                "remains active and quiet maintenance will "
+                                "continue in the background.",
+                                tag,
+                                retry_attempt,
+                                e.what());
+                        }
+                    }
+                }
                 // Keep one quiet, capped maintenance retry alive while the
-                // desired SNAT contract is still missing. Netfilter hooks can
-                // be lost during firmware service restarts; recovery must not
-                // depend on receiving another external event.
+                // desired SNAT contract or a restored URLTEST cursor is still
+                // awaiting proof. Netfilter hooks can be lost during firmware
+                // service restarts; recovery must not depend on another event.
                 log.info(
                     "Runtime firewall recovery remains pending after {} "
                     "bounded retries: {}. A maintenance retry will continue "
@@ -2832,7 +3324,7 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                     e.what());
                 schedule_runtime_firewall_retry(
                     retry_attempt,
-                    runtime_generation_.load(std::memory_order_acquire),
+                    current_runtime_generation,
                     snat_recovery);
             } else {
                 const auto incident =
@@ -2875,32 +3367,79 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
         const bool retry =
             config_has_native_vpn_catalog_policy(config_) &&
             retry_attempt < RUNTIME_FIREWALL_RETRY_DELAYS.size();
-        const auto incident =
-            runtime_firewall_incidents_.record_failure(
-                "runtime-firewall-reconciliation",
-                /*notify_immediately=*/true);
-        if (incident.notify) {
-            if (retry) {
-                log.error(
-                    "Runtime routing/firewall reconciliation failed: {}. A "
-                    "bounded retry will verify whether the failure clears. "
-                    "The last committed runtime generation remains active.",
-                    e.what());
-            } else {
-                log.error(
-                    "Runtime routing/firewall reconciliation failed "
-                    "permanently: {}. The last committed runtime generation "
-                    "remains active; inspect firewall diagnostics before "
-                    "retrying Apply.",
-                    e.what());
+        const auto current_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+        const bool urltest_recovery_failed_permanently =
+            urltest_after_firewall_gate_.waiting_for(
+                current_runtime_generation);
+        const auto failed_urltest_tags =
+            urltest_after_firewall_gate_.pending_tags(
+                current_runtime_generation);
+        if (urltest_recovery_failed_permanently) {
+            // A typed transient keeps the last committed runtime serving
+            // while recovery is pending. A non-transient failure during that
+            // proof is different: keep the permanent broken reason visible,
+            // while the actually active last committed routing/LKG remains
+            // available until an explicit stop performs full cleanup.
+            urltest_after_firewall_gate_.reset();
+            try {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    "urltest firewall recovery failed permanently");
+                publish_runtime_state();
+            } catch (...) {
+            }
+            // Use the same per-selector latch that owns bounded transient
+            // exhaustion.  Escalating a maintenance attempt to permanent
+            // state updates health, but cannot mint a second bell for the
+            // same gated incident.
+            for (const auto& tag : failed_urltest_tags) {
+                const auto incident =
+                    urltest_apply_incidents_.record_failure(
+                        tag, /*notify_immediately=*/true);
+                if (incident.notify) {
+                    log.error(
+                        "Urltest '{}' firewall recovery failed permanently: "
+                        "{}. Runtime state is broken because the restored "
+                        "kernel generation could not be verified.",
+                        tag,
+                        e.what());
+                } else {
+                    log.info(
+                        "Urltest '{}' firewall recovery became permanent: "
+                        "{}. Its existing notification remains active.",
+                        tag,
+                        e.what());
+                }
             }
         } else {
-            log.info(
-                "Runtime routing/firewall reconciliation remains failed: {}. "
-                "The existing notification remains active.",
-                e.what());
+            const auto incident =
+                runtime_firewall_incidents_.record_failure(
+                    "runtime-firewall-reconciliation",
+                    /*notify_immediately=*/true);
+            if (incident.notify) {
+                if (retry) {
+                    log.error(
+                        "Runtime routing/firewall reconciliation failed: {}. A "
+                        "bounded retry will verify whether the failure clears. "
+                        "The last committed runtime generation remains active.",
+                        e.what());
+                } else {
+                    log.error(
+                        "Runtime routing/firewall reconciliation failed "
+                        "permanently: {}. The last committed runtime generation "
+                        "remains active; inspect firewall diagnostics before "
+                        "retrying Apply.",
+                        e.what());
+                }
+            } else {
+                log.info(
+                    "Runtime routing/firewall reconciliation remains failed: "
+                    "{}. The existing notification remains active.",
+                    e.what());
+            }
         }
-        if (retry) {
+        if (retry && !urltest_recovery_failed_permanently) {
             schedule_runtime_firewall_retry(
                 retry_attempt,
                 runtime_generation_.load(std::memory_order_acquire),
@@ -2953,7 +3492,8 @@ void Daemon::schedule_runtime_firewall_retry(
                 std::nullopt,
                 /*schedule_catalog_refresh=*/true,
                 std::move(scheduled_snat_recovery));
-        });
+        },
+        urltest_after_firewall_gate_.waiting_for(runtime_generation));
     if (!retry_plan.schedule) {
         return;
     }
@@ -2962,7 +3502,7 @@ void Daemon::schedule_runtime_firewall_retry(
         : RUNTIME_FIREWALL_RETRY_DELAYS[attempt];
     if (retry_plan.maintenance) {
         Logger::instance().verbose(
-            "SNAT maintenance recovery scheduled in {}s.",
+            "Persistent firewall maintenance recovery scheduled in {}s.",
             delay.count());
     } else {
         Logger::instance().info(
@@ -2979,6 +3519,10 @@ void Daemon::handle_interface_event(const InterfaceMonitor::Event& event) {
     if (status_stream_) {
         status_stream_->reconcile();
     }
+    // Default-route publication and address churn are prerequisites of the
+    // independent remote-access policy even when this interface is unrelated
+    // to keen-pbr routing rules.
+    request_remote_access_reconcile_from_control("interface event");
 #endif
     if (!interface_event_requires_runtime_observation(event) ||
         !routing_runtime_active_) {
@@ -3282,8 +3826,31 @@ void Daemon::run_event_loop() {
             throw DaemonError("epoll_wait failed: " + std::string(strerror(errno)));
         }
 
+        bool signal_event_present = false;
         for (int i = 0; i < nfds; ++i) {
+            if (events[i].data.fd == signal_fd_) {
+                signal_event_present = true;
+                // signalfd is drained in one pass. Give terminal signals
+                // priority over every control, timer, API and netlink event
+                // returned by this same unordered epoll batch.
+                dispatch_event_fd(events[i].data.fd, events[i].events);
+                break;
+            }
+        }
+        if (!event_batch_allows_non_signal_dispatch(
+                signal_event_present,
+                running_.load(std::memory_order_acquire))) {
+            continue;
+        }
+
+        for (int i = 0; i < nfds; ++i) {
+            if (events[i].data.fd == signal_fd_) {
+                continue;
+            }
             dispatch_event_fd(events[i].data.fd, events[i].events);
+            if (!running_.load(std::memory_order_acquire)) {
+                break;
+            }
         }
     }
 }
@@ -3425,11 +3992,6 @@ void Daemon::run() {
     schedule_lists_autoupdate();
     schedule_interface_probe();
     schedule_catalog_refresh();
-#ifdef WITH_API
-    apply_remote_access_rules(config_.api.has_value()
-                                  ? config_.api->listen.value_or(std::string{})
-                                  : std::string{});
-#endif
 
     if (refresh_result.any_dns_relevant_changed()) {
         log.info("Startup lists: DNS-relevant list(s) changed ({}); reloading system resolver.",
@@ -3490,6 +4052,14 @@ void Daemon::run() {
     // URLTest children queue their first result without exposing a half-started
     // daemon to synchronous control requests.
     accept_posted_control_tasks_.store(true, std::memory_order_release);
+#ifdef WITH_API
+    // Retry hints can originate on API worker threads. Register the bridge
+    // only after posted control work is admitted, then create the startup
+    // desired-state generation through the same reconciler used everywhere.
+    setup_remote_access_retry_bridge();
+    schedule_remote_access_recovery_watchdog();
+    request_remote_access_reconcile_from_control("startup");
+#endif
     if (internal_vpn_resolution_requires_catalog_refresh(
             config_, internal_vpn_resolution_state) ||
         (config_requires_internal_vpn_service_inventory(config_) &&
@@ -3511,6 +4081,10 @@ void Daemon::run() {
         // event loop starts must therefore unwind every owned subsystem; the
         // normal shutdown tail below is never reached in this path.
         log.error("Daemon startup failed; rolling back partial runtime state.");
+#ifdef WITH_API
+        cancel_remote_access_recovery_watchdog();
+        reset_remote_access_retry_bridge();
+#endif
         runtime_mutation_admission_.shutdown();
         routing_test_admission_.shutdown();
         sighup_reload_coordinator_.stop();
@@ -3561,7 +4135,8 @@ void Daemon::run() {
             log.error("Startup rollback: conntrack cleanup failed: {}",
                       cleanup_error.what());
         }
-        remove_remote_access_rules();
+        remove_remote_access_rules(
+            RemoteAccessRemovalMode::expected_teardown);
 #endif
         routing_test_executor_.cancel_pending_and_shutdown();
         blocking_executor_.cancel_pending_and_shutdown();
@@ -3634,6 +4209,12 @@ void Daemon::run() {
 
     run_event_loop();
 
+#ifdef WITH_API
+    // Fence retry callbacks while posted-control admission and Scheduler are
+    // still alive. No API worker may retain a Daemon capture past this point.
+    cancel_remote_access_recovery_watchdog();
+    reset_remote_access_retry_bridge();
+#endif
     // Stop the continuous forwarded-flow observer before closing admission to
     // the control loop or tearing down API/conntrack state.  An in-flight
     // observation is generation-fenced, but disabling it here also prevents a
@@ -3685,7 +4266,8 @@ void Daemon::run() {
         api_server_->stop();
     }
     teardown_conntrack_events();
-    remove_remote_access_rules();
+    remove_remote_access_rules(
+        RemoteAccessRemovalMode::expected_teardown);
 #endif
 
     // Stop accepting API work before retiring workers. Otherwise a handler can

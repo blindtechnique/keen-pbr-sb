@@ -331,7 +331,8 @@ inline int safe_exec_with_timeouts(
     const std::vector<std::string>& args,
     bool suppress_output,
     const SafeExecTimeouts& timeouts,
-    const ChildEnvironmentOverrides& child_environment = {}) {
+    const ChildEnvironmentOverrides& child_environment = {},
+    SafeExecFailureLog failure_log = SafeExecFailureLog::Enabled) {
     if (args.empty()) return -1;
     if (!child_environment_overrides_are_valid(child_environment)) {
         return -1;
@@ -402,11 +403,29 @@ inline int safe_exec_with_timeouts(
     const ChildWaitResult wait_result = wait_for_child_until(
         pid, started_at + timeouts.timeout, timeouts.kill_grace);
     if (wait_result.timed_out) {
-        Logger::instance().error(
-            "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
-            "means the firmware is holding the xtables lock; the operation will "
-            "be retried.",
-            command, timeouts.timeout.count());
+        if (should_record_safe_exec_failure(failure_log)) {
+            try {
+                const std::string reason =
+                    "timeout timeout_ms=" +
+                    std::to_string(timeouts.timeout.count());
+                (void)write_last_command_failure(LastCommandFailureView{
+                    args, -1, {}, {}, reason});
+            } catch (...) {
+                // Diagnostics never replace the bounded command result.
+            }
+        }
+        if (should_log_safe_exec_failure(failure_log)) {
+            Logger::instance().error(
+                "Command '{}' exceeded {} ms and was killed. On Keenetic this usually "
+                "means the firmware is holding the xtables lock; the operation will "
+                "be retried.",
+                command, timeouts.timeout.count());
+        } else if (failure_log == SafeExecFailureLog::DiagnosticOnly) {
+            Logger::instance().verbose(
+                "safe_exec_timeout cmd={} timeout_ms={} notification=deferred",
+                command,
+                timeouts.timeout.count());
+        }
         return -1;
     }
     int status = wait_result.status;
@@ -437,9 +456,15 @@ inline int safe_exec_with_timeouts(
 }
 
 inline int safe_exec(const std::vector<std::string>& args,
-                     bool suppress_output = false) {
+                     bool suppress_output = false,
+                     SafeExecFailureLog failure_log =
+                         SafeExecFailureLog::Enabled) {
     return safe_exec_with_timeouts(
-        args, suppress_output, safe_exec_timeouts());
+        args,
+        suppress_output,
+        safe_exec_timeouts(),
+        {},
+        failure_log);
 }
 
 // Apply fixed environment overrides in the forked child only. The executable

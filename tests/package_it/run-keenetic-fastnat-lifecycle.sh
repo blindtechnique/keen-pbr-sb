@@ -64,6 +64,21 @@ log() { :; }
 log_error() { :; }
 . "$work/functions.sh"
 
+# The FastNAT contract exercises lifecycle ordering, not the separate
+# PID/startticks lease implementation. Model a uniquely owned stop admission
+# without adding entries to the expected FastNAT action log.
+acquire_control_lease() {
+    STOPPING_CONTROL_OWNER_ROLE=stop
+    return 0
+}
+release_control_lease() { return 0; }
+control_lease_owned_by_self() { return 0; }
+begin_stopping_marker() { return 0; }
+mark_stopping_mutation_started() { return 0; }
+discard_control_mailbox_after_successful_stop() { return 0; }
+finish_stopping_marker() { return 0; }
+drain_control_runtime() { return 0; }
+
 assert_calls_contain() {
     pattern=$1
     grep -Fq -- "$pattern" "$calls" || {
@@ -322,13 +337,51 @@ cleanup_stale_meta_udp443_firewall() {
 }
 
 FASTNAT_RESTORE_ON_START_FAILURE=no
+START_CONTROL_LEASE_HELD=no
+STOPPING_CONTROL_LEASE_ROLE=""
 : > "$order"
 restore_fastnat_after_failed_start
 [ ! -s "$order" ]
 
+# A losing start/restart must not restore or remove the snapshot created by the
+# exact start-lease winner after the loser inspected the old shared pathname.
+printf '%s\n' 1 > "$FASTNAT_STATE_FILE"
 FASTNAT_RESTORE_ON_START_FAILURE=yes
 restore_fastnat_after_failed_start
+[ ! -s "$order" ]
+[ -f "$FASTNAT_STATE_FILE" ]
+
+# Rollback authority is established only after exact start-lease ownership.
+START_CONTROL_LEASE_HELD=yes
+STOPPING_CONTROL_LEASE_ROLE=start
+FASTNAT_RESTORE_ON_START_FAILURE=no
+rm -f "$FASTNAT_STATE_FILE"
+establish_fastnat_start_rollback_authority if-absent
+[ "$FASTNAT_RESTORE_ON_START_FAILURE" = yes ]
+printf '%s\n' 1 > "$FASTNAT_STATE_FILE"
+restore_fastnat_after_failed_start
 [ "$(cat "$order")" = restore ]
+[ "$FASTNAT_RESTORE_ON_START_FAILURE" = no ]
+
+: > "$order"
+FASTNAT_RESTORE_ON_START_FAILURE=no
+establish_fastnat_start_rollback_authority restart
+[ "$FASTNAT_RESTORE_ON_START_FAILURE" = yes ]
+restore_fastnat_after_failed_start
+[ "$(cat "$order")" = restore ]
+
+# Exact lease ownership still cannot roll back underneath a daemon that another
+# completed start already launched before this action acquired the lease.
+: > "$order"
+: > "$FASTNAT_TEST_ALIVE"
+printf '%s\n' 1 > "$FASTNAT_STATE_FILE"
+FASTNAT_RESTORE_ON_START_FAILURE=yes
+restore_fastnat_after_failed_start
+[ ! -s "$order" ]
+[ -f "$FASTNAT_STATE_FILE" ]
+rm -f "$FASTNAT_TEST_ALIVE" "$FASTNAT_STATE_FILE"
+START_CONTROL_LEASE_HELD=no
+STOPPING_CONTROL_LEASE_ROLE=""
 
 : > "$order"
 stop_service_for_action stop no
@@ -342,6 +395,20 @@ stop_service_for_action stop yes
 stop:stop
 cleanup-meta-udp443
 restore" ]
+
+# Dispatcher authority is created after acquisition for both ordinary start
+# and restart; neither pre-lease path may infer ownership from shared state.
+start_case=$(sed -n '/^[[:space:]]*start)/,/^[[:space:]]*;;/p' "$init_script")
+case "$start_case" in
+    *'FASTNAT_RESTORE_ON_START_FAILURE=no'*'begin_start_control_lease'*'establish_fastnat_start_rollback_authority if-absent'*'prepare_start'*) ;;
+    *) echo "start rollback authority is not ordered behind its lease" >&2; exit 1 ;;
+esac
+restart_case=$(sed -n \
+    '/^[[:space:]]*restart|restartall)/,/^[[:space:]]*;;/p' "$init_script")
+case "$restart_case" in
+    *'FASTNAT_RESTORE_ON_START_FAILURE=no'*'begin_start_control_lease'*'establish_fastnat_start_rollback_authority restart'*'prepare_start'*) ;;
+    *) echo "restart rollback authority is not ordered behind its lease" >&2; exit 1 ;;
+esac
 
 # Package replacement must not briefly restore FastNAT between the old and new
 # daemon. A real final stop keeps the existing restore behavior.

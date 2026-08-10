@@ -340,13 +340,15 @@ run_prepare_start_order_case() (
     calls="$work/prepare-start-order.calls"
     : > "$calls"
     . "$work/functions.sh"
+    clear_stale_stopping_marker_for_start() { echo admission >> "$calls"; }
     wait_for_keenetic_rci() { echo rci >> "$calls"; }
     check_runtime_dependencies() { echo dependencies >> "$calls"; }
     configure_raw_prerouting() { echo raw >> "$calls"; }
     disable_hwnat() { echo fastnat >> "$calls"; }
 
     prepare_start
-    expected='rci
+    expected='admission
+rci
 dependencies
 raw
 fastnat'

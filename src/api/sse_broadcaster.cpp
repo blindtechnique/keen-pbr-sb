@@ -97,11 +97,22 @@ void SseBroadcaster::publish(const std::string& message) {
     subscriptions_.erase(out, subscriptions_.end());
 }
 
+void SseBroadcaster::revoke_active_subscriptions() {
+    // Revoked credentials must not drain frames queued before the epoch
+    // transition. Admission remains open for a newly authenticated session.
+    close_subscriptions(false, true);
+}
+
 void SseBroadcaster::close_all() {
+    close_subscriptions(true, false);
+}
+
+void SseBroadcaster::close_subscriptions(bool close_admission,
+                                         bool purge_messages) {
     std::vector<SubscriptionPtr> active;
     {
         KPBR_LOCK_GUARD(mutex_);
-        admission_closed_ = true;
+        if (close_admission) admission_closed_ = true;
         for (auto& weak : subscriptions_) {
             if (auto subscription = weak.lock()) {
                 active.push_back(std::move(subscription));
@@ -113,11 +124,14 @@ void SseBroadcaster::close_all() {
     for (auto& subscription : active) {
         {
             KPBR_UNIQUE_LOCK(sub_lock, subscription->mutex);
+            if (purge_messages) subscription->messages.clear();
             subscription->closed = true;
         }
         subscription->cv.notify_all();
     }
-    Logger::instance().trace("sse_close_all", "closed={}", active.size());
+    Logger::instance().trace(
+        close_admission ? "sse_close_all" : "sse_revoke_all",
+        "closed={}", active.size());
 }
 
 size_t SseBroadcaster::active_subscriptions() {
@@ -148,7 +162,8 @@ SseSubscriptionWaitResult wait_for_sse_subscription(
     const SseBroadcaster::SubscriptionPtr& subscription,
     std::chrono::milliseconds heartbeat_interval,
     std::chrono::milliseconds peer_probe_interval,
-    const std::function<bool()>& peer_is_writable) {
+    const std::function<bool()>& peer_is_writable,
+    const std::function<bool()>& authorization_is_current) {
     using Clock = std::chrono::steady_clock;
 
     const auto started_at = Clock::now();
@@ -176,6 +191,20 @@ SseSubscriptionWaitResult wait_for_sse_subscription(
     };
 
     while (true) {
+        if (authorization_is_current) {
+            {
+                KPBR_UNIQUE_LOCK(lock, subscription->mutex);
+                if (subscription->closed) {
+                    return {SseSubscriptionWaitStatus::CLOSED, {}};
+                }
+            }
+            if (!authorization_is_current()) {
+                return {
+                    SseSubscriptionWaitStatus::PEER_DISCONNECTED,
+                    {},
+                };
+            }
+        }
         {
             KPBR_UNIQUE_LOCK(lock, subscription->mutex);
             if (!subscription->messages.empty()) {
@@ -217,6 +246,19 @@ SseSubscriptionWaitResult wait_for_sse_subscription(
         // must never run under Subscription::mutex because publish/close need
         // that mutex to wake this waiter.
         const bool peer_writable = !peer_is_writable || peer_is_writable();
+        const bool authorization_current =
+            !authorization_is_current || authorization_is_current();
+
+        if (!authorization_current) {
+            KPBR_UNIQUE_LOCK(lock, subscription->mutex);
+            if (subscription->closed) {
+                return {SseSubscriptionWaitStatus::CLOSED, {}};
+            }
+            return {
+                SseSubscriptionWaitStatus::PEER_DISCONNECTED,
+                {},
+            };
+        }
 
         // A publish or close may have raced with the probe. Prefer that
         // authoritative subscription state over the transport result.

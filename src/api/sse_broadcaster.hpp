@@ -32,10 +32,14 @@ public:
     SubscriptionPtr subscribe(std::vector<std::string> initial_messages);
     void unsubscribe(const SubscriptionPtr& subscription);
     void publish(const std::string& message);
+    // Revokes the current cohort while keeping admission open for clients
+    // authenticated under the next session epoch.
+    void revoke_active_subscriptions();
     void close_all();
     size_t active_subscriptions();
 
 private:
+    void close_subscriptions(bool close_admission, bool purge_messages);
     void compact_locked() REQUIRES(mutex_);
 
     size_t max_queue_size_;
@@ -65,7 +69,8 @@ SseSubscriptionWaitResult wait_for_sse_subscription(
     const SseBroadcaster::SubscriptionPtr& subscription,
     std::chrono::milliseconds heartbeat_interval,
     std::chrono::milliseconds peer_probe_interval,
-    const std::function<bool()>& peer_is_writable = {});
+    const std::function<bool()>& peer_is_writable = {},
+    const std::function<bool()>& authorization_is_current = {});
 
 } // namespace keen_pbr3
 

@@ -18,6 +18,7 @@
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
 #include "../routing/netlink.hpp"
+#include "../runtime/runtime_state_machine.hpp"
 #include "../runtime/whatsapp_catalog_identity.hpp"
 
 namespace keen_pbr3 {
@@ -578,14 +579,15 @@ struct RuntimeFirewallRetryPlan {
 inline RuntimeFirewallRetryPlan plan_runtime_firewall_retry(
     std::size_t attempt,
     std::size_t bounded_retry_count,
-    bool snat_recovery_requested) noexcept {
+    bool snat_recovery_requested,
+    bool persistent_recovery_requested = false) noexcept {
     if (attempt < bounded_retry_count) {
         return RuntimeFirewallRetryPlan{
             /*schedule=*/true,
             /*maintenance=*/false,
             /*next_attempt=*/attempt + 1};
     }
-    if (snat_recovery_requested) {
+    if (snat_recovery_requested || persistent_recovery_requested) {
         return RuntimeFirewallRetryPlan{
             /*schedule=*/true,
             /*maintenance=*/true,
@@ -744,7 +746,7 @@ public:
     }
 
     bool retry_pending() const noexcept {
-        return retry_task_id_ >= 0;
+        return active_schedule_serial_ != 0U;
     }
 
     bool owned_snat_recovery_pending() const noexcept {
@@ -771,7 +773,8 @@ public:
         OwnedSnatRecovery snat_recovery,
         Schedule&& schedule,
         IsCurrent&& is_current,
-        RunAttempt&& run_attempt) {
+        RunAttempt&& run_attempt,
+        bool persistent_recovery_requested = false) {
         // The coordinator owns the recovery latch, so callers cannot
         // accidentally downgrade an exhausted owned-SNAT recovery to a
         // finished generic retry by passing an empty or stale payload.
@@ -783,42 +786,55 @@ public:
         const auto retry_plan = plan_runtime_firewall_retry(
             attempt,
             bounded_retry_count,
-            snat_recovery.requested);
+            snat_recovery.requested,
+            persistent_recovery_requested);
         if (!retry_plan.schedule) {
             return retry_plan;
         }
 
-        scheduled_runtime_generation_ = runtime_generation;
-        scheduled_retry_attempt_ = retry_plan.next_attempt;
-        scheduled_snat_recovery_ = std::move(snat_recovery);
+        const auto schedule_serial = next_schedule_serial();
+        active_schedule_serial_ = schedule_serial;
+        retry_task_id_ = -1;
+        const auto retry_attempt = retry_plan.next_attempt;
+        auto scheduled_recovery = std::move(snat_recovery);
         try {
-            retry_task_id_ = std::forward<Schedule>(schedule)(
+            const int task_id = std::forward<Schedule>(schedule)(
                 retry_plan,
                 [this,
+                 schedule_serial,
+                 retry_attempt,
+                 runtime_generation,
+                 snat_recovery = std::move(scheduled_recovery),
                  is_current = std::forward<IsCurrent>(is_current),
                  run_attempt = std::forward<RunAttempt>(run_attempt)]()
                     mutable {
-                    const auto retry_attempt = scheduled_retry_attempt_;
-                    const auto runtime_generation =
-                        scheduled_runtime_generation_;
-                    auto snat_recovery = scheduled_snat_recovery_;
-
                     // Release the single-flight slot before either the stale
                     // fence or the attempt callback. A reentrant failure may
-                    // therefore install its successor immediately.
-                    release_retry_slot();
+                    // therefore install its successor immediately. A canceled
+                    // callback cannot release a successor or borrow its
+                    // payload because both are fenced by this serial and the
+                    // payload is captured per schedule.
+                    if (!release_retry_slot_if_current(schedule_serial)) {
+                        return;
+                    }
                     if (!is_current(runtime_generation)) {
                         return;
                     }
                     run_attempt(
                         retry_attempt, std::move(snat_recovery));
                 });
+            // Scheduler test hooks may synchronously consume a ready timer
+            // before schedule() returns. Do not resurrect that completed slot
+            // (or overwrite a reentrant successor) with its returned id.
+            if (active_schedule_serial_ == schedule_serial) {
+                retry_task_id_ = task_id;
+                if (retry_task_id_ < 0) {
+                    (void)release_retry_slot_if_current(schedule_serial);
+                }
+            }
         } catch (...) {
-            release_retry_slot();
+            (void)release_retry_slot_if_current(schedule_serial);
             throw;
-        }
-        if (retry_task_id_ < 0) {
-            release_retry_slot();
         }
         return retry_plan;
     }
@@ -829,24 +845,111 @@ public:
             return;
         }
         const int task_id = retry_task_id_;
-        std::forward<Cancel>(cancel)(task_id);
-        release_retry_slot();
+        // Invalidate first. Scheduler::cancel may erase the entry and then
+        // throw while unregistering its fd; keeping a ghost task id would
+        // make every periodic recovery owner believe a retry is armed forever.
+        active_schedule_serial_ = 0U;
+        retry_task_id_ = -1;
+        (void)next_schedule_serial();
+        if (task_id >= 0) {
+            std::forward<Cancel>(cancel)(task_id);
+        }
     }
 
 private:
-    void release_retry_slot() noexcept {
+    std::uint64_t next_schedule_serial() noexcept {
+        ++schedule_serial_;
+        if (schedule_serial_ == 0U) ++schedule_serial_;
+        return schedule_serial_;
+    }
+
+    bool release_retry_slot_if_current(
+        std::uint64_t schedule_serial) noexcept {
+        if (active_schedule_serial_ != schedule_serial) return false;
+        active_schedule_serial_ = 0U;
         retry_task_id_ = -1;
-        scheduled_runtime_generation_ = 0;
-        scheduled_retry_attempt_ = 0;
-        scheduled_snat_recovery_ = {};
+        return true;
     }
 
     int retry_task_id_{-1};
-    std::uint64_t scheduled_runtime_generation_{0};
-    std::size_t scheduled_retry_attempt_{0};
-    OwnedSnatRecovery scheduled_snat_recovery_;
+    std::uint64_t schedule_serial_{0};
+    std::uint64_t active_schedule_serial_{0};
     OwnedSnatRecovery pending_owned_snat_recovery_;
 };
+
+// A transient URLTEST publication failure leaves the last committed cursor
+// authoritative, but the complete routing/firewall generation must be
+// reconciled before another selector is allowed to publish. Keep the exact
+// affected selector set so one trailing health probe can be requested after
+// verified recovery. A later runtime generation cannot release an older gate.
+class UrltestAfterFirewallRecoveryGate {
+public:
+    void wait_for(std::uint64_t runtime_generation,
+                  const std::string& urltest_tag) {
+        if (!waiting_for(runtime_generation)) {
+            std::set<std::string> replacement;
+            replacement.insert(urltest_tag);
+            tags_.swap(replacement);
+            runtime_generation_ = runtime_generation;
+            return;
+        }
+        tags_.insert(urltest_tag);
+    }
+
+    bool waiting_for(std::uint64_t runtime_generation) const noexcept {
+        return runtime_generation_.has_value() &&
+               *runtime_generation_ == runtime_generation;
+    }
+
+    std::set<std::string> pending_tags(
+        std::uint64_t runtime_generation) const {
+        if (!waiting_for(runtime_generation)) return {};
+        return tags_;
+    }
+
+    std::set<std::string> release(
+        std::uint64_t runtime_generation) noexcept {
+        if (!waiting_for(runtime_generation)) {
+            return {};
+        }
+        runtime_generation_.reset();
+        return std::move(tags_);
+    }
+
+    void reset() noexcept {
+        runtime_generation_.reset();
+        tags_.clear();
+    }
+
+private:
+    std::optional<std::uint64_t> runtime_generation_;
+    std::set<std::string> tags_;
+};
+
+// The resolver helper may stream a pinned immutable last-known-good
+// generation while the lifecycle state remains visibly broken, but only if
+// routing is still genuinely active. Stopped and shutting-down runtimes stay
+// fail-closed even if an old snapshot remains in memory.
+inline bool resolver_lkg_stream_available(
+    RuntimeState runtime_state,
+    bool routing_runtime_active,
+    bool committed_snapshot_available,
+    bool exact_activation_stream_authorized = false) noexcept {
+    if (!committed_snapshot_available) {
+        return false;
+    }
+    if (!routing_runtime_active) {
+        // A stopped runtime normally fails closed.  The sole exception is the
+        // exact committed generation being synchronously streamed as part of
+        // a lifecycle activation.  The daemon owns that pointer-scoped token;
+        // an old helper token or an arbitrary manual request cannot set it.
+        return exact_activation_stream_authorized &&
+               (runtime_state == RuntimeState::starting ||
+                runtime_state == RuntimeState::applying);
+    }
+    return runtime_state != RuntimeState::stopped &&
+           runtime_state != RuntimeState::shutting_down;
+}
 
 // Resolver recovery may depend on a firewall rollback that outlives the
 // bounded retry timer. Keep that dependency as an explicit generation latch:
@@ -906,6 +1009,62 @@ inline bool should_run_periodic_snat_repair(
            !netfilter_refresh_pending &&
            (state == OwnedSnatState::missing ||
             state == OwnedSnatState::stale);
+}
+
+inline bool should_run_periodic_urltest_firewall_recovery(
+    bool routing_runtime_active,
+    bool urltest_recovery_pending,
+    bool runtime_retry_pending,
+    bool netfilter_refresh_pending) noexcept {
+    return routing_runtime_active &&
+           urltest_recovery_pending &&
+           !runtime_retry_pending &&
+           !netfilter_refresh_pending;
+}
+
+inline bool should_run_periodic_netfilter_refresh(
+    bool retry_timer_armed,
+    bool refresh_reason_pending) noexcept {
+    return !retry_timer_armed && refresh_reason_pending;
+}
+
+// Interface/default-route and central-firewall notifications may arrive in a
+// burst while the remote-access reconciler is already backing off. Let the
+// armed generation-fenced timer own the next attempt instead of allowing each
+// observation to consume another retry immediately. With no timer, startup or
+// a newly persisted desired state is still reconciled without delay.
+inline bool should_coalesce_remote_access_runtime_refresh(
+    bool retry_timer_armed,
+    bool locally_unscheduled_retry,
+    bool desired_generation_present,
+    bool pending_or_degraded,
+    bool recovery_owned) noexcept {
+    return desired_generation_present && pending_or_degraded &&
+           (retry_timer_armed || locally_unscheduled_retry || recovery_owned);
+}
+
+// The handler retains a hint if dispatch into the daemon bridge fails. That
+// hint is deliberately opaque to the daemon, so the periodic control-loop
+// owner also recognizes the handler's explicit recovery-ownership bit.  The
+// attempt counter is diagnostic only: a permanent failure can follow one or
+// more transient attempts and must not be turned into endless maintenance.
+inline bool should_run_periodic_remote_access_recovery(
+    bool retry_timer_armed,
+    bool locally_unscheduled_retry,
+    bool desired_generation_present,
+    bool recovery_owned) noexcept {
+    return !retry_timer_armed && desired_generation_present &&
+           (locally_unscheduled_retry || recovery_owned);
+}
+
+// epoll does not promise an ordering for descriptors returned in one batch.
+// If signalfd was ready, the event loop dispatches it first and admits the
+// remaining descriptors only when that priority pass did not request terminal
+// shutdown.
+inline bool event_batch_allows_non_signal_dispatch(
+    bool signal_event_present,
+    bool daemon_running_after_signal_dispatch) noexcept {
+    return !signal_event_present || daemon_running_after_signal_dispatch;
 }
 
 inline bool should_run_periodic_forward_udp_reject_repair(
@@ -984,6 +1143,47 @@ inline bool netfilter_refresh_callback_is_current(
     std::uint64_t callback_serial,
     std::uint64_t current_serial) noexcept {
     return callback_serial == current_serial;
+}
+
+inline bool should_trigger_broad_urltest_probe_after_netfilter_refresh(
+    bool runtime_refreshed,
+    bool full_refresh,
+    bool targeted_recovery_pending_before_refresh) noexcept {
+    return runtime_refreshed && full_refresh &&
+           !targeted_recovery_pending_before_refresh;
+}
+
+struct NetfilterRefreshSchedule {
+    std::chrono::steady_clock::time_point batch_started_at;
+    std::chrono::steady_clock::time_point due_at;
+    std::chrono::milliseconds delay{0};
+};
+
+// Full/mangle rebuilds arrive in longer NDMS bursts than NAT-only rebuilds.
+// Each observation gets a source-appropriate quiet window, but no event may
+// move the current batch past its hard deadline.
+inline NetfilterRefreshSchedule plan_netfilter_refresh(
+    std::chrono::steady_clock::time_point now,
+    std::optional<std::chrono::steady_clock::time_point> batch_started_at,
+    bool full_refresh_pending) noexcept {
+    constexpr auto full_quiet = std::chrono::milliseconds{750};
+    constexpr auto nat_quiet = std::chrono::milliseconds{250};
+    constexpr auto max_batch = std::chrono::milliseconds{2000};
+    const auto started_at = batch_started_at.value_or(now);
+    const auto quiet = full_refresh_pending ? full_quiet : nat_quiet;
+    const auto due_at = std::min(now + quiet, started_at + max_batch);
+    auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(
+        due_at - now);
+    if (now + delay < due_at) {
+        delay += std::chrono::milliseconds{1};
+    }
+    // timerfd treats an all-zero it_value as disarmed. Preserve the hard
+    // deadline to millisecond scheduler precision while always returning an
+    // armed one-shot interval.
+    if (delay < std::chrono::milliseconds{1}) {
+        delay = std::chrono::milliseconds{1};
+    }
+    return NetfilterRefreshSchedule{started_at, due_at, delay};
 }
 
 inline bool meta_udp443_failed_completion_matches_pending(

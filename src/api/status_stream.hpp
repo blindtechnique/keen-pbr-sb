@@ -41,6 +41,7 @@ public:
     // opaque task snapshot on the shared status stream so a reconnecting WebUI
     // can immediately resume progress rendering without another poller.
     void publish_list_refresh(nlohmann::json state);
+    void revoke_active_subscriptions();
     void close_all();
     bool has_subscribers();
 

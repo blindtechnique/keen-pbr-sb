@@ -3,6 +3,7 @@
 #include "server.hpp"
 
 #include "auth_runtime.hpp"
+#include "handler_remote_access.hpp"
 #include "keenetic_auth.hpp"
 
 #include "../config/config_writer.hpp"
@@ -16,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <httplib.h>
@@ -26,10 +28,12 @@
 #include <sstream>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 #include <nlohmann/json.hpp>
 #include <fcntl.h>
 #include <sys/random.h>
 #include <unistd.h>
+#include <utility>
 
 namespace keen_pbr3 {
 
@@ -39,7 +43,116 @@ std::string make_error_json(const std::string& message) {
     return nlohmann::json{{"error", message}}.dump();
 }
 
+class ScopedAuthPublicationLatch {
+public:
+    explicit ScopedAuthPublicationLatch(std::atomic<bool>& latch)
+        : latch_(latch) {
+        latch_.store(true, std::memory_order_release);
+    }
+
+    ~ScopedAuthPublicationLatch() {
+        // Before the atomic replacement becomes visible, an exception leaves
+        // the old runtime authoritative and the latch may reopen. Afterwards
+        // an unexpected failure must stay fail-closed until restart.
+        if (!disk_published_) complete();
+    }
+
+    void mark_disk_published() noexcept { disk_published_ = true; }
+
+    void complete() noexcept {
+        if (!active_) return;
+        active_ = false;
+        latch_.store(false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool>& latch_;
+    bool active_{true};
+    bool disk_published_{false};
+};
+
 #ifdef KEEN_PBR3_TESTING
+std::mutex& auth_settings_publication_hook_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+AuthSettingsPublicationHook& auth_settings_publication_hook() {
+    static AuthSettingsPublicationHook hook;
+    return hook;
+}
+
+std::mutex& stream_admission_hook_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+StreamAdmissionHook& stream_admission_hook() {
+    static StreamAdmissionHook hook;
+    return hook;
+}
+
+std::mutex& auth_settings_admission_hook_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+AuthSettingsAdmissionHook& auth_settings_admission_hook() {
+    static AuthSettingsAdmissionHook hook;
+    return hook;
+}
+
+std::mutex& auth_login_verified_hook_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+AuthLoginVerifiedHook& auth_login_verified_hook() {
+    static AuthLoginVerifiedHook hook;
+    return hook;
+}
+
+void invoke_auth_settings_publication_hook(
+    AuthSettingsPublicationStage stage) {
+    AuthSettingsPublicationHook hook;
+    {
+        const std::lock_guard<std::mutex> lock(
+            auth_settings_publication_hook_mutex());
+        hook = auth_settings_publication_hook();
+    }
+    if (hook) hook(stage);
+}
+
+void invoke_stream_admission_hook() {
+    StreamAdmissionHook hook;
+    {
+        const std::lock_guard<std::mutex> lock(
+            stream_admission_hook_mutex());
+        hook = stream_admission_hook();
+    }
+    if (hook) hook();
+}
+
+void invoke_auth_settings_admission_hook() {
+    AuthSettingsAdmissionHook hook;
+    {
+        const std::lock_guard<std::mutex> lock(
+            auth_settings_admission_hook_mutex());
+        hook = auth_settings_admission_hook();
+    }
+    if (hook) hook();
+}
+
+void invoke_auth_login_verified_hook() {
+    AuthLoginVerifiedHook hook;
+    {
+        const std::lock_guard<std::mutex> lock(
+            auth_login_verified_hook_mutex());
+        hook = auth_login_verified_hook();
+    }
+    if (hook) hook();
+}
+
 void configure_auth_settings_write_fault(
     AtomicFileWriteOptions& options) {
     const char* configured =
@@ -377,7 +490,14 @@ WebAuthConfig load_web_auth_config() {
         config.username = document.value("username", std::string{});
         config.password = document.value("password", std::string{});
         const auto ttl = document.value("session_ttl_seconds", 604800);
-        if (ttl >= 300 && ttl <= 2592000) config.session_ttl = std::chrono::seconds(ttl);
+#ifdef KEEN_PBR3_TESTING
+        constexpr auto minimum_session_ttl = 1;
+#else
+        constexpr auto minimum_session_ttl = 300;
+#endif
+        if (ttl >= minimum_session_ttl && ttl <= 2592000) {
+            config.session_ttl = std::chrono::seconds(ttl);
+        }
         if (config.provider != "local" &&
             config.provider != "keenetic") {
             if (config.enabled) {
@@ -553,6 +673,60 @@ bool is_sensitive_backup_path(const std::string& path) {
 
 } // namespace
 
+#ifdef KEEN_PBR3_TESTING
+void set_auth_settings_publication_hook_for_testing(
+    AuthSettingsPublicationHook hook) {
+    const std::lock_guard<std::mutex> lock(
+        auth_settings_publication_hook_mutex());
+    auth_settings_publication_hook() = std::move(hook);
+}
+
+void reset_auth_settings_publication_hook_for_testing() {
+    const std::lock_guard<std::mutex> lock(
+        auth_settings_publication_hook_mutex());
+    auth_settings_publication_hook() = {};
+}
+
+void set_stream_admission_hook_for_testing(
+    StreamAdmissionHook hook) {
+    const std::lock_guard<std::mutex> lock(
+        stream_admission_hook_mutex());
+    stream_admission_hook() = std::move(hook);
+}
+
+void reset_stream_admission_hook_for_testing() {
+    const std::lock_guard<std::mutex> lock(
+        stream_admission_hook_mutex());
+    stream_admission_hook() = {};
+}
+
+void set_auth_settings_admission_hook_for_testing(
+    AuthSettingsAdmissionHook hook) {
+    const std::lock_guard<std::mutex> lock(
+        auth_settings_admission_hook_mutex());
+    auth_settings_admission_hook() = std::move(hook);
+}
+
+void reset_auth_settings_admission_hook_for_testing() {
+    const std::lock_guard<std::mutex> lock(
+        auth_settings_admission_hook_mutex());
+    auth_settings_admission_hook() = {};
+}
+
+void set_auth_login_verified_hook_for_testing(
+    AuthLoginVerifiedHook hook) {
+    const std::lock_guard<std::mutex> lock(
+        auth_login_verified_hook_mutex());
+    auth_login_verified_hook() = std::move(hook);
+}
+
+void reset_auth_login_verified_hook_for_testing() {
+    const std::lock_guard<std::mutex> lock(
+        auth_login_verified_hook_mutex());
+    auth_login_verified_hook() = {};
+}
+#endif
+
 struct ApiServer::Impl {
     httplib::Server server;
     std::string host;
@@ -567,8 +741,12 @@ struct ApiServer::Impl {
     std::mutex auth_update_mutex;
     std::mutex auth_endpoint_discovery_mutex;
     std::mutex auth_mutex;
+    std::mutex auth_revocation_mutex;
+    std::vector<std::function<void()>> auth_revocation_handlers;
+    std::atomic<bool> auth_publication_in_progress{false};
     std::chrono::steady_clock::time_point auth_endpoint_retry_after{};
     WebAuthConfig auth;
+    std::uint64_t auth_generation{0};
     AuthSessionRegistry sessions;
     AuthLoginRateLimiter login_rate_limiter;
 
@@ -577,21 +755,83 @@ struct ApiServer::Impl {
         return auth;
     }
 
+    std::pair<WebAuthConfig, std::uint64_t>
+    auth_snapshot_with_generation() {
+        std::lock_guard lock(auth_mutex);
+        return {auth, auth_generation};
+    }
+
+    void advance_auth_generation_locked() noexcept {
+        if (++auth_generation == 0U) ++auth_generation;
+    }
+
     void replace_auth(WebAuthConfig replacement) {
         std::lock_guard lock(auth_mutex);
         auth = std::move(replacement);
+        advance_auth_generation_locked();
     }
 
-    std::optional<WebAuthConfig> refresh_keenetic_endpoint_from_ndms(
+    void close_authenticated_streams_locked() noexcept {
+        for (auto& handler : auth_revocation_handlers) {
+            try {
+                if (handler) handler();
+            } catch (const std::exception& error) {
+                try {
+                    Logger::instance().info(
+                        "An authenticated stream will be retired by its "
+                        "transport after an auth revocation callback failed: {}",
+                        error.what());
+                } catch (...) {
+                    // Session invalidation below is the security boundary;
+                    // an optional diagnostic sink cannot abort it.
+                }
+            } catch (...) {
+                try {
+                    Logger::instance().info(
+                        "An authenticated stream will be retired by its "
+                        "transport after an auth revocation callback failed");
+                } catch (...) {
+                }
+            }
+        }
+    }
+
+    void revoke_auth_sessions() {
+        // This is the session/SSE epoch boundary. A stream admission takes the
+        // same lock, revalidates its cookie and registers the subscription
+        // before releasing it. Therefore it is either part of this cohort and
+        // closed below, or observes the cleared registry and is rejected.
+        std::lock_guard epoch_lock(auth_revocation_mutex);
+        close_authenticated_streams_locked();
+        sessions.clear();
+    }
+
+    bool revoke_auth_session(const std::string& token) {
+        // Logout is unauthenticated as an endpoint so clients can always
+        // discard a stale cookie. Only a currently valid token is authority
+        // to retire streams; otherwise this would be a global SSE DoS.
+        std::lock_guard epoch_lock(auth_revocation_mutex);
+        if (token.empty() || !sessions.contains(token)) return false;
+        // Broadcasters currently revoke the active authenticated cohort. This
+        // is conservative for another administrator: their stream reconnects
+        // with its still-valid cookie, while the logged-out stream cannot leak
+        // queued frames or outlive the session.
+        close_authenticated_streams_locked();
+        sessions.erase(token);
+        return true;
+    }
+
+    std::optional<std::pair<WebAuthConfig, std::uint64_t>>
+    refresh_keenetic_endpoint_from_ndms(
         const std::string& failed_endpoint) {
         // Only one request may query RCI at a time. Requests queued behind a
         // successful refresh reuse that result; failed discovery has a short
         // backoff so an unauthenticated client cannot occupy all HTTP workers.
         std::lock_guard discovery_lock(auth_endpoint_discovery_mutex);
         {
-            const auto current = auth_snapshot();
-            if (!current.endpoint_unavailable &&
-                current.keenetic_endpoint != failed_endpoint) {
+            const auto current = auth_snapshot_with_generation();
+            if (!current.first.endpoint_unavailable &&
+                current.first.keenetic_endpoint != failed_endpoint) {
                 return current;
             }
         }
@@ -613,7 +853,8 @@ struct ApiServer::Impl {
         auth.keenetic_endpoint_from_ndms = true;
         auth.endpoint_unavailable = false;
         auth_endpoint_retry_after = {};
-        return auth;
+        advance_auth_generation_locked();
+        return std::pair{auth, auth_generation};
     }
 };
 
@@ -657,7 +898,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->server.Get("/api/auth/status", [state = impl_.get()](const httplib::Request& req,
                                                                   httplib::Response& res) {
         auto auth = state->auth_snapshot();
-        bool authenticated = !auth.enabled;
+        const bool loopback_request =
+            is_loopback_address(req.remote_addr);
+        bool authenticated = !auth.enabled && loopback_request;
         if (auth.enabled) {
             const auto token = cookie_value(req, "keen_pbr_session");
             authenticated = state->sessions.contains(token);
@@ -667,6 +910,10 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             {"provider", auth.provider},
             {"authenticated", authenticated},
         };
+        if (!auth.enabled) {
+            response["no_auth_scope"] = "loopback_only";
+            response["network_api_blocked"] = !loopback_request;
+        }
         if (auth.misconfigured) {
             response["error"] = "auth_misconfigured";
         } else if (auth.endpoint_unavailable) {
@@ -684,7 +931,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     });
     impl_->server.Post("/api/auth/login", [state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
-        auto auth = state->auth_snapshot();
+        auto auth_state = state->auth_snapshot_with_generation();
+        auto auth = std::move(auth_state.first);
+        auto auth_generation = auth_state.second;
         res.set_header("Cache-Control", "no-store");
         if (auth.misconfigured) {
             res.status = 503;
@@ -716,7 +965,10 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     const auto refreshed =
                         state->refresh_keenetic_endpoint_from_ndms(
                             auth.keenetic_endpoint);
-                    if (refreshed) auth = *refreshed;
+                    if (refreshed) {
+                        auth = refreshed->first;
+                        auth_generation = refreshed->second;
+                    }
                 }
                 if (auth.endpoint_unavailable) {
                     res.status = 503;
@@ -738,7 +990,8 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         state->refresh_keenetic_endpoint_from_ndms(
                             auth.keenetic_endpoint);
                     if (refreshed) {
-                        auth = *refreshed;
+                        auth = refreshed->first;
+                        auth_generation = refreshed->second;
                         verdict = verify_keenetic_credentials(
                             auth.keenetic_endpoint,
                             username,
@@ -764,7 +1017,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 res.set_content(R"({"error":"invalid credentials"})", "application/json");
                 return;
             }
-            state->login_rate_limiter.record_success(req.remote_addr);
+#ifdef KEEN_PBR3_TESTING
+            invoke_auth_login_verified_hook();
+#endif
             const auto token = random_session_token();
             if (!token) {
                 Logger::instance().error(
@@ -775,16 +1030,37 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     "application/json");
                 return;
             }
-            if (!state->sessions.insert(*token, auth.session_ttl)) {
-                res.status = 503;
-                res.set_content(
-                    R"({"error":"session limit reached"})",
-                    "application/json");
-                return;
+            std::chrono::seconds session_ttl;
+            {
+                // Verification may involve NDM/network I/O and deliberately
+                // happens without the epoch. Session publication does not:
+                // the exact captured auth generation is revalidated while
+                // rotation/logout cannot cross this insertion boundary.
+                const std::lock_guard epoch_lock(
+                    state->auth_revocation_mutex);
+                const std::lock_guard auth_lock(state->auth_mutex);
+                if (state->auth_generation != auth_generation ||
+                    !state->auth.enabled || state->auth.misconfigured ||
+                    state->auth.provider != auth.provider) {
+                    res.status = 409;
+                    res.set_content(
+                        R"({"error":"authentication settings changed; retry login"})",
+                        "application/json");
+                    return;
+                }
+                session_ttl = state->auth.session_ttl;
+                if (!state->sessions.insert(*token, session_ttl)) {
+                    res.status = 503;
+                    res.set_content(
+                        R"({"error":"session limit reached"})",
+                        "application/json");
+                    return;
+                }
             }
+            state->login_rate_limiter.record_success(req.remote_addr);
             res.set_header("Set-Cookie", "keen_pbr_session=" + *token +
                            "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
-                           std::to_string(auth.session_ttl.count()));
+                           std::to_string(session_ttl.count()));
             res.set_content(R"({"authenticated":true})", "application/json");
         } catch (const std::exception&) {
             state->login_rate_limiter.record_failure(req.remote_addr);
@@ -797,10 +1073,30 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->server.Post("/api/auth/settings", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
         try {
+#ifdef KEEN_PBR3_TESTING
+            invoke_auth_settings_admission_hook();
+#endif
             // Keep the file replacement, reload and in-memory replacement in
             // one order when two administrators save at the same time.
             std::lock_guard update_lock(state->auth_update_mutex);
             const auto current_auth = state->auth_snapshot();
+            if (current_auth.enabled) {
+                // A second settings request can pass pre-routing with the old
+                // cookie, then wait here while the first rotation clears that
+                // session. Revalidate after serialization so revoked
+                // authority cannot publish another credential set.
+                const std::lock_guard epoch_lock(
+                    state->auth_revocation_mutex);
+                if (!state->sessions.contains(cookie_value(
+                        req, "keen_pbr_session"))) {
+                    res.status = 401;
+                    res.set_header("Cache-Control", "no-store");
+                    res.set_content(
+                        R"({"error":"authentication required"})",
+                        "application/json");
+                    return;
+                }
+            }
             const auto body = nlohmann::json::parse(req.body);
             const auto provider = body.value("provider", std::string{"local"});
             if (provider != "local" && provider != "keenetic") {
@@ -938,6 +1234,22 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 document["password"] = password;
             }
 
+            auto remote_access_security_boundary =
+                acquire_remote_access_security_boundary();
+            if (!requested_enabled) {
+                if (remote_access_blocks_auth_disable(
+                        remote_access_security_boundary)) {
+                    res.status = 409;
+                    res.set_content(
+                        R"({"error":"remote_access_enabled"})",
+                        "application/json");
+                    return;
+                }
+            }
+
+            ScopedAuthPublicationLatch auth_publication(
+                state->auth_publication_in_progress);
+
             const char* configured = std::getenv("KEEN_PBR_AUTH_FILE");
             const std::filesystem::path path = configured && *configured
                 ? configured : "/opt/etc/keen-pbr/auth.json";
@@ -960,6 +1272,10 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     // The file visible to future requests is already the new
                     // one. Reload it below even though directory fsync failed;
                     // otherwise authentication on disk and in memory diverge.
+                    // Record that fact before logging: formatting or a log
+                    // sink may throw, and the publication latch must remain
+                    // fail-closed after the rename under every exception.
+                    auth_publication.mark_disk_published();
                     auth_settings_durable = false;
                     Logger::instance().warn(
                         "auth.json was published but directory sync failed: {}",
@@ -975,37 +1291,104 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     return;
                 }
             } catch (const std::exception& error) {
-                Logger::instance().error(
-                    "Cannot write auth.json atomically: {}",
-                    error.what());
-                res.status = 500;
-                res.set_content(R"({"error":"cannot write auth.json"})", "application/json");
-                return;
+                if (auth_settings_committed) {
+                    auth_publication.mark_disk_published();
+                    auth_settings_durable = false;
+                    Logger::instance().warn(
+                        "auth.json was published before an unexpected "
+                        "write completion failure: {}",
+                        error.what());
+                } else {
+                    Logger::instance().error(
+                        "Cannot write auth.json atomically: {}",
+                        error.what());
+                    res.status = 500;
+                    res.set_content(
+                        R"({"error":"cannot write auth.json"})",
+                        "application/json");
+                    return;
+                }
             }
 
+            auth_publication.mark_disk_published();
+#ifdef KEEN_PBR3_TESTING
+            invoke_auth_settings_publication_hook(
+                AuthSettingsPublicationStage::disk_published);
+#endif
             const auto replacement = load_web_auth_config();
             if (replacement.misconfigured) {
                 // The file on disk is now authoritative. Never keep an older
                 // disabled/insecure in-memory mode after a failed reload.
                 state->replace_auth(replacement);
-                state->sessions.clear();
+#ifdef KEEN_PBR3_TESTING
+                invoke_auth_settings_publication_hook(
+                    AuthSettingsPublicationStage::runtime_published);
+#endif
+                state->revoke_auth_sessions();
+                auth_publication.complete();
                 res.status = 500;
                 res.set_content(
                     R"({"error":"auth_misconfigured"})",
                     "application/json");
                 return;
             }
-            state->replace_auth(replacement);
-            // Existing sessions belong to the previous mode.
-            state->sessions.clear();
+            const bool auth_disable_staged =
+                !requested_enabled && current_auth.enabled;
+            if (!auth_disable_staged) {
+                state->replace_auth(replacement);
+            }
+#ifdef KEEN_PBR3_TESTING
+            invoke_auth_settings_publication_hook(
+                AuthSettingsPublicationStage::runtime_published);
+#endif
+            // Existing sessions belong to the previous mode. Disabling an
+            // active runtime is deliberately staged until restart: firewall
+            // removal cannot retire an already-established keep-alive/SSE
+            // connection, so this process continues requiring credentials.
+            state->revoke_auth_sessions();
+            auth_publication.complete();
+            std::optional<RemoteAccessReconcileResult>
+                remote_access_reconcile;
+            if (requested_enabled) {
+                // Authentication is authoritative before this admission. No
+                // firewall command runs on the HTTP worker: the zero-delay
+                // hint is owned by the daemon control loop, including the
+                // recovery from an earlier auth-disabled degraded state.
+                remote_access_reconcile.emplace(
+                    defer_remote_access_reconcile_after_auth_enable(
+                        remote_access_security_boundary));
+            }
             nlohmann::json response{
                 {"saved", true},
                 {"durable", auth_settings_durable},
             };
+            if (remote_access_reconcile &&
+                !remote_access_reconcile->apply.applied) {
+                response["remote_access_pending"] =
+                    remote_access_reconcile->status.recovery_owned;
+                response["remote_access_generation"] =
+                    remote_access_reconcile->status.desired_generation;
+            }
+            if (auth_disable_staged) {
+                response["restart_required"] = true;
+                response["runtime_auth_enabled"] = true;
+                response["restart_detail"] =
+                    "authentication remains enabled until service restart "
+                    "so existing connections cannot become unauthenticated; "
+                    "after restart no-auth API access is loopback-only";
+                response["warning"] = response["restart_detail"];
+            }
             if (!auth_settings_durable) {
-                response["warning"] =
+                const std::string durability_warning =
                     "authentication settings are visible but directory "
                     "durability could not be confirmed";
+                if (response.contains("warning")) {
+                    response["warning"] =
+                        response["warning"].get<std::string>() + "; " +
+                        durability_warning;
+                } else {
+                    response["warning"] = durability_warning;
+                }
             }
             res.set_content(response.dump(), "application/json");
         } catch (const std::exception& error) {
@@ -1018,7 +1401,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->server.Post("/api/auth/logout", [state = impl_.get()](const httplib::Request& req,
                                                                     httplib::Response& res) {
         const auto token = cookie_value(req, "keen_pbr_session");
-        state->sessions.erase(token);
+        (void)state->revoke_auth_session(token);
         res.set_header("Set-Cookie", "keen_pbr_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
         res.set_header("Cache-Control", "no-store");
         res.set_content(R"({"authenticated":false})", "application/json");
@@ -1035,8 +1418,42 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         if (valid_local_transport_manager_request(req)) {
             return httplib::Server::HandlerResponse::Unhandled;
         }
+        const bool api_request = req.path.rfind("/api/", 0) == 0;
+        if (api_request &&
+            state->auth_publication_in_progress.load(
+                std::memory_order_acquire)) {
+            // auth.json and the middleware snapshot are deliberately
+            // published as one application-layer state. Reject instead of
+            // serving the older (possibly disabled) snapshot in the gap.
+            res.status = 503;
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Retry-After", "1");
+            res.set_content(
+                R"({"error":"authentication settings are being published"})",
+                "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        }
         const auto auth = state->auth_snapshot();
-        if (!auth.enabled || req.path.rfind("/api/", 0) != 0 ||
+        const bool loopback_request =
+            is_loopback_address(req.remote_addr);
+        if (api_request && !auth.enabled && !loopback_request &&
+            req.path != "/api/auth/status") {
+            const bool cleanup_unverified =
+                remote_access_runtime_blocks_unauthenticated_request(false);
+            // Even exact chain removal cannot retire a WAN TCP keep-alive
+            // established earlier. Therefore an auth-disabled runtime is a
+            // loopback recovery mode, never unauthenticated network access.
+            res.status = cleanup_unverified ? 503 : 403;
+            res.set_header("Cache-Control", "no-store");
+            if (cleanup_unverified) res.set_header("Retry-After", "1");
+            res.set_content(
+                cleanup_unverified
+                    ? R"({"error":"remote access cleanup is not verified"})"
+                    : R"({"error":"authentication is disabled; no-auth API access is loopback-only"})",
+                "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (!auth.enabled || !api_request ||
             req.path == "/api/auth/status" || req.path == "/api/auth/login" ||
             req.path == "/api/auth/logout") {
             return httplib::Server::HandlerResponse::Unhandled;
@@ -1130,14 +1547,78 @@ void ApiServer::post(const std::string& path, BodyRouteHandler handler) {
 }
 
 void ApiServer::get_stream(const std::string& path, StreamRouteHandler handler) {
-    impl_->server.Get(path, [h = std::move(handler)](const httplib::Request& req,
-                                                      httplib::Response& res) {
+    impl_->server.Get(path, [state = impl_.get(), h = std::move(handler)](
+                                const httplib::Request& req,
+                                httplib::Response& res) {
         const auto trace_id = allocate_trace_id();
         ScopedTraceContext trace_scope(trace_id);
         const auto started_at = std::chrono::steady_clock::now();
         log_request_start(req, "stream");
         try {
+            const bool protected_api_stream =
+                req.path.rfind("/api/", 0) == 0 &&
+                !valid_local_transport_manager_request(req);
+            std::unique_lock<std::mutex> auth_epoch_lock;
+            if (protected_api_stream) {
+#ifdef KEEN_PBR3_TESTING
+                // The normal middleware check has already succeeded. Pause
+                // here to prove a credential rotation cannot slip between
+                // that check and subscription registration.
+                invoke_stream_admission_hook();
+#endif
+                auth_epoch_lock = std::unique_lock<std::mutex>(
+                    state->auth_revocation_mutex);
+                if (state->auth_publication_in_progress.load(
+                        std::memory_order_acquire)) {
+                    res.status = 503;
+                    res.set_header("Cache-Control", "no-store");
+                    res.set_header("Retry-After", "1");
+                    res.set_content(
+                        R"({"error":"authentication settings are being published"})",
+                        "application/json");
+                    log_request_end(
+                        req, "stream", res.status, started_at);
+                    return;
+                }
+
+                const auto auth = state->auth_snapshot();
+                if (auth.enabled &&
+                    !state->sessions.contains(cookie_value(
+                        req, "keen_pbr_session"))) {
+                    res.status = 401;
+                    res.set_header("Cache-Control", "no-store");
+                    res.set_content(
+                        R"({"error":"authentication required"})",
+                        "application/json");
+                    log_request_end(
+                        req, "stream", res.status, started_at);
+                    return;
+                }
+                if (!auth.enabled &&
+                    !is_loopback_address(req.remote_addr)) {
+                    const bool cleanup_unverified =
+                        remote_access_runtime_blocks_unauthenticated_request(
+                            false);
+                    res.status = cleanup_unverified ? 503 : 403;
+                    res.set_header("Cache-Control", "no-store");
+                    if (cleanup_unverified) {
+                        res.set_header("Retry-After", "1");
+                    }
+                    res.set_content(
+                        cleanup_unverified
+                            ? R"({"error":"remote access cleanup is not verified"})"
+                            : R"({"error":"authentication is disabled; no-auth API access is loopback-only"})",
+                        "application/json");
+                    log_request_end(
+                        req, "stream", res.status, started_at);
+                    return;
+                }
+            }
+            // Keep the epoch lock through the handler's synchronous
+            // subscribe()/provider registration. It is released before any
+            // content-provider loop starts.
             h(req, res);
+            if (auth_epoch_lock.owns_lock()) auth_epoch_lock.unlock();
             log_request_end(req, "stream", res.status == 0 ? 200 : res.status, started_at);
         } catch (const std::exception& e) {
             if (!res.status) {
@@ -1150,6 +1631,32 @@ void ApiServer::get_stream(const std::string& path, StreamRouteHandler handler) 
             log_request_end(req, "stream", res.status, started_at);
         }
     });
+}
+
+void ApiServer::on_auth_sessions_revoked(
+    std::function<void()> handler) {
+    if (!handler) return;
+    std::lock_guard lock(impl_->auth_revocation_mutex);
+    impl_->auth_revocation_handlers.push_back(std::move(handler));
+}
+
+ApiServer::StreamAuthorizationProbe
+ApiServer::make_stream_authorization_probe(
+    const httplib::Request& request) const {
+    const auto token = cookie_value(request, "keen_pbr_session");
+    const bool loopback_request =
+        is_loopback_address(request.remote_addr);
+    return [state = impl_.get(), token, loopback_request]() {
+        const std::lock_guard epoch_lock(
+            state->auth_revocation_mutex);
+        if (state->auth_publication_in_progress.load(
+                std::memory_order_acquire)) {
+            return false;
+        }
+        const auto auth = state->auth_snapshot();
+        if (auth.enabled) return state->sessions.contains(token);
+        return loopback_request;
+    };
 }
 
 bool ApiServer::register_static_root(const std::string& frontend_root) {

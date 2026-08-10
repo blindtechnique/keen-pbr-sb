@@ -6,12 +6,22 @@
 
 #include <chrono>
 #include <httplib.h>
+#include <utility>
 
 namespace keen_pbr3 {
 
 void register_status_events_handler(ApiServer& server, ApiContext& ctx) {
+    if (ctx.status_stream) {
+        server.on_auth_sessions_revoked(
+            [stream = ctx.status_stream] {
+                stream->revoke_active_subscriptions();
+            });
+    }
     server.get_stream("/api/status/events",
-                      [&ctx](const httplib::Request&, httplib::Response& res) {
+                      [&ctx, &server](const httplib::Request& req,
+                                      httplib::Response& res) {
+        auto authorization_is_current =
+            server.make_stream_authorization_probe(req);
         auto subscription = ctx.status_stream->subscribe();
         if (!subscription) {
             res.status = 503;
@@ -26,14 +36,18 @@ void register_status_events_handler(ApiServer& server, ApiContext& ctx) {
         res.set_header("X-Accel-Buffering", "no");
         res.set_chunked_content_provider(
             "text/event-stream",
-            [subscription](size_t, httplib::DataSink& sink) -> bool {
+            [subscription,
+             authorization_is_current =
+                 std::move(authorization_is_current)](
+                size_t, httplib::DataSink& sink) -> bool {
                 auto result = wait_for_sse_subscription(
                     subscription,
                     std::chrono::seconds(15),
                     std::chrono::seconds(1),
                     [&sink] {
                         return !sink.is_writable || sink.is_writable();
-                    });
+                    },
+                    authorization_is_current);
                 switch (result.status) {
                     case SseSubscriptionWaitStatus::MESSAGE:
                         return sink.write(

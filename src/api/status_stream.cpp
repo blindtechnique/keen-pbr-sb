@@ -214,6 +214,10 @@ void StatusStream::close_all() {
     broadcaster_.close_all();
 }
 
+void StatusStream::revoke_active_subscriptions() {
+    broadcaster_.revoke_active_subscriptions();
+}
+
 bool StatusStream::has_subscribers() {
     return broadcaster_.active_subscriptions() != 0;
 }
