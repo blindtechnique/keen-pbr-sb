@@ -9,7 +9,8 @@ import type { RuntimeInterfaceTrafficSample } from './runtimeInterfaceTrafficSam
 
 export interface RuntimeInterfaceTrafficUpdate {
   /**
-     * Unix timestamp shared by this compact sampling batch.
+     * Unix timestamp of this compact sampling batch as a whole, i.e. when the round was dispatched. Retained for older clients and as a fallback. Clients that can read RuntimeInterfaceTrafficSample's observed_at_unix_ms must prefer it: this value says nothing about whether any individual interface was measured successfully.
+
      * @minimum 0
      */
   sampled_at_unix_ms: number;

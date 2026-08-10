@@ -126,8 +126,14 @@ export function applyInterfaceTrafficUpdate(
 function mergeInterfaceTrafficEntry(
   entry: RuntimeInterfaceInventoryEntry,
   sample: RuntimeInterfaceTrafficSample,
-  sampledAtUnixMs: number
+  batchSampledAtUnixMs: number
 ): RuntimeInterfaceInventoryEntry {
+  // When THIS interface was read, not when the round was dispatched. Stamping
+  // every entry with the batch time made a stalled interface look exactly as
+  // fresh as a live one, and dated the age of every history point by the
+  // batch's elapsed time rather than its own. The batch value remains the
+  // fallback for daemons that predate the per-interface field.
+  const sampledAtUnixMs = sample.observed_at_unix_ms ?? batchSampledAtUnixMs
   if (!sample.available) {
     const withoutTraffic = { ...entry }
     delete withoutTraffic.traffic

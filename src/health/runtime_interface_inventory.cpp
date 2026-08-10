@@ -73,6 +73,12 @@ api::RuntimeInterfaceInventoryEntry build_runtime_interface_inventory_entry(
             };
 
             api::Traffic traffic;
+            // Previously left unset, so every inventory response shipped a
+            // null here and the client filled the gap with the batch stamp -
+            // which made a stalled interface indistinguishable from a live
+            // one. This is the instant this interface was last read.
+            traffic.sampled_at_unix_ms =
+                unix_timestamp_ms(snapshot->latest.observed_at);
             traffic.rx_bytes = to_api_integer(snapshot->latest.rx_bytes);
             traffic.tx_bytes = to_api_integer(snapshot->latest.tx_bytes);
             if (snapshot->latest.rx_bits_per_second) {

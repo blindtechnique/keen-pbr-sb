@@ -915,6 +915,7 @@ namespace api {
     struct RuntimeInterfaceTrafficSample {
         bool available = false;
         std::string name;
+        std::optional<int64_t> observed_at_unix_ms;
         bool reset = false;
         std::optional<int64_t> rx_bits_per_second;
         std::optional<int64_t> rx_bytes;
@@ -3352,6 +3353,7 @@ namespace api {
     inline void from_json(const json & j, RuntimeInterfaceTrafficSample& x) {
         x.available = j.at("available").get<bool>();
         x.name = j.at("name").get<std::string>();
+        x.observed_at_unix_ms = get_stack_optional<int64_t>(j, "observed_at_unix_ms");
         x.reset = j.at("reset").get<bool>();
         x.rx_bits_per_second = get_stack_optional<int64_t>(j, "rx_bits_per_second");
         x.rx_bytes = get_stack_optional<int64_t>(j, "rx_bytes");
@@ -3363,6 +3365,7 @@ namespace api {
         j = json::object();
         j["available"] = x.available;
         j["name"] = x.name;
+        j["observed_at_unix_ms"] = x.observed_at_unix_ms;
         j["reset"] = x.reset;
         j["rx_bits_per_second"] = x.rx_bits_per_second;
         j["rx_bytes"] = x.rx_bytes;

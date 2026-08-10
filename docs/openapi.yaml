@@ -3077,6 +3077,20 @@ components:
           type: integer
           format: int64
           minimum: 0
+        observed_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Unix timestamp of the moment THIS interface's counters were read.
+            It is the only honest answer to "when was this measured": the batch
+            timestamp below describes when the round was dispatched, so an
+            interface whose own read failed or was skipped would otherwise look
+            exactly as fresh as one that succeeded. Absent when this round
+            produced no successful reading for the interface, and absent from
+            older daemons - clients then fall back to the batch timestamp and
+            must not present the result as per-interface freshness.
+          example: 1754812800000
 
     RuntimeInterfaceTrafficUpdate:
       type: object
@@ -3086,7 +3100,12 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Unix timestamp shared by this compact sampling batch.
+          description: >
+            Unix timestamp of this compact sampling batch as a whole, i.e. when
+            the round was dispatched. Retained for older clients and as a
+            fallback. Clients that can read RuntimeInterfaceTrafficSample's
+            observed_at_unix_ms must prefer it: this value says nothing about
+            whether any individual interface was measured successfully.
         interfaces:
           type: array
           items:

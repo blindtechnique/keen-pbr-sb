@@ -176,6 +176,13 @@ void Daemon::sample_interface_traffic_now() {
                      InterfaceTrafficSampler::SampleStatus::CounterReset},
             };
             if (result.point) {
+                // The instant this interface's own counters were read. Emitted
+                // only alongside a real reading, so an interface that was
+                // skipped or failed this round carries no timestamp at all
+                // rather than borrowing the round's and looking as fresh as
+                // the ones that succeeded.
+                entry["observed_at_unix_ms"] =
+                    unix_timestamp_ms(result.point->observed_at);
                 entry["rx_bytes"] =
                     interface_traffic_api_integer(result.point->rx_bytes);
                 entry["tx_bytes"] =
