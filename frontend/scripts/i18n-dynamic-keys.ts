@@ -182,6 +182,18 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "MODE_AUTO / MODE_LIST / MODE_ALL is a closed local tuple.",
   },
   {
+    file: "src/components/nfqws/profile-cards.tsx",
+    argument: "`nfqws.profiles.tier.${*}`",
+    keys: ["nfqws.profiles.tier.*"],
+    reason: "NfqwsProfileTier is a closed union safe/balanced/max.",
+  },
+  {
+    file: "src/components/nfqws/profile-cards.tsx",
+    argument: "`nfqws.profiles.description.${*}`",
+    keys: ["nfqws.profiles.description.*"],
+    reason: "NfqwsProfileTier is a closed union safe/balanced/max.",
+  },
+  {
     file: "src/pages/nfqws-page.tsx",
     argument: "`nfqws.fields.${*}.label`",
     keys: ["nfqws.fields.*.label"],

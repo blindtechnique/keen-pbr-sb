@@ -102,6 +102,30 @@ export const enTranslation = {
         udp: "UDP services",
       },
     },
+    profiles: {
+      recommended: "recommended",
+      applied: "Applied",
+      details: "Details",
+      poolSummary: "Traffic pools: {{count}}",
+      domainPools: "dedicated pools for YouTube, Discord and others",
+      sharedPools: "one shared pool per protocol",
+      tier: {
+        safe: "Safe",
+        balanced: "Balanced",
+        max: "Maximum",
+      },
+      description: {
+        safe: "The familiar conservative behaviour without the defects and risky techniques of the old presets. Use it as a fallback if a stronger profile causes trouble.",
+        balanced:
+          "Dedicated pools for YouTube, googlevideo and Discord let each traffic group choose its bypass independently. Recommended for most setups.",
+        max: "Everything in Balanced plus extra techniques such as syndata, IP fragmentation and QUIC replacement. Experimental: some providers may drop the connection.",
+      },
+    },
+    customStrategiesTitle: "Custom and edited strategies",
+    legacyShow: "Show legacy presets ({{count}})",
+    legacyHide: "Hide legacy presets",
+    legacyDescription:
+      "Untouched legacy built-in presets ver1–ver10 and default. Kept for compatibility and rollback; for new setups choose a profile above.",
     strategyNameDescription:
       "The name is only for you - it changes nothing except how the strategy is listed.",
     strategySaveBeforeApply: "Save the strategy first",

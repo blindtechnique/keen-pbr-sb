@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  canonicalNfqwsProfileTier,
+  parseNfqwsProfileMarker,
   parseNfqwsStrategy,
   parseShellAssignments,
 } from "../src/pages/nfqws-strategy-model"
@@ -218,5 +220,50 @@ NFQWS_ARGS_QUIC="$(unsafe)"
     expect(partial.pools).toHaveLength(1)
     expect(incomplete.status).toBe("incomplete")
     expect(incomplete.parseable).toBe(false)
+  })
+})
+
+describe("nfqws profile marker", () => {
+  test("maps the three generated first-line markers to ordered tiers", () => {
+    expect(
+      parseNfqwsProfileMarker("# keen-pbr-sb · профиль «БЕЗОПАСНЫЙ»\n#")
+    ).toEqual({ tier: "safe", role: "БЕЗОПАСНЫЙ" })
+    expect(
+      parseNfqwsProfileMarker("# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n#")
+    ).toEqual({ tier: "balanced", role: "ОБЫЧНЫЙ" })
+    expect(
+      parseNfqwsProfileMarker("# keen-pbr-sb · профиль «МАКСИМАЛЬНЫЙ»\r\n#")
+    ).toEqual({ tier: "max", role: "МАКСИМАЛЬНЫЙ" })
+  })
+
+  test("does not promote a marker found later or an unknown role", () => {
+    expect(
+      parseNfqwsProfileMarker(
+        "# custom\n# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\nNFQWS_ARGS=''"
+      )
+    ).toBeUndefined()
+    expect(
+      parseNfqwsProfileMarker("# keen-pbr-sb · профиль «ЭКСТРА»\n")
+    ).toEqual({ tier: undefined, role: "ЭКСТРА" })
+  })
+
+  test("promotes only untouched built-in entries", () => {
+    const content = "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n"
+    expect(
+      canonicalNfqwsProfileTier({ builtin: true, overridden: false, content })
+    ).toBe("balanced")
+    expect(
+      canonicalNfqwsProfileTier({ builtin: false, overridden: false, content })
+    ).toBeUndefined()
+    expect(
+      canonicalNfqwsProfileTier({ builtin: true, overridden: true, content })
+    ).toBeUndefined()
+    expect(
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: false,
+        content: "# keen-pbr-sb · профиль «ЭКСТРА»\n",
+      })
+    ).toBeUndefined()
   })
 })

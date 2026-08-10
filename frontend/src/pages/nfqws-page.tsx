@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   ArchiveIcon,
   ChevronDownIcon,
+  ChevronRightIcon,
   DownloadIcon,
   EraserIcon,
   ExternalLinkIcon,
@@ -18,6 +19,7 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { KeenPencilIcon, KeenTrashIcon } from "@/components/shared/keen-icons"
+import { NfqwsProfileCards } from "@/components/nfqws/profile-cards"
 import { StrategyBreakdown } from "@/components/nfqws/strategy-breakdown"
 import { DataTable } from "@/components/shared/data-table"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
@@ -91,6 +93,11 @@ import {
 } from "@/api/nfqws"
 import { copyText } from "@/lib/clipboard"
 import { cn } from "@/lib/utils"
+import {
+  canonicalNfqwsProfileTier,
+  NFQWS_PROFILE_ORDER,
+  parseNfqwsProfileMarker,
+} from "@/pages/nfqws-strategy-model"
 
 type NfqwsFile = {
   name: string
@@ -1298,6 +1305,16 @@ function StrategiesEditor({
   const [editorViewChoice, setEditorViewChoice] = useState<"breakdown" | "raw">(
     "breakdown"
   )
+  const [showLegacy, setShowLegacy] = useState(() => {
+    const active = status.strategies.find(
+      (item) => item.name === status.active_strategy
+    )
+    return Boolean(
+      active?.builtin &&
+      !active.overridden &&
+      parseNfqwsProfileMarker(active.content) === undefined
+    )
+  })
   const rawOnly = effectiveSelected.toLowerCase().endsWith(".list")
   const editorView = rawOnly ? "raw" : editorViewChoice
   const [creating, setCreating] = useState(false)
@@ -1391,6 +1408,150 @@ function StrategiesEditor({
     ]),
   ]
 
+  const managedProfiles = status.strategies
+    .flatMap((item) => {
+      const hasChangedDraft =
+        Object.hasOwn(draftContent, item.name) &&
+        draftContent[item.name] !== item.content
+      const tier = hasChangedDraft ? undefined : canonicalNfqwsProfileTier(item)
+      return tier
+        ? [
+            {
+              name: item.name,
+              tier,
+              content: item.content,
+              active: item.name === status.active_strategy,
+            },
+          ]
+        : []
+    })
+    .sort((left, right) => {
+      const tierOrder =
+        NFQWS_PROFILE_ORDER.indexOf(left.tier) -
+        NFQWS_PROFILE_ORDER.indexOf(right.tier)
+      return tierOrder || left.name.localeCompare(right.name)
+    })
+  const profileNames = new Set(managedProfiles.map((profile) => profile.name))
+  const legacyNames = names.filter((name) => {
+    const item = status.strategies.find((candidate) => candidate.name === name)
+    const hasChangedDraft =
+      item !== undefined &&
+      Object.hasOwn(draftContent, name) &&
+      draftContent[name] !== item.content
+    return Boolean(
+      item?.builtin &&
+      !item.overridden &&
+      !hasChangedDraft &&
+      parseNfqwsProfileMarker(item.content) === undefined
+    )
+  })
+  const legacySet = new Set(legacyNames)
+  const customNames = names.filter(
+    (name) => !profileNames.has(name) && !legacySet.has(name)
+  )
+  const activeIsLegacy = legacySet.has(status.active_strategy)
+
+  useEffect(() => {
+    if (activeIsLegacy) setShowLegacy(true)
+  }, [activeIsLegacy, status.active_strategy])
+
+  const strategyRow = (name: string): ReactNode[] => {
+    const item = status.strategies.find((candidate) => candidate.name === name)
+    const isActive = name === status.active_strategy
+    const isDraft = item === undefined
+    const isEditing = name === effectiveSelected
+
+    return [
+      <button
+        className={cn(
+          "flex w-full min-w-0 cursor-pointer items-center gap-2 text-left font-mono",
+          isEditing && "font-bold"
+        )}
+        key="name"
+        onClick={() => setSelected(name)}
+        type="button"
+      >
+        <span className="truncate">{name}</span>
+      </button>,
+      <span className="text-xs text-muted-foreground" key="origin">
+        {isDraft
+          ? t("nfqws.strategyOrigin.draft")
+          : item.builtin && item.overridden
+            ? t("nfqws.strategyOrigin.overridden")
+            : item.builtin
+              ? t("nfqws.strategyOrigin.builtin")
+              : t("nfqws.strategyOrigin.custom")}
+      </span>,
+      isActive ? (
+        <KeeneticStatus key="state" tone="success">
+          {t("nfqws.strategyState.active")}
+        </KeeneticStatus>
+      ) : (
+        <span className="text-xs text-muted-foreground" key="state">
+          {t("nfqws.strategyState.inactive")}
+        </span>
+      ),
+      <span className="flex items-center justify-end gap-1" key="actions">
+        <Button
+          aria-label={t("nfqws.applyStrategy")}
+          disabled={isDraft}
+          onClick={() => {
+            setSelected(name)
+            setApplying(name)
+          }}
+          size="sm"
+          title={
+            isDraft
+              ? t("nfqws.strategySaveBeforeApply")
+              : t("nfqws.applyStrategy")
+          }
+          variant="outline"
+        >
+          <PlayIcon />
+          {t("nfqws.applyStrategy")}
+        </Button>
+        <span className="keen-row-actions flex items-center gap-1">
+          <Button
+            aria-label={t("nfqws.editStrategy")}
+            className="keen-row-action size-8 rounded-[4px]"
+            onClick={() => setSelected(name)}
+            size="icon"
+            title={t("nfqws.editStrategy")}
+            variant="outline"
+          >
+            <KeenPencilIcon className="size-4" />
+          </Button>
+          <Button
+            aria-label={t("common.delete")}
+            className="keen-row-action keen-row-action--danger size-8 rounded-[4px]"
+            onClick={() => setDeleting(name)}
+            size="icon"
+            title={
+              item?.builtin && item.overridden
+                ? t("nfqws.restoreBuiltin")
+                : t("common.delete")
+            }
+            variant="outline"
+          >
+            <KeenTrashIcon className="size-4" />
+          </Button>
+        </span>
+      </span>,
+    ]
+  }
+  const strategyColumnClassNames = [
+    "w-full [&:where(td)]:max-w-0",
+    "min-w-[10rem]",
+    "min-w-[10rem]",
+    undefined,
+  ]
+  const strategyHeaders = [
+    t("nfqws.strategyHeaders.name"),
+    t("nfqws.strategyHeaders.origin"),
+    t("nfqws.strategyHeaders.state"),
+    t("nfqws.strategyHeaders.actions"),
+  ]
+
   return (
     <div className="space-y-3">
       <SectionHeading
@@ -1432,10 +1593,9 @@ function StrategiesEditor({
         </Alert>
       ) : null}
 
-      {/* Стратегии — список, а не выпадающее меню. В свёрнутом списке не видно
-          ни какая из них работает сейчас, ни какие вообще есть: чтобы
-          сравнить две, приходилось открывать их по очереди. Теперь это обычная
-          таблица панели — с состоянием, происхождением и действиями в строке. */}
+      {/* Three current profiles stay prominent. Custom, overridden and unknown
+          entries remain in a full table; only untouched legacy built-ins may
+          be collapsed. */}
       {names.length === 0 ? (
         <ListPlaceholder
           action={
@@ -1448,113 +1608,61 @@ function StrategiesEditor({
           title={t("nfqws.strategiesEmptyTitle")}
         />
       ) : (
-        <DataTable
-          columnClassNames={[
-            "w-full [&:where(td)]:max-w-0",
-            "min-w-[10rem]",
-            "min-w-[10rem]",
-            undefined,
-          ]}
-          headers={[
-            t("nfqws.strategyHeaders.name"),
-            t("nfqws.strategyHeaders.origin"),
-            t("nfqws.strategyHeaders.state"),
-            t("nfqws.strategyHeaders.actions"),
-          ]}
-          narrowColumns={[1, 2]}
-          rows={names.map((name) => {
-            const item = status.strategies.find(
-              (candidate) => candidate.name === name
-            )
-            const isActive = name === status.active_strategy
-            const isDraft = item === undefined
-            const isEditing = name === effectiveSelected
+        <div className="space-y-5">
+          <NfqwsProfileCards
+            onApply={(name) => {
+              setSelected(name)
+              setApplying(name)
+            }}
+            onOpen={setSelected}
+            profiles={managedProfiles}
+          />
 
-            return [
-              <button
-                className={cn(
-                  "flex w-full min-w-0 cursor-pointer items-center gap-2 text-left font-mono",
-                  isEditing && "font-bold"
-                )}
-                key="name"
-                onClick={() => setSelected(name)}
-                type="button"
-              >
-                <span className="truncate">{name}</span>
-              </button>,
-              <span className="text-xs text-muted-foreground" key="origin">
-                {isDraft
-                  ? t("nfqws.strategyOrigin.draft")
-                  : item.builtin && item.overridden
-                    ? t("nfqws.strategyOrigin.overridden")
-                    : item.builtin
-                      ? t("nfqws.strategyOrigin.builtin")
-                      : t("nfqws.strategyOrigin.custom")}
-              </span>,
-              isActive ? (
-                <KeeneticStatus key="state" tone="success">
-                  {t("nfqws.strategyState.active")}
-                </KeeneticStatus>
-              ) : (
-                <span className="text-xs text-muted-foreground" key="state">
-                  {t("nfqws.strategyState.inactive")}
-                </span>
-              ),
-              <span
-                className="flex items-center justify-end gap-1"
-                key="actions"
-              >
+          {customNames.length > 0 ? (
+            <div className="space-y-2">
+              <SectionHeading
+                size="compact"
+                title={t("nfqws.customStrategiesTitle")}
+              />
+              <DataTable
+                columnClassNames={strategyColumnClassNames}
+                headers={strategyHeaders}
+                narrowColumns={[1, 2]}
+                rows={customNames.map(strategyRow)}
+              />
+            </div>
+          ) : null}
+
+          {legacyNames.length > 0 ? (
+            <div className="space-y-2">
+              <div className="flex justify-start">
                 <Button
-                  aria-label={t("nfqws.applyStrategy")}
-                  disabled={isDraft}
-                  onClick={() => {
-                    setSelected(name)
-                    setApplying(name)
-                  }}
+                  onClick={() => setShowLegacy((current) => !current)}
                   size="sm"
-                  title={
-                    isDraft
-                      ? t("nfqws.strategySaveBeforeApply")
-                      : t("nfqws.applyStrategy")
-                  }
-                  variant="outline"
+                  variant="ghost"
                 >
-                  <PlayIcon />
-                  {t("nfqws.applyStrategy")}
+                  {showLegacy ? <ChevronDownIcon /> : <ChevronRightIcon />}
+                  {showLegacy
+                    ? t("nfqws.legacyHide")
+                    : t("nfqws.legacyShow", { count: legacyNames.length })}
                 </Button>
-                {/* «Применить» остаётся видимой: это подписанное действие
-                    строки, и прятать его до наведения означало бы прятать сам
-                    смысл строки. Значки прячутся — как в таблицах правил. */}
-                <span className="keen-row-actions flex items-center gap-1">
-                  <Button
-                    aria-label={t("nfqws.editStrategy")}
-                    className="keen-row-action size-8 rounded-[4px]"
-                    onClick={() => setSelected(name)}
-                    size="icon"
-                    title={t("nfqws.editStrategy")}
-                    variant="outline"
-                  >
-                    <KeenPencilIcon className="size-4" />
-                  </Button>
-                  <Button
-                    aria-label={t("common.delete")}
-                    className="keen-row-action keen-row-action--danger size-8 rounded-[4px]"
-                    onClick={() => setDeleting(name)}
-                    size="icon"
-                    title={
-                      item?.builtin && item.overridden
-                        ? t("nfqws.restoreBuiltin")
-                        : t("common.delete")
-                    }
-                    variant="outline"
-                  >
-                    <KeenTrashIcon className="size-4" />
-                  </Button>
-                </span>
-              </span>,
-            ]
-          })}
-        />
+              </div>
+              {showLegacy ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    {t("nfqws.legacyDescription")}
+                  </p>
+                  <DataTable
+                    columnClassNames={strategyColumnClassNames}
+                    headers={strategyHeaders}
+                    narrowColumns={[1, 2]}
+                    rows={legacyNames.map(strategyRow)}
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       )}
 
       {effectiveSelected ? (

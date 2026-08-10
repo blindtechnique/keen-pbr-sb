@@ -578,6 +578,59 @@ export function parseNfqwsStrategy(content: string): NfqwsStrategySummary {
   }
 }
 
+/** The three canonical profiles bundled by keen-pbr-sb. */
+export type NfqwsProfileTier = "safe" | "balanced" | "max"
+
+const PROFILE_MARKER = /^# keen-pbr-sb · профиль «([^»\r\n]+)»(?:\r?\n|$)/
+const TIER_BY_ROLE: Readonly<Record<string, NfqwsProfileTier>> = {
+  БЕЗОПАСНЫЙ: "safe",
+  ОБЫЧНЫЙ: "balanced",
+  МАКСИМАЛЬНЫЙ: "max",
+}
+
+export interface NfqwsProfileMarker {
+  /** Undefined means the file has a profile marker with an unknown role. */
+  readonly tier?: NfqwsProfileTier
+  readonly role: string
+}
+
+/**
+ * Reads only the generated first-line marker. Looking later in arbitrary shell
+ * content would let a comment or string accidentally masquerade as a profile.
+ */
+export function parseNfqwsProfileMarker(
+  content: string
+): NfqwsProfileMarker | undefined {
+  const match = PROFILE_MARKER.exec(content)
+  if (!match) return undefined
+  const role = match[1]!.trim()
+  return { tier: TIER_BY_ROLE[role.toUpperCase()], role }
+}
+
+export interface NfqwsProfileCandidate {
+  readonly builtin: boolean
+  readonly overridden: boolean
+  readonly content: string
+}
+
+/**
+ * A marker alone is not authority to use the profile-card treatment. Custom
+ * strategies and edited built-ins must stay in the table where their origin
+ * and delete/restore action remain visible.
+ */
+export function canonicalNfqwsProfileTier(
+  strategy: NfqwsProfileCandidate
+): NfqwsProfileTier | undefined {
+  if (!strategy.builtin || strategy.overridden) return undefined
+  return parseNfqwsProfileMarker(strategy.content)?.tier
+}
+
+export const NFQWS_PROFILE_ORDER: readonly NfqwsProfileTier[] = [
+  "safe",
+  "balanced",
+  "max",
+]
+
 export function nfqwsProtocolLabel(protocol: string): string {
   const labels: Record<string, string> = {
     tls: "TLS",
