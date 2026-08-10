@@ -666,6 +666,10 @@ export const enTranslation = {
       showChart: "Show chart",
       hideChart: "Hide chart",
       noTraffic: "No traffic yet",
+      // Shown when this interface's counters have not been updated for a
+      // while. Without it, a dead tunnel renders the same byte totals as a
+      // live one.
+      stale: "Stale: counters have not been updated for a while",
     },
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {

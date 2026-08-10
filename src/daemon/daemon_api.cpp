@@ -112,6 +112,10 @@ void Daemon::sample_interface_traffic_now() {
             interface_traffic_sampler_.clear_all();
             traffic_sampled_interfaces_.clear();
             traffic_sampling_active_ = false;
+            // The next viewer must not inherit the backoff this one left
+            // behind, or a freshly opened dashboard would sit blank for the
+            // length of a stretched interval.
+            interface_traffic_cadence_.reset();
             periodic_task_metrics_.record_skipped(
                 "interface-traffic-sample",
                 "status stream has no subscribers");
@@ -141,12 +145,30 @@ void Daemon::sample_interface_traffic_now() {
                 traffic_sampled_interfaces_.clear();
                 traffic_sampling_active_ = false;
             }
+            interface_traffic_cadence_.reset();
+            task_metrics.noop();
+            return;
+        }
+
+        // A changed target set means a screen was just opened or closed. That
+        // is the worst possible moment to be mid-backoff, so it both restores
+        // the fast rate and guarantees this tick takes a reading.
+        const bool targets_changed =
+            target_interfaces != traffic_sampled_interfaces_;
+        if (targets_changed) {
+            interface_traffic_cadence_.reset();
+        }
+        if (!interface_traffic_cadence_.begin_tick()) {
+            // Nothing has moved for a while. Skipping the read is the whole
+            // point of the backoff; publishing an empty batch here would undo
+            // it by waking every subscriber anyway.
             task_metrics.noop();
             return;
         }
 
         const auto target_plan = plan_interface_traffic_targets(
             target_interfaces, traffic_sampled_interfaces_);
+        bool anything_changed = targets_changed;
         nlohmann::json interfaces = nlohmann::json::array();
         for (const auto& interface_name : target_plan.reported) {
             if (target_plan.removed.find(interface_name) !=
@@ -163,6 +185,7 @@ void Daemon::sample_interface_traffic_now() {
 
             const auto result =
                 interface_traffic_sampler_.sample(interface_name);
+            anything_changed = anything_changed || result.state_changed;
             const bool unavailable =
                 result.status ==
                     InterfaceTrafficSampler::SampleStatus::Unavailable ||
@@ -201,6 +224,7 @@ void Daemon::sample_interface_traffic_now() {
             interfaces.push_back(std::move(entry));
         }
 
+        interface_traffic_cadence_.end_round(anything_changed);
         traffic_sampled_interfaces_ = target_interfaces;
         traffic_sampling_active_ = true;
         status_stream_->publish_interface_traffic(

@@ -396,6 +396,7 @@ set(SOURCES
   src/cache/cache_manager.cpp
   src/connections/conntrack_event_monitor.cpp
   src/runtime/conntrack_manager.cpp
+  src/runtime/interface_traffic_cadence.cpp
   src/runtime/interface_traffic_sampler.cpp
   src/runtime/interface_uptime_anchor.cpp
   src/runtime/periodic_task_metrics.cpp

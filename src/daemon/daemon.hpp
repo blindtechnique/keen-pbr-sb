@@ -41,6 +41,7 @@
 #include "../runtime/conntrack_manager.hpp"
 #include "../runtime/idle_stall_detector.hpp"
 #include "../runtime/udp_call_affinity.hpp"
+#include "../runtime/interface_traffic_cadence.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
 #include "../runtime/interface_uptime_anchor.hpp"
 #include "../runtime/runtime_state_machine.hpp"
@@ -1153,6 +1154,10 @@ private:
     // per request would restart the very uptime it is meant to report, so this
     // is daemon-scoped state and not a local of the response builder.
     InterfaceUptimeAnchorStore interface_uptime_anchors_;
+    // Touched only from sample_interface_traffic_now(), i.e. only from the
+    // scheduler thread - the same assumption the neighbouring
+    // traffic_sampled_interfaces_ and traffic_sampling_active_ already make.
+    InterfaceTrafficCadence interface_traffic_cadence_;
     std::mutex interface_traffic_targets_mutex_;
     std::map<std::string, std::set<std::string>>
         interface_traffic_targets_by_source_;

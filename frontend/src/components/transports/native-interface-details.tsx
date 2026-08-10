@@ -140,6 +140,7 @@ export function NativeInterfaceDetails({
           transmitted: t("transports.traffic.transmitted"),
           chart: t("transports.traffic.chart"),
           noTraffic: t("transports.traffic.noTraffic"),
+          stale: t("transports.traffic.stale"),
         }}
         locale={i18n.resolvedLanguage ?? i18n.language}
         showChart={false}
