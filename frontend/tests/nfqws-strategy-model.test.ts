@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   canonicalNfqwsProfileTier,
+  nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
   parseNfqwsStrategy,
   parseShellAssignments,
@@ -264,6 +265,41 @@ describe("nfqws profile marker", () => {
         overridden: false,
         content: "# keen-pbr-sb · профиль «ЭКСТРА»\n",
       })
+    ).toBeUndefined()
+  })
+})
+
+describe("nfqws legacy strategy display names", () => {
+  test("corrects spelling only for the three bundled legacy identifiers", () => {
+    expect(
+      nfqwsBuiltinStrategyDisplayKey({
+        name: "ver5 aggresive",
+        builtin: true,
+      })
+    ).toBe("ver5Aggressive")
+    expect(
+      nfqwsBuiltinStrategyDisplayKey({
+        name: "ver7 more aggresive",
+        builtin: true,
+      })
+    ).toBe("ver7MoreAggressive")
+    expect(
+      nfqwsBuiltinStrategyDisplayKey({
+        name: "ver8 max aggresive",
+        builtin: true,
+      })
+    ).toBe("ver8MostAggressive")
+  })
+
+  test("keeps custom and unknown identifiers verbatim", () => {
+    expect(
+      nfqwsBuiltinStrategyDisplayKey({
+        name: "ver5 aggresive",
+        builtin: false,
+      })
+    ).toBeUndefined()
+    expect(
+      nfqwsBuiltinStrategyDisplayKey({ name: "ver4", builtin: true })
     ).toBeUndefined()
   })
 })

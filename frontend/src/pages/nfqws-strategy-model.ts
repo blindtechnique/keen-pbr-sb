@@ -625,6 +625,31 @@ export function canonicalNfqwsProfileTier(
   return parseNfqwsProfileMarker(strategy.content)?.tier
 }
 
+export type NfqwsBuiltinStrategyDisplayKey =
+  | "ver5Aggressive"
+  | "ver7MoreAggressive"
+  | "ver8MostAggressive"
+
+const BUILTIN_STRATEGY_DISPLAY_KEYS: Readonly<
+  Record<string, NfqwsBuiltinStrategyDisplayKey>
+> = {
+  "ver5 aggresive": "ver5Aggressive",
+  "ver7 more aggresive": "ver7MoreAggressive",
+  "ver8 max aggresive": "ver8MostAggressive",
+}
+
+/**
+ * Corrects legacy spelling only for bundled entries. Their raw names remain
+ * stable API identifiers; a custom strategy with the same name stays verbatim.
+ */
+export function nfqwsBuiltinStrategyDisplayKey(strategy: {
+  readonly name: string
+  readonly builtin: boolean
+}): NfqwsBuiltinStrategyDisplayKey | undefined {
+  if (!strategy.builtin) return undefined
+  return BUILTIN_STRATEGY_DISPLAY_KEYS[strategy.name]
+}
+
 export const NFQWS_PROFILE_ORDER: readonly NfqwsProfileTier[] = [
   "safe",
   "balanced",

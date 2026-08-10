@@ -96,6 +96,7 @@ import { cn } from "@/lib/utils"
 import {
   canonicalNfqwsProfileTier,
   NFQWS_PROFILE_ORDER,
+  nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
 } from "@/pages/nfqws-strategy-model"
 
@@ -1452,6 +1453,12 @@ function StrategiesEditor({
   const activeIsLegacy = legacySet.has(status.active_strategy)
 
   const legacyExpanded = activeIsLegacy || showLegacy
+  const displayStrategyName = (name: string | null): string => {
+    if (!name) return ""
+    const item = status.strategies.find((candidate) => candidate.name === name)
+    const key = item ? nfqwsBuiltinStrategyDisplayKey(item) : undefined
+    return key ? t(`nfqws.strategyDisplayNames.${key}`) : name
+  }
 
   const strategyRow = (name: string): ReactNode[] => {
     const item = status.strategies.find((candidate) => candidate.name === name)
@@ -1469,7 +1476,7 @@ function StrategiesEditor({
         onClick={() => setSelected(name)}
         type="button"
       >
-        <span className="truncate">{name}</span>
+        <span className="truncate">{displayStrategyName(name)}</span>
       </button>,
       <span className="text-xs text-muted-foreground" key="origin">
         {isDraft
@@ -1682,10 +1689,10 @@ function StrategiesEditor({
               title={
                 editorView === "breakdown"
                   ? t("nfqws.strategyBreakdownTitle", {
-                      name: effectiveSelected,
+                      name: displayStrategyName(effectiveSelected),
                     })
                   : t("nfqws.strategyEditorTitle", {
-                      name: effectiveSelected,
+                      name: displayStrategyName(effectiveSelected),
                     })
               }
             />
@@ -1762,8 +1769,12 @@ function StrategiesEditor({
         confirmLabel={t("nfqws.applyStrategy")}
         description={
           customConfig
-            ? t("nfqws.applyOverCustomDescription", { name: applying })
-            : t("nfqws.applyDescription", { name: applying })
+            ? t("nfqws.applyOverCustomDescription", {
+                name: displayStrategyName(applying),
+              })
+            : t("nfqws.applyDescription", {
+                name: displayStrategyName(applying),
+              })
         }
         destructive={customConfig}
         onConfirm={() => {
@@ -1778,8 +1789,12 @@ function StrategiesEditor({
         confirmLabel={t("common.delete")}
         description={
           deletingIsOverride
-            ? t("nfqws.restoreBuiltinDescription", { name: deleting })
-            : t("nfqws.deleteStrategyDescription", { name: deleting })
+            ? t("nfqws.restoreBuiltinDescription", {
+                name: displayStrategyName(deleting),
+              })
+            : t("nfqws.deleteStrategyDescription", {
+                name: displayStrategyName(deleting),
+              })
         }
         onConfirm={() => {
           if (deleting) void run("delete_strategy", deleting)

@@ -121,6 +121,11 @@ export const enTranslation = {
         max: "Everything in Balanced plus extra techniques such as syndata, IP fragmentation and QUIC replacement. Experimental: some providers may drop the connection.",
       },
     },
+    strategyDisplayNames: {
+      ver5Aggressive: "Version 5 — Aggressive",
+      ver7MoreAggressive: "Version 7 — More aggressive",
+      ver8MostAggressive: "Version 8 — Most aggressive",
+    },
     customStrategiesTitle: "Custom and edited strategies",
     legacyShow: "Show legacy presets ({{count}})",
     legacyHide: "Hide legacy presets",
