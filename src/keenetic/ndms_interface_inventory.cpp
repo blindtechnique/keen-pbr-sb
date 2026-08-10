@@ -393,6 +393,22 @@ std::optional<NdmsTunnelKind> classify(const nlohmann::json& entry) {
     return classified;
 }
 
+// KeeneticOS reports "uptime" as whole seconds since the interface last came
+// up, and reports 0 for an interface it does not consider up. A negative or
+// non-integral value is firmware we do not understand, so it is dropped rather
+// than guessed at.
+std::optional<std::int64_t> uptime_seconds_field(const nlohmann::json& entry) {
+    const auto field = entry.find("uptime");
+    if (field == entry.end() || !field->is_number_integer()) {
+        return std::nullopt;
+    }
+    const auto value = field->get<std::int64_t>();
+    if (value < 0) {
+        return std::nullopt;
+    }
+    return value;
+}
+
 struct ParsedEntry {
     std::string id;
     std::string firmware_interface_name;
@@ -404,6 +420,10 @@ struct ParsedEntry {
     bool internal_vpn_server_role_confirmation_required{false};
     std::optional<bool> connected;
     std::optional<bool> link;
+    // Deliberately absent from inventory_revision below: this counter changes
+    // every second, and folding it into the structural digest would churn the
+    // interface identity on every poll and break optimistic concurrency.
+    std::optional<std::int64_t> uptime_seconds;
     std::string inventory_revision;
 };
 
@@ -518,6 +538,7 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
                 parsed_role.evidence == RoleEvidence::absent,
             boolean_field(entry, "connected"),
             boolean_field(entry, "link"),
+            uptime_seconds_field(entry),
             inventory_revision(entry),
         });
     }
@@ -542,6 +563,7 @@ NdmsInterfaceCatalog parse_ndms_interface_catalog(
             parsed.firmware_type,
             parsed.connected,
             parsed.link,
+            parsed.uptime_seconds,
         });
     }
 

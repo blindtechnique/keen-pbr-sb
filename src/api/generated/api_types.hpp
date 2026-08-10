@@ -866,6 +866,8 @@ namespace api {
         std::vector<std::string> warnings;
     };
 
+    enum class LinkUptimeSource : int { FIRMWARE, OBSERVED };
+
     enum class RuntimeInterfaceInventoryStatusEnum : int { DOWN, UP };
 
     struct RuntimeInterfaceTrafficPointElement {
@@ -888,6 +890,8 @@ namespace api {
         std::optional<bool> carrier;
         std::optional<std::vector<std::string>> ipv4_addresses;
         std::optional<std::vector<std::string>> ipv6_addresses;
+        std::optional<int64_t> link_up_since_unix_ms;
+        std::optional<LinkUptimeSource> link_uptime_source;
         std::string name;
         std::optional<std::string> oper_state;
         RuntimeInterfaceInventoryStatusEnum status;
@@ -1226,6 +1230,7 @@ namespace api {
         std::optional<RuntimeInterfaceTrafficPointElement> runtime_interface_traffic_point;
         std::optional<RuntimeInterfaceTrafficSample> runtime_interface_traffic_sample;
         std::optional<RuntimeInterfaceTrafficUpdate> runtime_interface_traffic_update;
+        std::optional<LinkUptimeSource> runtime_interface_uptime_source;
         std::optional<RuntimeInventoryResponse> runtime_inventory_response;
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
@@ -1714,6 +1719,9 @@ namespace api {
 
     void from_json(const json & j, ConfigScope & x);
     void to_json(json & j, const ConfigScope & x);
+
+    void from_json(const json & j, LinkUptimeSource & x);
+    void to_json(json & j, const LinkUptimeSource & x);
 
     void from_json(const json & j, RuntimeInterfaceInventoryStatusEnum & x);
     void to_json(json & j, const RuntimeInterfaceInventoryStatusEnum & x);
@@ -3293,6 +3301,8 @@ namespace api {
         x.carrier = get_stack_optional<bool>(j, "carrier");
         x.ipv4_addresses = get_stack_optional<std::vector<std::string>>(j, "ipv4_addresses");
         x.ipv6_addresses = get_stack_optional<std::vector<std::string>>(j, "ipv6_addresses");
+        x.link_up_since_unix_ms = get_stack_optional<int64_t>(j, "link_up_since_unix_ms");
+        x.link_uptime_source = get_stack_optional<LinkUptimeSource>(j, "link_uptime_source");
         x.name = j.at("name").get<std::string>();
         x.oper_state = get_stack_optional<std::string>(j, "oper_state");
         x.status = j.at("status").get<RuntimeInterfaceInventoryStatusEnum>();
@@ -3305,6 +3315,8 @@ namespace api {
         j["carrier"] = x.carrier;
         j["ipv4_addresses"] = x.ipv4_addresses;
         j["ipv6_addresses"] = x.ipv6_addresses;
+        j["link_up_since_unix_ms"] = x.link_up_since_unix_ms;
+        j["link_uptime_source"] = x.link_uptime_source;
         j["name"] = x.name;
         j["oper_state"] = x.oper_state;
         j["status"] = x.status;
@@ -3799,6 +3811,7 @@ namespace api {
         x.runtime_interface_traffic_point = get_stack_optional<RuntimeInterfaceTrafficPointElement>(j, "RuntimeInterfaceTrafficPoint");
         x.runtime_interface_traffic_sample = get_stack_optional<RuntimeInterfaceTrafficSample>(j, "RuntimeInterfaceTrafficSample");
         x.runtime_interface_traffic_update = get_stack_optional<RuntimeInterfaceTrafficUpdate>(j, "RuntimeInterfaceTrafficUpdate");
+        x.runtime_interface_uptime_source = get_stack_optional<LinkUptimeSource>(j, "RuntimeInterfaceUptimeSource");
         x.runtime_inventory_response = get_stack_optional<RuntimeInventoryResponse>(j, "RuntimeInventoryResponse");
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
@@ -3938,6 +3951,7 @@ namespace api {
         j["RuntimeInterfaceTrafficPoint"] = x.runtime_interface_traffic_point;
         j["RuntimeInterfaceTrafficSample"] = x.runtime_interface_traffic_sample;
         j["RuntimeInterfaceTrafficUpdate"] = x.runtime_interface_traffic_update;
+        j["RuntimeInterfaceUptimeSource"] = x.runtime_interface_uptime_source;
         j["RuntimeInventoryResponse"] = x.runtime_inventory_response;
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
@@ -4685,6 +4699,20 @@ namespace api {
         switch (x) {
             case ConfigScope::ACTIVE: j = "active"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"ConfigScope\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, LinkUptimeSource & x) {
+        if (j == "firmware") x = LinkUptimeSource::FIRMWARE;
+        else if (j == "observed") x = LinkUptimeSource::OBSERVED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"LinkUptimeSource\""); }
+    }
+
+    inline void to_json(json & j, const LinkUptimeSource & x) {
+        switch (x) {
+            case LinkUptimeSource::FIRMWARE: j = "firmware"; break;
+            case LinkUptimeSource::OBSERVED: j = "observed"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"LinkUptimeSource\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

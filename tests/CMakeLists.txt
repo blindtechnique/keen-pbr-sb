@@ -55,6 +55,7 @@ add_executable(keen-pbr-tests
   test_idle_stall_detector.cpp
   test_udp_call_affinity.cpp
   test_interface_traffic_sampler.cpp
+  test_interface_uptime_anchor.cpp
   test_periodic_task_metrics.cpp
   test_scheduler.cpp
   test_daemon_link_contract.cpp
@@ -151,6 +152,7 @@ add_executable(keen-pbr-tests
   ../src/connections/conntrack_event_monitor.cpp
   ../src/runtime/conntrack_manager.cpp
   ../src/runtime/interface_traffic_sampler.cpp
+  ../src/runtime/interface_uptime_anchor.cpp
   ../src/runtime/periodic_task_metrics.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp

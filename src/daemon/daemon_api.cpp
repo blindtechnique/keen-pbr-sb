@@ -23,6 +23,8 @@
 #include "../util/ipv6_support.hpp"
 #include "../health/routing_health_checker.hpp"
 #include "../health/runtime_interface_inventory.hpp"
+#include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_interface_inventory.hpp"
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
 #include "../api/handler_diagnostic_tasks.hpp"
@@ -56,6 +58,50 @@ std::int64_t interface_traffic_api_integer(std::uint64_t value) {
 }
 
 } // namespace
+
+api::RuntimeInterfaceInventoryResponse
+Daemon::build_runtime_interface_inventory_with_uptime() {
+    std::vector<DumpedInterface> dumped;
+    try {
+        dumped = netlink_.dump_interfaces();
+    } catch (const NetlinkError&) {
+        return api::RuntimeInterfaceInventoryResponse{};
+    }
+
+    // peek(), never get(): this runs on an HTTP worker and on the SSE
+    // reconcile path, and a blocking loopback RCI request there would stall
+    // both. A cold catalog simply leaves the firmware anchor unavailable,
+    // which the entry then reports as unknown instead of guessing.
+    const auto ndms = shared_ndms_catalog_cache().peek();
+    if (ndms.observed_at) {
+        std::vector<std::string> runtime_names;
+        runtime_names.reserve(dumped.size());
+        for (const auto& item : dumped) {
+            runtime_names.push_back(item.name);
+        }
+        for (const auto& metadata : ndms.catalog.interface_metadata) {
+            if (!metadata.uptime_seconds) {
+                continue;
+            }
+            const auto kernel_name = resolve_ndms_kernel_name(
+                metadata.firmware_interface_name, runtime_names);
+            if (!kernel_name) {
+                continue;
+            }
+            // Stamped with the instant the catalog was read, not with now:
+            // this snapshot can be a whole cache TTL old, and dating it to now
+            // would shorten every uptime it carries by that lag.
+            interface_uptime_anchors_.observe_firmware_uptime(
+                *kernel_name, *metadata.uptime_seconds, *ndms.observed_at);
+        }
+    }
+
+    return build_runtime_interface_inventory_response(
+        std::move(dumped),
+        &interface_traffic_sampler_,
+        &interface_uptime_anchors_,
+        std::chrono::system_clock::now());
+}
 
 void Daemon::sample_interface_traffic_now() {
     if (!status_stream_ || !status_stream_->has_subscribers()) {
@@ -810,8 +856,7 @@ void Daemon::setup_api() {
                 });
         },
         [this]() {
-            return build_runtime_interface_inventory_response_or_empty(
-                netlink_, &interface_traffic_sampler_);
+            return build_runtime_interface_inventory_with_uptime();
         },
         [this](const Config& config) {
             return build_list_refresh_state_map(config, list_service_.cache_manager());

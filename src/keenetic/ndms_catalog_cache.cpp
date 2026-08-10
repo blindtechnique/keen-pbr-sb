@@ -86,7 +86,7 @@ NdmsCatalogSnapshot NdmsCatalogCache::snapshot_locked(
             now_fn_() >= refresh_after_) {
             effective_status = NdmsCatalogCacheStatus::stale;
         }
-        return {*catalog_, effective_status, refreshed};
+        return {*catalog_, effective_status, refreshed, catalog_observed_at_};
     }
     return {
         unavailable_catalog(),
@@ -164,6 +164,10 @@ NdmsCatalogSnapshot NdmsCatalogCache::get_impl(bool force_refresh) {
             // all preserve the last successfully parsed catalog.
         }
         const auto completed_at = now_fn_();
+        // Deadlines stay on the steady clock; the wall stamp exists only so a
+        // consumer can turn the firmware's relative counters into absolute
+        // instants. They are read together so the pair cannot disagree.
+        const auto observed_at = std::chrono::system_clock::now();
 
         lock.lock();
         refresh_attempted_ = true;
@@ -174,6 +178,7 @@ NdmsCatalogSnapshot NdmsCatalogCache::get_impl(bool force_refresh) {
             refresh_epoch_is_current;
         if (refresh_accepted) {
             catalog_ = std::move(*fetched_catalog);
+            catalog_observed_at_ = observed_at;
             status_ = NdmsCatalogCacheStatus::fresh;
             refresh_after_ = completed_at + cache_ttl_;
         } else {

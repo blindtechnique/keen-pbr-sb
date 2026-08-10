@@ -42,6 +42,7 @@
 #include "../runtime/idle_stall_detector.hpp"
 #include "../runtime/udp_call_affinity.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
+#include "../runtime/interface_uptime_anchor.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../runtime/runtime_mutation_admission.hpp"
 #include "../firewall/firewall.hpp"
@@ -861,6 +862,12 @@ private:
     void teardown_conntrack_events();
     void schedule_interface_traffic_sampling();
     void sample_interface_traffic_now();
+    // Builds the interface inventory and, on the way, folds the firmware's
+    // per-interface uptime counter into the anchor store. Reached from HTTP
+    // workers and from the SSE reconcile, so it only ever peeks the NDMS
+    // catalog and never issues the loopback request itself.
+    api::RuntimeInterfaceInventoryResponse
+    build_runtime_interface_inventory_with_uptime();
     void replace_interface_traffic_targets(
         std::string source,
         std::vector<std::string> interface_names);
@@ -1142,6 +1149,10 @@ private:
     std::unique_ptr<StatusStream> status_stream_;
     std::unique_ptr<ConntrackEventMonitor> conntrack_event_monitor_;
     InterfaceTrafficSampler interface_traffic_sampler_;
+    // Outlives every individual inventory build on purpose. An anchor rebuilt
+    // per request would restart the very uptime it is meant to report, so this
+    // is daemon-scoped state and not a local of the response builder.
+    InterfaceUptimeAnchorStore interface_uptime_anchors_;
     std::mutex interface_traffic_targets_mutex_;
     std::map<std::string, std::set<std::string>>
         interface_traffic_targets_by_source_;

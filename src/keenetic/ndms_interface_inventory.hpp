@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -57,6 +58,11 @@ struct NdmsInterfaceMetadata {
     std::string firmware_type;
     std::optional<bool> connected;
     std::optional<bool> link;
+    // Whole seconds since this interface last came up, as maintained by the
+    // firmware. It is the only up-transition record that outlives a keen-pbr
+    // restart, and 0 is the firmware stating the interface is not up.
+    // Intentionally excluded from NdmsTunnelInterface::inventory_revision.
+    std::optional<std::int64_t> uptime_seconds;
 };
 
 struct NdmsInterfaceCatalog {

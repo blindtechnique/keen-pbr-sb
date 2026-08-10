@@ -20,6 +20,7 @@ import {
   type ActiveTrafficPath,
 } from "@/components/overview/active-interface-traffic-model"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
+import { formatUptimeSince } from "@/lib/uptime-format"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
@@ -112,9 +113,11 @@ export function ActiveInterfaceTraffic({
                     className="shrink-0"
                     tone={connection.connected ? "success" : "neutral"}
                   >
-                    {connection.connected
-                      ? t("overview.outbounds.connected")
-                      : t("overview.outbounds.disconnected")}
+                    {connectedLabel(
+                      connection.connected,
+                      runtimeInterface?.link_up_since_unix_ms,
+                      t
+                    )}
                   </KeeneticStatus>
                 </div>
                 <button
@@ -188,6 +191,31 @@ export function ActiveInterfaceTraffic({
       </div>
     </div>
   )
+}
+
+/**
+ * Labels the connection badge, adding how long the link has been up when the
+ * backend knows.
+ *
+ * A connected interface with no anchor keeps the plain "connected" label. The
+ * badge states connection, not duration, so saying nothing about the duration
+ * is accurate - whereas borrowing the router's or the daemon's uptime to fill
+ * the gap would not be. The details panel spells the gap out as "unknown".
+ */
+function connectedLabel(
+  connected: boolean,
+  upSinceUnixMs: number | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (!connected) {
+    return t("overview.outbounds.disconnected")
+  }
+  if (typeof upSinceUnixMs !== "number") {
+    return t("overview.outbounds.connected")
+  }
+  return t("overview.outbounds.connectedFor", {
+    duration: formatUptimeSince(upSinceUnixMs, t),
+  })
 }
 
 function statusBadgeVariant(

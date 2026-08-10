@@ -397,6 +397,7 @@ set(SOURCES
   src/connections/conntrack_event_monitor.cpp
   src/runtime/conntrack_manager.cpp
   src/runtime/interface_traffic_sampler.cpp
+  src/runtime/interface_uptime_anchor.cpp
   src/runtime/periodic_task_metrics.cpp
   src/cmd/recover_persistent_state.cpp
   src/cmd/status.cpp

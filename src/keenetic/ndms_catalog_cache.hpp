@@ -26,6 +26,12 @@ struct NdmsCatalogSnapshot {
     // represented by status=fresh: a recently verified cache hit remains
     // authoritative even though this particular call did not perform I/O.
     bool refreshed{false};
+    // Wall-clock instant this catalog was actually read from the firmware.
+    // Every live counter it carries is a "for the last N seconds" duration, so
+    // it is only convertible into an absolute instant together with this
+    // stamp - and a snapshot served from cache can be a whole TTL older than
+    // the moment a caller consumes it.
+    std::optional<std::chrono::system_clock::time_point> observed_at;
 };
 
 // Thread-safe, single-flight cache for the loopback NDMS request. Failed
@@ -68,6 +74,7 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable refresh_finished_;
     std::optional<NdmsInterfaceCatalog> catalog_;
+    std::optional<std::chrono::system_clock::time_point> catalog_observed_at_;
     NdmsCatalogCacheStatus status_{NdmsCatalogCacheStatus::unavailable};
     Clock::time_point refresh_after_{};
     Clock::time_point forced_refresh_after_{};

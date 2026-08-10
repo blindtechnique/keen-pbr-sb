@@ -2975,6 +2975,19 @@ components:
         - up: interface is administratively up
         - down: interface is not administratively up
 
+    RuntimeInterfaceUptimeSource:
+      type: string
+      enum: [firmware, observed]
+      description: >
+        Which confirmed up-transition the anchor was derived from.
+
+        - firmware: the KeeneticOS per-interface uptime counter. The firmware
+          owns it, so it survives a keen-pbr restart, a configuration apply and
+          a UI reload.
+        - observed: a down-to-up edge this daemon saw itself. Precise and
+          immediate, but it only covers transitions that happened while this
+          process was running.
+
     RuntimeInterfaceTrafficPoint:
       type: object
       required: [age_ms, rx_bits_per_second, tx_bits_per_second]
@@ -3113,6 +3126,21 @@ components:
             type: string
           description: Best-effort IPv6 addresses in CIDR form.
           example: ["fe80::1/64"]
+        link_up_since_unix_ms:
+          type: integer
+          format: int64
+          description: >
+            Unix timestamp of the confirmed link or tunnel up-transition this
+            interface has been up since. Absent when no authoritative
+            transition is known - clients must then render the uptime as
+            unknown and must never substitute daemon, routing-runtime or router
+            uptime, which are separate quantities that reset for unrelated
+            reasons. The value is an anchor rather than a duration precisely so
+            that a UI refresh, a configuration apply and a daemon restart
+            cannot move it.
+          example: 1754812800000
+        link_uptime_source:
+          $ref: "#/components/schemas/RuntimeInterfaceUptimeSource"
         traffic:
           $ref: "#/components/schemas/RuntimeInterfaceTraffic"
 

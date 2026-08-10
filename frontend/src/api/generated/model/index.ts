@@ -140,6 +140,7 @@ export * from './runtimeInterfaceTraffic';
 export * from './runtimeInterfaceTrafficPoint';
 export * from './runtimeInterfaceTrafficSample';
 export * from './runtimeInterfaceTrafficUpdate';
+export * from './runtimeInterfaceUptimeSource';
 export * from './runtimeInventoryResponse';
 export * from './runtimeOutboundsResponse';
 export * from './runtimeOutboundState';

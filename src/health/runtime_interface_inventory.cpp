@@ -2,6 +2,8 @@
 
 #include "runtime_interface_inventory.hpp"
 
+#include "../util/time_utils.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -18,9 +20,20 @@ api::RuntimeInterfaceInventoryStatusEnum map_interface_status(bool admin_up) {
         : api::RuntimeInterfaceInventoryStatusEnum::DOWN;
 }
 
+api::LinkUptimeSource map_uptime_source(InterfaceUptimeSource source) {
+    return source == InterfaceUptimeSource::firmware
+        ? api::LinkUptimeSource::FIRMWARE
+        : api::LinkUptimeSource::OBSERVED;
+}
+
 api::RuntimeInterfaceInventoryEntry build_runtime_interface_inventory_entry(
     DumpedInterface dumped,
-    const InterfaceTrafficSampler* traffic_sampler) {
+    const InterfaceTrafficSampler* traffic_sampler,
+    InterfaceUptimeAnchorStore* uptime_anchors,
+    std::chrono::system_clock::time_point observed_at) {
+    // Read before any member of `dumped` is moved from.
+    const bool link_up = interface_link_is_up(dumped);
+
     api::RuntimeInterfaceInventoryEntry entry;
     entry.name = std::move(dumped.name);
     entry.status = map_interface_status(dumped.admin_up);
@@ -37,6 +50,17 @@ api::RuntimeInterfaceInventoryEntry build_runtime_interface_inventory_entry(
     }
     if (!dumped.ipv6_addresses.empty()) {
         entry.ipv6_addresses = std::move(dumped.ipv6_addresses);
+    }
+
+    if (uptime_anchors != nullptr) {
+        uptime_anchors->observe_link_state(entry.name, link_up, observed_at);
+        if (const auto anchor = uptime_anchors->anchor(entry.name)) {
+            entry.link_up_since_unix_ms = unix_timestamp_ms(anchor->up_since);
+            entry.link_uptime_source = map_uptime_source(anchor->source);
+        }
+        // No anchor means no confirmed transition is known. Both fields stay
+        // absent so the client renders "unknown"; filling in a fallback here
+        // is what would turn daemon uptime into a fake interface uptime.
     }
 
     if (traffic_sampler != nullptr) {
@@ -85,15 +109,47 @@ api::RuntimeInterfaceInventoryEntry build_runtime_interface_inventory_entry(
 
 } // namespace
 
+bool interface_link_is_up(const DumpedInterface& dumped) {
+    if (!dumped.admin_up) {
+        return false;
+    }
+    if (dumped.carrier) {
+        return *dumped.carrier;
+    }
+    if (dumped.oper_state) {
+        // Point-to-point tunnel devices routinely report "unknown" because
+        // they implement no carrier at all. Refusing that would mark every
+        // WireGuard and TUN link permanently down here. The firmware counter,
+        // which does distinguish a dead tunnel, overrides this fallback
+        // wherever it is available.
+        return *dumped.oper_state == "up" || *dumped.oper_state == "unknown";
+    }
+    return false;
+}
+
 api::RuntimeInterfaceInventoryResponse build_runtime_interface_inventory_response(
     std::vector<DumpedInterface> dumped_interfaces,
-    const InterfaceTrafficSampler* traffic_sampler) {
+    const InterfaceTrafficSampler* traffic_sampler,
+    InterfaceUptimeAnchorStore* uptime_anchors,
+    std::chrono::system_clock::time_point observed_at) {
     api::RuntimeInterfaceInventoryResponse response;
+
+    if (uptime_anchors != nullptr) {
+        std::vector<std::string> present;
+        present.reserve(dumped_interfaces.size());
+        for (const auto& dumped : dumped_interfaces) {
+            present.push_back(dumped.name);
+        }
+        // A tunnel that was deleted and recreated under the same name is a new
+        // lifetime, so the vanished device's anchor must not be inherited.
+        uptime_anchors->retain_only(present);
+    }
 
     for (auto& dumped : dumped_interfaces) {
         response.interfaces.push_back(
             build_runtime_interface_inventory_entry(
-                std::move(dumped), traffic_sampler));
+                std::move(dumped), traffic_sampler, uptime_anchors,
+                observed_at));
     }
 
     return response;
@@ -101,17 +157,20 @@ api::RuntimeInterfaceInventoryResponse build_runtime_interface_inventory_respons
 
 api::RuntimeInterfaceInventoryResponse build_runtime_interface_inventory_response(
     NetlinkManager& netlink,
-    const InterfaceTrafficSampler* traffic_sampler) {
+    const InterfaceTrafficSampler* traffic_sampler,
+    InterfaceUptimeAnchorStore* uptime_anchors) {
     return build_runtime_interface_inventory_response(
-        netlink.dump_interfaces(), traffic_sampler);
+        netlink.dump_interfaces(), traffic_sampler, uptime_anchors,
+        std::chrono::system_clock::now());
 }
 
 api::RuntimeInterfaceInventoryResponse build_runtime_interface_inventory_response_or_empty(
     NetlinkManager& netlink,
-    const InterfaceTrafficSampler* traffic_sampler) {
+    const InterfaceTrafficSampler* traffic_sampler,
+    InterfaceUptimeAnchorStore* uptime_anchors) {
     try {
         return build_runtime_interface_inventory_response(
-            netlink, traffic_sampler);
+            netlink, traffic_sampler, uptime_anchors);
     } catch (const NetlinkError&) {
         return api::RuntimeInterfaceInventoryResponse{};
     }
