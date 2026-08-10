@@ -9,7 +9,11 @@
 
 set -e -u
 
-TOOLCHAIN_DIR="$(realpath "${1:?Usage: $0 <toolchain-dir>}")"
+# realpath fails on a path that does not exist yet, and under `set -e` that
+# aborts before the download branch below ever gets to create it - so a clean
+# checkout could never run this script at all. Create it first.
+mkdir -p "${1:?Usage: $0 <toolchain-dir>}"
+TOOLCHAIN_DIR="$(realpath "$1")"
 SDK_URL="${OPENWRT_SDK_URL:?Error: OPENWRT_SDK_URL is not set (e.g. https://downloads.openwrt.org/releases/24.10.4/targets/rockchip/armv8/openwrt-sdk-24.10.4-rockchip-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst)}"
 
 SDK_ARCHIVE="$TOOLCHAIN_DIR/$(basename "$SDK_URL")"

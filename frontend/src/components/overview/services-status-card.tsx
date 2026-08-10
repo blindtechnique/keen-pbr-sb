@@ -24,6 +24,10 @@ import { SectionCard } from "@/components/shared/section-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { waitForRuntimeReadiness } from "@/lib/runtime-readiness"
+import {
+  parseServiceCommandResult,
+  ServiceRestartFailure,
+} from "@/lib/service-restart-result"
 import { cn } from "@/lib/utils"
 
 /** The dnsmasq status vocabulary is not the badge vocabulary. */
@@ -160,13 +164,30 @@ export function ServicesStatusCard() {
         body: JSON.stringify({ action: "service", command: "restart" }),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return response.json()
+      // The endpoint answers 200 even when the init script failed, so the
+      // body is the only report of what actually happened to the service.
+      // Trusting the HTTP status alone made every failed restart look
+      // successful.
+      const result = parseServiceCommandResult(await response.json())
+      if (!result.ok) {
+        throw new ServiceRestartFailure(result)
+      }
+      return result
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      toast.success(t("overview.services.restartRequested"))
+      toast.success(t("overview.services.restartComplete"))
     },
-    onError: () => toast.error(t("overview.services.restartFailed")),
+    onError: async (error) => {
+      // Refresh regardless: a failed restart still moved the service, and a
+      // stale "running" badge next to a failure notice is its own lie.
+      await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
+      toast.error(
+        t("overview.services.restartFailedDetail", {
+          error: errorMessage(error),
+        })
+      )
+    },
   })
 
   const nfqwsServiceMutation = useMutation({
