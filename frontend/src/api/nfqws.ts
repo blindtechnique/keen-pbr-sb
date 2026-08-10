@@ -18,6 +18,44 @@ export type NfqwsUpdateStatus = {
 export const NFQWS_UPDATE_QUERY_KEY = ["nfqws", "update"] as const
 export const NFQWS_UPDATE_INTERVAL_MS = 30 * 60 * 1_000
 
+const MAX_VALIDATION_ERRORS = 5
+const MAX_VALIDATION_PATH_LENGTH = 160
+const MAX_VALIDATION_MESSAGE_LENGTH = 480
+
+function boundedText(value: string, limit: number): string {
+  const normalized = value.trim()
+  return normalized.length <= limit
+    ? normalized
+    : `${normalized.slice(0, limit - 1)}…`
+}
+
+function validationErrorDetails(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return []
+  const entries = (payload as { validation_errors?: unknown }).validation_errors
+  if (!Array.isArray(entries)) return []
+
+  const details: string[] = []
+  for (const entry of entries) {
+    if (details.length >= MAX_VALIDATION_ERRORS) break
+    if (!entry || typeof entry !== "object") continue
+    const path = (entry as { path?: unknown }).path
+    const message = (entry as { message?: unknown }).message
+    if (typeof message !== "string" || message.trim().length === 0) continue
+
+    const renderedPath =
+      typeof path === "string"
+        ? boundedText(path, MAX_VALIDATION_PATH_LENGTH)
+        : ""
+    const renderedMessage = boundedText(message, MAX_VALIDATION_MESSAGE_LENGTH)
+    details.push(
+      renderedPath
+        ? `- ${renderedPath}: ${renderedMessage}`
+        : `- ${renderedMessage}`
+    )
+  }
+  return details
+}
+
 export async function nfqwsAction<T = NfqwsActionResult>(
   payload: Record<string, unknown>
 ): Promise<T> {
@@ -28,11 +66,14 @@ export async function nfqwsAction<T = NfqwsActionResult>(
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok || data.ok === false) {
-    throw new Error(
+    const message =
       data.error ??
-        data.message ??
-        data.output?.trim() ??
-        `HTTP ${response.status}`
+      data.message ??
+      data.output?.trim() ??
+      `HTTP ${response.status}`
+    const details = validationErrorDetails(data)
+    throw new Error(
+      details.length > 0 ? `${message}\n${details.join("\n")}` : message
     )
   }
   return data as T

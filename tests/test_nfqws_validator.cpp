@@ -249,6 +249,31 @@ TEST_CASE("nfqws validator: dry-run rewrites a missing live blob to its packaged
           std::string::npos);
 }
 
+TEST_CASE("nfqws validator: logical Lua paths accept only a compressed Lua sibling") {
+    const std::string content =
+        "NFQWS_BASE_ARGS=\"--lua-init=@/opt/lua/base.lua\"\n"
+        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n";
+    const auto compressed_lua = allow_paths({"/opt/lua/base.lua.gz"});
+
+    CHECK(validate_nfqws_candidate(content, compressed_lua).empty());
+    const auto args = build_nfqws_dry_run_args(content, 300, compressed_lua);
+    CHECK(position_of(args, "--lua-init=@/opt/lua/base.lua") !=
+          std::string::npos);
+    CHECK(position_of(args, "--lua-init=@/opt/lua/base.lua.gz") ==
+          std::string::npos);
+
+    const std::string exact_only =
+        "NFQWS_BASE_ARGS=\"--blob=fake:@/opt/blobs/fake.lua\"\n"
+        "MODE_LIST=\"--hostlist=/opt/lists/user.lua\"\n"
+        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n";
+    const auto misleading_gzip = allow_paths(
+        {"/opt/blobs/fake.lua.gz", "/opt/lists/user.lua.gz"});
+    const auto issues =
+        validate_nfqws_candidate(exact_only, misleading_gzip);
+    CHECK(has_issue(issues, "NFQWS_BASE_ARGS/--blob", "does not exist"));
+    CHECK(has_issue(issues, "MODE_LIST/--hostlist", "does not exist"));
+}
+
 TEST_CASE("nfqws validator: candidate parser rejects executable shell and unterminated quotes") {
     auto issues = validate_nfqws_candidate(
         "touch /tmp/owned\n"

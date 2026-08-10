@@ -397,6 +397,24 @@ struct PathReference {
     std::string prefix;
 };
 
+std::optional<std::string> resolve_input_path(
+    const PathReference& reference,
+    const NfqwsPathResolver& resolve_path) {
+    if (!resolve_path) return std::nullopt;
+    if (auto resolved = resolve_path(reference.path)) return resolved;
+
+    // nfqws2 treats a logical foo.lua reference as foo.lua.gz when only the
+    // compressed sibling is installed.  Keep the logical path in the dry-run
+    // argv so verification exactly mirrors the init-script/runtime argv.
+    // Other input types must continue to resolve their exact path.
+    if (reference.flag == "--lua-init" && reference.path.size() > 4U &&
+        reference.path.compare(reference.path.size() - 4U, 4U, ".lua") == 0 &&
+        resolve_path(reference.path + ".gz").has_value()) {
+        return reference.path;
+    }
+    return std::nullopt;
+}
+
 std::optional<PathReference> input_path_reference(const std::string& token) {
     const auto direct = [&token](std::string_view flag)
         -> std::optional<PathReference> {
@@ -454,7 +472,8 @@ void validate_token(const std::string& variable,
             {variable + "/" + reference->flag, "empty file path"});
         return;
     }
-    if (resolve_path && !resolve_path(reference->path).has_value()) {
+    if (resolve_path &&
+        !resolve_input_path(*reference, resolve_path).has_value()) {
         issues.push_back({variable + "/" + reference->flag,
                           "referenced file does not exist: " + reference->path});
     }
@@ -587,7 +606,7 @@ std::string rewrite_input_path(const std::string& token,
     if (!resolve_path) return token;
     const auto reference = input_path_reference(token);
     if (!reference.has_value()) return token;
-    const auto resolved = resolve_path(reference->path);
+    const auto resolved = resolve_input_path(*reference, resolve_path);
     if (!resolved.has_value()) return token;
     return reference->prefix + *resolved;
 }
