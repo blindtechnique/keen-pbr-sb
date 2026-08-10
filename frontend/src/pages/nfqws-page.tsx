@@ -1451,9 +1451,7 @@ function StrategiesEditor({
   )
   const activeIsLegacy = legacySet.has(status.active_strategy)
 
-  useEffect(() => {
-    if (activeIsLegacy) setShowLegacy(true)
-  }, [activeIsLegacy, status.active_strategy])
+  const legacyExpanded = activeIsLegacy || showLegacy
 
   const strategyRow = (name: string): ReactNode[] => {
     const item = status.strategies.find((candidate) => candidate.name === name)
@@ -1635,19 +1633,25 @@ function StrategiesEditor({
 
           {legacyNames.length > 0 ? (
             <div className="space-y-2">
-              <div className="flex justify-start">
-                <Button
-                  onClick={() => setShowLegacy((current) => !current)}
-                  size="sm"
-                  variant="ghost"
-                >
-                  {showLegacy ? <ChevronDownIcon /> : <ChevronRightIcon />}
-                  {showLegacy
-                    ? t("nfqws.legacyHide")
-                    : t("nfqws.legacyShow", { count: legacyNames.length })}
-                </Button>
-              </div>
-              {showLegacy ? (
+              {!activeIsLegacy ? (
+                <div className="flex justify-start">
+                  <Button
+                    onClick={() => setShowLegacy((current) => !current)}
+                    size="sm"
+                    variant="ghost"
+                  >
+                    {legacyExpanded ? (
+                      <ChevronDownIcon />
+                    ) : (
+                      <ChevronRightIcon />
+                    )}
+                    {legacyExpanded
+                      ? t("nfqws.legacyHide")
+                      : t("nfqws.legacyShow", { count: legacyNames.length })}
+                  </Button>
+                </div>
+              ) : null}
+              {legacyExpanded ? (
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">
                     {t("nfqws.legacyDescription")}
