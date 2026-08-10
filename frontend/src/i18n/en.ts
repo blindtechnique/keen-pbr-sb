@@ -6,16 +6,29 @@ export const enTranslation = {
     repository: "Open the official nfqws2 repository",
     description:
       "Manage nfqws2, strategies, configuration, lists, Lua scripts and logs.",
-    refresh: "Refresh",
+    refresh: "Refresh data",
     service: "nfqws2 service",
     version: "Installed version: {{version}}",
     running: "Running",
     stopped: "Not running",
     start: "Start",
     stop: "Stop",
-    restart: "Restart",
+    restart: "Restart service",
     reload: "Reload configuration",
     upgrade: "Upgrade package",
+    serviceHelp: {
+      label: "What the service buttons do",
+      restart:
+        "Stops nfqws and starts it again with the current configuration. Connections drop for a second, but everything you changed takes effect.",
+      reload:
+        "The service re-reads its configuration files without stopping, so connections survive. Enough when only lists and parameters changed.",
+      upgrade:
+        "Installs a newer version of nfqws2 itself from the repository. Settings, lists and strategies stay as they are.",
+      backup:
+        "Save settings, lists, Lua scripts and strategies to a file on this computer — or restore them from such a file.",
+      refresh:
+        "Re-reads the service state from the router and shows it here. Does not touch the service itself.",
+    },
     updateAvailable: "Update {{version}} is available",
     upToDate: "The latest available nfqws2 version is installed.",
     upgradeConfirmTitle: "Update nfqws2",
@@ -99,10 +112,11 @@ export const enTranslation = {
       liveStale:
         "No trustworthy fresh state is available from the running service.",
       liveStarting: "Receiving live state from the newly started service.",
-      liveWarming: "No traffic has been observed in this pool yet.",
+      liveWarming: "no traffic here yet",
       livePartial:
         "Only part of the live state was captured; the exact slot is hidden.",
-      liveSlot: "Slot {{slot}} of {{count}} across {{targets}} targets",
+      liveSlot: "Slot {{slot}} of {{count}}",
+      liveTargets: "Targets tracked right now: {{count}}",
       liveDiverged: "Rotation state differs across {{count}} targets",
       liveFailures: "Current failure counter: {{count}} · not a lifetime total",
       liveFailuresVary:
@@ -288,6 +302,8 @@ export const enTranslation = {
     activeStrategyLabel: "Currently applied:",
     activeStrategyCustom: "manually modified configuration",
     selectedForEditing: "Selected for editing: {{name}}",
+    strategyAlreadyApplied:
+      "This strategy is already applied — there is nothing to re-apply.",
     strategyAppliedAndRestarted:
       "The strategy was applied and the nfqws2 service restarted.",
     addStrategy: "New strategy",

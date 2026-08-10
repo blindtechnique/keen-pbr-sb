@@ -6,9 +6,11 @@ import {
   DownloadIcon,
   EraserIcon,
   ExternalLinkIcon,
+  FileCogIcon,
   FilePlusIcon,
   LoaderCircleIcon,
   PlayIcon,
+  PowerIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   SaveIcon,
@@ -504,7 +506,20 @@ export function NfqwsPage() {
       {status?.installed ? (
         <>
           <NfqwsSection
-            title={t("nfqws.service")}
+            title={
+              // Пять кнопок в ряд, и по подписям не видно, чем «Перезапустить»
+              // отличается от «Перечитать конфигурацию», а «Обновить» — от
+              // «Обновить пакет». Знак вопроса у названия раздела — тот же
+              // приём, что у KeeneticOS: объяснение под рукой, но не занимает
+              // экран у того, кто и так знает.
+              <span className="inline-flex flex-wrap items-center gap-1">
+                {t("nfqws.service")}
+                <HelpHint
+                  label={t("nfqws.serviceHelp.label")}
+                  text={<ServiceActionsHelp />}
+                />
+              </span>
+            }
             description={t("nfqws.version", {
               version: status.version || "—",
             })}
@@ -549,8 +564,15 @@ export function NfqwsPage() {
               {/* На телефоне — сетка в две равные колонки, как в панели действий
                   на остальных страницах. В обычном `flex-wrap` каждая кнопка
                   занимала ширину своей подписи, и пять кнопок вставали лесенкой
-                  2 + 2 + 1 разной длины. */}
-              <div className="grid grid-cols-2 items-center gap-2 *:w-full sm:flex sm:flex-wrap sm:*:w-auto">
+                  2 + 2 + 1 разной длины.
+
+                  Подписи стали длиннее («Перезапустить службу» вместо
+                  «Перезапустить»), и в половину телефонного экрана они больше
+                  не влезают: у кнопок базовый `whitespace-nowrap` и жёсткая
+                  высота, поэтому текст вылезал за рамку на соседнюю кнопку.
+                  На узком экране разрешаем перенос и высоту по содержимому —
+                  с `items-stretch` кнопки в ряду всё равно одной высоты. */}
+              <div className="grid grid-cols-2 items-stretch gap-2 *:h-auto *:min-h-8 *:w-full *:py-1 *:leading-tight *:whitespace-normal sm:flex sm:flex-wrap sm:items-center sm:*:h-8 sm:*:w-auto sm:*:py-0 sm:*:whitespace-nowrap">
                 <Button
                   disabled={operation.pending}
                   onClick={() =>
@@ -564,9 +586,14 @@ export function NfqwsPage() {
                       t("nfqws.operationCompleted")
                     )
                   }
+                  title={t("nfqws.serviceHelp.restart")}
                   variant="outline"
                 >
-                  <RefreshCwIcon />
+                  {/* Своя иконка у каждой кнопки: «Перезапустить» и «Обновить»
+                      стояли рядом с одной и той же RefreshCwIcon, и по значку
+                      их было не отличить. Перезапуск — это выключение и
+                      включение службы, отсюда знак питания. */}
+                  <PowerIcon />
                   {t("nfqws.restart")}
                 </Button>
                 <Button
@@ -579,13 +606,16 @@ export function NfqwsPage() {
                       t("nfqws.operationCompleted")
                     )
                   }
+                  title={t("nfqws.serviceHelp.reload")}
                   variant="outline"
                 >
+                  <FileCogIcon />
                   {t("nfqws.reload")}
                 </Button>
                 <Button
                   disabled={operation.pending || updateQuery.isFetching}
                   onClick={() => setUpgradeOpen(true)}
+                  title={t("nfqws.serviceHelp.upgrade")}
                   variant="outline"
                 >
                   <DownloadIcon />
@@ -594,6 +624,7 @@ export function NfqwsPage() {
                 <Button
                   disabled={!status?.installed || backupPending !== null}
                   onClick={() => setBackupOpen(true)}
+                  title={t("nfqws.serviceHelp.backup")}
                   variant="outline"
                 >
                   <ArchiveIcon />
@@ -604,6 +635,7 @@ export function NfqwsPage() {
                     query.isFetching || updateQuery.isFetching || refreshPending
                   }
                   onClick={() => void refreshAll()}
+                  title={t("nfqws.serviceHelp.refresh")}
                   variant="outline"
                 >
                   <RefreshCwIcon
@@ -1305,6 +1337,15 @@ function StrategiesEditor({
     (item) => item.name === effectiveSelected
   )
   const content = draftContent[effectiveSelected] ?? strategy?.content ?? ""
+  // «Применена» — только когда применён именно этот текст. Правки снимают
+  // запрет: иначе применить их было бы нечем. Без этого кнопка оставалась
+  // активной у уже применённой стратегии, и второе нажатие перезапускало
+  // службу впустую.
+  const selectedHasEdits =
+    draftContent[effectiveSelected] !== undefined &&
+    draftContent[effectiveSelected] !== strategy?.content
+  const selectedIsApplied =
+    effectiveSelected === status.active_strategy && !selectedHasEdits
   const [editorViewChoice, setEditorViewChoice] = useState<"breakdown" | "raw">(
     "breakdown"
   )
@@ -1312,12 +1353,29 @@ function StrategiesEditor({
     const active = status.strategies.find(
       (item) => item.name === status.active_strategy
     )
+    // Тот же отказ от `overridden`: применение помечает пресет изменённым, и
+    // блок «старые пресеты» переставал раскрываться ровно тогда, когда в нём
+    // лежит применённая стратегия — то есть когда это и нужно.
     return Boolean(
-      active?.builtin &&
-      !active.overridden &&
-      parseNfqwsProfileMarker(active.content) === undefined
+      active?.builtin && parseNfqwsProfileMarker(active.content) === undefined
     )
   })
+  // «Подробнее» на карточке профиля открывает разбор ниже по странице — и
+  // должно туда доводить. Раньше кнопка только меняла выбранную стратегию:
+  // на длинной странице разбор оставался за экраном, и нажатие выглядело
+  // так, будто ничего не произошло. Счётчик, а не флаг: повторное нажатие
+  // на ту же карточку тоже должно прокручивать.
+  const detailsRef = useRef<HTMLDivElement>(null)
+  const [detailsRequest, setDetailsRequest] = useState(0)
+  useEffect(() => {
+    if (detailsRequest === 0) return
+    detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [detailsRequest])
+  const openDetails = (name: string) => {
+    setSelected(name)
+    setEditorViewChoice("breakdown")
+    setDetailsRequest((current) => current + 1)
+  }
   const rawOnly = effectiveSelected.toLowerCase().endsWith(".list")
   const editorView = rawOnly ? "raw" : editorViewChoice
   const [creating, setCreating] = useState(false)
@@ -1454,9 +1512,14 @@ function StrategiesEditor({
       item !== undefined &&
       Object.hasOwn(draftContent, name) &&
       draftContent[name] !== item.content
+    // `overridden` здесь тоже не участвует, и по той же причине, что в
+    // canonicalNfqwsProfileTier: применение стратегии заставляет backend
+    // записать пользовательскую копию. Пока флаг участвовал, применённый
+    // ver9 уезжал из «старых пресетов» в «Свои и изменённые» — то есть
+    // выбор пресета сам же его оттуда и уносил. Происхождение
+    // («Встроенная, изменена») по-прежнему видно в колонке строки.
     return Boolean(
       item?.builtin &&
-      !item.overridden &&
       !hasChangedDraft &&
       parseNfqwsProfileMarker(item.content) === undefined
     )
@@ -1634,7 +1697,7 @@ function StrategiesEditor({
               setSelected(name)
               setApplying(name)
             }}
-            onOpen={setSelected}
+            onOpen={openDetails}
             profiles={managedProfiles}
           />
 
@@ -1692,7 +1755,7 @@ function StrategiesEditor({
       )}
 
       {effectiveSelected ? (
-        <div className="space-y-3">
+        <div className="scroll-mt-4 space-y-3" ref={detailsRef}>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <SectionHeading
               description={
@@ -1754,9 +1817,19 @@ function StrategiesEditor({
               <SaveIcon />
               {t("nfqws.saveStrategy")}
             </Button>
-            <Button onClick={() => setApplying(effectiveSelected)}>
+            <Button
+              disabled={selectedIsApplied}
+              onClick={() => setApplying(effectiveSelected)}
+              title={
+                selectedIsApplied
+                  ? t("nfqws.strategyAlreadyApplied")
+                  : t("nfqws.applyStrategy")
+              }
+            >
               <PlayIcon />
-              {t("nfqws.applyStrategy")}
+              {selectedIsApplied
+                ? t("nfqws.profiles.applied")
+                : t("nfqws.applyStrategy")}
             </Button>
           </div>
         </div>
@@ -2317,6 +2390,53 @@ function NfqwsSection({
 
 /** Порог, после которого строка запуска сворачивается. Восемь строк сплошного
  *  цветного текста прочитать невозможно, а короткую — можно и нужно. */
+/**
+ * Что делает каждая кнопка службы — списком «подпись → объяснение».
+ *
+ * Развёрнуто, потому что разница между «Перезапустить службу» и «Перечитать
+ * конфигурацию» — это разница между «соединения оборвутся» и «не оборвутся»,
+ * и по одним подписям её не восстановить. Тот же текст висит в `title` на
+ * каждой кнопке — для мыши.
+ */
+function ServiceActionsHelp() {
+  const { t } = useTranslation()
+
+  return (
+    <dl className="grid gap-2.5">
+      <div>
+        <dt className="font-medium">{t("nfqws.restart")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.restart")}
+        </dd>
+      </div>
+      <div>
+        <dt className="font-medium">{t("nfqws.reload")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.reload")}
+        </dd>
+      </div>
+      <div>
+        <dt className="font-medium">{t("nfqws.upgrade")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.upgrade")}
+        </dd>
+      </div>
+      <div>
+        <dt className="font-medium">{t("nfqws.backup.button")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.backup")}
+        </dd>
+      </div>
+      <div>
+        <dt className="font-medium">{t("nfqws.refresh")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.refresh")}
+        </dd>
+      </div>
+    </dl>
+  )
+}
+
 const ARGS_COLLAPSE_THRESHOLD = 240
 
 function ArgsField({

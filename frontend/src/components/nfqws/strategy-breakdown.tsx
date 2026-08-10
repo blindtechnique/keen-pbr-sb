@@ -1,18 +1,24 @@
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
+import { KeeneticStatus } from "@/components/shared/keenetic-status"
 import { Badge } from "@/components/ui/badge"
-import type {
-  NfqwsRotatorPoolState,
-  NfqwsRotatorState,
-} from "@/api/nfqws"
+import type { NfqwsRotatorPoolState, NfqwsRotatorState } from "@/api/nfqws"
 import {
   nfqwsProtocolLabel,
   parseNfqwsStrategy,
   type NfqwsPool,
 } from "@/pages/nfqws-strategy-model"
 
-/** Read-only explanation of the exact strategy text shown in the raw editor. */
+/**
+ * Read-only explanation of the exact strategy text shown in the raw editor.
+ *
+ * Разбор живёт плоскими строками с разделителями, а не сеткой карточек.
+ * Карточками наверху страницы выбирают профиль — это выбор из трёх. Пул
+ * выбирать не из чего: это перечисление, и рамка вокруг каждого пункта
+ * давала карточку внутри карточки, а живое состояние ротатора — ещё одну
+ * карточку внутри неё.
+ */
 export function StrategyBreakdown({
   content,
   rotatorState,
@@ -22,6 +28,13 @@ export function StrategyBreakdown({
 }) {
   const { t } = useTranslation()
   const summary = useMemo(() => parseNfqwsStrategy(content), [content])
+  // Состояние ротатора целиком (не получено, несвежее, сервис прогревается,
+  // ответ обрезан) относится ко всей стратегии, а не к отдельному пулу.
+  // Строкой в каждом пуле одна и та же фраза повторялась бы восемь раз и
+  // читалась как список ошибок — поэтому она стоит один раз в шапке разбора.
+  const rotatorNote = rotatorState
+    ? describeRotatorState(rotatorState, t)
+    : undefined
 
   if (!summary.parseable) {
     return (
@@ -50,17 +63,18 @@ export function StrategyBreakdown({
             {t("nfqws.breakdown.blobCount", { count: summary.blobCount })}
           </span>
         ) : null}
+        {rotatorNote ? <span>{rotatorNote}</span> : null}
       </div>
-      <ul className="grid gap-2 lg:grid-cols-2">
+      <ul className="divide-y border-y">
         {summary.pools.map((pool) => (
-          <PoolCard key={pool.id} pool={pool} rotatorState={rotatorState} />
+          <PoolRow key={pool.id} pool={pool} rotatorState={rotatorState} />
         ))}
       </ul>
     </div>
   )
 }
 
-function PoolCard({
+function PoolRow({
   pool,
   rotatorState,
 }: {
@@ -75,9 +89,17 @@ function PoolCard({
       : pool.transport === "udp"
         ? "UDP"
         : t("nfqws.breakdown.unknownTransport")
+  const live =
+    pool.rotation?.stateKey && rotatorState
+      ? describeLiveRotation({
+          pool: rotatorState.pools[pool.rotation.stateKey],
+          state: rotatorState,
+          t,
+        })
+      : undefined
 
   return (
-    <li className="min-w-0 space-y-2 rounded-xl border p-3">
+    <li className="min-w-0 space-y-1.5 py-3">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="min-w-0 truncate text-sm font-medium" title={title}>
           {title}
@@ -90,6 +112,14 @@ function PoolCard({
             {nfqwsProtocolLabel(protocol)}
           </Badge>
         ))}
+        {/* Активный слот — плашкой справа: это единственное здесь, что
+            меняется само по себе, и в списке из семи пулов взгляд ищет
+            именно его. */}
+        {live?.slot ? (
+          <KeeneticStatus className="ml-auto" tone="success">
+            {live.slot}
+          </KeeneticStatus>
+        ) : null}
       </div>
 
       {pool.tcpPorts ? (
@@ -122,38 +152,35 @@ function PoolCard({
           {t("nfqws.breakdown.passthroughDescription")}
         </p>
       ) : pool.rotation ? (
-        <div className="space-y-1 text-xs text-muted-foreground">
-          <p className="font-medium text-foreground">
-            {t("nfqws.breakdown.rotation", { count: pool.rotation.slots })}
-          </p>
-          {pool.rotation.fails !== undefined ||
-          pool.rotation.inseq !== undefined ? (
-            <p>
-              {pool.rotation.fails !== undefined
-                ? t("nfqws.breakdown.switchAfter", {
-                    count: pool.rotation.fails,
-                  })
-                : null}
-              {pool.rotation.inseq !== undefined
-                ? ` · ${t("nfqws.breakdown.inseq", {
-                    value: pool.rotation.inseq,
-                  })}`
-                : null}
-            </p>
-          ) : null}
-        </div>
+        <p className="text-xs text-muted-foreground">
+          {t("nfqws.breakdown.rotation", { count: pool.rotation.slots })}
+          {pool.rotation.fails !== undefined
+            ? ` · ${t("nfqws.breakdown.switchAfter", {
+                count: pool.rotation.fails,
+              })}`
+            : ""}
+          {pool.rotation.inseq !== undefined
+            ? ` · ${t("nfqws.breakdown.inseq", {
+                value: pool.rotation.inseq,
+              })}`
+            : ""}
+          {live?.tail ? ` · ${live.tail}` : ""}
+        </p>
       ) : (
         <p className="text-xs text-muted-foreground">
           {t("nfqws.breakdown.noRotation")}
         </p>
       )}
 
-      {pool.rotation?.stateKey && rotatorState ? (
-        <LiveRotationState
-          pool={rotatorState.pools[pool.rotation.stateKey]}
-          state={rotatorState}
-        />
-      ) : null}
+      {/* Живое состояние — строками той же строки пула, без заголовка
+          «Ротация сейчас» и без подложки: заголовок над двумя строками
+          требовал рамки, а рамка внутри карточки профиля и была карточкой
+          в карточке. */}
+      {live?.lines.map((line) => (
+        <p className="text-xs text-muted-foreground" key={line}>
+          {line}
+        </p>
+      ))}
 
       {pool.techniques.length > 0 ? (
         <div className="flex flex-wrap gap-1">
@@ -168,63 +195,78 @@ function PoolCard({
   )
 }
 
-function LiveRotationState({
+/**
+ * Почему живых чисел нет — одной фразой на весь разбор. `undefined` значит,
+ * что числа есть и объяснять нечего.
+ */
+function describeRotatorState(
+  state: NfqwsRotatorState,
+  t: (key: string) => string
+): string | undefined {
+  if (state.status === "unsupported") {
+    return t("nfqws.breakdown.liveUnsupported")
+  }
+  if (state.status === "stale") return t("nfqws.breakdown.liveStale")
+  if (state.status === "warming") return t("nfqws.breakdown.liveStarting")
+  if (state.truncated) return t("nfqws.breakdown.livePartial")
+  return undefined
+}
+
+/**
+ * Живое состояние конкретного пула. Активный слот уходит в плашку — это
+ * единственное, что стоит видеть издалека; остальное строками под пулом.
+ *
+ * `tail` — короткий хвост к строке о настроенной ротации для пула, по
+ * которому ротатор ещё ничего не наблюдал. Отдельным предложением эта фраза
+ * повторялась в пяти строках из восьми. Числа при этом не выдумываются: нули
+ * вместо «трафика ещё не было» читались бы как поломка.
+ */
+function describeLiveRotation({
   pool,
   state,
+  t,
 }: {
   pool?: NfqwsRotatorPoolState
   state: NfqwsRotatorState
-}) {
-  const { t } = useTranslation()
-  let summary: string
-  let failures: string | undefined
+  t: (key: string, options?: Record<string, unknown>) => string
+}): { slot?: string; lines: string[]; tail?: string } {
+  if (describeRotatorState(state, t) !== undefined) {
+    // Причина уже сказана один раз в шапке разбора.
+    return { lines: [] }
+  }
+  if (pool === undefined) {
+    return { lines: [], tail: t("nfqws.breakdown.liveWarming") }
+  }
 
-  if (state.status === "unsupported") {
-    summary = t("nfqws.breakdown.liveUnsupported")
-  } else if (state.status === "stale") {
-    summary = t("nfqws.breakdown.liveStale")
-  } else if (state.status === "warming") {
-    summary = t("nfqws.breakdown.liveStarting")
-  } else if (state.truncated) {
-    summary = t("nfqws.breakdown.livePartial")
-  } else if (pool === undefined) {
-    summary = t("nfqws.breakdown.liveWarming")
-  } else if (pool.active_slot !== null && pool.slot_count !== null) {
-    summary = t("nfqws.breakdown.liveSlot", {
+  const lines: string[] = []
+  let slot: string | undefined
+  if (pool.active_slot !== null && pool.slot_count !== null) {
+    slot = t("nfqws.breakdown.liveSlot", {
       slot: pool.active_slot,
       count: pool.slot_count,
-      targets: pool.tracked_targets,
     })
+    lines.push(
+      t("nfqws.breakdown.liveTargets", { count: pool.tracked_targets })
+    )
   } else {
-    summary = t("nfqws.breakdown.liveDiverged", {
-      count: pool.tracked_targets,
-    })
+    lines.push(
+      t("nfqws.breakdown.liveDiverged", { count: pool.tracked_targets })
+    )
   }
 
-  if (state.status === "ready" && !state.truncated && pool) {
-    failures =
-      pool.pending_failures !== null
-        ? t("nfqws.breakdown.liveFailures", {
-            count: pool.pending_failures,
-          })
-        : pool.max_pending_failures !== null
-          ? t("nfqws.breakdown.liveFailuresVary", {
-              count: pool.max_pending_failures,
-            })
-          : undefined
+  if (pool.pending_failures !== null) {
+    lines.push(
+      t("nfqws.breakdown.liveFailures", { count: pool.pending_failures })
+    )
+  } else if (pool.max_pending_failures !== null) {
+    lines.push(
+      t("nfqws.breakdown.liveFailuresVary", {
+        count: pool.max_pending_failures,
+      })
+    )
   }
 
-  return (
-    <div className="rounded-lg border bg-muted/40 px-2.5 py-2 text-xs">
-      <p className="font-medium text-foreground">
-        {t("nfqws.breakdown.liveTitle")}
-      </p>
-      <p className="mt-0.5 text-muted-foreground">{summary}</p>
-      {failures ? (
-        <p className="mt-0.5 text-muted-foreground">{failures}</p>
-      ) : null}
-    </div>
-  )
+  return { slot, lines }
 }
 
 function poolTitle(pool: NfqwsPool, t: (key: string) => string): string {

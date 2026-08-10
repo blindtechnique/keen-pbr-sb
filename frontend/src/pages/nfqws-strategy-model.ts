@@ -614,14 +614,23 @@ export interface NfqwsProfileCandidate {
 }
 
 /**
- * A marker alone is not authority to use the profile-card treatment. Custom
- * strategies and edited built-ins must stay in the table where their origin
- * and delete/restore action remain visible.
+ * A marker alone is not authority to use the profile-card treatment: a custom
+ * strategy carrying the same comment must stay in the table where its origin
+ * and delete action remain visible.
+ *
+ * `overridden` deliberately takes no part in this decision. Applying a
+ * strategy makes the backend write a user copy of it, so the profile comes
+ * back from `/api/nfqws` with `overridden: true` even though nobody edited
+ * it. Keying the layout off that flag makes the profile the user just applied
+ * disappear from the cards — observed on the router with the balanced
+ * profile, which moved into the table the moment it was applied. Unsaved
+ * edits are a different signal and are handled by the caller, which still
+ * drops a strategy with a changed draft out of the cards.
  */
 export function canonicalNfqwsProfileTier(
   strategy: NfqwsProfileCandidate
 ): NfqwsProfileTier | undefined {
-  if (!strategy.builtin || strategy.overridden) return undefined
+  if (!strategy.builtin) return undefined
   return parseNfqwsProfileMarker(strategy.content)?.tier
 }
 

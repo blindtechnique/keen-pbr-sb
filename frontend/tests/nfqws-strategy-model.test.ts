@@ -248,7 +248,7 @@ describe("nfqws profile marker", () => {
     ).toEqual({ tier: undefined, role: "ЭКСТРА" })
   })
 
-  test("promotes only untouched built-in entries", () => {
+  test("promotes only built-in entries carrying a known marker", () => {
     const content = "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n"
     expect(
       canonicalNfqwsProfileTier({ builtin: true, overridden: false, content })
@@ -257,15 +257,28 @@ describe("nfqws profile marker", () => {
       canonicalNfqwsProfileTier({ builtin: false, overridden: false, content })
     ).toBeUndefined()
     expect(
-      canonicalNfqwsProfileTier({ builtin: true, overridden: true, content })
-    ).toBeUndefined()
-    expect(
       canonicalNfqwsProfileTier({
         builtin: true,
         overridden: false,
         content: "# keen-pbr-sb · профиль «ЭКСТРА»\n",
       })
     ).toBeUndefined()
+  })
+
+  /**
+   * Состояние роутера после «Применить»: backend записывает пользовательскую
+   * копию, и профиль возвращается с `overridden: true`, хотя его никто не
+   * правил. Пока флаг участвовал в раскладке, только что выбранная карточка
+   * исчезала из трёх профилей — то есть выбор сам себя и отменял.
+   */
+  test("keeps an applied profile on the cards even though it became overridden", () => {
+    expect(
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: true,
+        content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n",
+      })
+    ).toBe("balanced")
   })
 })
 
