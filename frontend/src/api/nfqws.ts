@@ -15,6 +15,30 @@ export type NfqwsUpdateStatus = {
   release_url?: string
 }
 
+export type NfqwsRotatorHistogramEntry = {
+  value: number
+  targets: number
+}
+
+export type NfqwsRotatorPoolState = {
+  tracked_targets: number
+  active_slot: number | null
+  slot_count: number | null
+  pending_failures: number | null
+  max_pending_failures: number | null
+  active_slot_histogram: NfqwsRotatorHistogramEntry[]
+  slot_count_histogram: NfqwsRotatorHistogramEntry[]
+  pending_failure_histogram: NfqwsRotatorHistogramEntry[]
+}
+
+export type NfqwsRotatorState = {
+  schema: 1
+  status: "ready" | "warming" | "stale" | "unsupported"
+  observed_at: number | null
+  truncated: boolean
+  pools: Record<string, NfqwsRotatorPoolState>
+}
+
 export const NFQWS_UPDATE_QUERY_KEY = ["nfqws", "update"] as const
 export const NFQWS_UPDATE_INTERVAL_MS = 30 * 60 * 1_000
 

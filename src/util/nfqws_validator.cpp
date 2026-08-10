@@ -11,6 +11,9 @@
 namespace keen_pbr3 {
 namespace {
 
+constexpr std::string_view kOwnedWritable =
+    "--writable=/var/run/keen-pbr-nfqws";
+
 struct ParsedCandidate {
     std::map<std::string, std::string> values;
     std::vector<ConfigValidationIssue> issues;
@@ -446,6 +449,12 @@ void validate_token(const std::string& variable,
                     const std::string& token,
                     const NfqwsPathResolver& resolve_path,
                     std::vector<ConfigValidationIssue>& issues) {
+    if (token.rfind("--writable", 0) == 0 &&
+        (variable != "NFQWS_BASE_ARGS" || token != kOwnedWritable)) {
+        issues.push_back(
+            {variable + "/--writable",
+             "only the package-owned nfqws rotator writable directory is allowed"});
+    }
     if (token.rfind("--filter-tcp=", 0) == 0) {
         validate_port_spec(variable, "--filter-tcp",
                            token.substr(std::string("--filter-tcp=").size()),
@@ -489,6 +498,12 @@ void validate_tokens(const ParsedCandidate& parsed,
         issues.push_back(
             {variable,
              "--new is not allowed here; use NFQWS_ARGS_CUSTOM for additional profiles"});
+    }
+    if (variable == "NFQWS_BASE_ARGS" &&
+        std::count(tokens.begin(), tokens.end(), kOwnedWritable) > 1) {
+        issues.push_back(
+            {variable + "/--writable",
+             "the package-owned writable directory may be declared only once"});
     }
     for (const auto& token : tokens) {
         validate_token(variable, token, resolve_path, issues);
@@ -615,6 +630,12 @@ void append_tokens(std::vector<std::string>& output,
                    const std::string& value,
                    const NfqwsPathResolver& resolve_path) {
     for (const auto& token : split_fields(value)) {
+        // The static validator accepts only this exact package-owned path.
+        // nfqws2 initializes --writable even in --dry-run, so forwarding it
+        // would let validation chown the live reporter directory before the
+        // candidate has been accepted. Lua itself is not initialized by
+        // --dry-run, therefore omitting the owned token loses no validation.
+        if (token == kOwnedWritable) continue;
         output.push_back(rewrite_input_path(token, resolve_path));
     }
 }

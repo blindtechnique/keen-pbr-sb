@@ -7,6 +7,7 @@
 #include "api_context_test_support.hpp"
 #include "api/handler_nfqws.hpp"
 #include "api/sse_broadcaster.hpp"
+#include "util/nfqws_validator.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -106,6 +107,73 @@ TEST_CASE("nfqws apply rejects an invalid candidate before every mutation") {
     CHECK(payload.at("validation_errors")[0].at("path") ==
           "NFQWS_ARGS/--filter-tcp");
     CHECK(validation_calls == 1U);
+    CHECK(provision_calls == 0U);
+    CHECK(write_calls == 0U);
+    CHECK(restart_calls == 0U);
+    CHECK(live.read() == "original-live-bytes\n");
+}
+
+TEST_CASE("nfqws apply rejects unsafe writable before provision write or restart") {
+    // The previous case has already stopped its server, so reusing slot 7 is
+    // safe and stays within the helper's supported 0..7 range.
+    const int port = test_support::isolated_api_port(7);
+    test_support::EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", test_support::missing_auth_path(port));
+    NfqwsApiTemporaryFile live;
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-nfqws-api-writable-context.json");
+
+    std::size_t validation_calls = 0;
+    std::size_t provision_calls = 0;
+    std::size_t write_calls = 0;
+    std::size_t restart_calls = 0;
+    NfqwsApplyStrategyTestHooks hooks;
+    hooks.installed = [] { return true; };
+    hooks.validate = [&](const std::string&, const std::string& content) {
+        ++validation_calls;
+        return validate_nfqws_candidate(content);
+    };
+    hooks.provision = [&](const std::string&) {
+        ++provision_calls;
+        return NfqwsStrategyAssetSync{};
+    };
+    hooks.write_active = [&](const std::string&) {
+        ++write_calls;
+        return NfqwsFileWriteResult{};
+    };
+    hooks.restart = [&](int& status) {
+        ++restart_calls;
+        status = 0;
+        return std::string("restarted\n");
+    };
+
+    ApiConfig config;
+    config.listen = "127.0.0.1:" + std::to_string(port);
+    ApiServer server(config);
+    register_nfqws_handler_for_test(server, context, std::move(hooks));
+    server.start();
+    httplib::Client client("127.0.0.1", port);
+    for (const auto& base_args : {
+             std::string("--writable=/tmp/attacker"),
+             std::string("--writable=/var/run/keen-pbr-nfqws ") +
+                 "--writable=/var/run/keen-pbr-nfqws",
+         }) {
+        const auto request = nlohmann::json{
+            {"action", "apply_strategy"},
+            {"name", "candidate"},
+            {"content",
+             "NFQWS_BASE_ARGS=\"" + base_args + "\"\n"
+             "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n"},
+        };
+        const auto response =
+            client.Post("/api/nfqws", request.dump(), "application/json");
+        REQUIRE(response != nullptr);
+        CHECK(response->status == 400);
+    }
+    server.stop();
+
+    CHECK(validation_calls == 2U);
     CHECK(provision_calls == 0U);
     CHECK(write_calls == 0U);
     CHECK(restart_calls == 0U);

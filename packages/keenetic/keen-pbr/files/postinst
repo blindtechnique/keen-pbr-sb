@@ -6,6 +6,8 @@ DNSMASQ_CONF="/opt/etc/dnsmasq.conf"
 DNSMASQ_TEMPLATE="/opt/usr/lib/keen-pbr/dnsmasq.conf.template"
 DNSMASQ_BACKUP="/opt/etc/dnsmasq.conf.backup-pre-keen-pbr"
 METADATA_HELPER="/opt/usr/lib/keen-pbr/portable-stat.sh"
+NFQWS_ROTATOR_REPORTER_SOURCE="/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+NFQWS_ROTATOR_REPORTER="/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua"
 
 echo "keen-pbr installation"
 echo "------------------------"
@@ -17,6 +19,20 @@ install_atomic_executable() {
     rm -f "$atomic_temporary" || return 1
     if cp "$atomic_source" "$atomic_temporary" &&
        chmod 0755 "$atomic_temporary" &&
+       mv -f "$atomic_temporary" "$atomic_destination"; then
+        return 0
+    fi
+    rm -f "$atomic_temporary"
+    return 1
+}
+
+install_atomic_data() {
+    atomic_source=$1
+    atomic_destination=$2
+    atomic_temporary="${atomic_destination}.tmp.$$"
+    rm -f "$atomic_temporary" || return 1
+    if cp "$atomic_source" "$atomic_temporary" &&
+       chmod 0644 "$atomic_temporary" &&
        mv -f "$atomic_temporary" "$atomic_destination"; then
         return 0
     fi
@@ -39,6 +55,46 @@ fi
     exit 1
 }
 . "$METADATA_HELPER" || exit 1
+
+[ -f "$NFQWS_ROTATOR_REPORTER_SOURCE" ] &&
+    [ ! -L "$NFQWS_ROTATOR_REPORTER_SOURCE" ] || {
+    echo "Packaged nfqws rotator reporter is missing or unsafe" >&2
+    exit 1
+}
+[ ! -L /opt/var/lib/keen-pbr ] &&
+    { [ ! -e /opt/var/lib/keen-pbr ] ||
+      [ -d /opt/var/lib/keen-pbr ]; } || {
+    echo "Unsafe keen-pbr runtime data directory" >&2
+    exit 1
+}
+mkdir -p /opt/var/lib/keen-pbr || exit 1
+runtime_data_owner="$(keen_pbr_stat_value '%u' /opt/var/lib/keen-pbr)" ||
+    exit 1
+[ "$runtime_data_owner" = "$(id -u)" ] || {
+    echo "Unsafe owner on keen-pbr runtime data directory" >&2
+    exit 1
+}
+chmod 0755 /opt/var/lib/keen-pbr || exit 1
+[ ! -L "$NFQWS_ROTATOR_REPORTER" ] &&
+    { [ ! -e "$NFQWS_ROTATOR_REPORTER" ] ||
+      [ -f "$NFQWS_ROTATOR_REPORTER" ]; } || {
+    echo "Unsafe durable nfqws rotator reporter path" >&2
+    exit 1
+}
+install_atomic_data \
+    "$NFQWS_ROTATOR_REPORTER_SOURCE" \
+    "$NFQWS_ROTATOR_REPORTER" || exit 1
+[ -f "$NFQWS_ROTATOR_REPORTER" ] &&
+    [ ! -L "$NFQWS_ROTATOR_REPORTER" ] &&
+    cmp "$NFQWS_ROTATOR_REPORTER_SOURCE" \
+        "$NFQWS_ROTATOR_REPORTER" >/dev/null 2>&1 || {
+    echo "Durable nfqws rotator reporter verification failed" >&2
+    exit 1
+}
+# This untracked schema-versioned copy is a future nfqws boot dependency even
+# after keen-pbr itself is removed. Persist the rename and its directory entry
+# now; upgrades may refresh implementation details within the v1 wire schema.
+sync
 
 [ ! -L /opt/var/lib/keen-pbr/rescue ] &&
     { [ ! -e /opt/var/lib/keen-pbr/rescue ] ||

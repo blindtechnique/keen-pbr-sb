@@ -89,6 +89,7 @@ import {
   nfqwsAction,
   nfqwsUpdateQueryOptions,
   type NfqwsActionResult,
+  type NfqwsRotatorState,
   type NfqwsUpdateStatus,
 } from "@/api/nfqws"
 import { copyText } from "@/lib/clipboard"
@@ -121,6 +122,7 @@ type Status = {
   files: NfqwsFile[]
   strategies: Strategy[]
   active_strategy: string
+  rotator_state: NfqwsRotatorState
 }
 // «Стратегии» первыми и по умолчанию: на эту страницу приходят выбрать или
 // переключить стратегию, а «Настройки» — редкий и куда более технический
@@ -1334,7 +1336,13 @@ function StrategiesEditor({
   // Текущий nfqws2.conf держим под рукой, чтобы его можно было сохранить
   // стратегией до того, как «Применить» его перезапишет.
   const activeConfigQuery = useQuery({
-    queryKey: ["nfqws", "file", "config", "nfqws2.conf"],
+    queryKey: [
+      "nfqws",
+      "file",
+      "config",
+      "nfqws2.conf",
+      status.active_strategy,
+    ],
     queryFn: () =>
       nfqwsAction<{ content: string }>({
         action: "read_file",
@@ -1362,6 +1370,13 @@ function StrategiesEditor({
     draftContent[name] ??
     status.strategies.find((item) => item.name === name)?.content ??
     ""
+  const showLiveRotatorState =
+    effectiveSelected === status.active_strategy &&
+    !Object.hasOwn(draftContent, effectiveSelected) &&
+    activeConfigQuery.data?.content !== undefined
+  const breakdownContent = showLiveRotatorState
+    ? (activeConfigQuery.data?.content ?? content)
+    : content
   const run = async (action: string, name: string) => {
     if (action === "apply_strategy") {
       const completed = await runOperation(
@@ -1712,7 +1727,12 @@ function StrategiesEditor({
             ) : null}
           </div>
           {editorView === "breakdown" ? (
-            <StrategyBreakdown content={content} />
+            <StrategyBreakdown
+              content={breakdownContent}
+              rotatorState={
+                showLiveRotatorState ? status.rotator_state : undefined
+              }
+            />
           ) : (
             <CodeEditor
               className="h-[50vh] max-h-[40rem] min-h-[18rem]"

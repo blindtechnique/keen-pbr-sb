@@ -93,6 +93,20 @@ export const enTranslation = {
       switchAfter: "switches after {{count}} failures in a row",
       inseq: "stream threshold {{value}}",
       noRotation: "No rotation — one fixed strategy.",
+      liveTitle: "Live rotation",
+      liveUnsupported:
+        "Live state is not enabled in this active configuration.",
+      liveStale:
+        "No trustworthy fresh state is available from the running service.",
+      liveStarting: "Receiving live state from the newly started service.",
+      liveWarming: "No traffic has been observed in this pool yet.",
+      livePartial:
+        "Only part of the live state was captured; the exact slot is hidden.",
+      liveSlot: "Slot {{slot}} of {{count}} across {{targets}} targets",
+      liveDiverged: "Rotation state differs across {{count}} targets",
+      liveFailures: "Current failure counter: {{count}} · not a lifetime total",
+      liveFailuresVary:
+        "Current failure counters differ; up to {{count}} · not lifetime totals",
       passthrough: "Pass-through",
       passthroughDescription:
         "This WebRTC segment only filters STUN on UDP ports 49152–65535; it does not modify packets.",

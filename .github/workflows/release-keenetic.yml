@@ -76,11 +76,14 @@ jobs:
             libnl-route-3-dev \
             libunwind-dev \
             busybox-static \
+            lua5.3 \
             pkg-config \
             zlib1g-dev
 
       - name: Run deterministic source and package gates
-        run: make check-shell check-openapi-parity check-nfqws-assets
+        run: >-
+          make check-shell check-openapi-parity check-nfqws-assets
+          check-nfqws-rotator-lua
 
       - name: Build and run backend test matrix
         # Includes the monolithic suite, crash smoke test and all eight narrow

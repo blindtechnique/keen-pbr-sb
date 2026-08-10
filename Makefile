@@ -34,6 +34,7 @@ CLANG_FEATURE_CMAKE_FLAGS := -DWITH_API=ON -DUSE_KEENETIC_API=ON
         clang-build clang-check clang-tidy clang-tidy-curated \
         generate generate-check \
         check-warnings check-shell check-openapi-parity check-nfqws-assets \
+        check-nfqws-rotator-lua \
         sanitize fuzz \
         cross-setup cross-build cross-deploy \
         help
@@ -101,6 +102,9 @@ check-openapi-parity: ## Fail when a registered API route is missing from docs/o
 check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiver contract
 	python3 build_scripts/check-nfqws-assets.py
 	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
+
+check-nfqws-rotator-lua: ## Execute the Lua companion; nfqws2 --dry-run does not initialize Lua
+	bash build_scripts/check-nfqws-rotator-lua.sh
 
 # Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.
 sanitize: ## Build and run the unit suite under AddressSanitizer + UndefinedBehaviorSanitizer

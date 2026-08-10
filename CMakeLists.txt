@@ -460,6 +460,7 @@ set(SOURCES
   src/util/network_routes.cpp
   src/util/nfqws_config.cpp
   src/util/nfqws_file_writer.cpp
+  src/util/nfqws_rotator_state.cpp
   src/util/nfqws_strategy_assets.cpp
   src/util/nfqws_validator.cpp
   src/util/system_info.cpp

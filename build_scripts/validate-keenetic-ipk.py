@@ -45,6 +45,7 @@ REQUIRED_FILES = REQUIRED_EXECUTABLES | {
     "opt/usr/share/keen-pbr/nfqws-blobs/stun.bin",
     "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_4pda_to.bin",
     "opt/usr/share/keen-pbr/nfqws-blobs/tls_clienthello_max_ru.bin",
+    "opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua",
     "opt/usr/share/keen-pbr/nfqws-strategies/01 safe/nfqws2.conf",
     "opt/usr/share/keen-pbr/nfqws-strategies/01 safe/required-blobs.txt",
     "opt/usr/share/keen-pbr/nfqws-strategies/02 balanced/nfqws2.conf",

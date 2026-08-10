@@ -2,6 +2,10 @@ import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
 import { Badge } from "@/components/ui/badge"
+import type {
+  NfqwsRotatorPoolState,
+  NfqwsRotatorState,
+} from "@/api/nfqws"
 import {
   nfqwsProtocolLabel,
   parseNfqwsStrategy,
@@ -9,7 +13,13 @@ import {
 } from "@/pages/nfqws-strategy-model"
 
 /** Read-only explanation of the exact strategy text shown in the raw editor. */
-export function StrategyBreakdown({ content }: { content: string }) {
+export function StrategyBreakdown({
+  content,
+  rotatorState,
+}: {
+  content: string
+  rotatorState?: NfqwsRotatorState
+}) {
   const { t } = useTranslation()
   const summary = useMemo(() => parseNfqwsStrategy(content), [content])
 
@@ -43,14 +53,20 @@ export function StrategyBreakdown({ content }: { content: string }) {
       </div>
       <ul className="grid gap-2 lg:grid-cols-2">
         {summary.pools.map((pool) => (
-          <PoolCard key={pool.id} pool={pool} />
+          <PoolCard key={pool.id} pool={pool} rotatorState={rotatorState} />
         ))}
       </ul>
     </div>
   )
 }
 
-function PoolCard({ pool }: { pool: NfqwsPool }) {
+function PoolCard({
+  pool,
+  rotatorState,
+}: {
+  pool: NfqwsPool
+  rotatorState?: NfqwsRotatorState
+}) {
   const { t } = useTranslation()
   const title = poolTitle(pool, t)
   const transportLabel =
@@ -132,6 +148,13 @@ function PoolCard({ pool }: { pool: NfqwsPool }) {
         </p>
       )}
 
+      {pool.rotation?.stateKey && rotatorState ? (
+        <LiveRotationState
+          pool={rotatorState.pools[pool.rotation.stateKey]}
+          state={rotatorState}
+        />
+      ) : null}
+
       {pool.techniques.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {pool.techniques.map((technique) => (
@@ -142,6 +165,65 @@ function PoolCard({ pool }: { pool: NfqwsPool }) {
         </div>
       ) : null}
     </li>
+  )
+}
+
+function LiveRotationState({
+  pool,
+  state,
+}: {
+  pool?: NfqwsRotatorPoolState
+  state: NfqwsRotatorState
+}) {
+  const { t } = useTranslation()
+  let summary: string
+  let failures: string | undefined
+
+  if (state.status === "unsupported") {
+    summary = t("nfqws.breakdown.liveUnsupported")
+  } else if (state.status === "stale") {
+    summary = t("nfqws.breakdown.liveStale")
+  } else if (state.status === "warming") {
+    summary = t("nfqws.breakdown.liveStarting")
+  } else if (state.truncated) {
+    summary = t("nfqws.breakdown.livePartial")
+  } else if (pool === undefined) {
+    summary = t("nfqws.breakdown.liveWarming")
+  } else if (pool.active_slot !== null && pool.slot_count !== null) {
+    summary = t("nfqws.breakdown.liveSlot", {
+      slot: pool.active_slot,
+      count: pool.slot_count,
+      targets: pool.tracked_targets,
+    })
+  } else {
+    summary = t("nfqws.breakdown.liveDiverged", {
+      count: pool.tracked_targets,
+    })
+  }
+
+  if (state.status === "ready" && !state.truncated && pool) {
+    failures =
+      pool.pending_failures !== null
+        ? t("nfqws.breakdown.liveFailures", {
+            count: pool.pending_failures,
+          })
+        : pool.max_pending_failures !== null
+          ? t("nfqws.breakdown.liveFailuresVary", {
+              count: pool.max_pending_failures,
+            })
+          : undefined
+  }
+
+  return (
+    <div className="rounded-lg border bg-muted/40 px-2.5 py-2 text-xs">
+      <p className="font-medium text-foreground">
+        {t("nfqws.breakdown.liveTitle")}
+      </p>
+      <p className="mt-0.5 text-muted-foreground">{summary}</p>
+      {failures ? (
+        <p className="mt-0.5 text-muted-foreground">{failures}</p>
+      ) : null}
+    </div>
   )
 }
 

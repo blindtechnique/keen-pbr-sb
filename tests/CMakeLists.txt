@@ -85,6 +85,7 @@ add_executable(keen-pbr-tests
   test_netlink_errors.cpp
   test_nfqws_config.cpp
   test_nfqws_file_writer.cpp
+  test_nfqws_rotator_state.cpp
   test_nfqws_strategy_assets.cpp
   test_nfqws_validator.cpp
   test_safe_exec.cpp
@@ -194,6 +195,7 @@ add_executable(keen-pbr-tests
   ../src/util/network_routes.cpp
   ../src/util/nfqws_config.cpp
   ../src/util/nfqws_file_writer.cpp
+  ../src/util/nfqws_rotator_state.cpp
   ../src/util/nfqws_strategy_assets.cpp
   ../src/util/nfqws_validator.cpp
   ../src/util/system_info.cpp
@@ -560,6 +562,7 @@ set_target_properties(keen-pbr-tests PROPERTIES
 target_compile_definitions(keen-pbr-tests PRIVATE
   KEEN_PBR3_TESTING
   KEEN_PBR_DEFAULT_CONFIG_PATH="${KEEN_PBR_DEFAULT_CONFIG_PATH}"
+  KEEN_PBR_NFQWS_STRATEGY_ROOT="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-strategies"
   KEEN_PBR_RESCUE_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh"
   KEEN_PBR_RESCUE_STARTUP_GUARD_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh"
   KEEN_PBR_UPDATE_LOCK_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh"

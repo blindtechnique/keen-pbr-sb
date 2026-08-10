@@ -25,6 +25,10 @@ FILTER_UDP_MAIN = "590-600,1400,3478-3481,5349,19294-19344,49152-65535"
 BLOBS = "/opt/etc/nfqws2/blobs"
 LISTS = "/opt/etc/nfqws2/lists"
 LUA = "/opt/etc/nfqws2/lua"
+ROTATOR_TELEMETRY_LUA = (
+    "/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua"
+)
+ROTATOR_TELEMETRY_WRITABLE = "/var/run/keen-pbr-nfqws"
 
 # alias -> файл в /opt/etc/nfqws2/blobs
 BLOB_FILES = {
@@ -327,9 +331,11 @@ def build(profile_name, spec):
     required = sorted(BLOB_FILES[a] for a in used
                       if a in BLOB_FILES and a not in STOCK_BLOBS)
 
-    declare = [f"--lua-init=@{LUA}/zapret-lib.lua",
+    declare = [f"--writable={ROTATOR_TELEMETRY_WRITABLE}",
+               f"--lua-init=@{LUA}/zapret-lib.lua",
                f"--lua-init=@{LUA}/zapret-antidpi.lua",
                f"--lua-init=@{LUA}/zapret-auto.lua",
+               f"--lua-init=@{ROTATOR_TELEMETRY_LUA}",
                f"--blob=quic_initial:@{BLOBS}/quic_initial.bin",
                f"--blob=tls_clienthello:@{BLOBS}/tls_clienthello.bin"]
     for alias in sorted(a for a in used if a in BLOB_FILES):

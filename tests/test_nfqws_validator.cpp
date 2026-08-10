@@ -291,6 +291,40 @@ TEST_CASE("nfqws validator: candidate rejects init-time wildcard expansion") {
     CHECK(has_issue(issues, "NFQWS_ARGS", "wildcard"));
 }
 
+TEST_CASE("nfqws validator: writable is restricted before engine validation") {
+    const auto candidate = [](const std::string& writable) {
+        return "NFQWS_BASE_ARGS=\"" + writable + "\"\n"
+               "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n";
+    };
+
+    const auto owned = candidate("--writable=/var/run/keen-pbr-nfqws");
+    CHECK(validate_nfqws_candidate(owned).empty());
+    const auto dry_run_args = build_nfqws_dry_run_args(owned);
+    CHECK(position_of(dry_run_args,
+                      "--writable=/var/run/keen-pbr-nfqws") ==
+          std::string::npos);
+
+    for (const auto& unsafe : {
+             std::string("--writable=/tmp/attacker"),
+             std::string("--writable"),
+             std::string("--writable=/var/run/keen-pbr-nfqws/../victim"),
+         }) {
+        const auto issues = validate_nfqws_candidate(candidate(unsafe));
+        INFO(unsafe);
+        CHECK(has_issue(issues, "NFQWS_BASE_ARGS/--writable", "only"));
+    }
+
+    const auto duplicate = validate_nfqws_candidate(candidate(
+        "--writable=/var/run/keen-pbr-nfqws "
+        "--writable=/var/run/keen-pbr-nfqws"));
+    CHECK(has_issue(duplicate, "NFQWS_BASE_ARGS/--writable", "only once"));
+
+    const auto wrong_variable = validate_nfqws_candidate(
+        "NFQWS_ARGS=\"--writable=/var/run/keen-pbr-nfqws "
+        "--filter-tcp=443 --lua-desync=fake\"\n");
+    CHECK(has_issue(wrong_variable, "NFQWS_ARGS/--writable", "only"));
+}
+
 TEST_CASE("nfqws validator: dry-run capability cache is bound to the binary identity") {
     NfqwsDryRunCapabilityCache cache;
     NfqwsBinaryIdentity identity{1, 10, 20, 30, 40, 50, 60};

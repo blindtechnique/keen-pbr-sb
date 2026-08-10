@@ -55,6 +55,12 @@ for helper in \
     chmod 0755 "/opt/usr/lib/keen-pbr/$helper"
 done
 
+if [ "$VARIANT" = full ]; then
+    mkdir -p /opt/usr/share/keen-pbr/nfqws-lua
+    cp "$SOURCE_ROOT/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua" \
+        /opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua
+fi
+
 for service in S79transport-manager S80keen-pbr; do
     printf '%s\n' \
         '#!/bin/sh' \
@@ -84,6 +90,15 @@ rm -f /opt/usr/lib/keen-pbr/portable-stat.sh
 
 case "$VARIANT" in
     full)
+        reporter_source="$SOURCE_ROOT/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+        reporter_live=/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua
+        [ -f "$reporter_live" ]
+        [ ! -L "$reporter_live" ]
+        [ "$(keen_pbr_stat_value '%a:%u' "$reporter_live")" = \
+            "644:$(id -u)" ]
+        cmp "$reporter_source" "$reporter_live"
+        rm -f /opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua
+        cmp "$reporter_source" "$reporter_live"
         [ "$(grep -c 'S79transport-manager start' \
             /opt/var/run/package-it-services.log)" -eq 1 ]
         [ "$(grep -c 'S80keen-pbr start' \

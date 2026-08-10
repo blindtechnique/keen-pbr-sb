@@ -203,6 +203,10 @@ def make_ipk(
                 b"max",
                 0o644,
             ),
+            "opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua": (
+                b"-- telemetry reporter\n",
+                0o644,
+            ),
             "opt/usr/share/keen-pbr/nfqws-strategies/01 safe/nfqws2.conf": (
                 b"NFQWS_ARGS=\n",
                 0o644,

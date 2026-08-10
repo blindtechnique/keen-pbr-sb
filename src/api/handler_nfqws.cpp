@@ -7,6 +7,7 @@
 #include "../util/network_routes.hpp"
 #include "../util/nfqws_config.hpp"
 #include "../util/nfqws_file_writer.hpp"
+#include "../util/nfqws_rotator_state.hpp"
 #include "../util/nfqws_strategy_assets.hpp"
 #include "../util/nfqws_validator.hpp"
 #include "../util/safe_exec.hpp"
@@ -51,6 +52,12 @@ constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
 constexpr const char* kBuiltinStrategies = "/opt/usr/share/keen-pbr/nfqws-strategies";
 constexpr const char* kBuiltinBlobs = "/opt/usr/share/keen-pbr/nfqws-blobs";
+constexpr const char* kPackagedRotatorReporter =
+    "/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua";
+constexpr const char* kLiveRotatorReporter =
+    "/opt/var/lib/keen-pbr/nfqws-rotator-telemetry-v1.lua";
+constexpr const char* kRotatorStateDirectory =
+    "/var/run/keen-pbr-nfqws";
 constexpr const char* kUserStrategies = "/opt/etc/keen-pbr/nfqws-strategies";
 constexpr const char* kDurabilityWarning =
     "Warning: the nfqws file is visible, but directory durability could not "
@@ -570,7 +577,27 @@ fs::path strategy_source(const std::string& name) {
     throw ApiError("nfqws strategy not found", 404);
 }
 
-NfqwsStrategyAssetSync provision_strategy_assets(const std::string& name) {
+NfqwsFileWriteResult provision_rotator_reporter(
+    const std::string& content) {
+    if (!nfqws_config_has_owned_rotator_telemetry(content)) return {};
+    const auto packaged =
+        read_file(kPackagedRotatorReporter, kMaxNfqwsFileSize);
+    std::error_code ec;
+    const auto status = fs::symlink_status(kLiveRotatorReporter, ec);
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        throw ApiError("failed to inspect durable nfqws rotator reporter", 500);
+    }
+    if (!ec && fs::exists(status)) {
+        if (fs::is_symlink(status) || !fs::is_regular_file(status)) {
+            throw ApiError("durable nfqws rotator reporter path is unsafe", 500);
+        }
+    }
+    return save_nfqws_file(kLiveRotatorReporter, packaged);
+}
+
+NfqwsStrategyAssetSync provision_strategy_assets(
+    const std::string& name, const std::string& content, bool& durable) {
+    merge_durability(durable, provision_rotator_reporter(content));
     if (!builtin_strategy(name)) return {};
     const auto strategy_directory = fs::path(kBuiltinStrategies) / name;
     try {
@@ -587,8 +614,19 @@ NfqwsStrategyAssetSync provision_strategy_assets(const std::string& name) {
 }
 
 std::map<std::string, std::string> strategy_asset_validation_paths(
-    const std::string& name) {
+    const std::string& name, const std::string& content) {
     std::map<std::string, std::string> result;
+    if (nfqws_config_has_owned_rotator_telemetry(content)) {
+        std::error_code reporter_error;
+        if (!fs::is_regular_file(kPackagedRotatorReporter, reporter_error) ||
+            reporter_error) {
+            throw ApiError(
+                "packaged nfqws rotator reporter is unavailable", 500);
+        }
+        result.emplace(
+            fs::path(kLiveRotatorReporter).lexically_normal().string(),
+            fs::path(kPackagedRotatorReporter).lexically_normal().string());
+    }
     if (!builtin_strategy(name)) return result;
     const auto strategy_directory = fs::path(kBuiltinStrategies) / name;
     try {
@@ -606,6 +644,107 @@ std::map<std::string, std::string> strategy_asset_validation_paths(
             500);
     }
     return result;
+}
+
+std::optional<std::uint64_t> nfqws_process_age_seconds(
+    const NfqwsProcessGeneration& generation) {
+    const long ticks_per_second = ::sysconf(_SC_CLK_TCK);
+    if (ticks_per_second <= 0) return std::nullopt;
+    struct timespec uptime {};
+#ifdef CLOCK_BOOTTIME
+    constexpr clockid_t uptime_clock = CLOCK_BOOTTIME;
+#else
+    constexpr clockid_t uptime_clock = CLOCK_MONOTONIC;
+#endif
+    if (::clock_gettime(uptime_clock, &uptime) != 0 || uptime.tv_sec < 0) {
+        return std::nullopt;
+    }
+    const auto ticks = static_cast<std::uint64_t>(uptime.tv_sec) *
+                           static_cast<std::uint64_t>(ticks_per_second) +
+                       static_cast<std::uint64_t>(uptime.tv_nsec) *
+                           static_cast<std::uint64_t>(ticks_per_second) /
+                           1000000000ULL;
+    if (generation.start_ticks > ticks) return std::nullopt;
+    return (ticks - generation.start_ticks) /
+           static_cast<std::uint64_t>(ticks_per_second);
+}
+
+nlohmann::json rotator_histogram_json(
+    const std::map<std::uint32_t, std::uint64_t>& histogram) {
+    nlohmann::json rendered = nlohmann::json::array();
+    for (const auto& [value, targets] : histogram) {
+        rendered.push_back({{"value", value}, {"targets", targets}});
+    }
+    return rendered;
+}
+
+nlohmann::json nfqws_rotator_state_json(
+    const std::string& active_content,
+    const std::vector<pid_t>& processes) {
+    NfqwsRotatorStateSelection selection;
+    selection.reporter_expected =
+        nfqws_config_has_owned_rotator_telemetry(active_content);
+    selection.now_unix = static_cast<std::int64_t>(std::time(nullptr));
+
+    if (selection.reporter_expected && processes.size() == 1U) {
+        const auto generation = read_nfqws_process_generation(
+            static_cast<std::int64_t>(processes.front()));
+        if (generation.has_value()) {
+            const auto age = nfqws_process_age_seconds(*generation);
+            if (age.has_value()) {
+                selection.process_generation = generation;
+                selection.process_age_seconds = *age;
+                selection.snapshot_candidates =
+                    read_nfqws_rotator_snapshot_candidates(
+                        kRotatorStateDirectory);
+            }
+        }
+    }
+
+    const auto state = select_nfqws_rotator_state(selection);
+    nlohmann::json rendered{
+        {"schema", 1},
+        {"status", nfqws_rotator_state_status_name(state.status)},
+        {"observed_at", nullptr},
+        {"truncated", false},
+        {"pools", nlohmann::json::object()},
+    };
+    if (!state.snapshot.has_value()) return rendered;
+
+    rendered["observed_at"] = state.snapshot->observed_at_unix;
+    rendered["truncated"] = state.snapshot->truncated;
+    const bool exact = state.status == NfqwsRotatorStateStatus::ready &&
+                       !state.snapshot->truncated;
+    for (const auto& pool : state.snapshot->pools) {
+        nlohmann::json pool_json{
+            {"tracked_targets", pool.tracked_targets},
+            {"active_slot", nullptr},
+            {"slot_count", nullptr},
+            {"pending_failures", nullptr},
+            {"max_pending_failures", nullptr},
+            {"active_slot_histogram",
+             rotator_histogram_json(pool.slot_histogram)},
+            {"slot_count_histogram",
+             rotator_histogram_json(pool.slot_count_histogram)},
+            {"pending_failure_histogram",
+             rotator_histogram_json(pool.pending_failure_histogram)},
+        };
+        if (exact) {
+            if (const auto value = pool.unanimous_slot()) {
+                pool_json["active_slot"] = *value;
+            }
+            if (const auto value = pool.unanimous_slot_count()) {
+                pool_json["slot_count"] = *value;
+            }
+            if (const auto value = pool.unanimous_pending_failures()) {
+                pool_json["pending_failures"] = *value;
+            }
+            pool_json["max_pending_failures"] =
+                pool.max_pending_failures();
+        }
+        rendered["pools"][pool.key] = std::move(pool_json);
+    }
+    return rendered;
 }
 
 std::optional<NfqwsBinaryIdentity> read_nfqws_binary_identity(
@@ -676,7 +815,8 @@ std::string last_nonempty_line(const std::string& text) {
 
 void validate_candidate_or_throw(const std::string& name,
                                  const std::string& content) {
-    const auto packaged_assets = strategy_asset_validation_paths(name);
+    const auto packaged_assets =
+        strategy_asset_validation_paths(name, content);
     const NfqwsPathResolver resolve_path =
         [packaged_assets](const std::string& path)
         -> std::optional<std::string> {
@@ -749,7 +889,9 @@ void register_nfqws_handler_impl(
     server.get("/api/nfqws", []() -> std::string {
         std::error_code ec;
         const bool installed = fs::is_regular_file(kBinary, ec);
-        const bool process_running = installed && !nfqws_processes().empty();
+        const auto processes =
+            installed ? nfqws_processes() : std::vector<pid_t>{};
+        const bool process_running = !processes.empty();
         const bool queue_active = installed && nfqueue_active(configured_nfqueue_num());
         const bool running = process_running && queue_active;
         nlohmann::json files = nlohmann::json::array();
@@ -760,14 +902,18 @@ void register_nfqws_handler_impl(
         append_files(files, kLogDir, "log", ".log", false);
         auto strategies = list_strategies();
         std::string active_strategy;
+        std::string active_content;
         const auto active_config = fs::path(kConfigDir) / "nfqws2.conf";
         if (fs::is_regular_file(active_config, ec)) {
-            const auto active_content = read_file(active_config);
+            active_content = read_file(active_config);
+            const auto active_identity =
+                nfqws_config_strategy_identity(active_content);
             for (const auto& strategy : strategies) {
                 const auto name = strategy.value("name", std::string{});
                 auto expected = strategy.value("content", std::string{});
                 if (automatic_wan_strategy(name)) expected = render_wan_interfaces(expected);
-                if (expected == active_content) {
+                if (nfqws_config_strategy_identity(expected) ==
+                    active_identity) {
                     active_strategy = strategy.value("name", std::string{});
                     break;
                 }
@@ -778,7 +924,10 @@ void register_nfqws_handler_impl(
                               {"queue_active", queue_active},
                               {"version", installed ? installed_version() : ""},
                               {"files", files}, {"strategies", strategies},
-                              {"active_strategy", active_strategy}}
+                              {"active_strategy", active_strategy},
+                              {"rotator_state", nfqws_rotator_state_json(
+                                                    active_content,
+                                                    processes)}}
             .dump();
     });
 
@@ -916,14 +1065,17 @@ void register_nfqws_handler_impl(
                 validate_candidate_or_throw(name, content);
             }
 
+            bool durable = true;
             const auto assets = apply_hooks.has_value()
                                     ? apply_hooks->provision(name)
-                                    : provision_strategy_assets(name);
+                                    : provision_strategy_assets(
+                                          name, content, durable);
             const auto saved = apply_hooks.has_value()
                                    ? apply_hooks->write_active(content)
                                    : save_nfqws_file(
                                          fs::path(kConfigDir) / "nfqws2.conf",
                                          content);
+            merge_durability(durable, saved);
             int status = 0;
             auto output = apply_hooks.has_value()
                               ? apply_hooks->restart(status)
@@ -935,12 +1087,12 @@ void register_nfqws_handler_impl(
                 details << "\n";
                 output = details.str() + output;
             }
-            append_durability_warning(output, saved.durable);
+            append_durability_warning(output, durable);
             return nlohmann::json{{"ok", status == 0},
                                   {"output", output},
                                   {"status", status},
-                                  {"durable", saved.durable},
-                                  {"warning", saved.durable
+                                  {"durable", durable},
+                                  {"warning", durable
                                                   ? ""
                                                   : kDurabilityWarning},
                                   {"installed_blobs", assets.installed},
