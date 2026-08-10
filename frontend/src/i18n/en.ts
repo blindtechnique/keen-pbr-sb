@@ -1176,7 +1176,7 @@ export const enTranslation = {
         degraded: "The route is responding unreliably",
         unavailable: "No route is currently available",
         member: "{{name}}: {{reason}}",
-        open: "Open routes and groups",
+        open: "Open “VPN, proxies, groups”",
       },
       members: "{{count}} in group",
       kind: {
@@ -2176,7 +2176,7 @@ export const enTranslation = {
           "The route “{{name}}” is ready. Services can be added later from the list catalogue.",
         openDashboard: "Open dashboard",
         openTunnels: "Open VPN and proxies",
-        openRules: "Open rules",
+        openRules: "Open routing rules",
       },
     },
     routingRules: {

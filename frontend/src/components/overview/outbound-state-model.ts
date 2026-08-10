@@ -23,6 +23,26 @@ export type OutboundRuntimeIssue = Readonly<{
   tone: "warning" | "error"
 }>
 
+/**
+ * Куда ведёт «Открыть …» из диагностики выхода: тот же раздел, что и в меню,
+ * и та вкладка, где эта запись живёт.
+ *
+ * Раньше это был `/outbounds#interfaces` — путь и якорь той поры, когда
+ * туннели и маршруты были разными страницами. Он ещё работает ради старых
+ * закладок, но ссылка внутри панели должна вести на нынешний `/transports`:
+ * иначе адресная строка после нажатия показывает раздел, которого в меню
+ * давно нет. Подпись ссылки берётся из `overview.outbounds.issue.open` и
+ * обязана совпадать с названием пункта меню — человек ищет глазами именно
+ * его.
+ */
+export function outboundManagementHref(
+  outbound: Pick<Outbound, "type">
+): string {
+  if (outbound.type === "urltest") return "/transports#failover"
+  if (outbound.type === "interface") return "/transports#tunnels"
+  return "/transports#system"
+}
+
 export function outboundTrafficBucket(
   outbound: Pick<Outbound, "type">,
   protocol: string

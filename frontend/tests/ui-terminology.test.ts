@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
+import { outboundManagementHref } from "@/components/overview/outbound-state-model"
 import { enTranslation } from "../src/i18n/en"
 import { ruTranslation } from "../src/i18n/ru"
 
@@ -49,6 +50,47 @@ describe("public routing terminology", () => {
     )
     expect(enTranslation.pages.outboundUpsert.urltest.groupTitle).toBe(
       "Tier {{index}}"
+    )
+  })
+})
+
+/**
+ * Раздел переименовали, а ссылки на него — нет: диагностика сломанного
+ * туннеля на дашборде звала «Открыть маршруты и группы» и вела на
+ * `/outbounds#interfaces`. Пункта с таким названием в меню давно нет, и
+ * человек, которому предложили «открыть» его, искать его будет глазами по
+ * меню. Тест закрепляет обе половины: подпись называет раздел так же, как
+ * меню, а ссылка ведёт на нынешний адрес.
+ */
+describe("cross-references to the renamed section", () => {
+  test("the dashboard link names the section exactly as the menu does", () => {
+    expect(ruTranslation.overview.outbounds.issue.open).toContain(
+      ruTranslation.nav.items.routesAndTunnels
+    )
+    expect(enTranslation.overview.outbounds.issue.open).toContain(
+      enTranslation.nav.items.routesAndTunnels
+    )
+  })
+
+  test("the dashboard link points at the current section address", () => {
+    const hrefs = [
+      outboundManagementHref({ type: "interface" }),
+      outboundManagementHref({ type: "urltest" }),
+      outboundManagementHref({ type: "table" }),
+      outboundManagementHref({ type: "blackhole" }),
+    ]
+    for (const href of hrefs) {
+      expect(href.startsWith("/transports#")).toBe(true)
+    }
+    // Вкладка сохраняется: группа открывается на группах, туннель — на туннелях.
+    expect(outboundManagementHref({ type: "urltest" })).toBe(
+      "/transports#failover"
+    )
+    expect(outboundManagementHref({ type: "interface" })).toBe(
+      "/transports#tunnels"
+    )
+    expect(outboundManagementHref({ type: "blackhole" })).toBe(
+      "/transports#system"
     )
   })
 })

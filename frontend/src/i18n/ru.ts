@@ -1185,7 +1185,7 @@ export const ruTranslation = {
         degraded: "Выход отвечает нестабильно",
         unavailable: "Нет доступного выхода",
         member: "{{name}}: {{reason}}",
-        open: "Открыть маршруты и группы",
+        open: "Открыть «VPN, прокси, группы»",
       },
       members: "{{count}} в группе",
       kind: {
@@ -2198,7 +2198,7 @@ export const ruTranslation = {
           "Маршрут «{{name}}» готов. Сервисы можно добавить позже из «Каталога списков».",
         openDashboard: "Открыть дашборд",
         openTunnels: "Открыть VPN и прокси",
-        openRules: "Открыть правила",
+        openRules: "Открыть правила маршрутизации",
       },
     },
     routingRules: {
