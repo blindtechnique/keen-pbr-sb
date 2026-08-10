@@ -250,7 +250,12 @@ cross-build: $(CROSS_TOOLCHAIN_STAMP) ## Cross-compile for aarch64_cortex-a53 di
 		-DCMAKE_BUILD_TYPE=MinSizeRel \
 		-DCMAKE_CXX_FLAGS_MINSIZEREL="-Os -DNDEBUG -g1" \
 		-DWITH_API=ON
-	STAGING_DIR=$(CROSS_STAGING_DIR) cmake --build $(CROSS_BUILD_DIR) -j$(shell nproc)
+	# BUILD_JOBS, like every other build target here, instead of a hardcoded
+	# nproc. A machine with many cores and modest RAM - 20 cores and 8 GB is
+	# enough - runs that many cc1plus processes straight into the OOM killer,
+	# and the failure reads as "Killed signal terminated program cc1plus"
+	# rather than as anything to do with memory.
+	STAGING_DIR=$(CROSS_STAGING_DIR) cmake --build $(CROSS_BUILD_DIR) --parallel $(BUILD_JOBS)
 	@mkdir -p $(DIST_DIR)
 	# Extract full debug symbols into a separate .debug file (stays on the host)
 	$(CROSS_OBJCOPY) --only-keep-debug $(CROSS_BUILD_DIR)/keen-pbr $(CROSS_DEBUG_BIN)
