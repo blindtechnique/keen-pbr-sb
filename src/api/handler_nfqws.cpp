@@ -4,6 +4,8 @@
 #include "handler_backup.hpp"
 #include "maintenance_api.hpp"
 #include "../update/package_footprint.hpp"
+#include "../update/rescue_integrity.hpp"
+#include "../util/nfqws_config_migration.hpp"
 
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
@@ -404,6 +406,46 @@ std::vector<std::string> nfqws_package_paths() {
     paths.emplace_back(kBinary);
     paths.emplace_back(kInit);
     return paths;
+}
+
+NfqwsConfigObservation observe_nfqws_config() {
+    NfqwsConfigObservation observation;
+    const auto active = fs::path(kConfigDir) / "nfqws2.conf";
+    const auto displaced = fs::path(kConfigDir) / "nfqws2.conf-old";
+    std::error_code ec;
+    if (fs::is_regular_file(active, ec)) {
+        observation.active_present = true;
+        if (const auto digest = rescue_integrity::sha256_file(active))
+            observation.active_sha256 = *digest;
+    }
+    if (fs::is_regular_file(displaced, ec)) {
+        observation.displaced_present = true;
+        if (const auto digest = rescue_integrity::sha256_file(displaced))
+            observation.displaced_sha256 = *digest;
+    }
+    return observation;
+}
+
+void describe_config_outcome(std::string& output,
+                             NfqwsConfigOutcome outcome) {
+    if (outcome != NfqwsConfigOutcome::replaced_by_package &&
+        outcome != NfqwsConfigOutcome::lost) {
+        return;
+    }
+    if (outcome == NfqwsConfigOutcome::lost) {
+        output += "\nThe active nfqws2 configuration is gone after the "
+                  "upgrade.\n";
+        return;
+    }
+    // The whole point of this slice. Upstream's preinst is allowed to migrate
+    // its own configuration; what it may not do is take the operator's
+    // settings away without anybody saying where they went.
+    output += "\nThe package replaced the active nfqws2 configuration with "
+              "its defaults (CONFIG_VERSION migration). Your previous "
+              "configuration is at ";
+    output += (fs::path(kConfigDir) / "nfqws2.conf-old").string();
+    output += ", and the rollback backup taken before this upgrade also "
+              "contains it.\n";
 }
 
 void describe_package_change(std::string& output,
@@ -1122,6 +1164,7 @@ void register_nfqws_handler_impl(
             create_full_rollback_backup(ctx);
             const auto footprint_before =
                 observe_package_footprint(nfqws_package_paths());
+            const auto config_before = observe_nfqws_config();
             int status = 0;
             auto output = std::string("Rollback backup created.\n") +
                           run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
@@ -1131,7 +1174,10 @@ void register_nfqws_handler_impl(
                 footprint_before, footprint_after, kBinary);
             const auto footprint_diff =
                 diff_package_footprint(footprint_before, footprint_after);
+            const auto config_outcome =
+                judge_nfqws_config(config_before, observe_nfqws_config());
             describe_package_change(output, binary_outcome, footprint_diff);
+            describe_config_outcome(output, config_outcome);
             bool durable = true;
             const auto created = status == 0
                                      ? save_updated_default_strategy(
@@ -1155,6 +1201,8 @@ void register_nfqws_handler_impl(
                                   {"durable", durable},
                                   {"binary_outcome",
                                    package_binary_outcome_name(binary_outcome)},
+                                  {"config_outcome",
+                                   nfqws_config_outcome_name(config_outcome)},
                                   {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
         if (action == "save_strategy") {

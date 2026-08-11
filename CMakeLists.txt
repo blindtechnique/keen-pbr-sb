@@ -386,6 +386,7 @@ set(SOURCES
   src/update/maintenance_lock.cpp
   src/update/rollback_availability.cpp
   src/update/package_footprint.cpp
+  src/util/nfqws_config_migration.cpp
   src/config/config.cpp
   src/config/config_writer.cpp
   src/config/dependency_analysis.cpp
