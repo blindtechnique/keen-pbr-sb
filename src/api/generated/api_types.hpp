@@ -800,6 +800,8 @@ namespace api {
 
     enum class RoutingHealthResponseOverall : int { DEGRADED, ERROR, OK };
 
+    enum class TtlBypassState : int { ACTIVE, CHAIN_ABSENT, CONFLICT, MISSING, UNKNOWN, UNSUPPORTED };
+
     struct RoutingHealthResponse {
         FirewallChain firewall;
         RoutingHealthResponseFirewallBackend firewall_backend;
@@ -807,6 +809,8 @@ namespace api {
         RoutingHealthResponseOverall overall;
         std::vector<PolicyRuleCheck> policy_rules;
         std::vector<RouteTableCheck> route_tables;
+        std::optional<std::string> ttl_bypass_detail;
+        std::optional<TtlBypassState> ttl_bypass_state;
     };
 
     enum class Evaluation : int { INSUFFICIENT_CONTEXT, MATCHED, NOT_MATCHED };
@@ -1711,6 +1715,9 @@ namespace api {
 
     void from_json(const json & j, RoutingHealthResponseOverall & x);
     void to_json(json & j, const RoutingHealthResponseOverall & x);
+
+    void from_json(const json & j, TtlBypassState & x);
+    void to_json(json & j, const TtlBypassState & x);
 
     void from_json(const json & j, Evaluation & x);
     void to_json(json & j, const Evaluation & x);
@@ -3145,6 +3152,8 @@ namespace api {
         x.overall = j.at("overall").get<RoutingHealthResponseOverall>();
         x.policy_rules = j.at("policy_rules").get<std::vector<PolicyRuleCheck>>();
         x.route_tables = j.at("route_tables").get<std::vector<RouteTableCheck>>();
+        x.ttl_bypass_detail = get_stack_optional<std::string>(j, "ttl_bypass_detail");
+        x.ttl_bypass_state = get_stack_optional<TtlBypassState>(j, "ttl_bypass_state");
     }
 
     inline void to_json(json & j, const RoutingHealthResponse & x) {
@@ -3155,6 +3164,8 @@ namespace api {
         j["overall"] = x.overall;
         j["policy_rules"] = x.policy_rules;
         j["route_tables"] = x.route_tables;
+        j["ttl_bypass_detail"] = x.ttl_bypass_detail;
+        j["ttl_bypass_state"] = x.ttl_bypass_state;
     }
 
     inline void from_json(const json & j, ListMatch& x) {
@@ -4642,6 +4653,28 @@ namespace api {
             case RoutingHealthResponseOverall::ERROR: j = "error"; break;
             case RoutingHealthResponseOverall::OK: j = "ok"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RoutingHealthResponseOverall\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, TtlBypassState & x) {
+        if (j == "active") x = TtlBypassState::ACTIVE;
+        else if (j == "chain_absent") x = TtlBypassState::CHAIN_ABSENT;
+        else if (j == "conflict") x = TtlBypassState::CONFLICT;
+        else if (j == "missing") x = TtlBypassState::MISSING;
+        else if (j == "unknown") x = TtlBypassState::UNKNOWN;
+        else if (j == "unsupported") x = TtlBypassState::UNSUPPORTED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TtlBypassState\""); }
+    }
+
+    inline void to_json(json & j, const TtlBypassState & x) {
+        switch (x) {
+            case TtlBypassState::ACTIVE: j = "active"; break;
+            case TtlBypassState::CHAIN_ABSENT: j = "chain_absent"; break;
+            case TtlBypassState::CONFLICT: j = "conflict"; break;
+            case TtlBypassState::MISSING: j = "missing"; break;
+            case TtlBypassState::UNKNOWN: j = "unknown"; break;
+            case TtlBypassState::UNSUPPORTED: j = "unsupported"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TtlBypassState\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

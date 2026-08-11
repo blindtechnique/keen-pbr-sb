@@ -122,6 +122,7 @@ export * from './routingHealthErrorResponseOverall';
 export * from './routingHealthResponse';
 export * from './routingHealthResponseFirewallBackend';
 export * from './routingHealthResponseOverall';
+export * from './routingHealthResponseTtlBypassState';
 export * from './routingTestEntry';
 export * from './routingTestEvaluation';
 export * from './routingTestListMatch';

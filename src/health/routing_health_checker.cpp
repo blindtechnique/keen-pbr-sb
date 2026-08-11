@@ -214,6 +214,19 @@ static api::CheckStatus to_api_check_status(CheckStatus s) {
     return api::CheckStatus::MISSING;
 }
 
+// The report carries the state as the string the firewall backend produced, so
+// the health layer does not have to link against the iptables backend just to
+// name a state. Unrecognised input becomes `unknown` rather than being dropped:
+// a state we cannot map is precisely a state nobody should read as "fine".
+static api::TtlBypassState to_api_ttl_bypass_state(const std::string& state) {
+    if (state == "chain_absent") return api::TtlBypassState::CHAIN_ABSENT;
+    if (state == "unsupported")  return api::TtlBypassState::UNSUPPORTED;
+    if (state == "active")       return api::TtlBypassState::ACTIVE;
+    if (state == "conflict")     return api::TtlBypassState::CONFLICT;
+    if (state == "missing")      return api::TtlBypassState::MISSING;
+    return api::TtlBypassState::UNKNOWN;
+}
+
 static api::RoutingHealthResponseFirewallBackend to_api_firewall_backend(FirewallBackend backend) {
     switch (backend) {
         case FirewallBackend::iptables:
@@ -243,6 +256,18 @@ nlohmann::json routing_health_report_to_json(const RoutingHealthReport& r) {
     }
 
     resp.firewall_backend = to_api_firewall_backend(*r.firewall_backend);
+
+    // Reported as its own field rather than folded into `overall`. An absent
+    // firmware chain and a missing kernel match are both routine and neither
+    // is a keen-pbr fault; degrading the whole report for them would teach the
+    // operator to ignore the same field when it says a chain is being
+    // rewritten underneath us.
+    if (!r.ttl_bypass_state.empty()) {
+        resp.ttl_bypass_state = to_api_ttl_bypass_state(r.ttl_bypass_state);
+    }
+    if (!r.ttl_bypass_detail.empty()) {
+        resp.ttl_bypass_detail = r.ttl_bypass_detail;
+    }
 
     resp.firewall.chain_present = r.firewall_chain.chain_present;
     resp.firewall.prerouting_hook_present = r.firewall_chain.prerouting_hook_present;

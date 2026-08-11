@@ -60,6 +60,13 @@ struct PolicyRuleCheck {
 struct RoutingHealthReport {
     bool overall_ok{false};
     std::optional<FirewallBackend> firewall_backend;
+    // State of the owned TTL bypass rule. Reported separately from the
+    // overall verdict on purpose: neither "the firmware chain is absent" nor
+    // "a kernel match is missing" is a keen-pbr fault, and folding either into
+    // a global DEGRADED would train the operator to ignore the flag that also
+    // reports a chain being rewritten underneath us.
+    std::string ttl_bypass_state;
+    std::string ttl_bypass_detail;
     FirewallChainCheck firewall_chain;
     std::vector<FirewallRuleCheck> firewall_rules;
     std::vector<RouteTableCheck> route_tables;

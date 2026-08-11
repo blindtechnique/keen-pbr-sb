@@ -11,6 +11,7 @@ import type { PolicyRuleCheck } from './policyRuleCheck';
 import type { RouteTableCheck } from './routeTableCheck';
 import type { RoutingHealthResponseFirewallBackend } from './routingHealthResponseFirewallBackend';
 import type { RoutingHealthResponseOverall } from './routingHealthResponseOverall';
+import type { RoutingHealthResponseTtlBypassState } from './routingHealthResponseTtlBypassState';
 
 export interface RoutingHealthResponse {
   /** - ok: all checks passed - degraded: one or more checks failed - error: an exception prevented checks from completing
@@ -18,6 +19,23 @@ export interface RoutingHealthResponse {
   overall: RoutingHealthResponseOverall;
   /** Active firewall backend. */
   firewall_backend: RoutingHealthResponseFirewallBackend;
+  /** State of the owned RETURN keen-pbr keeps first in the firmware's TTL chain so a packet nfqws2 already handled is not stripped of the TTL its desync depends on.
+  The values are deliberately distinct because they call for different responses:
+  - chain_absent: the firmware chain is not there, so there is
+    nothing to bypass. Routine, no action.
+  - unknown: the chain could not be inspected - a held xtables lock,
+    a timeout. Says nothing about the chain; do not read it as "fine".
+  - unsupported: a kernel match this needs is not registered. We
+    deliberately write nothing rather than install an unverified rule.
+  - active: our rule is present exactly once and first. - conflict: it drifted or was duplicated, i.e. something is
+    rewriting the chain underneath us. Repaired on the next apply,
+    but worth knowing about.
+  - missing: absent and installable; the next apply installs it.
+   */
+  ttl_bypass_state?: RoutingHealthResponseTtlBypassState;
+  /** Why the state is what it is, when the state alone is not enough. Empty for the uninteresting states.
+   */
+  ttl_bypass_detail?: string;
   firewall: FirewallChain;
   firewall_rules: FirewallRuleCheck[];
   route_tables: RouteTableCheck[];
