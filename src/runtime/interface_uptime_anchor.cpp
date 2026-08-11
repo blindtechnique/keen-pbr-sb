@@ -52,8 +52,12 @@ void InterfaceUptimeAnchorStore::begin_round(
             // back. Either way this is the start of a lifetime we can vouch
             // for, and nothing observed before it describes this interface.
             inserted.first->second.first_seen = now;
+            inserted.first->second.appeared_after_first_round =
+                any_round_completed_;
         }
     }
+
+    any_round_completed_ = true;
 }
 
 void InterfaceUptimeAnchorStore::observe_firmware_uptime(
@@ -137,10 +141,22 @@ void InterfaceUptimeAnchorStore::observe_link_state(
         latch_locked(state, observed_at, InterfaceUptimeSource::observed);
         return;
     }
+    if (!state.link_up_ever_observed && state.appeared_after_first_round) {
+        // The device did not exist in the previous round, so this is its
+        // creation rather than our first sighting of something older. That is
+        // a confirmed transition, and it is the only one a sing-box TUN ever
+        // gets: those devices are absent from the Keenetic inventory, so the
+        // firmware never reports an uptime for them.
+        state.link_up_ever_observed = true;
+        latch_locked(state, observed_at, InterfaceUptimeSource::observed);
+        return;
+    }
+    state.link_up_ever_observed = true;
     // Either the link was already known up - no transition, keep the anchor -
-    // or this is the first time we have ever seen it, in which case we do not
-    // know when it came up and must leave the anchor absent. See the header:
-    // guessing "now" here would publish daemon uptime under an interface name.
+    // or this is the first time we have ever seen it and it predates us, in
+    // which case we do not know when it came up and must leave the anchor
+    // absent. See the header: guessing "now" here would publish daemon uptime
+    // under an interface name.
 }
 
 std::optional<InterfaceUptimeAnchorStore::Anchor>

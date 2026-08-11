@@ -283,6 +283,62 @@ TEST_CASE("an interface outside the round is not observed at all") {
     CHECK(store.size() == 1);
 }
 
+TEST_CASE("an interface created after startup is anchored at its appearance") {
+    Store store;
+
+    // First round: whatever exists now predates us and proves nothing.
+    store.begin_round(present({"eth0"}), at(0));
+    store.observe_link_state("eth0", true, at(0));
+    REQUIRE_FALSE(store.anchor("eth0").has_value());
+
+    // A sing-box transport starts and its TUN device appears. It did not exist
+    // in the previous round, so this is a creation, not a first sighting.
+    // These devices are absent from the Keenetic inventory, so this is the
+    // only up-transition they will ever have.
+    store.begin_round(present({"eth0", "tun0"}), at(30));
+    store.observe_link_state("eth0", true, at(30));
+    store.observe_link_state("tun0", true, at(30));
+
+    const auto anchor = store.anchor("tun0");
+    REQUIRE(anchor.has_value());
+    CHECK(anchor->up_since == at(30));
+    CHECK(anchor->source == InterfaceUptimeSource::observed);
+}
+
+TEST_CASE("an interface present at startup is still not anchored") {
+    Store store;
+
+    // The guard must stay narrow: appearing in the FIRST round says only that
+    // the daemon has started, and dating that to "now" is precisely the
+    // daemon-uptime-as-interface-uptime lie.
+    store.begin_round(present({"eth0", "nwg1"}), at(0));
+    store.observe_link_state("eth0", true, at(0));
+    store.observe_link_state("nwg1", true, at(0));
+
+    store.begin_round(present({"eth0", "nwg1"}), at(10));
+    store.observe_link_state("eth0", true, at(10));
+
+    CHECK_FALSE(store.anchor("eth0").has_value());
+    CHECK_FALSE(store.anchor("nwg1").has_value());
+}
+
+TEST_CASE("a recreated tunnel is anchored at its new appearance") {
+    Store store;
+
+    store.begin_round(present({"tun0"}), at(0));
+    store.observe_link_state("tun0", true, at(0));
+    REQUIRE_FALSE(store.anchor("tun0").has_value());
+
+    // The transport is restarted: the device disappears and comes back.
+    store.begin_round(present({}), at(50));
+    store.begin_round(present({"tun0"}), at(60));
+    store.observe_link_state("tun0", true, at(60));
+
+    const auto anchor = store.anchor("tun0");
+    REQUIRE(anchor.has_value());
+    CHECK(anchor->up_since == at(60));
+}
+
 TEST_CASE("an unknown interface has no anchor") {
     Store store;
 

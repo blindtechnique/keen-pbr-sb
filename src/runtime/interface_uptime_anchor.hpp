@@ -112,6 +112,20 @@ private:
         // while a pre-deletion catalog is still cached, which would otherwise
         // hand the new interface the dead one's uptime.
         TimePoint first_seen{};
+        // True when this interface appeared in a round AFTER the first one,
+        // which means the device did not exist a moment ago and we are seeing
+        // it being created rather than seeing it for the first time.
+        //
+        // That distinction is what lets a sing-box TUN report an uptime at
+        // all. Such devices are invisible to the Keenetic inventory, so the
+        // firmware never describes them, and the "first sighting proves
+        // nothing" rule would otherwise leave every one of them unknown
+        // forever - including after the transport that owns it is restarted.
+        bool appeared_after_first_round{false};
+        // Whether this entry has ever been through observe_link_state with an
+        // up link. Distinct from link_up, which the firmware also sets: only a
+        // kernel observation proves the device was actually there.
+        bool link_up_ever_observed{false};
         // Set once the firmware has reported on this interface. A tunnel
         // device stays administratively and operationally "up" in the kernel
         // for as long as it exists, including while the tunnel itself is
@@ -128,6 +142,10 @@ private:
 
     Clock::duration tolerance_;
     mutable std::mutex mutex_;
+    // The first round is special: everything in it is merely being seen for
+    // the first time. Only from the second round on does a new name mean a
+    // device that was genuinely created.
+    bool any_round_completed_{false};
     std::unordered_map<std::string, State> states_;
 };
 

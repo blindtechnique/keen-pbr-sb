@@ -1,29 +1,28 @@
 type Translate = (key: string, options?: Record<string, unknown>) => string
 
+function pad2(value: number): string {
+  return value < 10 ? `0${value}` : String(value)
+}
+
 /**
- * Renders a duration in whole days, hours and minutes.
+ * Renders a duration the way KeeneticOS renders one: HH:MM:SS, with a day
+ * count in front once it passes twenty-four hours.
  *
- * Kept separate from the router card's own formatter on purpose: router,
- * daemon, routing-runtime and interface uptimes are four different quantities
- * that reset for unrelated reasons, and sharing a label between them is how a
- * reader ends up believing a tunnel has been up since the router booted.
+ * Matching the firmware's own format is the point. This number sits next to
+ * values the router itself displays, and a second convention beside them makes
+ * the reader stop and work out whether the two mean the same thing.
  */
 export function formatUptimeSeconds(seconds: number, t: Translate): string {
-  if (!Number.isFinite(seconds) || seconds < 60) {
-    return t("common.uptime.lessThanMinute")
-  }
+  const total = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0
 
-  const days = Math.floor(seconds / 86_400)
-  const hours = Math.floor((seconds % 86_400) / 3_600)
-  const minutes = Math.floor((seconds % 3_600) / 60)
+  const days = Math.floor(total / 86_400)
+  const clock = [
+    pad2(Math.floor((total % 86_400) / 3_600)),
+    pad2(Math.floor((total % 3_600) / 60)),
+    pad2(total % 60),
+  ].join(":")
 
-  if (days > 0) {
-    return t("common.uptime.days", { days, hours, minutes })
-  }
-  if (hours > 0) {
-    return t("common.uptime.hours", { hours, minutes })
-  }
-  return t("common.uptime.minutes", { minutes })
+  return days > 0 ? t("common.uptime.withDays", { days, clock }) : clock
 }
 
 /**
@@ -34,23 +33,23 @@ export function formatUptimeSeconds(seconds: number, t: Translate): string {
  * time. `null`/`undefined` means the backend has no confirmed transition and
  * MUST be rendered as unknown - substituting any other uptime we happen to
  * have would report a number that silently resets for the wrong reasons.
+ *
+ * `nowMs` must be on the ROUTER's clock, since `upSinceUnixMs` is. Callers get
+ * one from routerNowMs(); passing the browser's own clock would measure the
+ * disagreement between two machines instead of an elapsed time.
  */
 export function formatUptimeSince(
   upSinceUnixMs: number | null | undefined,
   t: Translate,
-  nowMs: number = Date.now()
+  nowMs: number
 ): string {
   if (typeof upSinceUnixMs !== "number" || !Number.isFinite(upSinceUnixMs)) {
     return t("common.uptime.unknown")
   }
 
-  const elapsedSeconds = (nowMs - upSinceUnixMs) / 1_000
-  if (elapsedSeconds < 0) {
-    // The daemon's wall clock and the browser's disagree, most often right
-    // after an NTP step. Reporting a negative age would be worse than
-    // rounding the transition to "just now".
-    return t("common.uptime.lessThanMinute")
-  }
-
-  return formatUptimeSeconds(elapsedSeconds, t)
+  // A negative age means the two clocks still disagree despite the correction,
+  // most often in the moments right after an NTP step. Clamping to zero shows
+  // "just now" instead of a nonsensical countdown; formatUptimeSeconds floors
+  // at zero for exactly this.
+  return formatUptimeSeconds((nowMs - upSinceUnixMs) / 1_000, t)
 }

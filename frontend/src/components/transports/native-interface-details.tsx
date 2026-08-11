@@ -13,7 +13,14 @@ import {
   type NativeInterfaceModel,
   type NativeRouteBlockReason,
 } from "@/lib/native-interfaces"
+import { routerNowMs } from "@/api/router-clock"
+import { useVisibleTick } from "@/hooks/use-visible-tick"
 import { formatUptimeSince } from "@/lib/uptime-format"
+
+// The uptime is rendered as a running clock, so it needs a reason to re-render
+// every second. useVisibleTick stops while the tab is hidden, so an unattended
+// page does not burn a render per second forever.
+const UPTIME_TICK_MS = 1_000
 
 /**
  * Подробности интерфейса KeeneticOS — то, что раньше жило в раскрытой карточке.
@@ -41,6 +48,8 @@ export function NativeInterfaceDetails({
   readonly usage?: ReactNode
 }) {
   const { t, i18n } = useTranslation()
+  // Drives the running uptime clock; the value itself is read below.
+  useVisibleTick(UPTIME_TICK_MS)
   const actionability = getNativeRouteActionability(nativeInterface, {
     hasConfig,
     boundOutboundTag,
@@ -118,7 +127,8 @@ export function NativeInterfaceDetails({
           )}
           value={formatUptimeSince(
             nativeInterface.runtime?.link_up_since_unix_ms,
-            t
+            t,
+            routerNowMs()
           )}
         />
         <NativeInterfaceField

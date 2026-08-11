@@ -410,10 +410,11 @@ export const enTranslation = {
     // on purpose: router, daemon, routing-runtime and interface uptime are
     // four different quantities that reset for unrelated reasons.
     uptime: {
-      days: "{{days}}d {{hours}}h {{minutes}}m",
-      hours: "{{hours}}h {{minutes}}m",
-      minutes: "{{minutes}}m",
-      lessThanMinute: "less than a minute",
+      // KeeneticOS's own format: HH:MM:SS, with a day count in front once it
+      // passes twenty-four hours. A second convention sitting next to the
+      // firmware's own numbers would make a reader stop and wonder whether the
+      // two mean the same thing.
+      withDays: "{{days}}d {{clock}}",
       // Shown when no confirmed link up-transition is known. Substituting any
       // other uptime we happen to have would report a number that resets for
       // reasons that have nothing to do with this interface.
