@@ -393,6 +393,12 @@ export const enTranslation = {
     retry: "Try again",
     credentialsHint:
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
+    stepUp: {
+      title: "Confirm your password",
+      description:
+        "This operation installs software on the router or changes how it can be reached. Enter your password again - the confirmation lasts a few minutes.",
+      confirm: "Confirm",
+    },
   },
   common: {
     // Labels of shared interface primitives. They used to be hardcoded in
