@@ -6,6 +6,7 @@
 #include "../update/package_footprint.hpp"
 #include "../update/rescue_integrity.hpp"
 #include "../util/nfqws_config_migration.hpp"
+#include "../util/nfqws_runtime_state.hpp"
 
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
@@ -406,6 +407,63 @@ std::vector<std::string> nfqws_package_paths() {
     paths.emplace_back(kBinary);
     paths.emplace_back(kInit);
     return paths;
+}
+
+std::vector<pid_t> nfqws_processes();
+
+// What the live processes are actually executing.
+//
+// /proc/<pid>/exe still hashes after the file it points at has been replaced,
+// which is the only way to tell a process running the new binary from one
+// running the bytes that used to be there.
+NfqwsRuntimeObservation observe_nfqws_runtime() {
+    NfqwsRuntimeObservation observation;
+    const auto pids = nfqws_processes();
+    if (pids.empty()) return observation;
+    observation.process_present = true;
+    observation.image_consistent = true;
+    for (const auto pid : pids) {
+        const auto image = fs::path("/proc") / std::to_string(pid) / "exe";
+        const auto digest = rescue_integrity::sha256_file(image);
+        if (!digest) {
+            observation.image_consistent = false;
+            break;
+        }
+        if (observation.image_sha256.empty()) {
+            observation.image_sha256 = *digest;
+        } else if (observation.image_sha256 != *digest) {
+            // Two live processes on different images is not a state to average
+            // out; it is one to report as unestablished.
+            observation.image_consistent = false;
+            break;
+        }
+    }
+    return observation;
+}
+
+std::string installed_binary_digest(const PackageFootprint& footprint) {
+    for (const auto& state : footprint.files) {
+        if (state.path == kBinary) return state.sha256;
+    }
+    return {};
+}
+
+void describe_runtime_outcome(std::string& output,
+                              NfqwsRuntimeOutcome outcome) {
+    output += "nfqws2 runtime: ";
+    output += nfqws_runtime_outcome_name(outcome);
+    output += "\n";
+    if (outcome == NfqwsRuntimeOutcome::stopped_by_upgrade) {
+        output +=
+            "nfqws2 was running before the upgrade and is not running now. "
+            "The init script refuses to start when it rejects the active "
+            "configuration, which is the usual reason after a configuration "
+            "migration.\n";
+    } else if (outcome == NfqwsRuntimeOutcome::running_stale) {
+        output +=
+            "nfqws2 is running an image that is not the installed binary; "
+            "restart the service to pick up the new one.\n";
+    }
 }
 
 NfqwsConfigObservation observe_nfqws_config() {
@@ -1165,6 +1223,7 @@ void register_nfqws_handler_impl(
             const auto footprint_before =
                 observe_package_footprint(nfqws_package_paths());
             const auto config_before = observe_nfqws_config();
+            const auto runtime_before = observe_nfqws_runtime();
             int status = 0;
             auto output = std::string("Rollback backup created.\n") +
                           run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
@@ -1176,7 +1235,11 @@ void register_nfqws_handler_impl(
                 diff_package_footprint(footprint_before, footprint_after);
             const auto config_outcome =
                 judge_nfqws_config(config_before, observe_nfqws_config());
+            const auto runtime_outcome = judge_nfqws_runtime(
+                runtime_before, observe_nfqws_runtime(),
+                installed_binary_digest(footprint_after));
             describe_package_change(output, binary_outcome, footprint_diff);
+            describe_runtime_outcome(output, runtime_outcome);
             describe_config_outcome(output, config_outcome);
             bool durable = true;
             const auto created = status == 0
@@ -1195,7 +1258,9 @@ void register_nfqws_handler_impl(
             // dead component.
             const bool binary_lost =
                 binary_outcome == PackageBinaryOutcome::missing_after;
-            return nlohmann::json{{"ok", status == 0 && !binary_lost},
+            return nlohmann::json{{"ok", status == 0 && !binary_lost &&
+                                             !nfqws_runtime_is_failure(
+                                                 runtime_outcome)},
                                   {"output", output}, {"status", status},
                                   {"strategy_created", created},
                                   {"durable", durable},
@@ -1203,6 +1268,8 @@ void register_nfqws_handler_impl(
                                    package_binary_outcome_name(binary_outcome)},
                                   {"config_outcome",
                                    nfqws_config_outcome_name(config_outcome)},
+                                  {"runtime_outcome",
+                                   nfqws_runtime_outcome_name(runtime_outcome)},
                                   {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
         if (action == "save_strategy") {

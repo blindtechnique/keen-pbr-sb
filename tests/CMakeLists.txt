@@ -9,6 +9,8 @@ add_executable(keen-pbr-tests
   test_package_footprint.cpp
   test_nfqws_config_migration.cpp
   ../src/util/nfqws_config_migration.cpp
+  test_nfqws_runtime_state.cpp
+  ../src/util/nfqws_runtime_state.cpp
   test_targeted_probe_admission.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp
