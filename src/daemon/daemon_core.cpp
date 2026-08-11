@@ -1288,6 +1288,14 @@ void Daemon::handle_ipc_control_socket() {
                         snapshot.policy_rule_specs,
                         netlink_);
                 }
+                // Filled from the live backend rather than recomputed here:
+                // the state is what the last apply actually observed, and
+                // re-inspecting the chain from a status request would both
+                // duplicate the writer and answer a different question.
+                routing_health.ttl_bypass_state =
+                    firewall_->ttl_bypass_state_name();
+                routing_health.ttl_bypass_detail =
+                    firewall_->ttl_bypass_state_detail();
                 response = {
                     {"protocol_version",
                      ipc::kControlProtocolVersion},

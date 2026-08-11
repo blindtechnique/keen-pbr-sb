@@ -831,13 +831,20 @@ void Daemon::setup_api() {
         [this]() {
             const auto check_once = [this]() {
                 const auto runtime_snapshot = runtime_state_store_.snapshot();
-                return build_routing_health_report(
+                auto report = build_routing_health_report(
                     firewall_->backend(),
                     firewall_->uses_raw_prerouting(),
                     runtime_snapshot.firewall_state,
                     runtime_snapshot.route_specs,
                     runtime_snapshot.policy_rule_specs,
                     netlink_);
+                // From the live backend: this is what the last apply observed.
+                // Re-inspecting the firmware chain on a health request would
+                // both duplicate the writer and answer a different question.
+                report.ttl_bypass_state = firewall_->ttl_bypass_state_name();
+                report.ttl_bypass_detail =
+                    firewall_->ttl_bypass_state_detail();
+                return report;
             };
 
             auto report = check_once();

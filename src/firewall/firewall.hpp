@@ -493,6 +493,13 @@ public:
     virtual FirewallBackend backend() const = 0;
     virtual bool uses_raw_prerouting() const { return false; }
 
+    // State of the owned TTL bypass rule, as a stable name, or empty when the
+    // backend does not implement one. Empty rather than a fabricated "ok":
+    // the nftables backend has no such rule, and claiming a state it never
+    // computed would be worse than reporting nothing.
+    virtual std::string ttl_bypass_state_name() const { return {}; }
+    virtual std::string ttl_bypass_state_detail() const { return {}; }
+
     // Non-copyable
     Firewall(const Firewall&) = delete;
     Firewall& operator=(const Firewall&) = delete;

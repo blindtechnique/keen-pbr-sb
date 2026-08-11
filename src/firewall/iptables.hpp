@@ -304,6 +304,8 @@ private:
 public:
     // Last observed state of the TTL bypass, for health reporting.
     TtlBypassState ttl_bypass_state() const;
+    std::string ttl_bypass_state_name() const override;
+    std::string ttl_bypass_state_detail() const override;
     std::string ttl_bypass_detail() const;
 
 private:

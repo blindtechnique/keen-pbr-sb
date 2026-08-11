@@ -3381,6 +3381,14 @@ void IptablesFirewall::remove_ttl_bypass() const {
     ttl_bypass_detail_.clear();
 }
 
+std::string IptablesFirewall::ttl_bypass_state_name() const {
+    return keen_pbr3::ttl_bypass_state_name(ttl_bypass_state());
+}
+
+std::string IptablesFirewall::ttl_bypass_state_detail() const {
+    return ttl_bypass_detail();
+}
+
 TtlBypassState IptablesFirewall::ttl_bypass_state() const {
     std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
     return ttl_bypass_state_;
