@@ -1755,6 +1755,9 @@ export const enTranslation = {
           "Clear learned domain addresses on full apply",
         clearDynamicSetsOnApplyHint:
           "Clear dynamic addresses learned by dnsmasq during a full config apply. Disable this to preserve them until TTL expiry and avoid a cold routing start.",
+        ttlBypassEnabledLabel: "Leave the TTL alone on packets nfqws2 handled",
+        ttlBypassEnabledHint:
+          "Keenetic firmware can rewrite the TTL. Every nfqws2 strategy depends on it: the decoy packet has to expire in transit, or the circumvention breaks. Leave this on unless you know otherwise. Turning it off removes the rule rather than merely stopping future installs.",
         ipv6EnabledLabel: "Enable IPv6 support",
         ipv6EnabledHint:
           "Install IPv6 routes, firewall rules, and dnsmasq targets. When explicitly disabled, managed dnsmasq suppresses AAAA and SVCB/HTTPS (types 64/65): A records keep working, but HTTP/3 and ECH discovery may be unavailable.",

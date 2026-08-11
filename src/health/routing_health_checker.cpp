@@ -224,6 +224,7 @@ static api::TtlBypassState to_api_ttl_bypass_state(const std::string& state) {
     if (state == "active")       return api::TtlBypassState::ACTIVE;
     if (state == "conflict")     return api::TtlBypassState::CONFLICT;
     if (state == "missing")      return api::TtlBypassState::MISSING;
+    if (state == "disabled")     return api::TtlBypassState::DISABLED;
     return api::TtlBypassState::UNKNOWN;
 }
 

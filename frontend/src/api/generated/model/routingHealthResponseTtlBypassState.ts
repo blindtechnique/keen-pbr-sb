@@ -18,7 +18,11 @@ The values are deliberately distinct because they call for different responses:
 - active: our rule is present exactly once and first. - conflict: it drifted or was duplicated, i.e. something is
   rewriting the chain underneath us. Repaired on the next apply,
   but worth knowing about.
-- missing: absent and installable; the next apply installs it.
+- missing: absent and installable; the next apply installs it. - disabled: the operator turned it off. Distinct from `missing` and
+  `unsupported` on purpose: those say we cannot, this says we were
+  told not to, and an operator needs to tell an instruction apart
+  from an inability. Any rule of ours is removed when this is
+  reported - off means gone, not "stop installing".
 
  */
 export type RoutingHealthResponseTtlBypassState = typeof RoutingHealthResponseTtlBypassState[keyof typeof RoutingHealthResponseTtlBypassState];
@@ -31,4 +35,5 @@ export const RoutingHealthResponseTtlBypassState = {
   active: 'active',
   conflict: 'conflict',
   missing: 'missing',
+  disabled: 'disabled',
 } as const;

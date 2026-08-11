@@ -1522,6 +1522,25 @@ components:
             Whether firewall prefilter rules should bypass packets that already carry
             a fwmark. Defaults to `true` when omitted or set to `null`.
           example: true
+        ttl_bypass_enabled:
+          type: boolean
+          nullable: true
+          description: >
+            Whether keen-pbr keeps its owned `RETURN` first in the firmware's
+            TTL chain, so a packet nfqws2 already handled is not stripped of the
+            TTL its desync depends on. Defaults to `true` when omitted or set to
+            `null`.
+
+            On by default because every nfqws2 strategy this project ships uses
+            a TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks
+            all of them at once; an opt-in switch would leave the fix off for
+            everyone who never learns it exists. This is an escape hatch, not a
+            feature flag.
+
+            Turning it off removes the rule rather than merely stopping future
+            installs: a rule left behind would keep working while the interface
+            says it is off.
+          example: true
         clear_dynamic_sets_on_apply:
           type: boolean
           nullable: true
@@ -4188,7 +4207,14 @@ components:
           example: "nftables"
         ttl_bypass_state:
           type: string
-          enum: [chain_absent, unknown, unsupported, active, conflict, missing]
+          enum:
+            - chain_absent
+            - unknown
+            - unsupported
+            - active
+            - conflict
+            - missing
+            - disabled
           description: >
             State of the owned RETURN keen-pbr keeps first in the firmware's
             TTL chain so a packet nfqws2 already handled is not stripped of the
@@ -4208,6 +4234,11 @@ components:
               rewriting the chain underneath us. Repaired on the next apply,
               but worth knowing about.
             - missing: absent and installable; the next apply installs it.
+            - disabled: the operator turned it off. Distinct from `missing` and
+              `unsupported` on purpose: those say we cannot, this says we were
+              told not to, and an operator needs to tell an instruction apart
+              from an inability. Any rule of ours is removed when this is
+              reported - off means gone, not "stop installing".
           example: "chain_absent"
         ttl_bypass_detail:
           type: string

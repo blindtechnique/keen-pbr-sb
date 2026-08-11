@@ -3281,6 +3281,7 @@ void IptablesFirewall::reconcile_hooks(bool ipv6) const {
 
 void IptablesFirewall::reconcile_ttl_bypass() const {
     TtlBypassInputs inputs;
+    inputs.enabled = ttl_bypass_enabled();
 
     // IPv4 only, by requirement. The firmware's TTL rewrite and nfqws2's mark
     // are both IPv4 here, and ip6tables is deliberately left untouched.

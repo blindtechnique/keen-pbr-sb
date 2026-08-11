@@ -258,6 +258,7 @@ namespace api {
         std::optional<bool> reconnect_unmarked_flows_on_routing_change;
         std::optional<bool> skip_marked_packets;
         std::optional<bool> strict_enforcement;
+        std::optional<bool> ttl_bypass_enabled;
     };
 
     struct DnsTestServer {
@@ -802,7 +803,7 @@ namespace api {
 
     enum class SystemAuthState : int { CHALLENGE_ABSENT, ENDPOINT_UNPROVEN, FIRMWARE_POLICY_UNKNOWN, LOCKOUT_BUDGET_UNSAFE, LOOPBACK_NOT_ACCEPTED, USABLE };
 
-    enum class TtlBypassState : int { ACTIVE, CHAIN_ABSENT, CONFLICT, MISSING, UNKNOWN, UNSUPPORTED };
+    enum class TtlBypassState : int { ACTIVE, CHAIN_ABSENT, CONFLICT, DISABLED, MISSING, UNKNOWN, UNSUPPORTED };
 
     struct RoutingHealthResponse {
         FirewallChain firewall;
@@ -2125,6 +2126,7 @@ namespace api {
         x.reconnect_unmarked_flows_on_routing_change = get_stack_optional<bool>(j, "reconnect_unmarked_flows_on_routing_change");
         x.skip_marked_packets = get_stack_optional<bool>(j, "skip_marked_packets");
         x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
+        x.ttl_bypass_enabled = get_stack_optional<bool>(j, "ttl_bypass_enabled");
     }
 
     inline void to_json(json & j, const Daemon & x) {
@@ -2141,6 +2143,7 @@ namespace api {
         j["reconnect_unmarked_flows_on_routing_change"] = x.reconnect_unmarked_flows_on_routing_change;
         j["skip_marked_packets"] = x.skip_marked_packets;
         j["strict_enforcement"] = x.strict_enforcement;
+        j["ttl_bypass_enabled"] = x.ttl_bypass_enabled;
     }
 
     inline void from_json(const json & j, DnsTestServer& x) {
@@ -4696,6 +4699,7 @@ namespace api {
         if (j == "active") x = TtlBypassState::ACTIVE;
         else if (j == "chain_absent") x = TtlBypassState::CHAIN_ABSENT;
         else if (j == "conflict") x = TtlBypassState::CONFLICT;
+        else if (j == "disabled") x = TtlBypassState::DISABLED;
         else if (j == "missing") x = TtlBypassState::MISSING;
         else if (j == "unknown") x = TtlBypassState::UNKNOWN;
         else if (j == "unsupported") x = TtlBypassState::UNSUPPORTED;
@@ -4707,6 +4711,7 @@ namespace api {
             case TtlBypassState::ACTIVE: j = "active"; break;
             case TtlBypassState::CHAIN_ABSENT: j = "chain_absent"; break;
             case TtlBypassState::CONFLICT: j = "conflict"; break;
+            case TtlBypassState::DISABLED: j = "disabled"; break;
             case TtlBypassState::MISSING: j = "missing"; break;
             case TtlBypassState::UNKNOWN: j = "unknown"; break;
             case TtlBypassState::UNSUPPORTED: j = "unsupported"; break;

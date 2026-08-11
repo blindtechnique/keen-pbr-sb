@@ -485,6 +485,18 @@ public:
         return clear_dynamic_sets_on_apply_;
     }
 
+    // Defaults to on. Every nfqws2 strategy this project ships uses a
+    // TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks all of
+    // them at once; an opt-in switch would leave the fix off for everyone who
+    // never learns it exists. This is an escape hatch, not a feature flag.
+    void set_ttl_bypass_enabled(bool enabled) {
+        ttl_bypass_enabled_ = enabled;
+    }
+
+    bool ttl_bypass_enabled() const {
+        return ttl_bypass_enabled_;
+    }
+
     // Remove all firewall rules and IP sets created by this instance.
     // Should be called on daemon shutdown.
     virtual void cleanup() = 0;
@@ -516,6 +528,7 @@ protected:
     uint32_t fwmark_mask_{0xFFFFFFFFu};
     bool ipv6_enabled_{true};
     bool clear_dynamic_sets_on_apply_{true};
+    bool ttl_bypass_enabled_{true};
 
 private:
     mutable std::atomic<std::uint64_t>

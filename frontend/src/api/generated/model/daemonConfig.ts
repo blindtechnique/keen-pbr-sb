@@ -23,6 +23,11 @@ export interface DaemonConfig {
   /** Whether firewall prefilter rules should bypass packets that already carry a fwmark. Defaults to `true` when omitted or set to `null`.
    */
   skip_marked_packets?: boolean | null;
+  /** Whether keen-pbr keeps its owned `RETURN` first in the firmware's TTL chain, so a packet nfqws2 already handled is not stripped of the TTL its desync depends on. Defaults to `true` when omitted or set to `null`.
+  On by default because every nfqws2 strategy this project ships uses a TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks all of them at once; an opt-in switch would leave the fix off for everyone who never learns it exists. This is an escape hatch, not a feature flag.
+  Turning it off removes the rule rather than merely stopping future installs: a rule left behind would keep working while the interface says it is off.
+   */
+  ttl_bypass_enabled?: boolean | null;
   /** Whether a full config apply or runtime restart should clear dynamic dnsmasq-managed firewall sets. Defaults to `true` when omitted or set to `null`. Preserve-set reconciles never clear learned entries.
    */
   clear_dynamic_sets_on_apply?: boolean | null;

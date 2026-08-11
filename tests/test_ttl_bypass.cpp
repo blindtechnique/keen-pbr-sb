@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "firewall/ttl_bypass.hpp"
+#include "firewall/iptables.hpp"
 
 #include <algorithm>
 #include <string>
@@ -363,6 +364,24 @@ TEST_CASE("an unanswerable chain outranks the switch") {
     // assert the rule is gone while it may still be installed.
     CHECK(plan_ttl_bypass(inputs).state == TtlBypassState::unknown);
     CHECK(plan_ttl_bypass(inputs).commands.empty());
+}
+
+
+TEST_CASE("the firewall default keeps the bypass on") {
+    // A router that never touches the setting must get the fix. Every shipped
+    // nfqws2 strategy depends on the TTL surviving, so the default is the one
+    // that matters most.
+    IptablesFirewall firewall;
+    CHECK(firewall.ttl_bypass_enabled());
+}
+
+TEST_CASE("the configuration flag reaches the firewall") {
+    IptablesFirewall firewall;
+
+    firewall.set_ttl_bypass_enabled(false);
+    CHECK_FALSE(firewall.ttl_bypass_enabled());
+    firewall.set_ttl_bypass_enabled(true);
+    CHECK(firewall.ttl_bypass_enabled());
 }
 
 } // namespace keen_pbr3
