@@ -1157,6 +1157,11 @@ private:
     // all measure the same thing, targeted probes must not because they do
     // not. See TargetedProbeAdmission.
     TargetedProbeAdmission targeted_probe_admission_;
+    // Where the next periodic tick resumes its rotation, and whether the round
+    // about to launch is one. Control-loop owned, like the round itself. A
+    // manual refresh and a failure retry stay full rounds.
+    std::size_t interface_probe_cursor_{0};
+    bool interface_probe_round_rotates_{false};
     OneTrailingFailureRetry interface_probe_failure_retry_;
 
 #ifdef WITH_API

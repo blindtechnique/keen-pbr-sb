@@ -210,4 +210,31 @@ bool interface_probe_target_is_current(
     const InterfaceProbe::Target& expected_target,
     const std::vector<InterfaceProbe::Target>& current_targets) noexcept;
 
+// How many targets one periodic tick measures. Small on purpose: the point of
+// rotating is that a tick stops being a synchronised sweep, and a slice large
+// enough to cover a typical configuration would restore exactly that.
+inline constexpr std::size_t kInterfaceProbeRotationSlice = 2;
+
+struct InterfaceProbeRotation {
+    std::vector<InterfaceProbe::Target> slice;
+    // Where the next tick resumes. Kept by the caller so this stays pure.
+    std::size_t next_cursor{0};
+};
+
+// Picks the next slice of targets to probe, wrapping around.
+//
+// Periodic probing used to measure every target on every tick, which made a
+// per-row refresh indistinguishable from the background sweep - every value on
+// the screen changed at once regardless of what the operator clicked. Rotating
+// spreads the same work over consecutive ticks so a tick touches a few targets
+// and the rest keep their previous readings.
+//
+// The cursor is an index into a target list that can change between ticks, so
+// it is normalised rather than trusted: an apply that removes outbounds must
+// not make the next tick read past the end or silently skip the survivors.
+InterfaceProbeRotation select_interface_probe_rotation(
+    const std::vector<InterfaceProbe::Target>& targets,
+    std::size_t cursor,
+    std::size_t slice_size = kInterfaceProbeRotationSlice);
+
 } // namespace keen_pbr3

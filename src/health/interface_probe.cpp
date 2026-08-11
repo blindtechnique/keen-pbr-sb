@@ -638,4 +638,32 @@ bool interface_probe_target_is_current(
            same_target_identity(expected_target, *matching_tag);
 }
 
+InterfaceProbeRotation select_interface_probe_rotation(
+    const std::vector<InterfaceProbe::Target>& targets,
+    const std::size_t cursor,
+    const std::size_t slice_size) {
+    InterfaceProbeRotation rotation;
+    if (targets.empty() || slice_size == 0) {
+        return rotation;
+    }
+
+    // The cursor indexes a list that an apply may have shortened since the
+    // last tick. Wrapping it rather than trusting it keeps a shrunken
+    // configuration probing its survivors instead of reading past the end.
+    std::size_t position = cursor % targets.size();
+
+    // A slice wider than the target list degenerates to the old behaviour -
+    // every target on every tick - so it is clamped. Each target still appears
+    // at most once per tick; rotating is about spreading ticks, not about
+    // measuring the same target twice in one.
+    const auto taken = std::min(slice_size, targets.size());
+    rotation.slice.reserve(taken);
+    for (std::size_t index = 0; index < taken; ++index) {
+        rotation.slice.push_back(targets[position]);
+        position = (position + 1) % targets.size();
+    }
+    rotation.next_cursor = position;
+    return rotation;
+}
+
 } // namespace keen_pbr3

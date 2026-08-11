@@ -2936,6 +2936,10 @@ void Daemon::probe_interfaces_now() noexcept {
         }
         return;
     }
+    // Only once this tick actually owns a round. Setting it before admission
+    // would leave the flag standing when the request coalesced, and the next
+    // manual refresh would quietly measure a slice instead of everything.
+    interface_probe_round_rotates_ = true;
     start_interface_probe_round();
 }
 
@@ -3074,12 +3078,30 @@ void Daemon::start_interface_probe_round() noexcept {
 
 void Daemon::start_interface_probe_round_impl(
     bool failure_retry_round) {
-    const auto targets = collect_interface_probe_targets(
+    const auto configured_targets = collect_interface_probe_targets(
         config_, outbound_marks_);
     const auto expected_runtime_generation =
         runtime_generation_.load(std::memory_order_acquire);
 
-    interface_probe_.retain_only(targets);
+    // Always the complete set. retain_only prunes to what it is given, so
+    // handing it a rotation slice would drop every target absent from this
+    // tick - the health of eight outbounds erased as a side effect of probing
+    // two.
+    interface_probe_.retain_only(configured_targets);
+
+    // A periodic tick measures a slice; a manual round and a failure retry
+    // measure everything. The operator asking for a refresh wants the screen
+    // to be right, and a retry exists precisely because the previous full
+    // attempt did not land.
+    auto targets = configured_targets;
+    if (interface_probe_round_rotates_ && !failure_retry_round) {
+        auto rotation = select_interface_probe_rotation(
+            configured_targets, interface_probe_cursor_);
+        interface_probe_cursor_ = rotation.next_cursor;
+        targets = std::move(rotation.slice);
+    }
+    // Consumed: the next round is full unless a scheduler tick says otherwise.
+    interface_probe_round_rotates_ = false;
 
     if (targets.empty()) {
         auto task_metrics =
