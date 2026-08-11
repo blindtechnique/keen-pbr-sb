@@ -421,6 +421,7 @@ set(SOURCES
   src/firewall/firewall_runtime.cpp
   src/firewall/port_spec_util.cpp
   src/firewall/iptables.cpp
+  src/firewall/ppe_deoffload.cpp
   src/firewall/ttl_bypass.cpp
   src/firewall/nftables.cpp
   src/firewall/ipset_restore_pipe.cpp

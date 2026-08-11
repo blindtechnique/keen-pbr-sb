@@ -2,6 +2,7 @@ add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
+  test_ppe_deoffload.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp
   test_iptables_builder.cpp
@@ -136,6 +137,7 @@ add_executable(keen-pbr-tests
   ../src/firewall/nftables.cpp
   ../src/firewall/nft_batch_pipe.cpp
   ../src/firewall/iptables.cpp
+  ../src/firewall/ppe_deoffload.cpp
   ../src/firewall/ttl_bypass.cpp
   ../src/firewall/ipset_restore_pipe.cpp
   ../src/log/logger.cpp
@@ -715,6 +717,7 @@ add_executable(keen-pbr-firewall-it
   ../src/firewall/firewall_runtime.cpp
   ../src/firewall/firewall_verifier.cpp
   ../src/firewall/iptables.cpp
+  ../src/firewall/ppe_deoffload.cpp
   ../src/firewall/ttl_bypass.cpp
   ../src/firewall/iptables_verifier.cpp
   ../src/firewall/ipset_restore_pipe.cpp
