@@ -315,6 +315,121 @@ TEST_CASE("nothing but a clean pass may retire the local password") {
     }
 }
 
+TEST_CASE("a stored endpoint that serves the challenge is usable") {
+    // The exact shape the live router was in when it wrongly reported
+    // challenge_absent: a healthy daemon, a valid endpoint loaded from
+    // auth.json rather than from a fresh NDMS discovery, logins working.
+    //
+    // This is the test that was missing. The judgement was always right; the
+    // inputs handed to it were not, and nothing here exercised the inputs.
+    SystemAuthEndpointState endpoint_state;
+    endpoint_state.endpoint = "192.168.1.1:777";
+    endpoint_state.endpoint_unavailable = false;
+
+    SystemAuthLimiterBudget limiter;
+    limiter.max_failures = 3;
+    limiter.window = 100s;
+    limiter.lockout = 100s;
+    limiter.global_forward_cap =
+        auth_forward_capacity_for(kNdmsDefaultLockoutThreshold);
+
+    std::string asked;
+    const auto inputs = build_system_auth_inputs(
+        endpoint_state, parse_ndms_lockout_policy(measured_http_config()),
+        limiter, [&asked](const std::string& endpoint) {
+            asked = endpoint;
+            return true;
+        });
+
+    // Asked, not inferred. Reverting to a provenance flag makes this fail.
+    CHECK(asked == "192.168.1.1:777");
+    CHECK(inputs.challenge_observed);
+
+    const auto capability = evaluate_system_auth_capability(inputs);
+    CHECK(capability.state == SystemAuthCapabilityState::usable);
+    CHECK(capability.may_replace_local_password);
+}
+
+TEST_CASE("an endpoint that answers without a challenge is refused") {
+    SystemAuthEndpointState endpoint_state;
+    endpoint_state.endpoint = "192.168.1.1:777";
+
+    SystemAuthLimiterBudget limiter;
+    limiter.max_failures = 3;
+    limiter.window = 100s;
+    limiter.lockout = 100s;
+    limiter.global_forward_cap = 4U;
+
+    const auto inputs = build_system_auth_inputs(
+        endpoint_state, parse_ndms_lockout_policy(measured_http_config()),
+        limiter, [](const std::string&) { return false; });
+
+    CHECK_FALSE(inputs.challenge_observed);
+    CHECK(evaluate_system_auth_capability(inputs).state ==
+          SystemAuthCapabilityState::challenge_absent);
+}
+
+TEST_CASE("nothing worth probing is never probed") {
+    SystemAuthLimiterBudget limiter;
+    limiter.max_failures = 3;
+    limiter.window = 100s;
+    limiter.lockout = 100s;
+
+    int probes = 0;
+    const auto counting = [&probes](const std::string&) {
+        ++probes;
+        return true;
+    };
+
+    SUBCASE("an unresolved endpoint") {
+        SystemAuthEndpointState state;
+        state.endpoint = "192.168.1.1:777";
+        state.endpoint_unavailable = true;
+        const auto inputs = build_system_auth_inputs(
+            state, std::nullopt, limiter, counting);
+        CHECK_FALSE(inputs.challenge_observed);
+    }
+    SUBCASE("an empty endpoint") {
+        const auto inputs = build_system_auth_inputs(
+            SystemAuthEndpointState{}, std::nullopt, limiter, counting);
+        CHECK_FALSE(inputs.endpoint_resolved);
+    }
+    SUBCASE("loopback, where the firmware answers 403 anyway") {
+        SystemAuthEndpointState state;
+        state.endpoint = "127.0.0.1:777";
+        const auto inputs = build_system_auth_inputs(
+            state, std::nullopt, limiter, counting);
+        CHECK(inputs.endpoint_is_loopback);
+    }
+
+    // A probe is a connection attempt. Spending one on a case whose answer
+    // cannot change the verdict is cost for nothing.
+    CHECK(probes == 0);
+}
+
+TEST_CASE("a missing probe refuses rather than assumes") {
+    SystemAuthEndpointState endpoint_state;
+    endpoint_state.endpoint = "192.168.1.1:777";
+
+    const auto inputs = build_system_auth_inputs(
+        endpoint_state, parse_ndms_lockout_policy(measured_http_config()),
+        SystemAuthLimiterBudget{}, nullptr);
+
+    // No way to ask is not the same as an affirmative answer.
+    CHECK_FALSE(inputs.challenge_observed);
+}
+
+TEST_CASE("loopback is recognised in the spellings the firmware refuses") {
+    CHECK(endpoint_is_loopback("127.0.0.1:777"));
+    CHECK(endpoint_is_loopback("127.53.1.9:80"));
+    CHECK(endpoint_is_loopback("[::1]:777"));
+    CHECK_FALSE(endpoint_is_loopback("192.168.1.1:777"));
+    CHECK_FALSE(endpoint_is_loopback(""));
+    // Not loopback despite the leading digits: a LAN address that merely looks
+    // similar must not be dismissed as unusable.
+    CHECK_FALSE(endpoint_is_loopback("12.7.0.1:777"));
+}
+
 TEST_CASE("the forward budget stops before the firmware threshold") {
     const auto start = AuthForwardBudget::Clock::now();
     AuthForwardBudget budget(

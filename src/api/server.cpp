@@ -331,16 +331,6 @@ struct WebAuthConfig {
     bool uses_router_account() const { return provider == "keenetic"; }
 };
 
-// Measured on a live Keenetic: the firmware answers /auth with 403 on
-// loopback and 401 with a challenge on a LAN address. A loopback endpoint
-// therefore can never verify anybody, however well-formed it looks.
-bool endpoint_is_loopback(const std::string& endpoint) {
-    if (endpoint.empty()) return false;
-    return endpoint.rfind("127.", 0) == 0 ||
-           endpoint.rfind("[::1]", 0) == 0 ||
-           endpoint.rfind("::1", 0) == 0;
-}
-
 std::optional<KeeneticAuthEndpoint> discover_keenetic_auth_endpoint(
     std::string* error = nullptr) {
     const auto endpoint = discover_ndms_web_endpoint(
@@ -1608,29 +1598,21 @@ std::optional<SystemAuthHealthSnapshot> ApiServer::system_auth_health() {
     if (!impl_) return std::nullopt;
     const auto auth = impl_->auth_snapshot();
 
-    SystemAuthCapabilityInputs inputs;
-    inputs.endpoint_resolved =
-        !auth.keenetic_endpoint.empty() && !auth.endpoint_unavailable;
-    inputs.endpoint_is_loopback =
-        endpoint_is_loopback(auth.keenetic_endpoint);
-    // Asked of the endpoint, not inferred from where the endpoint came from.
-    //
-    // This used to read keenetic_endpoint_from_ndms, which was wrong in the
-    // one direction that mattered. A stored endpoint is not an unproven one -
-    // it is one proved earlier and cached - and on a healthy router nothing
-    // ever re-discovers it, because rediscovery only runs when the endpoint is
-    // unreachable. So the flag stayed false forever, the verdict stayed
-    // challenge_absent forever, and a check built to authorise retiring the
-    // local password could never authorise anything.
-    inputs.challenge_observed =
-        impl_->keenetic_challenge_observed(auth.keenetic_endpoint);
-    inputs.firmware_lockout = auth.firmware_lockout;
-    inputs.local_limiter.max_failures =
-        static_cast<std::uint32_t>(kAuthLoginMaxFailures);
-    inputs.local_limiter.window = kAuthLoginWindow;
-    inputs.local_limiter.lockout = kAuthLoginLockout;
-    inputs.local_limiter.global_forward_cap =
-        impl_->firmware_forward_budget.capacity();
+    SystemAuthEndpointState endpoint_state;
+    endpoint_state.endpoint = auth.keenetic_endpoint;
+    endpoint_state.endpoint_unavailable = auth.endpoint_unavailable;
+
+    SystemAuthLimiterBudget limiter;
+    limiter.max_failures = static_cast<std::uint32_t>(kAuthLoginMaxFailures);
+    limiter.window = kAuthLoginWindow;
+    limiter.lockout = kAuthLoginLockout;
+    limiter.global_forward_cap = impl_->firmware_forward_budget.capacity();
+
+    const auto inputs = build_system_auth_inputs(
+        endpoint_state, auth.firmware_lockout, limiter,
+        [this](const std::string& endpoint) {
+            return impl_->keenetic_challenge_observed(endpoint);
+        });
 
     const auto capability = evaluate_system_auth_capability(inputs);
 

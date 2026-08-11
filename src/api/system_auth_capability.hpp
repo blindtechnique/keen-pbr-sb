@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -105,6 +106,39 @@ std::uint32_t forwarded_failures_within(
 // local password - it only reports whether doing so would be safe.
 SystemAuthCapability evaluate_system_auth_capability(
     const SystemAuthCapabilityInputs& inputs);
+
+// The web server's auth state, reduced to what the verdict depends on.
+struct SystemAuthEndpointState {
+    // Where /auth lives, as the running configuration has it - whether that
+    // came from discovery or from the stored file.
+    std::string endpoint;
+    bool endpoint_unavailable{false};
+};
+
+// Answers "does this endpoint serve the Keenetic challenge". Injected rather
+// than called directly so the wiring below can be tested without a router.
+using SystemAuthChallengeProbe = std::function<bool(const std::string&)>;
+
+// Measured: the firmware answers /auth with 403 on loopback and 401 with a
+// challenge on a router-owned LAN address. A loopback endpoint can therefore
+// never verify anybody, however well-formed it looks.
+bool endpoint_is_loopback(const std::string& endpoint);
+
+// Builds the verdict's inputs from live state.
+//
+// This exists as its own function because the defect it replaces lived here
+// and nowhere else: the judgement was right, the inputs handed to it were not.
+// A seam around the judgement alone could not have caught it, and did not.
+//
+// In particular `challenge_observed` is obtained by asking `probe`, never by
+// inferring from where the endpoint came from. A stored endpoint is one proved
+// earlier and cached, not an unproven one - and on a healthy router nothing
+// re-discovers it, so inference is permanently false there.
+SystemAuthCapabilityInputs build_system_auth_inputs(
+    const SystemAuthEndpointState& endpoint_state,
+    const std::optional<NdmsLockoutPolicy>& firmware_lockout,
+    const SystemAuthLimiterBudget& limiter,
+    const SystemAuthChallengeProbe& probe);
 
 const char* system_auth_capability_state_name(
     SystemAuthCapabilityState state) noexcept;

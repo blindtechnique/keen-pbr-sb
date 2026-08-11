@@ -73,6 +73,35 @@ std::uint32_t forwarded_failures_within(
     return capped(static_cast<std::uint32_t>(forwarded));
 }
 
+bool endpoint_is_loopback(const std::string& endpoint) {
+    if (endpoint.empty()) return false;
+    return endpoint.rfind("127.", 0) == 0 ||
+           endpoint.rfind("[::1]", 0) == 0 ||
+           endpoint.rfind("::1", 0) == 0;
+}
+
+SystemAuthCapabilityInputs build_system_auth_inputs(
+    const SystemAuthEndpointState& endpoint_state,
+    const std::optional<NdmsLockoutPolicy>& firmware_lockout,
+    const SystemAuthLimiterBudget& limiter,
+    const SystemAuthChallengeProbe& probe) {
+    SystemAuthCapabilityInputs inputs;
+    inputs.endpoint_resolved = !endpoint_state.endpoint.empty() &&
+                               !endpoint_state.endpoint_unavailable;
+    inputs.endpoint_is_loopback = endpoint_is_loopback(endpoint_state.endpoint);
+    inputs.firmware_lockout = firmware_lockout;
+    inputs.local_limiter = limiter;
+
+    // Asked, never inferred. Skipped only when there is nothing to ask about
+    // or when the answer cannot matter, so an unresolved or loopback endpoint
+    // never costs a probe.
+    inputs.challenge_observed =
+        inputs.endpoint_resolved && !inputs.endpoint_is_loopback && probe &&
+        probe(endpoint_state.endpoint);
+
+    return inputs;
+}
+
 SystemAuthCapability evaluate_system_auth_capability(
     const SystemAuthCapabilityInputs& inputs) {
     SystemAuthCapability capability;
