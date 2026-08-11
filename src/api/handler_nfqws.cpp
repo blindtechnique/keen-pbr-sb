@@ -3,6 +3,7 @@
 #include "handler_nfqws.hpp"
 #include "handler_backup.hpp"
 #include "maintenance_api.hpp"
+#include "../update/component_transaction_journal.hpp"
 #include "../update/package_footprint.hpp"
 #include "../update/rescue_integrity.hpp"
 #include "../util/nfqws_config_migration.hpp"
@@ -55,6 +56,8 @@ constexpr const char* kPidfile = "/opt/var/run/nfqws2.pid";
 constexpr const char* kConfigDir = "/opt/etc/nfqws2";
 constexpr const char* kOpkgPackageFileList =
     "/opt/lib/opkg/info/nfqws2-keenetic.list";
+constexpr const char* kNfqwsJournal =
+    "/opt/var/lib/keen-pbr/nfqws-transaction.json";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
@@ -1219,14 +1222,40 @@ void register_nfqws_handler_impl(
             // This is the same validated rollback bundle used by the main
             // keen-pbr-sb updater. It includes all nfqws2 configuration,
             // lists, Lua files and user strategies before opkg touches them.
+            // Refuse on top of an unfinished transaction. The previous run
+            // did not report an end, so what is installed is unknown, and
+            // running a package manager over an unknown state is how one
+            // interrupted upgrade becomes an unrecoverable one.
+            const auto journal = read_component_transaction(kNfqwsJournal);
+            if (journal.state != ComponentTransactionState::none) {
+                throw ApiError(
+                    std::string("a previous nfqws2 package operation did not "
+                                "finish (") +
+                        component_transaction_state_name(journal.state) +
+                        "); inspect the component before upgrading again",
+                    409);
+            }
             create_full_rollback_backup(ctx);
             const auto footprint_before =
                 observe_package_footprint(nfqws_package_paths());
             const auto config_before = observe_nfqws_config();
             const auto runtime_before = observe_nfqws_runtime();
+
+            ComponentTransactionRecord record;
+            record.component = "nfqws2-keenetic";
+            record.operation = "upgrade";
+            record.phase = ComponentTransactionPhase::mutating;
+            record.started_at = static_cast<std::int64_t>(std::time(nullptr));
+            record.binary_sha256 = installed_binary_digest(footprint_before);
+            record.config_sha256 = config_before.active_sha256;
+            record.runtime_was_running = runtime_before.process_present;
+            write_component_transaction(kNfqwsJournal, record);
+
             int status = 0;
             auto output = std::string("Rollback backup created.\n") +
                           run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
+            record.phase = ComponentTransactionPhase::verifying;
+            write_component_transaction(kNfqwsJournal, record);
             const auto footprint_after =
                 observe_package_footprint(nfqws_package_paths());
             const auto binary_outcome = judge_package_binary(
@@ -1258,6 +1287,14 @@ void register_nfqws_handler_impl(
             // dead component.
             const bool binary_lost =
                 binary_outcome == PackageBinaryOutcome::missing_after;
+            // Cleared only here, after every check has run. A record that
+            // survives is reported rather than ignored: the next upgrade must
+            // see it, and a removal that silently failed would let it through.
+            if (!clear_component_transaction(kNfqwsJournal)) {
+                output +=
+                    "\nThe transaction record could not be removed; the next "
+                    "upgrade will refuse until it is cleared.\n";
+            }
             return nlohmann::json{{"ok", status == 0 && !binary_lost &&
                                              !nfqws_runtime_is_failure(
                                                  runtime_outcome)},
