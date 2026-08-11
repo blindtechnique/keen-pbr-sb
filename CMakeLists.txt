@@ -384,6 +384,7 @@ set(SOURCES
   src/backup/restore_transaction.cpp
   src/backup/recovery_coordinator.cpp
   src/update/maintenance_lock.cpp
+  src/update/rollback_availability.cpp
   src/config/config.cpp
   src/config/config_writer.cpp
   src/config/dependency_analysis.cpp

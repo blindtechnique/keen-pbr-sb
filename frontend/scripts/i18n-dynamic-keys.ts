@@ -134,6 +134,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "The helper maps the auto/manual endpoint-mode union.",
   },
   {
+    file: "src/components/settings/maintenance-cards.tsx",
+    argument: "`pages.settings.softwareUpdate.${*}`",
+    keys: ["pages.settings.softwareUpdate.rollbackReason*"],
+    reason:
+      "packageRollbackReasonKey resolves only within this family, and its coverage of the backend enum is asserted in src/lib/package-rollback.test.ts.",
+  },
+  {
     file: "src/components/settings/logging-settings-card.tsx",
     argument: "`pages.settings.logging.levels.${*}`",
     keys: ["pages.settings.logging.levels.*"],

@@ -1907,7 +1907,19 @@ export const enTranslation = {
           "The saved IPK and the configuration that came with it will be installed. The current package stays available to roll forward again.",
         rollbackConfirmAction: "Restore the previous IPK",
         rollbackButton: "One-click rollback",
-        rollbackUnavailable: "Appears after a successful managed update",
+        rollbackUnavailable: "Rollback is not available",
+        rollbackReasonRecoveryPending:
+          "An interrupted update is still being recovered. Finish recovery before counting on a rollback.",
+        rollbackReasonRecoveryUnknown:
+          "The rescue store cannot say what is installed. Run rescue recovery before relying on a rollback.",
+        rollbackReasonHelperMissing:
+          "The rescue helper is not installed, so there is nothing here to restore with.",
+        rollbackReasonNeverCaptured:
+          "No previous package has been saved yet. Only an update started from this panel saves one, so a package installed with opkg leaves nothing to roll back to.",
+        rollbackReasonPackageUnverified:
+          "The saved previous package does not match its checksum and will not be installed.",
+        rollbackReasonSnapshotUnverified:
+          "The configuration saved alongside the previous package is incomplete, so restoring it would not reproduce that version.",
         rollbackStarting: "Restoring the previous package",
         rollbackFailed: "Could not start the package rollback",
         downloadBackupBefore: "Download a backup before installing",

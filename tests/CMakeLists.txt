@@ -5,6 +5,7 @@ add_executable(keen-pbr-tests
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
+  test_rollback_availability.cpp
   test_targeted_probe_admission.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp
@@ -127,6 +128,7 @@ add_executable(keen-pbr-tests
   ../src/backup/recovery_coordinator.cpp
   ../src/cmd/recover_persistent_state.cpp
   ../src/update/maintenance_lock.cpp
+  ../src/update/rollback_availability.cpp
   ../src/config/dependency_analysis.cpp
   ../src/config/list_delete_planner.cpp
   ../src/crash/crash_diagnostics.cpp
@@ -313,6 +315,8 @@ add_executable(keen-pbr-rescue-tests
   test_main.cpp
   test_rescue_update.cpp
   test_rescue_integrity.cpp
+  test_rollback_availability.cpp
+  ../src/update/rollback_availability.cpp
 )
 set_target_properties(keen-pbr-rescue-tests PROPERTIES
   CXX_STANDARD 17
