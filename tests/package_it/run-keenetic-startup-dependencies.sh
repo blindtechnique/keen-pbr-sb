@@ -397,7 +397,7 @@ for gated_action in reload reapply-dnsmasq-config start restart stop kill \
         stop-for-upgrade; do
     awk -v action="$gated_action" '
         $0 ~ "^    " action "\\)$" || $0 ~ "^    " action "\\|" { found = 1; next }
-        found && /enter_lifecycle_lock/ { gated = 1; exit }
+        found && /lifecycle_lock_or_fail/ { gated = 1; exit }
         found && /^    [a-z-]+\)/ { exit }
         END { exit(gated ? 0 : 1) }
     ' "$init_script" || {
@@ -405,5 +405,34 @@ for gated_action in reload reapply-dnsmasq-config start restart stop kill \
         exit 1
     }
 done
+
+# The lease must reach children. S79's restart runs "$0" stop, and both service
+# scripts run the rescue guard, all while the lease is held; without the export
+# those would contend with their own parent - the deadlock the whole mechanism
+# exists to avoid, reintroduced one level down.
+lifecycle_lib=$(dirname "$init_script")/../../usr/lib/keen-pbr/lifecycle-lock.sh
+if [ -f "$lifecycle_lib" ]; then
+    grep -q 'export KEEN_PBR_UPDATE_LOCK_PID KEEN_PBR_UPDATE_LOCK_TOKEN' \
+        "$lifecycle_lib" || {
+        echo "lifecycle-lock does not publish its lease to children" >&2
+        exit 1
+    }
+    # A borrowed lease must never be released by the borrower: the owning
+    # transaction outlives the lifecycle step.
+    # Comments are stripped before matching. An earlier version of this check
+    # matched the word anywhere and failed on a comment that merely explains
+    # why the borrower must not release - a test that reads prose instead of
+    # code, which is no test at all.
+    awk '
+        /^enter_lifecycle_lock\(\)/ { inside = 1 }
+        inside && /^[[:space:]]*#/ { next }
+        inside && /release/ { bad = 1 }
+        inside && /^}/ { inside = 0 }
+        END { exit(bad ? 1 : 0) }
+    ' "$lifecycle_lib" || {
+        echo "lifecycle-lock releases a lease it only borrowed" >&2
+        exit 1
+    }
+fi
 
 echo "Keenetic startup dependency checks passed"

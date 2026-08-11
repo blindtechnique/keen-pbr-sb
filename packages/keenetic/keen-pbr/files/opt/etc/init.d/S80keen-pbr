@@ -1521,59 +1521,32 @@ reapply_dnsmasq_config() {
     fi
 }
 
-# Mutual exclusion with package updates.
-#
-# An update holds the update lock across opkg, and opkg runs postinst, and
-# postinst starts this service. Acquiring normally there would wait on our own
-# caller forever, so an inherited lease is honoured instead of contended: the
-# transaction that started us already owns the exclusion we would be asking
-# for. Only a lifecycle invoked from outside any transaction takes its own.
+# Mutual exclusion with package updates. Shared with S79 so the two cannot
+# drift; absent, the service keeps its previous behaviour rather than refusing
+# to start, because a missing file is not evidence of a competing update.
 #
 # Refusing on genuine contention is the point - starting mid-update is the
 # hazard this closes. A lock left by a crashed update does not brick the boot:
 # acquire already removes a stale record whose owning PID identity is gone.
-LIFECYCLE_LOCK_HELPER=/opt/usr/lib/keen-pbr/update-lock.sh
-LIFECYCLE_LOCK_TOKEN=
-LIFECYCLE_LOCK_OWNED=0
+LIFECYCLE_LOCK_LIB=/opt/usr/lib/keen-pbr/lifecycle-lock.sh
+if [ -f "$LIFECYCLE_LOCK_LIB" ] && [ ! -L "$LIFECYCLE_LOCK_LIB" ]; then
+    . "$LIFECYCLE_LOCK_LIB"
+else
+    enter_lifecycle_lock() { return 0; }
+    release_lifecycle_lock() { return 0; }
+fi
 
-release_lifecycle_lock() {
-    [ "$LIFECYCLE_LOCK_OWNED" = "1" ] || return 0
-    "$LIFECYCLE_LOCK_HELPER" release $$ "$LIFECYCLE_LOCK_TOKEN" \
-        >/dev/null 2>&1 || true
-    LIFECYCLE_LOCK_OWNED=0
-}
-
-enter_lifecycle_lock() {
-    # A router without the helper keeps its previous behaviour rather than
-    # refusing to start: an absent lock file is not evidence of a competing
-    # update, and failing closed here would strand a boot on a missing script.
-    [ -x "$LIFECYCLE_LOCK_HELPER" ] || return 0
-
-    inherited_pid=${KEEN_PBR_UPDATE_LOCK_PID:-}
-    inherited_token=${KEEN_PBR_UPDATE_LOCK_TOKEN:-}
-    if [ -n "$inherited_pid" ] && [ -n "$inherited_token" ] &&
-       "$LIFECYCLE_LOCK_HELPER" held "$inherited_pid" "$inherited_token" \
-            >/dev/null 2>&1; then
-        # Borrowed. Never released here: the transaction outlives this action,
-        # and releasing would drop exclusion while the update is still running.
-        return 0
-    fi
-
-    LIFECYCLE_LOCK_TOKEN=$(
-        "$LIFECYCLE_LOCK_HELPER" acquire $$ lifecycle 2>/dev/null
-    ) || {
-        log_error "keen-pbr lifecycle is blocked by an in-flight update; try again once it finishes"
-        return 1
-    }
-    LIFECYCLE_LOCK_OWNED=1
-    return 0
+lifecycle_lock_or_fail() {
+    enter_lifecycle_lock && return 0
+    log_error "keen-pbr lifecycle is blocked by an in-flight update; try again once it finishes"
+    return 1
 }
 
 trap release_lifecycle_lock EXIT
 
 case "$1" in
     reload)
-        enter_lifecycle_lock || exit 1
+        lifecycle_lock_or_fail || exit 1
         run_recovery_guard reload || exit 1
         reapply_dnsmasq_config || exit 1
         signal_service HUP
@@ -1588,13 +1561,13 @@ case "$1" in
         exit $?
         ;;
     reapply-dnsmasq-config)
-        enter_lifecycle_lock || exit 1
+        lifecycle_lock_or_fail || exit 1
         run_recovery_guard reapply-dnsmasq-config || exit 1
         reapply_dnsmasq_config
         exit $?
         ;;
     start)
-        enter_lifecycle_lock || exit_failed_start 1
+        lifecycle_lock_or_fail || exit_failed_start 1
         # A state file left by an unclean process death is deliberately not
         # restored if this start fails. Only state captured by this clean
         # action is safe to roll back.
@@ -1606,7 +1579,7 @@ case "$1" in
         reapply_dnsmasq_config || exit_failed_start $?
         ;;
     restart|restartall)
-        enter_lifecycle_lock || exit 1
+        lifecycle_lock_or_fail || exit 1
         # Keep FastNAT disabled for the complete replacement. Enabling it
         # between TERM and the next start can cache the retiring route while
         # the firmware and daemon are rebuilding netfilter state.
@@ -1620,7 +1593,7 @@ case "$1" in
         set -- start "$2"
         ;;
     stop)
-        enter_lifecycle_lock || exit 1
+        lifecycle_lock_or_fail || exit 1
         stop_service_for_action stop yes
         exit $?
         ;;
@@ -1629,7 +1602,7 @@ case "$1" in
         # transaction already owns the lease and this borrows it; under a bare
         # `opkg upgrade` nothing is held and this takes its own, so a manual
         # upgrade is excluded from a concurrent one just the same.
-        enter_lifecycle_lock || exit 1
+        lifecycle_lock_or_fail || exit 1
         # Keep FastNAT disabled between the retiring daemon and the incoming
         # package. The new postinst will start the replacement and retain the
         # original snapshot for the next real, graceful stop.
@@ -1637,7 +1610,7 @@ case "$1" in
         exit $?
         ;;
     kill)
-        enter_lifecycle_lock || exit 1
+        lifecycle_lock_or_fail || exit 1
         stop_service_for_action kill yes
         exit $?
         ;;
