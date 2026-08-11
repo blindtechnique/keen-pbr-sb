@@ -1060,7 +1060,40 @@ void Daemon::setup_api() {
 
     // Manual "measure now": the scheduled round is deliberately unhurried, so
     // there has to be a way to ask for a fresh figure on the spot.
-    api_server_->post("/api/system/probes/run", [this]() -> std::string {
+    api_server_->post(
+        "/api/system/probes/run",
+        [this](const std::string& request_body) -> std::string {
+        // An optional {"tag": "..."} narrows this to one outbound. Without it
+        // the endpoint keeps its original meaning - the whole coalesced round -
+        // so an older frontend and any script calling it keep working.
+        std::string requested_tag;
+        if (!request_body.empty()) {
+            try {
+                const auto request = nlohmann::json::parse(request_body);
+                if (request.is_object()) {
+                    const auto tag = request.find("tag");
+                    if (tag != request.end() && tag->is_string()) {
+                        requested_tag = tag->get<std::string>();
+                    }
+                }
+            } catch (const nlohmann::json::exception&) {
+                throw ApiError("invalid probe request JSON", 400);
+            }
+        }
+
+        if (!requested_tag.empty()) {
+            const bool started =
+                start_targeted_interface_probe(requested_tag);
+            nlohmann::json response;
+            response["ok"] = true;
+            // False here means the tag is unknown, already being probed, or
+            // the daemon could not take the work. The caller needs to know
+            // that so it can stop a spinner for a probe that never started.
+            response["scheduled"] = started;
+            response["tag"] = requested_tag;
+            return response.dump();
+        }
+
         const auto admission =
             interface_probe_gate_.request(/*manual=*/true);
         bool scheduled = admission.manual_accepted;

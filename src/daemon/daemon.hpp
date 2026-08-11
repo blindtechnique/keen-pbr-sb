@@ -53,6 +53,7 @@
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
 #include "runtime_recovery_policy.hpp"
+#include "targeted_probe_admission.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
 #include "resolver_stream_coordinator.hpp"
@@ -803,6 +804,17 @@ private:
     void start_interface_probe_round() noexcept;
     void start_interface_probe_round_impl(bool failure_retry_round);
     void complete_interface_probe_round() noexcept;
+    // Probes exactly one outbound, for the per-row refresh button.
+    //
+    // Not a round, and deliberately not routed through the round path: that
+    // one calls retain_only(), which drops every target absent from the list
+    // it was given. Handing it a single target would wipe the health of every
+    // other outbound as a side effect of refreshing one row.
+    //
+    // Returns false when the tag is unknown, already in flight, or the daemon
+    // could not take the work, so the caller can say so instead of showing a
+    // spinner for a probe that never started.
+    bool start_targeted_interface_probe(const std::string& tag) noexcept;
     CacheCommitCallback make_guarded_cache_commit_callback();
     void refresh_lists_and_maybe_reload_async(
         std::string source = "autoupdate");
@@ -1141,6 +1153,10 @@ private:
     // tunnels may hold a probe for multiple seconds, so bound queued work to
     // one coalesced trailing round and retain manual state through completion.
     CoalescedManualSingleFlightGate interface_probe_gate_;
+    // Separate from the gate above on purpose: rounds coalesce because they
+    // all measure the same thing, targeted probes must not because they do
+    // not. See TargetedProbeAdmission.
+    TargetedProbeAdmission targeted_probe_admission_;
     OneTrailingFailureRetry interface_probe_failure_retry_;
 
 #ifdef WITH_API

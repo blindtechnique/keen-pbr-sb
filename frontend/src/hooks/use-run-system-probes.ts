@@ -4,9 +4,16 @@ import { toast } from "sonner"
 
 import { queryKeys } from "@/api/query-keys"
 
-type ProbeRunResponse = { ok: boolean; scheduled: boolean }
+type ProbeRunResponse = { ok: boolean; scheduled: boolean; tag?: string }
 
-/** Shared frontend entry point for the daemon-wide, coalesced probe round. */
+/**
+ * Shared frontend entry point for the probe.
+ *
+ * Called with a tag it measures that one outbound; called with nothing it runs
+ * the daemon-wide coalesced round, which is what the page-level button wants.
+ * Passing the tag is what makes a per-row button mean the row it sits on -
+ * before this, every row triggered the whole round.
+ */
 export function useRunSystemProbes() {
   const queryClient = useQueryClient()
   const { t } = useTranslation()
@@ -18,8 +25,13 @@ export function useRunSystemProbes() {
         queryClient.getQueryState(queryKeys.runtimeOutbounds())
           ?.dataUpdatedAt ?? 0,
     }),
-    mutationFn: async (): Promise<ProbeRunResponse> => {
-      const response = await fetch("/api/system/probes/run", { method: "POST" })
+    mutationFn: async (tag?: string): Promise<ProbeRunResponse> => {
+      const response = await fetch("/api/system/probes/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // An empty body keeps the endpoint's original whole-round meaning.
+        body: tag ? JSON.stringify({ tag }) : "",
+      })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return response.json()
     },

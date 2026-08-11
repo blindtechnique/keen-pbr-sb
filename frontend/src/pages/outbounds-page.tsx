@@ -377,20 +377,25 @@ export function OutboundsPage({
               ? []
               : [
                   {
-                    // Проверка задержки бьёт по всем выходам разом: у демона
-                    // одна общая проверка, отдельной «проверь только этот»
-                    // не существует.
-                    disabled: probeMutation.isPending,
+                    // Замеряется именно этот выход. Раньше кнопка на строке
+                    // запускала общий раунд по всем сразу — владелец увидел
+                    // это в интерфейсе, и он был прав: раунд действительно
+                    // трогал все.
+                    disabled:
+                      probeMutation.isPending &&
+                      probeMutation.variables === item.id,
                     icon: (
                       <RotateCw
                         className={cn(
                           "h-4 w-4",
-                          probeMutation.isPending && "animate-spin"
+                          probeMutation.isPending &&
+                            probeMutation.variables === item.id &&
+                            "animate-spin"
                         )}
                       />
                     ),
                     label: t("transports.latencyRefresh"),
-                    onClick: () => probeMutation.mutate(),
+                    onClick: () => probeMutation.mutate(item.id),
                   },
                 ]),
             {

@@ -2939,6 +2939,112 @@ void Daemon::probe_interfaces_now() noexcept {
     start_interface_probe_round();
 }
 
+bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
+    try {
+        const auto targets =
+            collect_interface_probe_targets(config_, outbound_marks_);
+        const auto found = std::find_if(
+            targets.begin(), targets.end(),
+            [&tag](const InterfaceProbe::Target& candidate) {
+                return candidate.tag == tag;
+            });
+        if (found == targets.end()) {
+            // Unknown, or not an interface outbound. Saying so beats probing
+            // nothing and reporting success.
+            return false;
+        }
+        const auto target = *found;
+
+        auto lease = targeted_probe_admission_.acquire(tag);
+        if (!lease.admitted()) return false;
+
+        const auto expected_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+
+        // NOTE: no retain_only() here, unlike the round path. This measures
+        // one target and must leave every other outbound's published health
+        // exactly as it found it.
+        const bool posted = blocking_executor_.try_post(
+            "targeted-interface-probe:" + tag,
+            [this, target, expected_runtime_generation,
+             lease = std::make_shared<TargetedProbeAdmission::Lease>(
+                 std::move(lease))]() mutable {
+                InterfaceProbe::Observation observation;
+                try {
+                    observation = interface_probe_.measure_one(target);
+                } catch (...) {
+                    // The lease dies with this lambda, so the row becomes
+                    // clickable again rather than staying stuck.
+                    return;
+                }
+                (void)post_control_task(
+                    [this, target, expected_runtime_generation,
+                     observation = std::move(observation), lease]() {
+                        try {
+                            const auto current_targets =
+                                collect_interface_probe_targets(
+                                    config_, outbound_marks_);
+                            // The config may have been reloaded while we were
+                            // on the network. Publishing then would attach a
+                            // latency measured for one transport to whatever
+                            // now answers to that tag.
+                            if (!interface_probe_target_is_current(
+                                    expected_runtime_generation,
+                                    runtime_generation_.load(
+                                        std::memory_order_acquire),
+                                    target,
+                                    current_targets)) {
+                                return;
+                            }
+                            std::vector<std::string> affected_urltests;
+                            if (urltest_manager_) {
+                                affected_urltests = find_affected_urltests(
+                                    config_.outbounds.value_or(
+                                        std::vector<Outbound>{}),
+                                    {target.tag});
+                            }
+                            const bool transitioned =
+                                interface_probe_.commit_observation(
+                                    observation);
+                            if (urltest_manager_ && transitioned) {
+                                for (const auto& urltest_tag :
+                                     affected_urltests) {
+                                    urltest_manager_
+                                        ->trigger_external_health_test(
+                                            urltest_tag);
+                                }
+                            }
+#ifdef WITH_API
+                            if (status_stream_) {
+                                try {
+                                    status_stream_->reconcile();
+                                } catch (...) {
+                                }
+                            }
+#endif
+                        } catch (const std::exception& error) {
+                            try {
+                                Logger::instance().info(
+                                    "Targeted probe result for '{}' could "
+                                    "not be published: {}",
+                                    target.tag,
+                                    error.what());
+                            } catch (...) {
+                            }
+                        } catch (...) {
+                        }
+                    },
+                    "targeted-interface-probe-result:" + target.tag);
+            });
+
+        // try_post may have refused without taking the lambda, in which case
+        // the lease above is still ours and releases on scope exit.
+        return posted;
+    } catch (...) {
+        return false;
+    }
+}
+
 void Daemon::start_interface_probe_round() noexcept {
     const bool failure_retry_round =
         interface_probe_failure_retry_.consume_for_round();

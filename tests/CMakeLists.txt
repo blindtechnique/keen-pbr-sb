@@ -5,6 +5,7 @@ add_executable(keen-pbr-tests
   test_ppe_deoffload.cpp
   test_system_auth_capability.cpp
   test_step_up.cpp
+  test_targeted_probe_admission.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp
   test_iptables_builder.cpp
