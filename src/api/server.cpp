@@ -306,6 +306,11 @@ bool resolve_static_file_under_root(const std::filesystem::path& root,
     return true;
 }
 
+// Long enough that health polling never becomes a probe loop, short enough
+// that a firmware whose web service just came back is noticed while the
+// operator is still looking at the page.
+constexpr std::chrono::seconds kChallengeProbeTtl{60};
+
 struct WebAuthConfig {
     bool enabled{false};
     bool misconfigured{false};
@@ -585,6 +590,10 @@ struct ApiServer::Impl {
     std::mutex auth_endpoint_discovery_mutex;
     std::mutex lockout_policy_mutex;
     std::chrono::steady_clock::time_point lockout_policy_retry_after{};
+    std::mutex challenge_probe_mutex;
+    std::string challenge_probe_endpoint;
+    bool challenge_probe_result{false};
+    std::chrono::steady_clock::time_point challenge_probe_expires{};
     std::mutex auth_mutex;
     std::chrono::steady_clock::time_point auth_endpoint_retry_after{};
     WebAuthConfig auth;
@@ -718,6 +727,28 @@ struct ApiServer::Impl {
         login_rate_limiter.record_success(remote_address);
         outcome.ok = true;
         return outcome;
+    }
+
+    // Whether the endpoint actually serves the Keenetic challenge, cached so a
+    // health poll cannot turn into a probe per request.
+    //
+    // No credentials are sent: probe_keenetic_auth_challenge only asks whether
+    // the realm and challenge headers come back. A failed probe is cached too,
+    // and for the same interval - retrying on every health request would turn
+    // an unreachable endpoint into a burst of connection attempts.
+    bool keenetic_challenge_observed(const std::string& endpoint) {
+        if (endpoint.empty()) return false;
+
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lock(challenge_probe_mutex);
+        if (challenge_probe_endpoint == endpoint &&
+            now < challenge_probe_expires) {
+            return challenge_probe_result;
+        }
+        challenge_probe_endpoint = endpoint;
+        challenge_probe_result = probe_keenetic_auth_challenge(endpoint);
+        challenge_probe_expires = now + kChallengeProbeTtl;
+        return challenge_probe_result;
     }
 
     // Reads the firmware policy at most once per retry interval, on the login
@@ -1582,10 +1613,17 @@ std::optional<SystemAuthHealthSnapshot> ApiServer::system_auth_health() {
         !auth.keenetic_endpoint.empty() && !auth.endpoint_unavailable;
     inputs.endpoint_is_loopback =
         endpoint_is_loopback(auth.keenetic_endpoint);
-    // Only an endpoint that NDMS discovery accepted was actually probed for
-    // the challenge. A hand-configured one never was, and claiming otherwise
-    // would let a manual entry pose as a proven verifier.
-    inputs.challenge_observed = auth.keenetic_endpoint_from_ndms;
+    // Asked of the endpoint, not inferred from where the endpoint came from.
+    //
+    // This used to read keenetic_endpoint_from_ndms, which was wrong in the
+    // one direction that mattered. A stored endpoint is not an unproven one -
+    // it is one proved earlier and cached - and on a healthy router nothing
+    // ever re-discovers it, because rediscovery only runs when the endpoint is
+    // unreachable. So the flag stayed false forever, the verdict stayed
+    // challenge_absent forever, and a check built to authorise retiring the
+    // local password could never authorise anything.
+    inputs.challenge_observed =
+        impl_->keenetic_challenge_observed(auth.keenetic_endpoint);
     inputs.firmware_lockout = auth.firmware_lockout;
     inputs.local_limiter.max_failures =
         static_cast<std::uint32_t>(kAuthLoginMaxFailures);
