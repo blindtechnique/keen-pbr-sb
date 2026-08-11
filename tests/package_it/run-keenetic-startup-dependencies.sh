@@ -384,4 +384,26 @@ if /bin/sh -n -c ':' >/dev/null 2>&1; then
     /bin/sh -n "$0"
 fi
 
+# Every action that mutates the running service must take the update lock, so
+# a lifecycle step cannot run underneath an in-flight package update. This is a
+# static check because the realistic regression is not a broken gate but a
+# missing one: someone adds an action and does not think about the lock, and
+# nothing at runtime says so.
+#
+# reapply-firewall and reapply-nat are deliberately absent: they only signal the
+# already-running daemon to re-derive netfilter state and touch no package or
+# persistent file.
+for gated_action in reload reapply-dnsmasq-config start restart stop kill \
+        stop-for-upgrade; do
+    awk -v action="$gated_action" '
+        $0 ~ "^    " action "\\)$" || $0 ~ "^    " action "\\|" { found = 1; next }
+        found && /enter_lifecycle_lock/ { gated = 1; exit }
+        found && /^    [a-z-]+\)/ { exit }
+        END { exit(gated ? 0 : 1) }
+    ' "$init_script" || {
+        echo "S80 action '$gated_action' does not take the update lock" >&2
+        exit 1
+    }
+done
+
 echo "Keenetic startup dependency checks passed"
