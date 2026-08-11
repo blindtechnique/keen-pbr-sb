@@ -1287,7 +1287,28 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             // Enforced here rather than in each privileged handler. A guard
             // every handler has to remember to call is a guard that a new
             // handler will not have.
-            if (requires_step_up(req.method, req.path) &&
+            //
+            // The body is parsed only for the paths that dispatch on an action
+            // field, and only to read that one field. Doing it for every
+            // request would put a JSON parse in front of the whole API to
+            // answer a question one route asks.
+            std::string step_up_action;
+            if (path_dispatches_on_action(req.path)) {
+                try {
+                    const auto body = nlohmann::json::parse(req.body);
+                    if (body.is_object()) {
+                        const auto found = body.find("action");
+                        if (found != body.end() && found->is_string()) {
+                            step_up_action = found->get<std::string>();
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // An unparseable body names no action, so it needs no
+                    // step-up. The handler will reject it on its own terms
+                    // rather than being told it needs a password first.
+                }
+            }
+            if (requires_step_up(req.method, req.path, step_up_action) &&
                 !state->step_up_grants.contains(token)) {
                 res.status = 403;
                 res.set_content(

@@ -41,4 +41,36 @@ struct StepUpProtectedRoute {
 // reviewed and tested as a list rather than inferred from control flow.
 const std::vector<StepUpProtectedRoute>& step_up_protected_routes();
 
+// Some routes are not one operation. POST /api/nfqws multiplexes sixteen
+// actions behind a JSON "action" field, all but one of them ordinary reads and
+// edits the panel performs constantly.
+//
+// Guarding such a route wholesale is what broke it: a password prompt landed in
+// front of opening a list and reading settings. For these the unit of privilege
+// is the action, not the path, and treating the path as the unit was a mistake
+// the route list could not express.
+struct StepUpProtectedAction {
+    std::string method;
+    std::string path;
+    std::string action;
+};
+
+const std::vector<StepUpProtectedAction>& step_up_protected_actions();
+
+// Whether this path dispatches on an action field, so the caller knows it must
+// supply one. Paths outside this set are decided by method and path alone.
+bool path_dispatches_on_action(std::string_view path);
+
+// Action-aware form. `action` is the value of the request body's "action"
+// field; empty when absent or unparseable.
+//
+// An unrecognised action on a multiplexing path requires no step-up. That is
+// deliberate: the alternative is prompting for a password on every action
+// nobody listed, which is how the panel broke. The listed action is the
+// privileged one, and a test walks the list against the handler's dispatch so a
+// new privileged action shows up as a failure rather than as an omission.
+bool requires_step_up(std::string_view method,
+                      std::string_view path,
+                      std::string_view action);
+
 } // namespace keen_pbr3

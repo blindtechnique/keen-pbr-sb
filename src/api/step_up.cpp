@@ -55,13 +55,36 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
         {"POST", "/api/system/update"},
         {"POST", "/api/system/update/rollback"},
         {"POST", "/api/system/naive-component"},
-        {"POST", "/api/nfqws"},
         {"POST", "/api/backup/restore"},
         {"POST", "/api/backup/rollback"},
         {"POST", "/api/system/remote-access"},
         {"POST", "/api/backup"},
     };
     return routes;
+}
+
+const std::vector<StepUpProtectedAction>& step_up_protected_actions() {
+    // POST /api/nfqws dispatches on an "action" field. Only `upgrade` installs
+    // software; the other fifteen read files, save strategies, clear logs and
+    // restart the service - things the panel does constantly and which must not
+    // ask for a password.
+    //
+    // `import_bundle` was considered and left out: it writes nfqws lists and
+    // configuration, which is an edit like the others, not an install.
+    static const std::vector<StepUpProtectedAction> actions = {
+        {"POST", "/api/nfqws", "upgrade"},
+    };
+    return actions;
+}
+
+bool path_dispatches_on_action(const std::string_view path) {
+    const auto candidate = normalised_path(path);
+    const auto& actions = step_up_protected_actions();
+    return std::any_of(
+        actions.begin(), actions.end(),
+        [&](const StepUpProtectedAction& entry) {
+            return entry.path == candidate;
+        });
 }
 
 bool requires_step_up(const std::string_view method,
@@ -72,6 +95,22 @@ bool requires_step_up(const std::string_view method,
         routes.begin(), routes.end(),
         [&](const StepUpProtectedRoute& route) {
             return route.method == method && route.path == candidate;
+        });
+}
+
+bool requires_step_up(const std::string_view method,
+                      const std::string_view path,
+                      const std::string_view action) {
+    if (requires_step_up(method, path)) {
+        return true;
+    }
+    const auto candidate = normalised_path(path);
+    const auto& actions = step_up_protected_actions();
+    return std::any_of(
+        actions.begin(), actions.end(),
+        [&](const StepUpProtectedAction& entry) {
+            return entry.method == method && entry.path == candidate &&
+                   entry.action == action;
         });
 }
 
