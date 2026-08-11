@@ -68,17 +68,28 @@ Daemon::build_runtime_interface_inventory_with_uptime() {
         return api::RuntimeInterfaceInventoryResponse{};
     }
 
+    // Read as a pair: anchors are kept on the steady clock and only expressed
+    // in wall time at publication, so the two must describe the same instant.
+    const auto observed_at = InterfaceUptimeAnchorStore::Clock::now();
+    const auto wall_now = std::chrono::system_clock::now();
+
+    std::vector<std::string> runtime_names;
+    runtime_names.reserve(dumped.size());
+    for (const auto& item : dumped) {
+        runtime_names.push_back(item.name);
+    }
+    // Open the round before folding in any firmware observation. Ordering is
+    // load-bearing: begin_round records when each interface entered the set,
+    // and a cached catalog read before that instant describes a previous
+    // lifetime of a reused name.
+    interface_uptime_anchors_.begin_round(runtime_names, observed_at);
+
     // peek(), never get(): this runs on an HTTP worker and on the SSE
     // reconcile path, and a blocking loopback RCI request there would stall
     // both. A cold catalog simply leaves the firmware anchor unavailable,
     // which the entry then reports as unknown instead of guessing.
     const auto ndms = shared_ndms_catalog_cache().peek();
     if (ndms.observed_at) {
-        std::vector<std::string> runtime_names;
-        runtime_names.reserve(dumped.size());
-        for (const auto& item : dumped) {
-            runtime_names.push_back(item.name);
-        }
         for (const auto& metadata : ndms.catalog.interface_metadata) {
             if (!metadata.uptime_seconds) {
                 continue;
@@ -100,7 +111,8 @@ Daemon::build_runtime_interface_inventory_with_uptime() {
         std::move(dumped),
         &interface_traffic_sampler_,
         &interface_uptime_anchors_,
-        std::chrono::system_clock::now());
+        observed_at,
+        wall_now);
 }
 
 void Daemon::sample_interface_traffic_now() {

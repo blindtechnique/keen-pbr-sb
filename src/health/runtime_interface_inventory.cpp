@@ -30,7 +30,8 @@ api::RuntimeInterfaceInventoryEntry build_runtime_interface_inventory_entry(
     DumpedInterface dumped,
     const InterfaceTrafficSampler* traffic_sampler,
     InterfaceUptimeAnchorStore* uptime_anchors,
-    std::chrono::system_clock::time_point observed_at) {
+    InterfaceUptimeAnchorStore::TimePoint observed_at,
+    std::chrono::system_clock::time_point wall_now) {
     // Read before any member of `dumped` is moved from.
     const bool link_up = interface_link_is_up(dumped);
 
@@ -55,7 +56,15 @@ api::RuntimeInterfaceInventoryEntry build_runtime_interface_inventory_entry(
     if (uptime_anchors != nullptr) {
         uptime_anchors->observe_link_state(entry.name, link_up, observed_at);
         if (const auto anchor = uptime_anchors->anchor(entry.name)) {
-            entry.link_up_since_unix_ms = unix_timestamp_ms(anchor->up_since);
+            // The anchor is a steady instant; only the elapsed time it stands
+            // for is meaningful. Expressing it in wall time here, from the
+            // pair the caller read together, means an NTP step relocates the
+            // published instant instead of inflating the uptime by the size
+            // of the step - which on a router with no RTC is hours.
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    observed_at - anchor->up_since);
+            entry.link_up_since_unix_ms = unix_timestamp_ms(wall_now - elapsed);
             entry.link_uptime_source = map_uptime_source(anchor->source);
         }
         // No anchor means no confirmed transition is known. Both fields stay
@@ -137,25 +146,15 @@ api::RuntimeInterfaceInventoryResponse build_runtime_interface_inventory_respons
     std::vector<DumpedInterface> dumped_interfaces,
     const InterfaceTrafficSampler* traffic_sampler,
     InterfaceUptimeAnchorStore* uptime_anchors,
-    std::chrono::system_clock::time_point observed_at) {
+    InterfaceUptimeAnchorStore::TimePoint observed_at,
+    std::chrono::system_clock::time_point wall_now) {
     api::RuntimeInterfaceInventoryResponse response;
-
-    if (uptime_anchors != nullptr) {
-        std::vector<std::string> present;
-        present.reserve(dumped_interfaces.size());
-        for (const auto& dumped : dumped_interfaces) {
-            present.push_back(dumped.name);
-        }
-        // A tunnel that was deleted and recreated under the same name is a new
-        // lifetime, so the vanished device's anchor must not be inherited.
-        uptime_anchors->retain_only(present);
-    }
 
     for (auto& dumped : dumped_interfaces) {
         response.interfaces.push_back(
             build_runtime_interface_inventory_entry(
                 std::move(dumped), traffic_sampler, uptime_anchors,
-                observed_at));
+                observed_at, wall_now));
     }
 
     return response;
@@ -167,6 +166,7 @@ api::RuntimeInterfaceInventoryResponse build_runtime_interface_inventory_respons
     InterfaceUptimeAnchorStore* uptime_anchors) {
     return build_runtime_interface_inventory_response(
         netlink.dump_interfaces(), traffic_sampler, uptime_anchors,
+        InterfaceUptimeAnchorStore::Clock::now(),
         std::chrono::system_clock::now());
 }
 

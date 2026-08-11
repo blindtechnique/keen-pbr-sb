@@ -1,6 +1,7 @@
 #include "interface_uptime_anchor.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace keen_pbr3 {
@@ -30,7 +31,29 @@ void InterfaceUptimeAnchorStore::latch_locked(State& state,
             return;
         }
     }
-    state.anchor = InterfaceUptimeAnchor{candidate, source};
+    state.anchor = Anchor{candidate, source};
+}
+
+void InterfaceUptimeAnchorStore::begin_round(
+    const std::vector<std::string>& present,
+    TimePoint now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto it = states_.begin(); it != states_.end();) {
+        const bool keep = std::find(present.begin(), present.end(), it->first)
+            != present.end();
+        it = keep ? std::next(it) : states_.erase(it);
+    }
+
+    for (const auto& name : present) {
+        const auto inserted = states_.emplace(name, State{});
+        if (inserted.second) {
+            // A name we have not seen before, or one that vanished and came
+            // back. Either way this is the start of a lifetime we can vouch
+            // for, and nothing observed before it describes this interface.
+            inserted.first->second.first_seen = now;
+        }
+    }
 }
 
 void InterfaceUptimeAnchorStore::observe_firmware_uptime(
@@ -38,8 +61,22 @@ void InterfaceUptimeAnchorStore::observe_firmware_uptime(
     std::int64_t uptime_seconds,
     TimePoint observed_at) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto& state = states_[std::string(interface_name)];
+    const auto entry = states_.find(std::string(interface_name));
+    if (entry == states_.end()) {
+        // Not part of the current round. The firmware knows about interfaces
+        // the kernel does not currently have, and inventing state for them
+        // here would resurrect entries begin_round has just dropped.
+        return;
+    }
+    auto& state = entry->second;
 
+    if (observed_at < state.first_seen) {
+        // Read before this interface entered the round set, so it describes a
+        // previous lifetime. This is the deleted-and-recreated tunnel: the
+        // catalog cache can still be serving a pre-deletion snapshot, and
+        // applying it would hand the new interface the dead one's uptime.
+        return;
+    }
     if (state.observed_at && observed_at < *state.observed_at) {
         // Served from a cache that lags behind the newest edge we already
         // applied. Letting it through would resurrect the previous lifetime.
@@ -67,7 +104,14 @@ void InterfaceUptimeAnchorStore::observe_link_state(
     bool link_up,
     TimePoint observed_at) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto& state = states_[std::string(interface_name)];
+    const auto entry = states_.find(std::string(interface_name));
+    if (entry == states_.end()) {
+        // Outside the current round. begin_round is the only way an interface
+        // enters this store, so that every entry carries a first_seen the
+        // firmware guard can compare against.
+        return;
+    }
+    auto& state = entry->second;
 
     if (state.observed_at && observed_at < *state.observed_at) {
         return;
@@ -99,8 +143,8 @@ void InterfaceUptimeAnchorStore::observe_link_state(
     // guessing "now" here would publish daemon uptime under an interface name.
 }
 
-std::optional<InterfaceUptimeAnchor> InterfaceUptimeAnchorStore::anchor(
-    std::string_view interface_name) const {
+std::optional<InterfaceUptimeAnchorStore::Anchor>
+InterfaceUptimeAnchorStore::anchor(std::string_view interface_name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = states_.find(std::string(interface_name));
     if (it == states_.end()) {
@@ -112,17 +156,6 @@ std::optional<InterfaceUptimeAnchor> InterfaceUptimeAnchorStore::anchor(
 void InterfaceUptimeAnchorStore::forget(std::string_view interface_name) {
     std::lock_guard<std::mutex> lock(mutex_);
     states_.erase(std::string(interface_name));
-}
-
-void InterfaceUptimeAnchorStore::retain_only(
-    const std::vector<std::string>& interface_names) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = states_.begin(); it != states_.end();) {
-        const bool keep = std::find(interface_names.begin(),
-                                    interface_names.end(),
-                                    it->first) != interface_names.end();
-        it = keep ? std::next(it) : states_.erase(it);
-    }
 }
 
 void InterfaceUptimeAnchorStore::clear() {

@@ -22,21 +22,24 @@ enum class InterfaceUptimeSource : std::uint8_t {
     observed,
 };
 
-struct InterfaceUptimeAnchor {
-    std::chrono::system_clock::time_point up_since{};
-    InterfaceUptimeSource source{InterfaceUptimeSource::observed};
-};
-
 // Remembers when each interface last completed a confirmed up-transition.
 //
+// Anchors live on the STEADY clock, never on the wall clock. A Keenetic has no
+// battery-backed RTC: the daemon starts with the firmware's fallback time and
+// NTP steps the clock minutes later. An anchor latched at the pre-sync instant
+// and never re-derived would then report an uptime longer than the router has
+// existed - and for an interface the firmware never reports, nothing would ever
+// correct it. Callers convert to wall time only at publication, from a steady
+// and wall pair read together, so a clock step moves the published instant
+// without changing the elapsed time it represents.
+//
 // Both available inputs are relative - the firmware reports "up for N seconds"
-// and netlink reports an edge - so the absolute instant has to be derived.
-// Deriving it again on every poll would make the rendered uptime jitter by the
-// poll interval and by the one-second granularity of the firmware counter, so
-// the store latches an anchor once and then defends it: a freshly derived
-// anchor replaces the stored one only when the two disagree by more than
-// `tolerance`. That is what an actual flap looks like and what poll noise
-// never is.
+// and netlink reports an edge - so the instant has to be derived. Deriving it
+// again on every poll would make the rendered uptime jitter by the poll
+// interval and by the one-second granularity of the firmware counter, so the
+// store latches once and then defends: a freshly derived anchor replaces the
+// stored one only when the two disagree by more than `tolerance`. That is what
+// an actual flap looks like and what poll noise never is.
 //
 // An interface with no confirmed transition has no anchor at all, and callers
 // must render that as unknown. Substituting process or router uptime would
@@ -44,13 +47,26 @@ struct InterfaceUptimeAnchor {
 // exactly the failure this store exists to prevent.
 class InterfaceUptimeAnchorStore {
 public:
-    using Clock = std::chrono::system_clock;
+    using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
     static constexpr std::chrono::seconds kDefaultTolerance{5};
 
+    struct Anchor {
+        TimePoint up_since{};
+        InterfaceUptimeSource source{InterfaceUptimeSource::observed};
+    };
+
     explicit InterfaceUptimeAnchorStore(
         Clock::duration tolerance = kDefaultTolerance);
+
+    // Opens an observation round: forgets every interface outside `present` and
+    // records the first sighting of the ones that are new.
+    //
+    // One call under one lock on purpose. Two API workers can build an
+    // inventory concurrently, and splitting this into separate drop and touch
+    // steps let one worker's round erase an entry the other had just created.
+    void begin_round(const std::vector<std::string>& present, TimePoint now);
 
     // Applies the firmware "up for N seconds" counter as read at
     // `observed_at`. A non-positive counter is the firmware saying the
@@ -66,27 +82,21 @@ public:
     //
     // The FIRST observation of an already-up interface deliberately creates no
     // anchor: this daemon cannot know when that link came up, and dating it to
-    // "now" would silently report daemon uptime wearing an interface label.
-    // Such an interface stays unknown until the firmware counter fills it in.
+    // "now" would publish daemon uptime wearing an interface label. Such an
+    // interface stays unknown until the firmware counter fills it in.
     void observe_link_state(std::string_view interface_name,
                             bool link_up,
                             TimePoint observed_at);
 
-    std::optional<InterfaceUptimeAnchor> anchor(
-        std::string_view interface_name) const;
+    std::optional<Anchor> anchor(std::string_view interface_name) const;
 
     void forget(std::string_view interface_name);
-    // Drops every entry outside `interface_names`. Callers that rebuild the
-    // whole interface set pass it here so a tunnel that was deleted and later
-    // recreated under the same name cannot inherit the previous lifetime's
-    // anchor.
-    void retain_only(const std::vector<std::string>& interface_names);
     void clear();
     std::size_t size() const;
 
 private:
     struct State {
-        std::optional<InterfaceUptimeAnchor> anchor;
+        std::optional<Anchor> anchor;
         // Tri-state on purpose. "Never observed" must not collapse into
         // "observed down", or the first sighting of an already-up interface
         // would read as a fresh up-transition.
@@ -96,6 +106,12 @@ private:
         // lag by up to its TTL, and a stale snapshot must never be allowed to
         // undo a newer netlink edge.
         std::optional<TimePoint> observed_at;
+        // When this interface entered the current round set. A firmware
+        // observation read BEFORE this instant describes a previous lifetime -
+        // the case where a tunnel is deleted and recreated under the same name
+        // while a pre-deletion catalog is still cached, which would otherwise
+        // hand the new interface the dead one's uptime.
+        TimePoint first_seen{};
         // Set once the firmware has reported on this interface. A tunnel
         // device stays administratively and operationally "up" in the kernel
         // for as long as it exists, including while the tunnel itself is

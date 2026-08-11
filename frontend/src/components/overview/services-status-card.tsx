@@ -202,7 +202,12 @@ export function ServicesStatusCard() {
     },
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["nfqws"] })
-      toast.success(t("overview.services.restartComplete"))
+      // Not restartComplete: that string promises "routing and DNS are ready",
+      // which this path never checks. It belongs to the keen-pbr and sing-box
+      // restarts, which do await waitForRuntimeReadiness.
+      toast.success(
+        t("overview.services.outcomeSucceeded", { service: "nfqws2" })
+      )
       if (result.output.trim().length > 0) {
         setRestartOutcome({ service: "nfqws2", ...result })
       }

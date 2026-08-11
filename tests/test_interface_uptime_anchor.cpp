@@ -11,23 +11,28 @@ namespace keen_pbr3 {
 
 namespace {
 
-using Clock = InterfaceUptimeAnchorStore::Clock;
-using TimePoint = InterfaceUptimeAnchorStore::TimePoint;
+using Store = InterfaceUptimeAnchorStore;
+using TimePoint = Store::TimePoint;
 
-// A fixed, arbitrary wall instant. Nothing in the store reads the real clock,
+// A fixed, arbitrary steady instant. Nothing in the store reads a real clock,
 // so every case below is deterministic.
 TimePoint base() {
-    return TimePoint{std::chrono::seconds{1'754'812'800}};
+    return TimePoint{std::chrono::hours{1000}};
 }
 
 TimePoint at(std::int64_t offset_seconds) {
     return base() + std::chrono::seconds{offset_seconds};
 }
 
+std::vector<std::string> present(std::vector<std::string> names) {
+    return names;
+}
+
 } // namespace
 
 TEST_CASE("first sighting of an already-up interface yields no anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_link_state("nwg1", true, at(0));
 
@@ -38,7 +43,8 @@ TEST_CASE("first sighting of an already-up interface yields no anchor") {
 }
 
 TEST_CASE("a down-to-up transition anchors at the edge") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_link_state("nwg1", false, at(0));
     store.observe_link_state("nwg1", true, at(10));
@@ -50,11 +56,13 @@ TEST_CASE("a down-to-up transition anchors at the edge") {
 }
 
 TEST_CASE("re-observing an unchanged up link never moves the anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_link_state("nwg1", false, at(0));
     store.observe_link_state("nwg1", true, at(10));
     for (std::int64_t tick = 11; tick < 60; ++tick) {
+        store.begin_round(present({"nwg1"}), at(tick));
         store.observe_link_state("nwg1", true, at(tick));
     }
 
@@ -66,7 +74,8 @@ TEST_CASE("re-observing an unchanged up link never moves the anchor") {
 }
 
 TEST_CASE("link down drops the anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_link_state("nwg1", false, at(0));
     store.observe_link_state("nwg1", true, at(10));
@@ -76,7 +85,8 @@ TEST_CASE("link down drops the anchor") {
 }
 
 TEST_CASE("firmware uptime anchors an interface the daemon never saw come up") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     // The whole point of the firmware source: this link came up long before
     // the daemon started, so no netlink edge for it exists anywhere.
@@ -89,7 +99,8 @@ TEST_CASE("firmware uptime anchors an interface the daemon never saw come up") {
 }
 
 TEST_CASE("firmware re-derivation within tolerance leaves the anchor still") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_firmware_uptime("nwg1", 3600, at(0));
     // A later poll of a counter that ticks in whole seconds re-derives an
@@ -104,7 +115,8 @@ TEST_CASE("firmware re-derivation within tolerance leaves the anchor still") {
 }
 
 TEST_CASE("firmware disagreement beyond tolerance is a flap and re-anchors") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_firmware_uptime("nwg1", 3600, at(0));
     store.observe_firmware_uptime("nwg1", 12, at(60));
@@ -115,7 +127,8 @@ TEST_CASE("firmware disagreement beyond tolerance is a flap and re-anchors") {
 }
 
 TEST_CASE("firmware zero means not up and clears the anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_firmware_uptime("nwg1", 3600, at(0));
     store.observe_firmware_uptime("nwg1", 0, at(30));
@@ -124,7 +137,8 @@ TEST_CASE("firmware zero means not up and clears the anchor") {
 }
 
 TEST_CASE("a stale firmware snapshot cannot undo a newer edge") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_link_state("nwg1", false, at(100));
     store.observe_link_state("nwg1", true, at(110));
@@ -140,8 +154,49 @@ TEST_CASE("a stale firmware snapshot cannot undo a newer edge") {
     CHECK(anchor->source == InterfaceUptimeSource::observed);
 }
 
+TEST_CASE("a recreated interface never inherits the dead one's firmware uptime") {
+    Store store;
+
+    // A tunnel that has been up for an hour, with a catalog read at t=0.
+    store.begin_round(present({"nwg0"}), at(0));
+    store.observe_firmware_uptime("nwg0", 3600, at(0));
+    REQUIRE(store.anchor("nwg0").has_value());
+
+    // It is deleted: this round's netlink dump no longer lists it.
+    store.begin_round(present({}), at(50));
+    // ...and recreated seconds later under the same name.
+    store.begin_round(present({"nwg0"}), at(60));
+
+    // The catalog cache is STILL serving the pre-deletion snapshot, which
+    // says this name has been up for an hour. It describes a device that no
+    // longer exists, and applying it would show an hour of uptime for a
+    // tunnel that came up seconds ago.
+    store.observe_firmware_uptime("nwg0", 3600, at(0));
+
+    CHECK_FALSE(store.anchor("nwg0").has_value());
+}
+
+TEST_CASE("a fresh firmware read after recreation is accepted") {
+    Store store;
+
+    store.begin_round(present({"nwg0"}), at(0));
+    store.observe_firmware_uptime("nwg0", 3600, at(0));
+    store.begin_round(present({}), at(50));
+    store.begin_round(present({"nwg0"}), at(60));
+
+    // Rejecting the stale snapshot must not wedge the interface: a catalog
+    // read after the interface reappeared is exactly what should fill it in.
+    store.observe_firmware_uptime("nwg0", 30, at(90));
+
+    const auto anchor = store.anchor("nwg0");
+    REQUIRE(anchor.has_value());
+    CHECK(anchor->up_since == at(60));
+    CHECK(anchor->source == InterfaceUptimeSource::firmware);
+}
+
 TEST_CASE("a dead tunnel that stays up in the kernel gets no invented anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg0"}), at(0));
 
     // A WireGuard device is administratively up and reports operstate
     // "unknown" for as long as it exists, including while the tunnel itself is
@@ -156,7 +211,8 @@ TEST_CASE("a dead tunnel that stays up in the kernel gets no invented anchor") {
 }
 
 TEST_CASE("firmware upgrades the provenance of an anchor first seen over netlink") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_link_state("nwg1", false, at(0));
     store.observe_link_state("nwg1", true, at(10));
@@ -171,7 +227,8 @@ TEST_CASE("firmware upgrades the provenance of an anchor first seen over netlink
 }
 
 TEST_CASE("a kernel-visible down still retracts a firmware anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
 
     store.observe_firmware_uptime("nwg1", 3600, at(0));
     store.observe_link_state("nwg1", false, at(10));
@@ -181,36 +238,53 @@ TEST_CASE("a kernel-visible down still retracts a firmware anchor") {
     CHECK_FALSE(store.anchor("nwg1").has_value());
 }
 
-TEST_CASE("retain_only drops interfaces that no longer exist") {
-    InterfaceUptimeAnchorStore store;
+TEST_CASE("begin_round drops interfaces that no longer exist") {
+    Store store;
+    store.begin_round(present({"nwg1", "nwg2"}), at(0));
 
     store.observe_firmware_uptime("nwg1", 3600, at(0));
     store.observe_firmware_uptime("nwg2", 1800, at(0));
     REQUIRE(store.size() == 2);
 
-    store.retain_only(std::vector<std::string>{"nwg1"});
+    store.begin_round(present({"nwg1"}), at(10));
 
     CHECK(store.size() == 1);
     CHECK(store.anchor("nwg1").has_value());
     CHECK_FALSE(store.anchor("nwg2").has_value());
 }
 
-TEST_CASE("a recreated interface does not inherit the previous lifetime") {
-    InterfaceUptimeAnchorStore store;
-
+TEST_CASE("begin_round leaves a surviving interface's anchor alone") {
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
     store.observe_firmware_uptime("nwg1", 3600, at(0));
-    // The tunnel is deleted...
-    store.retain_only(std::vector<std::string>{});
-    // ...and recreated under the same name, now up in the kernel.
-    store.observe_link_state("nwg1", true, at(60));
 
-    // A fresh entry has never been seen down, so there is no confirmed
-    // transition to report - and certainly not the vanished device's.
-    CHECK_FALSE(store.anchor("nwg1").has_value());
+    for (std::int64_t tick = 1; tick < 40; ++tick) {
+        store.begin_round(present({"nwg1"}), at(tick));
+    }
+
+    // Opening a round is not an observation. If it reset first_seen or the
+    // anchor, every inventory build would restart the uptime.
+    const auto anchor = store.anchor("nwg1");
+    REQUIRE(anchor.has_value());
+    CHECK(anchor->up_since == at(-3600));
+}
+
+TEST_CASE("an interface outside the round is not observed at all") {
+    Store store;
+    store.begin_round(present({"nwg1"}), at(0));
+
+    store.observe_link_state("nwg9", true, at(0));
+    store.observe_firmware_uptime("nwg9", 3600, at(0));
+
+    // The firmware knows about interfaces the kernel does not currently have.
+    // Creating state for them here would resurrect entries begin_round just
+    // dropped, and would publish an interface the dump does not contain.
+    CHECK_FALSE(store.anchor("nwg9").has_value());
+    CHECK(store.size() == 1);
 }
 
 TEST_CASE("an unknown interface has no anchor") {
-    InterfaceUptimeAnchorStore store;
+    Store store;
 
     CHECK_FALSE(store.anchor("nwg9").has_value());
     CHECK(store.size() == 0);
