@@ -1,6 +1,7 @@
 #pragma once
 
 #include "firewall.hpp"
+#include "ttl_bypass.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -293,6 +294,17 @@ private:
         LiveGenerationState primary,
         LiveGenerationState secondary);
     void reconcile_hooks(bool ipv6) const;
+    // Keeps our single tagged RETURN first in the firmware's TTL chain, when
+    // that chain exists and the kernel has the matches. Never creates,
+    // flushes or deletes the chain, and never touches a rule without our tag.
+    void reconcile_ttl_bypass() const;
+
+public:
+    // Last observed state of the TTL bypass, for health reporting.
+    TtlBypassState ttl_bypass_state() const;
+    std::string ttl_bypass_detail() const;
+
+private:
     void verify_applied_generation(
         bool ipv6,
         FirewallSetGeneration target) const;
@@ -431,6 +443,12 @@ private:
         last_applied_forward_udp_rejects_;
     bool apply_prepared_{false};
     bool use_raw_prerouting_{false};
+    // Result of the last TTL bypass reconciliation, for health. Guarded
+    // because apply() runs on the firewall worker while health is read from
+    // an API thread.
+    mutable std::mutex ttl_bypass_mutex_;
+    mutable TtlBypassState ttl_bypass_state_{TtlBypassState::chain_absent};
+    mutable std::string ttl_bypass_detail_;
 
     // DNS redirect (client DNS enforcement) state
     bool dns_redirect_requested_ = false;

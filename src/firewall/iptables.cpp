@@ -3279,6 +3279,73 @@ void IptablesFirewall::reconcile_hooks(bool ipv6) const {
     }
 }
 
+void IptablesFirewall::reconcile_ttl_bypass() const {
+    TtlBypassInputs inputs;
+
+    // IPv4 only, by requirement. The firmware's TTL rewrite and nfqws2's mark
+    // are both IPv4 here, and ip6tables is deliberately left untouched.
+    const std::vector<std::string> inspect_args{
+        "iptables", "-t", "mangle", "-S", kTtlChain};
+    const auto snapshot = run_iptables_control(inspect_args);
+
+    // A chain that does not exist is the normal case: the firmware creates it
+    // only when `ip ttl-fix` is in play. That is not a failure, and it must
+    // not be turned into one - nor into a reason to create the chain.
+    inputs.chain_exists = snapshot.exit_code == 0;
+    if (inputs.chain_exists) {
+        std::istringstream lines{snapshot.stdout_output};
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) inputs.chain_rules.push_back(line);
+        }
+    }
+
+    // The kernel's own registry, not `iptables-restore --test`: userspace can
+    // accept an extension the running kernel does not have and only fail at
+    // COMMIT.
+    constexpr const char* kMatchInventory = "/proc/net/ip_tables_matches";
+    inputs.mark_match_available =
+        xtables_match_registered(kMatchInventory, "mark");
+    inputs.comment_match_available =
+        xtables_match_registered(kMatchInventory, "comment");
+
+    const auto plan = plan_ttl_bypass(inputs);
+    {
+        std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+        ttl_bypass_state_ = plan.state;
+        ttl_bypass_detail_ = plan.detail;
+    }
+
+    for (const auto& argv : plan.commands) {
+        std::vector<std::string> command_args{"iptables"};
+        command_args.insert(
+            command_args.end(), argv.begin(), argv.end());
+        const auto result = run_iptables_control(command_args);
+        if (result.exit_code != 0) {
+            // Deliberately not fatal. The chain belongs to the firmware and
+            // can be rewritten between our snapshot and our write; failing the
+            // whole firewall apply over an optional bypass would trade a
+            // working router for a cosmetic one. The next apply retries, and
+            // the state below tells the operator it is not in place.
+            std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+            ttl_bypass_state_ = TtlBypassState::conflict;
+            ttl_bypass_detail_ = "failed to apply the TTL bypass rule";
+            break;
+        }
+    }
+}
+
+TtlBypassState IptablesFirewall::ttl_bypass_state() const {
+    std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+    return ttl_bypass_state_;
+}
+
+std::string IptablesFirewall::ttl_bypass_detail() const {
+    std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+    return ttl_bypass_detail_;
+}
+
 void IptablesFirewall::verify_applied_generation(
     bool ipv6,
     FirewallSetGeneration target) const {
@@ -4869,6 +4936,11 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
     if (has_v6) {
         reconcile_hooks(true);
     }
+
+    // Inside the same serialized apply on purpose. A separate writer for this
+    // one rule is exactly what roadmap item 3 rules out, and it would also
+    // race the restores above.
+    reconcile_ttl_bypass();
 
     // The kernel is the source of truth. Do not report success until both
     // stable dispatchers and their builtin hooks point at the target slot.
