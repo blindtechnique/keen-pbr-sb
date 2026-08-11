@@ -298,6 +298,8 @@ private:
     // that chain exists and the kernel has the matches. Never creates,
     // flushes or deletes the chain, and never touches a rule without our tag.
     void reconcile_ttl_bypass() const;
+    // Takes our rule back out of the firmware chain on teardown.
+    void remove_ttl_bypass() const;
 
 public:
     // Last observed state of the TTL bypass, for health reporting.

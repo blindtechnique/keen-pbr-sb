@@ -31,9 +31,18 @@ inline constexpr std::uint32_t kNfqwsProcessedMask = 0x40000000u;
 inline constexpr const char* kTtlBypassTag = "keen-pbr-sb:ttl-bypass";
 
 enum class TtlBypassState {
-    // The firmware chain does not exist, so `ip ttl-fix` is not in play and
-    // there is nothing to bypass. Not an error: most routers look like this.
+    // The firmware chain does not exist, so there is nothing to bypass.
+    //
+    // Note this does NOT mean `ip ttl-fix` is off: on a measured router the
+    // chain exists and is empty with ttl-fix disabled, because NDM creates the
+    // scaffold regardless. Absence and emptiness are different facts, and only
+    // absence is reported here.
     chain_absent,
+    // We could not find out. A held xtables lock, a timeout or a missing
+    // binary all land here rather than being mistaken for "no chain": those
+    // say nothing about the chain, and answering an unanswered question with
+    // "nothing to do" is how a feature disables itself in silence.
+    unknown,
     // A kernel match we need is not registered. Doing nothing and reporting it
     // is the entire point - the alternative is a second writer shelling out
     // rules whose effect nobody verified.
@@ -57,9 +66,17 @@ struct TtlBypassPlan {
 
 // Inputs a caller has to supply, kept explicit so the decision itself stays
 // pure and testable without a router.
+// What the caller learned by inspecting the chain. Deliberately three-valued:
+// an inspection that failed is not evidence of absence.
+enum class TtlChainObservation {
+    present,
+    absent,
+    // Inspection failed for a reason that says nothing about the chain.
+    indeterminate,
+};
+
 struct TtlBypassInputs {
-    // Whether `iptables -t mangle -S <chain>` succeeded, i.e. the chain exists.
-    bool chain_exists{false};
+    TtlChainObservation observation{TtlChainObservation::absent};
     // Rendered rules of that chain, one `-A <chain> ...` line each, in order.
     // The `-N` declaration line, if present, is ignored.
     std::vector<std::string> chain_rules;
@@ -72,6 +89,13 @@ struct TtlBypassInputs {
 
 // The exact rule we own, as it appears in `iptables -S` output.
 std::string ttl_bypass_rule_spec();
+
+// argv (after the iptables binary) that deletes our rule. Teardown needs this:
+// we insert into a chain we do not own, so leaving the rule behind on stop or
+// uninstall would abandon a modification to firmware state with nobody left to
+// remove it - and, with nfqws2 still running, one that keeps suppressing the
+// firmware's TTL rewrite for the rest of the router's uptime.
+std::vector<std::string> ttl_bypass_delete_argv();
 
 // Decides what to do. Never returns a command that creates, flushes or deletes
 // the chain, and never one that touches a rule without our tag.

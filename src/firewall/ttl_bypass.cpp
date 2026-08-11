@@ -56,9 +56,14 @@ std::string ttl_bypass_rule_spec() {
     return out.str();
 }
 
+std::vector<std::string> ttl_bypass_delete_argv() {
+    return with_prefix({"-t", "mangle", "-D", kTtlChain}, rule_body());
+}
+
 const char* ttl_bypass_state_name(TtlBypassState state) noexcept {
     switch (state) {
         case TtlBypassState::chain_absent: return "chain_absent";
+        case TtlBypassState::unknown:      return "unknown";
         case TtlBypassState::unsupported:  return "unsupported";
         case TtlBypassState::active:       return "active";
         case TtlBypassState::conflict:     return "conflict";
@@ -70,10 +75,18 @@ const char* ttl_bypass_state_name(TtlBypassState state) noexcept {
 TtlBypassPlan plan_ttl_bypass(const TtlBypassInputs& inputs) {
     TtlBypassPlan plan;
 
-    if (!inputs.chain_exists) {
-        // The firmware only creates this chain when `ip ttl-fix` is in play.
-        // Creating it ourselves would put us in the business of owning a
-        // firmware chain, which is exactly what must not happen.
+    if (inputs.observation == TtlChainObservation::indeterminate) {
+        // We asked and did not get an answer. Reporting "nothing to do" here
+        // would let a held xtables lock silently disable the feature while
+        // affirmatively claiming everything is fine.
+        plan.state = TtlBypassState::unknown;
+        plan.detail = "could not inspect the firmware TTL chain";
+        return plan;
+    }
+
+    if (inputs.observation == TtlChainObservation::absent) {
+        // Creating the chain ourselves would put us in the business of owning
+        // a firmware chain, which is exactly what must not happen.
         plan.state = TtlBypassState::chain_absent;
         return plan;
     }

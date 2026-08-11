@@ -3288,11 +3288,28 @@ void IptablesFirewall::reconcile_ttl_bypass() const {
         "iptables", "-t", "mangle", "-S", kTtlChain};
     const auto snapshot = run_iptables_control(inspect_args);
 
-    // A chain that does not exist is the normal case: the firmware creates it
-    // only when `ip ttl-fix` is in play. That is not a failure, and it must
-    // not be turned into one - nor into a reason to create the chain.
-    inputs.chain_exists = snapshot.exit_code == 0;
-    if (inputs.chain_exists) {
+    // A non-zero exit is NOT evidence that the chain is absent. A held xtables
+    // lock, a timeout and a missing binary all exit non-zero while saying
+    // nothing about the chain, and classify_iptables_command exists precisely
+    // to keep those apart - every other inspect in this file uses it.
+    switch (classify_iptables_command(snapshot)) {
+        case IptablesCommandOutcome::Success:
+            inputs.observation = TtlChainObservation::present;
+            break;
+        case IptablesCommandOutcome::PermanentFailure:
+            // The chain genuinely is not there. On a measured router it does
+            // exist and is empty even with `ip ttl-fix` off, so this is the
+            // rarer case, not the common one.
+            inputs.observation = command_reports_chain_missing(snapshot)
+                ? TtlChainObservation::absent
+                : TtlChainObservation::indeterminate;
+            break;
+        case IptablesCommandOutcome::TransientFailure:
+            inputs.observation = TtlChainObservation::indeterminate;
+            break;
+    }
+
+    if (inputs.observation == TtlChainObservation::present) {
         std::istringstream lines{snapshot.stdout_output};
         std::string line;
         while (std::getline(lines, line)) {
@@ -3334,6 +3351,34 @@ void IptablesFirewall::reconcile_ttl_bypass() const {
             break;
         }
     }
+}
+
+void IptablesFirewall::remove_ttl_bypass() const {
+    // We inserted into a chain we do not own, so teardown must take it back
+    // out. Leaving it behind would abandon a modification to firmware state
+    // with nobody left to remove it, and with nfqws2 still running it would go
+    // on suppressing the firmware's TTL rewrite for the rest of the router's
+    // uptime - with keen-pbr uninstalled and nothing to explain why.
+    std::vector<std::string> command_args{"iptables"};
+    const auto argv = ttl_bypass_delete_argv();
+    command_args.insert(command_args.end(), argv.begin(), argv.end());
+
+    // Repeated until the rule is gone: -D removes one match at a time, and a
+    // previous run could have left duplicates. Bounded so a chain we cannot
+    // write to cannot spin here.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const auto result = run_iptables_control(command_args);
+        if (result.exit_code != 0) {
+            // Nothing left to delete, or the chain is gone entirely. Either
+            // way there is nothing further to undo, and cleanup must not fail
+            // over a chain that was never ours.
+            break;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+    ttl_bypass_state_ = TtlBypassState::chain_absent;
+    ttl_bypass_detail_.clear();
 }
 
 TtlBypassState IptablesFirewall::ttl_bypass_state() const {
@@ -5012,6 +5057,11 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
     auto& log = Logger::instance();
     const bool owned_v4 = chain_v4_created_;
     const bool owned_v6 = chain_v6_created_;
+
+    // Before removing our own chains: the one rule we placed in a chain we do
+    // not own. Everything below deletes KeenPbr* objects, which would leave
+    // that rule stranded in firmware state.
+    remove_ttl_bypass();
 
     auto remove_chain = [](const char* command,
                            const char* table,

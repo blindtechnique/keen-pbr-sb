@@ -12,7 +12,7 @@ namespace {
 
 TtlBypassInputs supported(std::vector<std::string> rules) {
     TtlBypassInputs inputs;
-    inputs.chain_exists = true;
+    inputs.observation = TtlChainObservation::present;
     inputs.chain_rules = std::move(rules);
     inputs.mark_match_available = true;
     inputs.comment_match_available = true;
@@ -52,16 +52,52 @@ bool any_command_contains(const TtlBypassPlan& plan, const std::string& needle) 
 
 TEST_CASE("an absent firmware chain means there is nothing to bypass") {
     TtlBypassInputs inputs;
-    inputs.chain_exists = false;
+    inputs.observation = TtlChainObservation::absent;
     inputs.mark_match_available = true;
     inputs.comment_match_available = true;
 
     const auto plan = plan_ttl_bypass(inputs);
 
-    // The firmware creates this chain only when `ip ttl-fix` is in play.
-    // Creating it ourselves would make us the owner of a firmware chain.
+    // Creating the chain ourselves would make us the owner of a firmware
+    // chain. Note absence is NOT the same as `ip ttl-fix` being off: on a
+    // measured router the chain exists and is empty with ttl-fix disabled.
     CHECK(plan.state == TtlBypassState::chain_absent);
     CHECK(plan.commands.empty());
+}
+
+TEST_CASE("an inspection that failed is not evidence of absence") {
+    TtlBypassInputs inputs;
+    inputs.observation = TtlChainObservation::indeterminate;
+    inputs.mark_match_available = true;
+    inputs.comment_match_available = true;
+
+    const auto plan = plan_ttl_bypass(inputs);
+
+    // A held xtables lock, a timeout or a missing binary say nothing about the
+    // chain. Answering that with "nothing to do" is how a feature disables
+    // itself in silence while affirmatively reporting that all is well.
+    CHECK(plan.state == TtlBypassState::unknown);
+    CHECK(plan.commands.empty());
+    CHECK_FALSE(plan.detail.empty());
+}
+
+TEST_CASE("teardown deletes exactly the rule we insert") {
+    // The delete spec and the insert body must stay identical, or teardown
+    // silently leaves our rule behind in a chain nobody else will clean.
+    const auto insert = plan_ttl_bypass(supported({})).commands.front();
+    const auto remove = ttl_bypass_delete_argv();
+
+    REQUIRE(insert.size() >= 5);
+    REQUIRE(remove.size() >= 4);
+    // Everything after the chain/position prefix must match token for token.
+    const std::vector<std::string> insert_body(insert.begin() + 5,
+                                               insert.end());
+    const std::vector<std::string> remove_body(remove.begin() + 4,
+                                               remove.end());
+    CHECK(insert_body == remove_body);
+    CHECK(remove[2] == "-D");
+    CHECK(remove[3] == std::string(kTtlChain));
+    CHECK(joined_contains(remove, kTtlBypassTag));
 }
 
 TEST_CASE("a missing kernel match reports instead of writing") {
