@@ -10,7 +10,7 @@
 # Lives in one file because S79 and S80 must not drift: two copies of an
 # exclusion rule are two chances to fix only one of them.
 
-LIFECYCLE_LOCK_HELPER=/opt/usr/lib/keen-pbr/update-lock.sh
+LIFECYCLE_LOCK_HELPER="${KEEN_PBR_RESCUE_ROOT:-}/opt/usr/lib/keen-pbr/update-lock.sh"
 LIFECYCLE_LOCK_TOKEN=
 LIFECYCLE_LOCK_OWNED=0
 
