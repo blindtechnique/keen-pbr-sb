@@ -10,6 +10,36 @@ namespace keen_pbr3 {
 
 namespace {
 
+// Method and path of every route the protected list names, taken from the
+// handler registrations rather than from memory.
+//
+// The method matters as much as the path, and this list exists because getting
+// it wrong is silent: an entry naming a method the endpoint does not serve
+// matches no request, so the operation it was meant to guard stays open while
+// the list reads as though it is covered. That is exactly what "GET
+// /api/backup" did - the archive is exported by POST, the body selecting which
+// groups to include.
+const std::vector<StepUpProtectedRoute>& registered_privileged_routes() {
+    static const std::vector<StepUpProtectedRoute> routes = {
+        {"POST", "/api/backup"},
+        {"POST", "/api/backup/restore"},
+        {"POST", "/api/backup/rollback"},
+        {"GET", "/api/backup/rollback"},
+        {"POST", "/api/nfqws"},
+        {"GET", "/api/nfqws"},
+        {"POST", "/api/system/naive-component"},
+        {"GET", "/api/system/naive-component"},
+        {"POST", "/api/system/remote-access"},
+        {"GET", "/api/system/remote-access"},
+        {"POST", "/api/system/update"},
+        {"GET", "/api/system/update"},
+        {"POST", "/api/system/update/check"},
+        {"POST", "/api/system/update/rollback"},
+        {"GET", "/api/system/update/status"},
+    };
+    return routes;
+}
+
 // Every route the API registers today, taken from the handler registrations
 // rather than from memory. It exists so a typo in the protected list is a
 // failing test instead of a guard that silently matches nothing.
@@ -69,6 +99,25 @@ TEST_CASE("every protected path is a route that actually exists") {
     }
 }
 
+TEST_CASE("every protected entry names a method that endpoint serves") {
+    const auto& registered = registered_privileged_routes();
+
+    for (const auto& route : step_up_protected_routes()) {
+        const auto found = std::find_if(
+            registered.begin(), registered.end(),
+            [&](const StepUpProtectedRoute& known) {
+                return known.method == route.method &&
+                       known.path == route.path;
+            });
+        // Guarding a method the endpoint does not serve is worse than not
+        // guarding it: the list reads as covered while the real operation
+        // stays open.
+        CHECK_MESSAGE(found != registered.end(),
+                      "protected entry serves no such method: "
+                          << route.method << " " << route.path);
+    }
+}
+
 TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/system/update"));
     CHECK(requires_step_up("POST", "/api/system/update/rollback"));
@@ -77,9 +126,10 @@ TEST_CASE("the package and access operations require a step-up") {
     CHECK(requires_step_up("POST", "/api/backup/restore"));
     CHECK(requires_step_up("POST", "/api/backup/rollback"));
     CHECK(requires_step_up("POST", "/api/system/remote-access"));
-    // A read, but the archive carries credentials and the whole routing state,
-    // so handing it out is closer to exfiltration than to a status query.
-    CHECK(requires_step_up("GET", "/api/backup"));
+    // Exporting the archive: it carries credentials and the whole routing
+    // state, so handing it out is closer to exfiltration than to a status
+    // query. A POST because the body selects which groups to export.
+    CHECK(requires_step_up("POST", "/api/backup"));
 }
 
 TEST_CASE("reading what an update would do costs nothing") {
@@ -113,14 +163,15 @@ TEST_CASE("the method is part of the decision") {
     // Reading the update endpoint is not applying an update.
     CHECK_FALSE(requires_step_up("GET", "/api/system/update"));
     CHECK_FALSE(requires_step_up("GET", "/api/nfqws"));
-    // And the backup archive is privileged on the way out, not on the way in.
-    CHECK_FALSE(requires_step_up("POST", "/api/backup"));
+    // There is no GET /api/backup. Guarding the method the endpoint merely
+    // looks like it should use protects nothing and reads as if it does.
+    CHECK_FALSE(requires_step_up("GET", "/api/backup"));
 }
 
 TEST_CASE("a spare slash or a query string is not a way past the guard") {
     CHECK(requires_step_up("POST", "/api/nfqws/"));
     CHECK(requires_step_up("POST", "/api/nfqws///"));
-    CHECK(requires_step_up("GET", "/api/backup?format=tar"));
+    CHECK(requires_step_up("POST", "/api/backup?groups=all"));
     CHECK(requires_step_up("POST", "/api/backup/restore/?force=1"));
 }
 

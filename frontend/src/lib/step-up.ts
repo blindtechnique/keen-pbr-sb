@@ -80,6 +80,46 @@ export const requestStepUpGrant = async (
   }
 }
 
+/**
+ * fetch() that answers a step-up requirement and replays the request once.
+ *
+ * Every caller that talks to a privileged endpoint must go through this rather
+ * than through fetch() directly. There is no way to tell from a call site
+ * whether the endpoint is privileged today, and a module keeping its own
+ * fetch() silently opts out - which is exactly what backup.ts did until this
+ * wrapper existed.
+ */
+export const fetchWithStepUp = async (
+  url: string,
+  init: RequestInit = {},
+  fetchImpl: typeof fetch = fetch
+): Promise<Response> => {
+  const response = await fetchImpl(url, init)
+
+  if (response.status !== 403 || !isReplayable(init.body)) {
+    return response
+  }
+
+  // Peeked on a clone: the caller still has to read the body itself, and a
+  // response consumed here would reach it empty.
+  const payload = await response
+    .clone()
+    .json()
+    .catch(() => null)
+  if (!isStepUpRequired(response.status, payload)) {
+    return response
+  }
+
+  const granted = await requestStepUpGrant(fetchImpl)
+  if (!granted) {
+    return response
+  }
+
+  // Exactly once. A second refusal is the answer, not an invitation to prompt
+  // in a loop.
+  return fetchImpl(url, init)
+}
+
 // Exported for tests: the module-level single-flight state would otherwise
 // leak between cases.
 export const resetStepUpState = () => {

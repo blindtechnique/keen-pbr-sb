@@ -1,8 +1,4 @@
-import {
-  isReplayable,
-  isStepUpRequired,
-  requestStepUpGrant,
-} from "@/lib/step-up"
+import { fetchWithStepUp } from "@/lib/step-up"
 
 export type ApiError = {
   status: number
@@ -47,25 +43,12 @@ export const apiFetch = async <T>(
   url: string,
   options: RequestInit
 ): Promise<T> => {
-  let response = await fetch(url, options)
-  let payload = await parseResponsePayload(response)
-
   // Handled here rather than at each privileged call site, mirroring the
   // server: it enforces the step-up in one pre-routing guard, so the client
-  // answers it in one place too. Every existing caller - including the
-  // generated client and the backup download - gets this without changing.
-  if (
-    isStepUpRequired(response.status, payload) &&
-    isReplayable(options.body)
-  ) {
-    const granted = await requestStepUpGrant()
-    if (granted) {
-      // Exactly once. If the replay is refused again, that is the answer, not
-      // an invitation to prompt in a loop.
-      response = await fetch(url, options)
-      payload = await parseResponsePayload(response)
-    }
-  }
+  // answers it in one place too. Every caller that goes through apiFetch -
+  // including the generated client - gets this without changing.
+  const response = await fetchWithStepUp(url, options)
+  const payload = await parseResponsePayload(response)
 
   if (!response.ok) {
     throw normalizeError(response.status, payload)

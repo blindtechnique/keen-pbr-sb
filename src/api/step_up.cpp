@@ -38,11 +38,13 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
     // reached:
     //   POST /api/system/remote-access
     //
-    // And one read that is privileged despite being a read:
-    //   GET  /api/backup - the archive carries credentials and the complete
+    // And one that reads rather than writes:
+    //   POST /api/backup - the archive carries credentials and the complete
     //   routing state, so handing it out is closer to an exfiltration than to
     //   a status query. The pre-routing handler already refuses to let it be
-    //   cached for the same reason.
+    //   cached for the same reason. It is a POST because the request body
+    //   selects which groups to export; guarding the GET it looks like it
+    //   ought to be would have protected a route that does not exist.
     //
     // Deliberately absent: /api/system/update/check and
     // /api/system/update/status report what is available and what happened.
@@ -57,7 +59,7 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
         {"POST", "/api/backup/restore"},
         {"POST", "/api/backup/rollback"},
         {"POST", "/api/system/remote-access"},
-        {"GET", "/api/backup"},
+        {"POST", "/api/backup"},
     };
     return routes;
 }

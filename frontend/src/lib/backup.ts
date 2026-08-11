@@ -1,4 +1,5 @@
 import { downloadJson, formatDownloadTimestamp } from "@/lib/download"
+import { fetchWithStepUp } from "@/lib/step-up"
 import { filterNfqwsBackupBundle } from "@/lib/nfqws-backup"
 
 export const BACKUP_GROUPS = [
@@ -153,7 +154,10 @@ async function apiJson<T = unknown>(
   url: string,
   init?: RequestInit
 ): Promise<T> {
-  const response = await fetch(url, init)
+  // Not plain fetch(): backup export, restore and rollback are exactly the
+  // operations the server puts behind a step-up, so a private fetch here would
+  // opt the most privileged screen in the panel out of answering it.
+  const response = await fetchWithStepUp(url, init)
   const body = (await response.json().catch(() => ({}))) as T & ApiErrorBody
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
   return body
