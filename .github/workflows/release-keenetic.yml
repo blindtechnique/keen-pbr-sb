@@ -113,6 +113,12 @@ jobs:
             sh /workspace/tests/package_it/run-uninstall-target-shell.sh \
               /workspace
           docker run --rm \
+            -e KEEN_PBR_PACKAGE_IT_CONTAINER=1 \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-update-lock-reentry.sh \
+              /workspace
+          docker run --rm \
             -v "$PWD:/workspace:ro" \
             busybox:1.37 \
             sh /workspace/tests/package_it/run-dnsmasq-helper-lkg.sh \

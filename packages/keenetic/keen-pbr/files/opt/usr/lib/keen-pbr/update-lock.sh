@@ -886,8 +886,11 @@ guard_lock() {
     # lease. The authoritative owner is still alive and must retain mutual
     # exclusion even if this observer is killed.
     trap 'exit 130' HUP INT TERM
-    if ! printf '%s %s %s\n' "$GUARD_OWNER_PID" "$GUARD_TOKEN" \
-            "$guard_generation"; then
+    # Empty for `guard`, so its three-field output is unchanged for the
+    # callers that already parse it. `enter` sets it to distinguish a lease it
+    # took from one it borrowed.
+    if ! printf '%s %s %s%s\n' "$GUARD_OWNER_PID" "$GUARD_TOKEN" \
+            "$guard_generation" "${GUARD_OUTPUT_SUFFIX:-}"; then
         guardian_release
         return 1
     fi
@@ -899,6 +902,58 @@ guard_lock() {
         :
     done
     guardian_release
+}
+
+# Enter the update lock, re-entering it when the caller already owns it.
+#
+# This exists because acquire_lock is deliberately not reentrant: presented
+# with the very token that currently holds the lock it still answers 75, busy.
+# That is correct for contenders and wrong for the one caller that is not a
+# contender - a lifecycle step running *inside* a transaction. An update holds
+# the lock across opkg, opkg runs postinst, and postinst starts the service, so
+# a service script that acquired normally would wait on its own caller forever.
+#
+# Two outcomes, distinguished in the output so the caller and the log can tell
+# them apart:
+#   OWNER_PID TOKEN GENERATION owned     - we took it and release it at EOF
+#   OWNER_PID TOKEN GENERATION borrowed  - the caller already held it
+#
+# A borrowed lease is never released here. The owner outlives this process, and
+# releasing would strip mutual exclusion from a transaction still in flight -
+# the precise failure that makes "just wrap start in the lease" not a fix.
+enter_lock() {
+    requested_operation=${1:-}
+    valid_operation "$requested_operation" || return 2
+    requested_owner_pid=${2:-}
+    requested_token=${3:-}
+
+    if [ -n "$requested_owner_pid" ] && [ -n "$requested_token" ] &&
+       lock_is_held_by "$requested_owner_pid" "$requested_token"; then
+        entered_generation=$(read_generation) || return 1
+        # The operation recorded in the token stays authoritative. A lifecycle
+        # step inside an update belongs to that update; relabelling it here
+        # would let a later reader believe two operations were in flight.
+        if ! printf '%s %s %s borrowed\n' "$requested_owner_pid" \
+                "$requested_token" "$entered_generation"; then
+            return 1
+        fi
+        trap 'exit 130' HUP INT TERM
+        while IFS= read -r _entered_message; do
+            :
+        done
+        return 0
+    fi
+
+    # Not ours to re-enter: either nothing was presented, or what was presented
+    # is not what is held. Fall back to ordinary guarded acquisition, which
+    # still refuses when someone else holds the lock.
+    #
+    # Called directly rather than through a pipe on purpose: guard_lock blocks
+    # on stdin until EOF and returns the status that matters, and a pipeline
+    # would both reshape that protocol and discard the status.
+    GUARD_OUTPUT_SUFFIX=" owned"
+    guard_lock "$requested_operation" "$requested_owner_pid" \
+        "$requested_token"
 }
 
 trap release_cleanup_guard EXIT
@@ -960,8 +1015,12 @@ case "${1:-}" in
         [ "$#" -eq 2 ] || [ "$#" -eq 4 ] || exit 2
         guard_lock "$2" "${3:-}" "${4:-}"
         ;;
+    enter)
+        [ "$#" -eq 2 ] || [ "$#" -eq 4 ] || exit 2
+        enter_lock "$2" "${3:-}" "${4:-}"
+        ;;
     *)
-        echo "Usage: $0 {version|protocol|acquire PID [OPERATION]|held PID TOKEN|operation PID TOKEN|transfer PID TOKEN NEW_PID|release PID TOKEN|release-and-clean PID TOKEN|owner|generation|reserve PID TOKEN EXPECTED|sync-generation PID TOKEN EXPECTED|guard OPERATION [OWNER_PID TOKEN]}" >&2
+        echo "Usage: $0 {version|protocol|acquire PID [OPERATION]|held PID TOKEN|operation PID TOKEN|transfer PID TOKEN NEW_PID|release PID TOKEN|release-and-clean PID TOKEN|owner|generation|reserve PID TOKEN EXPECTED|sync-generation PID TOKEN EXPECTED|guard OPERATION [OWNER_PID TOKEN]|enter OPERATION [OWNER_PID TOKEN]}" >&2
         exit 2
         ;;
 esac
