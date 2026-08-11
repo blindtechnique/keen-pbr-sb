@@ -1,4 +1,5 @@
 import type { RuntimeInterfaceTraffic } from "@/api/generated/model/runtimeInterfaceTraffic"
+import { routerNowMs } from "@/api/router-clock"
 
 export const TRAFFIC_CHART_WIDTH = 744
 export const TRAFFIC_CHART_HEIGHT = 162
@@ -253,7 +254,7 @@ export const TRAFFIC_STALE_AFTER_MS = 30_000
  */
 export function isTrafficReadingStale(
   sampledAtUnixMs: number | undefined,
-  nowMs: number = Date.now()
+  routerNowUnixMs: number = routerNowMs()
 ): boolean {
   if (typeof sampledAtUnixMs !== "number") {
     // No timestamp at all is not the same as an old one: a daemon that
@@ -261,5 +262,9 @@ export function isTrafficReadingStale(
     // that stale would be an accusation we cannot support.
     return false
   }
-  return nowMs - sampledAtUnixMs > TRAFFIC_STALE_AFTER_MS
+  // Both sides of this subtraction must be on the ROUTER's clock. Comparing
+  // the daemon's timestamp against this browser's Date.now() would measure the
+  // disagreement between two machines, and a Keenetic without a settled RTC
+  // disagrees by years - which would brand every healthy link stale.
+  return routerNowUnixMs - sampledAtUnixMs > TRAFFIC_STALE_AFTER_MS
 }

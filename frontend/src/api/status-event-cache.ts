@@ -1,5 +1,7 @@
 import { QueryClient } from "@tanstack/react-query"
 
+import { noteRouterClock } from "@/api/router-clock"
+
 import {
   getGetHealthServiceQueryKey,
   getGetRuntimeInterfacesQueryKey,
@@ -108,6 +110,12 @@ export function applyInterfaceTrafficUpdate(
   inventory: RuntimeInterfaceInventoryResponse,
   update: RuntimeInterfaceTrafficUpdate
 ): RuntimeInterfaceInventoryResponse {
+  // The batch stamp is the router's own "now" at send time, which makes it the
+  // one value in this payload that can measure the offset between its clock
+  // and ours. Everything that later asks "how old is this reading" needs that
+  // offset, or it measures the disagreement between two machines instead.
+  noteRouterClock(update.sampled_at_unix_ms)
+
   const samples = new Map(
     update.interfaces.map((sample) => [sample.name, sample])
   )
