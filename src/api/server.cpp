@@ -6,6 +6,7 @@
 #include "keenetic_auth.hpp"
 
 #include "../config/config_writer.hpp"
+#include "step_up.hpp"
 #include "system_auth_capability.hpp"
 #include "../keenetic/ndms_lockout_policy.hpp"
 #include "../keenetic/ndms_web_endpoint.hpp"
@@ -588,6 +589,9 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point auth_endpoint_retry_after{};
     WebAuthConfig auth;
     AuthSessionRegistry sessions;
+    // Short-lived grants keyed by the session token. Same shape as a session,
+    // deliberately: a step-up is a session that expires in minutes.
+    AuthSessionRegistry step_up_grants{kStepUpGrantCapacity};
     AuthLoginRateLimiter login_rate_limiter;
     // Sized from the firmware defaults measured on a live Keenetic. Reading
     // the router's actual policy over RCI is a separate slice; until then the
@@ -612,6 +616,110 @@ struct ApiServer::Impl {
     // it. The measured defaults stand in when we did not, and the capability
     // report is what tells an operator which of the two happened - the budget
     // itself must never widen just because a read failed.
+    struct CredentialOutcome {
+        bool ok{false};
+        int status{401};
+        long long retry_after_seconds{0};
+        std::string body{R"({"error":"invalid credentials"})"};
+    };
+
+    // The single credential check, shared by login and by step-up.
+    //
+    // Sharing it is not tidiness. A second verification path would be a second
+    // way to spend the firmware's lockout budget, and a budget with two
+    // spenders that only one of them counts is not a budget - step-up would
+    // have become the way around the very protection it sits behind.
+    CredentialOutcome verify_credentials(WebAuthConfig& auth,
+                                         const std::string& remote_address,
+                                         const std::string& username,
+                                         const std::string& password) {
+        CredentialOutcome outcome;
+
+        if (auth.uses_router_account()) {
+            if (auth.endpoint_unavailable &&
+                auth.keenetic_endpoint_mode == "auto") {
+                const auto refreshed =
+                    refresh_keenetic_endpoint_from_ndms(auth.keenetic_endpoint);
+                if (refreshed) auth = *refreshed;
+            }
+            if (auth.endpoint_unavailable) {
+                outcome.status = 503;
+                outcome.body = R"({"error":"auth_endpoint_unavailable"})";
+                return outcome;
+            }
+            // Size the budget from the router's own policy before spending any
+            // of it, so a tightened lockout-policy is honoured rather than
+            // discovered by locking the owner out.
+            refresh_firmware_lockout_policy();
+            // Every credential we forward spends the router administrator's
+            // lockout budget, because the firmware sees the attempt as coming
+            // from this router rather than from the client. Refusing locally
+            // one short of the firmware threshold is what keeps a stranger at
+            // our login form from locking the owner out of KeeneticOS.
+            if (!firmware_forward_budget.may_forward()) {
+                login_rate_limiter.record_failure(remote_address);
+                outcome.status = 429;
+                outcome.retry_after_seconds =
+                    kNdmsDefaultLockoutObservation.count();
+                outcome.body = R"({"error":"too many login attempts"})";
+                return outcome;
+            }
+            auto verdict = verify_keenetic_credentials(
+                auth.keenetic_endpoint, username, password);
+            if (verdict.endpoint_verified && !verdict.authenticated) {
+                firmware_forward_budget.record_forwarded_failure();
+            }
+            if (!verdict.authenticated && !verdict.endpoint_verified &&
+                auth.keenetic_endpoint_mode == "auto") {
+                // LAN address or the firmware HTTP port may have changed after
+                // this daemon started. Refresh only on an actual connection
+                // failure; wrong passwords never fan out into additional RCI
+                // calls.
+                const auto refreshed =
+                    refresh_keenetic_endpoint_from_ndms(auth.keenetic_endpoint);
+                if (refreshed) {
+                    auth = *refreshed;
+                    // The rediscovered endpoint is a second forwarded attempt,
+                    // not a free retry of the first: the first never reached
+                    // the firmware, this one will.
+                    if (!firmware_forward_budget.may_forward()) {
+                        login_rate_limiter.record_failure(remote_address);
+                        outcome.status = 429;
+                        outcome.retry_after_seconds =
+                            kNdmsDefaultLockoutObservation.count();
+                        outcome.body = R"({"error":"too many login attempts"})";
+                        return outcome;
+                    }
+                    verdict = verify_keenetic_credentials(
+                        auth.keenetic_endpoint, username, password);
+                    if (verdict.endpoint_verified && !verdict.authenticated) {
+                        firmware_forward_budget.record_forwarded_failure();
+                    }
+                }
+            }
+            if (!verdict.authenticated) {
+                login_rate_limiter.record_failure(remote_address);
+                // A router that cannot be reached is an outage, not a typo.
+                outcome.status = verdict.reachable ? 401 : 503;
+                outcome.body =
+                    nlohmann::json{{"error", verdict.error.empty()
+                                                 ? "invalid credentials"
+                                                 : verdict.error}}
+                        .dump();
+                return outcome;
+            }
+        } else if (!constant_time_equal(username, auth.username) ||
+                   !constant_time_equal(password, auth.password)) {
+            login_rate_limiter.record_failure(remote_address);
+            outcome.status = 401;
+            return outcome;
+        }
+
+        login_rate_limiter.record_success(remote_address);
+        outcome.ok = true;
+        return outcome;
+    }
+
     // Reads the firmware policy at most once per retry interval, on the login
     // path rather than at startup. The daemon deliberately does not block
     // booting on NDMS probes, and a login is the first moment the answer
@@ -758,6 +866,80 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         res.set_header("Cache-Control", "no-store");
         res.set_content(response.dump(), "application/json");
     });
+    // Reauthentication on top of an existing session, for the operations that
+    // install software or change how the router is reached. Never reachable
+    // without a session: the pre-routing guard runs first, so an unauthenticated
+    // caller cannot use this to probe credentials.
+    impl_->server.Post("/api/auth/step-up", [state = impl_.get()](const httplib::Request& req,
+                                                                     httplib::Response& res) {
+        auto auth = state->auth_snapshot();
+        res.set_header("Cache-Control", "no-store");
+        if (auth.misconfigured) {
+            res.status = 503;
+            res.set_content(
+                R"({"error":"auth_misconfigured"})", "application/json");
+            return;
+        }
+        if (!auth.enabled) {
+            // There is no session to step up from, and the privileged routes
+            // are already open. Refusing here would only invent a control the
+            // deployment does not have.
+            res.set_content(R"({"granted":true})", "application/json");
+            return;
+        }
+        const auto session = cookie_value(req, "keen_pbr_session");
+        if (!state->sessions.contains(session)) {
+            res.status = 401;
+            res.set_content(
+                R"({"error":"authentication required"})", "application/json");
+            return;
+        }
+        if (!state->login_rate_limiter.allow(req.remote_addr)) {
+            res.status = 429;
+            res.set_header("Retry-After", "60");
+            res.set_content(
+                R"({"error":"too many login attempts"})", "application/json");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            const auto username = body.value("username", std::string{});
+            const auto password = body.value("password", std::string{});
+
+            const auto outcome = state->verify_credentials(
+                auth, req.remote_addr, username, password);
+            if (!outcome.ok) {
+                res.status = outcome.status;
+                if (outcome.retry_after_seconds > 0) {
+                    res.set_header(
+                        "Retry-After",
+                        std::to_string(outcome.retry_after_seconds));
+                }
+                res.set_content(outcome.body, "application/json");
+                return;
+            }
+            // Keyed by the session, so the grant dies with it. A grant that
+            // outlived its session would be a credential of its own.
+            if (!state->step_up_grants.insert(session, kStepUpGrantTtl)) {
+                res.status = 503;
+                res.set_content(
+                    R"({"error":"step-up grant limit reached"})",
+                    "application/json");
+                return;
+            }
+            res.set_content(
+                nlohmann::json{
+                    {"granted", true},
+                    {"expires_in_seconds", kStepUpGrantTtl.count()}}
+                    .dump(),
+                "application/json");
+        } catch (const std::exception&) {
+            state->login_rate_limiter.record_failure(req.remote_addr);
+            res.status = 400;
+            res.set_content(
+                R"({"error":"invalid step-up request"})", "application/json");
+        }
+    });
     impl_->server.Post("/api/auth/login", [state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
         auto auth = state->auth_snapshot();
@@ -786,106 +968,18 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const auto username = body.value("username", std::string{});
             const auto password = body.value("password", std::string{});
 
-            if (auth.uses_router_account()) {
-                if (auth.endpoint_unavailable &&
-                    auth.keenetic_endpoint_mode == "auto") {
-                    const auto refreshed =
-                        state->refresh_keenetic_endpoint_from_ndms(
-                            auth.keenetic_endpoint);
-                    if (refreshed) auth = *refreshed;
-                }
-                if (auth.endpoint_unavailable) {
-                    res.status = 503;
-                    res.set_content(
-                        R"({"error":"auth_endpoint_unavailable"})",
-                        "application/json");
-                    return;
-                }
-                // Size the budget from the router's own policy before spending
-                // any of it, so a tightened lockout-policy is honoured rather
-                // than discovered by locking the owner out.
-                state->refresh_firmware_lockout_policy();
-                // Every credential we forward spends the router
-                // administrator's lockout budget, because the firmware sees
-                // the attempt as coming from this router rather than from the
-                // client. Refusing locally one short of the firmware threshold
-                // is what keeps a stranger at our login form from locking the
-                // owner out of KeeneticOS.
-                if (!state->firmware_forward_budget.may_forward()) {
-                    state->login_rate_limiter.record_failure(req.remote_addr);
-                    res.status = 429;
+            const auto outcome = state->verify_credentials(
+                auth, req.remote_addr, username, password);
+            if (!outcome.ok) {
+                res.status = outcome.status;
+                if (outcome.retry_after_seconds > 0) {
                     res.set_header(
                         "Retry-After",
-                        std::to_string(kNdmsDefaultLockoutObservation.count()));
-                    res.set_content(
-                        R"({"error":"too many login attempts"})",
-                        "application/json");
-                    return;
+                        std::to_string(outcome.retry_after_seconds));
                 }
-                auto verdict = verify_keenetic_credentials(
-                    auth.keenetic_endpoint, username, password);
-                if (verdict.endpoint_verified && !verdict.authenticated) {
-                    state->firmware_forward_budget.record_forwarded_failure();
-                }
-                if (!verdict.authenticated &&
-                    !verdict.endpoint_verified &&
-                    auth.keenetic_endpoint_mode == "auto") {
-                    // LAN address or the firmware HTTP port may have changed
-                    // after this daemon started. Refresh only on an actual
-                    // connection failure; wrong passwords never fan out into
-                    // additional RCI calls.
-                    const auto refreshed =
-                        state->refresh_keenetic_endpoint_from_ndms(
-                            auth.keenetic_endpoint);
-                    if (refreshed) {
-                        auth = *refreshed;
-                        // The rediscovered endpoint is a second forwarded
-                        // attempt, not a free retry of the first one: the
-                        // first never reached the firmware, this one will.
-                        if (!state->firmware_forward_budget.may_forward()) {
-                            state->login_rate_limiter.record_failure(
-                                req.remote_addr);
-                            res.status = 429;
-                            res.set_header(
-                                "Retry-After",
-                                std::to_string(
-                                    kNdmsDefaultLockoutObservation.count()));
-                            res.set_content(
-                                R"({"error":"too many login attempts"})",
-                                "application/json");
-                            return;
-                        }
-                        verdict = verify_keenetic_credentials(
-                            auth.keenetic_endpoint,
-                            username,
-                            password);
-                        if (verdict.endpoint_verified &&
-                            !verdict.authenticated) {
-                            state->firmware_forward_budget
-                                .record_forwarded_failure();
-                        }
-                    }
-                }
-                if (!verdict.authenticated) {
-                    state->login_rate_limiter.record_failure(req.remote_addr);
-                    // A router that cannot be reached is an outage, not a typo.
-                    res.status = verdict.reachable ? 401 : 503;
-                    res.set_content(
-                        nlohmann::json{{"error", verdict.error.empty()
-                                                     ? "invalid credentials"
-                                                     : verdict.error}}
-                            .dump(),
-                        "application/json");
-                    return;
-                }
-            } else if (!constant_time_equal(username, auth.username) ||
-                       !constant_time_equal(password, auth.password)) {
-                state->login_rate_limiter.record_failure(req.remote_addr);
-                res.status = 401;
-                res.set_content(R"({"error":"invalid credentials"})", "application/json");
+                res.set_content(outcome.body, "application/json");
                 return;
             }
-            state->login_rate_limiter.record_success(req.remote_addr);
             const auto token = random_session_token();
             if (!token) {
                 Logger::instance().error(
@@ -1140,6 +1234,10 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                                                                     httplib::Response& res) {
         const auto token = cookie_value(req, "keen_pbr_session");
         state->sessions.erase(token);
+        // The grant is keyed by this token. Leaving it behind would let the
+        // next session that happened to reuse the token inherit a privilege
+        // nobody granted it.
+        state->step_up_grants.erase(token);
         res.set_header("Set-Cookie", "keen_pbr_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
         res.set_header("Cache-Control", "no-store");
         res.set_content(R"({"authenticated":false})", "application/json");
@@ -1164,7 +1262,19 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         }
         const auto token = cookie_value(req, "keen_pbr_session");
         const bool valid = state->sessions.contains(token);
-        if (valid) return httplib::Server::HandlerResponse::Unhandled;
+        if (valid) {
+            // Enforced here rather than in each privileged handler. A guard
+            // every handler has to remember to call is a guard that a new
+            // handler will not have.
+            if (requires_step_up(req.method, req.path) &&
+                !state->step_up_grants.contains(token)) {
+                res.status = 403;
+                res.set_content(
+                    R"({"error":"step_up_required"})", "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
         res.status = 401;
         res.set_content(R"({"error":"authentication required"})", "application/json");
         return httplib::Server::HandlerResponse::Handled;

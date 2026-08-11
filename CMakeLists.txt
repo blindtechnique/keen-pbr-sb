@@ -377,6 +377,7 @@ set(SOURCES
   src/keenetic/ndms_web_endpoint.cpp
   src/keenetic/ndms_lockout_policy.cpp
   src/api/system_auth_capability.cpp
+  src/api/step_up.cpp
   src/crash/crash_diagnostics.cpp
   src/backup/persistent_snapshot.cpp
   src/backup/restore_journal.cpp
