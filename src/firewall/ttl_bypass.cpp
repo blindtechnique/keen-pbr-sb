@@ -68,9 +68,25 @@ const char* ttl_bypass_state_name(TtlBypassState state) noexcept {
         case TtlBypassState::active:       return "active";
         case TtlBypassState::conflict:     return "conflict";
         case TtlBypassState::missing:      return "missing";
+        case TtlBypassState::disabled:     return "disabled";
     }
     return "unknown";
 }
+
+namespace {
+
+// Copies of our own rule in the chain, ignoring the -N declaration and any
+// line belonging elsewhere. Only tagged rules count: an untagged RETURN that
+// happens to look identical belongs to whoever wrote it, not to us.
+std::size_t count_our_rules(const std::vector<std::string>& chain_rules) {
+    std::size_t found = 0;
+    for (const auto& line : chain_rules) {
+        if (is_rule_of_chain(line) && carries_our_tag(line)) ++found;
+    }
+    return found;
+}
+
+} // namespace
 
 TtlBypassPlan plan_ttl_bypass(const TtlBypassInputs& inputs) {
     TtlBypassPlan plan;
@@ -81,6 +97,23 @@ TtlBypassPlan plan_ttl_bypass(const TtlBypassInputs& inputs) {
         // affirmatively claiming everything is fine.
         plan.state = TtlBypassState::unknown;
         plan.detail = "could not inspect the firmware TTL chain";
+        return plan;
+    }
+
+    if (!inputs.enabled) {
+        // Reported before the chain and capability checks, because the
+        // operator's instruction is the fact they will look for after flipping
+        // the switch. "chain_absent" while they are waiting to see the bypass
+        // turn off answers a question nobody asked.
+        plan.state = TtlBypassState::disabled;
+        plan.detail = "disabled by configuration";
+        // Off means gone, not "stop installing". A rule left behind would keep
+        // working while the interface says it is off, which is the worst of
+        // both: an effect with no visible cause.
+        for (std::size_t i = 0; i < count_our_rules(inputs.chain_rules); ++i) {
+            plan.commands.push_back(with_prefix(
+                {"-t", "mangle", "-D", kTtlChain}, rule_body()));
+        }
         return plan;
     }
 

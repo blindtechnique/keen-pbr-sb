@@ -54,6 +54,12 @@ enum class TtlBypassState {
     conflict,
     // Our rule is absent and can be installed.
     missing,
+    // The operator turned the bypass off. Kept distinct from `missing` and
+    // from `unsupported` on purpose: those say we cannot, this says we were
+    // told not to, and an operator reading the report needs to tell an
+    // instruction apart from an inability. Any existing rule of ours is
+    // removed when this is reported - "off" means gone, not "stop installing".
+    disabled,
 };
 
 struct TtlBypassPlan {
@@ -76,6 +82,11 @@ enum class TtlChainObservation {
 };
 
 struct TtlBypassInputs {
+    // Defaults to on. Every nfqws2 strategy this project ships uses a
+    // TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks all
+    // of them at once; an opt-in switch would leave that fix off for everyone
+    // who never learns it exists. This is an escape hatch, not a feature flag.
+    bool enabled{true};
     TtlChainObservation observation{TtlChainObservation::absent};
     // Rendered rules of that chain, one `-A <chain> ...` line each, in order.
     // The `-N` declaration line, if present, is ignored.

@@ -256,4 +256,113 @@ TEST_CASE("state names are stable for health output") {
           "missing");
 }
 
+TEST_CASE("the bypass is on unless the operator turns it off") {
+    TtlBypassInputs inputs;
+
+    // Every nfqws2 strategy this project ships uses a TTL-dependent desync, so
+    // an opt-in switch would leave the fix off for everyone who never learns
+    // it exists. Defaulting off would be a decision disguised as a default.
+    CHECK(inputs.enabled);
+}
+
+TEST_CASE("turning it off removes the rule rather than stopping installs") {
+    TtlBypassInputs inputs;
+    inputs.enabled = false;
+    inputs.observation = TtlChainObservation::present;
+    inputs.mark_match_available = true;
+    inputs.comment_match_available = true;
+    inputs.chain_rules = {
+        "-A _NDM_POSTROUTING_TTL -m mark --mark 0x40000000/0x40000000 "
+        "-m comment --comment \"keen-pbr-sb:ttl-bypass\" -j RETURN",
+    };
+
+    const auto plan = plan_ttl_bypass(inputs);
+
+    CHECK(plan.state == TtlBypassState::disabled);
+    // A rule left behind keeps working while the interface says it is off:
+    // an effect with no visible cause, which is worse than either state.
+    REQUIRE(plan.commands.size() == 1);
+    CHECK(plan.commands.front() == ttl_bypass_delete_argv());
+}
+
+TEST_CASE("turning it off when nothing is installed does nothing") {
+    TtlBypassInputs inputs;
+    inputs.enabled = false;
+    inputs.observation = TtlChainObservation::present;
+    inputs.mark_match_available = true;
+    inputs.comment_match_available = true;
+
+    const auto plan = plan_ttl_bypass(inputs);
+
+    CHECK(plan.state == TtlBypassState::disabled);
+    CHECK(plan.commands.empty());
+}
+
+TEST_CASE("turning it off removes every copy, not just the first") {
+    const std::string ours =
+        "-A _NDM_POSTROUTING_TTL -m mark --mark 0x40000000/0x40000000 "
+        "-m comment --comment \"keen-pbr-sb:ttl-bypass\" -j RETURN";
+
+    TtlBypassInputs inputs;
+    inputs.enabled = false;
+    inputs.observation = TtlChainObservation::present;
+    inputs.mark_match_available = true;
+    inputs.comment_match_available = true;
+    inputs.chain_rules = {ours, ours};
+
+    const auto plan = plan_ttl_bypass(inputs);
+
+    CHECK(plan.state == TtlBypassState::disabled);
+    CHECK(plan.commands.size() == 2);
+}
+
+TEST_CASE("turning it off never touches a rule that is not ours") {
+    TtlBypassInputs inputs;
+    inputs.enabled = false;
+    inputs.observation = TtlChainObservation::present;
+    inputs.mark_match_available = true;
+    inputs.comment_match_available = true;
+    // Same shape, no tag. It belongs to whoever wrote it.
+    inputs.chain_rules = {
+        "-A _NDM_POSTROUTING_TTL -m mark --mark 0x40000000/0x40000000 "
+        "-j RETURN",
+    };
+
+    const auto plan = plan_ttl_bypass(inputs);
+
+    CHECK(plan.state == TtlBypassState::disabled);
+    CHECK(plan.commands.empty());
+}
+
+TEST_CASE("being told not to is reported apart from being unable to") {
+    TtlBypassInputs off;
+    off.enabled = false;
+    off.observation = TtlChainObservation::present;
+    off.mark_match_available = true;
+    off.comment_match_available = true;
+
+    TtlBypassInputs incapable;
+    incapable.observation = TtlChainObservation::present;
+    incapable.mark_match_available = true;
+    incapable.comment_match_available = false;
+
+    // An operator who flipped the switch and an operator whose kernel lacks a
+    // match need different next actions, so the report must not merge them.
+    CHECK(plan_ttl_bypass(off).state == TtlBypassState::disabled);
+    CHECK(plan_ttl_bypass(incapable).state == TtlBypassState::unsupported);
+    CHECK(std::string(ttl_bypass_state_name(TtlBypassState::disabled)) ==
+          "disabled");
+}
+
+TEST_CASE("an unanswerable chain outranks the switch") {
+    TtlBypassInputs inputs;
+    inputs.enabled = false;
+    inputs.observation = TtlChainObservation::indeterminate;
+
+    // We cannot remove what we cannot see. Claiming "disabled" here would
+    // assert the rule is gone while it may still be installed.
+    CHECK(plan_ttl_bypass(inputs).state == TtlBypassState::unknown);
+    CHECK(plan_ttl_bypass(inputs).commands.empty());
+}
+
 } // namespace keen_pbr3
