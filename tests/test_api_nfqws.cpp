@@ -14,6 +14,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 namespace keen_pbr3 {
@@ -178,6 +179,62 @@ TEST_CASE("nfqws apply rejects unsafe writable before provision write or restart
     CHECK(write_calls == 0U);
     CHECK(restart_calls == 0U);
     CHECK(live.read() == "original-live-bytes\n");
+}
+
+TEST_CASE("nfqws upgrade refuses before any effect when the update lease is held") {
+    // The roadmap's first requirement for the component transaction is one
+    // cross-process lock. Until this, `opkg upgrade nfqws2-keenetic` ran under
+    // an in-process mutex only, which bounds nothing outside this daemon: S80
+    // could be stopping the service, keen-pbr's own updater could be replacing
+    // its package, and neither side had a reason to wait for the other.
+    //
+    // What is asserted here is the refusal *and its cost*. Acquiring the lease
+    // after the rollback snapshot would still be a lock, but a busy router
+    // would pay for a snapshot and a package index refresh before being told
+    // no. So the lease is requested first, and a held lease must leave the
+    // system exactly as it was.
+    const int port = test_support::isolated_api_port(7);
+    test_support::EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", test_support::missing_auth_path(port));
+    SseBroadcaster broadcaster;
+    auto context = test_support::make_minimal_api_context(
+        broadcaster, "/tmp/keen-pbr-nfqws-api-lease-context.json");
+
+    std::vector<std::string> operations;
+    context.maintenance_lease_factory_fn =
+        [&operations](std::string operation)
+            -> std::unique_ptr<MaintenanceLease> {
+        operations.push_back(operation);
+        throw MaintenanceLockError(
+            MaintenanceLockErrorKind::busy,
+            "another keen-pbr update or lifecycle operation is active",
+            75);
+    };
+
+    ApiConfig config;
+    config.listen = "127.0.0.1:" + std::to_string(port);
+    ApiServer server(config);
+    register_nfqws_handler_for_test(server, context, {});
+    server.start();
+    httplib::Client client("127.0.0.1", port);
+    const auto response = client.Post(
+        "/api/nfqws",
+        nlohmann::json{{"action", "upgrade"}}.dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    // 409, not 500: a held lease is a temporary state of the router, not a
+    // fault in the request. An operator who is told "server error" retries
+    // differently than one who is told "something else is running".
+    CHECK(response->status == 409);
+    const auto payload = nlohmann::json::parse(response->body);
+    CHECK(payload.at("error").get<std::string>().find("active") !=
+          std::string::npos);
+    // Named, because the lock record is what a stuck update is diagnosed from.
+    // "some API call" in that record is worth nothing at 3am.
+    REQUIRE(operations.size() == 1U);
+    CHECK(operations.front() == "nfqws-upgrade");
 }
 
 } // namespace keen_pbr3

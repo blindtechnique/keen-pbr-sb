@@ -2,6 +2,7 @@
 
 #include "handler_nfqws.hpp"
 #include "handler_backup.hpp"
+#include "maintenance_api.hpp"
 
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
@@ -24,6 +25,7 @@
 #include <functional>
 #include <httplib.h>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -1038,6 +1040,28 @@ void register_nfqws_handler_impl(
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
         }
         if (action == "upgrade") {
+            // The only nfqws action that mutates installed packages, and until
+            // now the only package mutation in the process that took no
+            // cross-process lease. An in-process mutex bounds nothing outside
+            // this daemon: `opkg upgrade nfqws2-keenetic` could run while
+            // S80 was stopping the service for its own lifecycle operation,
+            // while keen-pbr's self-update was replacing its own package, or
+            // while rescue recovery was restoring configuration.
+            //
+            // Acquired before the in-process mutex, not after. Config save and
+            // transports take the lease first and then do their work; taking
+            // them in the other order here would give two lock orders in one
+            // process, which is how a deadlock is built.
+            //
+            // Acquired before create_full_rollback_backup as well: a refusal
+            // must cost the operator nothing. If somebody else holds the
+            // lease, this writes no snapshot and runs no opkg.
+            std::unique_ptr<MaintenanceLease> maintenance;
+            try {
+                maintenance = ctx.acquire_maintenance_lease("nfqws-upgrade");
+            } catch (const MaintenanceLockError& error) {
+                throw_maintenance_api_error(error);
+            }
             const std::lock_guard lock(nfqws_operation_mutex());
             std::error_code ec2;
             const auto active_config = fs::path(kConfigDir) / "nfqws2.conf";
