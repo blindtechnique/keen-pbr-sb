@@ -3,6 +3,7 @@ add_executable(keen-pbr-tests
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
   test_ppe_deoffload.cpp
+  test_system_auth_capability.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp
   test_iptables_builder.cpp
@@ -139,6 +140,8 @@ add_executable(keen-pbr-tests
   ../src/firewall/iptables.cpp
   ../src/firewall/ppe_deoffload.cpp
   ../src/firewall/ttl_bypass.cpp
+  ../src/keenetic/ndms_lockout_policy.cpp
+  ../src/api/system_auth_capability.cpp
   ../src/firewall/ipset_restore_pipe.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
