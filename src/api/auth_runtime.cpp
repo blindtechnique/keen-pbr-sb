@@ -192,4 +192,49 @@ std::size_t AuthLoginRateLimiter::tracked_source_count(
     return entries_.size();
 }
 
+std::uint32_t auth_forward_capacity_for(
+    const std::uint32_t firmware_threshold) {
+    if (firmware_threshold == 0U) return 0U;
+    return firmware_threshold - 1U;
+}
+
+AuthForwardBudget::AuthForwardBudget(const std::uint32_t capacity,
+                                     const std::chrono::seconds window)
+    : capacity_(capacity), window_(window) {}
+
+void AuthForwardBudget::prune_locked(const Clock::time_point now) {
+    // The firmware counts failures over a sliding observation window, so a
+    // fixed-epoch counter would hand back the whole budget at each boundary
+    // and let a patient caller straddle two epochs.
+    while (!forwarded_.empty() && now - forwarded_.front() >= window_) {
+        forwarded_.pop_front();
+    }
+}
+
+bool AuthForwardBudget::may_forward(const Clock::time_point now) {
+    std::lock_guard lock(mutex_);
+    prune_locked(now);
+    return forwarded_.size() < capacity_;
+}
+
+void AuthForwardBudget::record_forwarded_failure(const Clock::time_point now) {
+    std::lock_guard lock(mutex_);
+    prune_locked(now);
+    // Recorded even when already at capacity: a caller that raced past
+    // may_forward() still spent the firmware's budget. Keeping the newest
+    // timestamps and dropping the oldest holds the deque bounded while pushing
+    // the refill later, never earlier - the safe direction to round in.
+    forwarded_.push_back(now);
+    const std::size_t bound = capacity_ > 0U ? capacity_ : 1U;
+    while (forwarded_.size() > bound) {
+        forwarded_.pop_front();
+    }
+}
+
+std::size_t AuthForwardBudget::spent(const Clock::time_point now) {
+    std::lock_guard lock(mutex_);
+    prune_locked(now);
+    return forwarded_.size();
+}
+
 } // namespace keen_pbr3

@@ -142,6 +142,7 @@ add_executable(keen-pbr-tests
   ../src/firewall/ttl_bypass.cpp
   ../src/keenetic/ndms_lockout_policy.cpp
   ../src/api/system_auth_capability.cpp
+  ../src/api/auth_runtime.cpp
   ../src/firewall/ipset_restore_pipe.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp

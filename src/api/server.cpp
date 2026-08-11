@@ -571,6 +571,13 @@ struct ApiServer::Impl {
     WebAuthConfig auth;
     AuthSessionRegistry sessions;
     AuthLoginRateLimiter login_rate_limiter;
+    // Sized from the firmware defaults measured on a live Keenetic. Reading
+    // the router's actual policy over RCI is a separate slice; until then the
+    // conservative default is the documented one, and the capability report
+    // stays honest about not having read it.
+    AuthForwardBudget firmware_forward_budget{
+        auth_forward_capacity_for(kNdmsDefaultLockoutThreshold),
+        kNdmsDefaultLockoutObservation};
 
     WebAuthConfig auth_snapshot() {
         std::lock_guard lock(auth_mutex);
@@ -725,8 +732,28 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         "application/json");
                     return;
                 }
+                // Every credential we forward spends the router
+                // administrator's lockout budget, because the firmware sees
+                // the attempt as coming from this router rather than from the
+                // client. Refusing locally one short of the firmware threshold
+                // is what keeps a stranger at our login form from locking the
+                // owner out of KeeneticOS.
+                if (!state->firmware_forward_budget.may_forward()) {
+                    state->login_rate_limiter.record_failure(req.remote_addr);
+                    res.status = 429;
+                    res.set_header(
+                        "Retry-After",
+                        std::to_string(kNdmsDefaultLockoutObservation.count()));
+                    res.set_content(
+                        R"({"error":"too many login attempts"})",
+                        "application/json");
+                    return;
+                }
                 auto verdict = verify_keenetic_credentials(
                     auth.keenetic_endpoint, username, password);
+                if (verdict.endpoint_verified && !verdict.authenticated) {
+                    state->firmware_forward_budget.record_forwarded_failure();
+                }
                 if (!verdict.authenticated &&
                     !verdict.endpoint_verified &&
                     auth.keenetic_endpoint_mode == "auto") {
@@ -739,10 +766,31 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                             auth.keenetic_endpoint);
                     if (refreshed) {
                         auth = *refreshed;
+                        // The rediscovered endpoint is a second forwarded
+                        // attempt, not a free retry of the first one: the
+                        // first never reached the firmware, this one will.
+                        if (!state->firmware_forward_budget.may_forward()) {
+                            state->login_rate_limiter.record_failure(
+                                req.remote_addr);
+                            res.status = 429;
+                            res.set_header(
+                                "Retry-After",
+                                std::to_string(
+                                    kNdmsDefaultLockoutObservation.count()));
+                            res.set_content(
+                                R"({"error":"too many login attempts"})",
+                                "application/json");
+                            return;
+                        }
                         verdict = verify_keenetic_credentials(
                             auth.keenetic_endpoint,
                             username,
                             password);
+                        if (verdict.endpoint_verified &&
+                            !verdict.authenticated) {
+                            state->firmware_forward_budget
+                                .record_forwarded_failure();
+                        }
                     }
                 }
                 if (!verdict.authenticated) {

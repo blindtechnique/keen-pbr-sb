@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include "api/auth_runtime.hpp"
 #include "api/system_auth_capability.hpp"
 #include "keenetic/ndms_lockout_policy.hpp"
 
@@ -33,12 +34,23 @@ nlohmann::json measured_http_config() {
     })");
 }
 
-// What keen-pbr ships today: 5 failures per 60s window, 60s lockout.
-SystemAuthLimiterBudget shipped_limiter() {
+// What keen-pbr shipped before this slice: 5 failures per 60s window, 60s
+// lockout, nothing bounding what reaches the firmware.
+SystemAuthLimiterBudget legacy_limiter() {
     SystemAuthLimiterBudget limiter;
     limiter.max_failures = 5;
     limiter.window = 60s;
     limiter.lockout = 60s;
+    return limiter;
+}
+
+// The per-source numbers chosen for a VPN helper on a home router: three
+// attempts, then a hundred seconds. Usability, not a security parameter.
+SystemAuthLimiterBudget current_limiter() {
+    SystemAuthLimiterBudget limiter;
+    limiter.max_failures = 3;
+    limiter.window = 100s;
+    limiter.lockout = 100s;
     return limiter;
 }
 
@@ -48,7 +60,7 @@ SystemAuthCapabilityInputs proven_endpoint() {
     inputs.endpoint_is_loopback = false;
     inputs.challenge_observed = true;
     inputs.firmware_lockout = parse_ndms_lockout_policy(measured_http_config());
-    inputs.local_limiter = shipped_limiter();
+    inputs.local_limiter = legacy_limiter();
     return inputs;
 }
 
@@ -110,10 +122,27 @@ TEST_CASE("numbers on the wire are accepted as well as strings") {
 }
 
 TEST_CASE("forwarded failures count the bursts an attacker gets, not one") {
-    SUBCASE("the shipped limiter over the measured window") {
-        // 5 failures immediately, then the 60s lock lifts, 60s window resets,
-        // and a second burst still lands inside the firmware's 3 minutes.
-        CHECK(forwarded_failures_within(shipped_limiter(), 3min) == 10U);
+    SUBCASE("the legacy limiter over the measured window") {
+        // The lockout runs concurrently with the counting window, so at
+        // lockout == window the counter resets the instant the block lifts:
+        // bursts at t=0, 60, 120 and 180, not the two a
+        // one-burst-per-(window+lockout) model would predict.
+        CHECK(forwarded_failures_within(legacy_limiter(), 3min) == 20U);
+    }
+    SUBCASE("the chosen per-source numbers still overshoot on their own") {
+        // Bursts at t=0 and t=100. Three attempts is the right call for a home
+        // router; it just cannot be the thing that protects the firmware.
+        CHECK(forwarded_failures_within(current_limiter(), 3min) == 6U);
+    }
+    SUBCASE("a global cap is what actually bounds the firmware's exposure") {
+        auto limiter = current_limiter();
+        limiter.global_forward_cap = 4U;
+        CHECK(forwarded_failures_within(limiter, 3min) == 4U);
+    }
+    SUBCASE("a global cap never inflates a limiter that is already tighter") {
+        auto limiter = current_limiter();
+        limiter.global_forward_cap = 100U;
+        CHECK(forwarded_failures_within(limiter, 3min) == 6U);
     }
     SUBCASE("a limiter whose cycle outlasts the window allows one burst") {
         SystemAuthLimiterBudget limiter;
@@ -141,7 +170,7 @@ TEST_CASE("forwarded failures count the bursts an attacker gets, not one") {
     }
 }
 
-TEST_CASE("the shipped limiter is not safe against the measured firmware") {
+TEST_CASE("the legacy limiter is not safe against the measured firmware") {
     const auto capability = evaluate_system_auth_capability(proven_endpoint());
 
     // This is the finding, pinned so it cannot be lost: forwarding WebUI logins
@@ -149,10 +178,43 @@ TEST_CASE("the shipped limiter is not safe against the measured firmware") {
     // administrator out of KeeneticOS for 15 minutes at a time.
     CHECK(capability.state ==
           SystemAuthCapabilityState::lockout_budget_unsafe);
-    CHECK(capability.forwarded_failures_per_window == 10U);
+    CHECK(capability.forwarded_failures_per_window == 20U);
     CHECK_FALSE(capability.may_replace_local_password);
-    CHECK(capability.detail.find("10") != std::string::npos);
-    CHECK(capability.detail.find("5") != std::string::npos);
+    CHECK(capability.detail.find("20") != std::string::npos);
+}
+
+TEST_CASE("per-source numbers alone do not make the switch safe") {
+    auto inputs = proven_endpoint();
+    inputs.local_limiter = current_limiter();
+
+    const auto capability = evaluate_system_auth_capability(inputs);
+
+    // Three attempts per source is friendlier than five, and still overshoots.
+    // Tightening the human-facing number was never going to be the fix.
+    CHECK(capability.state ==
+          SystemAuthCapabilityState::lockout_budget_unsafe);
+    CHECK(capability.forwarded_failures_per_window == 6U);
+}
+
+TEST_CASE("the global forward cap is what makes the switch safe") {
+    auto inputs = proven_endpoint();
+    inputs.local_limiter = current_limiter();
+    inputs.local_limiter.global_forward_cap =
+        auth_forward_capacity_for(kNdmsDefaultLockoutThreshold);
+
+    const auto capability = evaluate_system_auth_capability(inputs);
+
+    // The human keeps three tries; the firmware never sees a fifth failure.
+    CHECK(capability.state == SystemAuthCapabilityState::usable);
+    CHECK(capability.may_replace_local_password);
+    CHECK(capability.forwarded_failures_per_window == 4U);
+}
+
+TEST_CASE("the shipped capacity stops one short of the firmware threshold") {
+    CHECK(auth_forward_capacity_for(kNdmsDefaultLockoutThreshold) == 4U);
+    CHECK(auth_forward_capacity_for(1U) == 0U);
+    // A zero threshold must not underflow into a budget of four billion.
+    CHECK(auth_forward_capacity_for(0U) == 0U);
 }
 
 TEST_CASE("a limiter tighter than the firmware budget is usable") {
@@ -250,6 +312,67 @@ TEST_CASE("nothing but a clean pass may retire the local password") {
         // A refusal an operator cannot act on is barely better than silence.
         CHECK_FALSE(capability.detail.empty());
     }
+}
+
+TEST_CASE("the forward budget stops before the firmware threshold") {
+    const auto start = AuthForwardBudget::Clock::now();
+    AuthForwardBudget budget(
+        auth_forward_capacity_for(kNdmsDefaultLockoutThreshold),
+        kNdmsDefaultLockoutObservation);
+
+    for (int spent = 0; spent < 4; ++spent) {
+        CHECK(budget.may_forward(start));
+        budget.record_forwarded_failure(start);
+    }
+
+    // The fifth is the one the firmware would have counted as the lockout
+    // trigger, so it never leaves this router.
+    CHECK_FALSE(budget.may_forward(start));
+    CHECK(budget.spent(start) == 4U);
+}
+
+TEST_CASE("the forward budget refills on a sliding window, not an epoch") {
+    const auto start = AuthForwardBudget::Clock::now();
+    AuthForwardBudget budget(2U, 100s);
+
+    budget.record_forwarded_failure(start);
+    budget.record_forwarded_failure(start + 60s);
+    CHECK_FALSE(budget.may_forward(start + 60s));
+
+    // At +100s the first failure ages out and exactly one slot returns. A
+    // fixed-epoch counter would have handed back both and let a patient caller
+    // straddle two epochs.
+    CHECK(budget.may_forward(start + 100s));
+    CHECK(budget.spent(start + 100s) == 1U);
+    CHECK(budget.spent(start + 160s) == 0U);
+}
+
+TEST_CASE("a failure that raced past the guard is still counted") {
+    const auto start = AuthForwardBudget::Clock::now();
+    AuthForwardBudget budget(2U, 100s);
+
+    budget.record_forwarded_failure(start);
+    budget.record_forwarded_failure(start + 10s);
+    // Two concurrent workers can both pass may_forward() before either
+    // records. The budget must not forget the overspend.
+    budget.record_forwarded_failure(start + 20s);
+
+    CHECK_FALSE(budget.may_forward(start + 20s));
+    // Bounded, and holding the newest timestamps: the refill is pushed later
+    // than the first failure would have allowed, never earlier.
+    CHECK(budget.spent(start + 20s) == 2U);
+    CHECK_FALSE(budget.may_forward(start + 105s));
+    CHECK(budget.may_forward(start + 115s));
+}
+
+TEST_CASE("a zero capacity budget forwards nothing and stays bounded") {
+    const auto start = AuthForwardBudget::Clock::now();
+    AuthForwardBudget budget(auth_forward_capacity_for(0U), 100s);
+
+    CHECK_FALSE(budget.may_forward(start));
+    for (int i = 0; i < 8; ++i) budget.record_forwarded_failure(start);
+    CHECK(budget.spent(start) <= 1U);
+    CHECK_FALSE(budget.may_forward(start));
 }
 
 TEST_CASE("state names are stable for reporting") {

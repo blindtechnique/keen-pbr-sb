@@ -1,5 +1,7 @@
 #include "system_auth_capability.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
 
 namespace keen_pbr3 {
@@ -28,24 +30,47 @@ std::uint32_t forwarded_failures_within(
     std::chrono::seconds observation_window) {
     constexpr auto kSaturated = std::numeric_limits<std::uint32_t>::max();
 
+    const auto capped = [&limiter](std::uint32_t forwarded) {
+        if (!limiter.global_forward_cap) return forwarded;
+        return std::min(forwarded, *limiter.global_forward_cap);
+    };
+
     if (limiter.max_failures == 0U) return 0U;
 
-    const auto cycle = limiter.window + limiter.lockout;
-    if (cycle <= std::chrono::seconds::zero()) {
-        // Nothing paces the caller, so the firmware's budget is spent as fast
-        // as requests arrive.
-        return kSaturated;
+    const std::int64_t observation = observation_window.count();
+    const std::int64_t window = limiter.window.count();
+    const std::int64_t lockout = limiter.lockout.count();
+
+    // A limiter with no counting window resets before it can ever reach its
+    // own threshold, and one with no lockout never makes the caller wait.
+    // Either way nothing paces the forwarding.
+    if (window <= 0 || lockout <= 0) return capped(kSaturated);
+
+    // Replay of AuthLoginRateLimiter against an attacker who fires as fast as
+    // allowed and resumes the instant each block lifts.
+    std::int64_t now = 0;
+    std::int64_t window_started = 0;
+    std::int64_t blocked_until = -1;
+    std::uint32_t failures = 0;
+    std::uint64_t forwarded = 0;
+
+    while (true) {
+        if (blocked_until > now) now = blocked_until;
+        if (now > observation) break;
+        if (now - window_started >= window) {
+            failures = 0;
+            window_started = now;
+            blocked_until = -1;
+        }
+        ++failures;
+        ++forwarded;
+        if (forwarded >= kSaturated) return capped(kSaturated);
+        if (failures >= limiter.max_failures) {
+            blocked_until = now + lockout;
+        }
     }
 
-    // One burst is always available immediately; each further complete cycle
-    // inside the observation window buys the attacker another.
-    const std::uint64_t cycles =
-        1U + static_cast<std::uint64_t>(observation_window.count() /
-                                        cycle.count());
-    const std::uint64_t forwarded =
-        static_cast<std::uint64_t>(limiter.max_failures) * cycles;
-    if (forwarded >= kSaturated) return kSaturated;
-    return static_cast<std::uint32_t>(forwarded);
+    return capped(static_cast<std::uint32_t>(forwarded));
 }
 
 SystemAuthCapability evaluate_system_auth_capability(

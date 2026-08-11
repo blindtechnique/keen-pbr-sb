@@ -46,6 +46,14 @@ struct SystemAuthLimiterBudget {
     std::uint32_t max_failures{0};
     std::chrono::seconds window{0};
     std::chrono::seconds lockout{0};
+    // Router-wide ceiling on failures forwarded to the firmware, independent
+    // of how many sources ask.
+    //
+    // Without it the per-source limiter bounds nothing that matters here: the
+    // firmware sees one source - this router - so N attackers with one address
+    // each multiply straight through. With it, the friendly per-source numbers
+    // stop being a security parameter and go back to being a usability one.
+    std::optional<std::uint32_t> global_forward_cap;
 };
 
 struct SystemAuthCapabilityInputs {
@@ -78,9 +86,17 @@ struct SystemAuthCapability {
 // within `observation_window`, assuming an attacker who resumes the instant
 // each local lockout expires.
 //
-// Saturates instead of overflowing: a limiter with no window and no lockout is
-// unbounded, and reporting a wrapped small number there would turn the most
-// dangerous configuration into the one that looks safest.
+// This replays AuthLoginRateLimiter's actual rules rather than approximating
+// them with a closed form. The obvious formula - one burst per
+// (window + lockout) - is wrong, because the lockout runs concurrently with
+// the counting window, not after it: at lockout >= window the counter resets
+// at the very moment the block lifts, so the attacker's cycle is the lockout
+// alone. Getting that backwards understates the exposure, which is the one
+// direction a safety check must never err in.
+//
+// Saturates instead of overflowing: a limiter that never blocks is unbounded,
+// and reporting a wrapped small number there would turn the most dangerous
+// configuration into the one that looks safest.
 std::uint32_t forwarded_failures_within(
     const SystemAuthLimiterBudget& limiter,
     std::chrono::seconds observation_window);

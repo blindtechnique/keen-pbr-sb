@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -9,8 +11,19 @@
 namespace keen_pbr3 {
 
 inline constexpr std::size_t kAuthSessionCapacity = 64;
-inline constexpr std::size_t kAuthLoginMaxFailures = 5;
+// Three attempts, then a hundred seconds. This is a VPN helper on a home
+// router, not a bank: the number exists to stop hammering, not to punish
+// somebody who mistyped their own password twice.
+inline constexpr std::size_t kAuthLoginMaxFailures = 3;
+inline constexpr std::chrono::seconds kAuthLoginWindow{100};
+inline constexpr std::chrono::seconds kAuthLoginLockout{100};
 inline constexpr std::size_t kAuthLoginMaxSources = 256;
+
+// KeeneticOS brute-force policy, measured on a live Keenetic Ultra via
+// /rci/show/rc/ip/http and matching the firmware defaults: five failures
+// inside a three minute observation window, then a fifteen minute lock.
+inline constexpr std::uint32_t kNdmsDefaultLockoutThreshold = 5;
+inline constexpr std::chrono::seconds kNdmsDefaultLockoutObservation{180};
 
 // Sessions use monotonic time so an NTP correction cannot unexpectedly extend
 // or invalidate a web session.
@@ -46,8 +59,8 @@ public:
 
     struct Limits {
         std::size_t max_failures{kAuthLoginMaxFailures};
-        std::chrono::seconds window{60};
-        std::chrono::seconds lockout{60};
+        std::chrono::seconds window{kAuthLoginWindow};
+        std::chrono::seconds lockout{kAuthLoginLockout};
         std::size_t max_sources{kAuthLoginMaxSources};
     };
 
@@ -78,5 +91,45 @@ private:
     std::unordered_map<std::string, Entry> entries_;
     Clock::time_point saturated_until_{};
 };
+
+// A router-wide ceiling on failed logins forwarded to the router firmware.
+//
+// The per-source limiter above is a usability control. It cannot be the
+// security control here, because the firmware sees every forwarded attempt as
+// arriving from one source - this router - so per-source limits multiply
+// straight through by the number of sources that care to show up.
+//
+// This budget is the thing that actually keeps the router administrator from
+// being locked out of KeeneticOS by somebody poking keen-pbr's login form. It
+// is deliberately smaller than the firmware threshold: we stop one short and
+// refuse locally, so the firmware's own counter is never the one that trips.
+class AuthForwardBudget {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    // `capacity` is how many failures may reach the firmware inside `window`.
+    // Callers size it from the firmware's measured policy, one below its
+    // threshold.
+    AuthForwardBudget(std::uint32_t capacity, std::chrono::seconds window);
+
+    bool may_forward(Clock::time_point now = Clock::now());
+    void record_forwarded_failure(Clock::time_point now = Clock::now());
+    std::size_t spent(Clock::time_point now = Clock::now());
+
+    std::uint32_t capacity() const { return capacity_; }
+
+private:
+    void prune_locked(Clock::time_point now);
+
+    const std::uint32_t capacity_;
+    const std::chrono::seconds window_;
+    std::mutex mutex_;
+    // Bounded by capacity_, which is a firmware threshold - single digits.
+    std::deque<Clock::time_point> forwarded_;
+};
+
+// One below the firmware threshold, floored at zero. Stopping one short is the
+// whole point: reaching the threshold IS the lock.
+std::uint32_t auth_forward_capacity_for(std::uint32_t firmware_threshold);
 
 } // namespace keen_pbr3
