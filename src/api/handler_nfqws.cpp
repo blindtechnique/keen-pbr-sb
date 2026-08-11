@@ -3,6 +3,7 @@
 #include "handler_nfqws.hpp"
 #include "handler_backup.hpp"
 #include "maintenance_api.hpp"
+#include "../update/package_footprint.hpp"
 
 #include "../http/http_client.hpp"
 #include "../util/network_routes.hpp"
@@ -49,6 +50,8 @@ constexpr const char* kBinary = "/opt/usr/bin/nfqws2";
 constexpr const char* kInit = "/opt/etc/init.d/S51nfqws2";
 constexpr const char* kPidfile = "/opt/var/run/nfqws2.pid";
 constexpr const char* kConfigDir = "/opt/etc/nfqws2";
+constexpr const char* kOpkgPackageFileList =
+    "/opt/lib/opkg/info/nfqws2-keenetic.list";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
@@ -381,6 +384,50 @@ nlohmann::json nfqws_update_status(bool force = false) {
 std::mutex& nfqws_operation_mutex() {
     static std::mutex mutex;
     return mutex;
+}
+
+// Every path whose bytes decide whether nfqws2 still works, which is not the
+// same set opkg tracks.
+//
+// Measured on a live router: opkg's list names eight files that do not exist -
+// the package is `Architecture: all`, ships a binary per architecture, and its
+// postinst deletes the staging directory after picking one - while the binary
+// that actually runs, /opt/usr/bin/nfqws2, is absent from the list entirely
+// because the postinst creates it with `cp`.
+//
+// So opkg's record is the starting point, never the answer. The two paths this
+// project already knows about are added explicitly; the listed ones are
+// observed as they are, without deciding which absences were intended.
+std::vector<std::string> nfqws_package_paths() {
+    std::vector<std::string> paths =
+        read_opkg_file_list(kOpkgPackageFileList);
+    paths.emplace_back(kBinary);
+    paths.emplace_back(kInit);
+    return paths;
+}
+
+void describe_package_change(std::string& output,
+                             PackageBinaryOutcome outcome,
+                             const PackageFootprintDiff& diff) {
+    output += "\nnfqws2 binary: ";
+    output += package_binary_outcome_name(outcome);
+    output += "\n";
+    if (outcome == PackageBinaryOutcome::missing_after) {
+        output +=
+            "The nfqws2 binary is gone after the upgrade; the service has "
+            "nothing to run.\n";
+    }
+    output += "Package files changed: " + std::to_string(diff.changed.size()) +
+              ", added: " + std::to_string(diff.added.size()) +
+              ", removed: " + std::to_string(diff.removed.size());
+    if (!diff.indeterminate.empty()) {
+        // Surfaced rather than folded into "changed": a file we could not read
+        // is a gap in the observation, and calling it a change would make
+        // every permission error look like the upgrade doing work.
+        output += ", unreadable: " +
+                  std::to_string(diff.indeterminate.size());
+    }
+    output += "\n";
 }
 
 std::vector<pid_t> nfqws_processes() {
@@ -1073,9 +1120,18 @@ void register_nfqws_handler_impl(
             // keen-pbr-sb updater. It includes all nfqws2 configuration,
             // lists, Lua files and user strategies before opkg touches them.
             create_full_rollback_backup(ctx);
+            const auto footprint_before =
+                observe_package_footprint(nfqws_package_paths());
             int status = 0;
             auto output = std::string("Rollback backup created.\n") +
                           run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
+            const auto footprint_after =
+                observe_package_footprint(nfqws_package_paths());
+            const auto binary_outcome = judge_package_binary(
+                footprint_before, footprint_after, kBinary);
+            const auto footprint_diff =
+                diff_package_footprint(footprint_before, footprint_after);
+            describe_package_change(output, binary_outcome, footprint_diff);
             bool durable = true;
             const auto created = status == 0
                                      ? save_updated_default_strategy(
@@ -1087,9 +1143,18 @@ void register_nfqws_handler_impl(
                 output += "\nInstalled nfqws2 version: " + installed_version() + "\n";
             }
             append_durability_warning(output, durable);
-            return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
+            // A binary that vanished is not a successful upgrade, whatever
+            // opkg's exit code says. The service has nothing left to run, and
+            // reporting that as ok would hand the operator a green tick over a
+            // dead component.
+            const bool binary_lost =
+                binary_outcome == PackageBinaryOutcome::missing_after;
+            return nlohmann::json{{"ok", status == 0 && !binary_lost},
+                                  {"output", output}, {"status", status},
                                   {"strategy_created", created},
                                   {"durable", durable},
+                                  {"binary_outcome",
+                                   package_binary_outcome_name(binary_outcome)},
                                   {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
         if (action == "save_strategy") {
