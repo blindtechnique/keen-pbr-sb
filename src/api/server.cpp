@@ -6,6 +6,8 @@
 #include "keenetic_auth.hpp"
 
 #include "../config/config_writer.hpp"
+#include "system_auth_capability.hpp"
+#include "../keenetic/ndms_lockout_policy.hpp"
 #include "../keenetic/ndms_web_endpoint.hpp"
 #include "../log/logger.hpp"
 #include "../log/trace.hpp"
@@ -315,9 +317,23 @@ struct WebAuthConfig {
     std::string username;
     std::string password;
     std::chrono::seconds session_ttl{std::chrono::hours(24 * 7)};
+    // The firmware's brute-force policy, read once alongside endpoint
+    // discovery. Empty means the read failed, which keeps the conservative
+    // default rather than lifting the limit.
+    std::optional<NdmsLockoutPolicy> firmware_lockout;
 
     bool uses_router_account() const { return provider == "keenetic"; }
 };
+
+// Measured on a live Keenetic: the firmware answers /auth with 403 on
+// loopback and 401 with a challenge on a LAN address. A loopback endpoint
+// therefore can never verify anybody, however well-formed it looks.
+bool endpoint_is_loopback(const std::string& endpoint) {
+    if (endpoint.empty()) return false;
+    return endpoint.rfind("127.", 0) == 0 ||
+           endpoint.rfind("[::1]", 0) == 0 ||
+           endpoint.rfind("::1", 0) == 0;
+}
 
 std::optional<KeeneticAuthEndpoint> discover_keenetic_auth_endpoint(
     std::string* error = nullptr) {
@@ -566,6 +582,8 @@ struct ApiServer::Impl {
     std::string listen_error_message;
     std::mutex auth_update_mutex;
     std::mutex auth_endpoint_discovery_mutex;
+    std::mutex lockout_policy_mutex;
+    std::chrono::steady_clock::time_point lockout_policy_retry_after{};
     std::mutex auth_mutex;
     std::chrono::steady_clock::time_point auth_endpoint_retry_after{};
     WebAuthConfig auth;
@@ -585,8 +603,59 @@ struct ApiServer::Impl {
     }
 
     void replace_auth(WebAuthConfig replacement) {
+        apply_forward_budget(replacement);
         std::lock_guard lock(auth_mutex);
         auth = std::move(replacement);
+    }
+
+    // The firmware's own policy is authoritative whenever we managed to read
+    // it. The measured defaults stand in when we did not, and the capability
+    // report is what tells an operator which of the two happened - the budget
+    // itself must never widen just because a read failed.
+    // Reads the firmware policy at most once per retry interval, on the login
+    // path rather than at startup. The daemon deliberately does not block
+    // booting on NDMS probes, and a login is the first moment the answer
+    // actually matters. Held across the read on purpose: concurrent logins
+    // should queue behind one RCI call, not stampede it.
+    void refresh_firmware_lockout_policy() {
+        std::lock_guard lock(lockout_policy_mutex);
+        {
+            std::lock_guard auth_lock(auth_mutex);
+            if (auth.firmware_lockout) return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < lockout_policy_retry_after) return;
+
+        std::string error;
+        const auto policy = fetch_ndms_lockout_policy(&error);
+        if (!policy) {
+            // Keep the conservative default and try again later. A failed read
+            // must never be the reason the budget widens.
+            lockout_policy_retry_after = now + std::chrono::seconds(60);
+            Logger::instance().warn(
+                "Falling back to the default KeeneticOS lockout policy: {}",
+                error);
+            return;
+        }
+        lockout_policy_retry_after = {};
+        {
+            std::lock_guard auth_lock(auth_mutex);
+            auth.firmware_lockout = policy;
+        }
+        firmware_forward_budget.reconfigure(
+            auth_forward_capacity_for(policy->threshold),
+            policy->observation_window);
+    }
+
+    void apply_forward_budget(const WebAuthConfig& config) {
+        const auto threshold = config.firmware_lockout
+                                   ? config.firmware_lockout->threshold
+                                   : kNdmsDefaultLockoutThreshold;
+        const auto window = config.firmware_lockout
+                                ? config.firmware_lockout->observation_window
+                                : kNdmsDefaultLockoutObservation;
+        firmware_forward_budget.reconfigure(
+            auth_forward_capacity_for(threshold), window);
     }
 
     std::optional<WebAuthConfig> refresh_keenetic_endpoint_from_ndms(
@@ -732,6 +801,10 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                         "application/json");
                     return;
                 }
+                // Size the budget from the router's own policy before spending
+                // any of it, so a tightened lockout-policy is honoured rather
+                // than discovered by locking the owner out.
+                state->refresh_firmware_lockout_policy();
                 // Every credential we forward spends the router
                 // administrator's lockout budget, because the firmware sees
                 // the attempt as coming from this router rather than from the
@@ -1388,6 +1461,37 @@ void ApiServer::start() {
     stop();
     throw ApiError("Failed to start API server on " + impl_->host + ":" +
                    std::to_string(impl_->port) + " (" + diagnostic + ")");
+}
+
+std::optional<SystemAuthHealthSnapshot> ApiServer::system_auth_health() {
+    if (!impl_) return std::nullopt;
+    const auto auth = impl_->auth_snapshot();
+
+    SystemAuthCapabilityInputs inputs;
+    inputs.endpoint_resolved =
+        !auth.keenetic_endpoint.empty() && !auth.endpoint_unavailable;
+    inputs.endpoint_is_loopback =
+        endpoint_is_loopback(auth.keenetic_endpoint);
+    // Only an endpoint that NDMS discovery accepted was actually probed for
+    // the challenge. A hand-configured one never was, and claiming otherwise
+    // would let a manual entry pose as a proven verifier.
+    inputs.challenge_observed = auth.keenetic_endpoint_from_ndms;
+    inputs.firmware_lockout = auth.firmware_lockout;
+    inputs.local_limiter.max_failures =
+        static_cast<std::uint32_t>(kAuthLoginMaxFailures);
+    inputs.local_limiter.window = kAuthLoginWindow;
+    inputs.local_limiter.lockout = kAuthLoginLockout;
+    inputs.local_limiter.global_forward_cap =
+        impl_->firmware_forward_budget.capacity();
+
+    const auto capability = evaluate_system_auth_capability(inputs);
+
+    SystemAuthHealthSnapshot snapshot;
+    snapshot.state = system_auth_capability_state_name(capability.state);
+    snapshot.detail = capability.detail;
+    snapshot.forwarded_failures_per_window =
+        static_cast<std::int64_t>(capability.forwarded_failures_per_window);
+    return snapshot;
 }
 
 void ApiServer::stop() {

@@ -3,6 +3,7 @@
 #ifdef WITH_API
 
 #include "../config/config.hpp"
+#include "../health/routing_health.hpp"
 
 #include <functional>
 #include <memory>
@@ -82,6 +83,12 @@ public:
 
     // Stop the server and join the background thread.
     void stop();
+
+    // Whether the router's own authentication is proven usable in place of the
+    // local password, evaluated from the live auth configuration and the
+    // firmware policy this server managed to read. Reports only; retires
+    // nothing. Empty before the server has any state to judge.
+    std::optional<SystemAuthHealthSnapshot> system_auth_health();
 
     // Returns true if the server is currently listening.
     bool listening() const;

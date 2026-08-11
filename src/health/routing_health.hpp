@@ -57,6 +57,15 @@ struct PolicyRuleCheck {
     std::string detail;
 };
 
+// The system-auth verdict as the web server sees it. Carried as plain values
+// so the health layer never has to link against the auth machinery just to
+// report what it concluded.
+struct SystemAuthHealthSnapshot {
+    std::string state;
+    std::string detail;
+    std::int64_t forwarded_failures_per_window{0};
+};
+
 struct RoutingHealthReport {
     bool overall_ok{false};
     std::optional<FirewallBackend> firewall_backend;
@@ -67,6 +76,13 @@ struct RoutingHealthReport {
     // reports a chain being rewritten underneath us.
     std::string ttl_bypass_state;
     std::string ttl_bypass_detail;
+    // Whether the router's own authentication is proven usable in place of the
+    // password in auth.json. Like the TTL bypass above, kept out of the overall
+    // verdict: none of its refusals is a routing fault, and degrading the whole
+    // report for them would teach the operator to skip the field.
+    std::string system_auth_state;
+    std::string system_auth_detail;
+    std::optional<std::int64_t> system_auth_forwarded_failures_per_window;
     FirewallChainCheck firewall_chain;
     std::vector<FirewallRuleCheck> firewall_rules;
     std::vector<RouteTableCheck> route_tables;

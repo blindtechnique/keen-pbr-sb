@@ -1,7 +1,11 @@
 #include "ndms_lockout_policy.hpp"
 
+#include "../http/http_client.hpp"
+
+#include <chrono>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -9,6 +13,9 @@
 namespace keen_pbr3 {
 
 namespace {
+
+constexpr const char* kRciHttpConfig =
+    "http://127.0.0.1:79/rci/show/rc/ip/http";
 
 // The firmware spells these as strings ("5"), but older and newer builds have
 // been seen using JSON numbers for neighbouring fields, so accept both rather
@@ -80,6 +87,31 @@ std::optional<NdmsLockoutPolicy> parse_ndms_lockout_policy(
     parsed.duration = std::chrono::minutes(*duration);
     parsed.observation_window = std::chrono::minutes(*observation);
     return parsed;
+}
+
+std::optional<NdmsLockoutPolicy> fetch_ndms_lockout_policy(
+    std::string* error) {
+    try {
+        HttpClient client;
+        client.set_timeout(std::chrono::seconds(1));
+        client.set_max_response_size(2U * 1024U * 1024U);
+        const auto policy = parse_ndms_lockout_policy(
+            nlohmann::json::parse(client.download(kRciHttpConfig)));
+        if (!policy) {
+            if (error) {
+                *error = "NDMS reported no usable HTTP lockout policy";
+            }
+            return std::nullopt;
+        }
+        if (error) error->clear();
+        return policy;
+    } catch (const std::exception& exception) {
+        if (error) {
+            *error = std::string{"NDMS lockout policy read failed: "} +
+                     exception.what();
+        }
+        return std::nullopt;
+    }
 }
 
 } // namespace keen_pbr3

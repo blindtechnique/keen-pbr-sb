@@ -2,6 +2,7 @@
 
 #include "api/auth_runtime.hpp"
 #include "api/system_auth_capability.hpp"
+#include "health/routing_health_checker.hpp"
 #include "keenetic/ndms_lockout_policy.hpp"
 
 #include <chrono>
@@ -365,6 +366,40 @@ TEST_CASE("a failure that raced past the guard is still counted") {
     CHECK(budget.may_forward(start + 115s));
 }
 
+TEST_CASE("a tightened policy does not hand back budget already spent") {
+    const auto start = AuthForwardBudget::Clock::now();
+    AuthForwardBudget budget(4U, 180s);
+
+    for (int spent = 0; spent < 4; ++spent) {
+        budget.record_forwarded_failure(start);
+    }
+
+    // The administrator lowers the firmware threshold from 5 to 3 while the
+    // daemon is running. The four failures the firmware already counted do not
+    // become unspent because we learned about the change afterwards.
+    budget.reconfigure(auth_forward_capacity_for(3U), 180s);
+
+    CHECK(budget.capacity() == 2U);
+    CHECK(budget.spent(start) == 2U);
+    CHECK_FALSE(budget.may_forward(start));
+}
+
+TEST_CASE("a loosened policy widens the budget without losing history") {
+    const auto start = AuthForwardBudget::Clock::now();
+    AuthForwardBudget budget(2U, 180s);
+
+    budget.record_forwarded_failure(start);
+    budget.record_forwarded_failure(start + 10s);
+    CHECK_FALSE(budget.may_forward(start + 10s));
+
+    budget.reconfigure(auth_forward_capacity_for(6U), 180s);
+
+    CHECK(budget.capacity() == 5U);
+    // Room opens up, but the two already spent are still on the books.
+    CHECK(budget.may_forward(start + 10s));
+    CHECK(budget.spent(start + 10s) == 2U);
+}
+
 TEST_CASE("a zero capacity budget forwards nothing and stays bounded") {
     const auto start = AuthForwardBudget::Clock::now();
     AuthForwardBudget budget(auth_forward_capacity_for(0U), 100s);
@@ -373,6 +408,46 @@ TEST_CASE("a zero capacity budget forwards nothing and stays bounded") {
     for (int i = 0; i < 8; ++i) budget.record_forwarded_failure(start);
     CHECK(budget.spent(start) <= 1U);
     CHECK_FALSE(budget.may_forward(start));
+}
+
+TEST_CASE("the health report carries every state name the judge produces") {
+    const SystemAuthCapabilityState states[] = {
+        SystemAuthCapabilityState::usable,
+        SystemAuthCapabilityState::endpoint_unproven,
+        SystemAuthCapabilityState::loopback_not_accepted,
+        SystemAuthCapabilityState::challenge_absent,
+        SystemAuthCapabilityState::firmware_policy_unknown,
+        SystemAuthCapabilityState::lockout_budget_unsafe,
+    };
+
+    for (const auto state : states) {
+        RoutingHealthReport report;
+        report.overall_ok = true;
+        report.firewall_backend = FirewallBackend::iptables;
+        report.system_auth_state = system_auth_capability_state_name(state);
+
+        const auto json = routing_health_report_to_json(report);
+
+        REQUIRE(json.contains("system_auth_state"));
+        // A name the health layer silently rewrites is a name an operator
+        // cannot act on, and the two vocabularies drifting apart is exactly
+        // how "usable" would end up meaning something else.
+        CHECK(json["system_auth_state"].get<std::string>() ==
+              std::string(system_auth_capability_state_name(state)));
+    }
+}
+
+TEST_CASE("an unmappable system-auth state never reports as usable") {
+    RoutingHealthReport report;
+    report.overall_ok = true;
+    report.firewall_backend = FirewallBackend::iptables;
+    report.system_auth_state = "invented_by_a_newer_build";
+
+    const auto json = routing_health_report_to_json(report);
+
+    // The one direction that must never happen: a state we cannot map becoming
+    // the state that says it is safe to delete the only local password.
+    CHECK(json["system_auth_state"].get<std::string>() == "endpoint_unproven");
 }
 
 TEST_CASE("state names are stable for reporting") {

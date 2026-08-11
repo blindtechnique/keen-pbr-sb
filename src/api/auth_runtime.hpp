@@ -116,13 +116,19 @@ public:
     void record_forwarded_failure(Clock::time_point now = Clock::now());
     std::size_t spent(Clock::time_point now = Clock::now());
 
-    std::uint32_t capacity() const { return capacity_; }
+    // Re-sizes the budget once the firmware's real policy has been read.
+    // Failures already forwarded are kept: an administrator tightening the
+    // policy must not hand back budget that the firmware's counter has already
+    // seen spent.
+    void reconfigure(std::uint32_t capacity, std::chrono::seconds window);
+
+    std::uint32_t capacity();
 
 private:
     void prune_locked(Clock::time_point now);
 
-    const std::uint32_t capacity_;
-    const std::chrono::seconds window_;
+    std::uint32_t capacity_;
+    std::chrono::seconds window_;
     std::mutex mutex_;
     // Bounded by capacity_, which is a firmware threshold - single digits.
     std::deque<Clock::time_point> forwarded_;

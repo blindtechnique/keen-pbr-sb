@@ -33,4 +33,13 @@ struct NdmsLockoutPolicy {
 std::optional<NdmsLockoutPolicy> parse_ndms_lockout_policy(
     const nlohmann::json& http_config);
 
+// One bounded read of the fixed loopback RCI URL. No timer and no polling
+// loop: callers decide when a refresh is warranted, exactly as endpoint
+// discovery does.
+//
+// Returns nullopt on any failure, which callers must treat as "keep the
+// conservative default and say so", never as "no policy, so no limit".
+std::optional<NdmsLockoutPolicy> fetch_ndms_lockout_policy(
+    std::string* error = nullptr);
+
 } // namespace keen_pbr3

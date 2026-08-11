@@ -800,6 +800,8 @@ namespace api {
 
     enum class RoutingHealthResponseOverall : int { DEGRADED, ERROR, OK };
 
+    enum class SystemAuthState : int { CHALLENGE_ABSENT, ENDPOINT_UNPROVEN, FIRMWARE_POLICY_UNKNOWN, LOCKOUT_BUDGET_UNSAFE, LOOPBACK_NOT_ACCEPTED, USABLE };
+
     enum class TtlBypassState : int { ACTIVE, CHAIN_ABSENT, CONFLICT, MISSING, UNKNOWN, UNSUPPORTED };
 
     struct RoutingHealthResponse {
@@ -809,6 +811,9 @@ namespace api {
         RoutingHealthResponseOverall overall;
         std::vector<PolicyRuleCheck> policy_rules;
         std::vector<RouteTableCheck> route_tables;
+        std::optional<std::string> system_auth_detail;
+        std::optional<int64_t> system_auth_forwarded_failures_per_window;
+        std::optional<SystemAuthState> system_auth_state;
         std::optional<std::string> ttl_bypass_detail;
         std::optional<TtlBypassState> ttl_bypass_state;
     };
@@ -1715,6 +1720,9 @@ namespace api {
 
     void from_json(const json & j, RoutingHealthResponseOverall & x);
     void to_json(json & j, const RoutingHealthResponseOverall & x);
+
+    void from_json(const json & j, SystemAuthState & x);
+    void to_json(json & j, const SystemAuthState & x);
 
     void from_json(const json & j, TtlBypassState & x);
     void to_json(json & j, const TtlBypassState & x);
@@ -3152,6 +3160,9 @@ namespace api {
         x.overall = j.at("overall").get<RoutingHealthResponseOverall>();
         x.policy_rules = j.at("policy_rules").get<std::vector<PolicyRuleCheck>>();
         x.route_tables = j.at("route_tables").get<std::vector<RouteTableCheck>>();
+        x.system_auth_detail = get_stack_optional<std::string>(j, "system_auth_detail");
+        x.system_auth_forwarded_failures_per_window = get_stack_optional<int64_t>(j, "system_auth_forwarded_failures_per_window");
+        x.system_auth_state = get_stack_optional<SystemAuthState>(j, "system_auth_state");
         x.ttl_bypass_detail = get_stack_optional<std::string>(j, "ttl_bypass_detail");
         x.ttl_bypass_state = get_stack_optional<TtlBypassState>(j, "ttl_bypass_state");
     }
@@ -3164,6 +3175,9 @@ namespace api {
         j["overall"] = x.overall;
         j["policy_rules"] = x.policy_rules;
         j["route_tables"] = x.route_tables;
+        j["system_auth_detail"] = x.system_auth_detail;
+        j["system_auth_forwarded_failures_per_window"] = x.system_auth_forwarded_failures_per_window;
+        j["system_auth_state"] = x.system_auth_state;
         j["ttl_bypass_detail"] = x.ttl_bypass_detail;
         j["ttl_bypass_state"] = x.ttl_bypass_state;
     }
@@ -4653,6 +4667,28 @@ namespace api {
             case RoutingHealthResponseOverall::ERROR: j = "error"; break;
             case RoutingHealthResponseOverall::OK: j = "ok"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"RoutingHealthResponseOverall\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, SystemAuthState & x) {
+        if (j == "challenge_absent") x = SystemAuthState::CHALLENGE_ABSENT;
+        else if (j == "endpoint_unproven") x = SystemAuthState::ENDPOINT_UNPROVEN;
+        else if (j == "firmware_policy_unknown") x = SystemAuthState::FIRMWARE_POLICY_UNKNOWN;
+        else if (j == "lockout_budget_unsafe") x = SystemAuthState::LOCKOUT_BUDGET_UNSAFE;
+        else if (j == "loopback_not_accepted") x = SystemAuthState::LOOPBACK_NOT_ACCEPTED;
+        else if (j == "usable") x = SystemAuthState::USABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SystemAuthState\""); }
+    }
+
+    inline void to_json(json & j, const SystemAuthState & x) {
+        switch (x) {
+            case SystemAuthState::CHALLENGE_ABSENT: j = "challenge_absent"; break;
+            case SystemAuthState::ENDPOINT_UNPROVEN: j = "endpoint_unproven"; break;
+            case SystemAuthState::FIRMWARE_POLICY_UNKNOWN: j = "firmware_policy_unknown"; break;
+            case SystemAuthState::LOCKOUT_BUDGET_UNSAFE: j = "lockout_budget_unsafe"; break;
+            case SystemAuthState::LOOPBACK_NOT_ACCEPTED: j = "loopback_not_accepted"; break;
+            case SystemAuthState::USABLE: j = "usable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SystemAuthState\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

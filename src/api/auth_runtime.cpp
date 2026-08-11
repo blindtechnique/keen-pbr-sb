@@ -237,4 +237,23 @@ std::size_t AuthForwardBudget::spent(const Clock::time_point now) {
     return forwarded_.size();
 }
 
+std::uint32_t AuthForwardBudget::capacity() {
+    std::lock_guard lock(mutex_);
+    return capacity_;
+}
+
+void AuthForwardBudget::reconfigure(const std::uint32_t capacity,
+                                    const std::chrono::seconds window) {
+    std::lock_guard lock(mutex_);
+    capacity_ = capacity;
+    window_ = window;
+    // Trimming drops the oldest entries, so the timestamps that survive are
+    // the newest. That delays the refill rather than accelerating it, which is
+    // the direction to round in when the policy has just become stricter.
+    const std::size_t bound = capacity_ > 0U ? capacity_ : 1U;
+    while (forwarded_.size() > bound) {
+        forwarded_.pop_front();
+    }
+}
+
 } // namespace keen_pbr3

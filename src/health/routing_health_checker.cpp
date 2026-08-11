@@ -227,6 +227,23 @@ static api::TtlBypassState to_api_ttl_bypass_state(const std::string& state) {
     return api::TtlBypassState::UNKNOWN;
 }
 
+// Same shape and same reason as the TTL mapping above: the health layer names
+// a state without linking against the API server that produced it. An
+// unrecognised value becomes `endpoint_unproven` rather than `usable`, because
+// a state we cannot map must never be the one that says it is safe to delete
+// the only local password.
+static api::SystemAuthState to_api_system_auth_state(const std::string& state) {
+    if (state == "usable")           return api::SystemAuthState::USABLE;
+    if (state == "loopback_not_accepted")
+        return api::SystemAuthState::LOOPBACK_NOT_ACCEPTED;
+    if (state == "challenge_absent") return api::SystemAuthState::CHALLENGE_ABSENT;
+    if (state == "firmware_policy_unknown")
+        return api::SystemAuthState::FIRMWARE_POLICY_UNKNOWN;
+    if (state == "lockout_budget_unsafe")
+        return api::SystemAuthState::LOCKOUT_BUDGET_UNSAFE;
+    return api::SystemAuthState::ENDPOINT_UNPROVEN;
+}
+
 static api::RoutingHealthResponseFirewallBackend to_api_firewall_backend(FirewallBackend backend) {
     switch (backend) {
         case FirewallBackend::iptables:
@@ -267,6 +284,17 @@ nlohmann::json routing_health_report_to_json(const RoutingHealthReport& r) {
     }
     if (!r.ttl_bypass_detail.empty()) {
         resp.ttl_bypass_detail = r.ttl_bypass_detail;
+    }
+
+    if (!r.system_auth_state.empty()) {
+        resp.system_auth_state = to_api_system_auth_state(r.system_auth_state);
+    }
+    if (!r.system_auth_detail.empty()) {
+        resp.system_auth_detail = r.system_auth_detail;
+    }
+    if (r.system_auth_forwarded_failures_per_window) {
+        resp.system_auth_forwarded_failures_per_window =
+            *r.system_auth_forwarded_failures_per_window;
     }
 
     resp.firewall.chain_present = r.firewall_chain.chain_present;
