@@ -162,6 +162,9 @@ export const ruTranslation = {
     profiles: {
       recommended: "рекомендуется",
       applied: "Применена",
+      modified: "изменена",
+      modifiedHint:
+        "Файл на роутере отличается от профиля из поставки: сводка выше посчитана по нему, а не по пакету.",
       details: "Подробнее",
       poolSummary: "Пулов трафика: {{count}}",
       domainPools: "отдельные пулы под YouTube, Discord и другие",

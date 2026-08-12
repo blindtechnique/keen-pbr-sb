@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   canonicalNfqwsProfileTier,
+  nfqwsProfileMatchesPackage,
   nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
   parseNfqwsStrategy,
@@ -293,24 +294,59 @@ describe("nfqws profile marker", () => {
     ).toBe("balanced")
   })
 
-  test("does not promote an edited override that retained the profile marker", () => {
+  /**
+   * Изменённая копия остаётся ступенью — иначе выбор из трёх молча
+   * превращался бы в выбор из двух, а применённая ступень переставала быть
+   * видна. Но выдавать её за профиль из поставки нельзя, и это говорит
+   * `nfqwsProfileMatchesPackage`: карточка получает подпись «изменена» и
+   * кнопку «Вернуть встроенную».
+   */
+  test("marks an edited override instead of hiding the tier", () => {
+    const edited = {
+      builtin: true,
+      overridden: true,
+      canonical: false,
+      content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\nNFQWS_ARGS='edited'\n",
+    }
+    expect(canonicalNfqwsProfileTier(edited)).toBe("balanced")
+    expect(nfqwsProfileMatchesPackage(edited)).toBe(false)
+  })
+
+  test("a strategy without a user copy always matches the package", () => {
+    // На роутере `canonical` ложный и без копии — расхождению взяться неоткуда.
     expect(
-      canonicalNfqwsProfileTier({
+      nfqwsProfileMatchesPackage({
+        builtin: true,
+        overridden: false,
+        canonical: false,
+        content: "# keen-pbr-sb · профиль «БЕЗОПАСНЫЙ»\n",
+      })
+    ).toBe(true)
+  })
+
+  test("an untouched copy still matches the package", () => {
+    expect(
+      nfqwsProfileMatchesPackage({
         builtin: true,
         overridden: true,
-        canonical: false,
-        content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\nNFQWS_ARGS='edited'\n",
+        canonical: true,
+        content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n",
       })
-    ).toBeUndefined()
+    ).toBe(true)
+    // Демон постарше бита не присылает — расхождение не выдумывается.
+    expect(
+      nfqwsProfileMatchesPackage({
+        builtin: true,
+        overridden: true,
+        content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n",
+      })
+    ).toBe(true)
   })
 
   /**
    * Состояние живого роутера: `canonical` приходит ложным у каждой встроенной
    * стратегии, у которой нет пользовательской копии, — backend сравнивает
-   * пакетный текст с текстом, где `ISP_INTERFACE` уже подставлен. Правки
-   * встроенной стратегии без копии не бывает: `save_strategy` эту копию и
-   * создаёт. Значит, спрашивать флаг там не о чем, и профиль обязан остаться
-   * карточкой.
+   * пакетный текст с текстом, где `ISP_INTERFACE` уже подставлен.
    */
   test("trusts the package when there is no user copy to disagree with", () => {
     expect(

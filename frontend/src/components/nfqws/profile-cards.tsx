@@ -1,4 +1,4 @@
-import { PlayIcon } from "lucide-react"
+import { PlayIcon, RotateCcwIcon } from "lucide-react"
 import { useMemo } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -15,16 +15,24 @@ export interface NfqwsProfileEntry {
   readonly tier: NfqwsProfileTier
   readonly content: string
   readonly active: boolean
+  /**
+   * Файл на роутере отличается от профиля из поставки. Карточка от этого не
+   * исчезает — иначе выбор из трёх ступеней молча превращался бы в выбор из
+   * двух, а применённая ступень переставала быть видна.
+   */
+  readonly modified: boolean
 }
 
 export function NfqwsProfileCards({
   profiles,
   onApply,
   onOpen,
+  onRestore,
 }: {
   readonly profiles: readonly NfqwsProfileEntry[]
   readonly onApply: (name: string) => void
   readonly onOpen: (name: string) => void
+  readonly onRestore: (name: string) => void
 }) {
   if (profiles.length === 0) return null
 
@@ -35,6 +43,7 @@ export function NfqwsProfileCards({
           key={profile.name}
           onApply={() => onApply(profile.name)}
           onOpen={() => onOpen(profile.name)}
+          onRestore={() => onRestore(profile.name)}
           profile={profile}
         />
       ))}
@@ -46,10 +55,12 @@ function ProfileCard({
   profile,
   onApply,
   onOpen,
+  onRestore,
 }: {
   readonly profile: NfqwsProfileEntry
   readonly onApply: () => void
   readonly onOpen: () => void
+  readonly onRestore: () => void
 }) {
   const { t } = useTranslation()
   const summary = useMemo(
@@ -67,6 +78,11 @@ function ProfileCard({
         {profile.tier === "balanced" ? (
           <Badge size="xs" variant="secondary">
             {t("nfqws.profiles.recommended")}
+          </Badge>
+        ) : null}
+        {profile.modified ? (
+          <Badge size="xs" variant="warning">
+            {t("nfqws.profiles.modified")}
           </Badge>
         ) : null}
         {profile.active ? (
@@ -89,6 +105,15 @@ function ProfileCard({
         </p>
       ) : null}
 
+      {/* Расхождение с поставкой — не повод прятать ступень, но и не мелочь:
+          сводка выше посчитана по файлу на роутере, а не по профилю из
+          пакета. Поэтому сказано прямо и рядом дана кнопка вернуть. */}
+      {profile.modified ? (
+        <p className="text-xs text-warning-foreground">
+          {t("nfqws.profiles.modifiedHint")}
+        </p>
+      ) : null}
+
       <div className="mt-auto flex flex-wrap gap-2 pt-1">
         <Button disabled={profile.active} onClick={onApply} size="sm">
           <PlayIcon />
@@ -99,6 +124,12 @@ function ProfileCard({
         <Button onClick={onOpen} size="sm" variant="outline">
           {t("nfqws.profiles.details")}
         </Button>
+        {profile.modified ? (
+          <Button onClick={onRestore} size="sm" variant="outline">
+            <RotateCcwIcon />
+            {t("nfqws.restoreBuiltin")}
+          </Button>
+        ) : null}
       </div>
     </li>
   )

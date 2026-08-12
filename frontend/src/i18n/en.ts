@@ -162,6 +162,9 @@ export const enTranslation = {
     profiles: {
       recommended: "recommended",
       applied: "Applied",
+      modified: "changed",
+      modifiedHint:
+        "The file on the router differs from the packaged profile: the summary above describes the file, not the package.",
       details: "Details",
       poolSummary: "Traffic pools: {{count}}",
       domainPools: "dedicated pools for YouTube, Discord and others",

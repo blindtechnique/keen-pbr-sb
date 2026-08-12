@@ -107,6 +107,7 @@ import {
 } from "@/lib/nfqws-upgrade-capability"
 import {
   canonicalNfqwsProfileTier,
+  nfqwsProfileMatchesPackage,
   NFQWS_PROFILE_ORDER,
   nfqwsBuiltinStrategyDisplayKey,
   parseNfqwsProfileMarker,
@@ -1678,6 +1679,7 @@ function StrategiesEditor({
               tier,
               content: item.content,
               active: item.name === status.active_strategy,
+              modified: !nfqwsProfileMatchesPackage(item),
             },
           ]
         : []
@@ -1883,6 +1885,9 @@ function StrategiesEditor({
               setApplying(name)
             }}
             onOpen={openDetails}
+            // Тот же диалог, что у карандаша в таблице: «Вернуть встроенную»
+            // отбрасывает пользовательскую копию и возвращает файл поставки.
+            onRestore={setDeleting}
             profiles={managedProfiles}
           />
 
