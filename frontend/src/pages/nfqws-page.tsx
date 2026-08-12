@@ -642,6 +642,22 @@ export function NfqwsPage() {
                   {t("nfqws.upgrade")}
                 </Button>
                 <Button
+                  disabled={operation.pending || !status?.installed}
+                  onClick={() =>
+                    void runOperation(
+                      t("nfqws.captureRestorePoint"),
+                      () => nfqwsAction({ action: "capture_restore_point" }),
+                      t("nfqws.operationCompleted"),
+                      true
+                    )
+                  }
+                  title={t("nfqws.serviceHelp.captureRestorePoint")}
+                  variant="outline"
+                >
+                  <ArchiveIcon />
+                  {t("nfqws.captureRestorePoint")}
+                </Button>
+                <Button
                   disabled={
                     operation.pending ||
                     !status?.installed ||

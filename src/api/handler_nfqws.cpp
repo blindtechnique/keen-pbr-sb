@@ -481,7 +481,11 @@ void describe_runtime_outcome(std::string& output,
 // are not the only way a store goes bad, and a cache that only we can clear
 // would keep reporting `usable` after something outside this process damaged
 // it. Thirty seconds bounds how long that lie can live.
-ComponentCaptureState cached_restore_point_state() {
+//
+// `force` is for our own mutations, which know the answer changed. Without it
+// an operator who has just created a restore point watches a disabled button
+// for half a minute and concludes it did not work.
+ComponentCaptureState cached_restore_point_state(bool force = false) {
     static std::mutex mutex;
     static std::optional<ComponentCaptureState> cached;
     static std::chrono::steady_clock::time_point checked_at{};
@@ -489,7 +493,7 @@ ComponentCaptureState cached_restore_point_state() {
 
     const std::lock_guard lock(mutex);
     const auto now = std::chrono::steady_clock::now();
-    if (cached && now - checked_at < kTtl) return *cached;
+    if (!force && cached && now - checked_at < kTtl) return *cached;
     cached = verify_component_capture(kNfqwsCapture);
     checked_at = now;
     return *cached;
@@ -1295,6 +1299,7 @@ void register_nfqws_handler_impl(
             std::string output = "Rollback backup created.\n";
             const auto capture =
                 capture_component_files(footprint_before, kNfqwsCapture);
+            cached_restore_point_state(/*force=*/true);
             output += capture.complete
                           ? std::string("Component restore point captured (") +
                                 std::to_string(capture.captured) +
@@ -1411,6 +1416,56 @@ void register_nfqws_handler_impl(
                                   {"runtime_outcome",
                                    nfqws_runtime_outcome_name(runtime_outcome)},
                                   {"warning", durable ? "" : kDurabilityWarning}}.dump();
+        }
+        if (action == "capture_restore_point") {
+            // No step-up. This installs nothing; it copies files this daemon
+            // already reads into a private store of ours. Asking for a
+            // password to take a safety net discourages taking one, and the
+            // action an attacker wants is the restore, which is guarded.
+            //
+            // The lease is still required: capturing while opkg is midway
+            // through replacing files would store a mixture of two versions
+            // and call it a restore point.
+            std::unique_ptr<MaintenanceLease> maintenance;
+            try {
+                maintenance =
+                    ctx.acquire_maintenance_lease("nfqws-capture-restore-point");
+            } catch (const MaintenanceLockError& error) {
+                throw_maintenance_api_error(error);
+            }
+            const std::lock_guard lock(nfqws_operation_mutex());
+
+            const auto journal = read_component_transaction(kNfqwsJournal);
+            if (journal.state != ComponentTransactionState::none) {
+                throw ApiError(
+                    "a previous nfqws2 package operation did not finish; what "
+                    "is installed is unknown, so it must not be captured as a "
+                    "restore point",
+                    409);
+            }
+
+            const auto captured = capture_component_files(
+                observe_package_footprint(nfqws_package_paths()),
+                kNfqwsCapture);
+            const auto state = cached_restore_point_state(/*force=*/true);
+            std::string output =
+                "Captured files: " + std::to_string(captured.captured) + "\n";
+            for (const auto& failure : captured.failed) {
+                output += "Could not capture: " + failure + "\n";
+            }
+            // The verdict comes from re-reading the store, not from the write
+            // having returned. What matters is whether a restore could use it.
+            output += "Restore point: ";
+            output += component_capture_state_name(state);
+            output += "\n";
+            return nlohmann::json{
+                {"ok", captured.complete &&
+                           state == ComponentCaptureState::usable},
+                {"output", output},
+                {"captured", captured.captured},
+                {"failed", captured.failed.size()},
+                {"restore_point", component_capture_state_name(state)}}
+                .dump();
         }
         if (action == "restore_component") {
             // Same lease as the upgrade: this replaces installed binaries, so

@@ -16,6 +16,7 @@ export const enTranslation = {
     restart: "Restart service",
     reload: "Reload configuration",
     upgrade: "Upgrade package",
+    captureRestorePoint: "Save restore point",
     restoreComponent: "Restore previous files",
     restorePointMissing:
       "Nothing to restore yet. Files are saved automatically just before an upgrade started from this panel.",
@@ -36,6 +37,8 @@ export const enTranslation = {
         "The service re-reads its configuration files without stopping, so connections survive. Enough when only lists and parameters changed.",
       upgrade:
         "Installs a newer version of nfqws2 itself from the repository. Settings, lists and strategies stay as they are.",
+      captureRestorePoint:
+        "Saves the current nfqws2 files — the binary, the configuration and the lists — so you can return to them later. An upgrade does this by itself; use this to take one before changing anything else.",
       restoreComponent:
         "Puts back the nfqws2 files saved just before the last upgrade — the binary, the configuration and the lists — and restarts the service.",
       backup:

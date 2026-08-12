@@ -189,6 +189,10 @@ TEST_CASE("the everyday nfqws actions never ask for a password") {
         "delete_file",  "clear_log",      "service",        "save_strategy",
         "apply_strategy", "save_files",   "delete_strategy", "import_lists",
         "import_bundle", "check_url",
+        // Taking a safety net installs nothing, and asking for a password to
+        // take one discourages taking it. The action an attacker wants is the
+        // restore, which is guarded.
+        "capture_restore_point",
     };
 
     for (const auto& action : everyday) {
@@ -228,6 +232,7 @@ TEST_CASE("an action-scoped entry names an action the handler dispatches on") {
         "delete_file",  "clear_log",       "service",       "upgrade",
         "save_strategy", "apply_strategy", "save_files",    "delete_strategy",
         "import_lists", "import_bundle",   "check_url",     "restore_component",
+        "capture_restore_point",
     };
 
     for (const auto& entry : step_up_protected_actions()) {
