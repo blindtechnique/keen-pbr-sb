@@ -64,15 +64,21 @@ const std::vector<StepUpProtectedRoute>& step_up_protected_routes() {
 }
 
 const std::vector<StepUpProtectedAction>& step_up_protected_actions() {
-    // POST /api/nfqws dispatches on an "action" field. Only `upgrade` installs
-    // software; the other fifteen read files, save strategies, clear logs and
-    // restart the service - things the panel does constantly and which must not
-    // ask for a password.
+    // POST /api/nfqws dispatches on an "action" field. Two of them install
+    // software; the rest read files, save strategies, clear logs and restart
+    // the service - things the panel does constantly and which must not ask
+    // for a password.
+    //
+    // `restore_component` is here for the same reason as `upgrade` and not a
+    // weaker one: putting an older binary back is installing software, and an
+    // attacker who can reach the panel would rather downgrade a component to a
+    // version with known holes than upgrade it.
     //
     // `import_bundle` was considered and left out: it writes nfqws lists and
     // configuration, which is an edit like the others, not an install.
     static const std::vector<StepUpProtectedAction> actions = {
         {"POST", "/api/nfqws", "upgrade"},
+        {"POST", "/api/nfqws", "restore_component"},
     };
     return actions;
 }

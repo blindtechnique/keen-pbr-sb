@@ -64,4 +64,28 @@ ComponentCaptureState verify_component_capture(
 const char* component_capture_state_name(
     ComponentCaptureState state) noexcept;
 
+struct ComponentRestoreResult {
+    bool complete{false};
+    std::size_t restored{0};
+    std::vector<std::string> failed;
+    // Why nothing was attempted, when nothing was. Empty on an attempt.
+    std::string refused;
+};
+
+// Puts the captured bytes back at their recorded paths, with their recorded
+// modes.
+//
+// Refuses unless the capture verifies first. A restore that discovers halfway
+// through that its source is damaged leaves the component in a state that is
+// neither the old one nor the new one, which is worse than both.
+//
+// Restores only what was captured. Files the new package added are reported by
+// the caller's own footprint diff and deliberately not deleted here: a list of
+// paths to unlink, assembled by us rather than by the package manager, is not
+// something to run against a live system on the strength of our own bookkeeping.
+// So this returns the component to its captured bytes, not the machine to its
+// exact former state, and the difference is named rather than glossed.
+ComponentRestoreResult restore_component_files(
+    const std::filesystem::path& store);
+
 } // namespace keen_pbr3

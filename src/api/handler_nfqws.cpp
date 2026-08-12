@@ -1326,6 +1326,71 @@ void register_nfqws_handler_impl(
                                    nfqws_runtime_outcome_name(runtime_outcome)},
                                   {"warning", durable ? "" : kDurabilityWarning}}.dump();
         }
+        if (action == "restore_component") {
+            // Same lease as the upgrade: this replaces installed binaries, so
+            // it must not run beside a lifecycle operation or the keen-pbr
+            // updater any more than an upgrade may.
+            std::unique_ptr<MaintenanceLease> maintenance;
+            try {
+                maintenance =
+                    ctx.acquire_maintenance_lease("nfqws-restore-component");
+            } catch (const MaintenanceLockError& error) {
+                throw_maintenance_api_error(error);
+            }
+            const std::lock_guard lock(nfqws_operation_mutex());
+
+            const auto capture_state =
+                verify_component_capture(kNfqwsCapture);
+            if (capture_state != ComponentCaptureState::usable) {
+                // Refused before anything stops, so a component that is
+                // working keeps working when there is nothing to restore.
+                throw ApiError(
+                    std::string("no usable nfqws2 restore point (") +
+                        component_capture_state_name(capture_state) + ")",
+                    409);
+            }
+
+            ComponentTransactionRecord record;
+            record.component = "nfqws2-keenetic";
+            record.operation = "restore-component";
+            record.phase = ComponentTransactionPhase::mutating;
+            record.started_at = static_cast<std::int64_t>(std::time(nullptr));
+            record.runtime_was_running =
+                observe_nfqws_runtime().process_present;
+            write_component_transaction(kNfqwsJournal, record);
+
+            std::string output;
+            int service_status = 0;
+            if (record.runtime_was_running) {
+                output += run_nfqws_service_command("stop", service_status);
+            }
+            const auto restored = restore_component_files(kNfqwsCapture);
+            output += "\nRestored files: " +
+                      std::to_string(restored.restored) + "\n";
+            for (const auto& failure : restored.failed) {
+                output += "Could not restore: " + failure + "\n";
+            }
+            if (record.runtime_was_running) {
+                int start_status = 0;
+                output += run_nfqws_service_command("start", start_status);
+            }
+            // Only what was captured came back. Files the newer package added
+            // are still there, and saying so is the difference between a
+            // restore and a claim of one.
+            output +=
+                "Files added by the newer package were not removed; this "
+                "restores the captured bytes, not the exact former state.\n";
+            if (!clear_component_transaction(kNfqwsJournal)) {
+                output +=
+                    "The transaction record could not be removed; the next "
+                    "package operation will refuse until it is cleared.\n";
+            }
+            return nlohmann::json{{"ok", restored.complete},
+                                  {"output", output},
+                                  {"restored", restored.restored},
+                                  {"failed", restored.failed.size()}}
+                .dump();
+        }
         if (action == "save_strategy") {
             const auto name = request.value("name", std::string{});
             if (!valid_name(name, true)) throw ApiError("invalid strategy name", 400);

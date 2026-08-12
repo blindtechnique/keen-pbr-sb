@@ -2,6 +2,8 @@
 
 #include "rescue_integrity.hpp"
 
+#include "../config/config_writer.hpp"
+
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
@@ -194,6 +196,59 @@ ComponentCaptureState verify_component_capture(const fs::path& store) {
             return ComponentCaptureState::corrupted;
     }
     return ComponentCaptureState::usable;
+}
+
+ComponentRestoreResult restore_component_files(const fs::path& store) {
+    ComponentRestoreResult result;
+    const auto state = verify_component_capture(store);
+    if (state != ComponentCaptureState::usable) {
+        result.refused = component_capture_state_name(state);
+        return result;
+    }
+
+    std::vector<ManifestEntry> entries;
+    if (!parse_manifest(store / kManifestName, entries)) {
+        // verify_component_capture just parsed this successfully, so reaching
+        // here means the store changed underneath us.
+        result.refused = "incomplete";
+        return result;
+    }
+
+    for (const auto& entry : entries) {
+        const auto stored = store / kFilesDir / stored_name(entry.index);
+        std::ifstream input(stored, std::ios::binary);
+        if (!input) {
+            result.failed.push_back(entry.path);
+            continue;
+        }
+        std::string body((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+        if (input.bad()) {
+            result.failed.push_back(entry.path);
+            continue;
+        }
+        try {
+            AtomicFileWriteOptions options;
+            options.create_parent_directories = true;
+            options.file_mode = static_cast<mode_t>(entry.mode);
+            write_file_atomically(entry.path, body, options);
+        } catch (const std::exception&) {
+            result.failed.push_back(entry.path);
+            continue;
+        }
+        // Confirmed from the destination. The point of this whole path is that
+        // the bytes are what they are claimed to be, and the one place that
+        // must not be taken on trust is the last one.
+        const auto written = rescue_integrity::sha256_file(entry.path);
+        if (!written || *written != entry.sha256) {
+            result.failed.push_back(entry.path);
+            continue;
+        }
+        ++result.restored;
+    }
+
+    result.complete = result.failed.empty() && result.restored == entries.size();
+    return result;
 }
 
 const char* component_capture_state_name(

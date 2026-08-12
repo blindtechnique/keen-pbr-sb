@@ -229,6 +229,73 @@ TEST_CASE("a footprint with nothing present captures nothing and says so") {
           ComponentCaptureState::usable);
 }
 
+TEST_CASE("a restore puts the captured bytes and modes back") {
+    TempDirectory directory;
+    const auto binary = directory.path / "live" / "nfqws2";
+    const auto blob = directory.path / "live" / "quic initial.bin";
+    write_file(binary, "old-binary\n", 0755);
+    write_file(blob, "old-blob\n", 0644);
+
+    const auto store = directory.path / "store";
+    REQUIRE(capture_component_files(
+                observe_package_footprint({binary.string(), blob.string()}),
+                store)
+                .complete);
+
+    write_file(binary, "new-binary-that-fails\n", 0644);
+    std::error_code error;
+    fs::remove(blob, error);
+    REQUIRE_FALSE(error);
+
+    const auto restored = restore_component_files(store);
+    CHECK(restored.complete);
+    CHECK(restored.restored == 2U);
+    CHECK(restored.refused.empty());
+
+    std::ifstream check(binary);
+    std::string body((std::istreambuf_iterator<char>(check)),
+                     std::istreambuf_iterator<char>());
+    CHECK(body == "old-binary\n");
+    struct stat info {};
+    REQUIRE(::lstat(binary.c_str(), &info) == 0);
+    // A binary restored without its execute bit runs no better than one that
+    // was never restored.
+    CHECK((info.st_mode & 07777) == 0755U);
+    CHECK(fs::exists(blob, error));
+}
+
+TEST_CASE("a restore refuses a capture it cannot trust, before touching anything") {
+    TempDirectory directory;
+    const auto live = directory.path / "live" / "nfqws2";
+    write_file(live, "current\n", 0755);
+    const auto store = directory.path / "store";
+    REQUIRE(capture_component_files(
+                observe_package_footprint({live.string()}), store)
+                .complete);
+
+    write_file(live, "newer\n", 0755);
+    write_file(store / "files" / "000001", "rotted\n");
+
+    // Discovering damage halfway through leaves the component neither the old
+    // one nor the new one, which is worse than both.
+    const auto refused = restore_component_files(store);
+    CHECK_FALSE(refused.complete);
+    CHECK(refused.restored == 0U);
+    CHECK(refused.refused == "corrupted");
+
+    std::ifstream check(live);
+    std::string body((std::istreambuf_iterator<char>(check)),
+                     std::istreambuf_iterator<char>());
+    CHECK(body == "newer\n");
+}
+
+TEST_CASE("restoring from nothing is a refusal, not a silent success") {
+    TempDirectory directory;
+    const auto result = restore_component_files(directory.path / "never");
+    CHECK_FALSE(result.complete);
+    CHECK(result.refused == "absent");
+}
+
 TEST_CASE("every capture state has a distinct stable name") {
     std::set<std::string> names;
     for (const auto state : {ComponentCaptureState::usable,

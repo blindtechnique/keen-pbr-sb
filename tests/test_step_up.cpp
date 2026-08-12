@@ -198,8 +198,12 @@ TEST_CASE("the everyday nfqws actions never ask for a password") {
     }
 }
 
-TEST_CASE("installing nfqws is the one action that does") {
+TEST_CASE("installing nfqws software is what demands a step-up") {
     CHECK(requires_step_up("POST", "/api/nfqws", "upgrade"));
+    // Putting an older binary back is installing software too, and an attacker
+    // who can reach the panel would rather downgrade a component to a version
+    // with known holes than upgrade it.
+    CHECK(requires_step_up("POST", "/api/nfqws", "restore_component"));
     // Reading the route without naming an action must not demand one either,
     // or the same breakage returns through the front door.
     CHECK_FALSE(requires_step_up("POST", "/api/nfqws", ""));
@@ -223,7 +227,7 @@ TEST_CASE("an action-scoped entry names an action the handler dispatches on") {
         "check_update", "read_file",       "save_file",     "create_file",
         "delete_file",  "clear_log",       "service",       "upgrade",
         "save_strategy", "apply_strategy", "save_files",    "delete_strategy",
-        "import_lists", "import_bundle",   "check_url",
+        "import_lists", "import_bundle",   "check_url",     "restore_component",
     };
 
     for (const auto& entry : step_up_protected_actions()) {
