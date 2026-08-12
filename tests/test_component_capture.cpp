@@ -75,6 +75,40 @@ TEST_CASE("a capture stores every present file and verifies from the copy") {
     CHECK(verify_component_capture(store) == ComponentCaptureState::usable);
 }
 
+TEST_CASE("the store is private no matter how open the originals were") {
+    // Measured on the live router: every one of nfqws2's six conffiles is in
+    // opkg's file list, so the capture holds the operator's nfqws2.conf and
+    // all five domain and address lists. A world-readable copy of those beside
+    // a 0644 original is a copy that leaks what the original merely exposed.
+    TempDirectory directory;
+    const auto open_file = directory.path / "src" / "user.list";
+    write_file(open_file, "example.test\n", 0666);
+
+    const auto store = directory.path / "store";
+    REQUIRE(capture_component_files(
+                observe_package_footprint({open_file.string()}), store)
+                .complete);
+
+    struct stat info {};
+    for (const auto& path : {store,
+                             store / "files",
+                             store / "files" / "000001",
+                             store / "manifest",
+                             store / ".ready"}) {
+        REQUIRE(::lstat(path.c_str(), &info) == 0);
+        const bool directory_entry = S_ISDIR(info.st_mode);
+        CHECK((info.st_mode & 07777) ==
+              (directory_entry ? 0700U : 0600U));
+    }
+
+    // The original's mode still travels in the manifest, so a restore puts it
+    // back as it was rather than as the store kept it.
+    write_file(open_file, "changed\n", 0600);
+    REQUIRE(restore_component_files(store).complete);
+    REQUIRE(::lstat(open_file.c_str(), &info) == 0);
+    CHECK((info.st_mode & 07777) == 0666U);
+}
+
 TEST_CASE("an absent capture is absent, not damaged") {
     TempDirectory directory;
     CHECK(verify_component_capture(directory.path / "never") ==

@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <sys/stat.h>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -27,6 +28,14 @@ std::string stored_name(std::size_t index) {
     return name.str();
 }
 
+// The store holds whatever the package owns, and for nfqws2 that was measured
+// to include every conffile: the operator's nfqws2.conf and all five domain
+// and address lists. So the copy is private regardless of how permissive the
+// original was, and the original's mode is carried in the manifest and applied
+// on restore rather than on the stored copy.
+constexpr mode_t kStoredFileMode = 0600;
+constexpr mode_t kStoreDirectoryMode = 0700;
+
 bool copy_file_bytes(const fs::path& from, const fs::path& to) {
     std::ifstream input(from, std::ios::binary);
     if (!input) return false;
@@ -35,7 +44,19 @@ bool copy_file_bytes(const fs::path& from, const fs::path& to) {
     output << input.rdbuf();
     if (input.bad() || !output) return false;
     output.close();
-    return static_cast<bool>(output);
+    if (!output) return false;
+    // Narrowed after creation rather than through the open, because the mode
+    // an ofstream creates with is whatever the process umask allows.
+    return ::chmod(to.c_str(), kStoredFileMode) == 0;
+}
+
+bool write_private_file(const fs::path& path, const std::string& body) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+    output << body;
+    output.close();
+    if (!output) return false;
+    return ::chmod(path.c_str(), kStoredFileMode) == 0;
 }
 
 struct ManifestEntry {
@@ -90,6 +111,11 @@ ComponentCaptureResult capture_component_files(
         result.failed.push_back(store.string());
         return result;
     }
+    if (::chmod(store.c_str(), kStoreDirectoryMode) != 0 ||
+        ::chmod((store / kFilesDir).c_str(), kStoreDirectoryMode) != 0) {
+        result.failed.push_back(store.string());
+        return result;
+    }
 
     std::ostringstream manifest;
     manifest << kManifestHeader << '\n';
@@ -136,15 +162,11 @@ ComponentCaptureResult capture_component_files(
         return result;
     }
 
-    {
-        std::ofstream output(store / kManifestName,
-                             std::ios::binary | std::ios::trunc);
-        output << manifest.str();
-        output.close();
-        if (!output) {
-            result.failed.push_back((store / kManifestName).string());
-            return result;
-        }
+    // The manifest names every captured path, so it is no less private than
+    // the files it describes.
+    if (!write_private_file(store / kManifestName, manifest.str())) {
+        result.failed.push_back((store / kManifestName).string());
+        return result;
     }
     const auto manifest_digest =
         rescue_integrity::sha256_file(store / kManifestName);
@@ -152,18 +174,12 @@ ComponentCaptureResult capture_component_files(
         result.failed.push_back((store / kManifestName).string());
         return result;
     }
-    {
-        // Written last on purpose: until this exists the capture is not a
-        // capture, so an interruption anywhere above is detectable rather than
-        // silently short.
-        std::ofstream ready(store / kReadyName,
-                            std::ios::binary | std::ios::trunc);
-        ready << *manifest_digest << '\n';
-        ready.close();
-        if (!ready) {
-            result.failed.push_back((store / kReadyName).string());
-            return result;
-        }
+    // Written last on purpose: until this exists the capture is not a capture,
+    // so an interruption anywhere above is detectable rather than silently
+    // short.
+    if (!write_private_file(store / kReadyName, *manifest_digest + "\n")) {
+        result.failed.push_back((store / kReadyName).string());
+        return result;
     }
 
     result.complete = result.failed.empty();

@@ -1304,6 +1304,54 @@ void register_nfqws_handler_impl(
             // dead component.
             const bool binary_lost =
                 binary_outcome == PackageBinaryOutcome::missing_after;
+            // Automatic rollback, armed only for the outcomes that mean the
+            // component is broken.
+            //
+            // Not armed for `replaced_by_package`: that migration is upstream's
+            // own and the upgrade worked. Reverting a successful upgrade
+            // because the package migrated its configuration would be keen-pbr
+            // fighting the package on the operator's behalf without being
+            // asked, and the previous slice already made the migration visible.
+            //
+            // Not armed for `unknown` either. A check that could not be made
+            // is not a failure, and replacing a working component on the
+            // strength of an unreadable /proc entry would be a rollback that
+            // causes the outage it exists to prevent.
+            const bool component_broken =
+                binary_lost || nfqws_runtime_is_failure(runtime_outcome);
+            bool rolled_back = false;
+            if (component_broken && capture.complete) {
+                output +=
+                    "\nThe upgrade left the component broken; restoring the "
+                    "captured bytes.\n";
+                if (record.runtime_was_running) {
+                    int stop_status = 0;
+                    output += run_nfqws_service_command("stop", stop_status);
+                }
+                const auto restored =
+                    restore_component_files(kNfqwsCapture);
+                rolled_back = restored.complete;
+                output += restored.complete
+                              ? "Restored " +
+                                    std::to_string(restored.restored) +
+                                    " files.\n"
+                              : "Restore did not complete: " +
+                                    (restored.refused.empty()
+                                         ? std::to_string(
+                                               restored.failed.size()) +
+                                               " file(s) failed"
+                                         : restored.refused) +
+                                    ".\n";
+                if (record.runtime_was_running) {
+                    int start_status = 0;
+                    output += run_nfqws_service_command("start", start_status);
+                }
+            } else if (component_broken) {
+                // Said plainly rather than left to be inferred from silence.
+                output +=
+                    "\nThe upgrade left the component broken and there is no "
+                    "complete restore point to return to.\n";
+            }
             // Cleared only here, after every check has run. A record that
             // survives is reported rather than ignored: the next upgrade must
             // see it, and a removal that silently failed would let it through.
@@ -1312,9 +1360,11 @@ void register_nfqws_handler_impl(
                     "\nThe transaction record could not be removed; the next "
                     "upgrade will refuse until it is cleared.\n";
             }
-            return nlohmann::json{{"ok", status == 0 && !binary_lost &&
-                                             !nfqws_runtime_is_failure(
-                                                 runtime_outcome)},
+            // A rolled-back upgrade is still not a successful upgrade. The
+            // operator asked for a new version and does not have one; that the
+            // component survived is the recovery working, not the request.
+            return nlohmann::json{{"ok", status == 0 && !component_broken},
+                                  {"rolled_back", rolled_back},
                                   {"output", output}, {"status", status},
                                   {"strategy_created", created},
                                   {"durable", durable},
