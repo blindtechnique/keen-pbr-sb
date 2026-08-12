@@ -17,6 +17,11 @@ import {
   UploadIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+
+import {
+  subscribeComponentTransaction,
+  type ComponentTransactionProgress,
+} from "@/api/component-transaction-events"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -842,6 +847,27 @@ export function NfqwsPage() {
   )
 }
 
+// Step names the backend can send, mapped to the text an operator reads. A
+// name missing here shows nothing rather than a guess, which is why the map is
+// exhaustive over the handler's steps and asserted by a test.
+const progressStepKeys: Record<string, string> = {
+  backup: "progressStepBackup",
+  capture: "progressStepCapture",
+  install: "progressStepInstall",
+  verify: "progressStepVerify",
+  rollback: "progressStepRollback",
+  stop: "progressStepStop",
+  restore: "progressStepRestore",
+  start: "progressStepStart",
+}
+
+function useComponentTransactionProgress() {
+  const [progress, setProgress] =
+    useState<ComponentTransactionProgress | null>(null)
+  useEffect(() => subscribeComponentTransaction(setProgress), [])
+  return progress
+}
+
 function NfqwsOperationDialog({
   onClose,
   onRollback,
@@ -852,6 +878,15 @@ function NfqwsOperationDialog({
   operation: OperationState
 }) {
   const { t } = useTranslation()
+  // Progress arrives on the shared status stream, not in the response to the
+  // request that is still running. Unknown step names fall back to the plain
+  // "running" text rather than being printed raw: a backend step this page has
+  // never heard of is not something to show an operator as an explanation.
+  const progress = useComponentTransactionProgress()
+  const progressStep =
+    operation.pending && progress && progressStepKeys[progress.step]
+      ? t(`nfqws.${progressStepKeys[progress.step]}`)
+      : ""
   return (
     <Dialog
       onOpenChange={(open) => {
@@ -875,7 +910,9 @@ function NfqwsOperationDialog({
             }
           >
             {operation.pending
-              ? t("nfqws.operationRunning")
+              ? progressStep
+                ? t("nfqws.operationRunningStep", { step: progressStep })
+                : t("nfqws.operationRunning")
               : operation.success
                 ? t("nfqws.operationSucceeded")
                 : t("nfqws.operationFailed")}

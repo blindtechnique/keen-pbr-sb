@@ -41,6 +41,15 @@ public:
     // opaque task snapshot on the shared status stream so a reconnecting WebUI
     // can immediately resume progress rendering without another poller.
     void publish_list_refresh(nlohmann::json state);
+    // A package operation on an external component takes a minute or more
+    // inside one request, and until now said nothing until it ended. The
+    // operator watched a spinner through an opkg run with no way to tell a
+    // slow download from a hung one.
+    //
+    // Kept on the shared stream and cached like the others so a page opened or
+    // reloaded mid-operation - or a second tab - sees where it is rather than
+    // nothing at all.
+    void publish_component_transaction(nlohmann::json state);
     void close_all();
     bool has_subscribers();
 
@@ -55,6 +64,8 @@ private:
     bool connections_initialized_ GUARDED_BY(mutex_){false};
     nlohmann::json list_refresh_ GUARDED_BY(mutex_);
     bool list_refresh_initialized_ GUARDED_BY(mutex_){false};
+    nlohmann::json component_transaction_ GUARDED_BY(mutex_);
+    bool component_transaction_initialized_ GUARDED_BY(mutex_){false};
     bool initialized_ GUARDED_BY(mutex_){false};
 };
 

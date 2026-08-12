@@ -499,6 +499,61 @@ ComponentCaptureState cached_restore_point_state(bool force = false) {
     return *cached;
 }
 
+// One place that names a step, so a phase cannot be broadcast under a name the
+// page does not know. Never throws: a component operation must not fail
+// because nobody was listening to its progress.
+void publish_transaction_step(const ApiContext& ctx,
+                              std::string_view operation,
+                              std::string_view step,
+                              bool active,
+                              const std::string& detail = {}) noexcept {
+    if (ctx.status_stream == nullptr) return;
+    try {
+        ctx.status_stream->publish_component_transaction(nlohmann::json{
+            {"component", "nfqws2-keenetic"},
+            {"operation", std::string(operation)},
+            {"step", std::string(step)},
+            {"active", active},
+            {"detail", detail}});
+    } catch (...) {
+    }
+}
+
+// Guarantees the stream is told the operation ended, on every path out.
+//
+// Without this, a throw between the first step and the last leaves every open
+// page showing progress for an operation that stopped minutes ago - and the
+// paths that throw here are refusals and failures, exactly when an operator is
+// watching.
+class TransactionProgress {
+public:
+    TransactionProgress(const ApiContext& ctx, std::string operation)
+        : ctx_(ctx), operation_(std::move(operation)) {}
+
+    ~TransactionProgress() {
+        if (!finished_)
+            publish_transaction_step(ctx_, operation_, "finished", false,
+                                     "aborted");
+    }
+
+    TransactionProgress(const TransactionProgress&) = delete;
+    TransactionProgress& operator=(const TransactionProgress&) = delete;
+
+    void step(std::string_view name) const {
+        publish_transaction_step(ctx_, operation_, name, true);
+    }
+
+    void finish(const std::string& detail) {
+        publish_transaction_step(ctx_, operation_, "finished", false, detail);
+        finished_ = true;
+    }
+
+private:
+    const ApiContext& ctx_;
+    std::string operation_;
+    bool finished_{false};
+};
+
 NfqwsConfigObservation observe_nfqws_config() {
     NfqwsConfigObservation observation;
     const auto active = fs::path(kConfigDir) / "nfqws2.conf";
@@ -1278,6 +1333,8 @@ void register_nfqws_handler_impl(
                         "); inspect the component before upgrading again",
                     409);
             }
+            TransactionProgress progress(ctx, "upgrade");
+            progress.step("backup");
             create_full_rollback_backup(ctx);
             const auto footprint_before =
                 observe_package_footprint(nfqws_package_paths());
@@ -1303,6 +1360,7 @@ void register_nfqws_handler_impl(
             // Taken before opkg, because these bytes stop existing the moment
             // it runs and cannot be reconstructed afterwards.
             std::string output = "Rollback backup created.\n";
+            progress.step("capture");
             const auto capture =
                 capture_component_files(footprint_before, kNfqwsCapture);
             cached_restore_point_state(/*force=*/true);
@@ -1320,8 +1378,10 @@ void register_nfqws_handler_impl(
             // line earlier: from here on anything on disk may have changed.
             record.phase = ComponentTransactionPhase::mutating;
             write_component_transaction(kNfqwsJournal, record);
+            progress.step("install");
             int status = 0;
             output += run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
+            progress.step("verify");
             record.phase = ComponentTransactionPhase::verifying;
             write_component_transaction(kNfqwsJournal, record);
             const auto footprint_after =
@@ -1372,6 +1432,7 @@ void register_nfqws_handler_impl(
                 binary_lost || nfqws_runtime_is_failure(runtime_outcome);
             bool rolled_back = false;
             if (component_broken && capture.complete) {
+                progress.step("rollback");
                 output +=
                     "\nThe upgrade left the component broken; restoring the "
                     "captured bytes.\n";
@@ -1414,6 +1475,12 @@ void register_nfqws_handler_impl(
             // A rolled-back upgrade is still not a successful upgrade. The
             // operator asked for a new version and does not have one; that the
             // component survived is the recovery working, not the request.
+            // Published before returning, so a page that never sees the HTTP
+            // response - a closed tab, a dropped connection - still learns the
+            // operation ended rather than showing progress forever.
+            progress.finish(component_broken
+                                ? (rolled_back ? "rolled_back" : "broken")
+                                : std::string{});
             return nlohmann::json{{"ok", status == 0 && !component_broken},
                                   {"rolled_back", rolled_back},
                                   {"output", output}, {"status", status},
@@ -1510,11 +1577,14 @@ void register_nfqws_handler_impl(
                 observe_nfqws_runtime().process_present;
             write_component_transaction(kNfqwsJournal, record);
 
+            TransactionProgress progress(ctx, "restore");
             std::string output;
             int service_status = 0;
             if (record.runtime_was_running) {
+                progress.step("stop");
                 output += run_nfqws_service_command("stop", service_status);
             }
+            progress.step("restore");
             const auto restored = restore_component_files(kNfqwsCapture);
             output += "\nRestored files: " +
                       std::to_string(restored.restored) + "\n";
@@ -1522,9 +1592,11 @@ void register_nfqws_handler_impl(
                 output += "Could not restore: " + failure + "\n";
             }
             if (record.runtime_was_running) {
+                progress.step("start");
                 int start_status = 0;
                 output += run_nfqws_service_command("start", start_status);
             }
+            progress.finish(restored.complete ? std::string{} : "incomplete");
             // Only what was captured came back. Files the newer package added
             // are still there, and saying so is the difference between a
             // restore and a claim of one.

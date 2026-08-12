@@ -134,6 +134,13 @@ export const dynamicTranslationUsages: readonly DynamicTranslationUsage[] = [
     reason: "The helper maps the auto/manual endpoint-mode union.",
   },
   {
+    file: "src/pages/nfqws-page.tsx",
+    argument: "`nfqws.${*}`",
+    keys: ["nfqws.progressStep*"],
+    reason:
+      "progressStepKeys covers exactly the steps the handler publishes, asserted in src/api/component-transaction-events.test.ts.",
+  },
+  {
     file: "src/components/settings/maintenance-cards.tsx",
     argument: "`pages.settings.softwareUpdate.${*}`",
     keys: ["pages.settings.softwareUpdate.rollbackReason*"],
