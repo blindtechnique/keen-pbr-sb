@@ -17,6 +17,11 @@ export const enTranslation = {
     reload: "Reload configuration",
     upgrade: "Upgrade package",
     restoreComponent: "Restore previous files",
+    restorePointMissing:
+      "Nothing to restore yet. Files are saved automatically just before an upgrade started from this panel.",
+    interruptedTransactionTitle: "A package operation did not finish",
+    interruptedTransactionDescription:
+      "An upgrade or restore of nfqws2 started and never reported an end — most likely the router restarted while it was running. Check that nfqws2 works before upgrading again; the next upgrade will refuse until this is resolved.",
     restoreComponentConfirmTitle: "Restore the nfqws2 files saved before the upgrade?",
     restoreComponentConfirmDescription:
       "The binary, configuration and lists captured just before the last upgrade are written back, and the service is restarted onto them.",

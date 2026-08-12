@@ -472,6 +472,29 @@ void describe_runtime_outcome(std::string& output,
     }
 }
 
+// Verifying the restore point hashes every captured file. The nfqws page polls
+// this status, so doing it per request would spend hundreds of kilobytes of
+// hashing a few seconds apart to answer a question whose answer changes only
+// when we change it.
+//
+// Cached with a short life rather than invalidated by hand: our own mutations
+// are not the only way a store goes bad, and a cache that only we can clear
+// would keep reporting `usable` after something outside this process damaged
+// it. Thirty seconds bounds how long that lie can live.
+ComponentCaptureState cached_restore_point_state() {
+    static std::mutex mutex;
+    static std::optional<ComponentCaptureState> cached;
+    static std::chrono::steady_clock::time_point checked_at{};
+    constexpr auto kTtl = std::chrono::seconds{30};
+
+    const std::lock_guard lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (cached && now - checked_at < kTtl) return *cached;
+    cached = verify_component_capture(kNfqwsCapture);
+    checked_at = now;
+    return *cached;
+}
+
 NfqwsConfigObservation observe_nfqws_config() {
     NfqwsConfigObservation observation;
     const auto active = fs::path(kConfigDir) / "nfqws2.conf";
@@ -1123,7 +1146,20 @@ void register_nfqws_handler_impl(
                               {"active_strategy", active_strategy},
                               {"rotator_state", nfqws_rotator_state_json(
                                                     active_content,
-                                                    processes)}}
+                                                    processes)},
+                              // Surfaced here rather than only on the next
+                              // attempt. A reboot in the middle of a package
+                              // operation leaves a record nobody reads until
+                              // an operator tries to upgrade again, and the
+                              // moment to learn that something was interrupted
+                              // is before deciding what to do next.
+                              {"transaction_state",
+                               component_transaction_state_name(
+                                   read_component_transaction(kNfqwsJournal)
+                                       .state)},
+                              {"restore_point",
+                               component_capture_state_name(
+                                   cached_restore_point_state())}}
             .dump();
     });
 

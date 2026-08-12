@@ -125,6 +125,10 @@ type Status = {
   strategies: Strategy[]
   active_strategy: string
   rotator_state: NfqwsRotatorState
+  // Optional so a page talking to an older backend degrades to "nothing to
+  // say" rather than to a confident wrong answer.
+  transaction_state?: string
+  restore_point?: string
 }
 // «Стратегии» первыми и по умолчанию: на эту страницу приходят выбрать или
 // переключить стратегию, а «Настройки» — редкий и куда более технический
@@ -573,6 +577,21 @@ export function NfqwsPage() {
                   высота, поэтому текст вылезал за рамку на соседнюю кнопку.
                   На узком экране разрешаем перенос и высоту по содержимому —
                   с `items-stretch` кнопки в ряду всё равно одной высоты. */}
+              {/* A package operation that never reported an end. Shown here
+                  and not only when the next upgrade refuses: a reboot in the
+                  middle of one leaves this record, and the moment to learn
+                  about it is before deciding what to do next. */}
+              {status?.transaction_state &&
+              status.transaction_state !== "none" ? (
+                <Alert variant="destructive">
+                  <AlertTitle>
+                    {t("nfqws.interruptedTransactionTitle")}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {t("nfqws.interruptedTransactionDescription")}
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               <div className="grid grid-cols-2 items-stretch gap-2 *:h-auto *:min-h-8 *:w-full *:py-1 *:leading-tight *:whitespace-normal sm:flex sm:flex-wrap sm:items-center sm:*:h-8 sm:*:w-auto sm:*:py-0 sm:*:whitespace-nowrap">
                 <Button
                   disabled={operation.pending}
@@ -623,9 +642,20 @@ export function NfqwsPage() {
                   {t("nfqws.upgrade")}
                 </Button>
                 <Button
-                  disabled={operation.pending || !status?.installed}
+                  disabled={
+                    operation.pending ||
+                    !status?.installed ||
+                    // Only enabled when the backend says there is something to
+                    // restore. A control that is always clickable and always
+                    // refuses teaches the operator that it never works.
+                    status?.restore_point !== "usable"
+                  }
                   onClick={() => setRestoreOpen(true)}
-                  title={t("nfqws.serviceHelp.restoreComponent")}
+                  title={
+                    status?.restore_point === "usable"
+                      ? t("nfqws.serviceHelp.restoreComponent")
+                      : t("nfqws.restorePointMissing")
+                  }
                   variant="outline"
                 >
                   <RotateCcwIcon />
