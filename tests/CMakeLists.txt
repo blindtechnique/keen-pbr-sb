@@ -13,6 +13,8 @@ add_executable(keen-pbr-tests
   ../src/util/nfqws_runtime_state.cpp
   test_component_transaction_journal.cpp
   ../src/update/component_transaction_journal.cpp
+  test_component_capture.cpp
+  ../src/update/component_capture.cpp
   test_targeted_probe_admission.cpp
   test_ttl_bypass.cpp
   test_nftables_builder.cpp

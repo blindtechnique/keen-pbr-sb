@@ -3,6 +3,7 @@
 #include "handler_nfqws.hpp"
 #include "handler_backup.hpp"
 #include "maintenance_api.hpp"
+#include "../update/component_capture.hpp"
 #include "../update/component_transaction_journal.hpp"
 #include "../update/package_footprint.hpp"
 #include "../update/rescue_integrity.hpp"
@@ -58,6 +59,8 @@ constexpr const char* kOpkgPackageFileList =
     "/opt/lib/opkg/info/nfqws2-keenetic.list";
 constexpr const char* kNfqwsJournal =
     "/opt/var/lib/keen-pbr/nfqws-transaction.json";
+constexpr const char* kNfqwsCapture =
+    "/opt/var/lib/keen-pbr/nfqws-restore-point";
 constexpr const char* kListsDir = "/opt/etc/nfqws2/lists";
 constexpr const char* kLuaDir = "/opt/etc/nfqws2/lua";
 constexpr const char* kLogDir = "/opt/var/log";
@@ -1251,9 +1254,23 @@ void register_nfqws_handler_impl(
             record.runtime_was_running = runtime_before.process_present;
             write_component_transaction(kNfqwsJournal, record);
 
+            // Taken before opkg, because these bytes stop existing the moment
+            // it runs and cannot be reconstructed afterwards.
+            std::string output = "Rollback backup created.\n";
+            const auto capture =
+                capture_component_files(footprint_before, kNfqwsCapture);
+            output += capture.complete
+                          ? std::string("Component restore point captured (") +
+                                std::to_string(capture.captured) +
+                                " files).\n"
+                          : std::string("Component restore point is "
+                                        "incomplete; ") +
+                                std::to_string(capture.failed.size()) +
+                                " file(s) could not be captured, so there is "
+                                "nothing complete to restore from.\n";
+
             int status = 0;
-            auto output = std::string("Rollback backup created.\n") +
-                          run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
+            output += run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
             record.phase = ComponentTransactionPhase::verifying;
             write_component_transaction(kNfqwsJournal, record);
             const auto footprint_after =

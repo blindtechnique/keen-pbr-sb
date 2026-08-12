@@ -387,6 +387,7 @@ set(SOURCES
   src/update/rollback_availability.cpp
   src/update/package_footprint.cpp
   src/update/component_transaction_journal.cpp
+  src/update/component_capture.cpp
   src/util/nfqws_config_migration.cpp
   src/util/nfqws_runtime_state.cpp
   src/config/config.cpp
