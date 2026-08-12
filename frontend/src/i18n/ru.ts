@@ -317,6 +317,7 @@ export const ruTranslation = {
       ariaLabel: "Разделы nfqws2",
       settings: "Настройки",
       strategies: "Стратегии",
+      files: "Файлы",
       lists: "Списки",
       lua: "Lua-скрипты",
       logs: "Журналы",

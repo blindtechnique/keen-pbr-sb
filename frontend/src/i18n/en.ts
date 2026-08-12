@@ -317,6 +317,7 @@ export const enTranslation = {
       ariaLabel: "nfqws2 sections",
       settings: "Settings",
       strategies: "Strategies",
+      files: "Files",
       lists: "Lists",
       lua: "Lua scripts",
       logs: "Logs",

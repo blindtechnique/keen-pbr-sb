@@ -160,11 +160,14 @@ type Status = {
 // переключить стратегию, а «Настройки» — редкий и куда более технический
 // экран, туда же уехала строка запуска. Открывать страницу на нём значило
 // встречать человека тем, зачем он почти никогда не приходил.
+// «Списки» и «Lua-скрипты» — это один и тот же экран правки файла на диске,
+// и оба нужны редко. Вместе они занимали две вкладки из шести, а «Списки»
+// вдобавок повторяли название пункта меню, за которым лежат совсем другие
+// списки keen-pbr. Теперь это «Файлы» с переключателем внутри.
 const NFQWS_TAB_VALUES = [
   "strategies",
   "settings",
-  "lists",
-  "lua",
+  "files",
   "logs",
   "check",
 ] as const
@@ -219,6 +222,8 @@ export function NfqwsPage() {
   const [strategyDirty, setStrategyDirty] = useState(false)
   const [refreshPending, setRefreshPending] = useState(false)
   const [tab, setTab] = useState<Tab>("strategies")
+  // Какой из двух файловых редакторов открыт внутри вкладки «Файлы».
+  const [filesCategory, setFilesCategory] = useState<"list" | "lua">("list")
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [restoreOpen, setRestoreOpen] = useState(false)
   const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
@@ -790,49 +795,42 @@ export function NfqwsPage() {
               status={status}
             />
           ) : null}
-          {tab === "lists" ? (
-            <FilesEditor
-              category="list"
-              drafts={drafts}
-              files={status.files}
-              onDraftChange={(draft) =>
-                setDrafts((current) => ({
-                  ...current,
-                  [`${draft.category}/${draft.name}`]: draft,
-                }))
-              }
-              onDraftRemove={(category, name) =>
-                setDrafts((current) => {
-                  const next = { ...current }
-                  delete next[`${category}/${name}`]
-                  return next
-                })
-              }
-              onSaveDrafts={saveDrafts}
-              refresh={() => void query.refetch()}
-            />
-          ) : null}
-          {tab === "lua" ? (
-            <FilesEditor
-              category="lua"
-              drafts={drafts}
-              files={status.files}
-              onDraftChange={(draft) =>
-                setDrafts((current) => ({
-                  ...current,
-                  [`${draft.category}/${draft.name}`]: draft,
-                }))
-              }
-              onDraftRemove={(category, name) =>
-                setDrafts((current) => {
-                  const next = { ...current }
-                  delete next[`${category}/${name}`]
-                  return next
-                })
-              }
-              onSaveDrafts={saveDrafts}
-              refresh={() => void query.refetch()}
-            />
+          {tab === "files" ? (
+            <div className="space-y-3">
+              {/* Переключатель из двух пунктов на всю ширину экрана выглядел
+                  бы важнее самого содержимого — держим его в ширину поля. */}
+              <SegmentedControl
+                className="max-w-[480px]"
+                ariaLabel={t("nfqws.tabs.files")}
+                onChange={setFilesCategory}
+                options={[
+                  { value: "list", label: t("nfqws.tabs.lists") },
+                  { value: "lua", label: t("nfqws.tabs.lua") },
+                ]}
+                value={filesCategory}
+              />
+              <FilesEditor
+                category={filesCategory}
+                drafts={drafts}
+                files={status.files}
+                key={filesCategory}
+                onDraftChange={(draft) =>
+                  setDrafts((current) => ({
+                    ...current,
+                    [`${draft.category}/${draft.name}`]: draft,
+                  }))
+                }
+                onDraftRemove={(category, name) =>
+                  setDrafts((current) => {
+                    const next = { ...current }
+                    delete next[`${category}/${name}`]
+                    return next
+                  })
+                }
+                onSaveDrafts={saveDrafts}
+                refresh={() => void query.refetch()}
+              />
+            </div>
           ) : null}
           {tab === "logs" ? (
             <FilesEditor
