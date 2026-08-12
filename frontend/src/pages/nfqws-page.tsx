@@ -190,6 +190,7 @@ export function NfqwsPage() {
   const [refreshPending, setRefreshPending] = useState(false)
   const [tab, setTab] = useState<Tab>("strategies")
   const [upgradeOpen, setUpgradeOpen] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
   const [downloadUpgradeBackup, setDownloadUpgradeBackup] = useState(true)
   const [drafts, setDrafts] = useState<Record<string, DraftFile>>({})
   const [operation, setOperation] = useState<OperationState>({
@@ -622,6 +623,15 @@ export function NfqwsPage() {
                   {t("nfqws.upgrade")}
                 </Button>
                 <Button
+                  disabled={operation.pending || !status?.installed}
+                  onClick={() => setRestoreOpen(true)}
+                  title={t("nfqws.serviceHelp.restoreComponent")}
+                  variant="outline"
+                >
+                  <RotateCcwIcon />
+                  {t("nfqws.restoreComponent")}
+                </Button>
+                <Button
                   disabled={!status?.installed || backupPending !== null}
                   onClick={() => setBackupOpen(true)}
                   title={t("nfqws.serviceHelp.backup")}
@@ -757,6 +767,19 @@ export function NfqwsPage() {
             onOpenChange={setUpgradeOpen}
             onUpgrade={() => void runUpgrade()}
             open={upgradeOpen}
+          />
+          <NfqwsRestoreComponentDialog
+            onOpenChange={setRestoreOpen}
+            onRestore={() => {
+              setRestoreOpen(false)
+              void runOperation(
+                t("nfqws.restoreComponent"),
+                () => nfqwsAction({ action: "restore_component" }),
+                t("nfqws.operationCompleted"),
+                true
+              )
+            }}
+            open={restoreOpen}
           />
           <NfqwsBackupDialog
             busy={backupPending}
@@ -1005,6 +1028,48 @@ function NfqwsUpgradeDialog({
           <Button onClick={onUpgrade}>
             <DownloadIcon />
             {t("nfqws.upgrade")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Confirmation, not a plain button. This replaces installed binaries with
+// older ones and restarts the component; it is the same class of action as the
+// upgrade and gets the same pause before it happens.
+function NfqwsRestoreComponentDialog({
+  onOpenChange,
+  onRestore,
+  open,
+}: {
+  onOpenChange: (open: boolean) => void
+  onRestore: () => void
+  open: boolean
+}) {
+  const { t } = useTranslation()
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{t("nfqws.restoreComponentConfirmTitle")}</DialogTitle>
+          <DialogDescription>
+            {t("nfqws.restoreComponentConfirmDescription")}
+          </DialogDescription>
+        </DialogHeader>
+        <Alert>
+          <AlertTitle>{t("nfqws.restoreComponentLimitTitle")}</AlertTitle>
+          <AlertDescription>
+            {t("nfqws.restoreComponentLimitDescription")}
+          </AlertDescription>
+        </Alert>
+        <DialogFooter>
+          <Button onClick={() => onOpenChange(false)} variant="outline">
+            {t("common.cancel")}
+          </Button>
+          <Button onClick={onRestore} variant="destructive">
+            <RotateCcwIcon />
+            {t("nfqws.restoreComponent")}
           </Button>
         </DialogFooter>
       </DialogContent>

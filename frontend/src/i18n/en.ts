@@ -16,6 +16,13 @@ export const enTranslation = {
     restart: "Restart service",
     reload: "Reload configuration",
     upgrade: "Upgrade package",
+    restoreComponent: "Restore previous files",
+    restoreComponentConfirmTitle: "Restore the nfqws2 files saved before the upgrade?",
+    restoreComponentConfirmDescription:
+      "The binary, configuration and lists captured just before the last upgrade are written back, and the service is restarted onto them.",
+    restoreComponentLimitTitle: "What this does not do",
+    restoreComponentLimitDescription:
+      "Files the newer package added are left in place. This returns nfqws2 to the saved files, not the router to its exact earlier state.",
     serviceHelp: {
       label: "What the service buttons do",
       restart:
@@ -24,6 +31,8 @@ export const enTranslation = {
         "The service re-reads its configuration files without stopping, so connections survive. Enough when only lists and parameters changed.",
       upgrade:
         "Installs a newer version of nfqws2 itself from the repository. Settings, lists and strategies stay as they are.",
+      restoreComponent:
+        "Puts back the nfqws2 files saved just before the last upgrade — the binary, the configuration and the lists — and restarts the service.",
       backup:
         "Save settings, lists, Lua scripts and strategies to a file on this computer — or restore them from such a file.",
       refresh:
