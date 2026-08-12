@@ -1287,7 +1287,13 @@ void register_nfqws_handler_impl(
             ComponentTransactionRecord record;
             record.component = "nfqws2-keenetic";
             record.operation = "upgrade";
-            record.phase = ComponentTransactionPhase::mutating;
+            // `started`, not `mutating`: nothing on this router has been
+            // touched yet, and the capture below only reads. An interruption
+            // between here and opkg leaves the component exactly as it was,
+            // and recording it as "the package manager may have run" would
+            // make a harmless interruption look like a dangerous one - the
+            // same overstatement the rest of this work exists to remove.
+            record.phase = ComponentTransactionPhase::started;
             record.started_at = static_cast<std::int64_t>(std::time(nullptr));
             record.binary_sha256 = installed_binary_digest(footprint_before);
             record.config_sha256 = config_before.active_sha256;
@@ -1310,6 +1316,10 @@ void register_nfqws_handler_impl(
                                 " file(s) could not be captured, so there is "
                                 "nothing complete to restore from.\n";
 
+            // Promoted immediately before the package manager runs, and not a
+            // line earlier: from here on anything on disk may have changed.
+            record.phase = ComponentTransactionPhase::mutating;
+            write_component_transaction(kNfqwsJournal, record);
             int status = 0;
             output += run_command("/opt/bin/opkg update && /opt/bin/opkg upgrade nfqws2-keenetic", status);
             record.phase = ComponentTransactionPhase::verifying;
