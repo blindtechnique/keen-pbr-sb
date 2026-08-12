@@ -1,5 +1,7 @@
 import { queryOptions } from "@tanstack/react-query"
 
+import { fetchWithStepUp } from "@/lib/step-up"
+
 export type NfqwsActionResult = {
   ok: boolean
   output?: string
@@ -83,7 +85,7 @@ function validationErrorDetails(payload: unknown): string[] {
 export async function nfqwsAction<T = NfqwsActionResult>(
   payload: Record<string, unknown>
 ): Promise<T> {
-  const response = await fetch("/api/nfqws", {
+  const response = await fetchWithStepUp("/api/nfqws", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

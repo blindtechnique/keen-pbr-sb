@@ -248,22 +248,58 @@ describe("nfqws profile marker", () => {
     ).toEqual({ tier: undefined, role: "ЭКСТРА" })
   })
 
-  test("promotes only untouched built-in entries", () => {
+  test("promotes only built-in entries carrying a known marker", () => {
     const content = "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n"
     expect(
-      canonicalNfqwsProfileTier({ builtin: true, overridden: false, content })
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: false,
+        canonical: true,
+        content,
+      })
     ).toBe("balanced")
     expect(
-      canonicalNfqwsProfileTier({ builtin: false, overridden: false, content })
-    ).toBeUndefined()
-    expect(
-      canonicalNfqwsProfileTier({ builtin: true, overridden: true, content })
+      canonicalNfqwsProfileTier({
+        builtin: false,
+        overridden: false,
+        canonical: false,
+        content,
+      })
     ).toBeUndefined()
     expect(
       canonicalNfqwsProfileTier({
         builtin: true,
         overridden: false,
+        canonical: true,
         content: "# keen-pbr-sb · профиль «ЭКСТРА»\n",
+      })
+    ).toBeUndefined()
+  })
+
+  /**
+   * Состояние роутера после «Применить»: backend записывает пользовательскую
+   * копию, и профиль возвращается с `overridden: true`, хотя его никто не
+   * правил. Пока флаг участвовал в раскладке, только что выбранная карточка
+   * исчезала из трёх профилей — то есть выбор сам себя и отменял.
+   */
+  test("keeps an applied profile on the cards even though it became overridden", () => {
+    expect(
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: true,
+        canonical: true,
+        content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\n",
+      })
+    ).toBe("balanced")
+  })
+
+  test("does not promote an edited override that retained the profile marker", () => {
+    expect(
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: true,
+        canonical: false,
+        content: "# keen-pbr-sb · профиль «ОБЫЧНЫЙ»\nNFQWS_ARGS='edited'\n",
       })
     ).toBeUndefined()
   })

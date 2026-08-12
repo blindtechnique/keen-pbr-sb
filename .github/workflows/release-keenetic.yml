@@ -52,7 +52,8 @@ jobs:
           bun run literals:check
           bun test
           bun run typecheck
-          bun run build
+          cd ..
+          sh build_scripts/build-frontend.sh "$PWD" "$PWD/frontend/dist"
 
       - name: Upload frontend bundle
         uses: actions/upload-artifact@v7
@@ -60,6 +61,7 @@ jobs:
           name: frontend-dist
           path: frontend/dist
           if-no-files-found: error
+          include-hidden-files: true
 
   backend:
     runs-on: ubuntu-latest
@@ -111,6 +113,12 @@ jobs:
             -v "$PWD:/workspace:ro" \
             busybox:1.37 \
             sh /workspace/tests/package_it/run-uninstall-target-shell.sh \
+              /workspace
+          docker run --rm \
+            -e KEEN_PBR_PACKAGE_IT_CONTAINER=1 \
+            -v "$PWD:/workspace:ro" \
+            busybox:1.37 \
+            sh /workspace/tests/package_it/run-rescue-guard-lock.sh \
               /workspace
           docker run --rm \
             -v "$PWD:/workspace:ro" \

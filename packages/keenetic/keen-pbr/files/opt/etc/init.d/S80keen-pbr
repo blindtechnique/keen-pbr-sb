@@ -2010,10 +2010,8 @@ control_lease_closing_has_only_known_entries() {
             continue
         fi
         case "$entry" in
-            "$closing_dir/owner"|
-            "$closing_dir/pending-full"|
-            "$closing_dir/pending-nat"|
-            "$closing_dir/pending-dns"|
+            "$closing_dir/owner"|"$closing_dir/pending-full"|\
+            "$closing_dir/pending-nat"|"$closing_dir/pending-dns"|\
             "$closing_dir/pending-hup") ;;
             *) return 1 ;;
         esac
@@ -3894,7 +3892,7 @@ stop_service_for_action() {
     fi
 
     # The marker records uncertain teardown; the lease only serializes active
-    # controllers and must never survive an ordinary function return.
+    # controllers and must be released before this helper exits normally.
     if [ "$lease_released" = no ]; then
         if ! release_control_lease; then
             result=1
@@ -3970,6 +3968,29 @@ reapply_dnsmasq_config() {
     fi
 }
 
+# Mutual exclusion with package updates. Shared with S79 so the two cannot
+# drift; absent, the service keeps its previous behaviour rather than refusing
+# to start, because a missing file is not evidence of a competing update.
+#
+# Refusing on genuine contention is the point - starting mid-update is the
+# hazard this closes. A lock left by a crashed update does not brick the boot:
+# acquire already removes a stale record whose owning PID identity is gone.
+LIFECYCLE_LOCK_LIB=/opt/usr/lib/keen-pbr/lifecycle-lock.sh
+if [ -f "$LIFECYCLE_LOCK_LIB" ] && [ ! -L "$LIFECYCLE_LOCK_LIB" ]; then
+    . "$LIFECYCLE_LOCK_LIB"
+else
+    enter_lifecycle_lock() { return 0; }
+    release_lifecycle_lock() { return 0; }
+fi
+
+lifecycle_lock_or_fail() {
+    enter_lifecycle_lock && return 0
+    log_error "keen-pbr lifecycle is blocked by an in-flight update; try again once it finishes"
+    return 1
+}
+
+trap release_lifecycle_lock EXIT
+
 case "$1" in
     drain-pending-delayed)
         if claim_control_drain_token; then
@@ -4011,8 +4032,10 @@ case "$1" in
         exit "$delayed_drain_status"
         ;;
     reload)
-        # Recovery may perform a nested package/runtime transaction and is a
-        # deliberate pre-existing boundary outside the short runtime lease.
+        # Take the shared reentrant lease before recovery. Any nested recovery
+        # action borrows the exported token; the short runtime control lease is
+        # still admitted only after the rescue guard reaches a known state.
+        lifecycle_lock_or_fail || exit 1
         run_recovery_guard reload || exit 1
         reapply_dns_runtime yes
         exit $?
@@ -4026,13 +4049,15 @@ case "$1" in
         exit $?
         ;;
     reapply-dnsmasq-config)
-        # See reload: the rescue guard must finish before a non-reentrant
-        # runtime lease can be admitted.
+        # See reload: recovery borrows this outer lease, while DNS runtime
+        # reconciliation retains its independent crash-safe control lease.
+        lifecycle_lock_or_fail || exit 1
         run_recovery_guard reapply-dnsmasq-config || exit 1
         reapply_dns_runtime no
         exit $?
         ;;
     start)
+        lifecycle_lock_or_fail || exit_failed_start 1
         # A state file left by an unclean process death is deliberately not
         # restored if this start fails. Only state captured by this clean
         # action is safe to roll back.
@@ -4045,6 +4070,7 @@ case "$1" in
         reapply_dnsmasq_config || exit_failed_start $?
         ;;
     restart|restartall)
+        lifecycle_lock_or_fail || exit 1
         # Keep FastNAT disabled for the complete replacement. Enabling it
         # between TERM and the next start can cache the retiring route while
         # the firmware and daemon are rebuilding netfilter state.
@@ -4061,10 +4087,16 @@ case "$1" in
         set -- start "$2"
         ;;
     stop)
+        lifecycle_lock_or_fail || exit 1
         stop_service_for_action stop yes
         exit $?
         ;;
     stop-for-upgrade)
+        # Reached from prerm, i.e. from inside opkg. Under a self-update the
+        # transaction already owns the lease and this borrows it; under a bare
+        # `opkg upgrade` nothing is held and this takes its own, so a manual
+        # upgrade is excluded from a concurrent one just the same.
+        lifecycle_lock_or_fail || exit 1
         # Keep FastNAT disabled between the retiring daemon and the incoming
         # package. The new postinst will start the replacement and retain the
         # original snapshot for the next real, graceful stop.
@@ -4072,6 +4104,7 @@ case "$1" in
         exit $?
         ;;
     kill)
+        lifecycle_lock_or_fail || exit 1
         stop_service_for_action kill yes
         exit $?
         ;;

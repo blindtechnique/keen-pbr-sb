@@ -49,7 +49,8 @@ struct ConfigCommitTransportEffect {
     std::string base_revision;
     std::function<std::string()> mutate;
     std::function<void(const std::string&)> verify_revision;
-    std::function<void(const std::string&)> restore_revision;
+    std::function<void(const std::string&, MaintenanceLease&)>
+        restore_revision;
 };
 
 struct PreparedConfigCommit {

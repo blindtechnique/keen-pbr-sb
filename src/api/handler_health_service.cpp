@@ -9,6 +9,7 @@
 #include "../http/http_client.hpp"
 #include "../log/logger.hpp"
 #include "../update/rescue_integrity.hpp"
+#include "../update/rollback_availability.hpp"
 
 #include <keen-pbr/version.hpp>
 #include <chrono>
@@ -126,6 +127,26 @@ bool update_recovery_is_blocked() {
            recovery_marker_present(kUnknownUpdate);
 }
 
+RescueStoreLayout rescue_store_layout() {
+    RescueStoreLayout layout;
+    layout.helper = kRescueHelper;
+    layout.previous_package = kPreviousPackage;
+    layout.previous_config = kPreviousPackageConfig;
+    layout.pending_marker = kPendingUpdate;
+    layout.unknown_marker = kUnknownUpdate;
+    return layout;
+}
+
+// One reading of the store, shared by the status report and the refusal.
+//
+// Two readings would be two answers: a rollback that the panel showed as
+// available can be refused with an unrelated reason, and the operator has no
+// way to tell which of the two was wrong.
+PackageRollbackState package_rollback_state() {
+    return classify_package_rollback(
+        observe_package_rollback(rescue_store_layout()));
+}
+
 bool is_update_process(pid_t pid) {
     if (::kill(pid, 0) != 0 && errno != EPERM) return false;
 
@@ -209,10 +230,14 @@ nlohmann::json local_update_status() {
     status["package_rescue_ready"] =
         !recovery_blocked && executable_nonempty_file(kRescueHelper) &&
         rescue_integrity::verified_ipk_file(kCurrentPackage);
+    const auto rollback_state = package_rollback_state();
     status["package_rollback_available"] =
-        !recovery_blocked && executable_nonempty_file(kRescueHelper) &&
-        rescue_integrity::verified_ipk_file(kPreviousPackage) &&
-        rescue_integrity::verified_snapshot(kPreviousPackageConfig);
+        package_rollback_is_available(rollback_state);
+    // The reason, not just the verdict. Reported before a rollback is started
+    // so an operator learns there is nothing to roll back to while it still
+    // changes what they do, instead of at the moment they need it.
+    status["package_rollback_state"] =
+        package_rollback_state_name(rollback_state);
     return status;
 }
 
@@ -399,18 +424,11 @@ void register_health_service_handler(ApiServer& server, ApiContext& ctx) {
         const std::lock_guard lock(update_start_mutex());
         if (update_is_running())
             throw ApiError("keen-pbr-sb update or rollback is already running", 409);
-        if (update_recovery_is_blocked())
-            throw ApiError(
-                "package recovery is pending or has unknown state; run rescue recovery before starting rollback",
-                409);
-        if (!executable_nonempty_file(kRescueHelper) ||
-            !rescue_integrity::verified_ipk_file(kPreviousPackage) ||
-            !rescue_integrity::verified_snapshot(
-                kPreviousPackageConfig)) {
-            throw ApiError(
-                "previous IPK is not available; complete one managed update first",
-                409);
-        }
+        // Same classification the status endpoint reports, so the refusal an
+        // operator gets here always names the reason they were already shown.
+        const auto rollback_state = package_rollback_state();
+        if (!package_rollback_is_available(rollback_state))
+            throw ApiError(package_rollback_state_message(rollback_state), 409);
         if (std::system(
                 "/opt/var/lib/keen-pbr/rescue/rescue-update.sh "
                 "can-rollback-previous >/dev/null 2>&1") != 0) {

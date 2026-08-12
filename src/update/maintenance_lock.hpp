@@ -46,6 +46,12 @@ public:
     virtual std::uint32_t base_generation() const noexcept = 0;
     virtual std::uint32_t reserve(std::uint32_t expected_generation) = 0;
     virtual void verify_held() = 0;
+
+    // Exact child-only capability for a trusted maintainer script that must
+    // borrow this lease instead of contending with its parent. Test doubles
+    // and leases without a shell borrower keep the default empty value.
+    virtual pid_t borrow_owner_pid() const noexcept { return -1; }
+    virtual std::string borrow_token() const { return {}; }
 };
 
 #ifdef KEEN_PBR3_TESTING
@@ -95,6 +101,8 @@ public:
     void verify_held() override;
 
     pid_t guardian_pid() const noexcept;
+    pid_t borrow_owner_pid() const noexcept override;
+    std::string borrow_token() const override;
 
 private:
     struct RuntimeOptions;

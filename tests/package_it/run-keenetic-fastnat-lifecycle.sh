@@ -237,9 +237,14 @@ fi
 assert_no_calls
 rm -f "$FASTNAT_STATE_FILE"
 
-# Reapply proves that a daemon is live, restores the invariant, and only then
-# delivers the signal. A failed guard must never schedule a daemon refresh.
+# The mailbox wrapper is covered by run-netfilter-hook-signals.sh. Exercise its
+# mutation primitive here: it proves that a daemon is live, restores the
+# FastNAT invariant, and only then delivers the signal. A failed guard must
+# never schedule a daemon refresh.
 reapply_order="$work/reapply-order"
+stopping_marker_authorizes_runtime_suppression() {
+    return 1
+}
 validate_service_pid() {
     printf '%s\n' "validate:$1" >> "$reapply_order"
     [ "${FASTNAT_TEST_VALIDATE_OK:-yes}" = yes ]
@@ -257,14 +262,14 @@ signal_service() {
 FASTNAT_TEST_VALIDATE_OK=yes
 FASTNAT_TEST_SIGNAL_OK=yes
 FASTNAT_TEST_GUARD_OK=yes
-reapply_netfilter_runtime SIGUSR1
+reapply_netfilter_runtime_without_lease SIGUSR1
 [ "$(cat "$reapply_order")" = "validate:SIGUSR1
 guard
 signal:SIGUSR1" ]
 
 : > "$reapply_order"
 FASTNAT_TEST_VALIDATE_OK=no
-if reapply_netfilter_runtime SIGUSR2; then
+if reapply_netfilter_runtime_without_lease SIGUSR2; then
     echo "reapply accepted a failed daemon validation" >&2
     exit 1
 fi
@@ -273,7 +278,7 @@ fi
 : > "$reapply_order"
 FASTNAT_TEST_VALIDATE_OK=yes
 FASTNAT_TEST_GUARD_OK=no
-if reapply_netfilter_runtime SIGUSR1; then
+if reapply_netfilter_runtime_without_lease SIGUSR1; then
     echo "reapply ignored a failed FastNAT guard" >&2
     exit 1
 fi
@@ -283,7 +288,7 @@ guard" ]
 : > "$reapply_order"
 FASTNAT_TEST_GUARD_OK=yes
 FASTNAT_TEST_SIGNAL_OK=no
-if reapply_netfilter_runtime SIGUSR2; then
+if reapply_netfilter_runtime_without_lease SIGUSR2; then
     echo "reapply accepted a failed daemon signal" >&2
     exit 1
 fi
@@ -332,6 +337,9 @@ stop_keen_pbr() {
     STOP_KEEN_PBR_SAFE=yes
 }
 restore_hwnat_if_safe() { printf '%s\n' restore >> "$order"; }
+cleanup_stale_tcp_rst_firewall() {
+    printf '%s\n' cleanup-tcp-rst >> "$order"
+}
 cleanup_stale_meta_udp443_firewall() {
     printf '%s\n' cleanup-meta-udp443 >> "$order"
 }
@@ -387,12 +395,14 @@ STOPPING_CONTROL_LEASE_ROLE=""
 stop_service_for_action stop no
 [ "$(cat "$order")" = "prepare
 stop:stop
+cleanup-tcp-rst
 cleanup-meta-udp443" ]
 
 : > "$order"
 stop_service_for_action stop yes
 [ "$(cat "$order")" = "prepare
 stop:stop
+cleanup-tcp-rst
 cleanup-meta-udp443
 restore" ]
 

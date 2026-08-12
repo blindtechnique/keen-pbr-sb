@@ -7,11 +7,13 @@ import {
   findNearestTrafficSampleIndex,
   formatBitRate,
   formatTrafficBytes,
+  isTrafficReadingStale,
   TRAFFIC_CHART_HEIGHT,
   TRAFFIC_CHART_WIDTH,
   trafficTooltipTop,
   type TrafficChartSample,
 } from "@/components/transports/interface-traffic-model"
+import { useVisibleTick } from "@/hooks/use-visible-tick"
 import { cn } from "@/lib/utils"
 
 const TRAFFIC_TOOLTIP_HEIGHT = 78
@@ -33,13 +35,20 @@ export function InterfaceTraffic({
     transmitted: string
     chart: string
     noTraffic: string
+    stale: string
   }>
   readonly className?: string
   readonly showChart?: boolean
 }) {
+  // Must run before the early return below: hooks cannot be conditional.
+  const tick = useVisibleTick(STALE_RECHECK_MS)
+  void tick
+
   if (!traffic) {
     return null
   }
+
+  const stale = isTrafficReadingStale(traffic.sampled_at_unix_ms)
 
   return (
     <div className={cn("mt-2 min-w-0 border-t pt-2", className)}>
@@ -68,9 +77,16 @@ export function InterfaceTraffic({
           value={formatTrafficBytes(traffic.tx_bytes, locale)}
         />
       </div>
+      {stale ? (
+        <p className="mt-1 text-xs text-muted-foreground">{labels.stale}</p>
+      ) : null}
     </div>
   )
 }
+
+// How often to re-check, not how precise the threshold is. A dead reading does
+// not become more dead by being noticed a few seconds sooner.
+const STALE_RECHECK_MS = 5_000
 
 function KeeneticTrafficChart({
   traffic,

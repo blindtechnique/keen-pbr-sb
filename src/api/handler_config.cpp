@@ -620,14 +620,15 @@ std::string commit_prepared_config_impl(
             committed_transport_revision;
         const auto rollback_transport =
             [&prepared,
-             &previous_transport_revision]() {
+             &previous_transport_revision,
+             &maintenance]() {
                 if (!prepared.transport.has_value() ||
                     !previous_transport_revision
                          .has_value()) {
                     return;
                 }
                 prepared.transport->restore_revision(
-                    *previous_transport_revision);
+                    *previous_transport_revision, *maintenance);
             };
 
         try {
@@ -728,7 +729,21 @@ std::string commit_prepared_config_impl(
             const auto original_failure =
                 std::current_exception();
             std::string recovery_error;
-            if (!restore_exact_config_snapshot(
+            bool lease_verified = false;
+            try {
+                maintenance->verify_held();
+                lease_verified = true;
+            } catch (const std::exception& error) {
+                recovery_error =
+                    std::string(
+                        "Maintenance lease was lost before persistent "
+                        "rollback: ") +
+                    error.what();
+            } catch (...) {
+                recovery_error =
+                    "Maintenance lease was lost before persistent rollback";
+            }
+            if (!lease_verified || !restore_exact_config_snapshot(
                     runtime_options,
                     persistent_layout,
                     rollback_transport,
@@ -824,7 +839,21 @@ std::string commit_prepared_config_impl(
             }
 
             std::string recovery_error;
-            if (!restore_exact_config_snapshot(
+            bool lease_verified = false;
+            try {
+                maintenance->verify_held();
+                lease_verified = true;
+            } catch (const std::exception& error) {
+                recovery_error =
+                    std::string(
+                        "Maintenance lease was lost before persistent "
+                        "rollback: ") +
+                    error.what();
+            } catch (...) {
+                recovery_error =
+                    "Maintenance lease was lost before persistent rollback";
+            }
+            if (!lease_verified || !restore_exact_config_snapshot(
                     runtime_options,
                     persistent_layout,
                     rollback_transport,

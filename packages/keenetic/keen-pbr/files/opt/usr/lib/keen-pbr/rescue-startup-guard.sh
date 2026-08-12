@@ -27,6 +27,65 @@ RECOVERY_UNKNOWN="$RECOVERY_DIR/UNKNOWN"
 CONFIG_SAVE_UNKNOWN="$CONFIG_SAVE_DIR/UNKNOWN"
 BACKUP_RESTORE_UNKNOWN="$BACKUP_RESTORE_DIR/UNKNOWN"
 KEEN_PBR_BINARY="${ROOT}/opt/usr/bin/keen-pbr"
+STABLE_LOCK_HELPER="$RESCUE_DIR/update-lock.sh"
+PACKAGE_LOCK_HELPER="${ROOT}/opt/usr/lib/keen-pbr/update-lock.sh"
+
+# Only the two recovery invocations below take the update lock, not this whole
+# script.
+#
+# This is a rescue component: its job is to look at a broken system and say
+# what it found. Gating the inspection would add a way for it to refuse to
+# report, which is the one thing it must never do. Gating the mutations is
+# enough - what must not happen under someone else's transaction is changing
+# state, not reading markers.
+#
+# Helper discovery mirrors the rescue helper above: the copy under the rescue
+# directory wins, because it is the one that survives a half-installed package.
+RECOVERY_LOCK_HELPER=
+if [ -f "$STABLE_LOCK_HELPER" ] && [ ! -L "$STABLE_LOCK_HELPER" ] &&
+   [ -x "$STABLE_LOCK_HELPER" ]; then
+    RECOVERY_LOCK_HELPER=$STABLE_LOCK_HELPER
+elif [ -f "$PACKAGE_LOCK_HELPER" ] && [ ! -L "$PACKAGE_LOCK_HELPER" ] &&
+     [ -x "$PACKAGE_LOCK_HELPER" ]; then
+    RECOVERY_LOCK_HELPER=$PACKAGE_LOCK_HELPER
+fi
+
+RECOVERY_LOCK_TOKEN=
+RECOVERY_LOCK_OWNED=0
+
+release_recovery_lock() {
+    [ "$RECOVERY_LOCK_OWNED" = "1" ] || return 0
+    "$RECOVERY_LOCK_HELPER" release $$ "$RECOVERY_LOCK_TOKEN" \
+        >/dev/null 2>&1 || true
+    RECOVERY_LOCK_OWNED=0
+}
+
+trap release_recovery_lock EXIT
+
+enter_recovery_lock() {
+    # No helper is not evidence of a competing update, and a rescue that
+    # refuses because a lock script is missing helps nobody.
+    [ -n "$RECOVERY_LOCK_HELPER" ] || return 0
+
+    inherited_pid=${KEEN_PBR_UPDATE_LOCK_PID:-}
+    inherited_token=${KEEN_PBR_UPDATE_LOCK_TOKEN:-}
+    if [ -n "$inherited_pid" ] && [ -n "$inherited_token" ] &&
+       "$RECOVERY_LOCK_HELPER" held "$inherited_pid" "$inherited_token" \
+            >/dev/null 2>&1; then
+        # Reached from S79, S80 or a postinst running under self-update. The
+        # caller owns the exclusion; borrowing it is the whole point.
+        return 0
+    fi
+
+    RECOVERY_LOCK_TOKEN=$(
+        "$RECOVERY_LOCK_HELPER" acquire $$ recovery 2>/dev/null
+    ) || return 1
+    RECOVERY_LOCK_OWNED=1
+    KEEN_PBR_UPDATE_LOCK_PID=$$
+    KEEN_PBR_UPDATE_LOCK_TOKEN=$RECOVERY_LOCK_TOKEN
+    export KEEN_PBR_UPDATE_LOCK_PID KEEN_PBR_UPDATE_LOCK_TOKEN
+    return 0
+}
 
 fail() {
     message=$1
@@ -158,6 +217,9 @@ if [ -f "$PENDING_FILE" ] &&
             fail "keen-pbr recovery is pending but the rescue helper is unavailable"
         fi
 
+        enter_recovery_lock ||
+            fail "keen-pbr startup recovery is blocked by an in-flight update; services remain stopped"
+
         if ! "$HELPER" recover-startup; then
             fail "keen-pbr automatic startup recovery failed; services remain stopped"
         fi
@@ -222,6 +284,9 @@ if [ ! -f "$KEEN_PBR_BINARY" ] || [ -L "$KEEN_PBR_BINARY" ] ||
    [ ! -x "$KEEN_PBR_BINARY" ]; then
     fail "keen-pbr persistent recovery is pending but the keen-pbr binary is unsafe or unavailable"
 fi
+
+enter_recovery_lock ||
+    fail "keen-pbr persistent recovery is blocked by an in-flight update; services remain stopped"
 
 recovery_attempt=1
 while :; do

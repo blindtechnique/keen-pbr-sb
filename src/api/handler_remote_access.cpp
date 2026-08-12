@@ -30,8 +30,11 @@ namespace {
 constexpr const char* kSettingsPath = "/opt/etc/keen-pbr/remote-access.json";
 constexpr const char* kAuthPath = "/opt/etc/keen-pbr/auth.json";
 constexpr const char* kChain = "KeenPbrRemote";
-// The panel itself always listens here; a different external port is published
-// with a REDIRECT rather than by moving the listener.
+// The panel itself listens here. A different external port cannot be offered
+// safely with a plain REDIRECT: INPUT sees the translated destination, so a
+// rule accepting the translated packet also accepts direct WAN :12121. Until
+// original-destination matching is capability-probed and verified, only the
+// actual listener port is admissible.
 constexpr int kInternalPort = 12121;
 constexpr int kDefaultPort = 12121;
 constexpr unsigned int kMaximumDuplicateRules = 16U;
@@ -357,16 +360,33 @@ std::string primary_wan_interface() {
     return primary_default_route_interface();
 }
 
-// Login must be on before anything is published. Reading auth.json directly
-// keeps this independent of whichever provider is configured.
-bool login_required() {
+struct RemoteAuthState {
+    bool readable{false};
+    bool enabled{false};
+    std::string provider{"local"};
+};
+
+// Reading auth.json directly keeps firewall admission on the same durable
+// authority as the middleware, including during daemon startup.
+RemoteAuthState load_remote_auth_state() {
+    RemoteAuthState state;
     try {
         const auto raw = read_file(auth_path());
-        if (raw.empty()) return false;
+        if (raw.empty()) return state;
         const auto parsed = nlohmann::json::parse(raw);
-        return parsed.value("enabled", false);
+        if (!parsed.is_object() || !parsed.contains("enabled") ||
+            !parsed["enabled"].is_boolean()) {
+            return state;
+        }
+        state.enabled = parsed["enabled"].get<bool>();
+        state.provider = parsed.value("provider", std::string{"local"});
+        if (state.provider != "local" && state.provider != "keenetic") {
+            return RemoteAuthState{};
+        }
+        state.readable = true;
+        return state;
     } catch (const std::exception&) {
-        return false;
+        return state;
     }
 }
 
@@ -568,9 +588,9 @@ bool install_rules_once(const std::string& wan,
                         XtablesWaitMode wait_mode,
                         ReconcileCommandContext& context) {
     if (!remove_rules_once(wait_mode, context)) return false;
+    if (port != kInternalPort) return false;
 
     const auto internal_port = std::to_string(kInternalPort);
-    const auto external_port = std::to_string(port);
     const std::vector<std::string> input_jump{"-j", kChain};
     const std::vector<std::string> internal_accept{
         "-i", wan, "-p", "tcp", "--dport", internal_port,
@@ -588,27 +608,6 @@ bool install_rules_once(const std::string& wan,
         return false;
     }
 
-    if (port != kInternalPort) {
-        if (!run_required("nat", {"-N", kChain}, wait_mode, context,
-                          RemoteAccessReconcilePhase::install_nat) ||
-            !run_required(
-                "nat", {"-I", "PREROUTING", "1", "-j", kChain},
-                wait_mode, context,
-                RemoteAccessReconcilePhase::install_nat) ||
-            !run_required(
-                "nat", {"-A", kChain, "-i", wan, "-p", "tcp",
-                         "--dport", external_port, "-j", "REDIRECT",
-                         "--to-ports", internal_port}, wait_mode, context,
-                RemoteAccessReconcilePhase::install_nat) ||
-            !run_required(
-                {}, {"-A", kChain, "-i", wan, "-p", "tcp",
-                     "--dport", external_port, "-j", "ACCEPT"},
-                wait_mode, context,
-                RemoteAccessReconcilePhase::install_filter)) {
-            return false;
-        }
-    }
-
     if (inspect_chain({}, wait_mode, context,
                       RemoteAccessReconcilePhase::verify_filter) !=
             RuleState::present ||
@@ -621,30 +620,9 @@ bool install_rules_once(const std::string& wan,
         return false;
     }
 
-    if (port == kInternalPort) {
-        return inspect_chain("nat", wait_mode, context,
-                             RemoteAccessReconcilePhase::verify_nat) ==
-               RuleState::absent;
-    }
-
-    const std::vector<std::string> external_accept{
-        "-i", wan, "-p", "tcp", "--dport", external_port,
-        "-j", "ACCEPT"};
-    const std::vector<std::string> redirect{
-        "-i", wan, "-p", "tcp", "--dport", external_port,
-        "-j", "REDIRECT", "--to-ports", internal_port};
     return inspect_chain("nat", wait_mode, context,
                          RemoteAccessReconcilePhase::verify_nat) ==
-               RuleState::present &&
-           inspect_rule("nat", "PREROUTING", input_jump, wait_mode,
-                        context, RemoteAccessReconcilePhase::verify_nat) ==
-               RuleState::present &&
-           inspect_rule("nat", kChain, redirect, wait_mode, context,
-                        RemoteAccessReconcilePhase::verify_nat) ==
-               RuleState::present &&
-           inspect_rule({}, kChain, external_accept, wait_mode, context,
-                        RemoteAccessReconcilePhase::verify_filter) ==
-               RuleState::present;
+           RuleState::absent;
 }
 
 std::string command_failure_detail(
@@ -722,9 +700,19 @@ ReconcileAttemptOutcome reconcile_remote_access_rules_once(
     }
 
     context.phase = RemoteAccessReconcilePhase::prerequisites;
-    if (!login_required()) {
+    const auto auth = load_remote_auth_state();
+    if (!auth.readable || !auth.enabled) {
         return close_with_error(
             "remote access requires web-interface authentication",
+            false,
+            wait_mode,
+            context);
+    }
+    if (auth.provider == "keenetic") {
+        return close_with_error(
+            "remote access is unavailable with the Keenetic authentication "
+            "provider because router credentials would traverse plaintext "
+            "WAN HTTP",
             false,
             wait_mode,
             context);
@@ -759,6 +747,14 @@ ReconcileAttemptOutcome reconcile_remote_access_rules_once(
     if (desired.port < 1 || desired.port > 65535) {
         return close_with_error(
             "the stored remote-access port is outside 1..65535",
+            false,
+            wait_mode,
+            context);
+    }
+    if (desired.port != kInternalPort) {
+        return close_with_error(
+            "custom external ports are unavailable until translated traffic "
+            "can be distinguished from direct WAN access to port 12121",
             false,
             wait_mode,
             context);
@@ -1440,6 +1436,11 @@ bool remote_access_blocks_auth_disable(
            runtime.state != RemoteAccessRuntimeState::closed;
 }
 
+bool remote_access_blocks_keenetic_auth(
+    const RemoteAccessSecurityBoundaryGuard& guard) {
+    return remote_access_blocks_auth_disable(guard);
+}
+
 RemoteAccessReconcileResult
 defer_remote_access_reconcile_after_auth_enable(
     const RemoteAccessSecurityBoundaryGuard&) {
@@ -1678,6 +1679,10 @@ void register_remote_access_handler(ApiServer& server, ApiContext& ctx) {
 
         nlohmann::json settings;
         RemoteAccessRuntimeStatus runtime;
+        auto security_boundary =
+            acquire_remote_access_security_boundary();
+        const bool keenetic_auth_switch_allowed =
+            !remote_access_blocks_keenetic_auth(security_boundary);
         {
             const std::lock_guard<std::mutex> lock(settings_mutex());
             settings = load_settings();
@@ -1686,7 +1691,26 @@ void register_remote_access_handler(ApiServer& server, ApiContext& ctx) {
             // POST and refresh admission.
             runtime = remote_access_runtime_status();
         }
-        settings["login_required"] = login_required();
+        const auto auth = load_remote_auth_state();
+        settings["login_required"] = auth.readable && auth.enabled;
+        settings["auth_provider"] =
+            auth.readable ? auth.provider : "unavailable";
+        settings["custom_port_supported"] = false;
+        settings["supported_port"] = kInternalPort;
+        settings["keenetic_auth_switch_allowed"] =
+            keenetic_auth_switch_allowed;
+        if (!auth.readable) {
+            settings["blocked_reason"] = "auth_state_unavailable";
+        } else if (!auth.enabled) {
+            settings["blocked_reason"] = "login_disabled";
+        } else if (auth.provider == "keenetic") {
+            settings["blocked_reason"] =
+                "keenetic_auth_plaintext_wan";
+        } else if (!listen_address_is_reachable(listen)) {
+            settings["blocked_reason"] = "listen_loopback";
+        } else {
+            settings["blocked_reason"] = nullptr;
+        }
         settings["internal_port"] = kInternalPort;
         settings["listen"] = listen;
         settings["listen_reachable"] = listen_address_is_reachable(listen);
@@ -1726,13 +1750,33 @@ void register_remote_access_handler(ApiServer& server, ApiContext& ctx) {
                 acquire_remote_access_security_boundary();
             // Refusing here rather than warning later: the whole point of the
             // check is that the panel never reaches the internet unprotected.
-            if (enabled && !login_required()) {
+            const auto auth = load_remote_auth_state();
+            if (enabled && !auth.readable) {
+                response["error"] = "auth_state_unavailable";
+                return response.dump();
+            }
+            if (enabled && !auth.enabled) {
                 response["error"] = "login_disabled";
+                return response.dump();
+            }
+            if (enabled && auth.provider == "keenetic") {
+                response["error"] = "keenetic_auth_plaintext_wan";
+                response["detail"] =
+                    "Keenetic router credentials cannot be sent through a "
+                    "panel published over plaintext WAN HTTP";
                 return response.dump();
             }
             if (enabled && !listen_address_is_reachable(listen)) {
                 response["error"] = "listen_loopback";
                 response["listen"] = listen;
+                return response.dump();
+            }
+            if (enabled && port != kInternalPort) {
+                response["error"] = "custom_port_not_supported_safely";
+                response["supported_port"] = kInternalPort;
+                response["detail"] =
+                    "a translated custom port cannot yet be verified without "
+                    "also exposing direct WAN port 12121";
                 return response.dump();
             }
 
@@ -1756,7 +1800,6 @@ void register_remote_access_handler(ApiServer& server, ApiContext& ctx) {
                 response["error"] = "cannot write remote-access.json";
                 return response.dump();
             }
-
             publish_reconcile_result_hint(reconcile);
             publish_reconcile_incident(reconcile);
             if (!reconcile.apply.applied) {

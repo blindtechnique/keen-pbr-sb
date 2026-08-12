@@ -487,7 +487,16 @@ export function TransportsPage({
       interfaceName,
       baselineRuntimeUpdatedAt: runtimeOutboundsQuery.dataUpdatedAt,
     })
-    runProbeMutation.mutate(undefined, {
+    // The tag of the outbound bound to this interface, so the daemon measures
+    // this row and nothing else. Falling back to the whole round when the
+    // interface has no bound outbound keeps the button working rather than
+    // making it silently do nothing.
+    const boundTag = (keenConfig?.outbounds ?? []).find(
+      (outbound) =>
+        outbound.type === "interface" &&
+        outbound.interface === interfaceName
+    )?.tag
+    runProbeMutation.mutate(boundTag, {
       onError: () => setRequestedProbe(null),
     })
   }
@@ -1104,6 +1113,7 @@ export function TransportsPage({
             transmitted: t("transports.traffic.transmitted"),
             chart: t("transports.traffic.chart"),
             noTraffic: t("transports.traffic.noTraffic"),
+          stale: t("transports.traffic.stale"),
           }}
           locale={i18n.resolvedLanguage ?? i18n.language}
           // График живёт только на дашборде: рядом с цепочкой зависимостей он

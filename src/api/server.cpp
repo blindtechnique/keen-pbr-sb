@@ -7,6 +7,9 @@
 #include "keenetic_auth.hpp"
 
 #include "../config/config_writer.hpp"
+#include "step_up.hpp"
+#include "system_auth_capability.hpp"
+#include "../keenetic/ndms_lockout_policy.hpp"
 #include "../keenetic/ndms_web_endpoint.hpp"
 #include "../log/logger.hpp"
 #include "../log/trace.hpp"
@@ -416,6 +419,11 @@ bool resolve_static_file_under_root(const std::filesystem::path& root,
     return true;
 }
 
+// Long enough that health polling never becomes a probe loop, short enough
+// that a firmware whose web service just came back is noticed while the
+// operator is still looking at the page.
+constexpr std::chrono::seconds kChallengeProbeTtl{60};
+
 struct WebAuthConfig {
     bool enabled{false};
     bool misconfigured{false};
@@ -428,6 +436,10 @@ struct WebAuthConfig {
     std::string username;
     std::string password;
     std::chrono::seconds session_ttl{std::chrono::hours(24 * 7)};
+    // The firmware's brute-force policy, read once alongside endpoint
+    // discovery. Empty means the read failed, which keeps the conservative
+    // default rather than lifting the limit.
+    std::optional<NdmsLockoutPolicy> firmware_lockout;
 
     bool uses_router_account() const { return provider == "keenetic"; }
 };
@@ -740,6 +752,12 @@ struct ApiServer::Impl {
     std::string listen_error_message;
     std::mutex auth_update_mutex;
     std::mutex auth_endpoint_discovery_mutex;
+    std::mutex lockout_policy_mutex;
+    std::chrono::steady_clock::time_point lockout_policy_retry_after{};
+    std::mutex challenge_probe_mutex;
+    std::string challenge_probe_endpoint;
+    bool challenge_probe_result{false};
+    std::chrono::steady_clock::time_point challenge_probe_expires{};
     std::mutex auth_mutex;
     std::mutex auth_revocation_mutex;
     std::vector<std::function<void()>> auth_revocation_handlers;
@@ -748,7 +766,17 @@ struct ApiServer::Impl {
     WebAuthConfig auth;
     std::uint64_t auth_generation{0};
     AuthSessionRegistry sessions;
+    // Short-lived grants keyed by the session token. Same shape as a session,
+    // deliberately: a step-up is a session that expires in minutes.
+    AuthSessionRegistry step_up_grants{kStepUpGrantCapacity};
     AuthLoginRateLimiter login_rate_limiter;
+    // Sized from the firmware defaults measured on a live Keenetic. Reading
+    // the router's actual policy over RCI is a separate slice; until then the
+    // conservative default is the documented one, and the capability report
+    // stays honest about not having read it.
+    AuthForwardBudget firmware_forward_budget{
+        auth_forward_capacity_for(kNdmsDefaultLockoutThreshold),
+        kNdmsDefaultLockoutObservation};
 
     WebAuthConfig auth_snapshot() {
         std::lock_guard lock(auth_mutex);
@@ -766,6 +794,7 @@ struct ApiServer::Impl {
     }
 
     void replace_auth(WebAuthConfig replacement) {
+        apply_forward_budget(replacement);
         std::lock_guard lock(auth_mutex);
         auth = std::move(replacement);
         advance_auth_generation_locked();
@@ -804,6 +833,7 @@ struct ApiServer::Impl {
         std::lock_guard epoch_lock(auth_revocation_mutex);
         close_authenticated_streams_locked();
         sessions.clear();
+        step_up_grants.clear();
     }
 
     bool revoke_auth_session(const std::string& token) {
@@ -811,14 +841,232 @@ struct ApiServer::Impl {
         // discard a stale cookie. Only a currently valid token is authority
         // to retire streams; otherwise this would be a global SSE DoS.
         std::lock_guard epoch_lock(auth_revocation_mutex);
-        if (token.empty() || !sessions.contains(token)) return false;
+        if (token.empty()) return false;
+        if (!sessions.contains(token)) {
+            step_up_grants.erase(token);
+            return false;
+        }
         // Broadcasters currently revoke the active authenticated cohort. This
         // is conservative for another administrator: their stream reconnects
         // with its still-valid cookie, while the logged-out stream cannot leak
         // queued frames or outlive the session.
         close_authenticated_streams_locked();
         sessions.erase(token);
+        step_up_grants.erase(token);
         return true;
+    }
+
+    // The firmware's own policy is authoritative whenever we managed to read
+    // it. The measured defaults stand in when we did not, and the capability
+    // report is what tells an operator which of the two happened - the budget
+    // itself must never widen just because a read failed.
+    struct CredentialOutcome {
+        bool ok{false};
+        int status{401};
+        long long retry_after_seconds{0};
+        std::string body{R"({"error":"invalid credentials"})"};
+        KeeneticAuthResult keenetic;
+    };
+
+    CredentialOutcome forward_keenetic_credentials(
+        const std::string& endpoint,
+        const std::string& username,
+        const std::string& password) {
+        CredentialOutcome outcome;
+        // Policy refresh happens before admission. reconfigure() shares the
+        // budget mutex with Permit, so it cannot resize a live forwarding
+        // attempt underneath it.
+        refresh_firmware_lockout_policy();
+        auto permit = firmware_forward_budget.reserve_forward();
+        if (!permit) {
+            outcome.status = 429;
+            outcome.retry_after_seconds =
+                kNdmsDefaultLockoutObservation.count();
+            outcome.body = R"({"error":"too many login attempts"})";
+            return outcome;
+        }
+
+        outcome.keenetic = verify_keenetic_credentials(
+            endpoint, username, password);
+        if (outcome.keenetic.endpoint_verified &&
+            !outcome.keenetic.authenticated) {
+            permit->record_forwarded_failure();
+        }
+        if (!outcome.keenetic.authenticated) {
+            outcome.status = outcome.keenetic.reachable ? 401 : 503;
+            outcome.body = nlohmann::json{
+                {"error", outcome.keenetic.error.empty()
+                              ? "invalid credentials"
+                              : outcome.keenetic.error}}
+                               .dump();
+            return outcome;
+        }
+
+        outcome.ok = true;
+        return outcome;
+    }
+
+    // The single credential check, shared by login and by step-up.
+    //
+    // Sharing it is not tidiness. A second verification path would be a second
+    // way to spend the firmware's lockout budget, and a budget with two
+    // spenders that only one of them counts is not a budget - step-up would
+    // have become the way around the very protection it sits behind.
+    CredentialOutcome verify_credentials(
+        WebAuthConfig& auth,
+        std::uint64_t& auth_generation_snapshot,
+        const std::string& username,
+        const std::string& password,
+        AuthLoginRateLimiter::Permit& login_attempt) {
+        CredentialOutcome outcome;
+
+        if (auth.uses_router_account()) {
+            if (auth.endpoint_unavailable &&
+                auth.keenetic_endpoint_mode == "auto") {
+                const auto refreshed =
+                    refresh_keenetic_endpoint_from_ndms(auth.keenetic_endpoint);
+                if (refreshed) {
+                    auth = refreshed->first;
+                    auth_generation_snapshot = refreshed->second;
+                }
+            }
+            if (auth.endpoint_unavailable) {
+                login_attempt.release();
+                outcome.status = 503;
+                outcome.body = R"({"error":"auth_endpoint_unavailable"})";
+                return outcome;
+            }
+            outcome = forward_keenetic_credentials(
+                auth.keenetic_endpoint, username, password);
+            if (!outcome.ok && outcome.status != 429 &&
+                !outcome.keenetic.endpoint_verified &&
+                auth.keenetic_endpoint_mode == "auto") {
+                // LAN address or the firmware HTTP port may have changed after
+                // this daemon started. Refresh only on an actual connection
+                // failure; wrong passwords never fan out into additional RCI
+                // calls.
+                const auto refreshed =
+                    refresh_keenetic_endpoint_from_ndms(auth.keenetic_endpoint);
+                if (refreshed) {
+                    auth = refreshed->first;
+                    auth_generation_snapshot = refreshed->second;
+                    outcome = forward_keenetic_credentials(
+                        auth.keenetic_endpoint, username, password);
+                }
+            }
+            if (!outcome.ok) {
+                // An unreachable endpoint did not test a credential. Release
+                // that reservation without penalizing the source; invalid or
+                // budget-exhausting attempts remain failures.
+                if (outcome.status == 503) {
+                    login_attempt.release();
+                } else {
+                    login_attempt.record_failure();
+                }
+                return outcome;
+            }
+        } else if (!constant_time_equal(username, auth.username) ||
+                   !constant_time_equal(password, auth.password)) {
+            login_attempt.record_failure();
+            outcome.status = 401;
+            return outcome;
+        }
+
+        login_attempt.record_success();
+        outcome.ok = true;
+        return outcome;
+    }
+
+    // Whether the endpoint actually serves the Keenetic challenge, cached so a
+    // health poll cannot turn into a probe per request.
+    //
+    // No credentials are sent: probe_keenetic_auth_challenge only asks whether
+    // the realm and challenge headers come back. A failed probe is cached too,
+    // and for the same interval - retrying on every health request would turn
+    // an unreachable endpoint into a burst of connection attempts.
+    bool keenetic_challenge_observed(const std::string& endpoint) {
+        if (endpoint.empty()) return false;
+
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lock(challenge_probe_mutex);
+        if (challenge_probe_endpoint == endpoint &&
+            now < challenge_probe_expires) {
+            return challenge_probe_result;
+        }
+        challenge_probe_endpoint = endpoint;
+        challenge_probe_result = probe_keenetic_auth_challenge(endpoint);
+        challenge_probe_expires = now + kChallengeProbeTtl;
+        return challenge_probe_result;
+    }
+
+    // Reads the firmware policy at most once per retry interval, on the login
+    // path rather than at startup. The daemon deliberately does not block
+    // booting on NDMS probes, and a login is the first moment the answer
+    // actually matters. Held across the read on purpose: concurrent logins
+    // should queue behind one RCI call, not stampede it.
+    void refresh_firmware_lockout_policy() {
+        std::lock_guard lock(lockout_policy_mutex);
+        {
+            std::lock_guard auth_lock(auth_mutex);
+            if (auth.firmware_lockout) return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < lockout_policy_retry_after) return;
+
+        std::string error;
+        const auto policy = fetch_ndms_lockout_policy(&error);
+        if (!policy) {
+            // Keep the conservative default and try again later. A failed read
+            // must never be the reason the budget widens.
+            lockout_policy_retry_after = now + std::chrono::seconds(60);
+            Logger::instance().warn(
+                "Falling back to the default KeeneticOS lockout policy: {}",
+                error);
+            return;
+        }
+        lockout_policy_retry_after = {};
+        {
+            std::lock_guard auth_lock(auth_mutex);
+            auth.firmware_lockout = policy;
+        }
+        firmware_forward_budget.reconfigure(
+            auth_forward_capacity_for(policy->threshold),
+            policy->observation_window);
+    }
+
+    void apply_forward_budget(const WebAuthConfig& config) {
+        const auto threshold = config.firmware_lockout
+                                   ? config.firmware_lockout->threshold
+                                   : kNdmsDefaultLockoutThreshold;
+        const auto window = config.firmware_lockout
+                                ? config.firmware_lockout->observation_window
+                                : kNdmsDefaultLockoutObservation;
+        firmware_forward_budget.reconfigure(
+            auth_forward_capacity_for(threshold), window);
+    }
+
+    SystemAuthCapability system_auth_switch_capability(
+        const std::string& endpoint,
+        const bool challenge_observed) {
+        // The local password is replacement authority. Do not discard it on
+        // the strength of a reachable /auth endpoint alone: unless the live
+        // firmware lockout policy is known, we cannot prove that forwarding
+        // WebUI failures will not lock the router administrator out.
+        refresh_firmware_lockout_policy();
+        const auto current = auth_snapshot();
+
+        SystemAuthCapabilityInputs inputs;
+        inputs.endpoint_resolved = !endpoint.empty();
+        inputs.endpoint_is_loopback = endpoint_is_loopback(endpoint);
+        inputs.challenge_observed = challenge_observed;
+        inputs.firmware_lockout = current.firmware_lockout;
+        inputs.local_limiter.max_failures =
+            static_cast<std::uint32_t>(kAuthLoginMaxFailures);
+        inputs.local_limiter.window = kAuthLoginWindow;
+        inputs.local_limiter.lockout = kAuthLoginLockout;
+        inputs.local_limiter.global_forward_cap =
+            firmware_forward_budget.capacity();
+        return evaluate_system_auth_capability(inputs);
     }
 
     std::optional<std::pair<WebAuthConfig, std::uint64_t>>
@@ -871,6 +1119,14 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     });
     impl_->server.set_read_timeout(15);
     impl_->server.set_write_timeout(30);
+    // Remote-access firewall removal cannot revoke a TCP connection which was
+    // accepted while the WAN rule still existed. In particular, such a
+    // connection must never survive a later switch to the Keenetic provider
+    // and carry router credentials over plaintext WAN HTTP. One request per
+    // HTTP connection makes the firewall proof an actual request boundary.
+    // Long-lived SSE responses remain one request and are separately revoked
+    // by the authentication epoch.
+    impl_->server.set_keep_alive_max_count(1);
     impl_->server.set_keep_alive_timeout(20);
 
     // Parse "host:port" from config.listen
@@ -897,7 +1153,7 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
     impl_->replace_auth(load_web_auth_config());
     impl_->server.Get("/api/auth/status", [state = impl_.get()](const httplib::Request& req,
                                                                   httplib::Response& res) {
-        auto auth = state->auth_snapshot();
+        const auto auth = state->auth_snapshot();
         const bool loopback_request =
             is_loopback_address(req.remote_addr);
         bool authenticated = !auth.enabled && loopback_request;
@@ -929,6 +1185,110 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         res.set_header("Cache-Control", "no-store");
         res.set_content(response.dump(), "application/json");
     });
+    // Reauthentication on top of an existing session, for the operations that
+    // install software or change how the router is reached. Never reachable
+    // without a session: the pre-routing guard runs first, so an unauthenticated
+    // caller cannot use this to probe credentials.
+    impl_->server.Post("/api/auth/step-up", [state = impl_.get()](const httplib::Request& req,
+                                                                     httplib::Response& res) {
+        auto auth_state = state->auth_snapshot_with_generation();
+        auto auth = std::move(auth_state.first);
+        auto auth_generation = auth_state.second;
+        res.set_header("Cache-Control", "no-store");
+        if (auth.misconfigured) {
+            res.status = 503;
+            res.set_content(
+                R"({"error":"auth_misconfigured"})", "application/json");
+            return;
+        }
+        if (!auth.enabled) {
+            // There is no session to step up from, and the privileged routes
+            // are already open. Refusing here would only invent a control the
+            // deployment does not have.
+            res.set_content(R"({"granted":true})", "application/json");
+            return;
+        }
+        const auto session = cookie_value(req, "keen_pbr_session");
+        if (!state->sessions.contains(session)) {
+            res.status = 401;
+            res.set_content(
+                R"({"error":"authentication required"})", "application/json");
+            return;
+        }
+        auto login_attempt =
+            state->login_rate_limiter.reserve_attempt(req.remote_addr);
+        if (!login_attempt) {
+            res.status = 429;
+            res.set_header("Retry-After", "60");
+            res.set_content(
+                R"({"error":"too many login attempts"})", "application/json");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            const auto username = body.value("username", std::string{});
+            const auto password = body.value("password", std::string{});
+
+            const auto outcome = state->verify_credentials(
+                auth, auth_generation, username, password, *login_attempt);
+            if (!outcome.ok) {
+                res.status = outcome.status;
+                if (outcome.retry_after_seconds > 0) {
+                    res.set_header(
+                        "Retry-After",
+                        std::to_string(outcome.retry_after_seconds));
+                }
+                res.set_content(outcome.body, "application/json");
+                return;
+            }
+            {
+                // Credential verification may perform NDM/network I/O, so it
+                // deliberately happens without the epoch. Publication does
+                // not: rotation/logout cannot cross the generation, session
+                // revalidation and grant insertion boundary.
+                const std::lock_guard epoch_lock(
+                    state->auth_revocation_mutex);
+                const std::lock_guard auth_lock(state->auth_mutex);
+                if (state->auth_generation != auth_generation ||
+                    !state->auth.enabled || state->auth.misconfigured ||
+                    state->auth.provider != auth.provider) {
+                    res.status = 409;
+                    res.set_content(
+                        R"({"error":"authentication settings changed; retry step-up"})",
+                        "application/json");
+                    return;
+                }
+                if (!state->sessions.contains(session)) {
+                    res.status = 401;
+                    res.set_content(
+                        R"({"error":"authentication required"})",
+                        "application/json");
+                    return;
+                }
+                // Keyed by the session, so the grant dies with it. A grant
+                // that outlived its session would be a credential of its own.
+                if (!state->step_up_grants.insert(
+                        session, kStepUpGrantTtl)) {
+                    res.status = 503;
+                    res.set_content(
+                        R"({"error":"step-up grant limit reached"})",
+                        "application/json");
+                    return;
+                }
+            }
+            res.set_content(
+                nlohmann::json{
+                    {"granted", true},
+                    {"expires_in_seconds", kStepUpGrantTtl.count()}}
+                    .dump(),
+                "application/json");
+        } catch (const std::exception&) {
+            login_attempt->record_failure();
+            res.status = 400;
+            res.set_content(
+                R"({"error":"invalid step-up request"})", "application/json");
+        }
+    });
     impl_->server.Post("/api/auth/login", [state = impl_.get()](const httplib::Request& req,
                                                                    httplib::Response& res) {
         auto auth_state = state->auth_snapshot_with_generation();
@@ -946,7 +1306,9 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             res.set_content(R"({"authenticated":true})", "application/json");
             return;
         }
-        if (!state->login_rate_limiter.allow(req.remote_addr)) {
+        auto login_attempt =
+            state->login_rate_limiter.reserve_attempt(req.remote_addr);
+        if (!login_attempt) {
             res.status = 429;
             res.set_header("Retry-After", "60");
             res.set_content(
@@ -959,62 +1321,16 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
             const auto username = body.value("username", std::string{});
             const auto password = body.value("password", std::string{});
 
-            if (auth.uses_router_account()) {
-                if (auth.endpoint_unavailable &&
-                    auth.keenetic_endpoint_mode == "auto") {
-                    const auto refreshed =
-                        state->refresh_keenetic_endpoint_from_ndms(
-                            auth.keenetic_endpoint);
-                    if (refreshed) {
-                        auth = refreshed->first;
-                        auth_generation = refreshed->second;
-                    }
+            const auto outcome = state->verify_credentials(
+                auth, auth_generation, username, password, *login_attempt);
+            if (!outcome.ok) {
+                res.status = outcome.status;
+                if (outcome.retry_after_seconds > 0) {
+                    res.set_header(
+                        "Retry-After",
+                        std::to_string(outcome.retry_after_seconds));
                 }
-                if (auth.endpoint_unavailable) {
-                    res.status = 503;
-                    res.set_content(
-                        R"({"error":"auth_endpoint_unavailable"})",
-                        "application/json");
-                    return;
-                }
-                auto verdict = verify_keenetic_credentials(
-                    auth.keenetic_endpoint, username, password);
-                if (!verdict.authenticated &&
-                    !verdict.endpoint_verified &&
-                    auth.keenetic_endpoint_mode == "auto") {
-                    // LAN address or the firmware HTTP port may have changed
-                    // after this daemon started. Refresh only on an actual
-                    // connection failure; wrong passwords never fan out into
-                    // additional RCI calls.
-                    const auto refreshed =
-                        state->refresh_keenetic_endpoint_from_ndms(
-                            auth.keenetic_endpoint);
-                    if (refreshed) {
-                        auth = refreshed->first;
-                        auth_generation = refreshed->second;
-                        verdict = verify_keenetic_credentials(
-                            auth.keenetic_endpoint,
-                            username,
-                            password);
-                    }
-                }
-                if (!verdict.authenticated) {
-                    state->login_rate_limiter.record_failure(req.remote_addr);
-                    // A router that cannot be reached is an outage, not a typo.
-                    res.status = verdict.reachable ? 401 : 503;
-                    res.set_content(
-                        nlohmann::json{{"error", verdict.error.empty()
-                                                     ? "invalid credentials"
-                                                     : verdict.error}}
-                            .dump(),
-                        "application/json");
-                    return;
-                }
-            } else if (!constant_time_equal(username, auth.username) ||
-                       !constant_time_equal(password, auth.password)) {
-                state->login_rate_limiter.record_failure(req.remote_addr);
-                res.status = 401;
-                res.set_content(R"({"error":"invalid credentials"})", "application/json");
+                res.set_content(outcome.body, "application/json");
                 return;
             }
 #ifdef KEEN_PBR3_TESTING
@@ -1057,13 +1373,12 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                     return;
                 }
             }
-            state->login_rate_limiter.record_success(req.remote_addr);
             res.set_header("Set-Cookie", "keen_pbr_session=" + *token +
                            "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
                            std::to_string(session_ttl.count()));
             res.set_content(R"({"authenticated":true})", "application/json");
         } catch (const std::exception&) {
-            state->login_rate_limiter.record_failure(req.remote_addr);
+            login_attempt->record_failure();
             res.status = 400;
             res.set_content(R"({"error":"invalid login request"})", "application/json");
         }
@@ -1104,9 +1419,27 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 res.set_content(R"({"error":"unknown provider"})", "application/json");
                 return;
             }
+            const bool requested_enabled = body.value("enabled", true);
+
+            // Provider publication and remote desired-state publication share
+            // one fence. Keep it across endpoint/credential verification and
+            // the atomic auth publication: otherwise a remote-enable POST can
+            // slip between this check and auth.json and expose the router
+            // administrator password over plaintext WAN HTTP.
+            auto remote_access_security_boundary =
+                acquire_remote_access_security_boundary();
+            if (requested_enabled && provider == "keenetic" &&
+                remote_access_blocks_keenetic_auth(
+                    remote_access_security_boundary)) {
+                res.status = 409;
+                res.set_header("Cache-Control", "no-store");
+                res.set_content(
+                    R"({"error":"remote_access_incompatible_with_keenetic_auth"})",
+                    "application/json");
+                return;
+            }
 
             nlohmann::json document;
-            const bool requested_enabled = body.value("enabled", true);
             document["enabled"] = requested_enabled;
             document["provider"] = provider;
             document["session_ttl_seconds"] =
@@ -1168,6 +1501,19 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 }
                 const auto username = body.value("username", std::string{});
                 const auto password = body.value("password", std::string{});
+                const bool switching_to_router =
+                    !current_auth.enabled ||
+                    !current_auth.uses_router_account();
+                if (!requested_enabled && switching_to_router) {
+                    // A disabled provider cannot be verified. Accepting this
+                    // would erase the last working local credential before
+                    // its replacement had proved either capability or login.
+                    res.status = 409;
+                    res.set_content(
+                        R"({"error":"system_auth_requires_enabled_verification"})",
+                        "application/json");
+                    return;
+                }
                 if (requested_enabled) {
                     if (!endpoint ||
                         !probe_keenetic_auth_challenge(endpoint->canonical)) {
@@ -1177,9 +1523,27 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                             "application/json");
                         return;
                     }
-                    const bool switching_to_router =
-                        !current_auth.enabled ||
-                        !current_auth.uses_router_account();
+                    if (switching_to_router) {
+                        const auto capability =
+                            state->system_auth_switch_capability(
+                                endpoint->canonical, true);
+                        if (!capability.may_replace_local_password) {
+                            res.status = 503;
+                            res.set_header("Cache-Control", "no-store");
+                            res.set_content(
+                                nlohmann::json{
+                                    {"error",
+                                     "system_auth_capability_not_usable"},
+                                    {"capability_state",
+                                     system_auth_capability_state_name(
+                                         capability.state)},
+                                    {"detail", capability.detail},
+                                }
+                                    .dump(),
+                                "application/json");
+                            return;
+                        }
+                    }
                     const bool credentials_supplied =
                         !username.empty() || !password.empty();
                     if (switching_to_router && !credentials_supplied) {
@@ -1197,16 +1561,40 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                                 "application/json");
                             return;
                         }
-                        const auto verdict =
-                            verify_keenetic_credentials(
-                                endpoint->canonical, username, password);
-                        if (!verdict.authenticated) {
-                            res.status = verdict.reachable ? 401 : 503;
+                        auto login_attempt =
+                            state->login_rate_limiter.reserve_attempt(
+                                req.remote_addr);
+                        if (!login_attempt) {
+                            res.status = 429;
+                            res.set_header("Retry-After", "60");
                             res.set_content(
-                                nlohmann::json{{"error", verdict.error}}.dump(),
+                                R"({"error":"too many login attempts"})",
                                 "application/json");
                             return;
                         }
+                        const auto credential_outcome =
+                            state->forward_keenetic_credentials(
+                                endpoint->canonical, username, password);
+                        if (!credential_outcome.ok) {
+                            if (credential_outcome.status == 503) {
+                                login_attempt->release();
+                            } else {
+                                login_attempt->record_failure();
+                            }
+                            res.status = credential_outcome.status;
+                            if (credential_outcome.retry_after_seconds > 0) {
+                                res.set_header(
+                                    "Retry-After",
+                                    std::to_string(
+                                        credential_outcome
+                                            .retry_after_seconds));
+                            }
+                            res.set_content(
+                                credential_outcome.body,
+                                "application/json");
+                            return;
+                        }
+                        login_attempt->record_success();
                     }
                 }
                 document["keenetic_endpoint_mode"] = endpoint_mode;
@@ -1234,8 +1622,6 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
                 document["password"] = password;
             }
 
-            auto remote_access_security_boundary =
-                acquire_remote_access_security_boundary();
             if (!requested_enabled) {
                 if (remote_access_blocks_auth_disable(
                         remote_access_security_boundary)) {
@@ -1460,7 +1846,40 @@ ApiServer::ApiServer(const ApiConfig& config) : impl_(std::make_unique<Impl>()) 
         }
         const auto token = cookie_value(req, "keen_pbr_session");
         const bool valid = state->sessions.contains(token);
-        if (valid) return httplib::Server::HandlerResponse::Unhandled;
+        if (valid) {
+            // Enforced here rather than in each privileged handler. A guard
+            // every handler has to remember to call is a guard that a new
+            // handler will not have.
+            //
+            // The body is parsed only for the paths that dispatch on an action
+            // field, and only to read that one field. Doing it for every
+            // request would put a JSON parse in front of the whole API to
+            // answer a question one route asks.
+            std::string step_up_action;
+            if (path_dispatches_on_action(req.path)) {
+                try {
+                    const auto body = nlohmann::json::parse(req.body);
+                    if (body.is_object()) {
+                        const auto found = body.find("action");
+                        if (found != body.end() && found->is_string()) {
+                            step_up_action = found->get<std::string>();
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // An unparseable body names no action, so it needs no
+                    // step-up. The handler will reject it on its own terms
+                    // rather than being told it needs a password first.
+                }
+            }
+            if (requires_step_up(req.method, req.path, step_up_action) &&
+                !state->step_up_grants.contains(token)) {
+                res.status = 403;
+                res.set_content(
+                    R"({"error":"step_up_required"})", "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
         res.status = 401;
         res.set_content(R"({"error":"authentication required"})", "application/json");
         return httplib::Server::HandlerResponse::Handled;
@@ -1847,6 +2266,36 @@ void ApiServer::start() {
     stop();
     throw ApiError("Failed to start API server on " + impl_->host + ":" +
                    std::to_string(impl_->port) + " (" + diagnostic + ")");
+}
+
+std::optional<SystemAuthHealthSnapshot> ApiServer::system_auth_health() {
+    if (!impl_) return std::nullopt;
+    const auto auth = impl_->auth_snapshot();
+
+    SystemAuthEndpointState endpoint_state;
+    endpoint_state.endpoint = auth.keenetic_endpoint;
+    endpoint_state.endpoint_unavailable = auth.endpoint_unavailable;
+
+    SystemAuthLimiterBudget limiter;
+    limiter.max_failures = static_cast<std::uint32_t>(kAuthLoginMaxFailures);
+    limiter.window = kAuthLoginWindow;
+    limiter.lockout = kAuthLoginLockout;
+    limiter.global_forward_cap = impl_->firmware_forward_budget.capacity();
+
+    const auto inputs = build_system_auth_inputs(
+        endpoint_state, auth.firmware_lockout, limiter,
+        [this](const std::string& endpoint) {
+            return impl_->keenetic_challenge_observed(endpoint);
+        });
+
+    const auto capability = evaluate_system_auth_capability(inputs);
+
+    SystemAuthHealthSnapshot snapshot;
+    snapshot.state = system_auth_capability_state_name(capability.state);
+    snapshot.detail = capability.detail;
+    snapshot.forwarded_failures_per_window =
+        static_cast<std::int64_t>(capability.forwarded_failures_per_window);
+    return snapshot;
 }
 
 void ApiServer::stop() {

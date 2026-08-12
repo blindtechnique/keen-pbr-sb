@@ -56,6 +56,8 @@ constexpr std::array<std::chrono::seconds, 5>
         std::chrono::seconds{8},
         std::chrono::seconds{16},
     };
+constexpr auto RESOLVER_RELOAD_MAINTENANCE_DELAY =
+    std::chrono::seconds{60};
 constexpr std::array<std::chrono::seconds, 5>
     OWNED_CONNTRACK_CLEANUP_RETRY_DELAYS{
         std::chrono::seconds{2},
@@ -1642,6 +1644,8 @@ void Daemon::restart_routing_runtime() {
         runtime_firewall_incidents_.clear();
         transition_runtime_or_throw(
             RuntimeState::running, "transactional runtime restart complete");
+        acknowledge_verified_resolver_reload(
+            runtime_generation_.load(std::memory_order_acquire));
         publish_runtime_state();
         if (runtime_firewall_retry_.owned_snat_recovery_pending() &&
             !runtime_firewall_retry_.retry_pending()) {
@@ -1684,7 +1688,7 @@ void Daemon::restart_routing_runtime() {
             transition_runtime_or_throw(
                 RuntimeState::running,
                 kernel_generation_committed
-                    ? "runtime restart committed; resolver reload pending"
+                    ? kResolverReloadPendingRuntimeReason.data()
                     : "runtime restart failed; previous runtime retained");
             refresh_resolver_config_hash_actual_async();
             publish_runtime_state();
@@ -3105,7 +3109,117 @@ void Daemon::probe_interfaces_now() noexcept {
         }
         return;
     }
+    // Only once this tick actually owns a round. Setting it before admission
+    // would leave the flag standing when the request coalesced, and the next
+    // manual refresh would quietly measure a slice instead of everything.
+    interface_probe_round_rotates_ = true;
     start_interface_probe_round();
+}
+
+bool Daemon::start_targeted_interface_probe(const std::string& tag) noexcept {
+    try {
+        const auto targets =
+            collect_interface_probe_targets(config_, outbound_marks_);
+        const auto found = std::find_if(
+            targets.begin(), targets.end(),
+            [&tag](const InterfaceProbe::Target& candidate) {
+                return candidate.tag == tag;
+            });
+        if (found == targets.end()) {
+            // Unknown, or not an interface outbound. Saying so beats probing
+            // nothing and reporting success.
+            return false;
+        }
+        const auto target = *found;
+
+        auto lease = targeted_probe_admission_.acquire(tag);
+        if (!lease.admitted()) return false;
+
+        const auto expected_runtime_generation =
+            runtime_generation_.load(std::memory_order_acquire);
+
+        // NOTE: no retain_only() here, unlike the round path. This measures
+        // one target and must leave every other outbound's published health
+        // exactly as it found it.
+        const bool posted = blocking_executor_.try_post(
+            "targeted-interface-probe:" + tag,
+            [this, target, expected_runtime_generation,
+             lease = std::make_shared<TargetedProbeAdmission::Lease>(
+                 std::move(lease))]() mutable {
+                InterfaceProbe::Observation observation;
+                try {
+                    observation = interface_probe_.measure_one(target);
+                } catch (...) {
+                    // The lease dies with this lambda, so the row becomes
+                    // clickable again rather than staying stuck.
+                    return;
+                }
+                (void)post_control_task(
+                    [this, target, expected_runtime_generation,
+                     observation = std::move(observation), lease]() {
+                        try {
+                            const auto current_targets =
+                                collect_interface_probe_targets(
+                                    config_, outbound_marks_);
+                            // The config may have been reloaded while we were
+                            // on the network. Publishing then would attach a
+                            // latency measured for one transport to whatever
+                            // now answers to that tag.
+                            if (!interface_probe_target_is_current(
+                                    expected_runtime_generation,
+                                    runtime_generation_.load(
+                                        std::memory_order_acquire),
+                                    target,
+                                    current_targets)) {
+                                return;
+                            }
+                            std::vector<std::string> affected_urltests;
+                            if (urltest_manager_) {
+                                affected_urltests = find_affected_urltests(
+                                    config_.outbounds.value_or(
+                                        std::vector<Outbound>{}),
+                                    {target.tag});
+                            }
+                            const bool transitioned =
+                                interface_probe_.commit_observation(
+                                    observation);
+                            if (urltest_manager_ && transitioned) {
+                                for (const auto& urltest_tag :
+                                     affected_urltests) {
+                                    urltest_manager_
+                                        ->trigger_external_health_test(
+                                            urltest_tag);
+                                }
+                            }
+#ifdef WITH_API
+                            if (status_stream_) {
+                                try {
+                                    status_stream_->reconcile();
+                                } catch (...) {
+                                }
+                            }
+#endif
+                        } catch (const std::exception& error) {
+                            try {
+                                Logger::instance().info(
+                                    "Targeted probe result for '{}' could "
+                                    "not be published: {}",
+                                    target.tag,
+                                    error.what());
+                            } catch (...) {
+                            }
+                        } catch (...) {
+                        }
+                    },
+                    "targeted-interface-probe-result:" + target.tag);
+            });
+
+        // try_post may have refused without taking the lambda, in which case
+        // the lease above is still ours and releases on scope exit.
+        return posted;
+    } catch (...) {
+        return false;
+    }
 }
 
 void Daemon::start_interface_probe_round() noexcept {
@@ -3137,12 +3251,30 @@ void Daemon::start_interface_probe_round() noexcept {
 
 void Daemon::start_interface_probe_round_impl(
     bool failure_retry_round) {
-    const auto targets = collect_interface_probe_targets(
+    const auto configured_targets = collect_interface_probe_targets(
         config_, outbound_marks_);
     const auto expected_runtime_generation =
         runtime_generation_.load(std::memory_order_acquire);
 
-    interface_probe_.retain_only(targets);
+    // Always the complete set. retain_only prunes to what it is given, so
+    // handing it a rotation slice would drop every target absent from this
+    // tick - the health of eight outbounds erased as a side effect of probing
+    // two.
+    interface_probe_.retain_only(configured_targets);
+
+    // A periodic tick measures a slice; a manual round and a failure retry
+    // measure everything. The operator asking for a refresh wants the screen
+    // to be right, and a retry exists precisely because the previous full
+    // attempt did not land.
+    auto targets = configured_targets;
+    if (interface_probe_round_rotates_ && !failure_retry_round) {
+        auto rotation = select_interface_probe_rotation(
+            configured_targets, interface_probe_cursor_);
+        interface_probe_cursor_ = rotation.next_cursor;
+        targets = std::move(rotation.slice);
+    }
+    // Consumed: the next round is full unless a scheduler tick says otherwise.
+    interface_probe_round_rotates_ = false;
 
     if (targets.empty()) {
         auto task_metrics =
@@ -4778,51 +4910,121 @@ void Daemon::cancel_internal_vpn_catalog_refresh_retry() {
 }
 
 void Daemon::cancel_resolver_reload_retry() {
-    if (resolver_reload_retry_task_id_ < 0) {
+    // Invalidate before cancellation. Scheduler::cancel() may race a callback
+    // which has already been dequeued; its serial check must fail before it
+    // can clear a successor's timer slot.
+    ++resolver_reload_retry_schedule_serial_;
+    resolver_reload_retry_pending_ = false;
+    resolver_reload_retry_pending_attempt_ = 0U;
+    resolver_reload_retry_pending_generation_ = 0U;
+    // Do not clear the generation-keyed incident here. A same-generation
+    // firewall refresh may cancel and re-arm resolver work; clearing would
+    // mint a second bell for the same unresolved incident. Verified resolver
+    // success resets its exact key, while a new runtime generation uses a new
+    // key naturally.
+    if (!scheduler_ || resolver_reload_retry_task_id_ < 0) {
         return;
     }
-    scheduler_->cancel(resolver_reload_retry_task_id_);
+    const int task_id = resolver_reload_retry_task_id_;
     resolver_reload_retry_task_id_ = -1;
+    scheduler_->cancel(task_id);
 }
 
 void Daemon::schedule_resolver_reload_retry(
     std::size_t attempt,
     std::uint64_t runtime_generation) {
-    if (resolver_reload_retry_task_id_ >= 0 ||
-        attempt >= RESOLVER_RELOAD_RETRY_DELAYS.size()) {
+    if (!scheduler_ || resolver_reload_retry_task_id_ >= 0 ||
+        !runtime_recovery_is_current(
+            routing_runtime_active_,
+            runtime_generation,
+            runtime_generation_.load(std::memory_order_acquire))) {
         return;
     }
 
-    const auto delay = RESOLVER_RELOAD_RETRY_DELAYS[attempt];
-    resolver_reload_retry_task_id_ = scheduler_->schedule_oneshot(
-        delay,
-        [this, attempt, runtime_generation]() {
-            resolver_reload_retry_task_id_ = -1;
-            // Resolver bytes must never advance ahead of a failed firewall
-            // rollback. This explicit generation latch remains closed even
-            // after bounded firewall retries are exhausted; the successful
-            // firewall reconciliation schedules a fresh resolver attempt.
-            if (resolver_after_firewall_gate_.waiting_for(
-                    runtime_generation)) {
-                Logger::instance().verbose(
-                    "Holding resolver reload recovery until firewall "
-                    "generation {} has converged.",
-                    runtime_generation);
-                return;
-            }
-            start_resolver_reload_retry_attempt(
-                attempt, runtime_generation);
-        },
-        "resolver-reload-recovery");
-    Logger::instance().info(
-        "Resolver reload recovery attempt {} scheduled in {}s.",
-        attempt + 1,
-        delay.count());
+    const auto plan = plan_resolver_reload_retry(
+        attempt,
+        RESOLVER_RELOAD_RETRY_DELAYS,
+        RESOLVER_RELOAD_MAINTENANCE_DELAY);
+    const std::uint64_t schedule_serial =
+        ++resolver_reload_retry_schedule_serial_;
+    resolver_reload_retry_pending_ = true;
+    resolver_reload_retry_pending_attempt_ = plan.attempt;
+    resolver_reload_retry_pending_generation_ = runtime_generation;
+    try {
+        resolver_reload_retry_task_id_ = scheduler_->schedule_oneshot(
+            plan.delay,
+            [this, plan, runtime_generation, schedule_serial]() {
+                if (schedule_serial !=
+                    resolver_reload_retry_schedule_serial_) {
+                    return;
+                }
+                resolver_reload_retry_task_id_ = -1;
+                resolver_reload_retry_pending_ = false;
+                resolver_reload_retry_pending_attempt_ = 0U;
+                resolver_reload_retry_pending_generation_ = 0U;
+                if (!runtime_recovery_is_current(
+                        routing_runtime_active_,
+                        runtime_generation,
+                        runtime_generation_.load(
+                            std::memory_order_acquire))) {
+                    return;
+                }
+                // Resolver bytes must never advance ahead of a failed
+                // firewall rollback. This explicit generation latch remains
+                // closed even after bounded firewall retries are exhausted;
+                // the successful firewall reconciliation schedules a fresh
+                // resolver attempt.
+                if (resolver_after_firewall_gate_.waiting_for(
+                        runtime_generation)) {
+                    Logger::instance().verbose(
+                        "Holding resolver reload recovery until firewall "
+                        "generation {} has converged.",
+                        runtime_generation);
+                    return;
+                }
+                start_resolver_reload_retry_attempt(
+                    plan.attempt, runtime_generation);
+            },
+            "resolver-reload-recovery");
+    } catch (const std::exception& error) {
+        resolver_reload_retry_task_id_ = -1;
+        try {
+            Logger::instance().info(
+                "Resolver reload retry timer could not be installed; the "
+                "periodic runtime health owner retained generation {}: {}",
+                runtime_generation,
+                error.what());
+        } catch (...) {
+        }
+        return;
+    } catch (...) {
+        resolver_reload_retry_task_id_ = -1;
+        return;
+    }
+    try {
+        if (plan.maintenance) {
+            Logger::instance().verbose(
+                "Resolver reload maintenance scheduled in {}s for runtime "
+                "generation {}.",
+                plan.delay.count(),
+                runtime_generation);
+        } else {
+            Logger::instance().info(
+                "Resolver reload recovery attempt {} scheduled in {}s.",
+                plan.attempt + 1,
+                plan.delay.count());
+        }
+    } catch (...) {
+        // The timer and retained intent already own recovery. Diagnostics
+        // must not abort the caller before it records the incident/state.
+    }
 }
 
 void Daemon::start_resolver_reload_retry_attempt(
     std::size_t attempt,
     std::uint64_t runtime_generation) {
+    const bool maintenance_attempt =
+        attempt >= RESOLVER_RELOAD_RETRY_DELAYS.size();
     if (!routing_runtime_active_ ||
         runtime_generation !=
             runtime_generation_.load(std::memory_order_acquire)) {
@@ -4924,10 +5126,16 @@ void Daemon::start_resolver_reload_retry_attempt(
             schedule_resolver_reload_retry(attempt, runtime_generation);
         } else if (
             request == ResolverStreamCoordinator::RequestResult::rejected) {
-            Logger::instance().info(
-                "Resolver reload recovery attempt {} was rejected by the "
-                "worker coordinator",
-                attempt + 1);
+            if (maintenance_attempt) {
+                Logger::instance().verbose(
+                    "Resolver reload maintenance was rejected by the worker "
+                    "coordinator");
+            } else {
+                Logger::instance().info(
+                    "Resolver reload recovery attempt {} was rejected by "
+                    "the worker coordinator",
+                    attempt + 1);
+            }
             ResolverStreamOperation rejected_operation;
             rejected_operation.runtime_generation = runtime_generation;
             rejected_operation.retry_attempt = attempt;
@@ -4940,10 +5148,16 @@ void Daemon::start_resolver_reload_retry_attempt(
                     "resolver stream worker rejected the operation"});
         }
     } catch (const std::exception& error) {
-        Logger::instance().info(
-            "Resolver reload recovery attempt {} could not start: {}",
-            attempt + 1,
-            error.what());
+        if (maintenance_attempt) {
+            Logger::instance().verbose(
+                "Resolver reload maintenance could not start: {}",
+                error.what());
+        } else {
+            Logger::instance().info(
+                "Resolver reload recovery attempt {} could not start: {}",
+                attempt + 1,
+                error.what());
+        }
         ResolverStreamOperation operation;
         operation.runtime_generation = runtime_generation;
         operation.retry_attempt = attempt;
@@ -4978,11 +5192,20 @@ void Daemon::complete_resolver_reload_retry_attempt(
             return;
         }
 
+        const bool maintenance_attempt =
+            operation.retry_attempt >=
+                RESOLVER_RELOAD_RETRY_DELAYS.size();
         if (!result.completed && !result.error.empty()) {
-            Logger::instance().info(
-                "Resolver reload recovery attempt {} failed: {}",
-                operation.retry_attempt + 1,
-                result.error);
+            if (maintenance_attempt) {
+                Logger::instance().verbose(
+                    "Resolver reload maintenance did not converge: {}",
+                    result.error);
+            } else {
+                Logger::instance().info(
+                    "Resolver reload recovery attempt {} failed: {}",
+                    operation.retry_attempt + 1,
+                    result.error);
+            }
         }
         const auto outcome = evaluate_resolver_reload_retry(
             routing_runtime_active_,
@@ -4996,6 +5219,8 @@ void Daemon::complete_resolver_reload_retry_attempt(
             return;
         }
         if (outcome == ResolverReloadRetryOutcome::recovered) {
+            acknowledge_verified_resolver_reload(
+                operation.runtime_generation);
             refresh_resolver_config_hash_actual_async();
             publish_runtime_state();
             Logger::instance().info(
@@ -5011,12 +5236,41 @@ void Daemon::complete_resolver_reload_retry_attempt(
             return;
         }
 
-        Logger::instance().error(
-            "Resolver reload did not recover after {} bounded attempts; "
-            "routing remains active but DNS needs attention.",
-            RESOLVER_RELOAD_RETRY_DELAYS.size());
+        // Arm the durable-in-process successor before diagnostics/state
+        // publication. An allocation or observer failure below must not be
+        // able to terminate the only liveness chain.
+        schedule_resolver_reload_retry(
+            RESOLVER_RELOAD_RETRY_DELAYS.size(),
+            operation.runtime_generation);
+
+        const std::string incident_key =
+            "resolver-reload:" +
+            std::to_string(operation.runtime_generation);
+        RuntimeIncidentLatch::Decision incident;
+        if (!maintenance_attempt) {
+            // The bounded chain owns the one operator-visible incident.
+            // Minute-by-minute maintenance failures stay diagnostic-only and
+            // do not grow a counter or mint another bell.
+            incident =
+                resolver_reload_incidents_.record_failure(incident_key);
+        }
+        if (incident.notify) {
+            Logger::instance().error(
+                "Resolver reload did not recover after {} bounded attempts; "
+                "routing remains active and quiet maintenance will retry "
+                "every {}s.",
+                RESOLVER_RELOAD_RETRY_DELAYS.size(),
+                RESOLVER_RELOAD_MAINTENANCE_DELAY.count());
+            if (runtime_state_machine_.state() == RuntimeState::running) {
+                transition_runtime_or_throw(
+                    RuntimeState::broken,
+                    kResolverReloadExhaustedRuntimeReason.data());
+            }
+        }
         refresh_resolver_config_hash_actual_async();
-        publish_runtime_state();
+        if (incident.notify) {
+            publish_runtime_state();
+        }
         resume_deferred_keenetic_dns_refresh();
     } catch (const std::exception& error) {
         try {
@@ -5029,6 +5283,37 @@ void Daemon::complete_resolver_reload_retry_attempt(
     } catch (...) {
         resume_deferred_keenetic_dns_refresh();
     }
+}
+
+bool Daemon::acknowledge_verified_resolver_reload(
+    std::uint64_t runtime_generation) {
+    const auto current_generation =
+        runtime_generation_.load(std::memory_order_acquire);
+    if (!routing_runtime_active_ || runtime_generation != current_generation) {
+        return false;
+    }
+
+    resolver_reload_incidents_.reset(
+        "resolver-reload:" + std::to_string(runtime_generation));
+
+    const auto runtime_recovery_action = plan_resolver_runtime_recovery(
+        routing_runtime_active_,
+        runtime_state_machine_.state(),
+        runtime_state_machine_.reason());
+    if (runtime_recovery_action == ResolverRuntimeRecoveryAction::preserve) {
+        return false;
+    }
+
+    // Both broken -> applying and running -> applying are legal. No
+    // intermediate publication occurs: this bridge replaces only the exact
+    // resolver-owned reason, while unrelated broken states remain untouched.
+    transition_runtime_or_throw(
+        RuntimeState::applying,
+        "verified resolver recovery publication");
+    transition_runtime_or_throw(
+        RuntimeState::running,
+        kResolverReloadRecoveredRuntimeReason.data());
+    return true;
 }
 
 void Daemon::resume_deferred_keenetic_dns_refresh() noexcept {

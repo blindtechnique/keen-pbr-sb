@@ -12,8 +12,19 @@ set(CMAKE_SYSTEM_NAME      Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
 # CMAKE_CURRENT_LIST_DIR is always the directory of this file (cmake/).
-# Go one level up to reach the project root, then into cross-toolchain/.
-get_filename_component(_CROSS_BASE "${CMAKE_CURRENT_LIST_DIR}/../cross-toolchain" REALPATH)
+# Go one level up to reach the project root, then into the toolchain dir.
+#
+# `make cross-setup` populates build/cross-toolchain (see CROSS_TOOLCHAIN_DIR
+# in the Makefile), while this file used to look only at <root>/cross-toolchain
+# - so the documented cross-build could not configure at all. Both are accepted
+# now: the Makefile's location wins, and a hand-placed toolchain at the project
+# root still works.
+get_filename_component(_CROSS_BASE
+  "${CMAKE_CURRENT_LIST_DIR}/../build/cross-toolchain" REALPATH)
+if(NOT EXISTS "${_CROSS_BASE}")
+  get_filename_component(_CROSS_BASE
+    "${CMAKE_CURRENT_LIST_DIR}/../cross-toolchain" REALPATH)
+endif()
 
 set(_TC  "${_CROSS_BASE}/toolchain-aarch64_cortex-a53_gcc-13.3.0_musl")
 set(_TGT "${_CROSS_BASE}/target-aarch64_cortex-a53_musl")

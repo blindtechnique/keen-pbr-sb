@@ -160,13 +160,28 @@ bool wait_until_process_is_gone(
     pid_t pid,
     std::chrono::milliseconds timeout =
         std::chrono::milliseconds{500}) {
+    const auto process_is_live = [pid]() {
+        errno = 0;
+        if (::kill(pid, 0) != 0) return errno != ESRCH;
+
+        // A killed helper descendant can briefly remain as a zombie until
+        // the container/host subreaper collects it. kill(pid, 0) still
+        // succeeds for Z, but it cannot execute or retain the lifecycle lock.
+        // Use the same liveness contract as the shipped update-lock helper.
+        std::ifstream stat(fs::path("/proc") /
+                           std::to_string(pid) / "stat");
+        std::string line;
+        if (!std::getline(stat, line)) return true;
+        const auto comm_end = line.rfind(") ");
+        if (comm_end == std::string::npos || comm_end + 2 >= line.size())
+            return true;
+        const char state = line[comm_end + 2];
+        return state != 'Z' && state != 'X' && state != 'x';
+    };
     const auto deadline =
         std::chrono::steady_clock::now() + timeout;
     do {
-        errno = 0;
-        if (::kill(pid, 0) != 0 && errno == ESRCH) {
-            return true;
-        }
+        if (!process_is_live()) return true;
         std::this_thread::sleep_for(
             std::chrono::milliseconds{5});
     } while (std::chrono::steady_clock::now() < deadline);
@@ -208,6 +223,8 @@ TEST_CASE("maintenance coordinator holds protocol-3 guardian") {
     CHECK(coordinator.operation() == "backup-restore");
     CHECK(coordinator.base_generation() == 0);
     CHECK(coordinator.guardian_pid() > 1);
+    CHECK(coordinator.borrow_owner_pid() == ::getpid());
+    CHECK_FALSE(coordinator.borrow_token().empty());
     std::ifstream owner_record(
         root / "opt/var/run/keen-pbr-update.lock/owner");
     long authoritative_owner = -1;

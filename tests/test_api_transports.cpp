@@ -25,9 +25,22 @@ namespace keen_pbr3 {
 
 namespace {
 
+struct TransportMaintenanceTestState {
+    std::size_t verify_calls = 0U;
+    std::optional<std::size_t> fail_from_verify_call;
+};
+
 class TransportTestMaintenanceLease final
     : public MaintenanceLease {
 public:
+    TransportTestMaintenanceLease()
+        : TransportTestMaintenanceLease(
+              std::make_shared<TransportMaintenanceTestState>()) {}
+
+    explicit TransportTestMaintenanceLease(
+        std::shared_ptr<TransportMaintenanceTestState> state)
+        : state_(std::move(state)) {}
+
     std::uint32_t base_generation()
         const noexcept override {
         return 1U;
@@ -38,11 +51,29 @@ public:
         return expected_generation + 1U;
     }
 
-    void verify_held() override {}
+    void verify_held() override {
+        ++state_->verify_calls;
+        if (state_->fail_from_verify_call.has_value() &&
+            state_->verify_calls >= *state_->fail_from_verify_call) {
+            throw MaintenanceLockError(
+                MaintenanceLockErrorKind::guardian_died,
+                "injected delegated lifecycle owner death",
+                1);
+        }
+    }
+
+private:
+    std::shared_ptr<TransportMaintenanceTestState> state_;
 };
 
 ApiContext make_transports_test_context(SseBroadcaster& broadcaster,
-                                         const std::string& config_path) {
+                                         const std::string& config_path,
+                                         std::shared_ptr<TransportMaintenanceTestState>
+                                             maintenance_state = {}) {
+    if (!maintenance_state) {
+        maintenance_state =
+            std::make_shared<TransportMaintenanceTestState>();
+    }
     ApiContext context{
         config_path,
         broadcaster,
@@ -67,10 +98,10 @@ ApiContext make_transports_test_context(SseBroadcaster& broadcaster,
         [](std::optional<std::string>) { return ListRefreshOperationResult{}; },
     };
     context.maintenance_lease_factory_fn =
-        [](std::string)
+        [maintenance_state](std::string)
             -> std::unique_ptr<MaintenanceLease> {
         return std::make_unique<
-            TransportTestMaintenanceLease>();
+            TransportTestMaintenanceLease>(maintenance_state);
     };
     return context;
 }
@@ -460,9 +491,13 @@ TEST_CASE(
     }
 
     SseBroadcaster broadcaster;
+    const auto maintenance_state =
+        std::make_shared<TransportMaintenanceTestState>();
     auto context =
         make_transports_test_context(
-            broadcaster, config_path.string());
+            broadcaster,
+            config_path.string(),
+            maintenance_state);
     context.transport_runtime_ready_wait_attempts = 3U;
     context.transport_runtime_ready_wait_interval_ms = 1U;
     int restarts = 0;
@@ -528,6 +563,14 @@ TEST_CASE(
             {"sing_box_process_mode", "isolated"}}
             .dump(),
         "application/json");
+    maintenance_state->fail_from_verify_call =
+        maintenance_state->verify_calls + 1U;
+    const auto lost_delegated_lease = client.Post(
+        "/api/transports/settings",
+        nlohmann::json{
+            {"sing_box_process_mode", "isolated"}}
+            .dump(),
+        "application/json");
     const auto invalid = client.Post(
         "/api/transports/settings",
         nlohmann::json{
@@ -568,14 +611,16 @@ TEST_CASE(
     CHECK(locally_unready->status == 500);
     REQUIRE(rolled_back != nullptr);
     CHECK(rolled_back->status == 500);
-    CHECK(restarts == 5);
+    REQUIRE(lost_delegated_lease != nullptr);
+    CHECK(lost_delegated_lease->status == 500);
+    CHECK(restarts == 6);
     CHECK(
         transport_mode_from_file(
-            transports_path) == "shared");
+            transports_path) == "isolated");
     {
         std::lock_guard<std::mutex> lock(
             runtime_mutex);
-        CHECK(running_mode == "shared");
+        CHECK(running_mode == "isolated");
     }
     REQUIRE(invalid != nullptr);
     CHECK(invalid->status == 400);
@@ -1121,7 +1166,7 @@ TEST_CASE(
                             return {};
                         },
                         [](const std::string&) {},
-                        [](const std::string&) {},
+                        [](const std::string&, MaintenanceLease&) {},
                     };
                 return prepared;
             },
@@ -1202,7 +1247,7 @@ TEST_CASE(
                                     409);
                         },
                         [](const std::string&) {},
-                        [&](const std::string&) {
+                        [&](const std::string&, MaintenanceLease&) {
                             restore_called = true;
                         },
                     };
@@ -1294,7 +1339,7 @@ TEST_CASE(
                                     409);
                         },
                         [](const std::string&) {},
-                        [&](const std::string&) {
+                        [&](const std::string&, MaintenanceLease&) {
                             restore_called = true;
                         },
                     };
@@ -1439,7 +1484,8 @@ TEST_CASE(
                                     transports_path) ==
                                 transport_after);
                         },
-                        [&](const std::string& revision) {
+                        [&](const std::string& revision,
+                            MaintenanceLease&) {
                             restore_called = true;
                             CHECK(
                                 revision ==

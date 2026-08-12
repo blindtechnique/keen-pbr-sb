@@ -14,6 +14,11 @@
 POST /api/auth/login
 POST /api/auth/logout
 POST /api/auth/settings
+# Реавторизация поверх сессии для package/NDMS операций. Записан сюда, а не
+# описан по отдельности, чтобы весь блок auth получил схему одним срезом:
+# описать один эндпоинт из пяти — значит закрепить половину контракта, по
+# которой фронтенд всё равно не сможет работать без остальных.
+POST /api/auth/step-up
 GET  /api/auth/status
 POST /api/backup
 POST /api/backup/restore

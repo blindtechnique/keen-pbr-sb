@@ -987,8 +987,46 @@ static IptablesCommandOutcome classify_iptables_command(
     return IptablesCommandOutcome::PermanentFailure;
 }
 
+#ifdef KEEN_PBR3_TESTING
+namespace {
+std::mutex iptables_control_runner_mutex;
+testing::IptablesControlRunnerForTest iptables_control_runner_for_test;
+} // namespace
+
+namespace testing {
+
+void set_iptables_control_runner_for_test(
+    IptablesControlRunnerForTest runner) {
+    std::lock_guard<std::mutex> lock(iptables_control_runner_mutex);
+    iptables_control_runner_for_test = std::move(runner);
+}
+
+void reset_iptables_control_runner_for_test() {
+    std::lock_guard<std::mutex> lock(iptables_control_runner_mutex);
+    iptables_control_runner_for_test = {};
+}
+
+} // namespace testing
+#endif
+
 static ExecCaptureResult run_iptables_control(
     const std::vector<std::string>& args) {
+#ifdef KEEN_PBR3_TESTING
+    testing::IptablesControlRunnerForTest test_runner;
+    {
+        std::lock_guard<std::mutex> lock(iptables_control_runner_mutex);
+        test_runner = iptables_control_runner_for_test;
+    }
+    if (test_runner) {
+        const auto result = test_runner(args);
+        return ExecCaptureResult{
+            result.stdout_output,
+            result.exit_code,
+            result.truncated,
+            result.timed_out,
+        };
+    }
+#endif
     return safe_exec_capture(
         args,
         /*suppress_stderr=*/false,
@@ -3279,6 +3317,250 @@ void IptablesFirewall::reconcile_hooks(bool ipv6) const {
     }
 }
 
+void IptablesFirewall::reconcile_ttl_bypass() const {
+    TtlBypassInputs inputs;
+    inputs.enabled = ttl_bypass_enabled();
+
+    // IPv4 only, by requirement. The firmware's TTL rewrite and nfqws2's mark
+    // are both IPv4 here, and ip6tables is deliberately left untouched.
+    const std::vector<std::string> inspect_args{
+        "iptables", "-t", "mangle", "-S", kTtlChain};
+    const auto snapshot = run_iptables_control(inspect_args);
+
+    // A non-zero exit is NOT evidence that the chain is absent. A held xtables
+    // lock, a timeout and a missing binary all exit non-zero while saying
+    // nothing about the chain, and classify_iptables_command exists precisely
+    // to keep those apart - every other inspect in this file uses it.
+    switch (classify_iptables_command(snapshot)) {
+        case IptablesCommandOutcome::Success:
+            inputs.observation = TtlChainObservation::present;
+            break;
+        case IptablesCommandOutcome::PermanentFailure:
+            // The chain genuinely is not there. On a measured router it does
+            // exist and is empty even with `ip ttl-fix` off, so this is the
+            // rarer case, not the common one.
+            inputs.observation = command_reports_chain_missing(snapshot)
+                ? TtlChainObservation::absent
+                : TtlChainObservation::indeterminate;
+            break;
+        case IptablesCommandOutcome::TransientFailure:
+            inputs.observation = TtlChainObservation::indeterminate;
+            break;
+    }
+
+    if (inputs.observation == TtlChainObservation::present) {
+        std::istringstream lines{snapshot.stdout_output};
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) inputs.chain_rules.push_back(line);
+        }
+    }
+
+    // The kernel's own registry, not `iptables-restore --test`: userspace can
+    // accept an extension the running kernel does not have and only fail at
+    // COMMIT.
+    constexpr const char* kMatchInventory = "/proc/net/ip_tables_matches";
+    inputs.mark_match_available =
+        xtables_match_registered(kMatchInventory, "mark");
+    inputs.comment_match_available =
+        xtables_match_registered(kMatchInventory, "comment");
+    inputs.routing_mark_disjoint =
+        (fwmark_mask() & kNfqwsProcessedMask) == 0U;
+
+    // Do not assume the package/binary default forever. The official nfqws
+    // hook advertises the processed-bit contract in its live owned chain; an
+    // absent hook or a custom mark makes the bypass inert and removes a stale
+    // rule from an earlier compatible generation.
+    const auto mangle = run_iptables_control(
+        {"iptables", "-t", "mangle", "-S"});
+    if (classify_iptables_command(mangle) ==
+        IptablesCommandOutcome::Success) {
+        inputs.nfqws_processed_mark_observed = true;
+        std::istringstream lines{mangle.stdout_output};
+        std::string line;
+        constexpr std::string_view kExactMark =
+            "-m mark --mark 0x40000000/0x40000000 -j RETURN";
+        while (std::getline(lines, line)) {
+            if (line.rfind("-A nfqws", 0) == 0 &&
+                line.find(kExactMark) != std::string::npos) {
+                inputs.nfqws_processed_mark_compatible = true;
+                break;
+            }
+        }
+    }
+
+    const auto plan = plan_ttl_bypass(inputs);
+    {
+        std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+        ttl_bypass_state_ = plan.state;
+        ttl_bypass_detail_ = plan.detail;
+    }
+
+    for (const auto& argv : plan.commands) {
+        std::vector<std::string> command_args{"iptables"};
+        command_args.insert(
+            command_args.end(), argv.begin(), argv.end());
+        const auto result = run_iptables_control(command_args);
+        if (result.exit_code != 0) {
+            // Deliberately not fatal. The chain belongs to the firmware and
+            // can be rewritten between our snapshot and our write; failing the
+            // whole firewall apply over an optional bypass would trade a
+            // working router for a cosmetic one. The next apply retries, and
+            // the state below tells the operator it is not in place.
+            std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+            ttl_bypass_state_ = TtlBypassState::conflict;
+            ttl_bypass_detail_ = "failed to apply the TTL bypass rule";
+            break;
+        }
+    }
+}
+
+void IptablesFirewall::remove_ttl_bypass() const {
+    // We inserted into a chain we do not own, so teardown must take it back
+    // out. Leaving it behind would abandon a modification to firmware state
+    // with nobody left to remove it, and with nfqws2 still running it would go
+    // on suppressing the firmware's TTL rewrite for the rest of the router's
+    // uptime - with keen-pbr uninstalled and nothing to explain why.
+    const std::vector<std::string> inspect_args{
+        "iptables", "-t", "mangle", "-S", kTtlChain};
+    std::vector<std::string> delete_args{"iptables"};
+    const auto delete_argv = ttl_bypass_delete_argv();
+    delete_args.insert(
+        delete_args.end(), delete_argv.begin(), delete_argv.end());
+
+    const auto publish = [this](TtlBypassState state, std::string detail) {
+        std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+        ttl_bypass_state_ = state;
+        ttl_bypass_detail_ = std::move(detail);
+    };
+    const auto snapshot_has_owned_rule = [](const std::string& output) {
+        const std::string prefix = std::string("-A ") + kTtlChain + " ";
+        std::istringstream lines{output};
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.rfind(prefix, 0) == 0 &&
+                line.find(kTtlBypassTag) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Every successful delete is followed by a fresh inspection. A nonzero
+    // -D says only that this mutation failed; it is never evidence that the
+    // rule is absent. This also removes bounded duplicate copies left by an
+    // interrupted older apply without spinning forever on hostile state.
+    constexpr std::size_t kMaxOwnedRuleDeletes = 8;
+    std::size_t deleted = 0;
+    std::size_t transient_failures = 0;
+    while (true) {
+        const auto snapshot = run_iptables_control(inspect_args);
+
+        // `iptables -S <chain>` is the authoritative absence check. Its usual
+        // missing-chain diagnostic exits 1, which the generic classifier also
+        // uses for publication races, so recognize that exact diagnostic
+        // before applying the generic classification.
+        if (command_reports_chain_missing(snapshot)) {
+            publish(TtlBypassState::chain_absent, {});
+            return;
+        }
+
+        const auto inspection = classify_iptables_command(snapshot);
+        if (inspection == IptablesCommandOutcome::Success) {
+            if (!snapshot_has_owned_rule(snapshot.stdout_output)) {
+                if (ttl_bypass_enabled()) {
+                    publish(TtlBypassState::missing, {});
+                } else {
+                    publish(
+                        TtlBypassState::disabled,
+                        "disabled by configuration");
+                }
+                return;
+            }
+            if (deleted >= kMaxOwnedRuleDeletes) {
+                publish(
+                    TtlBypassState::conflict,
+                    "too many owned TTL bypass rules to remove safely");
+                return;
+            }
+
+            const auto mutation = run_iptables_control(delete_args);
+            const auto mutation_outcome =
+                classify_iptables_command(mutation);
+            if (mutation_outcome == IptablesCommandOutcome::Success) {
+                ++deleted;
+                continue;
+            }
+            if (mutation_outcome ==
+                    IptablesCommandOutcome::PermanentFailure &&
+                !command_reports_chain_missing(mutation)) {
+                record_iptables_control_failure(delete_args, mutation);
+                publish(
+                    TtlBypassState::conflict,
+                    "failed to remove the owned TTL bypass rule");
+                return;
+            }
+
+            // The chain or rule may have disappeared between -S and -D, or
+            // xtables may have been busy. Neither proves absence; retry from a
+            // new inspection below.
+            if (transient_failures >= iptables_control_retry_delays.size()) {
+                record_iptables_control_failure(delete_args, mutation);
+                publish(
+                    TtlBypassState::unknown,
+                    "could not verify removal of the TTL bypass rule");
+                return;
+            }
+            std::this_thread::sleep_for(
+                iptables_control_retry_delays[transient_failures++]);
+            continue;
+        }
+
+        if (inspection == IptablesCommandOutcome::PermanentFailure) {
+            record_iptables_control_failure(inspect_args, snapshot);
+            publish(
+                TtlBypassState::unknown,
+                "could not verify removal of the TTL bypass rule");
+            return;
+        }
+        if (transient_failures >= iptables_control_retry_delays.size()) {
+            record_iptables_control_failure(inspect_args, snapshot);
+            publish(
+                TtlBypassState::unknown,
+                "could not verify removal of the TTL bypass rule");
+            return;
+        }
+        std::this_thread::sleep_for(
+            iptables_control_retry_delays[transient_failures++]);
+    }
+}
+
+#ifdef KEEN_PBR3_TESTING
+void IptablesFirewall::remove_ttl_bypass_for_test() const {
+    remove_ttl_bypass();
+}
+#endif
+
+std::string IptablesFirewall::ttl_bypass_state_name() const {
+    return keen_pbr3::ttl_bypass_state_name(ttl_bypass_state());
+}
+
+std::string IptablesFirewall::ttl_bypass_state_detail() const {
+    return ttl_bypass_detail();
+}
+
+TtlBypassState IptablesFirewall::ttl_bypass_state() const {
+    std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+    return ttl_bypass_state_;
+}
+
+std::string IptablesFirewall::ttl_bypass_detail() const {
+    std::lock_guard<std::mutex> lock(ttl_bypass_mutex_);
+    return ttl_bypass_detail_;
+}
+
 void IptablesFirewall::verify_applied_generation(
     bool ipv6,
     FirewallSetGeneration target) const {
@@ -4870,6 +5152,11 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         reconcile_hooks(true);
     }
 
+    // Inside the same serialized apply on purpose. A separate writer for this
+    // one rule is exactly what roadmap item 3 rules out, and it would also
+    // race the restores above.
+    reconcile_ttl_bypass();
+
     // The kernel is the source of truth. Do not report success until both
     // stable dispatchers and their builtin hooks point at the target slot.
     verify_applied_generation(false, target_v4_generation_);
@@ -4940,6 +5227,11 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
     auto& log = Logger::instance();
     const bool owned_v4 = chain_v4_created_;
     const bool owned_v6 = chain_v6_created_;
+
+    // Before removing our own chains: the one rule we placed in a chain we do
+    // not own. Everything below deletes KeenPbr* objects, which would leave
+    // that rule stranded in firmware state.
+    remove_ttl_bypass();
 
     auto remove_chain = [](const char* command,
                            const char* table,

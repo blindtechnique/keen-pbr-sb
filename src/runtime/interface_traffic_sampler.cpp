@@ -79,15 +79,20 @@ bool is_ascii_space(char character) {
 
 InterfaceTrafficSampler::InterfaceTrafficSampler(CounterReader reader,
                                                  NowProvider now,
-                                                 size_t history_limit)
+                                                 size_t history_limit,
+                                                 WallNowProvider wall_now)
     : reader_(std::move(reader)),
       now_(std::move(now)),
+      wall_now_(std::move(wall_now)),
       history_limit_(std::min(history_limit, kMaxHistoryPoints)) {
     if (!reader_) {
         reader_ = read_counter_file;
     }
     if (!now_) {
         now_ = [] { return Clock::now(); };
+    }
+    if (!wall_now_) {
+        wall_now_ = [] { return WallClock::now(); };
     }
 }
 
@@ -123,12 +128,17 @@ InterfaceTrafficSampler::SampleResult InterfaceTrafficSampler::sample(
     }
 
     const TimePoint sampled_at = now_();
+    // Read immediately after the steady stamp and only once per interface, so
+    // the published instant belongs to this interface's counter read rather
+    // than to the round that happened to contain it.
+    const WallTimePoint observed_at = wall_now_();
     std::lock_guard<std::mutex> lock(mutex_);
     auto& state = states_[name];
 
     if (!state.previous) {
         TrafficPoint point;
         point.sampled_at = sampled_at;
+        point.observed_at = observed_at;
         point.rx_bytes = *rx;
         point.tx_bytes = *tx;
         state.previous = PreviousCounters{sampled_at, *rx, *tx};
@@ -153,6 +163,7 @@ InterfaceTrafficSampler::SampleResult InterfaceTrafficSampler::sample(
 
     TrafficPoint point;
     point.sampled_at = sampled_at;
+    point.observed_at = observed_at;
     point.rx_bytes = *rx;
     point.tx_bytes = *tx;
     point.rx_counter_wrapped = rx_delta.wrapped;

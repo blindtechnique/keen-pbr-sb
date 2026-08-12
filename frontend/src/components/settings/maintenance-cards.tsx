@@ -38,6 +38,7 @@ import {
   downloadBackup,
 } from "@/lib/backup"
 import { formatDownloadTimestamp } from "@/lib/download"
+import { packageRollbackReasonKey } from "@/lib/package-rollback"
 
 type SoftwareUpdateStatus = {
   current: string
@@ -56,6 +57,7 @@ type SoftwareUpdateStatus = {
   success?: boolean | null
   package_rescue_ready?: boolean
   package_rollback_available?: boolean
+  package_rollback_state?: string
   check_error?: string
   cached?: boolean
 }
@@ -108,6 +110,7 @@ export function SoftwareUpdateCard() {
   const [starting, setStarting] = useState(false)
   const [downloadBackupBeforeUpdate, setDownloadBackupBeforeUpdate] =
     useState(true)
+  const rollbackUnavailableReason = useRollbackUnavailableReason(status)
   const logRef = useRef<HTMLPreElement>(null)
   const dialogContent = getSoftwareUpdateDialogContent(status, showResult)
   const showUpdateLog = dialogContent === "update-log"
@@ -404,6 +407,7 @@ export function SoftwareUpdateCard() {
             <UpdateVersionSummary status={status} />
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
             <UpdateStateMessage status={status} />
+            <RollbackAvailabilityNotice status={status} />
             {status && showUpdateLog ? (
               <UpdateProgress status={status} />
             ) : null}
@@ -482,11 +486,7 @@ export function SoftwareUpdateCard() {
                 confirmRollback
               }
               onClick={() => setConfirmRollback(true)}
-              title={
-                status?.package_rollback_available
-                  ? undefined
-                  : t("pages.settings.softwareUpdate.rollbackUnavailable")
-              }
+              title={rollbackUnavailableReason ?? undefined}
               variant="destructive"
             >
               <RotateCcwIcon />
@@ -550,6 +550,41 @@ function UpdateVersionSummary({
       </div>
     </div>
   )
+}
+
+// Why no rollback is possible, in the operator's language.
+//
+// Deliberately keyed off the backend's state rather than reworded from the
+// boolean: an unavailable rollback used to be explained as "appears after a
+// successful managed update", which is true only when nothing was ever saved
+// and misleading in every other case - a corrupted store told the operator to
+// wait for something that had already happened.
+//
+// An unrecognised state falls back to the bare statement. A newer backend must
+// never have its reason guessed at by an older page.
+function useRollbackUnavailableReason(status: SoftwareUpdateStatus | null) {
+  const { t } = useTranslation()
+
+  if (!status || status.package_rollback_available) return null
+  const key = packageRollbackReasonKey(status.package_rollback_state)
+  const headline = t("pages.settings.softwareUpdate.rollbackUnavailable")
+  if (!key) return headline
+  return `${headline} — ${t(`pages.settings.softwareUpdate.${key}`)}`
+}
+
+// Shown in the dialog body, not only on the disabled button. The point of the
+// slice is that the operator learns there is nothing to roll back to before
+// they start an update, and a tooltip on a disabled control is not something a
+// touch device can deliver.
+function RollbackAvailabilityNotice({
+  status,
+}: {
+  status: SoftwareUpdateStatus | null
+}) {
+  const reason = useRollbackUnavailableReason(status)
+
+  if (!reason || status?.running) return null
+  return <p className="text-sm text-muted-foreground">{reason}</p>
 }
 
 function UpdateStateMessage({

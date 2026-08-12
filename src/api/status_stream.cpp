@@ -92,6 +92,12 @@ SseBroadcaster::SubscriptionPtr StatusStream::subscribe() {
                 "list_refresh",
                 make_event_payload("list_refresh", list_refresh_)));
         }
+        if (component_transaction_initialized_) {
+            initial_frames.push_back(make_named_sse_frame(
+                "component_transaction",
+                make_event_payload("component_transaction",
+                                   component_transaction_)));
+        }
         // Keep cache mutation, delivery to the previous subscriber cohort and
         // newcomer registration in one order.  Registering first and excluding
         // just that pointer lets a concurrent second subscriber receive a
@@ -208,6 +214,20 @@ void StatusStream::publish_list_refresh(nlohmann::json state) {
             make_event_payload("list_refresh", list_refresh_));
         broadcaster_.publish(frame);
     }
+}
+
+void StatusStream::publish_component_transaction(nlohmann::json state) {
+    KPBR_LOCK_GUARD(mutex_);
+    // Deliberately no equality skip. The others cache a state that happens to
+    // repeat; this reports progress, and two identical phases in a row are two
+    // events an operator is waiting for - suppressing the second would stall
+    // the display at the very moment it is being watched.
+    component_transaction_ = std::move(state);
+    component_transaction_initialized_ = true;
+    broadcaster_.publish(make_named_sse_frame(
+        "component_transaction",
+        make_event_payload("component_transaction",
+                           component_transaction_)));
 }
 
 void StatusStream::close_all() {

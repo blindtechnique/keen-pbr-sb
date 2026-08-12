@@ -210,6 +210,35 @@ if(NOT LIBRESOLV)
   message(FATAL_ERROR "libresolv is required for keen-pbr DNS resolution support")
 endif()
 message(STATUS "Found libresolv: ${LIBRESOLV}")
+
+# res_ninit/res_nquery/res_nclose are a glibc extension. OpenWrt's musl
+# exposes only the legacy resolver entry points, so probe the target libc
+# instead of assuming that every Linux toolchain has the stateful API.
+include(CheckCXXSourceCompiles)
+set(_keen_pbr_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+set(CMAKE_REQUIRED_LIBRARIES "${LIBRESOLV}")
+check_cxx_source_compiles([=[
+  #include <arpa/nameser.h>
+  #include <resolv.h>
+  int main() {
+    struct __res_state state {};
+    unsigned char answer[NS_PACKETSZ] {};
+    if (res_ninit(&state) != 0) return 1;
+    (void)res_nquery(&state, "localhost", ns_c_in, ns_t_a,
+                     answer, sizeof(answer));
+    res_nclose(&state);
+    return 0;
+  }
+]=] KEEN_PBR_HAS_RESOLVER_STATE_API)
+set(CMAKE_REQUIRED_LIBRARIES "${_keen_pbr_saved_required_libraries}")
+unset(_keen_pbr_saved_required_libraries)
+if(KEEN_PBR_HAS_RESOLVER_STATE_API)
+  add_compile_definitions(KEEN_PBR_HAS_RESOLVER_STATE_API=1)
+  message(STATUS "Using stateful libresolv API")
+else()
+  message(STATUS "Stateful libresolv API unavailable; using serialized legacy resolver API")
+endif()
+
 if(LIBATOMIC)
   message(STATUS "Found libatomic: ${LIBATOMIC}")
 else()
@@ -375,12 +404,21 @@ set(SOURCES
   src/keenetic/ndms_rci_observation.cpp
   src/keenetic/ndms_rci_restorable_snapshot.cpp
   src/keenetic/ndms_web_endpoint.cpp
+  src/keenetic/ndms_lockout_policy.cpp
+  src/api/system_auth_capability.cpp
+  src/api/step_up.cpp
   src/crash/crash_diagnostics.cpp
   src/backup/persistent_snapshot.cpp
   src/backup/restore_journal.cpp
   src/backup/restore_transaction.cpp
   src/backup/recovery_coordinator.cpp
   src/update/maintenance_lock.cpp
+  src/update/rollback_availability.cpp
+  src/update/package_footprint.cpp
+  src/update/component_transaction_journal.cpp
+  src/update/component_capture.cpp
+  src/util/nfqws_config_migration.cpp
+  src/util/nfqws_runtime_state.cpp
   src/config/config.cpp
   src/config/config_writer.cpp
   src/config/dependency_analysis.cpp
@@ -396,7 +434,9 @@ set(SOURCES
   src/cache/cache_manager.cpp
   src/connections/conntrack_event_monitor.cpp
   src/runtime/conntrack_manager.cpp
+  src/runtime/interface_traffic_cadence.cpp
   src/runtime/interface_traffic_sampler.cpp
+  src/runtime/interface_uptime_anchor.cpp
   src/runtime/periodic_task_metrics.cpp
   src/cmd/recover_persistent_state.cpp
   src/cmd/status.cpp
@@ -419,6 +459,8 @@ set(SOURCES
   src/firewall/firewall_runtime.cpp
   src/firewall/port_spec_util.cpp
   src/firewall/iptables.cpp
+  src/firewall/ppe_deoffload.cpp
+  src/firewall/ttl_bypass.cpp
   src/firewall/nftables.cpp
   src/firewall/ipset_restore_pipe.cpp
   src/firewall/nft_batch_pipe.cpp

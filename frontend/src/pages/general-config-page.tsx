@@ -115,6 +115,7 @@ type SettingsDraft = {
   strictEnforcement: StrictEnforcementOption
   skipMarkedPackets: boolean
   clearDynamicSetsOnApply: boolean
+  ttlBypassEnabled: boolean
   reconnectUnmarkedFlowsOnRoutingChange: boolean
   reconnectOwnedFlowsOnRoutingChangeLists: string[] | undefined
   metaUdp443Policy: MetaUdp443Policy
@@ -136,6 +137,7 @@ const fallbackDraft: SettingsDraft = {
   strictEnforcement: "automatic",
   skipMarkedPackets: true,
   clearDynamicSetsOnApply: true,
+  ttlBypassEnabled: true,
   reconnectUnmarkedFlowsOnRoutingChange: true,
   reconnectOwnedFlowsOnRoutingChangeLists: undefined,
   metaUdp443Policy: "balanced",
@@ -155,6 +157,7 @@ const SETTINGS_FIELD_NAMES = {
   strictEnforcement: "strictEnforcement",
   skipMarkedPackets: "skipMarkedPackets",
   clearDynamicSetsOnApply: "clearDynamicSetsOnApply",
+  ttlBypassEnabled: "ttlBypassEnabled",
   reconnectUnmarkedFlowsOnRoutingChange:
     "reconnectUnmarkedFlowsOnRoutingChange",
   reconnectOwnedFlowsOnRoutingChangeLists:
@@ -670,6 +673,42 @@ function LoadedGeneralConfigPage({
                       <FieldHint
                         description={t(
                           "pages.settings.general.clearDynamicSetsOnApplyHint"
+                        )}
+                      />
+                    </FieldContent>
+                  </Field>
+                )}
+              </form.Field>
+
+              <FieldSeparator
+                className={activeTab === "general" ? undefined : "hidden"}
+              />
+
+              <form.Field name={SETTINGS_FIELD_NAMES.ttlBypassEnabled}>
+                {(field) => (
+                  <Field
+                    width="short"
+                    className={activeTab === "general" ? undefined : "hidden"}
+                  >
+                    <FieldContent>
+                      <div className="flex items-center space-x-3">
+                        <Checkbox
+                          checked={field.state.value}
+                          id="ttl-bypass-enabled"
+                          onCheckedChange={(checked) =>
+                            field.handleChange(checked === true)
+                          }
+                        />
+                        <FieldLabel
+                          className="cursor-pointer flex-col items-start gap-0"
+                          htmlFor="ttl-bypass-enabled"
+                        >
+                          {t("pages.settings.general.ttlBypassEnabledLabel")}
+                        </FieldLabel>
+                      </div>
+                      <FieldHint
+                        description={t(
+                          "pages.settings.general.ttlBypassEnabledHint"
                         )}
                       />
                     </FieldContent>
@@ -1837,6 +1876,8 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
     clearDynamicSetsOnApply:
       config.daemon?.clear_dynamic_sets_on_apply ??
       fallbackDraft.clearDynamicSetsOnApply,
+    ttlBypassEnabled:
+      config.daemon?.ttl_bypass_enabled ?? fallbackDraft.ttlBypassEnabled,
     reconnectUnmarkedFlowsOnRoutingChange:
       config.daemon?.reconnect_unmarked_flows_on_routing_change ??
       fallbackDraft.reconnectUnmarkedFlowsOnRoutingChange,
@@ -1895,6 +1936,7 @@ function buildUpdatedConfig(
             : draft.strictEnforcement === "enabled",
         skip_marked_packets: draft.skipMarkedPackets,
         clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
+        ttl_bypass_enabled: draft.ttlBypassEnabled,
         reconnect_unmarked_flows_on_routing_change:
           draft.reconnectUnmarkedFlowsOnRoutingChange,
         reconnect_owned_flows_on_routing_change_lists:
@@ -2025,6 +2067,8 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.skipMarkedPackets
     case "daemon.clear_dynamic_sets_on_apply":
       return SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply
+    case "daemon.ttl_bypass_enabled":
+      return SETTINGS_FIELD_NAMES.ttlBypassEnabled
     case "daemon.reconnect_unmarked_flows_on_routing_change":
       return SETTINGS_FIELD_NAMES.reconnectUnmarkedFlowsOnRoutingChange
     case "daemon.meta_udp443_policy":

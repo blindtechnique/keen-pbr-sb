@@ -9,6 +9,7 @@
 Makefile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+/src/api/generated/api_types.hpp text eol=lf
 
 /packages/**/files/** text eol=lf
 # nfqws packet captures are opaque binary protocol fixtures.  The broader

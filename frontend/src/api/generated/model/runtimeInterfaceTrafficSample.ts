@@ -22,4 +22,10 @@ export interface RuntimeInterfaceTrafficSample {
   rx_bits_per_second?: number;
   /** @minimum 0 */
   tx_bits_per_second?: number;
+  /**
+     * Unix timestamp of the moment THIS interface's counters were read. It is the only honest answer to "when was this measured": the batch timestamp below describes when the round was dispatched, so an interface whose own read failed or was skipped would otherwise look exactly as fresh as one that succeeded. Absent when this round produced no successful reading for the interface, and absent from older daemons - clients then fall back to the batch timestamp and must not present the result as per-interface freshness.
+
+     * @minimum 0
+     */
+  observed_at_unix_ms?: number;
 }

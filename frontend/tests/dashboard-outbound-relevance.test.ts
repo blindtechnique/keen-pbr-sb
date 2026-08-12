@@ -8,6 +8,7 @@ import type {
 } from "@/api/generated/model"
 import {
   countEnabledRouteRuleListsByOutbound,
+  countOrphanedLists,
   selectDashboardRuntimeOutbounds,
 } from "@/components/overview/dashboard-outbound-relevance"
 
@@ -184,5 +185,62 @@ describe("dashboard outbound relevance", () => {
         runtimeOutbounds: [unavailableRuntime],
       })
     ).toEqual([unavailableRuntime])
+  })
+})
+
+describe("countOrphanedLists", () => {
+  const runtime = (
+    tag: string,
+    status: RuntimeOutboundState["status"]
+  ): RuntimeOutboundState => ({ tag, status }) as RuntimeOutboundState
+
+  test("считает списки только у упавших маршрутов", () => {
+    expect(
+      countOrphanedLists({
+        rules: [
+          { outbound: "vpn_main", list: ["streaming", "ai"] },
+          { outbound: "spare", list: ["games"] },
+        ],
+        outbounds: [runtime("vpn_main", "healthy"), runtime("spare", "unavailable")],
+      })
+    ).toBe(1)
+  })
+
+  test("активное правило без списков всё равно делает упавший маршрут красным", () => {
+    expect(
+      countOrphanedLists({
+        rules: [
+          {
+            outbound: "spare",
+            list: [],
+            proto: "tcp",
+            dest_port: "443",
+          },
+        ],
+        outbounds: [runtime("spare", "unavailable")],
+      })
+    ).toBe(1)
+  })
+
+  // degraded — группа ещё выбирает участника; трафик идёт. Это не сирота.
+  test("degraded не считается потерей маршрута", () => {
+    expect(
+      countOrphanedLists({
+        rules: [{ outbound: "failover", list: ["streaming"] }],
+        outbounds: [runtime("failover", "degraded")],
+      })
+    ).toBe(0)
+  })
+
+  // Отфильтрованный намеренно остановленный транспорт исчезает из списка.
+  // Считать его исчезновение поломкой значило бы вернуть красный тем, кто сам
+  // выключил туннель, — ровно то, от чего уходит selectDashboardRuntimeOutbounds.
+  test("маршрута нет в списке — не сирота", () => {
+    expect(
+      countOrphanedLists({
+        rules: [{ outbound: "gone", list: ["streaming"] }],
+        outbounds: [runtime("vpn_main", "healthy")],
+      })
+    ).toBe(0)
   })
 })

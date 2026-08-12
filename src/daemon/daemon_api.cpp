@@ -23,6 +23,8 @@
 #include "../util/ipv6_support.hpp"
 #include "../health/routing_health_checker.hpp"
 #include "../health/runtime_interface_inventory.hpp"
+#include "../keenetic/ndms_catalog_cache.hpp"
+#include "../keenetic/ndms_interface_inventory.hpp"
 #include "../health/runtime_outbound_state.hpp"
 #include "../api/handler_runtime_inventory.hpp"
 #include "../api/handler_diagnostic_tasks.hpp"
@@ -57,6 +59,65 @@ std::int64_t interface_traffic_api_integer(std::uint64_t value) {
 
 } // namespace
 
+api::RuntimeInterfaceInventoryResponse
+Daemon::build_runtime_interface_inventory_with_uptime() {
+    // Stamp the round before its netlink dump.  Concurrent workers can finish
+    // in the opposite order from the one in which their snapshots started;
+    // begin_round uses this instant to reject a late, older snapshot as a
+    // whole.  The wall/steady pair is also kept together so publication never
+    // derives elapsed time across an RTC step.
+    const auto observed_at = InterfaceUptimeAnchorStore::Clock::now();
+    const auto wall_now = std::chrono::system_clock::now();
+
+    std::vector<DumpedInterface> dumped;
+    try {
+        dumped = netlink_.dump_interfaces();
+    } catch (const NetlinkError&) {
+        return api::RuntimeInterfaceInventoryResponse{};
+    }
+
+    std::vector<std::string> runtime_names;
+    runtime_names.reserve(dumped.size());
+    for (const auto& item : dumped) {
+        runtime_names.push_back(item.name);
+    }
+    // Open the round before folding in any firmware observation. Ordering is
+    // load-bearing: begin_round records when each interface entered the set,
+    // and a cached catalog read before that instant describes a previous
+    // lifetime of a reused name.
+    interface_uptime_anchors_.begin_round(runtime_names, observed_at);
+
+    // peek(), never get(): this runs on an HTTP worker and on the SSE
+    // reconcile path, and a blocking loopback RCI request there would stall
+    // both. A cold catalog simply leaves the firmware anchor unavailable,
+    // which the entry then reports as unknown instead of guessing.
+    const auto ndms = shared_ndms_catalog_cache().peek();
+    if (ndms.observed_at) {
+        for (const auto& metadata : ndms.catalog.interface_metadata) {
+            if (!metadata.uptime_seconds) {
+                continue;
+            }
+            const auto kernel_name = resolve_ndms_kernel_name(
+                metadata.firmware_interface_name, runtime_names);
+            if (!kernel_name) {
+                continue;
+            }
+            // Stamped with the instant the catalog was read, not with now:
+            // this snapshot can be a whole cache TTL old, and dating it to now
+            // would shorten every uptime it carries by that lag.
+            interface_uptime_anchors_.observe_firmware_uptime(
+                *kernel_name, *metadata.uptime_seconds, *ndms.observed_at);
+        }
+    }
+
+    return build_runtime_interface_inventory_response(
+        std::move(dumped),
+        &interface_traffic_sampler_,
+        &interface_uptime_anchors_,
+        observed_at,
+        wall_now);
+}
+
 void Daemon::sample_interface_traffic_now() {
     if (!status_stream_ || !status_stream_->has_subscribers()) {
         const bool sampling_stopped =
@@ -66,6 +127,10 @@ void Daemon::sample_interface_traffic_now() {
             interface_traffic_sampler_.clear_all();
             traffic_sampled_interfaces_.clear();
             traffic_sampling_active_ = false;
+            // The next viewer must not inherit the backoff this one left
+            // behind, or a freshly opened dashboard would sit blank for the
+            // length of a stretched interval.
+            interface_traffic_cadence_.reset();
             periodic_task_metrics_.record_skipped(
                 "interface-traffic-sample",
                 "status stream has no subscribers");
@@ -95,12 +160,30 @@ void Daemon::sample_interface_traffic_now() {
                 traffic_sampled_interfaces_.clear();
                 traffic_sampling_active_ = false;
             }
+            interface_traffic_cadence_.reset();
+            task_metrics.noop();
+            return;
+        }
+
+        // A changed target set means a screen was just opened or closed. That
+        // is the worst possible moment to be mid-backoff, so it both restores
+        // the fast rate and guarantees this tick takes a reading.
+        const bool targets_changed =
+            target_interfaces != traffic_sampled_interfaces_;
+        if (targets_changed) {
+            interface_traffic_cadence_.reset();
+        }
+        if (!interface_traffic_cadence_.begin_tick()) {
+            // Nothing has moved for a while. Skipping the read is the whole
+            // point of the backoff; publishing an empty batch here would undo
+            // it by waking every subscriber anyway.
             task_metrics.noop();
             return;
         }
 
         const auto target_plan = plan_interface_traffic_targets(
             target_interfaces, traffic_sampled_interfaces_);
+        bool anything_changed = targets_changed;
         nlohmann::json interfaces = nlohmann::json::array();
         for (const auto& interface_name : target_plan.reported) {
             if (target_plan.removed.find(interface_name) !=
@@ -117,6 +200,7 @@ void Daemon::sample_interface_traffic_now() {
 
             const auto result =
                 interface_traffic_sampler_.sample(interface_name);
+            anything_changed = anything_changed || result.state_changed;
             const bool unavailable =
                 result.status ==
                     InterfaceTrafficSampler::SampleStatus::Unavailable ||
@@ -130,6 +214,13 @@ void Daemon::sample_interface_traffic_now() {
                      InterfaceTrafficSampler::SampleStatus::CounterReset},
             };
             if (result.point) {
+                // The instant this interface's own counters were read. Emitted
+                // only alongside a real reading, so an interface that was
+                // skipped or failed this round carries no timestamp at all
+                // rather than borrowing the round's and looking as fresh as
+                // the ones that succeeded.
+                entry["observed_at_unix_ms"] =
+                    unix_timestamp_ms(result.point->observed_at);
                 entry["rx_bytes"] =
                     interface_traffic_api_integer(result.point->rx_bytes);
                 entry["tx_bytes"] =
@@ -148,6 +239,7 @@ void Daemon::sample_interface_traffic_now() {
             interfaces.push_back(std::move(entry));
         }
 
+        interface_traffic_cadence_.end_round(anything_changed);
         traffic_sampled_interfaces_ = target_interfaces;
         traffic_sampling_active_ = true;
         status_stream_->publish_interface_traffic(
@@ -742,13 +834,20 @@ void Daemon::setup_api() {
         [this]() {
             const auto check_once = [this]() {
                 const auto runtime_snapshot = runtime_state_store_.snapshot();
-                return build_routing_health_report(
+                auto report = build_routing_health_report(
                     firewall_->backend(),
                     firewall_->uses_raw_prerouting(),
                     runtime_snapshot.firewall_state,
                     runtime_snapshot.route_specs,
                     runtime_snapshot.policy_rule_specs,
                     netlink_);
+                // From the live backend: this is what the last apply observed.
+                // Re-inspecting the firmware chain on a health request would
+                // both duplicate the writer and answer a different question.
+                report.ttl_bypass_state = firewall_->ttl_bypass_state_name();
+                report.ttl_bypass_detail =
+                    firewall_->ttl_bypass_state_detail();
+                return report;
             };
 
             auto report = check_once();
@@ -810,8 +909,7 @@ void Daemon::setup_api() {
                 });
         },
         [this]() {
-            return build_runtime_interface_inventory_response_or_empty(
-                netlink_, &interface_traffic_sampler_);
+            return build_runtime_interface_inventory_with_uptime();
         },
         [this](const Config& config) {
             return build_list_refresh_state_map(config, list_service_.cache_manager());
@@ -965,7 +1063,54 @@ void Daemon::setup_api() {
 
     // Manual "measure now": the scheduled round is deliberately unhurried, so
     // there has to be a way to ask for a fresh figure on the spot.
-    api_server_->post("/api/system/probes/run", [this]() -> std::string {
+    api_server_->post(
+        "/api/system/probes/run",
+        [this](const std::string& request_body) -> std::string {
+        // An optional {"tag": "..."} narrows this to one outbound. Without it
+        // the endpoint keeps its original meaning - the whole coalesced round -
+        // so an older frontend and any script calling it keep working.
+        std::string requested_tag;
+        if (!request_body.empty()) {
+            try {
+                const auto request = nlohmann::json::parse(request_body);
+                if (request.is_object()) {
+                    const auto tag = request.find("tag");
+                    if (tag != request.end() && tag->is_string()) {
+                        requested_tag = tag->get<std::string>();
+                    }
+                }
+            } catch (const nlohmann::json::exception&) {
+                throw ApiError("invalid probe request JSON", 400);
+            }
+        }
+
+        if (!requested_tag.empty()) {
+            // Target discovery reads config_ and outbound_marks_, which are
+            // owned by the event-loop thread.  The HTTP worker may run beside
+            // a config reload, so admission and the immutable target snapshot
+            // must be taken on that owner thread as one control operation.
+            bool started = false;
+            try {
+                enqueue_control_task(
+                    [this, &requested_tag, &started]() {
+                        started = start_targeted_interface_probe(requested_tag);
+                    },
+                    /*wait_for_completion=*/true,
+                    "targeted-interface-probe-admission:" + requested_tag,
+                    /*require_active_event_loop=*/true);
+            } catch (...) {
+                started = false;
+            }
+            nlohmann::json response;
+            response["ok"] = true;
+            // False here means the tag is unknown, already being probed, or
+            // the daemon could not take the work. The caller needs to know
+            // that so it can stop a spinner for a probe that never started.
+            response["scheduled"] = started;
+            response["tag"] = requested_tag;
+            return response.dump();
+        }
+
         const auto admission =
             interface_probe_gate_.request(/*manual=*/true);
         bool scheduled = admission.manual_accepted;

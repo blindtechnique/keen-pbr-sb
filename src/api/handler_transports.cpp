@@ -504,17 +504,44 @@ private:
 
 void restart_transport_manager_and_wait(
     ApiContext& ctx,
-    const std::string& expected_revision) {
+    const std::string& expected_revision,
+    MaintenanceLease* maintenance = nullptr) {
     constexpr const char* kInitScript =
         "/opt/etc/init.d/S79transport-manager";
-    const int status =
-        ctx.restart_restore_service_fn
-            ? ctx.restart_restore_service_fn(kInitScript)
-            : safe_exec_with_environment(
-                  {kInitScript, "restart"},
-                  {{"KEEN_PBR_PERSISTENT_TRANSACTION",
-                    "1"}},
-                  true);
+    int status = 0;
+    if (ctx.restart_restore_service_fn) {
+        status = ctx.restart_restore_service_fn(kInitScript);
+    } else {
+        ChildEnvironmentOverrides child_environment{
+            {"KEEN_PBR_PERSISTENT_TRANSACTION", "1"},
+        };
+        if (maintenance != nullptr) {
+            // Prove the scoped capability immediately before delegating it;
+            // a token from a guardian that already died must never become a
+            // child bypass of the lifecycle lock.
+            maintenance->verify_held();
+            const auto owner_pid = maintenance->borrow_owner_pid();
+            const auto token = maintenance->borrow_token();
+            if (owner_pid <= 1 || token.empty()) {
+                throw std::runtime_error(
+                    "maintenance lease cannot be delegated to transport manager");
+            }
+            child_environment.emplace_back(
+                "KEEN_PBR_UPDATE_LOCK_PID",
+                std::to_string(static_cast<long>(owner_pid)));
+            child_environment.emplace_back(
+                "KEEN_PBR_UPDATE_LOCK_TOKEN", token);
+        }
+        status = safe_exec_with_environment(
+            {kInitScript, "restart"}, child_environment, true);
+    }
+    if (maintenance != nullptr) {
+        // S79 temporarily becomes the authoritative lifecycle-lock owner.
+        // A normal EXIT transfers the exact token back to this process. If
+        // the child was killed before that hand-off, fail closed before any
+        // caller can mutate rollback bytes under a lease it no longer owns.
+        maintenance->verify_held();
+    }
     if (status != 0) {
         throw std::runtime_error(
             "transport manager restart failed");
@@ -527,9 +554,10 @@ void restart_transport_manager_and_wait(
 nlohmann::json restart_transport_manager_and_wait_for_runtime(
     ApiContext& ctx,
     const std::string& expected_revision,
-    const std::string& expected_mode) {
+    const std::string& expected_mode,
+    MaintenanceLease* maintenance = nullptr) {
     restart_transport_manager_and_wait(
-        ctx, expected_revision);
+        ctx, expected_revision, maintenance);
     return TransportManagerClient(
                load_endpoint(ctx.config_path))
         .wait_for_runtime_mode(
@@ -679,7 +707,8 @@ static void register_transports_handler_impl(
                             restart_transport_manager_and_wait_for_runtime(
                                 ctx,
                                 candidate_revision,
-                                requested_mode);
+                                requested_mode,
+                                maintenance.get());
                     } else {
                         applied =
                             client.wait_for_runtime_mode(
@@ -710,13 +739,15 @@ static void register_transports_handler_impl(
                 } catch (const std::exception&
                              apply_error) {
                     try {
+                        maintenance->verify_held();
                         write_file_atomically(
                             transports_path.string(),
                             previous_data);
                         (void)restart_transport_manager_and_wait_for_runtime(
                             ctx,
                             Sha256::hex(previous_data),
-                            previous_mode);
+                            previous_mode,
+                            maintenance.get());
                     } catch (const std::exception&
                                  rollback_error) {
                         throw ApiError(
@@ -1151,10 +1182,10 @@ static void register_transports_handler_impl(
                                         revision);
                             },
                             [&ctx](
-                                const std::string&
-                                    revision) {
+                                const std::string& revision,
+                                MaintenanceLease& maintenance) {
                                 restart_transport_manager_and_wait(
-                                    ctx, revision);
+                                    ctx, revision, &maintenance);
                             },
                         };
                     return prepared;

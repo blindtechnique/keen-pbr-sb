@@ -60,6 +60,9 @@ def pipeline_environment(fake_bin: Path, trace: Path, commit: str) -> dict[str, 
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment.get('PATH', '')}"
     environment["IDENTITY_TRACE"] = str(trace)
     environment["KEEN_PBR_COMMIT_OVERRIDE"] = commit
+    # These identity-only fixtures intentionally supply a detached synthetic
+    # bundle. Production source builds use the fingerprinted default mode.
+    environment["KEEN_PBR_FRONTEND_DIST_MODE"] = "prebuilt"
     return environment
 
 
@@ -442,6 +445,99 @@ class BuildIdentityTest(unittest.TestCase):
 
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         self.assertEqual(main.count("KEEN_PBR3_VERSION_IDENTITY_STRING"), 3)
+
+
+class FrontendDistFreshnessTest(unittest.TestCase):
+    def test_nonempty_stale_bundle_is_rebuilt_and_fresh_bundle_is_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            fake_bin = root / "fake-bin"
+            workspace.mkdir()
+            copy_fixture(
+                workspace,
+                (
+                    "build_scripts/frontend-source-id.sh",
+                    "build_scripts/build-frontend.sh",
+                    "build_scripts/ensure-frontend-dist.sh",
+                ),
+            )
+            source = workspace / "frontend/src/app.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("current-v1\n", encoding="utf-8")
+            (workspace / "frontend/package.json").write_text(
+                '{"name":"fixture"}\n', encoding="utf-8"
+            )
+
+            dist = workspace / "frontend/dist"
+            dist.mkdir(parents=True)
+            (dist / "index.html").write_text("stale\n", encoding="utf-8")
+
+            trace = root / "bun.trace"
+            write_executable(
+                fake_bin / "bun",
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "printf '%s\\n' \"$*\" >> \"$BUN_TRACE\"\n"
+                "case \"${1:-} ${2:-}\" in\n"
+                "  'install --frozen-lockfile') exit 0 ;;\n"
+                "  'run build')\n"
+                "    mkdir -p \"$KEEN_PBR_FRONTEND_OUT_DIR\"\n"
+                "    cp src/app.txt \"$KEEN_PBR_FRONTEND_OUT_DIR/index.html\"\n"
+                "    exit 0\n"
+                "    ;;\n"
+                "  *) exit 64 ;;\n"
+                "esac\n",
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = (
+                f"{fake_bin}{os.pathsep}{environment.get('PATH', '')}"
+            )
+            environment["BUN_TRACE"] = str(trace)
+            ensure = workspace / "build_scripts/ensure-frontend-dist.sh"
+
+            rebuilt = run(
+                ["sh", str(ensure), str(workspace), str(dist)],
+                env=environment,
+            )
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+            self.assertEqual(
+                (dist / "index.html").read_text(encoding="utf-8"),
+                "current-v1\n",
+            )
+            self.assertTrue((dist / ".keen-pbr-source-id").is_file())
+            self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 2)
+
+            reused = run(
+                ["sh", str(ensure), str(workspace), str(dist)],
+                env=environment,
+            )
+            self.assertEqual(reused.returncode, 0, reused.stderr)
+            self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 2)
+
+            source.write_text("current-v2\n", encoding="utf-8")
+            rebuilt_again = run(
+                ["sh", str(ensure), str(workspace), str(dist)],
+                env=environment,
+            )
+            self.assertEqual(rebuilt_again.returncode, 0, rebuilt_again.stderr)
+            self.assertEqual(
+                (dist / "index.html").read_text(encoding="utf-8"),
+                "current-v2\n",
+            )
+            self.assertEqual(len(trace.read_text(encoding="utf-8").splitlines()), 4)
+
+    def test_prebuilt_mode_is_explicit_and_frontend_builder_never_bootstraps_tools(self) -> None:
+        ensure = (ROOT / "build_scripts/ensure-frontend-dist.sh").read_text(
+            encoding="utf-8"
+        )
+        builder = (ROOT / "build_scripts/build-frontend.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("KEEN_PBR_FRONTEND_DIST_MODE", ensure)
+        self.assertNotIn("curl", builder)
+        self.assertNotIn("apt-get", builder)
+        self.assertNotIn("pipefail", builder)
 
 
 if __name__ == "__main__":

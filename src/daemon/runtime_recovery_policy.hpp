@@ -1240,6 +1240,80 @@ enum class ResolverReloadRetryOutcome : std::uint8_t {
     exhausted,
 };
 
+// A failed resolver hook gets a short convergence window first.  Once that
+// bounded budget is exhausted the work must remain live, but at a quiet,
+// capped cadence: dnsmasq/NDMS can stay busy for considerably longer than the
+// initial 31 seconds during a cold boot.  Attempts at or beyond the bounded
+// array are deliberately collapsed onto one maintenance slot, so callers
+// cannot turn a large/stale attempt counter into an out-of-range access or a
+// progressively faster retry.
+struct ResolverReloadRetryPlan {
+    std::size_t attempt{0};
+    std::chrono::seconds delay{0};
+    bool maintenance{false};
+};
+
+template <std::size_t N>
+ResolverReloadRetryPlan plan_resolver_reload_retry(
+    std::size_t attempt,
+    const std::array<std::chrono::seconds, N>& bounded_delays,
+    std::chrono::seconds maintenance_delay) noexcept {
+    if (attempt < N) {
+        return {attempt, bounded_delays[attempt], false};
+    }
+    return {N, maintenance_delay, true};
+}
+
+// A timer publication failure must not terminate resolver recovery. The
+// independent periodic runtime-health owner may consume only the retained
+// work for the exact current generation and only after firewall recovery has
+// released the resolver ordering gate.
+inline bool should_run_periodic_resolver_reload_recovery(
+    bool routing_runtime_active,
+    bool retry_timer_armed,
+    bool retry_pending,
+    bool firewall_generation_waiting,
+    std::uint64_t pending_generation,
+    std::uint64_t current_generation) noexcept {
+    return routing_runtime_active && !retry_timer_armed && retry_pending &&
+           !firewall_generation_waiting && pending_generation != 0U &&
+           pending_generation == current_generation;
+}
+
+inline constexpr std::string_view kResolverReloadPendingRuntimeReason =
+    "runtime restart committed; resolver reload pending";
+inline constexpr std::string_view kResolverReloadExhaustedRuntimeReason =
+    "resolver reload recovery exhausted";
+inline constexpr std::string_view kResolverReloadRecoveredRuntimeReason =
+    "resolver reload recovery complete";
+
+enum class ResolverRuntimeRecoveryAction : std::uint8_t {
+    preserve,
+    refresh_running_reason,
+    recover_resolver_broken,
+};
+
+// RuntimeState::broken is shared by several independent recovery owners.  A
+// successful dnsmasq stream may clear only the exact latch installed by this
+// resolver chain; URLTEST/firewall/apply failures remain authoritative.
+inline ResolverRuntimeRecoveryAction plan_resolver_runtime_recovery(
+    bool routing_runtime_active,
+    RuntimeState state,
+    std::string_view reason) noexcept {
+    if (!routing_runtime_active) {
+        return ResolverRuntimeRecoveryAction::preserve;
+    }
+    if (state == RuntimeState::broken &&
+        reason == kResolverReloadExhaustedRuntimeReason) {
+        return ResolverRuntimeRecoveryAction::recover_resolver_broken;
+    }
+    if (state == RuntimeState::running &&
+        reason == kResolverReloadPendingRuntimeReason) {
+        return ResolverRuntimeRecoveryAction::refresh_running_reason;
+    }
+    return ResolverRuntimeRecoveryAction::preserve;
+}
+
 template <typename Reload>
 ResolverReloadRetryOutcome evaluate_resolver_reload_retry(
     bool runtime_active,

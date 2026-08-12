@@ -86,7 +86,7 @@ NdmsCatalogSnapshot NdmsCatalogCache::snapshot_locked(
             now_fn_() >= refresh_after_) {
             effective_status = NdmsCatalogCacheStatus::stale;
         }
-        return {*catalog_, effective_status, refreshed};
+        return {*catalog_, effective_status, refreshed, catalog_observed_at_};
     }
     return {
         unavailable_catalog(),
@@ -174,6 +174,10 @@ NdmsCatalogSnapshot NdmsCatalogCache::get_impl(bool force_refresh) {
             refresh_epoch_is_current;
         if (refresh_accepted) {
             catalog_ = std::move(*fetched_catalog);
+            // The instant this catalog was read, kept so a consumer can turn
+            // the firmware's relative counters into durations. Same clock as
+            // the TTL deadlines, read once so the two cannot disagree.
+            catalog_observed_at_ = completed_at;
             status_ = NdmsCatalogCacheStatus::fresh;
             refresh_after_ = completed_at + cache_ttl_;
         } else {

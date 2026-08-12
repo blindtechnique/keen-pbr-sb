@@ -330,5 +330,8 @@ export function interfaceConnectionState(
 }
 
 // TransportStatus.updated_at is the latest state observation, not a
-// connected-since timestamp. Until runtime exposes an authoritative field, the
-// dashboard reports only the live connected state instead of inventing uptime.
+// connected-since timestamp, so it is still not the field to render a duration
+// from. The dashboard now takes that duration from
+// RuntimeInterfaceInventoryEntry.link_up_since_unix_ms, which is an anchored
+// up-transition rather than an observation stamp, and falls back to the bare
+// connected state whenever that anchor is absent.

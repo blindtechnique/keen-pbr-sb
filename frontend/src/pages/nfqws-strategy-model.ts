@@ -610,18 +610,24 @@ export function parseNfqwsProfileMarker(
 export interface NfqwsProfileCandidate {
   readonly builtin: boolean
   readonly overridden: boolean
+  readonly canonical: boolean
   readonly content: string
 }
 
 /**
- * A marker alone is not authority to use the profile-card treatment. Custom
- * strategies and edited built-ins must stay in the table where their origin
- * and delete/restore action remain visible.
+ * A marker alone is not authority to use the profile-card treatment: a custom
+ * strategy carrying the same comment must stay in the table where its origin
+ * and delete action remain visible.
+ *
+ * Applying a strategy creates an override, so `overridden` alone is not proof
+ * of a user edit. The backend's `canonical` bit compares normalized strategy
+ * identity with the current packaged profile (including rendered WAN and
+ * owned telemetry differences). A copied marker therefore has no authority.
  */
 export function canonicalNfqwsProfileTier(
   strategy: NfqwsProfileCandidate
 ): NfqwsProfileTier | undefined {
-  if (!strategy.builtin || strategy.overridden) return undefined
+  if (!strategy.builtin || !strategy.canonical) return undefined
   return parseNfqwsProfileMarker(strategy.content)?.tier
 }
 

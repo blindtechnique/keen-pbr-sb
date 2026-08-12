@@ -792,3 +792,74 @@ TEST_CASE("interface probe exact lookup never lends health to a reused tag") {
     probe.retain_only({changed_device});
     CHECK_FALSE(probe.result_for("friendly").has_value());
 }
+
+TEST_CASE("periodic probing rotates instead of sweeping everything") {
+    const std::vector<InterfaceProbe::Target> targets = {
+        {"a", 1, "nwg1"}, {"b", 2, "nwg2"}, {"c", 3, "nwg3"},
+        {"d", 4, "nwg4"}, {"e", 5, "nwg5"},
+    };
+
+    // A tick measures a slice, not the whole list. Sweeping everything every
+    // twenty seconds is what made a per-row refresh indistinguishable from the
+    // background: every value on screen changed regardless of what was clicked.
+    const auto first = select_interface_probe_rotation(targets, 0, 2);
+    REQUIRE(first.slice.size() == 2);
+    CHECK(first.slice[0].tag == "a");
+    CHECK(first.slice[1].tag == "b");
+
+    const auto second =
+        select_interface_probe_rotation(targets, first.next_cursor, 2);
+    CHECK(second.slice[0].tag == "c");
+    CHECK(second.slice[1].tag == "d");
+}
+
+TEST_CASE("rotation wraps and eventually covers every target") {
+    const std::vector<InterfaceProbe::Target> targets = {
+        {"a", 1, "nwg1"}, {"b", 2, "nwg2"}, {"c", 3, "nwg3"},
+    };
+
+    std::set<std::string> seen;
+    std::size_t cursor = 0;
+    for (int tick = 0; tick < 6; ++tick) {
+        const auto rotation =
+            select_interface_probe_rotation(targets, cursor, 2);
+        for (const auto& target : rotation.slice) seen.insert(target.tag);
+        cursor = rotation.next_cursor;
+    }
+
+    // Spreading the work must not mean starving a target: every one is still
+    // measured, just on its own tick rather than all at once.
+    CHECK(seen.size() == targets.size());
+}
+
+TEST_CASE("a cursor left over from a longer list does not read past the end") {
+    const std::vector<InterfaceProbe::Target> targets = {
+        {"a", 1, "nwg1"}, {"b", 2, "nwg2"},
+    };
+
+    // An apply removed outbounds between ticks. Trusting the old cursor would
+    // index past the end; wrapping keeps the survivors being probed.
+    const auto rotation = select_interface_probe_rotation(targets, 97, 1);
+    REQUIRE(rotation.slice.size() == 1);
+    CHECK(rotation.next_cursor < targets.size());
+}
+
+TEST_CASE("a slice wider than the list still measures each target once") {
+    const std::vector<InterfaceProbe::Target> targets = {
+        {"a", 1, "nwg1"}, {"b", 2, "nwg2"},
+    };
+
+    const auto rotation = select_interface_probe_rotation(targets, 0, 99);
+
+    CHECK(rotation.slice.size() == targets.size());
+    std::set<std::string> tags;
+    for (const auto& target : rotation.slice) tags.insert(target.tag);
+    CHECK(tags.size() == targets.size());
+}
+
+TEST_CASE("no targets and no slice both yield nothing to probe") {
+    const std::vector<InterfaceProbe::Target> targets = {{"a", 1, "nwg1"}};
+
+    CHECK(select_interface_probe_rotation({}, 0, 2).slice.empty());
+    CHECK(select_interface_probe_rotation(targets, 0, 0).slice.empty());
+}

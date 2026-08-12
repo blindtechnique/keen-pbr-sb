@@ -135,6 +135,11 @@ acquire_remote_access_security_boundary();
 // disable whose firewall cleanup has not yet reached verified closed state.
 bool remote_access_blocks_auth_disable(
     const RemoteAccessSecurityBoundaryGuard& guard);
+// The router administrator password must never be accepted by a panel that is
+// desired, applied, or possibly still reachable through plaintext WAN HTTP.
+// As with auth disable, only a verified-closed generation is sufficient proof.
+bool remote_access_blocks_keenetic_auth(
+    const RemoteAccessSecurityBoundaryGuard& guard);
 // Authentication was published first; this only admits a fresh desired
 // generation and publishes a zero-delay hint. The daemon control loop remains
 // the sole firewall writer.

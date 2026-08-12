@@ -141,6 +141,13 @@ struct ApiContext {
         std::string,
         bool,
         bool)> acquire_runtime_mutation_fn;
+    // Tail callback for the same reason as the two above. The system-auth
+    // verdict belongs to the web server rather than the routing daemon, so it
+    // is annotated onto the routing report instead of being produced with it.
+    // Left unset - by tests, by embedders, by the daemon before the web server
+    // exists - the fields are simply omitted.
+    std::function<std::optional<SystemAuthHealthSnapshot>()>
+        get_system_auth_health_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -223,7 +230,16 @@ struct ApiContext {
     }
 
     RoutingHealthReport get_routing_health() const {
-        return get_routing_health_fn();
+        auto report = get_routing_health_fn();
+        if (get_system_auth_health_fn) {
+            if (const auto snapshot = get_system_auth_health_fn()) {
+                report.system_auth_state = snapshot->state;
+                report.system_auth_detail = snapshot->detail;
+                report.system_auth_forwarded_failures_per_window =
+                    snapshot->forwarded_failures_per_window;
+            }
+        }
+        return report;
     }
 
     api::RuntimeOutboundsResponse get_runtime_outbounds() const {

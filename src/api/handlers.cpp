@@ -30,6 +30,12 @@
 namespace keen_pbr3 {
 
 void register_api_handlers(ApiServer& server, ApiContext& ctx) {
+    // The system-auth verdict is the web server's own, not the daemon's.
+    // Wiring it here rather than in ApiContext's initializer keeps that
+    // struct's positional aggregate initialization untouched.
+    ctx.get_system_auth_health_fn = [&server]() {
+        return server.system_auth_health();
+    };
     register_health_service_handler(server, ctx);
     register_reload_handler(server, ctx);
     register_lists_refresh_handler(server, ctx);

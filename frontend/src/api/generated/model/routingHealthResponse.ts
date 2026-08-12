@@ -11,6 +11,8 @@ import type { PolicyRuleCheck } from './policyRuleCheck';
 import type { RouteTableCheck } from './routeTableCheck';
 import type { RoutingHealthResponseFirewallBackend } from './routingHealthResponseFirewallBackend';
 import type { RoutingHealthResponseOverall } from './routingHealthResponseOverall';
+import type { RoutingHealthResponseSystemAuthState } from './routingHealthResponseSystemAuthState';
+import type { RoutingHealthResponseTtlBypassState } from './routingHealthResponseTtlBypassState';
 
 export interface RoutingHealthResponse {
   /** - ok: all checks passed - degraded: one or more checks failed - error: an exception prevented checks from completing
@@ -18,6 +20,55 @@ export interface RoutingHealthResponse {
   overall: RoutingHealthResponseOverall;
   /** Active firewall backend. */
   firewall_backend: RoutingHealthResponseFirewallBackend;
+  /** State of the owned RETURN keen-pbr keeps first in the firmware's TTL chain so a packet nfqws2 already handled is not stripped of the TTL its desync depends on.
+  The values are deliberately distinct because they call for different responses:
+  - chain_absent: the firmware chain is not there, so there is
+    nothing to bypass. Routine, no action.
+  - unknown: the chain could not be inspected - a held xtables lock,
+    a timeout. Says nothing about the chain; do not read it as "fine".
+  - unsupported: a kernel match this needs is not registered. We
+    deliberately write nothing rather than install an unverified rule.
+  - active: our rule is present exactly once and first. - conflict: it drifted or was duplicated, i.e. something is
+    rewriting the chain underneath us. Repaired on the next apply,
+    but worth knowing about.
+  - missing: absent and installable; the next apply installs it. - disabled: the operator turned it off. Distinct from `missing` and
+    `unsupported` on purpose: those say we cannot, this says we were
+    told not to, and an operator needs to tell an instruction apart
+    from an inability. Any rule of ours is removed when this is
+    reported - off means gone, not "stop installing".
+   */
+  ttl_bypass_state?: RoutingHealthResponseTtlBypassState;
+  /** Why the state is what it is, when the state alone is not enough. Empty for the uninteresting states.
+   */
+  ttl_bypass_detail?: string;
+  /** Whether keen-pbr may rely on the router's own authentication instead of the password kept in auth.json.
+  Reported before anything is retired, because the risk is asymmetric: keeping a local password one day too long is an inconvenience, while deleting it before the system verifier is proven leaves SSH as the owner's only way back into the panel.
+  - usable: every check passed. The switch would be safe to make;
+    this does not perform it.
+  - endpoint_unproven: no router-owned address was proven to serve
+    the Keenetic challenge.
+  - loopback_not_accepted: only loopback was available. The firmware
+    answers /auth with 403 there and 401 with a challenge on the LAN
+    address, so loopback can never verify anybody.
+  - challenge_absent: something answers but issues no realm and
+    challenge, i.e. an unrelated service on a stale port.
+  - firmware_policy_unknown: the firmware lockout policy could not be
+    read, so our own limiter cannot be proven to stay inside it.
+  - lockout_budget_unsafe: we would forward enough failures to trip
+    the firmware's lockout. Because keen-pbr reaches the firmware
+    from the router itself, that would lock the administrator out of
+    KeeneticOS rather than the person guessing.
+   */
+  system_auth_state?: RoutingHealthResponseSystemAuthState;
+  /** Why the state is what it is, including the measured margin between the failures we would forward and the firmware's threshold. Empty when the state alone is enough.
+   */
+  system_auth_detail?: string;
+  /**
+     * Worst case failed logins forwarded to the firmware inside its observation window. Shown next to the threshold so an operator sees the margin rather than only the verdict.
+
+     * @minimum 0
+     */
+  system_auth_forwarded_failures_per_window?: number;
   firewall: FirewallChain;
   firewall_rules: FirewallRuleCheck[];
   route_tables: RouteTableCheck[];

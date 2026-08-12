@@ -46,8 +46,34 @@ run_recovery_guard() {
     return 0
 }
 
+# Shared with S80 so the two cannot drift. Absent, behave as before rather than
+# refuse: a missing file is not evidence of a competing update.
+LIFECYCLE_LOCK_LIB=/opt/usr/lib/keen-pbr/lifecycle-lock.sh
+if [ -f "$LIFECYCLE_LOCK_LIB" ] && [ ! -L "$LIFECYCLE_LOCK_LIB" ]; then
+    . "$LIFECYCLE_LOCK_LIB"
+else
+    enter_lifecycle_lock() { return 0; }
+    release_lifecycle_lock() { return 0; }
+fi
+
+lifecycle_lock_or_fail() {
+    enter_lifecycle_lock && return 0
+    echo "transport-manager lifecycle is blocked by an in-flight update; try again once it finishes" >&2
+    return 1
+}
+
+trap release_lifecycle_lock EXIT
+
+case "${1:-}" in
+    start|stop|restart|restartall|kill)
+        lifecycle_lock_or_fail || exit 1
+        ;;
+esac
+
 case "${1:-}" in
     restart|restartall)
+        # Runs while this lease is held. enter_lifecycle_lock exported it, so
+        # the nested invocation borrows rather than contending with its parent.
         "$0" stop || exit 1
         set -- start
         ;;

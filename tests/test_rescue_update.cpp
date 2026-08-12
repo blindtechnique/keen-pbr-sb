@@ -1905,7 +1905,7 @@ TEST_CASE("installer rejects symbolic links in inherited legacy lock") {
         std::to_string(static_cast<long>(legacy_owner.pid()));
     constexpr auto token = "legacy-inherited-token";
 
-    for (const auto unsafe_name :
+    for (const auto& unsafe_name :
          {std::string{"pid"}, std::string{"token"}, std::string{"ready"}}) {
         const auto root = directory.path / unsafe_name;
         const auto rescue = rescue_dir(root);

@@ -2,6 +2,7 @@ import {
   ChevronRight,
   CircleAlert,
   CircleCheckBig,
+  CircleX,
   LoaderCircle,
 } from "lucide-react"
 import type { ReactNode } from "react"
@@ -9,6 +10,7 @@ import { useTranslation } from "react-i18next"
 
 import type {
   HealthResponse,
+  RouteRule,
   RuntimeOutboundState,
 } from "@/api/generated/model"
 import { useStatusEventConnectionState } from "@/api/status-event-connection"
@@ -17,13 +19,23 @@ import { collectDashboardAttentionItems } from "@/components/overview/system-sta
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
-type SummaryTone = "healthy" | "waiting" | "degraded"
+/**
+ * `warning` — своя ступень между «получаем состояние» и «сломано».
+ *
+ * Раньше их было три, и всё, что не «Всё в порядке» и не загрузка, красилось
+ * в красное «Требуется внимание»: упавший туннель без списков, участник
+ * группы, которого группа уже заменила, несохранённый черновик. Красный при
+ * работающих службах и работающей маршрутизации не сообщает ничего — он
+ * просто перестаёт значить «сломалось».
+ */
+type SummaryTone = "healthy" | "waiting" | "warning" | "degraded"
 
 export function SystemStatusSummary({
   configIsDraft,
   listCount,
   outbounds,
   outboundsQueryFailed = false,
+  routeRules,
   routingOverall,
   ruleCount,
   service,
@@ -34,6 +46,8 @@ export function SystemStatusSummary({
   listCount: number
   outbounds?: readonly RuntimeOutboundState[]
   outboundsQueryFailed?: boolean
+  /** Правила: по ним видно, осиротел ли список из-за упавшего маршрута. */
+  routeRules?: readonly RouteRule[]
   routingOverall?: string
   ruleCount: number
   service?: HealthResponse
@@ -45,6 +59,7 @@ export function SystemStatusSummary({
   const sharedHealthTone = getHeaderHealthTone({
     outbounds,
     outboundsQueryFailed,
+    routeRules,
     service,
     serviceQueryFailed,
     statusEvents,
@@ -66,17 +81,24 @@ export function SystemStatusSummary({
     service.resolver_live_status !== "healthy" ||
     service.resolver_config_sync_state !== "converged"
   const routingFailed = routingOverall !== undefined && routingOverall !== "ok"
-  const tone: SummaryTone =
-    routingFailed || sharedHealthTone === "failed"
+  // «Получаем состояние» — только пока данных действительно нет. Раньше в эту
+  // же ветку падало всё «внимание», и карточка с крутящимся кружком уверяла,
+  // что опрашивает службы, когда опрос давно закончился.
+  const stillLoading =
+    (!service && !serviceQueryFailed) ||
+    (!outbounds && !outboundsQueryFailed) ||
+    routingOverall === undefined
+  const tone: SummaryTone = stillLoading
+    ? "waiting"
+    : routingFailed || sharedHealthTone === "failed"
       ? "degraded"
-      : sharedHealthTone === "attention" ||
-          routingOverall === undefined ||
-          configIsDraft
-        ? "waiting"
+      : sharedHealthTone === "attention" || configIsDraft
+        ? "warning"
         : "healthy"
   const attentionItems = collectDashboardAttentionItems({
     outbounds,
     outboundsQueryFailed,
+    routeRules,
     routingOverall,
     service,
     serviceQueryFailed,
@@ -88,7 +110,7 @@ export function SystemStatusSummary({
       className={cn(
         "rounded-[6px] border bg-card px-4 py-3",
         tone === "degraded" && "border-destructive/40",
-        tone === "waiting" && "border-warning/40"
+        (tone === "waiting" || tone === "warning") && "border-warning/40"
       )}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -198,8 +220,18 @@ function StatusIcon({ tone }: { tone: SummaryTone }) {
     )
   }
   if (tone === "degraded") {
+    // Крест, а не восклицательный знак: «сломано» и «посмотрите» должны
+    // отличаться и значком, а не только цветом — это те же две иконки, что
+    // у индикатора в шапке.
     return (
       <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+        <CircleX className="size-5" />
+      </span>
+    )
+  }
+  if (tone === "warning") {
+    return (
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-warning/10 text-warning-foreground">
         <CircleAlert className="size-5" />
       </span>
     )

@@ -37,3 +37,6 @@ crash-*
 leak-*
 timeout-*
 oom-*
+
+# Generated at build time by the Keenetic package build.
+packages/keenetic/keen-pbr/version.mk

@@ -285,6 +285,7 @@ std::optional<std::string> query_dns_record_with_resolver(
     int resolver_error = 0;
 
     if (!server.has_value()) {
+#ifdef KEEN_PBR_HAS_RESOLVER_STATE_API
         // Keep the diagnostic on its absolute operation deadline even when
         // resolv.conf points at an unresponsive server. A private resolver
         // state avoids mutating the process-global _res used by runtime DNS.
@@ -329,6 +330,30 @@ std::optional<std::string> query_dns_record_with_resolver(
                                   answer.data(),
                                   static_cast<int>(answer.size()));
         resolver_error = resolver_state.res_h_errno;
+#else
+        // musl (including OpenWrt) does not provide the glibc res_n* API.
+        // Serialize its process-global compatibility API with every other
+        // legacy resolver user. A too-small operation budget is rejected
+        // before entering the libc call; the deadline is checked again below.
+        if (deadline.has_value() &&
+            routing_test_remaining(
+                deadline, std::chrono::seconds{2}) <=
+                std::chrono::seconds{1}) {
+            throw RoutingTestTimeoutError(
+                "routing test DNS deadline exceeded");
+        }
+        std::lock_guard<std::mutex> resolver_lock(
+            legacy_resolver_mutex());
+        if (res_init() != 0) {
+            return "Failed to initialize the system resolver";
+        }
+        response_len = res_query(domain.c_str(),
+                                 ns_c_in,
+                                 record_type,
+                                 answer.data(),
+                                 static_cast<int>(answer.size()));
+        resolver_error = h_errno;
+#endif
     } else {
         sockaddr_storage resolver_addr {};
         socklen_t resolver_addr_len = 0;

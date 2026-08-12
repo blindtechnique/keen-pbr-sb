@@ -15,6 +15,7 @@ import {
 } from "@/api/status-event-connection"
 import { createStatusQueryResilience } from "@/api/status-event-resilience"
 import { applyDnsProbeStatusEvent } from "@/api/dns-probe-events"
+import { applyComponentTransactionStatusEvent } from "@/api/component-transaction-events"
 import { applyListRefreshStatusEvent } from "@/api/list-refresh-events"
 
 const HIDDEN_DISCONNECT_DELAY_MS = 60_000
@@ -27,6 +28,7 @@ const STATUS_EVENT_NAMES = [
   "connections",
   "dns_probe",
   "list_refresh",
+  "component_transaction",
 ] as const
 
 export function StatusEventBridge() {
@@ -78,6 +80,8 @@ export function StatusEventBridge() {
             applyDnsProbeStatusEvent(data)
           } else if (eventName === "list_refresh") {
             applyListRefreshStatusEvent(data)
+          } else if (eventName === "component_transaction") {
+            applyComponentTransactionStatusEvent(data)
           } else {
             applyStatusEvent(queryClient, data)
           }

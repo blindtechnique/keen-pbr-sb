@@ -1,4 +1,5 @@
 import type { RuntimeInterfaceTraffic } from "@/api/generated/model/runtimeInterfaceTraffic"
+import { routerNowMs } from "@/api/router-clock"
 
 export const TRAFFIC_CHART_WIDTH = 744
 export const TRAFFIC_CHART_HEIGHT = 162
@@ -232,4 +233,38 @@ function formatScaled(
   return `${new Intl.NumberFormat(locale, {
     maximumFractionDigits: value >= 100 ? 0 : value >= 10 ? 1 : 2,
   }).format(value)} ${units[unitIndex]}`
+}
+
+/**
+ * Comfortably above the daemon's slowest sampling cadence.
+ *
+ * The daemon backs off an idle interface to five ticks of its two-second
+ * timer, so a tighter threshold would mark a perfectly healthy quiet link as
+ * stale purely because the daemon correctly stopped reading it so often. It
+ * also clears the 15s fallback poll used while the event stream reconnects.
+ */
+export const TRAFFIC_STALE_AFTER_MS = 30_000
+
+/**
+ * Whether a reading is old enough that it should not be presented as current.
+ *
+ * Without this, an interface whose counters stopped arriving renders its last
+ * byte totals exactly like a live one, and the number quietly ages on screen
+ * with nothing to say so.
+ */
+export function isTrafficReadingStale(
+  sampledAtUnixMs: number | undefined,
+  routerNowUnixMs: number = routerNowMs()
+): boolean {
+  if (typeof sampledAtUnixMs !== "number") {
+    // No timestamp at all is not the same as an old one: a daemon that
+    // predates the per-interface field simply does not report it, and calling
+    // that stale would be an accusation we cannot support.
+    return false
+  }
+  // Both sides of this subtraction must be on the ROUTER's clock. Comparing
+  // the daemon's timestamp against this browser's Date.now() would measure the
+  // disagreement between two machines, and a Keenetic without a settled RTC
+  // disagrees by years - which would brand every healthy link stale.
+  return routerNowUnixMs - sampledAtUnixMs > TRAFFIC_STALE_AFTER_MS
 }

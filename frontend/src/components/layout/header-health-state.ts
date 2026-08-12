@@ -1,8 +1,10 @@
 import type {
   HealthResponse,
+  RouteRule,
   RuntimeOutboundState,
 } from "@/api/generated/model"
 import type { StatusEventConnectionState } from "@/api/status-event-connection"
+import { countOrphanedLists } from "@/components/overview/dashboard-outbound-relevance"
 
 export type HeaderHealthTone = "healthy" | "attention" | "failed"
 
@@ -17,17 +19,24 @@ type HeaderHealthService = Pick<
   | "status"
 >
 
-type HeaderHealthOutbound = Pick<RuntimeOutboundState, "status">
+type HeaderHealthOutbound = Pick<RuntimeOutboundState, "status" | "tag">
 
 export function getHeaderHealthTone({
   outbounds,
   outboundsQueryFailed = false,
+  routeRules,
   service,
   serviceQueryFailed = false,
   statusEvents,
 }: {
   outbounds?: readonly HeaderHealthOutbound[]
   outboundsQueryFailed?: boolean
+  /**
+   * Правила маршрутизации. По ним видно, висит ли на упавшем маршруте хотя бы
+   * один список. Без правил безобидность падения доказать нечем, поэтому там
+   * сохраняется прежнее строгое поведение: любой `unavailable` — красный.
+   */
+  routeRules?: readonly RouteRule[]
   service?: HeaderHealthService
   serviceQueryFailed?: boolean
   statusEvents?: StatusEventConnectionState
@@ -51,9 +60,14 @@ export function getHeaderHealthTone({
     service.resolver_config_probe_status === "missing_txt" ||
     service.resolver_config_probe_status === "invalid_txt" ||
     service.resolver_config_probe_status === "query_failed"
-  const outboundFailed = outbounds.some(
-    (outbound) => outbound.status === "unavailable"
-  )
+  // Красный — только когда упавший маршрут действительно везёт трафик: на нём
+  // висит список включённого правила. Туннель без списков и участник группы,
+  // которого группа уже заменила, работу не ломают — это «внимание», а не
+  // «сломано». Раньше любой `unavailable` красил индикатор в красный, и он
+  // пугал при полностью рабочей маршрутизации.
+  const outboundFailed = routeRules
+    ? countOrphanedLists({ rules: routeRules, outbounds }) > 0
+    : outbounds.some((outbound) => outbound.status === "unavailable")
 
   // During a transactional apply, DNS and outbound paths legitimately
   // disappear for a moment. That is an attention state, not a red failure.

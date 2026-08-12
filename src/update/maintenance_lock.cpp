@@ -1414,6 +1414,14 @@ pid_t MaintenanceCoordinator::guardian_pid() const noexcept {
     return guardian_pid_;
 }
 
+pid_t MaintenanceCoordinator::borrow_owner_pid() const noexcept {
+    return owner_pid_;
+}
+
+std::string MaintenanceCoordinator::borrow_token() const {
+    return token_;
+}
+
 void MaintenanceCoordinator::release_noexcept() noexcept {
     if (control_fd_ >= 0) {
         (void)::close(control_fd_);

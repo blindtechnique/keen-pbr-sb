@@ -1151,6 +1151,94 @@ TEST_CASE("current resolver recovery retries, recovers, and eventually exhausts"
         ResolverReloadRetryOutcome::exhausted);
 }
 
+TEST_CASE("resolver recovery becomes one capped quiet maintenance slot") {
+    constexpr std::array<std::chrono::seconds, 5> bounded_delays{
+        std::chrono::seconds{1},
+        std::chrono::seconds{2},
+        std::chrono::seconds{4},
+        std::chrono::seconds{8},
+        std::chrono::seconds{16},
+    };
+
+    std::chrono::seconds bounded_window{0};
+    for (std::size_t attempt = 0; attempt < bounded_delays.size(); ++attempt) {
+        const auto plan = plan_resolver_reload_retry(
+            attempt, bounded_delays, std::chrono::seconds{60});
+        CHECK(plan.attempt == attempt);
+        CHECK(plan.delay == bounded_delays[attempt]);
+        CHECK_FALSE(plan.maintenance);
+        bounded_window += plan.delay;
+    }
+    CHECK(bounded_window == std::chrono::seconds{31});
+
+    const auto first_maintenance = plan_resolver_reload_retry(
+        bounded_delays.size(),
+        bounded_delays,
+        std::chrono::seconds{60});
+    CHECK(first_maintenance.attempt == bounded_delays.size());
+    CHECK(first_maintenance.delay == std::chrono::seconds{60});
+    CHECK(first_maintenance.maintenance);
+
+    // A corrupt or repeatedly incremented attempt cannot accelerate the
+    // maintenance loop or escape the bounded array.
+    const auto capped_maintenance = plan_resolver_reload_retry(
+        999,
+        bounded_delays,
+        std::chrono::seconds{60});
+    CHECK(capped_maintenance.attempt == bounded_delays.size());
+    CHECK(capped_maintenance.delay == std::chrono::seconds{60});
+    CHECK(capped_maintenance.maintenance);
+}
+
+TEST_CASE("periodic resolver owner recovers only an exact retained generation") {
+    CHECK(should_run_periodic_resolver_reload_recovery(
+        true, false, true, false, 9U, 9U));
+    CHECK_FALSE(should_run_periodic_resolver_reload_recovery(
+        false, false, true, false, 9U, 9U));
+    CHECK_FALSE(should_run_periodic_resolver_reload_recovery(
+        true, true, true, false, 9U, 9U));
+    CHECK_FALSE(should_run_periodic_resolver_reload_recovery(
+        true, false, false, false, 9U, 9U));
+    CHECK_FALSE(should_run_periodic_resolver_reload_recovery(
+        true, false, true, true, 9U, 9U));
+    CHECK_FALSE(should_run_periodic_resolver_reload_recovery(
+        true, false, true, false, 8U, 9U));
+}
+
+TEST_CASE("resolver success clears only resolver-owned runtime reasons") {
+    CHECK(
+        plan_resolver_runtime_recovery(
+            true,
+            RuntimeState::broken,
+            kResolverReloadExhaustedRuntimeReason) ==
+        ResolverRuntimeRecoveryAction::recover_resolver_broken);
+    CHECK(
+        plan_resolver_runtime_recovery(
+            true,
+            RuntimeState::running,
+            kResolverReloadPendingRuntimeReason) ==
+        ResolverRuntimeRecoveryAction::refresh_running_reason);
+
+    CHECK(
+        plan_resolver_runtime_recovery(
+            true,
+            RuntimeState::broken,
+            "urltest firewall recovery failed permanently") ==
+        ResolverRuntimeRecoveryAction::preserve);
+    CHECK(
+        plan_resolver_runtime_recovery(
+            true,
+            RuntimeState::broken,
+            "configuration apply failed") ==
+        ResolverRuntimeRecoveryAction::preserve);
+    CHECK(
+        plan_resolver_runtime_recovery(
+            false,
+            RuntimeState::broken,
+            kResolverReloadExhaustedRuntimeReason) ==
+        ResolverRuntimeRecoveryAction::preserve);
+}
+
 TEST_CASE("runtime incident latch reports threshold once and resets") {
     RuntimeIncidentLatch incidents(3);
 

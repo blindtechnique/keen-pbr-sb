@@ -106,3 +106,73 @@ describe("header health classifier", () => {
     ).toBe("failed")
   })
 })
+
+/**
+ * Красный обещает, что что-то не работает. Пока любой упавший маршрут красил
+ * индикатор, обещание нарушалось: туннель, к которому не привязан ни один
+ * список, и участник группы, которого группа уже заменила, ничего не ломают.
+ */
+describe("header health: упавший маршрут против осиротевшего списка", () => {
+  const tagged = (
+    tag: string,
+    status: RuntimeOutboundState["status"]
+  ): RuntimeOutboundState => ({ tag, status }) as RuntimeOutboundState
+
+  test("упавший маршрут без списков — внимание, а не красный", () => {
+    expect(
+      getHeaderHealthTone({
+        service: healthyService,
+        outbounds: [tagged("vpn_main", "healthy"), tagged("spare", "unavailable")],
+        routeRules: [{ outbound: "vpn_main", list: ["streaming"] }],
+        statusEvents: "connected",
+      })
+    ).toBe("attention")
+  })
+
+  test("упавший маршрут со списком — красный: списку некуда идти", () => {
+    expect(
+      getHeaderHealthTone({
+        service: healthyService,
+        outbounds: [tagged("vpn_main", "unavailable")],
+        routeRules: [{ outbound: "vpn_main", list: ["streaming"] }],
+        statusEvents: "connected",
+      })
+    ).toBe("failed")
+  })
+
+  test("выключенное правило не делает упавший маршрут поломкой", () => {
+    expect(
+      getHeaderHealthTone({
+        service: healthyService,
+        outbounds: [tagged("vpn_main", "unavailable")],
+        routeRules: [
+          { outbound: "vpn_main", list: ["streaming"], enabled: false },
+        ],
+        statusEvents: "connected",
+      })
+    ).toBe("attention")
+  })
+
+  // Намеренно остановленный транспорт вырезается из списка ещё до классификатора.
+  test("маршрута нет в списке — индикатор не краснеет", () => {
+    expect(
+      getHeaderHealthTone({
+        service: healthyService,
+        outbounds: [tagged("vpn_main", "healthy")],
+        routeRules: [{ outbound: "gone", list: ["streaming"] }],
+        statusEvents: "connected",
+      })
+    ).toBe("healthy")
+  })
+
+  // Без правил безобидность падения доказать нечем — старое строгое поведение.
+  test("без правил любой упавший маршрут остаётся красным", () => {
+    expect(
+      getHeaderHealthTone({
+        service: healthyService,
+        outbounds: [tagged("spare", "unavailable")],
+        statusEvents: "connected",
+      })
+    ).toBe("failed")
+  })
+})

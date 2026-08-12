@@ -1014,6 +1014,9 @@ Config parse_config(const std::string& json_str) {
         parsed_json, "daemon", "clear_dynamic_sets_on_apply",
         "daemon.clear_dynamic_sets_on_apply", issues);
     validate_optional_boolean_field(
+        parsed_json, "daemon", "ttl_bypass_enabled",
+        "daemon.ttl_bypass_enabled", issues);
+    validate_optional_boolean_field(
         parsed_json, "daemon", "reconnect_unmarked_flows_on_routing_change",
         "daemon.reconnect_unmarked_flows_on_routing_change", issues);
     validate_optional_string_array_field(

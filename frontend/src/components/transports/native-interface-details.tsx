@@ -2,7 +2,10 @@ import { EyeIcon, EyeOffIcon, WorkflowIcon } from "lucide-react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
-import type { NdmsManagementBlocker } from "@/api/generated/model"
+import type {
+  NdmsManagementBlocker,
+  RuntimeInterfaceUptimeSource,
+} from "@/api/generated/model"
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { Button } from "@/components/ui/button"
 import {
@@ -10,6 +13,14 @@ import {
   type NativeInterfaceModel,
   type NativeRouteBlockReason,
 } from "@/lib/native-interfaces"
+import { routerNowMs } from "@/api/router-clock"
+import { useVisibleTick } from "@/hooks/use-visible-tick"
+import { formatUptimeSince } from "@/lib/uptime-format"
+
+// The uptime is rendered as a running clock, so it needs a reason to re-render
+// every second. useVisibleTick stops while the tab is hidden, so an unattended
+// page does not burn a render per second forever.
+const UPTIME_TICK_MS = 1_000
 
 /**
  * Подробности интерфейса KeeneticOS — то, что раньше жило в раскрытой карточке.
@@ -37,6 +48,8 @@ export function NativeInterfaceDetails({
   readonly usage?: ReactNode
 }) {
   const { t, i18n } = useTranslation()
+  // Drives the running uptime clock; the value itself is read below.
+  useVisibleTick(UPTIME_TICK_MS)
   const actionability = getNativeRouteActionability(nativeInterface, {
     hasConfig,
     boundOutboundTag,
@@ -107,6 +120,18 @@ export function NativeInterfaceDetails({
           )}
         />
         <NativeInterfaceField
+          label={t("transports.nativeInterface.uptime")}
+          title={uptimeSourceTitle(
+            nativeInterface.runtime?.link_uptime_source,
+            t
+          )}
+          value={formatUptimeSince(
+            nativeInterface.runtime?.link_up_since_unix_ms,
+            t,
+            routerNowMs()
+          )}
+        />
+        <NativeInterfaceField
           label={t("transports.nativeInterface.management")}
           title={managementReadinessTitle(managementReadiness?.blockers, t)}
           value={
@@ -125,6 +150,7 @@ export function NativeInterfaceDetails({
           transmitted: t("transports.traffic.transmitted"),
           chart: t("transports.traffic.chart"),
           noTraffic: t("transports.traffic.noTraffic"),
+          stale: t("transports.traffic.stale"),
         }}
         locale={i18n.resolvedLanguage ?? i18n.language}
         showChart={false}
@@ -215,6 +241,27 @@ function booleanState(
     return unknown
   }
   return value ? whenTrue : whenFalse
+}
+
+/**
+ * Explains, on hover, how much the shown uptime is worth.
+ *
+ * The two sources are not interchangeable: a firmware-anchored value outlives
+ * a keen-pbr restart, an observed one does not. Hiding that difference would
+ * leave a reader unable to tell a genuinely short uptime from an anchor this
+ * daemon simply lost.
+ */
+function uptimeSourceTitle(
+  source: RuntimeInterfaceUptimeSource | undefined,
+  t: (key: string) => string
+): string | undefined {
+  if (source === "firmware") {
+    return t("transports.nativeInterface.uptimeFromFirmware")
+  }
+  if (source === "observed") {
+    return t("transports.nativeInterface.uptimeObserved")
+  }
+  return undefined
 }
 
 function routeBlockTitle(

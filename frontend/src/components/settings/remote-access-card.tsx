@@ -24,6 +24,7 @@ import type {
   SettingsSectionController,
   SettingsSectionState,
 } from "@/components/settings/settings-section-control"
+import { fetchWithStepUp } from "@/lib/step-up"
 
 type RemoteAccess = {
   enabled: boolean
@@ -32,6 +33,15 @@ type RemoteAccess = {
   internal_port: number
   listen?: string
   listen_reachable?: boolean
+  auth_provider?: "local" | "keenetic" | "unavailable"
+  blocked_reason?:
+    | "auth_state_unavailable"
+    | "login_disabled"
+    | "keenetic_auth_plaintext_wan"
+    | "listen_loopback"
+    | null
+  custom_port_supported?: boolean
+  supported_port?: number
 }
 
 type RemoteAccessDraft = {
@@ -72,7 +82,7 @@ function RemoteAccessCardInner(
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch("/api/system/remote-access", {
+      const response = await fetchWithStepUp("/api/system/remote-access", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled, port: Number(port) }),
@@ -86,6 +96,16 @@ function RemoteAccessCardInner(
           throw new Error(
             t("pages.settings.remoteAccess.listenLoopback", {
               listen: data.listen,
+            })
+          )
+        }
+        if (data.error === "keenetic_auth_plaintext_wan") {
+          throw new Error(t("pages.settings.remoteAccess.keeneticAuthBlocked"))
+        }
+        if (data.error === "custom_port_not_supported_safely") {
+          throw new Error(
+            t("pages.settings.remoteAccess.fixedPortHint", {
+              port: data.supported_port ?? 12121,
             })
           )
         }
@@ -103,23 +123,23 @@ function RemoteAccessCardInner(
   })
 
   const loginRequired = query.data?.login_required ?? false
+  const keeneticAuth = query.data?.auth_provider === "keenetic"
   // A panel bound to loopback cannot be published at all; from outside that
   // looks exactly like a blocked port, so it has to be said here.
   const listenReachable = query.data?.listen_reachable ?? true
-  const blocked = !loginRequired || !listenReachable
-  const getSectionState = (
-    nextDraft = draft
-  ): SettingsSectionState => {
+  const blocked = !loginRequired || !listenReachable || keeneticAuth
+  const getSectionState = (nextDraft = draft): SettingsSectionState => {
     const nextPort = Number(nextDraft.port ?? port)
+    const nextEnabled = nextDraft.enabled ?? enabled
     const dirty = Object.keys(nextDraft).length > 0
     return {
       dirty,
       valid:
         !dirty ||
+        !nextEnabled ||
         (!blocked &&
           Number.isInteger(nextPort) &&
-          nextPort >= 1 &&
-          nextPort <= 65535),
+          nextPort === (query.data?.supported_port ?? 12121)),
     }
   }
 
@@ -129,25 +149,26 @@ function RemoteAccessCardInner(
     onStateChange(getSectionState(nextDraft))
   }
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      reset: () => {
-        setDraft({})
-        onStateChange({ dirty: false, valid: true })
-      },
-      save: async () => {
-        const state = getSectionState()
-        if (!state.dirty) {
-          return
-        }
-        if (!state.valid) {
-          throw new Error(t("pages.settings.remoteAccess.portHint"))
-        }
-        await saveMutation.mutateAsync()
-      },
-    })
-  )
+  useImperativeHandle(ref, () => ({
+    reset: () => {
+      setDraft({})
+      onStateChange({ dirty: false, valid: true })
+    },
+    save: async () => {
+      const state = getSectionState()
+      if (!state.dirty) {
+        return
+      }
+      if (!state.valid) {
+        throw new Error(
+          t("pages.settings.remoteAccess.fixedPortHint", {
+            port: query.data?.supported_port ?? 12121,
+          })
+        )
+      }
+      await saveMutation.mutateAsync()
+    },
+  }))
 
   return (
     <Card size="sm">
@@ -178,13 +199,27 @@ function RemoteAccessCardInner(
           </Alert>
         ) : null}
 
+        {keeneticAuth ? (
+          <Alert className="max-w-[480px] border-warning/40 bg-warning/10">
+            <AlertTriangleIcon className="size-4 text-warning-foreground" />
+            <AlertDescription>
+              {t("pages.settings.remoteAccess.keeneticAuthBlocked")}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
         <div className="flex items-center gap-3">
           <Switch
             checked={enabled}
-            disabled={blocked}
+            disabled={blocked && !enabled}
             id="remote-access-enabled"
             onCheckedChange={(nextEnabled) =>
-              updateDraft({ enabled: nextEnabled })
+              updateDraft({
+                enabled: nextEnabled,
+                ...(nextEnabled
+                  ? { port: String(query.data?.supported_port ?? 12121) }
+                  : {}),
+              })
             }
           />
           <Label className="cursor-pointer" htmlFor="remote-access-enabled">
@@ -206,20 +241,20 @@ function RemoteAccessCardInner(
                 {t("pages.settings.remoteAccess.port")}
               </Label>
               <Input
+                disabled
                 id="remote-access-port"
                 inputMode="numeric"
-                onChange={(event) =>
-                  updateDraft({ port: event.target.value })
-                }
+                onChange={(event) => updateDraft({ port: event.target.value })}
                 value={port}
               />
               <p className="text-xs text-muted-foreground">
-                {t("pages.settings.remoteAccess.portHint")}
+                {t("pages.settings.remoteAccess.fixedPortHint", {
+                  port: query.data?.supported_port ?? 12121,
+                })}
               </p>
             </div>
           </>
         ) : null}
-
       </CardContent>
     </Card>
   )

@@ -6,16 +6,49 @@ export const enTranslation = {
     repository: "Open the official nfqws2 repository",
     description:
       "Manage nfqws2, strategies, configuration, lists, Lua scripts and logs.",
-    refresh: "Refresh",
+    refresh: "Refresh data",
     service: "nfqws2 service",
     version: "Installed version: {{version}}",
     running: "Running",
     stopped: "Not running",
     start: "Start",
     stop: "Stop",
-    restart: "Restart",
+    restart: "Restart service",
     reload: "Reload configuration",
     upgrade: "Upgrade package",
+    upgradeUnavailableTitle: "In-panel upgrade is temporarily unavailable",
+    upgradeUnavailableDescription:
+      "The panel will not run opkg until it can preserve the exact previous IPK, verify and pin the target IPK, preserve opkg state and finish rollback after a reboot. The current configuration is unchanged.",
+    captureRestorePoint: "Save restore point",
+    restoreComponent: "Restore previous files",
+    restorePointMissing:
+      "Nothing to restore yet. Files are saved automatically just before an upgrade started from this panel.",
+    interruptedTransactionTitle: "A package operation did not finish",
+    interruptedTransactionDescription:
+      "An upgrade or restore of nfqws2 started and never reported an end — most likely the router restarted while it was running. Check that nfqws2 works before upgrading again; the next upgrade will refuse until this is resolved.",
+    restoreComponentConfirmTitle: "Restore the nfqws2 files saved before the upgrade?",
+    restoreComponentConfirmDescription:
+      "The saved binary, configuration and lists are written back. If the service was running, the panel starts it on the restored binary and verifies NFQUEUE; if it was stopped, it remains stopped.",
+    restoreComponentLimitTitle: "What this does not do",
+    restoreComponentLimitDescription:
+      "Files the newer package added are left in place. This returns nfqws2 to the saved files, not the router to its exact earlier state.",
+    serviceHelp: {
+      label: "What the service buttons do",
+      restart:
+        "Stops nfqws and starts it again with the current configuration. Connections drop for a second, but everything you changed takes effect.",
+      reload:
+        "The service re-reads its configuration files without stopping, so connections survive. Enough when only lists and parameters changed.",
+      upgrade:
+        "Installs a newer version of nfqws2 itself from the repository. The button is available only when an exact, reboot-safe rollback is available.",
+      captureRestorePoint:
+        "Saves the current nfqws2 files — the binary, the configuration and the lists — so you can return to them later. An upgrade does this by itself; use this to take one before changing anything else.",
+      restoreComponent:
+        "Puts back the saved nfqws2 files and verifies the original service state, process image and NFQUEUE. This is not an exact opkg package rollback.",
+      backup:
+        "Save settings, lists, Lua scripts and strategies to a file on this computer — or restore them from such a file.",
+      refresh:
+        "Re-reads the service state from the router and shows it here. Does not touch the service itself.",
+    },
     updateAvailable: "Update {{version}} is available",
     upToDate: "The latest available nfqws2 version is installed.",
     upgradeConfirmTitle: "Update nfqws2",
@@ -28,6 +61,15 @@ export const enTranslation = {
       "Also download a copy of the original nfqws2 files to this computer",
     operationResult: "nfqws2 operation result",
     operationRunning: "The operation is running. Do not close this page.",
+    operationRunningStep: "{{step}} — do not close this page.",
+    progressStepBackup: "Saving a configuration backup",
+    progressStepCapture: "Saving the current files",
+    progressStepInstall: "Installing the package",
+    progressStepVerify: "Checking the result",
+    progressStepRollback: "Restoring the saved files",
+    progressStepStop: "Stopping nfqws2",
+    progressStepRestore: "Writing the saved files back",
+    progressStepStart: "Starting nfqws2",
     operationSucceeded: "The operation completed successfully",
     operationFailed: "The operation failed",
     operationCompleted: "The operation completed successfully.",
@@ -99,10 +141,11 @@ export const enTranslation = {
       liveStale:
         "No trustworthy fresh state is available from the running service.",
       liveStarting: "Receiving live state from the newly started service.",
-      liveWarming: "No traffic has been observed in this pool yet.",
+      liveWarming: "no traffic here yet",
       livePartial:
         "Only part of the live state was captured; the exact slot is hidden.",
-      liveSlot: "Slot {{slot}} of {{count}} across {{targets}} targets",
+      liveSlot: "Slot {{slot}} of {{count}}",
+      liveTargets: "Targets tracked right now: {{count}}",
       liveDiverged: "Rotation state differs across {{count}} targets",
       liveFailures: "Current failure counter: {{count}} · not a lifetime total",
       liveFailuresVary:
@@ -288,6 +331,8 @@ export const enTranslation = {
     activeStrategyLabel: "Currently applied:",
     activeStrategyCustom: "manually modified configuration",
     selectedForEditing: "Selected for editing: {{name}}",
+    strategyAlreadyApplied:
+      "This strategy is already applied — there is nothing to re-apply.",
     strategyAppliedAndRestarted:
       "The strategy was applied and the nfqws2 service restarted.",
     addStrategy: "New strategy",
@@ -377,6 +422,12 @@ export const enTranslation = {
     retry: "Try again",
     credentialsHint:
       "Use the sign-in method selected in keen-pbr-sb settings. When Keenetic verification is enabled, enter the router web interface credentials.",
+    stepUp: {
+      title: "Confirm your password",
+      description:
+        "This operation installs software on the router or changes how it can be reached. Enter your password again - the confirmation lasts a few minutes.",
+      confirm: "Confirm",
+    },
   },
   common: {
     // Labels of shared interface primitives. They used to be hardcoded in
@@ -389,6 +440,20 @@ export const enTranslation = {
       closePanel: "Close panel",
       close: "Close",
       skipToContent: "Skip to content",
+    },
+    // "How long it has been up" durations. Kept apart from overview.router.*
+    // on purpose: router, daemon, routing-runtime and interface uptime are
+    // four different quantities that reset for unrelated reasons.
+    uptime: {
+      // KeeneticOS's own format: HH:MM:SS, with a day count in front once it
+      // passes twenty-four hours. A second convention sitting next to the
+      // firmware's own numbers would make a reader stop and wonder whether the
+      // two mean the same thing.
+      withDays: "{{days}}d {{clock}}",
+      // Shown when no confirmed link up-transition is known. Substituting any
+      // other uptime we happen to have would report a number that resets for
+      // reasons that have nothing to do with this interface.
+      unknown: "unknown",
     },
     help: {
       about: "About this section",
@@ -637,6 +702,10 @@ export const enTranslation = {
       showChart: "Show chart",
       hideChart: "Hide chart",
       noTraffic: "No traffic yet",
+      // Shown when this interface's counters have not been updated for a
+      // while. Without it, a dead tunnel renders the same byte totals as a
+      // live one.
+      stale: "Stale: counters have not been updated for a while",
     },
     dnsDetour: "DNS through this tunnel",
     singBoxMissing: {
@@ -754,6 +823,9 @@ export const enTranslation = {
       linkState: "Link",
       linkUp: "Link up",
       linkDown: "Link down",
+      uptime: "Up for",
+      uptimeFromFirmware: "Reported by KeeneticOS: survives a keen-pbr restart",
+      uptimeObserved: "Seen by this daemon: resets when it restarts",
       latency: "Latency",
       boundRoute: "Route",
       routeNotConfigured: "Not configured",
@@ -1006,9 +1078,15 @@ export const enTranslation = {
         description:
           "Services are being queried; current state will appear automatically.",
       },
-      degraded: {
+      warning: {
         title: "Attention required",
-        description: "A routing, DNS, or service health check has failed.",
+        description:
+          "Services are running and traffic flows. One thing is worth a look: a stopped tunnel, a group failover, or an unsaved draft.",
+      },
+      degraded: {
+        title: "Something is broken",
+        description:
+          "A service, DNS, or routing is down — or a list has no working route left.",
       },
       routing: "Routing",
       configuration: "Lists: {{lists}} · Rules: {{rules}}",
@@ -1057,6 +1135,13 @@ export const enTranslation = {
       restart: "Restart",
       restartRequested: "Restart requested",
       restartComplete: "Restart complete: routing and DNS are ready",
+      // The command's terminal result. A toast holds one line - enough to say
+      // a restart failed, nowhere near enough to say why.
+      outcomeSucceeded: "{{service}}: restart succeeded",
+      outcomeFailed: "{{service}}: restart failed",
+      outcomeExitCode: "Exit code: {{code}}",
+      outcomeNoExitCode: "No exit code reported",
+      outcomeNoOutput: "The command produced no output.",
       restartFailed: "Restart failed",
       restartFailedDetail: "Restart failed: {{error}}",
       switchFailed: "Could not switch the service",
@@ -1154,7 +1239,7 @@ export const enTranslation = {
         degraded: "The route is responding unreliably",
         unavailable: "No route is currently available",
         member: "{{name}}: {{reason}}",
-        open: "Open routes and groups",
+        open: "Open “VPN, proxies, groups”",
       },
       members: "{{count}} in group",
       kind: {
@@ -1581,12 +1666,16 @@ export const enTranslation = {
         port: "External port",
         portHint:
           "The port the panel answers on from outside. Pick something non-obvious.",
+        fixedPortHint:
+          "Only port {{port}} is available until custom-port filtering can be verified without exposing the panel's direct port.",
         warning:
           "The panel becomes reachable by anyone who knows the address and port, with only the password protecting it. Use this only if you accept that risk.",
         loginDisabled:
           "Turn on login first. Without it the panel would sit on the internet with no password at all.",
         listenLoopback:
           "The panel listens on {{listen}}, an address that only accepts connections from the router itself, so it cannot be published. Set api.listen to 0.0.0.0:12121 in config.json and restart the service.",
+        keeneticAuthBlocked:
+          "Internet access cannot be enabled with Router account login: the router administrator password would cross plaintext WAN HTTP. Use the separate keen-pbr-sb password or keep access local.",
         save: "Save",
         saved: "Access settings saved",
       },
@@ -1664,6 +1753,10 @@ export const enTranslation = {
           "Enter the router credentials: they are verified before saving so you cannot lock yourself out.",
         localStoreHint:
           "Set the login and password you will use for keen-pbr-sb.",
+        remoteAccessConflict:
+          "Turn off Internet access and wait until its firewall state is verified closed before switching to the router account.",
+        systemAuthUnavailable:
+          "Router-account login cannot be enabled safely yet: keen-pbr-sb could not verify both the system login and its administrator-lockout protection. The separate password was preserved.",
         save: "Save login method",
         saved: "Login settings saved, sign in again",
       },
@@ -1699,6 +1792,9 @@ export const enTranslation = {
           "Clear learned domain addresses on full apply",
         clearDynamicSetsOnApplyHint:
           "Clear dynamic addresses learned by dnsmasq during a full config apply. Disable this to preserve them until TTL expiry and avoid a cold routing start.",
+        ttlBypassEnabledLabel: "Leave the TTL alone on packets nfqws2 handled",
+        ttlBypassEnabledHint:
+          "Keenetic firmware can rewrite the TTL. Every nfqws2 strategy depends on it: the decoy packet has to expire in transit, or the circumvention breaks. Leave this on unless you know otherwise. Turning it off removes the rule rather than merely stopping future installs.",
         ipv6EnabledLabel: "Enable IPv6 support",
         ipv6EnabledHint:
           "Install IPv6 routes, firewall rules, and dnsmasq targets. When explicitly disabled, managed dnsmasq suppresses AAAA and SVCB/HTTPS (types 64/65): A records keep working, but HTTP/3 and ECH discovery may be unavailable.",
@@ -1848,7 +1944,19 @@ export const enTranslation = {
           "The saved IPK and the configuration that came with it will be installed. The current package stays available to roll forward again.",
         rollbackConfirmAction: "Restore the previous IPK",
         rollbackButton: "One-click rollback",
-        rollbackUnavailable: "Appears after a successful managed update",
+        rollbackUnavailable: "Rollback is not available",
+        rollbackReasonRecoveryPending:
+          "An interrupted update is still being recovered. Finish recovery before counting on a rollback.",
+        rollbackReasonRecoveryUnknown:
+          "The rescue store cannot say what is installed. Run rescue recovery before relying on a rollback.",
+        rollbackReasonHelperMissing:
+          "The rescue helper is not installed, so there is nothing here to restore with.",
+        rollbackReasonNeverCaptured:
+          "No previous package has been saved yet. Only an update started from this panel saves one, so a package installed with opkg leaves nothing to roll back to.",
+        rollbackReasonPackageUnverified:
+          "The saved previous package does not match its checksum and will not be installed.",
+        rollbackReasonSnapshotUnverified:
+          "The configuration saved alongside the previous package is incomplete, so restoring it would not reproduce that version.",
         rollbackStarting: "Restoring the previous package",
         rollbackFailed: "Could not start the package rollback",
         downloadBackupBefore: "Download a backup before installing",
@@ -2154,7 +2262,7 @@ export const enTranslation = {
           "The route “{{name}}” is ready. Services can be added later from the list catalogue.",
         openDashboard: "Open dashboard",
         openTunnels: "Open VPN and proxies",
-        openRules: "Open rules",
+        openRules: "Open routing rules",
       },
     },
     routingRules: {

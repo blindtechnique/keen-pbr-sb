@@ -128,6 +128,7 @@ define Package/keen-pbr/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh $(1)/opt/usr/lib/keen-pbr/rescue-update.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh $(1)/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh $(1)/opt/usr/lib/keen-pbr/update-lock.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/lifecycle-lock.sh $(1)/opt/usr/lib/keen-pbr/lifecycle-lock.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh $(1)/opt/usr/lib/keen-pbr/portable-stat.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/install-naive-component.sh $(1)/opt/usr/share/keen-pbr/install-naive-component.sh
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/catalog.json $(1)/opt/usr/share/keen-pbr/catalog.json
@@ -198,6 +199,7 @@ define Package/keen-pbr-headless/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-update.sh $(1)/opt/usr/lib/keen-pbr/rescue-update.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/rescue-startup-guard.sh $(1)/opt/usr/lib/keen-pbr/rescue-startup-guard.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/update-lock.sh $(1)/opt/usr/lib/keen-pbr/update-lock.sh
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/lifecycle-lock.sh $(1)/opt/usr/lib/keen-pbr/lifecycle-lock.sh
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/portable-stat.sh $(1)/opt/usr/lib/keen-pbr/portable-stat.sh
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/usr/lib/keen-pbr/dnsmasq.conf.template $(1)/opt/usr/lib/keen-pbr/dnsmasq.conf.template
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/packages/keenetic/keen-pbr/files/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh $(1)/opt/etc/ndm/netfilter.d/50-keen-pbr-routing.sh

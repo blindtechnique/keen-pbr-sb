@@ -247,6 +247,19 @@ std::string remote_access_session_cookie(
     return header.substr(0, separator);
 }
 
+void grant_step_up(httplib::Client& client,
+                   const httplib::Headers& headers,
+                   const std::string& username,
+                   const std::string& password) {
+    const auto response = client.Post(
+        "/api/auth/step-up", headers,
+        nlohmann::json{{"username", username}, {"password", password}}.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body).at("granted").get<bool>());
+}
+
 } // namespace
 
 TEST_CASE("remote access POST defers its firewall writer to the control retry") {
@@ -282,7 +295,7 @@ TEST_CASE("remote access POST defers its firewall writer to the control retry") 
     httplib::Client client("127.0.0.1", port);
     const auto enabled = client.Post(
         "/api/system/remote-access",
-        R"({"enabled":true,"port":15443})",
+        R"({"enabled":true,"port":12121})",
         "application/json");
     REQUIRE(enabled != nullptr);
     const auto enabled_body = nlohmann::json::parse(enabled->body);
@@ -304,7 +317,7 @@ TEST_CASE("remote access POST defers its firewall writer to the control retry") 
 
     const auto disabled = client.Post(
         "/api/system/remote-access",
-        R"({"enabled":false,"port":15443})",
+        R"({"enabled":false,"port":12121})",
         "application/json");
     server.stop();
 
@@ -320,6 +333,118 @@ TEST_CASE("remote access POST defers its firewall writer to the control retry") 
         "0.0.0.0:12121");
     CHECK(disabled_apply.apply.applied);
     CHECK(disabled_apply.status.state == RemoteAccessRuntimeState::closed);
+    CHECK(remove_remote_access_rules());
+}
+
+TEST_CASE("remote access refuses a custom port instead of exposing direct 12121") {
+    RemoteAccessTempDir directory;
+    RemoteAccessRunnerGuard runner_guard;
+    const auto settings_path = directory.path / "remote-access.json";
+    EnvironmentVariableGuard settings_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", settings_path.string());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_TEST_REMOTE_AUTH_FILE",
+        (directory.path / "auth.json").string());
+    {
+        std::ofstream auth(directory.path / "auth.json");
+        auth << R"({"enabled":true,"provider":"local"})";
+    }
+
+    std::atomic<unsigned int> command_count{0};
+    set_remote_access_command_runner_for_testing(
+        [&command_count](const std::vector<std::string>&) {
+            command_count.fetch_add(1U, std::memory_order_relaxed);
+            return 0;
+        });
+
+    SseBroadcaster broadcaster;
+    auto context = make_remote_access_context(broadcaster);
+    ApiConfig config;
+    const int port =
+        next_remote_access_port.fetch_add(1, std::memory_order_relaxed);
+    config.listen = "127.0.0.1:" + std::to_string(port);
+    ApiServer server(config);
+    register_remote_access_handler(server, context);
+    server.start();
+
+    httplib::Client client("127.0.0.1", port);
+    const auto response = client.Post(
+        "/api/system/remote-access",
+        R"({"enabled":true,"port":15443})",
+        "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("error") == "custom_port_not_supported_safely");
+    CHECK(body.at("supported_port") == 12121);
+    CHECK(command_count.load(std::memory_order_relaxed) == 0U);
+    CHECK_FALSE(std::filesystem::exists(settings_path));
+}
+
+TEST_CASE("Keenetic auth provider keeps remote access fail-closed") {
+    RemoteAccessTempDir directory;
+    RemoteAccessRunnerGuard runner_guard;
+    const auto settings_path = directory.path / "remote-access.json";
+    const auto auth_path = directory.path / "auth.json";
+    EnvironmentVariableGuard settings_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", settings_path.string());
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_TEST_REMOTE_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard wan("KEEN_PBR_TEST_REMOTE_WAN", "wan-test");
+    EnvironmentVariableGuard wait_mode(
+        "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
+    {
+        std::ofstream settings(settings_path);
+        settings << R"({"enabled":true,"port":12121})";
+    }
+    {
+        std::ofstream auth(auth_path);
+        auth << R"({"enabled":true,"provider":"keenetic"})";
+    }
+
+    FakeIptables firewall;
+    set_remote_access_command_runner_for_testing(
+        [&firewall](const std::vector<std::string>& command) {
+            return firewall.run(command);
+        });
+
+    SseBroadcaster broadcaster;
+    auto context = make_remote_access_context(broadcaster);
+    ApiConfig config;
+    const int api_port =
+        next_remote_access_port.fetch_add(1, std::memory_order_relaxed);
+    config.listen = "127.0.0.1:" + std::to_string(api_port);
+    ApiServer server(config);
+    register_remote_access_handler(server, context);
+    server.start();
+    httplib::Client client("127.0.0.1", api_port);
+    const auto status = client.Get("/api/system/remote-access");
+    REQUIRE(status != nullptr);
+    const auto status_body = nlohmann::json::parse(status->body);
+    CHECK(status_body.at("auth_provider") == "keenetic");
+    CHECK(status_body.at("blocked_reason") ==
+          "keenetic_auth_plaintext_wan");
+    CHECK_FALSE(
+        status_body.at("keenetic_auth_switch_allowed").get<bool>());
+    CHECK_FALSE(status_body.at("custom_port_supported").get<bool>());
+    CHECK(status_body.at("supported_port") == 12121);
+    const auto enable = client.Post(
+        "/api/system/remote-access",
+        R"({"enabled":true,"port":12121})",
+        "application/json");
+    server.stop();
+    REQUIRE(enable != nullptr);
+    CHECK(nlohmann::json::parse(enable->body).at("error") ==
+          "keenetic_auth_plaintext_wan");
+
+    const auto result =
+        refresh_remote_access_reconcile("0.0.0.0:12121");
+    CHECK_FALSE(result.apply.applied);
+    CHECK(result.status.state == RemoteAccessRuntimeState::degraded);
+    CHECK_FALSE(result.status.recovery_owned);
+    CHECK(result.status.error.find("plaintext WAN HTTP") !=
+          std::string::npos);
     CHECK(remove_remote_access_rules());
 }
 
@@ -354,7 +479,7 @@ TEST_CASE("remote access reports pending and schedules an unapplied firewall sta
     httplib::Client client("127.0.0.1", port);
     const auto response = client.Post(
         "/api/system/remote-access",
-        R"({"enabled":true,"port":15443})",
+        R"({"enabled":true,"port":12121})",
         "application/json");
     server.stop();
 
@@ -379,7 +504,7 @@ TEST_CASE("remote access reports pending and schedules an unapplied firewall sta
     REQUIRE(stored_file.is_open());
     const auto stored = nlohmann::json::parse(stored_file);
     CHECK(stored.at("enabled").get<bool>());
-    CHECK(stored.at("port") == 15443);
+    CHECK(stored.at("port") == 12121);
 }
 
 TEST_CASE("remote access retries with timed hints and clears degraded state on success") {
@@ -395,7 +520,7 @@ TEST_CASE("remote access retries with timed hints and clears degraded state on s
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     { std::ofstream auth(directory.path / "auth.json"); auth << R"({"enabled":true})"; }
-    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":12121})"; }
 
     RemoteAccessLogCapture logs;
     const auto error_count = [&logs]() {
@@ -484,7 +609,7 @@ TEST_CASE("remote access preserves the exact failed firewall phase") {
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     { std::ofstream auth(directory.path / "auth.json"); auth << R"({"enabled":true})"; }
-    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":12121})"; }
 
     FakeIptables firewall;
     bool fail_filter_create = true;
@@ -532,7 +657,7 @@ TEST_CASE("remote access permanent failure retires transient recovery ownership"
     }
     {
         std::ofstream settings(directory.path / "remote-access.json");
-        settings << R"({"enabled":true,"port":15443})";
+        settings << R"({"enabled":true,"port":12121})";
     }
 
     FakeIptables firewall;
@@ -582,7 +707,7 @@ TEST_CASE("enabling authentication revives a closed remote desired state") {
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     {
         std::ofstream settings(settings_path);
-        settings << R"({"enabled":true,"port":15443})";
+        settings << R"({"enabled":true,"port":12121})";
     }
     {
         std::ofstream auth(auth_path);
@@ -713,6 +838,66 @@ TEST_CASE("auth enable queues cleanup for an uninitialized remote runtime") {
     CHECK(command_count.load(std::memory_order_relaxed) == 0U);
 }
 
+TEST_CASE("auth settings need step-up and cannot switch to Keenetic while WAN is desired") {
+    RemoteAccessTempDir directory;
+    RemoteAccessRunnerGuard runner_guard;
+    const auto settings_path = directory.path / "remote-access.json";
+    const auto auth_path = directory.path / "auth.json";
+    EnvironmentVariableGuard settings_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", settings_path.string());
+    EnvironmentVariableGuard remote_auth_file(
+        "KEEN_PBR_TEST_REMOTE_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard server_auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    {
+        std::ofstream settings(settings_path);
+        settings << R"({"enabled":true,"port":12121})";
+    }
+    {
+        std::ofstream auth(auth_path);
+        auth << R"({"enabled":true,"provider":"local","username":"admin","password":"secret"})";
+    }
+
+    ApiConfig config;
+    const int port =
+        next_remote_access_port.fetch_add(1, std::memory_order_relaxed);
+    config.listen = "127.0.0.1:" + std::to_string(port);
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", port);
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers headers{
+        {"Cookie", remote_access_session_cookie(*login)},
+    };
+    const auto request_body =
+        R"({"enabled":true,"provider":"keenetic","username":"admin","password":"router-secret"})";
+
+    const auto without_step_up = client.Post(
+        "/api/auth/settings", headers, request_body, "application/json");
+    REQUIRE(without_step_up != nullptr);
+    CHECK(without_step_up->status == 403);
+    CHECK(nlohmann::json::parse(without_step_up->body).at("error") ==
+          "step_up_required");
+
+    grant_step_up(client, headers, "admin", "secret");
+    const auto blocked = client.Post(
+        "/api/auth/settings", headers, request_body, "application/json");
+    server.stop();
+
+    REQUIRE(blocked != nullptr);
+    CHECK(blocked->status == 409);
+    CHECK(nlohmann::json::parse(blocked->body).at("error") ==
+          "remote_access_incompatible_with_keenetic_auth");
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("provider") == "local");
+    CHECK(stored.at("password") == "secret");
+}
+
 TEST_CASE("remote access shares the middleware auth file authority") {
     RemoteAccessTempDir directory;
     RemoteAccessRunnerGuard runner_guard;
@@ -726,7 +911,7 @@ TEST_CASE("remote access shares the middleware auth file authority") {
     EnvironmentVariableGuard wan("KEEN_PBR_TEST_REMOTE_WAN", "wan-test");
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
-    { std::ofstream settings(settings_path); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(settings_path); settings << R"({"enabled":true,"port":12121})"; }
     { std::ofstream auth(production_auth_path); auth << R"({"enabled":true})"; }
     { std::ofstream auth(test_auth_path); auth << R"({"enabled":false})"; }
 
@@ -772,7 +957,7 @@ TEST_CASE("remote writer waits for auth disk and runtime publication") {
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     {
         std::ofstream settings(settings_path);
-        settings << R"({"enabled":true,"port":15443})";
+        settings << R"({"enabled":true,"port":12121})";
     }
     {
         std::ofstream auth(auth_path);
@@ -945,7 +1130,7 @@ TEST_CASE("remote access releases single-flight ownership after runner exception
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     { std::ofstream auth(directory.path / "auth.json"); auth << R"({"enabled":true})"; }
-    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":12121})"; }
 
     bool throw_once = true;
     FakeIptables firewall;
@@ -984,7 +1169,7 @@ TEST_CASE("remote access coalesces a concurrent refresh into one trailing pass")
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     { std::ofstream auth(directory.path / "auth.json"); auth << R"({"enabled":true})"; }
-    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":12121})"; }
 
     FakeIptables firewall;
     bool reentered = false;
@@ -1034,7 +1219,7 @@ TEST_CASE("remote access counts a failed attempt during a coalesced refresh") {
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     { std::ofstream auth(directory.path / "auth.json"); auth << R"({"enabled":true})"; }
-    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":12121})"; }
 
     bool reentered = false;
     RemoteAccessReconcileResult nested;
@@ -1071,7 +1256,7 @@ TEST_CASE("remote access retains an API retry hint until scheduler registration"
     EnvironmentVariableGuard wait_mode(
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     { std::ofstream auth(directory.path / "auth.json"); auth << R"({"enabled":true})"; }
-    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":15443})"; }
+    { std::ofstream settings(directory.path / "remote-access.json"); settings << R"({"enabled":true,"port":12121})"; }
 
     set_remote_access_command_runner_for_testing(
         [](const std::vector<std::string>&) { return 4; });
@@ -1152,6 +1337,7 @@ TEST_CASE("auth disable waits for verified startup remote cleanup") {
     const httplib::Headers headers{
         {"Cookie", remote_access_session_cookie(*login)},
     };
+    grant_step_up(client, headers, "admin", "secret");
     const auto disable = client.Post(
         "/api/auth/settings",
         headers,
@@ -1220,6 +1406,7 @@ TEST_CASE("auth disable is staged so existing connections stay protected") {
     const httplib::Headers headers{
         {"Cookie", remote_access_session_cookie(*login)},
     };
+    grant_step_up(keep_alive_client, headers, "admin", "secret");
     const auto disable = keep_alive_client.Post(
         "/api/auth/settings",
         headers,
@@ -1305,6 +1492,7 @@ TEST_CASE("credential rotation revokes admitted SSE cohorts") {
     const httplib::Headers headers{
         {"Cookie", remote_access_session_cookie(*login)},
     };
+    grant_step_up(client, headers, "admin", "old-secret");
     const auto rotated = client.Post(
         "/api/auth/settings",
         headers,
@@ -1391,6 +1579,7 @@ TEST_CASE(
     const httplib::Headers headers{
         {"Cookie", remote_access_session_cookie(*login)},
     };
+    grant_step_up(login_client, headers, "admin", "old-secret");
 
     int stream_status = 0;
     std::thread stream_thread([&]() {
@@ -1454,20 +1643,44 @@ TEST_CASE("queued credential rotation loses revoked session authority") {
     const httplib::Headers headers{
         {"Cookie", remote_access_session_cookie(*login)},
     };
+    grant_step_up(login_client, headers, "admin", "old-secret");
 
     std::mutex barrier_mutex;
     std::condition_variable barrier_cv;
     bool first_disk_published = false;
+    bool first_admitted = false;
     bool second_admitted = false;
-    bool release_first = false;
+    bool release_first_admission = false;
+    bool release_second_admission = false;
+    int admission_sequence = 0;
+    struct AuthSettingsHooksReset {
+        ~AuthSettingsHooksReset() {
+            reset_auth_settings_admission_hook_for_testing();
+            reset_auth_settings_publication_hook_for_testing();
+        }
+    } auth_settings_hooks_reset;
     set_auth_settings_publication_hook_for_testing(
         [&](AuthSettingsPublicationStage stage) {
             if (stage != AuthSettingsPublicationStage::disk_published) return;
-            std::unique_lock<std::mutex> lock(barrier_mutex);
+            const std::lock_guard<std::mutex> lock(barrier_mutex);
             first_disk_published = true;
             barrier_cv.notify_all();
-            barrier_cv.wait(lock, [&]() { return release_first; });
         });
+    set_auth_settings_admission_hook_for_testing([&]() {
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        const int sequence = ++admission_sequence;
+        if (sequence == 1) {
+            first_admitted = true;
+            barrier_cv.notify_all();
+            barrier_cv.wait(
+                lock, [&]() { return release_first_admission; });
+        } else if (sequence == 2) {
+            second_admitted = true;
+            barrier_cv.notify_all();
+            barrier_cv.wait(
+                lock, [&]() { return release_second_admission; });
+        }
+    });
 
     int first_status = 0;
     int second_status = 0;
@@ -1479,15 +1692,26 @@ TEST_CASE("queued credential rotation loses revoked session authority") {
             "application/json");
         if (response) first_status = response->status;
     });
+    bool first_reached_admission = false;
     {
         std::unique_lock<std::mutex> lock(barrier_mutex);
-        barrier_cv.wait(lock, [&]() { return first_disk_published; });
+        first_reached_admission = barrier_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return first_admitted; });
     }
-    set_auth_settings_admission_hook_for_testing([&]() {
-        const std::lock_guard<std::mutex> lock(barrier_mutex);
-        second_admitted = true;
+    if (!first_reached_admission) {
+        {
+            const std::lock_guard<std::mutex> lock(barrier_mutex);
+            release_first_admission = true;
+            release_second_admission = true;
+        }
         barrier_cv.notify_all();
-    });
+        first.join();
+        server.stop();
+        REQUIRE(first_reached_admission);
+        return;
+    }
     std::thread second([&]() {
         httplib::Client client("127.0.0.1", port);
         const auto response = client.Post(
@@ -1496,16 +1720,33 @@ TEST_CASE("queued credential rotation loses revoked session authority") {
             "application/json");
         if (response) second_status = response->status;
     });
+    bool second_reached_admission = false;
     {
         std::unique_lock<std::mutex> lock(barrier_mutex);
-        barrier_cv.wait(lock, [&]() { return second_admitted; });
-        release_first = true;
+        second_reached_admission = barrier_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return second_admitted; });
+        release_first_admission = true;
+    }
+    barrier_cv.notify_all();
+
+    bool first_reached_publication = false;
+    {
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        first_reached_publication = barrier_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return first_disk_published; });
+        release_second_admission = true;
     }
     barrier_cv.notify_all();
     first.join();
     second.join();
     server.stop();
 
+    REQUIRE(second_reached_admission);
+    REQUIRE(first_reached_publication);
     CHECK(first_status == 200);
     CHECK(second_status == 401);
     const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
@@ -1542,6 +1783,7 @@ TEST_CASE("verified login cannot publish a session after auth rotation") {
     const httplib::Headers admin_headers{
         {"Cookie", remote_access_session_cookie(*admin_login)},
     };
+    grant_step_up(admin_client, admin_headers, "admin", "old-secret");
 
     std::mutex barrier_mutex;
     std::condition_variable barrier_cv;
@@ -1553,6 +1795,11 @@ TEST_CASE("verified login cannot publish a session after auth rotation") {
         barrier_cv.notify_all();
         barrier_cv.wait(lock, [&]() { return release_old_login; });
     });
+    struct AuthLoginHookReset {
+        ~AuthLoginHookReset() {
+            reset_auth_login_verified_hook_for_testing();
+        }
+    } auth_login_hook_reset;
 
     int stale_login_status = 0;
     std::string stale_set_cookie;
@@ -1568,9 +1815,26 @@ TEST_CASE("verified login cannot publish a session after auth rotation") {
                 response->get_header_value("Set-Cookie");
         }
     });
+    bool old_login_reached_verification = false;
     {
         std::unique_lock<std::mutex> lock(barrier_mutex);
-        barrier_cv.wait(lock, [&]() { return old_login_verified; });
+        old_login_reached_verification = barrier_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return old_login_verified; });
+        if (!old_login_reached_verification) {
+            // Never strand the request thread when the admission prerequisite
+            // fails. The bounded REQUIRE below then reports the real failure
+            // instead of hanging the entire monolithic suite.
+            release_old_login = true;
+        }
+    }
+    if (!old_login_reached_verification) {
+        barrier_cv.notify_all();
+        stale_login.join();
+        server.stop();
+        REQUIRE(old_login_reached_verification);
+        return;
     }
 
     httplib::Client rotate_client("127.0.0.1", port);
@@ -1584,7 +1848,6 @@ TEST_CASE("verified login cannot publish a session after auth rotation") {
     }
     barrier_cv.notify_all();
     stale_login.join();
-    reset_auth_login_verified_hook_for_testing();
     server.stop();
 
     REQUIRE(rotated != nullptr);
@@ -1799,7 +2062,7 @@ TEST_CASE("disabled auth fences retained rules until cleanup is verified") {
         "KEEN_PBR_TEST_REMOTE_XTABLES_WAIT", "timeout");
     {
         std::ofstream settings(settings_path);
-        settings << R"({"enabled":true,"port":15443})";
+        settings << R"({"enabled":true,"port":12121})";
     }
     {
         std::ofstream auth(auth_path);
@@ -1882,7 +2145,7 @@ TEST_CASE("remote enable is rejected after authentication was disabled") {
     httplib::Client client("127.0.0.1", port);
     const auto response = client.Post(
         "/api/system/remote-access",
-        R"({"enabled":true,"port":15443})",
+        R"({"enabled":true,"port":12121})",
         "application/json");
     server.stop();
 
@@ -1934,6 +2197,7 @@ TEST_CASE("concurrent remote enable wins before auth disable can publish") {
     const httplib::Headers headers{
         {"Cookie", remote_access_session_cookie(*login)},
     };
+    grant_step_up(login_client, headers, "admin", "secret");
 
     std::mutex barrier_mutex;
     std::condition_variable barrier_cv;
@@ -1955,7 +2219,7 @@ TEST_CASE("concurrent remote enable wins before auth disable can publish") {
         const auto response = client.Post(
             "/api/system/remote-access",
             headers,
-            R"({"enabled":true,"port":15443})",
+            R"({"enabled":true,"port":12121})",
             "application/json");
         if (response) {
             remote_status = response->status;
@@ -2024,7 +2288,7 @@ TEST_CASE("remote access desired POST cannot overtake a claimed bell transition"
     }
     {
         std::ofstream settings(directory.path / "remote-access.json");
-        settings << R"({"enabled":true,"port":15443})";
+        settings << R"({"enabled":true,"port":12121})";
     }
 
     FakeIptables firewall;

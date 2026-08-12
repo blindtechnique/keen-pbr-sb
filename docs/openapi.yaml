@@ -1522,6 +1522,25 @@ components:
             Whether firewall prefilter rules should bypass packets that already carry
             a fwmark. Defaults to `true` when omitted or set to `null`.
           example: true
+        ttl_bypass_enabled:
+          type: boolean
+          nullable: true
+          description: >
+            Whether keen-pbr keeps its owned `RETURN` first in the firmware's
+            TTL chain, so a packet nfqws2 already handled is not stripped of the
+            TTL its desync depends on. Defaults to `true` when omitted or set to
+            `null`.
+
+            On by default because every nfqws2 strategy this project ships uses
+            a TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks
+            all of them at once; an opt-in switch would leave the fix off for
+            everyone who never learns it exists. This is an escape hatch, not a
+            feature flag.
+
+            Turning it off removes the rule rather than merely stopping future
+            installs: a rule left behind would keep working while the interface
+            says it is off.
+          example: true
         clear_dynamic_sets_on_apply:
           type: boolean
           nullable: true
@@ -2975,6 +2994,19 @@ components:
         - up: interface is administratively up
         - down: interface is not administratively up
 
+    RuntimeInterfaceUptimeSource:
+      type: string
+      enum: [firmware, observed]
+      description: >
+        Which confirmed up-transition the anchor was derived from.
+
+        - firmware: the KeeneticOS per-interface uptime counter. The firmware
+          owns it, so it survives a keen-pbr restart, a configuration apply and
+          a UI reload.
+        - observed: a down-to-up edge this daemon saw itself. Precise and
+          immediate, but it only covers transitions that happened while this
+          process was running.
+
     RuntimeInterfaceTrafficPoint:
       type: object
       required: [age_ms, rx_bits_per_second, tx_bits_per_second]
@@ -3064,6 +3096,20 @@ components:
           type: integer
           format: int64
           minimum: 0
+        observed_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Unix timestamp of the moment THIS interface's counters were read.
+            It is the only honest answer to "when was this measured": the batch
+            timestamp below describes when the round was dispatched, so an
+            interface whose own read failed or was skipped would otherwise look
+            exactly as fresh as one that succeeded. Absent when this round
+            produced no successful reading for the interface, and absent from
+            older daemons - clients then fall back to the batch timestamp and
+            must not present the result as per-interface freshness.
+          example: 1754812800000
 
     RuntimeInterfaceTrafficUpdate:
       type: object
@@ -3073,7 +3119,12 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Unix timestamp shared by this compact sampling batch.
+          description: >
+            Unix timestamp of this compact sampling batch as a whole, i.e. when
+            the round was dispatched. Retained for older clients and as a
+            fallback. Clients that can read RuntimeInterfaceTrafficSample's
+            observed_at_unix_ms must prefer it: this value says nothing about
+            whether any individual interface was measured successfully.
         interfaces:
           type: array
           items:
@@ -3113,6 +3164,21 @@ components:
             type: string
           description: Best-effort IPv6 addresses in CIDR form.
           example: ["fe80::1/64"]
+        link_up_since_unix_ms:
+          type: integer
+          format: int64
+          description: >
+            Unix timestamp of the confirmed link or tunnel up-transition this
+            interface has been up since. Absent when no authoritative
+            transition is known - clients must then render the uptime as
+            unknown and must never substitute daemon, routing-runtime or router
+            uptime, which are separate quantities that reset for unrelated
+            reasons. The value is an anchor rather than a duration precisely so
+            that a UI refresh, a configuration apply and a daemon restart
+            cannot move it.
+          example: 1754812800000
+        link_uptime_source:
+          $ref: "#/components/schemas/RuntimeInterfaceUptimeSource"
         traffic:
           $ref: "#/components/schemas/RuntimeInterfaceTraffic"
 
@@ -4139,6 +4205,95 @@ components:
           enum: [iptables, nftables]
           description: Active firewall backend.
           example: "nftables"
+        ttl_bypass_state:
+          type: string
+          enum:
+            - chain_absent
+            - unknown
+            - unsupported
+            - active
+            - conflict
+            - missing
+            - disabled
+          description: >
+            State of the owned RETURN keen-pbr keeps first in the firmware's
+            TTL chain so a packet nfqws2 already handled is not stripped of the
+            TTL its desync depends on.
+
+            The values are deliberately distinct because they call for
+            different responses:
+
+            - chain_absent: the firmware chain is not there, so there is
+              nothing to bypass. Routine, no action.
+            - unknown: the chain could not be inspected - a held xtables lock,
+              a timeout. Says nothing about the chain; do not read it as "fine".
+            - unsupported: a kernel match this needs is not registered. We
+              deliberately write nothing rather than install an unverified rule.
+            - active: our rule is present exactly once and first.
+            - conflict: it drifted or was duplicated, i.e. something is
+              rewriting the chain underneath us. Repaired on the next apply,
+              but worth knowing about.
+            - missing: absent and installable; the next apply installs it.
+            - disabled: the operator turned it off. Distinct from `missing` and
+              `unsupported` on purpose: those say we cannot, this says we were
+              told not to, and an operator needs to tell an instruction apart
+              from an inability. Any rule of ours is removed when this is
+              reported - off means gone, not "stop installing".
+          example: "chain_absent"
+        ttl_bypass_detail:
+          type: string
+          description: >
+            Why the state is what it is, when the state alone is not enough.
+            Empty for the uninteresting states.
+        system_auth_state:
+          type: string
+          enum:
+            - usable
+            - endpoint_unproven
+            - loopback_not_accepted
+            - challenge_absent
+            - firmware_policy_unknown
+            - lockout_budget_unsafe
+          description: >
+            Whether keen-pbr may rely on the router's own authentication
+            instead of the password kept in auth.json.
+
+            Reported before anything is retired, because the risk is
+            asymmetric: keeping a local password one day too long is an
+            inconvenience, while deleting it before the system verifier is
+            proven leaves SSH as the owner's only way back into the panel.
+
+            - usable: every check passed. The switch would be safe to make;
+              this does not perform it.
+            - endpoint_unproven: no router-owned address was proven to serve
+              the Keenetic challenge.
+            - loopback_not_accepted: only loopback was available. The firmware
+              answers /auth with 403 there and 401 with a challenge on the LAN
+              address, so loopback can never verify anybody.
+            - challenge_absent: something answers but issues no realm and
+              challenge, i.e. an unrelated service on a stale port.
+            - firmware_policy_unknown: the firmware lockout policy could not be
+              read, so our own limiter cannot be proven to stay inside it.
+            - lockout_budget_unsafe: we would forward enough failures to trip
+              the firmware's lockout. Because keen-pbr reaches the firmware
+              from the router itself, that would lock the administrator out of
+              KeeneticOS rather than the person guessing.
+          example: "usable"
+        system_auth_detail:
+          type: string
+          description: >
+            Why the state is what it is, including the measured margin between
+            the failures we would forward and the firmware's threshold. Empty
+            when the state alone is enough.
+        system_auth_forwarded_failures_per_window:
+          type: integer
+          format: int64
+          minimum: 0
+          description: >
+            Worst case failed logins forwarded to the firmware inside its
+            observation window. Shown next to the threshold so an operator sees
+            the margin rather than only the verdict.
+          example: 4
         firewall:
           $ref: "#/components/schemas/FirewallChain"
         firewall_rules:

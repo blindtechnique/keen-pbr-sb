@@ -18,9 +18,17 @@ class InterfaceTrafficSampler {
 public:
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
+    // Rates are derived on the steady clock so an NTP step cannot invent a
+    // gigabit spike, but nothing outside this process can read a steady
+    // instant. Publication therefore needs a wall stamp taken at the same
+    // moment, per interface - not one taken later while serializing, which is
+    // exactly what collapses independent measurements into a single batch.
+    using WallClock = std::chrono::system_clock;
+    using WallTimePoint = WallClock::time_point;
     using CounterReader =
         std::function<std::optional<uint64_t>(const std::string& path)>;
     using NowProvider = std::function<TimePoint()>;
+    using WallNowProvider = std::function<WallTimePoint()>;
 
     static constexpr size_t kMaxHistoryPoints = 120;
 
@@ -35,6 +43,11 @@ public:
 
     struct TrafficPoint {
         TimePoint sampled_at;
+        // Wall-clock twin of sampled_at, captured in the same breath. This is
+        // what "last measurement" means for THIS interface; it is deliberately
+        // not compared by same_public_state, since it differs on every sample
+        // and would defeat change detection.
+        WallTimePoint observed_at;
         uint64_t rx_bytes{0};
         uint64_t tx_bytes{0};
         std::optional<uint64_t> rx_bits_per_second;
@@ -57,7 +70,8 @@ public:
     explicit InterfaceTrafficSampler(
         CounterReader reader = {},
         NowProvider now = {},
-        size_t history_limit = kMaxHistoryPoints);
+        size_t history_limit = kMaxHistoryPoints,
+        WallNowProvider wall_now = {});
 
     SampleResult sample(std::string_view interface_name);
     std::optional<TrafficSnapshot> snapshot(
@@ -92,6 +106,7 @@ private:
 
     CounterReader reader_;
     NowProvider now_;
+    WallNowProvider wall_now_;
     size_t history_limit_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, InterfaceState> states_;

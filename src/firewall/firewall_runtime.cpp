@@ -159,6 +159,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
     firewall.set_ipv6_enabled(ipv6_decision.enabled);
     firewall.set_clear_dynamic_sets_on_apply(
         config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
+    firewall.set_ttl_bypass_enabled(
+        config.daemon.value_or(DaemonConfig{}).ttl_bypass_enabled.value_or(true));
     auto prefilter = effective_internal_vpn_targets != nullptr
         ? build_firewall_global_prefilter_for_runtime_targets(
               config, *effective_internal_vpn_targets)

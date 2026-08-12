@@ -11,9 +11,12 @@
 #include "../src/log/logger.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -207,6 +210,20 @@ std::string session_cookie(const httplib::Response& response) {
     return header.substr(0, separator);
 }
 
+void grant_local_step_up(httplib::Client& client,
+                         const httplib::Headers& headers,
+                         const std::string& username,
+                         const std::string& password) {
+    const auto response = client.Post(
+        "/api/auth/step-up",
+        headers,
+        nlohmann::json{{"username", username}, {"password", password}}.dump(),
+        "application/json");
+    REQUIRE(response != nullptr);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body).at("granted").get<bool>());
+}
+
 } // namespace
 
 TEST_CASE("missing auth file keeps the bootstrap API open") {
@@ -305,9 +322,11 @@ TEST_CASE("auth settings are replaced atomically with private permissions") {
         "application/json");
     REQUIRE(login_response != nullptr);
     REQUIRE(login_response->status == 200);
+    CHECK(login_response->get_header_value("Connection") == "close");
     const httplib::Headers headers{
         {"Cookie", session_cookie(*login_response)},
     };
+    grant_local_step_up(client, headers, "old", "old-secret");
     const auto settings_response = client.Post(
         "/api/auth/settings",
         headers,
@@ -364,6 +383,7 @@ TEST_CASE("authentication cannot be disabled while remote access is desired") {
     const httplib::Headers headers{
         {"Cookie", session_cookie(*login)},
     };
+    grant_local_step_up(client, headers, "admin", "secret");
     const auto disable = client.Post(
         "/api/auth/settings",
         headers,
@@ -383,6 +403,78 @@ TEST_CASE("authentication cannot be disabled while remote access is desired") {
     CHECK(nlohmann::json::parse(status->body)
               .at("authenticated")
               .get<bool>());
+}
+
+TEST_CASE(
+    "Keenetic provider switch preserves local auth until capability is usable") {
+    AuthTempDir directory;
+    const auto auth_path = directory.path / "auth.json";
+    const auto remote_path = directory.path / "remote-access.json";
+    write_text(
+        auth_path,
+        R"({"enabled":true,"provider":"local","username":"admin","password":"local-secret"})");
+    write_text(remote_path, R"({"enabled":false,"port":12121})");
+    EnvironmentVariableGuard auth_file(
+        "KEEN_PBR_AUTH_FILE", auth_path.string());
+    EnvironmentVariableGuard remote_file(
+        "KEEN_PBR_TEST_REMOTE_SETTINGS_FILE", remote_path.string());
+    VerifiedClosedRemoteAccessGuard remote_access_closed;
+
+    std::atomic<unsigned int> forwarded_credentials{0};
+    httplib::Server router;
+    router.Get("/auth", [](const httplib::Request&,
+                            httplib::Response& response) {
+        response.status = 401;
+        response.set_header("X-NDM-Realm", "Keenetic");
+        response.set_header("X-NDM-Challenge", "challenge");
+    });
+    router.Post("/auth", [&forwarded_credentials](
+                             const httplib::Request&,
+                             httplib::Response& response) {
+        forwarded_credentials.fetch_add(1, std::memory_order_relaxed);
+        response.status = 200;
+    });
+    BoundHttpServer running_router(router);
+
+    const auto config = auth_api_config();
+    ApiServer server(config);
+    server.start();
+    httplib::Client client("127.0.0.1", configured_port(config));
+    const auto login = client.Post(
+        "/api/auth/login",
+        R"({"username":"admin","password":"local-secret"})",
+        "application/json");
+    REQUIRE(login != nullptr);
+    REQUIRE(login->status == 200);
+    const httplib::Headers headers{{"Cookie", session_cookie(*login)}};
+    grant_local_step_up(client, headers, "admin", "local-secret");
+
+    const auto endpoint =
+        "127.0.0.1:" + std::to_string(running_router.port());
+    const auto response = client.Post(
+        "/api/auth/settings",
+        headers,
+        nlohmann::json{
+            {"enabled", true},
+            {"provider", "keenetic"},
+            {"keenetic_endpoint_mode", "manual"},
+            {"keenetic_endpoint", endpoint},
+            {"username", "admin"},
+            {"password", "router-secret"},
+        }
+            .dump(),
+        "application/json");
+    server.stop();
+
+    REQUIRE(response != nullptr);
+    CHECK(response->status == 503);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body.at("error") == "system_auth_capability_not_usable");
+    CHECK(body.at("capability_state") == "loopback_not_accepted");
+    CHECK(forwarded_credentials.load(std::memory_order_relaxed) == 0U);
+    const auto stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("provider") == "local");
+    CHECK(stored.at("password") == "local-secret");
 }
 
 TEST_CASE(
@@ -409,6 +501,7 @@ TEST_CASE(
     const httplib::Headers headers{
         {"Cookie", session_cookie(*login_response)},
     };
+    grant_local_step_up(client, headers, "old", "old-secret");
 
     EnvironmentVariableGuard write_fault(
         "KEEN_PBR_TEST_AUTH_WRITE_FAULT", "directory_fsync");
@@ -473,6 +566,7 @@ TEST_CASE(
     const httplib::Headers headers{
         {"Cookie", session_cookie(*login)},
     };
+    grant_local_step_up(client, headers, "old", "old-secret");
 
     int settings_status = 0;
     {
@@ -545,24 +639,39 @@ TEST_CASE("concurrent auth settings writes leave disk and memory consistent") {
     ApiServer server(config);
     server.start();
 
-    constexpr int writer_count = 12;
+    // Both requests must cross pre-routing before either one publishes the
+    // auth latch. A request which arrives after that point is intentionally
+    // rejected with 503, so scheduler timing must not decide whether this
+    // test exercises two admitted writers or the fail-closed publication
+    // fence.
+    constexpr int writer_count = 2;
+    std::mutex admission_mutex;
+    std::condition_variable admission_cv;
+    int admitted_writers = 0;
+    bool release_writers = false;
+    set_auth_settings_admission_hook_for_testing([&]() {
+        std::unique_lock lock(admission_mutex);
+        ++admitted_writers;
+        admission_cv.notify_all();
+        admission_cv.wait(lock, [&]() { return release_writers; });
+    });
+    struct AdmissionHookReset {
+        ~AdmissionHookReset() {
+            reset_auth_settings_admission_hook_for_testing();
+        }
+    } admission_hook_reset;
+
     const int port = configured_port(config);
     std::atomic<bool> failed{false};
     std::vector<std::thread> writers;
     writers.reserve(writer_count);
     for (int index = 0; index < writer_count; ++index) {
-        writers.emplace_back([&, index] {
+        writers.emplace_back([&] {
             httplib::Client client("127.0.0.1", port);
-            const auto provider =
-                index % 2 == 0 ? "local" : "keenetic";
             nlohmann::json settings{
                 {"enabled", false},
-                {"provider", provider},
+                {"provider", "local"},
             };
-            if (provider == std::string{"keenetic"}) {
-                settings["keenetic_endpoint"] =
-                    "127.0.0.1:" + std::to_string(19000 + index);
-            }
             const auto response = client.Post(
                 "/api/auth/settings",
                 settings.dump(),
@@ -572,8 +681,19 @@ TEST_CASE("concurrent auth settings writes leave disk and memory consistent") {
             }
         });
     }
+    bool both_admitted = false;
+    {
+        std::unique_lock lock(admission_mutex);
+        both_admitted = admission_cv.wait_for(
+            lock,
+            std::chrono::seconds{5},
+            [&]() { return admitted_writers == writer_count; });
+        release_writers = true;
+    }
+    admission_cv.notify_all();
     for (auto& writer : writers) writer.join();
 
+    REQUIRE(both_admitted);
     CHECK_FALSE(failed.load(std::memory_order_relaxed));
     std::ifstream stored_input(auth_path);
     REQUIRE(stored_input);
@@ -900,6 +1020,80 @@ TEST_CASE("rate limiter normalizes IPv4-mapped peer addresses") {
         "::ffff:127.0.0.1", start + std::chrono::seconds{1});
     CHECK_FALSE(limiter.allow(
         "127.0.0.1", start + std::chrono::seconds{2}));
+}
+
+TEST_CASE("rate limiter atomically caps parallel attempts from one source") {
+    using Clock = AuthLoginRateLimiter::Clock;
+    const auto start = Clock::now();
+    AuthLoginRateLimiter limiter({
+        3,
+        std::chrono::seconds{100},
+        std::chrono::seconds{100},
+        8,
+    });
+
+    constexpr int workers = 16;
+    std::atomic<int> ready{0};
+    std::atomic<int> attempted{0};
+    std::atomic<int> admitted{0};
+    std::atomic<bool> begin{false};
+    std::atomic<bool> release{false};
+    std::vector<std::thread> threads;
+    threads.reserve(workers);
+    for (int index = 0; index < workers; ++index) {
+        threads.emplace_back([&]() {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!begin.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            auto permit = limiter.reserve_attempt("192.0.2.10", start);
+            if (permit) {
+                admitted.fetch_add(1, std::memory_order_release);
+            }
+            attempted.fetch_add(1, std::memory_order_release);
+            if (permit) {
+                while (!release.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                permit->record_failure(start);
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_acquire) != workers) {
+        std::this_thread::yield();
+    }
+    begin.store(true, std::memory_order_release);
+    while (attempted.load(std::memory_order_acquire) != workers) {
+        std::this_thread::yield();
+    }
+    // The old allow()/record_failure() split admitted all sixteen before any
+    // worker could publish a failure. Reservations make the ceiling atomic.
+    CHECK(admitted.load(std::memory_order_acquire) == 3);
+    release.store(true, std::memory_order_release);
+    for (auto& thread : threads) thread.join();
+
+    CHECK_FALSE(limiter.reserve_attempt(
+        "192.0.2.10", start + std::chrono::seconds{1}));
+}
+
+TEST_CASE("an abandoned login permit fails closed") {
+    using Clock = AuthLoginRateLimiter::Clock;
+    const auto start = Clock::now();
+    AuthLoginRateLimiter limiter({
+        1,
+        std::chrono::seconds{100},
+        std::chrono::seconds{100},
+        8,
+    });
+
+    {
+        auto permit = limiter.reserve_attempt("192.0.2.11", start);
+        REQUIRE(permit.has_value());
+        // Scope exit models parsing/verification throwing before a verdict.
+    }
+    CHECK_FALSE(limiter.reserve_attempt(
+        "192.0.2.11", Clock::now()));
 }
 
 TEST_CASE("session registry enforces its cap and garbage collects expiry") {

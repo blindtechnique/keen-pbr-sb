@@ -1,3 +1,5 @@
+import { fetchWithStepUp } from "@/lib/step-up"
+
 export type ApiError = {
   status: number
   message: string
@@ -41,7 +43,11 @@ export const apiFetch = async <T>(
   url: string,
   options: RequestInit
 ): Promise<T> => {
-  const response = await fetch(url, options)
+  // Handled here rather than at each privileged call site, mirroring the
+  // server: it enforces the step-up in one pre-routing guard, so the client
+  // answers it in one place too. Every caller that goes through apiFetch -
+  // including the generated client - gets this without changing.
+  const response = await fetchWithStepUp(url, options)
   const payload = await parseResponsePayload(response)
 
   if (!response.ok) {

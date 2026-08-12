@@ -1335,6 +1335,14 @@ void Daemon::handle_ipc_control_socket() {
                         snapshot.policy_rule_specs,
                         netlink_);
                 }
+                // Filled from the live backend rather than recomputed here:
+                // the state is what the last apply actually observed, and
+                // re-inspecting the chain from a status request would both
+                // duplicate the writer and answer a different question.
+                routing_health.ttl_bypass_state =
+                    firewall_->ttl_bypass_state_name();
+                routing_health.ttl_bypass_detail =
+                    firewall_->ttl_bypass_state_detail();
                 response = {
                     {"protocol_version",
                      ipc::kControlProtocolVersion},
@@ -1504,7 +1512,8 @@ bool Daemon::is_event_loop_thread() const {
 
 void Daemon::enqueue_control_task(std::function<void()> task,
                                   bool wait_for_completion,
-                                  const std::string& label) {
+                                  const std::string& label,
+                                  bool require_active_event_loop) {
     if (!task) {
         return;
     }
@@ -1555,6 +1564,9 @@ void Daemon::enqueue_control_task(std::function<void()> task,
 
     if (!event_loop_active_.load(std::memory_order_acquire) ||
         event_loop_thread_id_.load(std::memory_order_relaxed) == std::thread::id{}) {
+        if (require_active_event_loop) {
+            throw DaemonError("control loop is not running");
+        }
         run_inline();
         return;
     }
@@ -2006,6 +2018,25 @@ void Daemon::check_owned_snat_health() {
             task_metrics.failure(
                 "URLTEST firewall recovery failed with an unknown error");
         }
+        return;
+    }
+    const bool resolver_recovery_without_timer =
+        should_run_periodic_resolver_reload_recovery(
+            routing_runtime_active_,
+            resolver_reload_retry_task_id_ >= 0,
+            resolver_reload_retry_pending_,
+            resolver_after_firewall_gate_.waiting_for(
+                current_runtime_generation),
+            resolver_reload_retry_pending_generation_,
+            current_runtime_generation);
+    if (resolver_recovery_without_timer) {
+        const auto attempt = resolver_reload_retry_pending_attempt_;
+        const auto generation =
+            resolver_reload_retry_pending_generation_;
+        resolver_reload_retry_pending_ = false;
+        resolver_reload_retry_pending_attempt_ = 0U;
+        resolver_reload_retry_pending_generation_ = 0U;
+        start_resolver_reload_retry_attempt(attempt, generation);
         return;
     }
     const bool recovery_pending =
@@ -3176,6 +3207,14 @@ bool Daemon::refresh_iproute_and_firewall_runtime(
                 try {
                     if (run_system_resolver_hook_stream_prepared(
                             "reload", /*rebuild_snapshot=*/false)) {
+                        if (acknowledge_verified_resolver_reload(
+                                current_runtime_generation)) {
+                            // The resolver proof is complete independently of
+                            // later conntrack/remote-access tail work. Publish
+                            // the exact resolver-owned recovery now so a tail
+                            // exception cannot leave a stale broken reason.
+                            publish_runtime_state();
+                        }
                         refresh_resolver_config_hash_actual_async();
                     } else {
                         log.info(

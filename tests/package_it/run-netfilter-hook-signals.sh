@@ -103,7 +103,7 @@ printf 'keen-pbr-stopping-v3 mutating %s %s %s %s\n' \
     "$hook_pid" "$hook_startticks" "$hook_pid" "$hook_startticks" \
     > "$stopping_marker"
 chmod 0600 "$stopping_marker"
-printf '%s\n' 1 > "$stopping_pidfile"
+printf '%s\n' "$((hook_pid + 1))" > "$stopping_pidfile"
 run_hook iptables mangle reapply-firewall
 printf '%s\n' "$hook_pid" > "$stopping_pidfile"
 
@@ -1153,8 +1153,8 @@ arm-731-42'
     expected='acquire
 begin
 lease-check
-lease-check
 mark-mutating
+lease-check
 prepare
 stop
 tcp-cleanup
@@ -1175,8 +1175,8 @@ finish'
     expected='acquire
 begin
 lease-check
-lease-check
 mark-mutating
+lease-check
 prepare
 stop
 release'
@@ -1193,8 +1193,8 @@ release'
     expected='acquire
 begin
 lease-check
-lease-check
 mark-mutating
+lease-check
 finish
 release
 drain'
@@ -1210,8 +1210,8 @@ drain'
     expected='acquire
 begin
 lease-check
-lease-check
 mark-mutating
+lease-check
 release'
     [ "$(cat "$lifecycle")" = "$expected" ]
 

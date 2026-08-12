@@ -11,6 +11,7 @@ import type {
 } from "@/api/generated/model"
 import {
   activeOutboundMember,
+  outboundManagementHref,
   outboundRuntimeIssues,
   outboundTrafficBucket,
 } from "@/components/overview/outbound-state-model"
@@ -231,12 +232,6 @@ export function OutboundStateList({
       ) : null}
     </div>
   )
-}
-
-function outboundManagementHref(outbound: Outbound): string {
-  if (outbound.type === "interface") return "/outbounds#interfaces"
-  if (outbound.type === "urltest") return "/outbounds#failover"
-  return "/outbounds#system"
 }
 
 /**

@@ -44,6 +44,10 @@ public:
     }
 
     TimePoint now{};
+    // Deliberately independent of `now`: rates must stay on the steady clock
+    // while the published stamp comes from the wall clock, and a test that
+    // moved them together could not tell which one a value came from.
+    InterfaceTrafficSampler::WallTimePoint wall_now{};
     std::unordered_map<std::string, uint64_t> counters;
     std::vector<std::string> paths;
 };
@@ -57,7 +61,10 @@ InterfaceTrafficSampler make_sampler(FakeTrafficSource& source,
         [&source] {
             return source.now;
         },
-        history_limit);
+        history_limit,
+        [&source] {
+            return source.wall_now;
+        });
 }
 
 } // namespace
@@ -300,6 +307,103 @@ TEST_CASE("InterfaceTrafficSampler can clear every retained series") {
 
     CHECK_FALSE(sampler.snapshot("wg0").has_value());
     CHECK_FALSE(sampler.snapshot("nwg2").has_value());
+}
+
+TEST_CASE("each interface carries the wall instant of its own reading") {
+    FakeTrafficSource source;
+    auto sampler = make_sampler(source);
+
+    const InterfaceTrafficSampler::WallTimePoint origin{
+        std::chrono::seconds{1'754'812'800}};
+
+    source.set("nwg1", 100, 200);
+    source.set("nwg2", 300, 400);
+
+    // One sampling round, but the two interfaces are read a measurable moment
+    // apart - which is exactly what a shared batch timestamp erased.
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{10}};
+    source.wall_now = origin;
+    const auto first = sampler.sample("nwg1");
+
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{10}} +
+                 std::chrono::milliseconds{400};
+    source.wall_now = origin + std::chrono::milliseconds{400};
+    const auto second = sampler.sample("nwg2");
+
+    REQUIRE(first.point.has_value());
+    REQUIRE(second.point.has_value());
+    CHECK(first.point->observed_at == origin);
+    CHECK(second.point->observed_at == origin + std::chrono::milliseconds{400});
+    CHECK(first.point->observed_at != second.point->observed_at);
+}
+
+TEST_CASE("the published wall stamp advances with every successful reading") {
+    FakeTrafficSource source;
+    auto sampler = make_sampler(source);
+
+    const InterfaceTrafficSampler::WallTimePoint origin{
+        std::chrono::seconds{1'754'812'800}};
+
+    source.set("nwg1", 0, 0);
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{0}};
+    source.wall_now = origin;
+    REQUIRE(sampler.sample("nwg1").status ==
+            InterfaceTrafficSampler::SampleStatus::Baseline);
+
+    source.set("nwg1", 1'000, 2'000);
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{2}};
+    source.wall_now = origin + std::chrono::seconds{2};
+    const auto sampled = sampler.sample("nwg1");
+
+    REQUIRE(sampled.point.has_value());
+    CHECK(sampled.point->observed_at == origin + std::chrono::seconds{2});
+
+    const auto snapshot = sampler.snapshot("nwg1");
+    REQUIRE(snapshot.has_value());
+    CHECK(snapshot->latest.observed_at == origin + std::chrono::seconds{2});
+}
+
+TEST_CASE("a wall clock step does not disturb the steady rate calculation") {
+    FakeTrafficSource source;
+    auto sampler = make_sampler(source);
+
+    source.set("nwg1", 0, 0);
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{0}};
+    source.wall_now =
+        InterfaceTrafficSampler::WallTimePoint{std::chrono::seconds{1'000}};
+    REQUIRE(sampler.sample("nwg1").status ==
+            InterfaceTrafficSampler::SampleStatus::Baseline);
+
+    // NTP steps the wall clock an hour forward between the two readings. The
+    // rate must still be computed over the two steady seconds that actually
+    // elapsed, or the graph would show a plausible but fabricated collapse.
+    source.set("nwg1", 250'000, 0);
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{2}};
+    source.wall_now =
+        InterfaceTrafficSampler::WallTimePoint{std::chrono::seconds{4'600}};
+    const auto sampled = sampler.sample("nwg1");
+
+    REQUIRE(sampled.point.has_value());
+    REQUIRE(sampled.point->rx_bits_per_second.has_value());
+    CHECK(*sampled.point->rx_bits_per_second == 1'000'000);
+    CHECK(sampled.point->observed_at ==
+          InterfaceTrafficSampler::WallTimePoint{std::chrono::seconds{4'600}});
+}
+
+TEST_CASE("an unreadable interface publishes no reading to be stamped") {
+    FakeTrafficSource source;
+    auto sampler = make_sampler(source);
+
+    source.now = InterfaceTrafficSampler::TimePoint{std::chrono::seconds{5}};
+    source.wall_now =
+        InterfaceTrafficSampler::WallTimePoint{std::chrono::seconds{5}};
+
+    const auto result = sampler.sample("nwg9");
+
+    // No point means no observed_at on the wire, which is what stops a failed
+    // read from looking as fresh as a successful one in the same round.
+    CHECK(result.status == InterfaceTrafficSampler::SampleStatus::Unavailable);
+    CHECK_FALSE(result.point.has_value());
 }
 
 } // namespace keen_pbr3

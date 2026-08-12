@@ -42,7 +42,9 @@
 #include "../runtime/conntrack_manager.hpp"
 #include "../runtime/idle_stall_detector.hpp"
 #include "../runtime/udp_call_affinity.hpp"
+#include "../runtime/interface_traffic_cadence.hpp"
 #include "../runtime/interface_traffic_sampler.hpp"
+#include "../runtime/interface_uptime_anchor.hpp"
 #include "../runtime/runtime_state_machine.hpp"
 #include "../runtime/runtime_mutation_admission.hpp"
 #include "../firewall/firewall.hpp"
@@ -52,6 +54,7 @@
 #include "../util/traced_mutex.hpp"
 #include "list_service.hpp"
 #include "runtime_recovery_policy.hpp"
+#include "targeted_probe_admission.hpp"
 #include "runtime_state_store.hpp"
 #include "resolver_sync_state_machine.hpp"
 #include "resolver_stream_coordinator.hpp"
@@ -505,7 +508,8 @@ public:
     // Serialize execution of control operations in event loop.
     void enqueue_control_task(std::function<void()> task,
                               bool wait_for_completion = false,
-                              const std::string& label = "");
+                              const std::string& label = "",
+                              bool require_active_event_loop = false);
 
     // Backward-compatible alias for enqueue_control_task.
     void enqueue_control_command(std::function<void()> command,
@@ -601,6 +605,8 @@ private:
     void complete_resolver_reload_retry_attempt(
         const ResolverStreamOperation& operation,
         const ResolverStreamResult& result) noexcept;
+    bool acknowledge_verified_resolver_reload(
+        std::uint64_t runtime_generation);
     void resume_deferred_keenetic_dns_refresh() noexcept;
     void quiesce_resolver_stream_recovery() noexcept;
     void cancel_resolver_reload_retry();
@@ -813,6 +819,18 @@ private:
     void start_interface_probe_round() noexcept;
     void start_interface_probe_round_impl(bool failure_retry_round);
     void complete_interface_probe_round() noexcept;
+    // Probes exactly one outbound, for the per-row refresh button.
+    //
+    // Not a round, and deliberately not routed through the round path: that
+    // one calls retain_only(), which drops every target absent from the list
+    // it was given. Handing it a single target would wipe the health of every
+    // other outbound as a side effect of refreshing one row.
+    //
+    // Called only on the control loop: target discovery reads config_ and
+    // outbound_marks_. Returns false when the tag is unknown, already in
+    // flight, or the daemon could not take the work, so the caller can say so
+    // instead of showing a spinner for a probe that never started.
+    bool start_targeted_interface_probe(const std::string& tag) noexcept;
     CacheCommitCallback make_guarded_cache_commit_callback();
     void refresh_lists_and_maybe_reload_async(
         std::string source = "autoupdate");
@@ -873,6 +891,12 @@ private:
     void teardown_conntrack_events();
     void schedule_interface_traffic_sampling();
     void sample_interface_traffic_now();
+    // Builds the interface inventory and, on the way, folds the firmware's
+    // per-interface uptime counter into the anchor store. Reached from HTTP
+    // workers and from the SSE reconcile, so it only ever peeks the NDMS
+    // catalog and never issues the loopback request itself.
+    api::RuntimeInterfaceInventoryResponse
+    build_runtime_interface_inventory_with_uptime();
     void replace_interface_traffic_targets(
         std::string source,
         std::vector<std::string> interface_names);
@@ -953,8 +977,20 @@ private:
     std::shared_ptr<OwnedConntrackCleanupOperation>
         active_owned_conntrack_cleanup_operation_;
     // Separate bounded repair chain for a resolver hook that failed after
-    // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq.
+    // routing/firewall COMMIT. A firewall retry cannot repair dnsmasq. After
+    // the bounded boot-convergence window this same single owner continues at
+    // a quiet capped maintenance cadence until success or lifecycle change.
     int resolver_reload_retry_task_id_{-1};
+    // Fences a callback which was already dequeued when its timer was
+    // cancelled. Such a stale callback must not clear or consume a newer
+    // generation's single timer slot.
+    std::uint64_t resolver_reload_retry_schedule_serial_{0};
+    // Retained before timer installation. If Scheduler cannot publish the
+    // timer, the independent 60-second runtime health owner consumes this
+    // exact generation/attempt instead of letting DNS recovery die silently.
+    bool resolver_reload_retry_pending_{false};
+    std::size_t resolver_reload_retry_pending_attempt_{0};
+    std::uint64_t resolver_reload_retry_pending_generation_{0};
     // A failed Keenetic DNS rollback must restore firewall before resolver
     // bytes may advance. Unlike retry_pending(), this generation latch remains
     // set after bounded firewall retries are exhausted and is released only by
@@ -1115,6 +1151,7 @@ private:
     RuntimeIncidentLatch runtime_firewall_incidents_{1};
     RuntimeIncidentLatch meta_udp443_incidents_{1};
     RuntimeIncidentLatch internal_vpn_catalog_incidents_{5};
+    RuntimeIncidentLatch resolver_reload_incidents_{1};
     BlockingExecutor blocking_executor_{2, 64};
     // Resolver hooks can synchronously request a generated configuration.
     // Keep command execution, streaming and TXT probes on independent queues.
@@ -1168,6 +1205,15 @@ private:
     // tunnels may hold a probe for multiple seconds, so bound queued work to
     // one coalesced trailing round and retain manual state through completion.
     CoalescedManualSingleFlightGate interface_probe_gate_;
+    // Separate from the gate above on purpose: rounds coalesce because they
+    // all measure the same thing, targeted probes must not because they do
+    // not. See TargetedProbeAdmission.
+    TargetedProbeAdmission targeted_probe_admission_;
+    // Where the next periodic tick resumes its rotation, and whether the round
+    // about to launch is one. Control-loop owned, like the round itself. A
+    // manual refresh and a failure retry stay full rounds.
+    std::size_t interface_probe_cursor_{0};
+    bool interface_probe_round_rotates_{false};
     OneTrailingFailureRetry interface_probe_failure_retry_;
 
 #ifdef WITH_API
@@ -1177,6 +1223,14 @@ private:
     std::unique_ptr<StatusStream> status_stream_;
     std::unique_ptr<ConntrackEventMonitor> conntrack_event_monitor_;
     InterfaceTrafficSampler interface_traffic_sampler_;
+    // Outlives every individual inventory build on purpose. An anchor rebuilt
+    // per request would restart the very uptime it is meant to report, so this
+    // is daemon-scoped state and not a local of the response builder.
+    InterfaceUptimeAnchorStore interface_uptime_anchors_;
+    // Touched only from sample_interface_traffic_now(), i.e. only from the
+    // scheduler thread - the same assumption the neighbouring
+    // traffic_sampled_interfaces_ and traffic_sampling_active_ already make.
+    InterfaceTrafficCadence interface_traffic_cadence_;
     std::mutex interface_traffic_targets_mutex_;
     std::map<std::string, std::set<std::string>>
         interface_traffic_targets_by_source_;

@@ -30,6 +30,7 @@ import {
   authEndpointModeLabelKey,
   type KeeneticEndpointMode,
 } from "@/lib/auth-status"
+import { fetchWithStepUp } from "@/lib/step-up"
 import type {
   SettingsSectionController,
   SettingsSectionState,
@@ -42,6 +43,10 @@ type AuthStatus = {
   keenetic_endpoint_mode?: KeeneticEndpointMode
   keenetic_endpoint_source?: "ndms" | "fallback"
   authenticated: boolean
+}
+
+type RemoteAccessAuthSafety = {
+  keenetic_auth_switch_allowed?: boolean
 }
 
 type AuthDraft = {
@@ -76,6 +81,16 @@ function AuthSettingsCardInner(
       return response.json()
     },
   })
+  const remoteAccessQuery = useQuery<RemoteAccessAuthSafety>({
+    queryKey: ["remote-access"],
+    queryFn: async () => {
+      const response = await fetch("/api/system/remote-access", {
+        cache: "no-store",
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    },
+  })
 
   const [draft, setDraft] = useState<Partial<AuthDraft>>({})
   const [username, setUsername] = useState("")
@@ -85,16 +100,18 @@ function AuthSettingsCardInner(
   const provider =
     draft.provider ??
     (statusQuery.data?.provider === "local" ? "local" : "keenetic")
-  const endpoint =
-    draft.endpoint ?? statusQuery.data?.keenetic_endpoint ?? ""
+  const endpoint = draft.endpoint ?? statusQuery.data?.keenetic_endpoint ?? ""
   const endpointMode =
-    draft.endpointMode ??
-    statusQuery.data?.keenetic_endpoint_mode ??
-    "auto"
+    draft.endpointMode ?? statusQuery.data?.keenetic_endpoint_mode ?? "auto"
+  const keeneticAuthSwitchAllowed =
+    remoteAccessQuery.data?.keenetic_auth_switch_allowed === true
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch("/api/auth/settings", {
+      if (enabled && provider === "keenetic" && !keeneticAuthSwitchAllowed) {
+        throw new Error(t("pages.settings.auth.remoteAccessConflict"))
+      }
+      const response = await fetchWithStepUp("/api/auth/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -108,6 +125,15 @@ function AuthSettingsCardInner(
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
+        if (data.error === "remote_access_incompatible_with_keenetic_auth") {
+          throw new Error(t("pages.settings.auth.remoteAccessConflict"))
+        }
+        if (
+          data.error === "system_auth_capability_not_usable" ||
+          data.error === "system_auth_requires_enabled_verification"
+        ) {
+          throw new Error(t("pages.settings.auth.systemAuthUnavailable"))
+        }
         throw new Error(data.error || `HTTP ${response.status}`)
       }
       return data
@@ -119,8 +145,7 @@ function AuthSettingsCardInner(
       onStateChange({ dirty: false, valid: true })
       toast.success(t("pages.settings.auth.saved"))
     },
-    onError: (error: Error) =>
-      toast.error(error.message, { richColors: true }),
+    onError: (error: Error) => toast.error(error.message, { richColors: true }),
   })
 
   const getSectionState = (
@@ -128,8 +153,7 @@ function AuthSettingsCardInner(
     nextUsername = username,
     nextPassword = password
   ): SettingsSectionState => {
-    const nextEnabled =
-      nextDraft.enabled ?? statusQuery.data?.enabled ?? true
+    const nextEnabled = nextDraft.enabled ?? statusQuery.data?.enabled ?? true
     const nextProvider =
       nextDraft.provider ??
       (statusQuery.data?.provider === "local" ? "local" : "keenetic")
@@ -152,13 +176,16 @@ function AuthSettingsCardInner(
       nextEnabled &&
       nextEndpointMode === "manual" &&
       (nextDraft.endpoint ?? endpoint).trim().length === 0
+    const remoteAccessConflict =
+      nextEnabled && nextProvider === "keenetic" && !keeneticAuthSwitchAllowed
     return {
       dirty,
       valid:
         !dirty ||
         ((!credentialsRequired ||
           (nextUsername.length > 0 && nextPassword.length > 0)) &&
-          !manualEndpointMissing),
+          !manualEndpointMissing &&
+          !remoteAccessConflict),
     }
   }
 
@@ -178,27 +205,27 @@ function AuthSettingsCardInner(
     onStateChange(getSectionState(draft, username, nextPassword))
   }
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      reset: () => {
-        setDraft({})
-        setUsername("")
-        setPassword("")
-        onStateChange({ dirty: false, valid: true })
-      },
-      save: async () => {
-        const state = getSectionState()
-        if (!state.dirty) {
-          return
+  useImperativeHandle(ref, () => ({
+    reset: () => {
+      setDraft({})
+      setUsername("")
+      setPassword("")
+      onStateChange({ dirty: false, valid: true })
+    },
+    save: async () => {
+      const state = getSectionState()
+      if (!state.dirty) {
+        return
+      }
+      if (!state.valid) {
+        if (enabled && provider === "keenetic" && !keeneticAuthSwitchAllowed) {
+          throw new Error(t("pages.settings.auth.remoteAccessConflict"))
         }
-        if (!state.valid) {
-          throw new Error(t("pages.settings.auth.verifyHint"))
-        }
-        await saveMutation.mutateAsync()
-      },
-    })
-  )
+        throw new Error(t("pages.settings.auth.verifyHint"))
+      }
+      await saveMutation.mutateAsync()
+    },
+  }))
 
   return (
     <Card size="sm">
@@ -245,7 +272,12 @@ function AuthSettingsCardInner(
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectItem value="keenetic">
+                    <SelectItem
+                      disabled={
+                        !keeneticAuthSwitchAllowed && provider !== "keenetic"
+                      }
+                      value="keenetic"
+                    >
                       {t("pages.settings.auth.providerRouter")}
                     </SelectItem>
                     <SelectItem value="local">
@@ -256,7 +288,9 @@ function AuthSettingsCardInner(
               </Select>
               <p className="text-xs text-muted-foreground">
                 {provider === "keenetic"
-                  ? t("pages.settings.auth.providerRouterHint")
+                  ? keeneticAuthSwitchAllowed
+                    ? t("pages.settings.auth.providerRouterHint")
+                    : t("pages.settings.auth.remoteAccessConflict")
                   : t("pages.settings.auth.providerLocalHint")}
               </p>
             </div>
@@ -268,8 +302,7 @@ function AuthSettingsCardInner(
                   <Select
                     onValueChange={(value) =>
                       updateDraft({
-                        endpointMode:
-                          value === "manual" ? "manual" : "auto",
+                        endpointMode: value === "manual" ? "manual" : "auto",
                       })
                     }
                     value={endpointMode}
@@ -380,7 +413,6 @@ function AuthSettingsCardInner(
             </p>
           </>
         ) : null}
-
       </CardContent>
     </Card>
   )

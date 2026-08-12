@@ -258,6 +258,7 @@ namespace api {
         std::optional<bool> reconnect_unmarked_flows_on_routing_change;
         std::optional<bool> skip_marked_packets;
         std::optional<bool> strict_enforcement;
+        std::optional<bool> ttl_bypass_enabled;
     };
 
     struct DnsTestServer {
@@ -800,6 +801,10 @@ namespace api {
 
     enum class RoutingHealthResponseOverall : int { DEGRADED, ERROR, OK };
 
+    enum class SystemAuthState : int { CHALLENGE_ABSENT, ENDPOINT_UNPROVEN, FIRMWARE_POLICY_UNKNOWN, LOCKOUT_BUDGET_UNSAFE, LOOPBACK_NOT_ACCEPTED, USABLE };
+
+    enum class TtlBypassState : int { ACTIVE, CHAIN_ABSENT, CONFLICT, DISABLED, MISSING, UNKNOWN, UNSUPPORTED };
+
     struct RoutingHealthResponse {
         FirewallChain firewall;
         RoutingHealthResponseFirewallBackend firewall_backend;
@@ -807,6 +812,11 @@ namespace api {
         RoutingHealthResponseOverall overall;
         std::vector<PolicyRuleCheck> policy_rules;
         std::vector<RouteTableCheck> route_tables;
+        std::optional<std::string> system_auth_detail;
+        std::optional<int64_t> system_auth_forwarded_failures_per_window;
+        std::optional<SystemAuthState> system_auth_state;
+        std::optional<std::string> ttl_bypass_detail;
+        std::optional<TtlBypassState> ttl_bypass_state;
     };
 
     enum class Evaluation : int { INSUFFICIENT_CONTEXT, MATCHED, NOT_MATCHED };
@@ -866,6 +876,8 @@ namespace api {
         std::vector<std::string> warnings;
     };
 
+    enum class LinkUptimeSource : int { FIRMWARE, OBSERVED };
+
     enum class RuntimeInterfaceInventoryStatusEnum : int { DOWN, UP };
 
     struct RuntimeInterfaceTrafficPointElement {
@@ -888,6 +900,8 @@ namespace api {
         std::optional<bool> carrier;
         std::optional<std::vector<std::string>> ipv4_addresses;
         std::optional<std::vector<std::string>> ipv6_addresses;
+        std::optional<int64_t> link_up_since_unix_ms;
+        std::optional<LinkUptimeSource> link_uptime_source;
         std::string name;
         std::optional<std::string> oper_state;
         RuntimeInterfaceInventoryStatusEnum status;
@@ -911,6 +925,7 @@ namespace api {
     struct RuntimeInterfaceTrafficSample {
         bool available = false;
         std::string name;
+        std::optional<int64_t> observed_at_unix_ms;
         bool reset = false;
         std::optional<int64_t> rx_bits_per_second;
         std::optional<int64_t> rx_bytes;
@@ -1226,6 +1241,7 @@ namespace api {
         std::optional<RuntimeInterfaceTrafficPointElement> runtime_interface_traffic_point;
         std::optional<RuntimeInterfaceTrafficSample> runtime_interface_traffic_sample;
         std::optional<RuntimeInterfaceTrafficUpdate> runtime_interface_traffic_update;
+        std::optional<LinkUptimeSource> runtime_interface_uptime_source;
         std::optional<RuntimeInventoryResponse> runtime_inventory_response;
         std::optional<RuntimeOutboundsResponse> runtime_outbounds_response;
         std::optional<RuntimeOutboundStateElement> runtime_outbound_state;
@@ -1706,6 +1722,12 @@ namespace api {
     void from_json(const json & j, RoutingHealthResponseOverall & x);
     void to_json(json & j, const RoutingHealthResponseOverall & x);
 
+    void from_json(const json & j, SystemAuthState & x);
+    void to_json(json & j, const SystemAuthState & x);
+
+    void from_json(const json & j, TtlBypassState & x);
+    void to_json(json & j, const TtlBypassState & x);
+
     void from_json(const json & j, Evaluation & x);
     void to_json(json & j, const Evaluation & x);
 
@@ -1714,6 +1736,9 @@ namespace api {
 
     void from_json(const json & j, ConfigScope & x);
     void to_json(json & j, const ConfigScope & x);
+
+    void from_json(const json & j, LinkUptimeSource & x);
+    void to_json(json & j, const LinkUptimeSource & x);
 
     void from_json(const json & j, RuntimeInterfaceInventoryStatusEnum & x);
     void to_json(json & j, const RuntimeInterfaceInventoryStatusEnum & x);
@@ -2101,6 +2126,7 @@ namespace api {
         x.reconnect_unmarked_flows_on_routing_change = get_stack_optional<bool>(j, "reconnect_unmarked_flows_on_routing_change");
         x.skip_marked_packets = get_stack_optional<bool>(j, "skip_marked_packets");
         x.strict_enforcement = get_stack_optional<bool>(j, "strict_enforcement");
+        x.ttl_bypass_enabled = get_stack_optional<bool>(j, "ttl_bypass_enabled");
     }
 
     inline void to_json(json & j, const Daemon & x) {
@@ -2117,6 +2143,7 @@ namespace api {
         j["reconnect_unmarked_flows_on_routing_change"] = x.reconnect_unmarked_flows_on_routing_change;
         j["skip_marked_packets"] = x.skip_marked_packets;
         j["strict_enforcement"] = x.strict_enforcement;
+        j["ttl_bypass_enabled"] = x.ttl_bypass_enabled;
     }
 
     inline void from_json(const json & j, DnsTestServer& x) {
@@ -3136,6 +3163,11 @@ namespace api {
         x.overall = j.at("overall").get<RoutingHealthResponseOverall>();
         x.policy_rules = j.at("policy_rules").get<std::vector<PolicyRuleCheck>>();
         x.route_tables = j.at("route_tables").get<std::vector<RouteTableCheck>>();
+        x.system_auth_detail = get_stack_optional<std::string>(j, "system_auth_detail");
+        x.system_auth_forwarded_failures_per_window = get_stack_optional<int64_t>(j, "system_auth_forwarded_failures_per_window");
+        x.system_auth_state = get_stack_optional<SystemAuthState>(j, "system_auth_state");
+        x.ttl_bypass_detail = get_stack_optional<std::string>(j, "ttl_bypass_detail");
+        x.ttl_bypass_state = get_stack_optional<TtlBypassState>(j, "ttl_bypass_state");
     }
 
     inline void to_json(json & j, const RoutingHealthResponse & x) {
@@ -3146,6 +3178,11 @@ namespace api {
         j["overall"] = x.overall;
         j["policy_rules"] = x.policy_rules;
         j["route_tables"] = x.route_tables;
+        j["system_auth_detail"] = x.system_auth_detail;
+        j["system_auth_forwarded_failures_per_window"] = x.system_auth_forwarded_failures_per_window;
+        j["system_auth_state"] = x.system_auth_state;
+        j["ttl_bypass_detail"] = x.ttl_bypass_detail;
+        j["ttl_bypass_state"] = x.ttl_bypass_state;
     }
 
     inline void from_json(const json & j, ListMatch& x) {
@@ -3293,6 +3330,8 @@ namespace api {
         x.carrier = get_stack_optional<bool>(j, "carrier");
         x.ipv4_addresses = get_stack_optional<std::vector<std::string>>(j, "ipv4_addresses");
         x.ipv6_addresses = get_stack_optional<std::vector<std::string>>(j, "ipv6_addresses");
+        x.link_up_since_unix_ms = get_stack_optional<int64_t>(j, "link_up_since_unix_ms");
+        x.link_uptime_source = get_stack_optional<LinkUptimeSource>(j, "link_uptime_source");
         x.name = j.at("name").get<std::string>();
         x.oper_state = get_stack_optional<std::string>(j, "oper_state");
         x.status = j.at("status").get<RuntimeInterfaceInventoryStatusEnum>();
@@ -3305,6 +3344,8 @@ namespace api {
         j["carrier"] = x.carrier;
         j["ipv4_addresses"] = x.ipv4_addresses;
         j["ipv6_addresses"] = x.ipv6_addresses;
+        j["link_up_since_unix_ms"] = x.link_up_since_unix_ms;
+        j["link_uptime_source"] = x.link_uptime_source;
         j["name"] = x.name;
         j["oper_state"] = x.oper_state;
         j["status"] = x.status;
@@ -3340,6 +3381,7 @@ namespace api {
     inline void from_json(const json & j, RuntimeInterfaceTrafficSample& x) {
         x.available = j.at("available").get<bool>();
         x.name = j.at("name").get<std::string>();
+        x.observed_at_unix_ms = get_stack_optional<int64_t>(j, "observed_at_unix_ms");
         x.reset = j.at("reset").get<bool>();
         x.rx_bits_per_second = get_stack_optional<int64_t>(j, "rx_bits_per_second");
         x.rx_bytes = get_stack_optional<int64_t>(j, "rx_bytes");
@@ -3351,6 +3393,7 @@ namespace api {
         j = json::object();
         j["available"] = x.available;
         j["name"] = x.name;
+        j["observed_at_unix_ms"] = x.observed_at_unix_ms;
         j["reset"] = x.reset;
         j["rx_bits_per_second"] = x.rx_bits_per_second;
         j["rx_bytes"] = x.rx_bytes;
@@ -3799,6 +3842,7 @@ namespace api {
         x.runtime_interface_traffic_point = get_stack_optional<RuntimeInterfaceTrafficPointElement>(j, "RuntimeInterfaceTrafficPoint");
         x.runtime_interface_traffic_sample = get_stack_optional<RuntimeInterfaceTrafficSample>(j, "RuntimeInterfaceTrafficSample");
         x.runtime_interface_traffic_update = get_stack_optional<RuntimeInterfaceTrafficUpdate>(j, "RuntimeInterfaceTrafficUpdate");
+        x.runtime_interface_uptime_source = get_stack_optional<LinkUptimeSource>(j, "RuntimeInterfaceUptimeSource");
         x.runtime_inventory_response = get_stack_optional<RuntimeInventoryResponse>(j, "RuntimeInventoryResponse");
         x.runtime_outbounds_response = get_stack_optional<RuntimeOutboundsResponse>(j, "RuntimeOutboundsResponse");
         x.runtime_outbound_state = get_stack_optional<RuntimeOutboundStateElement>(j, "RuntimeOutboundState");
@@ -3938,6 +3982,7 @@ namespace api {
         j["RuntimeInterfaceTrafficPoint"] = x.runtime_interface_traffic_point;
         j["RuntimeInterfaceTrafficSample"] = x.runtime_interface_traffic_sample;
         j["RuntimeInterfaceTrafficUpdate"] = x.runtime_interface_traffic_update;
+        j["RuntimeInterfaceUptimeSource"] = x.runtime_interface_uptime_source;
         j["RuntimeInventoryResponse"] = x.runtime_inventory_response;
         j["RuntimeOutboundsResponse"] = x.runtime_outbounds_response;
         j["RuntimeOutboundState"] = x.runtime_outbound_state;
@@ -4628,6 +4673,52 @@ namespace api {
         }
     }
 
+    inline void from_json(const json & j, SystemAuthState & x) {
+        if (j == "challenge_absent") x = SystemAuthState::CHALLENGE_ABSENT;
+        else if (j == "endpoint_unproven") x = SystemAuthState::ENDPOINT_UNPROVEN;
+        else if (j == "firmware_policy_unknown") x = SystemAuthState::FIRMWARE_POLICY_UNKNOWN;
+        else if (j == "lockout_budget_unsafe") x = SystemAuthState::LOCKOUT_BUDGET_UNSAFE;
+        else if (j == "loopback_not_accepted") x = SystemAuthState::LOOPBACK_NOT_ACCEPTED;
+        else if (j == "usable") x = SystemAuthState::USABLE;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"SystemAuthState\""); }
+    }
+
+    inline void to_json(json & j, const SystemAuthState & x) {
+        switch (x) {
+            case SystemAuthState::CHALLENGE_ABSENT: j = "challenge_absent"; break;
+            case SystemAuthState::ENDPOINT_UNPROVEN: j = "endpoint_unproven"; break;
+            case SystemAuthState::FIRMWARE_POLICY_UNKNOWN: j = "firmware_policy_unknown"; break;
+            case SystemAuthState::LOCKOUT_BUDGET_UNSAFE: j = "lockout_budget_unsafe"; break;
+            case SystemAuthState::LOOPBACK_NOT_ACCEPTED: j = "loopback_not_accepted"; break;
+            case SystemAuthState::USABLE: j = "usable"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"SystemAuthState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, TtlBypassState & x) {
+        if (j == "active") x = TtlBypassState::ACTIVE;
+        else if (j == "chain_absent") x = TtlBypassState::CHAIN_ABSENT;
+        else if (j == "conflict") x = TtlBypassState::CONFLICT;
+        else if (j == "disabled") x = TtlBypassState::DISABLED;
+        else if (j == "missing") x = TtlBypassState::MISSING;
+        else if (j == "unknown") x = TtlBypassState::UNKNOWN;
+        else if (j == "unsupported") x = TtlBypassState::UNSUPPORTED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"TtlBypassState\""); }
+    }
+
+    inline void to_json(json & j, const TtlBypassState & x) {
+        switch (x) {
+            case TtlBypassState::ACTIVE: j = "active"; break;
+            case TtlBypassState::CHAIN_ABSENT: j = "chain_absent"; break;
+            case TtlBypassState::CONFLICT: j = "conflict"; break;
+            case TtlBypassState::DISABLED: j = "disabled"; break;
+            case TtlBypassState::MISSING: j = "missing"; break;
+            case TtlBypassState::UNKNOWN: j = "unknown"; break;
+            case TtlBypassState::UNSUPPORTED: j = "unsupported"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"TtlBypassState\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
     inline void from_json(const json & j, Evaluation & x) {
         if (j == "insufficient_context") x = Evaluation::INSUFFICIENT_CONTEXT;
         else if (j == "matched") x = Evaluation::MATCHED;
@@ -4685,6 +4776,20 @@ namespace api {
         switch (x) {
             case ConfigScope::ACTIVE: j = "active"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"ConfigScope\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, LinkUptimeSource & x) {
+        if (j == "firmware") x = LinkUptimeSource::FIRMWARE;
+        else if (j == "observed") x = LinkUptimeSource::OBSERVED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"LinkUptimeSource\""); }
+    }
+
+    inline void to_json(json & j, const LinkUptimeSource & x) {
+        switch (x) {
+            case LinkUptimeSource::FIRMWARE: j = "firmware"; break;
+            case LinkUptimeSource::OBSERVED: j = "observed"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"LinkUptimeSource\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

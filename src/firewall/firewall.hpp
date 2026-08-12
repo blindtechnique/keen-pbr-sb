@@ -485,6 +485,18 @@ public:
         return clear_dynamic_sets_on_apply_;
     }
 
+    // Defaults to on. Every nfqws2 strategy this project ships uses a
+    // TTL-dependent desync, so a router with `ip ttl-fix` enabled breaks all of
+    // them at once; an opt-in switch would leave the fix off for everyone who
+    // never learns it exists. This is an escape hatch, not a feature flag.
+    void set_ttl_bypass_enabled(bool enabled) {
+        ttl_bypass_enabled_ = enabled;
+    }
+
+    bool ttl_bypass_enabled() const {
+        return ttl_bypass_enabled_;
+    }
+
     // Remove all firewall rules and IP sets created by this instance.
     // Should be called on daemon shutdown.
     virtual void cleanup() = 0;
@@ -492,6 +504,13 @@ public:
     // Return the backend type for this firewall instance.
     virtual FirewallBackend backend() const = 0;
     virtual bool uses_raw_prerouting() const { return false; }
+
+    // State of the owned TTL bypass rule, as a stable name, or empty when the
+    // backend does not implement one. Empty rather than a fabricated "ok":
+    // the nftables backend has no such rule, and claiming a state it never
+    // computed would be worse than reporting nothing.
+    virtual std::string ttl_bypass_state_name() const { return {}; }
+    virtual std::string ttl_bypass_state_detail() const { return {}; }
 
     // Non-copyable
     Firewall(const Firewall&) = delete;
@@ -509,6 +528,7 @@ protected:
     uint32_t fwmark_mask_{0xFFFFFFFFu};
     bool ipv6_enabled_{true};
     bool clear_dynamic_sets_on_apply_{true};
+    bool ttl_bypass_enabled_{true};
 
 private:
     mutable std::atomic<std::uint64_t>

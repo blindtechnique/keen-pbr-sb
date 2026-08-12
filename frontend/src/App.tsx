@@ -4,6 +4,7 @@ import { Redirect, Route, Switch, useSearch } from "wouter"
 
 import { AppShell } from "@/components/layout/app-shell"
 import { AuthGate } from "@/components/auth-gate"
+import { StepUpDialog } from "@/components/step-up-dialog"
 import { ScrollToTopOnRouteChange } from "@/components/layout/scroll-route"
 import { KeenSpinner } from "@/components/shared/keen-spinner"
 import { OverviewPage } from "@/pages/overview-page"
@@ -278,6 +279,10 @@ function TransportEditorRoute({
 function App() {
   return (
     <AuthGate>
+      {/* Inside the gate, so it only exists once there is a session to step
+          up from, and above the pages, so no privileged screen has to mount
+          its own copy. */}
+      <StepUpDialog />
       <AppShell>
         <ScrollToTopOnRouteChange />
         <Suspense fallback={<PageFallback />}>

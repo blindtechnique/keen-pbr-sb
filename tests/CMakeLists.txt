@@ -2,6 +2,21 @@ add_executable(keen-pbr-tests
   test_main.cpp
   test_firewall_verifier.cpp
   test_firewall_runtime.cpp
+  test_ppe_deoffload.cpp
+  test_system_auth_capability.cpp
+  test_step_up.cpp
+  test_rollback_availability.cpp
+  test_package_footprint.cpp
+  test_nfqws_config_migration.cpp
+  ../src/util/nfqws_config_migration.cpp
+  test_nfqws_runtime_state.cpp
+  ../src/util/nfqws_runtime_state.cpp
+  test_component_transaction_journal.cpp
+  ../src/update/component_transaction_journal.cpp
+  test_component_capture.cpp
+  ../src/update/component_capture.cpp
+  test_targeted_probe_admission.cpp
+  test_ttl_bypass.cpp
   test_nftables_builder.cpp
   test_iptables_builder.cpp
   test_cron.cpp
@@ -54,7 +69,9 @@ add_executable(keen-pbr-tests
   test_conntrack_manager.cpp
   test_idle_stall_detector.cpp
   test_udp_call_affinity.cpp
+  test_interface_traffic_cadence.cpp
   test_interface_traffic_sampler.cpp
+  test_interface_uptime_anchor.cpp
   test_periodic_task_metrics.cpp
   test_scheduler.cpp
   test_daemon_link_contract.cpp
@@ -120,6 +137,8 @@ add_executable(keen-pbr-tests
   ../src/backup/recovery_coordinator.cpp
   ../src/cmd/recover_persistent_state.cpp
   ../src/update/maintenance_lock.cpp
+  ../src/update/rollback_availability.cpp
+  ../src/update/package_footprint.cpp
   ../src/config/dependency_analysis.cpp
   ../src/config/list_delete_planner.cpp
   ../src/crash/crash_diagnostics.cpp
@@ -133,6 +152,12 @@ add_executable(keen-pbr-tests
   ../src/firewall/nftables.cpp
   ../src/firewall/nft_batch_pipe.cpp
   ../src/firewall/iptables.cpp
+  ../src/firewall/ppe_deoffload.cpp
+  ../src/firewall/ttl_bypass.cpp
+  ../src/keenetic/ndms_lockout_policy.cpp
+  ../src/api/system_auth_capability.cpp
+  ../src/api/step_up.cpp
+  ../src/api/auth_runtime.cpp
   ../src/firewall/ipset_restore_pipe.cpp
   ../src/log/logger.cpp
   ../src/log/trace.cpp
@@ -150,7 +175,9 @@ add_executable(keen-pbr-tests
   ../src/ipc/resolver_fallback.cpp
   ../src/connections/conntrack_event_monitor.cpp
   ../src/runtime/conntrack_manager.cpp
+  ../src/runtime/interface_traffic_cadence.cpp
   ../src/runtime/interface_traffic_sampler.cpp
+  ../src/runtime/interface_uptime_anchor.cpp
   ../src/runtime/periodic_task_metrics.cpp
   ../src/lists/ipset.cpp
   ../src/lists/kernel_set_tester.cpp
@@ -298,6 +325,10 @@ add_executable(keen-pbr-rescue-tests
   test_main.cpp
   test_rescue_update.cpp
   test_rescue_integrity.cpp
+  test_rollback_availability.cpp
+  test_package_footprint.cpp
+  ../src/update/rollback_availability.cpp
+  ../src/update/package_footprint.cpp
 )
 set_target_properties(keen-pbr-rescue-tests PROPERTIES
   CXX_STANDARD 17
@@ -709,6 +740,8 @@ add_executable(keen-pbr-firewall-it
   ../src/firewall/firewall_runtime.cpp
   ../src/firewall/firewall_verifier.cpp
   ../src/firewall/iptables.cpp
+  ../src/firewall/ppe_deoffload.cpp
+  ../src/firewall/ttl_bypass.cpp
   ../src/firewall/iptables_verifier.cpp
   ../src/firewall/ipset_restore_pipe.cpp
   ../src/firewall/nft_batch_pipe.cpp

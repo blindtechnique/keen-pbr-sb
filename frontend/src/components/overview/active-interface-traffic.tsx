@@ -20,6 +20,12 @@ import {
   type ActiveTrafficPath,
 } from "@/components/overview/active-interface-traffic-model"
 import { KeeneticStatus } from "@/components/shared/keenetic-status"
+import { routerNowMs } from "@/api/router-clock"
+import { useVisibleTick } from "@/hooks/use-visible-tick"
+import { formatUptimeSince } from "@/lib/uptime-format"
+
+// One second, because the badge shows KeeneticOS-style HH:MM:SS.
+const UPTIME_TICK_MS = 1_000
 import { InterfaceTraffic } from "@/components/transports/interface-traffic"
 import { Badge } from "@/components/ui/badge"
 import { useInterfaceProtocols } from "@/hooks/use-interface-protocols"
@@ -43,6 +49,10 @@ export function ActiveInterfaceTraffic({
   readonly transports: readonly TransportStatus[]
 }) {
   const { i18n, t } = useTranslation()
+  // The connection badge carries a running uptime clock, so it needs a reason
+  // to re-render every second. useVisibleTick stops while the tab is hidden.
+  useVisibleTick(UPTIME_TICK_MS)
+  const routerNow = routerNowMs()
   const { protocolOf } = useInterfaceProtocols()
   const [chartPreferences, setChartPreferences] = useState(() =>
     parseTrafficChartPreferences(
@@ -112,9 +122,12 @@ export function ActiveInterfaceTraffic({
                     className="shrink-0"
                     tone={connection.connected ? "success" : "neutral"}
                   >
-                    {connection.connected
-                      ? t("overview.outbounds.connected")
-                      : t("overview.outbounds.disconnected")}
+                    {connectedLabel(
+                      connection.connected,
+                      runtimeInterface?.link_up_since_unix_ms,
+                      t,
+                      routerNow
+                    )}
                   </KeeneticStatus>
                 </div>
                 <button
@@ -170,6 +183,7 @@ export function ActiveInterfaceTraffic({
                       transmitted: t("transports.traffic.transmitted"),
                       chart: t("transports.traffic.chart"),
                       noTraffic: t("transports.traffic.noTraffic"),
+          stale: t("transports.traffic.stale"),
                     }}
                     locale={i18n.resolvedLanguage ?? i18n.language}
                     showChart
@@ -188,6 +202,32 @@ export function ActiveInterfaceTraffic({
       </div>
     </div>
   )
+}
+
+/**
+ * Labels the connection badge, adding how long the link has been up when the
+ * backend knows.
+ *
+ * A connected interface with no anchor keeps the plain "connected" label. The
+ * badge states connection, not duration, so saying nothing about the duration
+ * is accurate - whereas borrowing the router's or the daemon's uptime to fill
+ * the gap would not be. The details panel spells the gap out as "unknown".
+ */
+function connectedLabel(
+  connected: boolean,
+  upSinceUnixMs: number | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string,
+  routerNowUnixMs: number
+): string {
+  if (!connected) {
+    return t("overview.outbounds.disconnected")
+  }
+  if (typeof upSinceUnixMs !== "number") {
+    return t("overview.outbounds.connected")
+  }
+  return t("overview.outbounds.connectedFor", {
+    duration: formatUptimeSince(upSinceUnixMs, t, routerNowUnixMs),
+  })
 }
 
 function statusBadgeVariant(
