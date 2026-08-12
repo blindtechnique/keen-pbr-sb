@@ -303,6 +303,36 @@ describe("nfqws profile marker", () => {
       })
     ).toBeUndefined()
   })
+
+  /**
+   * Состояние живого роутера: `canonical` приходит ложным у каждой встроенной
+   * стратегии, у которой нет пользовательской копии, — backend сравнивает
+   * пакетный текст с текстом, где `ISP_INTERFACE` уже подставлен. Правки
+   * встроенной стратегии без копии не бывает: `save_strategy` эту копию и
+   * создаёт. Значит, спрашивать флаг там не о чем, и профиль обязан остаться
+   * карточкой.
+   */
+  test("trusts the package when there is no user copy to disagree with", () => {
+    expect(
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: false,
+        canonical: false,
+        content: "# keen-pbr-sb · профиль «БЕЗОПАСНЫЙ»\n",
+      })
+    ).toBe("safe")
+  })
+
+  /** Старый демон поля не присылает — это не повод терять карточки. */
+  test("falls back to the marker when the backend omits the bit", () => {
+    expect(
+      canonicalNfqwsProfileTier({
+        builtin: true,
+        overridden: true,
+        content: "# keen-pbr-sb · профиль «МАКСИМАЛЬНЫЙ»\n",
+      })
+    ).toBe("max")
+  })
 })
 
 describe("nfqws legacy strategy display names", () => {

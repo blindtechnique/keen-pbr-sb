@@ -122,7 +122,9 @@ type Strategy = {
   name: string
   builtin: boolean
   overridden: boolean
-  canonical: boolean
+  // Optional so a page talking to an older backend degrades to the marker
+  // rule rather than dropping every bundled profile out of the cards.
+  canonical?: boolean
   content: string
 }
 type Status = {
@@ -1693,15 +1695,16 @@ function StrategiesEditor({
       item !== undefined &&
       Object.hasOwn(draftContent, name) &&
       draftContent[name] !== item.content
-    // `overridden` здесь тоже не участвует, и по той же причине, что в
-    // canonicalNfqwsProfileTier: применение стратегии заставляет backend
-    // записать пользовательскую копию. Пока флаг участвовал, применённый
-    // ver9 уезжал из «старых пресетов» в «Свои и изменённые» — то есть
-    // выбор пресета сам же его оттуда и уносил. Происхождение
-    // («Встроенная, изменена») по-прежнему видно в колонке строки.
+    // Ни `overridden`, ни `canonical` здесь не участвуют. Старый пресет —
+    // это встроенная стратегия без маркера профиля, и он остаётся ею,
+    // сколько бы раз его ни применяли и ни правили: происхождение
+    // («Встроенная, изменена») видно в колонке строки, а место записи от
+    // этого не меняется. Пока флаги участвовали, пресет уезжал из
+    // сворачиваемого блока в «Свои и изменённые» — и владелец видел все
+    // десять ver* развёрнутым списком, потому что `canonical` на роутере
+    // ложный у каждой невзятой в работу встроенной стратегии.
     return Boolean(
       item?.builtin &&
-      item.canonical &&
       !hasChangedDraft &&
       parseNfqwsProfileMarker(item.content) === undefined
     )

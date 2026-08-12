@@ -610,7 +610,8 @@ export function parseNfqwsProfileMarker(
 export interface NfqwsProfileCandidate {
   readonly builtin: boolean
   readonly overridden: boolean
-  readonly canonical: boolean
+  /** Absent on backends that predate the bit — see below. */
+  readonly canonical?: boolean
   readonly content: string
 }
 
@@ -623,11 +624,25 @@ export interface NfqwsProfileCandidate {
  * of a user edit. The backend's `canonical` bit compares normalized strategy
  * identity with the current packaged profile (including rendered WAN and
  * owned telemetry differences). A copied marker therefore has no authority.
+ *
+ * `canonical` спрашивается только у стратегии, у которой есть
+ * пользовательская копия. Другого способа изменить встроенную стратегию нет:
+ * правка идёт через `save_strategy`, а он и создаёт эту копию. Пока копии
+ * нет, содержимое — это ровно файл из пакета, и сверять его не с чем.
+ *
+ * Разница не теоретическая. На роутере `canonical` приходит ложным у каждой
+ * встроенной стратегии без копии: backend сравнивает пакетный текст с
+ * текстом, в который уже подставлен `ISP_INTERFACE`, а нормализация
+ * идентичности убирает только строки телеметрии ротатора. В итоге безопасный
+ * и максимальный профили теряли карточки, а все ver* уезжали из «старых
+ * пресетов» в «Свои и изменённые». Спрашивать флаг только у копий — не
+ * ослабление проверки: там, где он что-то значит, он по-прежнему решает.
  */
 export function canonicalNfqwsProfileTier(
   strategy: NfqwsProfileCandidate
 ): NfqwsProfileTier | undefined {
-  if (!strategy.builtin || !strategy.canonical) return undefined
+  if (!strategy.builtin) return undefined
+  if (strategy.overridden && strategy.canonical === false) return undefined
   return parseNfqwsProfileMarker(strategy.content)?.tier
 }
 
