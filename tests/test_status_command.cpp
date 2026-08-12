@@ -116,6 +116,39 @@ TEST_CASE("status command renders realized table and priority from daemon") {
     CHECK(output.find("pri=404") != std::string::npos);
 }
 
+TEST_CASE("status command preserves and renders PPE health") {
+    auto response = healthy_status_response();
+    response["result"]["routing_health"]["ppe_deoffload"] = {
+        {"mode", "auto"},
+        {"capability", "supported"},
+        {"state", "active"},
+        {"connskip_packets", 30},
+        {"last_reconcile_ts", 1000},
+        {"observed_at", 1001},
+        {"prerouting", {{"packets", 11}, {"bytes", 1100}}},
+        {"forward", {{"packets", 7}, {"bytes", 700}}},
+        {"tcp",
+         {{"desired_ports", {"80,443"}},
+          {"applied_ports", {"80,443"}},
+          {"active", true},
+          {"counters", {{"packets", 5}, {"bytes", 500}}}}},
+        {"quic",
+         {{"desired_ports", {"443"}},
+          {"applied_ports", {"443"}},
+          {"active", true},
+          {"counters", {{"packets", 3}, {"bytes", 300}}}}},
+    };
+
+    CoutCapture capture;
+    CHECK(keen_pbr3::run_status_command(response) == 0);
+    const auto output = capture.str();
+    CHECK(output.find("PPE de-offload:") != std::string::npos);
+    CHECK(output.find("mode=auto state=active") != std::string::npos);
+    CHECK(output.find("packets prerouting=11 forward=7 tcp=5 quic=3") !=
+          std::string::npos);
+    CHECK(output.find("observed_at=1001") != std::string::npos);
+}
+
 TEST_CASE("status command returns nonzero for degraded live health") {
     auto response = healthy_status_response();
     auto& health = response["result"]["routing_health"];

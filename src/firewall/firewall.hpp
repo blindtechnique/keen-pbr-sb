@@ -1,14 +1,17 @@
 #pragma once
 
+#include "ppe_deoffload.hpp"
 #include "port_spec_util.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
+#include <utility>
 #include <vector>
 
 namespace keen_pbr3 {
@@ -497,6 +500,19 @@ public:
         return ttl_bypass_enabled_;
     }
 
+    // The active-runtime observer supplies validated ports and process/queue
+    // state. The backend still performs live kernel/userspace capability
+    // checks inside its serialized apply before it mutates the PPE graph.
+    void set_ppe_deoffload_desired(PpeDeoffloadDesired desired) {
+        std::lock_guard<std::mutex> lock(ppe_deoffload_desired_mutex_);
+        ppe_deoffload_desired_ = std::move(desired);
+    }
+
+    PpeDeoffloadDesired ppe_deoffload_desired() const {
+        std::lock_guard<std::mutex> lock(ppe_deoffload_desired_mutex_);
+        return ppe_deoffload_desired_;
+    }
+
     // Remove all firewall rules and IP sets created by this instance.
     // Should be called on daemon shutdown.
     virtual void cleanup() = 0;
@@ -511,6 +527,40 @@ public:
     // computed would be worse than reporting nothing.
     virtual std::string ttl_bypass_state_name() const { return {}; }
     virtual std::string ttl_bypass_state_detail() const { return {}; }
+
+    // Passive health view. Backends that cannot own the IPv4 xtables graph
+    // still preserve the configured mode instead of reporting a fabricated
+    // "off" state when automatic de-offload was requested.
+    virtual PpeDeoffloadSnapshot ppe_deoffload_snapshot() const {
+        PpeDeoffloadSnapshot snapshot;
+        const auto desired = ppe_deoffload_desired();
+        snapshot.mode = desired.mode;
+        snapshot.desired_quic =
+            desired.quic_enabled && desired.quic_443_active;
+        try {
+            snapshot.desired_tcp_ports =
+                build_ppe_deoffload_graph_spec(desired).tcp_chunks;
+        } catch (const std::invalid_argument& error) {
+            snapshot.detail = error.what();
+            snapshot.degraded = true;
+        }
+        if (snapshot.mode == PpeDeoffloadMode::automatic) {
+            snapshot.state = PpeDeoffloadState::backend_incompatible;
+            if (snapshot.detail.empty()) {
+                snapshot.detail =
+                    "PPE de-offload requires the iptables backend";
+            }
+        }
+        return snapshot;
+    }
+
+    // Refreshes the stored passive observation from an existing serialized
+    // control-loop owner. API/IPC callers only read the snapshot and never
+    // launch firewall tools themselves.
+    virtual PpeObservationRefreshResult
+    refresh_ppe_deoffload_observation() noexcept {
+        return PpeObservationRefreshResult::inactive;
+    }
 
     // Non-copyable
     Firewall(const Firewall&) = delete;
@@ -529,6 +579,8 @@ protected:
     bool ipv6_enabled_{true};
     bool clear_dynamic_sets_on_apply_{true};
     bool ttl_bypass_enabled_{true};
+    mutable std::mutex ppe_deoffload_desired_mutex_;
+    PpeDeoffloadDesired ppe_deoffload_desired_;
 
 private:
     mutable std::atomic<std::uint64_t>

@@ -37,6 +37,7 @@
 #include "../dns/dnsmasq_access_policy.hpp"
 #include "../dns/dnsmasq_gen.hpp"
 #include "../firewall/firewall.hpp"
+#include "../firewall/firewall_runtime.hpp"
 #include "../firewall/firewall_verifier.hpp"
 #include "../health/routing_health_checker.hpp"
 #include "../ipc/control_protocol.hpp"
@@ -1343,6 +1344,8 @@ void Daemon::handle_ipc_control_socket() {
                     firewall_->ttl_bypass_state_name();
                 routing_health.ttl_bypass_detail =
                     firewall_->ttl_bypass_state_detail();
+                routing_health.ppe_deoffload =
+                    firewall_->ppe_deoffload_snapshot();
                 response = {
                     {"protocol_version",
                      ipc::kControlProtocolVersion},
@@ -2050,6 +2053,62 @@ void Daemon::check_owned_snat_health() {
             !routing_runtime_active_
                 ? "routing runtime is inactive"
                 : "netfilter recovery is already pending");
+        return;
+    }
+
+    // Reuse this already serialized control-loop cadence for PPE liveness.
+    // A fresh NFQWS observation detects external init/process/queue changes;
+    // a semantic counter read validates that the installed graph still equals
+    // the published one. Either drift source coalesces into the existing FULL
+    // netfilter refresh owner. API/IPC getters remain passive.
+    const auto stored_ppe_desired = firewall_->ppe_deoffload_desired();
+    const bool configured_ppe_auto =
+        config_.daemon.value_or(DaemonConfig{})
+            .ppe_deoffload_mode.value_or(api::PpeDeoffloadMode::OFF) ==
+        api::PpeDeoffloadMode::AUTO;
+    const bool ppe_liveness_owned = configured_ppe_auto ||
+        stored_ppe_desired.mode == PpeDeoffloadMode::automatic;
+    bool ppe_desired_drift = false;
+    try {
+        const auto observed_ppe_desired =
+            observe_ppe_deoffload_desired(config_);
+        ppe_desired_drift =
+            !ppe_deoffload_desired_semantically_equal(
+                stored_ppe_desired, observed_ppe_desired);
+    } catch (...) {
+        // An auto-mode observer failure cannot prove the old active contract.
+        // Let the normal full-refresh/retry path establish cleanup or a fresh
+        // graph; off mode is intentionally a no-observation path.
+        ppe_desired_drift = configured_ppe_auto;
+    }
+    if (should_schedule_periodic_ppe_full_refresh(
+            routing_runtime_active_,
+            recovery_pending,
+            netfilter_refresh_pending,
+            ppe_liveness_owned,
+            ppe_desired_drift,
+            /*live_graph_semantic_drift=*/false)) {
+        schedule_netfilter_runtime_refresh(NetfilterRefreshReason::full);
+        periodic_task_metrics_.record_skipped(
+            "owned-snat-health",
+            "PPE active-runtime contract drift scheduled a full refresh");
+        return;
+    }
+
+    const auto ppe_observation =
+        firewall_->refresh_ppe_deoffload_observation();
+    if (should_schedule_periodic_ppe_full_refresh(
+            routing_runtime_active_,
+            recovery_pending,
+            netfilter_refresh_pending,
+            ppe_liveness_owned,
+            /*desired_contract_drift=*/false,
+            ppe_observation ==
+                PpeObservationRefreshResult::semantic_drift)) {
+        schedule_netfilter_runtime_refresh(NetfilterRefreshReason::full);
+        periodic_task_metrics_.record_skipped(
+            "owned-snat-health",
+            "PPE live graph drift scheduled a full refresh");
         return;
     }
 

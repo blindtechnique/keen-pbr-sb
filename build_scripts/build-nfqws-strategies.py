@@ -222,13 +222,13 @@ def pool(tiers, count):
     return out
 
 
-def circular(key, *, inseq=None, retrans=None, udp=False, maxseq=None):
+def circular(key, *, inseq=None, retrans=2, udp=False, maxseq=None):
     """circular с обязательным key= (стабильное пространство состояний)."""
     parts = ["fails=2", "time=300"]
     if udp:
         parts += ["udp_in=1", "udp_out=4"]
     else:
-        parts += [f"retrans={retrans if retrans else 3}"]
+        parts += [f"retrans={retrans}"]
         if inseq:
             parts.append(f"inseq={inseq}")
         if maxseq:

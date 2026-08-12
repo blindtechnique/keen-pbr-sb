@@ -1028,6 +1028,23 @@ inline bool should_run_periodic_netfilter_refresh(
     return !retry_timer_armed && refresh_reason_pending;
 }
 
+// PPE liveness reuses the existing full netfilter refresh owner. It may
+// request one only from the idle/active health window; pending recovery or a
+// previously coalesced netfilter reason remains the sole owner of convergence.
+inline bool should_schedule_periodic_ppe_full_refresh(
+    bool routing_runtime_active,
+    bool recovery_pending,
+    bool netfilter_refresh_pending,
+    bool automatic_mode,
+    bool desired_contract_drift,
+    bool live_graph_semantic_drift) noexcept {
+    return routing_runtime_active &&
+        !recovery_pending &&
+        !netfilter_refresh_pending &&
+        automatic_mode &&
+        (desired_contract_drift || live_graph_semantic_drift);
+}
+
 // Interface/default-route and central-firewall notifications may arrive in a
 // burst while the remote-access reconciler is already backing off. Let the
 // armed generation-fenced timer own the next attempt instead of allowing each

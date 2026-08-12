@@ -245,6 +245,8 @@ namespace api {
 
     enum class MetaUdp443Policy : int { BALANCED, MESSAGES_FIRST };
 
+    enum class PpeDeoffloadMode : int { AUTO, OFF };
+
     struct Daemon {
         std::optional<std::string> cache_dir;
         std::optional<bool> clear_dynamic_sets_on_apply;
@@ -254,6 +256,8 @@ namespace api {
         std::optional<int64_t> max_file_size_bytes;
         std::optional<MetaUdp443Policy> meta_udp443_policy;
         std::optional<std::string> pid_file;
+        std::optional<PpeDeoffloadMode> ppe_deoffload_mode;
+        std::optional<bool> ppe_deoffload_quic_enabled;
         std::optional<std::vector<std::string>> reconnect_owned_flows_on_routing_change_lists;
         std::optional<bool> reconnect_unmarked_flows_on_routing_change;
         std::optional<bool> skip_marked_packets;
@@ -763,6 +767,37 @@ namespace api {
         CheckStatus status;
     };
 
+    enum class PpeDeoffloadCapability : int { SUPPORTED, UNKNOWN, UNSUPPORTED };
+
+    struct PpeDeoffloadCounter {
+        std::optional<int64_t> bytes;
+        std::optional<int64_t> packets;
+    };
+
+    struct PpeDeoffloadProtocolHealth {
+        bool active = false;
+        std::vector<std::string> applied_ports;
+        std::optional<PpeDeoffloadCounter> counters;
+        std::vector<std::string> desired_ports;
+    };
+
+    enum class PpeDeoffloadHealthState : int { ACTIVE, ADMISSIBLE, DEGRADED, INACTIVE, OFF, UNKNOWN };
+
+    struct PpeDeoffloadHealth {
+        PpeDeoffloadCapability capability;
+        std::optional<int64_t> connskip_packets;
+        std::optional<std::string> detail;
+        std::optional<PpeDeoffloadCounter> forward;
+        std::optional<int64_t> last_reconcile_ts;
+        PpeDeoffloadMode mode;
+        std::optional<int64_t> observed_at;
+        std::optional<PpeDeoffloadCounter> prerouting;
+        PpeDeoffloadProtocolHealth quic;
+        std::optional<std::string> reason;
+        PpeDeoffloadHealthState state;
+        PpeDeoffloadProtocolHealth tcp;
+    };
+
     struct RecommendedListSetupRequest {
         std::string base_revision;
         ConfigObject config;
@@ -811,6 +846,7 @@ namespace api {
         std::vector<FirewallRuleCheck> firewall_rules;
         RoutingHealthResponseOverall overall;
         std::vector<PolicyRuleCheck> policy_rules;
+        std::optional<PpeDeoffloadHealth> ppe_deoffload;
         std::vector<RouteTableCheck> route_tables;
         std::optional<std::string> system_auth_detail;
         std::optional<int64_t> system_auth_forwarded_failures_per_window;
@@ -1214,6 +1250,11 @@ namespace api {
         std::optional<LastOutcome> periodic_task_outcome;
         std::optional<PlainDnsTemplateElement> plain_dns_template;
         std::optional<PolicyRuleCheck> policy_rule_check;
+        std::optional<PpeDeoffloadCapability> ppe_deoffload_capability;
+        std::optional<PpeDeoffloadCounter> ppe_deoffload_counter;
+        std::optional<PpeDeoffloadHealth> ppe_deoffload_health;
+        std::optional<PpeDeoffloadMode> ppe_deoffload_mode;
+        std::optional<PpeDeoffloadProtocolHealth> ppe_deoffload_protocol_health;
         std::optional<RecommendedListSetupRequest> recommended_list_setup_request;
         std::optional<ReloadResponse> reload_response;
         std::optional<ResolverConfigProbeStatus> resolver_config_probe_status;
@@ -1491,6 +1532,15 @@ namespace api {
     void from_json(const json & j, PolicyRuleCheck & x);
     void to_json(json & j, const PolicyRuleCheck & x);
 
+    void from_json(const json & j, PpeDeoffloadCounter & x);
+    void to_json(json & j, const PpeDeoffloadCounter & x);
+
+    void from_json(const json & j, PpeDeoffloadProtocolHealth & x);
+    void to_json(json & j, const PpeDeoffloadProtocolHealth & x);
+
+    void from_json(const json & j, PpeDeoffloadHealth & x);
+    void to_json(json & j, const PpeDeoffloadHealth & x);
+
     void from_json(const json & j, RecommendedListSetupRequest & x);
     void to_json(json & j, const RecommendedListSetupRequest & x);
 
@@ -1626,6 +1676,9 @@ namespace api {
     void from_json(const json & j, MetaUdp443Policy & x);
     void to_json(json & j, const MetaUdp443Policy & x);
 
+    void from_json(const json & j, PpeDeoffloadMode & x);
+    void to_json(json & j, const PpeDeoffloadMode & x);
+
     void from_json(const json & j, DnsServerType & x);
     void to_json(json & j, const DnsServerType & x);
 
@@ -1712,6 +1765,12 @@ namespace api {
 
     void from_json(const json & j, LastOutcome & x);
     void to_json(json & j, const LastOutcome & x);
+
+    void from_json(const json & j, PpeDeoffloadCapability & x);
+    void to_json(json & j, const PpeDeoffloadCapability & x);
+
+    void from_json(const json & j, PpeDeoffloadHealthState & x);
+    void to_json(json & j, const PpeDeoffloadHealthState & x);
 
     void from_json(const json & j, RoutingHealthErrorResponseOverall & x);
     void to_json(json & j, const RoutingHealthErrorResponseOverall & x);
@@ -2122,6 +2181,8 @@ namespace api {
         x.max_file_size_bytes = get_stack_optional<int64_t>(j, "max_file_size_bytes");
         x.meta_udp443_policy = get_stack_optional<MetaUdp443Policy>(j, "meta_udp443_policy");
         x.pid_file = get_stack_optional<std::string>(j, "pid_file");
+        x.ppe_deoffload_mode = get_stack_optional<PpeDeoffloadMode>(j, "ppe_deoffload_mode");
+        x.ppe_deoffload_quic_enabled = get_stack_optional<bool>(j, "ppe_deoffload_quic_enabled");
         x.reconnect_owned_flows_on_routing_change_lists = get_stack_optional<std::vector<std::string>>(j, "reconnect_owned_flows_on_routing_change_lists");
         x.reconnect_unmarked_flows_on_routing_change = get_stack_optional<bool>(j, "reconnect_unmarked_flows_on_routing_change");
         x.skip_marked_packets = get_stack_optional<bool>(j, "skip_marked_packets");
@@ -2139,6 +2200,8 @@ namespace api {
         j["max_file_size_bytes"] = x.max_file_size_bytes;
         j["meta_udp443_policy"] = x.meta_udp443_policy;
         j["pid_file"] = x.pid_file;
+        j["ppe_deoffload_mode"] = x.ppe_deoffload_mode;
+        j["ppe_deoffload_quic_enabled"] = x.ppe_deoffload_quic_enabled;
         j["reconnect_owned_flows_on_routing_change_lists"] = x.reconnect_owned_flows_on_routing_change_lists;
         j["reconnect_unmarked_flows_on_routing_change"] = x.reconnect_unmarked_flows_on_routing_change;
         j["skip_marked_packets"] = x.skip_marked_packets;
@@ -3088,6 +3151,63 @@ namespace api {
         j["status"] = x.status;
     }
 
+    inline void from_json(const json & j, PpeDeoffloadCounter& x) {
+        x.bytes = get_stack_optional<int64_t>(j, "bytes");
+        x.packets = get_stack_optional<int64_t>(j, "packets");
+    }
+
+    inline void to_json(json & j, const PpeDeoffloadCounter & x) {
+        j = json::object();
+        j["bytes"] = x.bytes;
+        j["packets"] = x.packets;
+    }
+
+    inline void from_json(const json & j, PpeDeoffloadProtocolHealth& x) {
+        x.active = j.at("active").get<bool>();
+        x.applied_ports = j.at("applied_ports").get<std::vector<std::string>>();
+        x.counters = get_stack_optional<PpeDeoffloadCounter>(j, "counters");
+        x.desired_ports = j.at("desired_ports").get<std::vector<std::string>>();
+    }
+
+    inline void to_json(json & j, const PpeDeoffloadProtocolHealth & x) {
+        j = json::object();
+        j["active"] = x.active;
+        j["applied_ports"] = x.applied_ports;
+        j["counters"] = x.counters;
+        j["desired_ports"] = x.desired_ports;
+    }
+
+    inline void from_json(const json & j, PpeDeoffloadHealth& x) {
+        x.capability = j.at("capability").get<PpeDeoffloadCapability>();
+        x.connskip_packets = get_stack_optional<int64_t>(j, "connskip_packets");
+        x.detail = get_stack_optional<std::string>(j, "detail");
+        x.forward = get_stack_optional<PpeDeoffloadCounter>(j, "forward");
+        x.last_reconcile_ts = get_stack_optional<int64_t>(j, "last_reconcile_ts");
+        x.mode = j.at("mode").get<PpeDeoffloadMode>();
+        x.observed_at = get_stack_optional<int64_t>(j, "observed_at");
+        x.prerouting = get_stack_optional<PpeDeoffloadCounter>(j, "prerouting");
+        x.quic = j.at("quic").get<PpeDeoffloadProtocolHealth>();
+        x.reason = get_stack_optional<std::string>(j, "reason");
+        x.state = j.at("state").get<PpeDeoffloadHealthState>();
+        x.tcp = j.at("tcp").get<PpeDeoffloadProtocolHealth>();
+    }
+
+    inline void to_json(json & j, const PpeDeoffloadHealth & x) {
+        j = json::object();
+        j["capability"] = x.capability;
+        j["connskip_packets"] = x.connskip_packets;
+        j["detail"] = x.detail;
+        j["forward"] = x.forward;
+        j["last_reconcile_ts"] = x.last_reconcile_ts;
+        j["mode"] = x.mode;
+        j["observed_at"] = x.observed_at;
+        j["prerouting"] = x.prerouting;
+        j["quic"] = x.quic;
+        j["reason"] = x.reason;
+        j["state"] = x.state;
+        j["tcp"] = x.tcp;
+    }
+
     inline void from_json(const json & j, RecommendedListSetupRequest& x) {
         x.base_revision = j.at("base_revision").get<std::string>();
         x.config = j.at("config").get<ConfigObject>();
@@ -3162,6 +3282,7 @@ namespace api {
         x.firewall_rules = j.at("firewall_rules").get<std::vector<FirewallRuleCheck>>();
         x.overall = j.at("overall").get<RoutingHealthResponseOverall>();
         x.policy_rules = j.at("policy_rules").get<std::vector<PolicyRuleCheck>>();
+        x.ppe_deoffload = get_stack_optional<PpeDeoffloadHealth>(j, "ppe_deoffload");
         x.route_tables = j.at("route_tables").get<std::vector<RouteTableCheck>>();
         x.system_auth_detail = get_stack_optional<std::string>(j, "system_auth_detail");
         x.system_auth_forwarded_failures_per_window = get_stack_optional<int64_t>(j, "system_auth_forwarded_failures_per_window");
@@ -3177,6 +3298,7 @@ namespace api {
         j["firewall_rules"] = x.firewall_rules;
         j["overall"] = x.overall;
         j["policy_rules"] = x.policy_rules;
+        j["ppe_deoffload"] = x.ppe_deoffload;
         j["route_tables"] = x.route_tables;
         j["system_auth_detail"] = x.system_auth_detail;
         j["system_auth_forwarded_failures_per_window"] = x.system_auth_forwarded_failures_per_window;
@@ -3815,6 +3937,11 @@ namespace api {
         x.periodic_task_outcome = get_stack_optional<LastOutcome>(j, "PeriodicTaskOutcome");
         x.plain_dns_template = get_stack_optional<PlainDnsTemplateElement>(j, "PlainDnsTemplate");
         x.policy_rule_check = get_stack_optional<PolicyRuleCheck>(j, "PolicyRuleCheck");
+        x.ppe_deoffload_capability = get_stack_optional<PpeDeoffloadCapability>(j, "PpeDeoffloadCapability");
+        x.ppe_deoffload_counter = get_stack_optional<PpeDeoffloadCounter>(j, "PpeDeoffloadCounter");
+        x.ppe_deoffload_health = get_stack_optional<PpeDeoffloadHealth>(j, "PpeDeoffloadHealth");
+        x.ppe_deoffload_mode = get_stack_optional<PpeDeoffloadMode>(j, "PpeDeoffloadMode");
+        x.ppe_deoffload_protocol_health = get_stack_optional<PpeDeoffloadProtocolHealth>(j, "PpeDeoffloadProtocolHealth");
         x.recommended_list_setup_request = get_stack_optional<RecommendedListSetupRequest>(j, "RecommendedListSetupRequest");
         x.reload_response = get_stack_optional<ReloadResponse>(j, "ReloadResponse");
         x.resolver_config_probe_status = get_stack_optional<ResolverConfigProbeStatus>(j, "ResolverConfigProbeStatus");
@@ -3955,6 +4082,11 @@ namespace api {
         j["PeriodicTaskOutcome"] = x.periodic_task_outcome;
         j["PlainDnsTemplate"] = x.plain_dns_template;
         j["PolicyRuleCheck"] = x.policy_rule_check;
+        j["PpeDeoffloadCapability"] = x.ppe_deoffload_capability;
+        j["PpeDeoffloadCounter"] = x.ppe_deoffload_counter;
+        j["PpeDeoffloadHealth"] = x.ppe_deoffload_health;
+        j["PpeDeoffloadMode"] = x.ppe_deoffload_mode;
+        j["PpeDeoffloadProtocolHealth"] = x.ppe_deoffload_protocol_health;
         j["RecommendedListSetupRequest"] = x.recommended_list_setup_request;
         j["ReloadResponse"] = x.reload_response;
         j["ResolverConfigProbeStatus"] = x.resolver_config_probe_status;
@@ -4110,6 +4242,20 @@ namespace api {
             case MetaUdp443Policy::BALANCED: j = "balanced"; break;
             case MetaUdp443Policy::MESSAGES_FIRST: j = "messages_first"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"MetaUdp443Policy\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, PpeDeoffloadMode & x) {
+        if (j == "auto") x = PpeDeoffloadMode::AUTO;
+        else if (j == "off") x = PpeDeoffloadMode::OFF;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"PpeDeoffloadMode\""); }
+    }
+
+    inline void to_json(json & j, const PpeDeoffloadMode & x) {
+        switch (x) {
+            case PpeDeoffloadMode::AUTO: j = "auto"; break;
+            case PpeDeoffloadMode::OFF: j = "off"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"PpeDeoffloadMode\": " + std::to_string(static_cast<int>(x)));
         }
     }
 
@@ -4628,6 +4774,44 @@ namespace api {
             case LastOutcome::SKIPPED: j = "skipped"; break;
             case LastOutcome::SUCCESS: j = "success"; break;
             default: throw std::runtime_error("Unexpected value in enumeration \"LastOutcome\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, PpeDeoffloadCapability & x) {
+        if (j == "supported") x = PpeDeoffloadCapability::SUPPORTED;
+        else if (j == "unknown") x = PpeDeoffloadCapability::UNKNOWN;
+        else if (j == "unsupported") x = PpeDeoffloadCapability::UNSUPPORTED;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"PpeDeoffloadCapability\""); }
+    }
+
+    inline void to_json(json & j, const PpeDeoffloadCapability & x) {
+        switch (x) {
+            case PpeDeoffloadCapability::SUPPORTED: j = "supported"; break;
+            case PpeDeoffloadCapability::UNKNOWN: j = "unknown"; break;
+            case PpeDeoffloadCapability::UNSUPPORTED: j = "unsupported"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"PpeDeoffloadCapability\": " + std::to_string(static_cast<int>(x)));
+        }
+    }
+
+    inline void from_json(const json & j, PpeDeoffloadHealthState & x) {
+        if (j == "active") x = PpeDeoffloadHealthState::ACTIVE;
+        else if (j == "admissible") x = PpeDeoffloadHealthState::ADMISSIBLE;
+        else if (j == "degraded") x = PpeDeoffloadHealthState::DEGRADED;
+        else if (j == "inactive") x = PpeDeoffloadHealthState::INACTIVE;
+        else if (j == "off") x = PpeDeoffloadHealthState::OFF;
+        else if (j == "unknown") x = PpeDeoffloadHealthState::UNKNOWN;
+        else { throw std::runtime_error("Cannot deserialize to enumeration \"PpeDeoffloadHealthState\""); }
+    }
+
+    inline void to_json(json & j, const PpeDeoffloadHealthState & x) {
+        switch (x) {
+            case PpeDeoffloadHealthState::ACTIVE: j = "active"; break;
+            case PpeDeoffloadHealthState::ADMISSIBLE: j = "admissible"; break;
+            case PpeDeoffloadHealthState::DEGRADED: j = "degraded"; break;
+            case PpeDeoffloadHealthState::INACTIVE: j = "inactive"; break;
+            case PpeDeoffloadHealthState::OFF: j = "off"; break;
+            case PpeDeoffloadHealthState::UNKNOWN: j = "unknown"; break;
+            default: throw std::runtime_error("Unexpected value in enumeration \"PpeDeoffloadHealthState\": " + std::to_string(static_cast<int>(x)));
         }
     }
 

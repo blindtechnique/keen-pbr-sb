@@ -1,4 +1,5 @@
 #include "nftables.hpp"
+#include "iptables.hpp"
 #include "nft_batch_pipe.hpp"
 #include "port_spec_util.hpp"
 #include "../log/logger.hpp"
@@ -2730,6 +2731,9 @@ nlohmann::json NftablesFirewall::build_apply_document(const LiveTableState& live
 
 void NftablesFirewall::apply(FirewallApplyMode mode) {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    // A backend switch must not strand the xtables-only PPE graph. This uses
+    // the same daemon single-flight apply; there is no second writer/hook.
+    cleanup_stale_iptables_ppe_deoffload_strict();
     const bool snat_expected = router_origin_snat_requested_;
     const auto expected_snat_interfaces = snat_interfaces_;
     const auto expected_source_egress_snat_selectors =
@@ -2940,6 +2944,7 @@ void NftablesFirewall::cleanup_impl(bool verification_required) {
 
 void NftablesFirewall::cleanup() {
     std::lock_guard<std::mutex> lock(pair_state_mutex_);
+    cleanup_stale_iptables_ppe_deoffload_strict();
     cleanup_impl(/*verification_required=*/true);
 }
 

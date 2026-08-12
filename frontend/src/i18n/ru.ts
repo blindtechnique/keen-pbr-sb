@@ -1309,6 +1309,42 @@ export const ruTranslation = {
         routes: "Маршруты",
         policies: "Политики",
       },
+      ppe: {
+        title: "Видимость трафика при аппаратном ускорении",
+        states: {
+          verifiedActive: "Активно и проверено",
+          admissibleOnly: "Условия выполнены, но не активно",
+          degraded: "Требует внимания",
+          inactive: "Неактивно",
+          off: "Выключено",
+          unknown: "Состояние неизвестно",
+        },
+        capabilities: {
+          supported: "поддерживается",
+          unsupported: "не поддерживается",
+          unknown: "ещё не подтверждено",
+        },
+        capability: "Аппаратный контракт: {{value}}",
+        modes: {
+          auto: "автоматический",
+          off: "выключен",
+        },
+        mode: "Заданный режим: {{value}}",
+        protocolStates: {
+          active: "активен",
+          inactive: "неактивен",
+        },
+        connskipWindow: "Окно CPU: первые {{count}} пакетов",
+        protocolPorts:
+          "{{protocol}} {{state}}; требуются: {{desired}}; применены: {{applied}}",
+        noPorts: "нет",
+        rawCounter:
+          "{{chain}}, сырые значения: {{packets}} пакетов / {{bytes}} байт",
+        lastReconcile: "последняя сверка {{value}}",
+        observedAt: "наблюдалось {{value}}",
+        counterCaveat:
+          "Это сырые попадания пакетов в правила, а не число соединений и не доказательство возврата потока в аппаратное ускорение после окна CPU.",
+      },
       chain: "chain",
       prerouting: "prerouting",
       defaultRoute: "default",
@@ -2016,6 +2052,17 @@ export const ruTranslation = {
         title: "Расширенные настройки маршрутизации",
         description:
           "Расширенные настройки - меняйте только если понимаете, что делаете.",
+        ppeDeoffloadModeLabel:
+          "Выборочная видимость при аппаратном ускорении",
+        ppeDeoffloadModeHint:
+          "Автоматический режим действует только после подтверждения полного аппаратного контракта PPE на Keenetic и при активной обработке трафика nfqws2. Выполнение этих условий ещё не означает, что правило активно: проверенное состояние показывает карточка диагностики. Системный переключатель аппаратного ускорения не изменяется.",
+        ppeDeoffloadModeOptions: {
+          off: "Выключено (безопасно по умолчанию)",
+          auto: "Автоматически при поддержке",
+        },
+        ppeDeoffloadQuicEnabledLabel: "Также обрабатывать QUIC (только UDP/443)",
+        ppeDeoffloadQuicEnabledHint:
+          "Действует только в автоматическом режиме. Высокие UDP-порты и WebRTC эта настройка никогда не добавляет.",
         reconnectUnmarkedFlowsOnRoutingChangeLabel:
           "Переподключать прямые соединения после изменения маршрутов",
         reconnectUnmarkedFlowsOnRoutingChangeHint:

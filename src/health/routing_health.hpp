@@ -76,6 +76,7 @@ struct RoutingHealthReport {
     // reports a chain being rewritten underneath us.
     std::string ttl_bypass_state;
     std::string ttl_bypass_detail;
+    std::optional<PpeDeoffloadSnapshot> ppe_deoffload;
     // Whether the router's own authentication is proven usable in place of the
     // password in auth.json. Like the TTL bypass above, kept out of the overall
     // verdict: none of its refusals is a routing fault, and degrading the whole

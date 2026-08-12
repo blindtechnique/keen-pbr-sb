@@ -21,6 +21,14 @@ fi
 work=$(mktemp -d "${TMPDIR:-/tmp}/keen-pbr-nfqws-lua.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
+fixture="$repo_root/tests/fixtures/zapret2-v1.0.3"
+(cd "$fixture" && sha256sum -c SHA256SUMS)
+
 WRITABLE=$work "$lua_bin" \
     "$repo_root/tests/nfqws_rotator_telemetry_smoke.lua" \
     "$repo_root/packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/nfqws-lua/rotator-telemetry.lua"
+
+"$lua_bin" \
+    "$repo_root/tests/nfqws_circular_v103_semantics.lua" \
+    "$fixture/zapret-auto.lua" \
+    "$fixture/zapret-lib-is-retransmission.lua"

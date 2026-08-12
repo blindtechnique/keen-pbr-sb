@@ -5,9 +5,15 @@ import { useTranslation } from "react-i18next"
 import { ListPlaceholder } from "@/components/shared/list-placeholder"
 
 import type {
+  PpeDeoffloadCounter,
+  PpeDeoffloadHealth,
   RouteTableCheck,
   RoutingHealthResponse,
 } from "@/api/generated/model"
+import {
+  formatPpePorts,
+  getPpeDeoffloadPresentation,
+} from "@/components/overview/ppe-deoffload-status-model"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 
@@ -40,6 +46,7 @@ export function RoutingHealthCard({
     [routeTables]
   )
   const hasVisibleEntries =
+    Boolean(routingHealth.ppe_deoffload) ||
     firewallRules.length > 0 ||
     groupedRoutes.length > 0 ||
     policyRules.length > 0
@@ -71,6 +78,10 @@ export function RoutingHealthCard({
           <span>{t("overview.routing.showHealthyEntries")}</span>
         </label>
       </div>
+
+      {routingHealth.ppe_deoffload ? (
+        <PpeDeoffloadStatus health={routingHealth.ppe_deoffload} />
+      ) : null}
 
       {!hasVisibleEntries && !showHealthyEntries ? (
         <div className="flex min-h-12 items-center gap-2 border-y border-border py-2 text-sm text-success">
@@ -199,6 +210,144 @@ export function RoutingHealthCard({
       ) : null}
     </div>
   )
+}
+
+function PpeDeoffloadStatus({ health }: { health: PpeDeoffloadHealth }) {
+  const { t } = useTranslation()
+  const presentation = getPpeDeoffloadPresentation(health)
+  const stateLabel =
+    presentation.kind === "verifiedActive"
+      ? t("overview.routing.ppe.states.verifiedActive")
+      : presentation.kind === "admissibleOnly"
+        ? t("overview.routing.ppe.states.admissibleOnly")
+        : presentation.kind === "degraded"
+          ? t("overview.routing.ppe.states.degraded")
+          : presentation.kind === "inactive"
+            ? t("overview.routing.ppe.states.inactive")
+            : presentation.kind === "off"
+              ? t("overview.routing.ppe.states.off")
+              : t("overview.routing.ppe.states.unknown")
+  const capabilityLabel =
+    health.capability === "supported"
+      ? t("overview.routing.ppe.capabilities.supported")
+      : health.capability === "unsupported"
+        ? t("overview.routing.ppe.capabilities.unsupported")
+        : t("overview.routing.ppe.capabilities.unknown")
+  const modeLabel =
+    health.mode === "auto"
+      ? t("overview.routing.ppe.modes.auto")
+      : t("overview.routing.ppe.modes.off")
+  const tcpState = health.tcp.active
+    ? t("overview.routing.ppe.protocolStates.active")
+    : t("overview.routing.ppe.protocolStates.inactive")
+  const quicState = health.quic.active
+    ? t("overview.routing.ppe.protocolStates.active")
+    : t("overview.routing.ppe.protocolStates.inactive")
+  const noPorts = t("overview.routing.ppe.noPorts")
+  const tcpDesired = formatPpePorts(health.tcp.desired_ports) ?? noPorts
+  const tcpApplied = formatPpePorts(health.tcp.applied_ports) ?? noPorts
+  const quicDesired = formatPpePorts(health.quic.desired_ports) ?? noPorts
+  const quicApplied = formatPpePorts(health.quic.applied_ports) ?? noPorts
+  const lastReconcile = formatPpeTimestamp(health.last_reconcile_ts)
+  const observedAt = formatPpeTimestamp(health.observed_at)
+  const diagnosticDetail = health.detail ?? health.reason
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold">
+        {t("overview.routing.ppe.title")}
+      </h3>
+      <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <Badge size="xs" variant={presentation.badgeVariant}>
+            {stateLabel}
+          </Badge>
+          <InlineMeta>
+            {t("overview.routing.ppe.capability", {
+              value: capabilityLabel,
+            })}
+          </InlineMeta>
+          <InlineMeta>
+            {t("overview.routing.ppe.mode", { value: modeLabel })}
+          </InlineMeta>
+          {health.connskip_packets ? (
+            <InlineMeta>
+              {t("overview.routing.ppe.connskipWindow", {
+                count: health.connskip_packets,
+              })}
+            </InlineMeta>
+          ) : null}
+          <InlineMeta>
+            {t("overview.routing.ppe.protocolPorts", {
+              protocol: "TCP",
+              state: tcpState,
+              desired: tcpDesired,
+              applied: tcpApplied,
+            })}
+          </InlineMeta>
+          <InlineMeta>
+            {t("overview.routing.ppe.protocolPorts", {
+              protocol: "QUIC",
+              state: quicState,
+              desired: quicDesired,
+              applied: quicApplied,
+            })}
+          </InlineMeta>
+          {formatPpeCounter("PREROUTING", health.prerouting, t)}
+          {formatPpeCounter("FORWARD", health.forward, t)}
+          {lastReconcile ? (
+            <InlineMeta>
+              {t("overview.routing.ppe.lastReconcile", {
+                value: lastReconcile,
+              })}
+            </InlineMeta>
+          ) : null}
+          {observedAt ? (
+            <InlineMeta>
+              {t("overview.routing.ppe.observedAt", { value: observedAt })}
+            </InlineMeta>
+          ) : null}
+          {diagnosticDetail ? (
+            <span className="basis-full text-xs text-muted-foreground">
+              {diagnosticDetail}
+            </span>
+          ) : null}
+          {health.prerouting || health.forward ? (
+            <span className="basis-full text-xs text-muted-foreground">
+              {t("overview.routing.ppe.counterCaveat")}
+            </span>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function formatPpeCounter(
+  chain: string,
+  counter: PpeDeoffloadCounter | undefined,
+  t: ReturnType<typeof useTranslation>["t"]
+) {
+  if (!counter) return null
+
+  return (
+    <InlineMeta>
+      {t("overview.routing.ppe.rawCounter", {
+        chain,
+        packets: counter.packets ?? "—",
+        bytes: counter.bytes ?? "—",
+      })}
+    </InlineMeta>
+  )
+}
+
+function formatPpeTimestamp(value: number | undefined) {
+  if (!value || !Number.isFinite(value)) return null
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "medium",
+  }).format(new Date(value * 1000))
 }
 
 function CompactSection<T>({

@@ -6,6 +6,7 @@
 #include "../keenetic/internal_vpn_runtime_target.hpp"
 #include "../lists/list_set_usage.hpp"
 #include "../routing/firewall_state.hpp"
+#include "../runtime/nfqws_runtime_contract.hpp"
 #include "firewall.hpp"
 
 #include <map>
@@ -38,6 +39,21 @@ struct StagedRuntimeFirewall {
     // another.
     FirewallApplyMode mode{FirewallApplyMode::Destructive};
 };
+
+// Convert one stable active-runtime observation into the typed firewall
+// desired state. The overload taking an observation is deterministic for
+// tests; the production overload performs the bounded read-only observation.
+PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
+    const Config& config,
+    const NfqwsPpeRuntimeContractObservation& observation);
+PpeDeoffloadDesired observe_ppe_deoffload_desired(const Config& config);
+PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
+    PpeDeoffloadMode mode,
+    bool quic_enabled,
+    const NfqwsPpeRuntimeContractObservation& observation);
+PpeDeoffloadDesired observe_ppe_deoffload_desired(
+    PpeDeoffloadMode mode,
+    bool quic_enabled);
 
 // Build the complete backend transaction. It does not publish the Meta
 // UDP/443 filter or delete conntrack tuples; see the staging note above.

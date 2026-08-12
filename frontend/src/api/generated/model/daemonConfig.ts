@@ -7,6 +7,7 @@
  */
 import type { DaemonConfigFirewallBackend } from './daemonConfigFirewallBackend';
 import type { DaemonConfigMetaUdp443Policy } from './daemonConfigMetaUdp443Policy';
+import type { PpeDeoffloadMode } from './ppeDeoffloadMode';
 
 export interface DaemonConfig {
   /** Path to the PID file. */
@@ -15,6 +16,12 @@ export interface DaemonConfig {
   cache_dir?: string;
   /** Firewall backend selection. */
   firewall_backend?: DaemonConfigFirewallBackend;
+  /** Selective per-flow hardware PPE de-offload policy. `off` removes only the graph owned by keen-pbr. `auto` may install that graph only after the live iptables backend, PPE target, connskip match, active NFQUEUE path and validated strategy ports are all proven. Omitting the field or setting it to `null` is fail-safe `off` until the hardware acceptance matrix allows a different default. This setting never writes `net.hwnat.ppe_enabled`.
+   */
+  ppe_deoffload_mode?: PpeDeoffloadMode | null;
+  /** Whether automatic PPE de-offload may also cover QUIC. Version 1 is restricted to UDP/443; high UDP/WebRTC ports are never inferred from this switch. Effective only when `ppe_deoffload_mode` is `auto`. Omitting the field or setting it to `null` means `false`.
+   */
+  ppe_deoffload_quic_enabled?: boolean | null;
   /**
      * Max stdout bytes captured per firewall verification command (0 = unlimited).
      * @minimum 0

@@ -2,6 +2,7 @@
 
 #include "../config/config.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -17,6 +18,44 @@ namespace keen_pbr3 {
 using NfqwsPathResolver =
     std::function<std::optional<std::string>(const std::string&)>;
 
+// A canonical port interval used by the PPE hand-off.  `first == last`
+// represents one port.  Intervals are sorted, non-overlapping and coalesced,
+// so consumers never have to interpret the original shell text.
+struct NfqwsPpePortRange {
+    std::uint16_t first{0};
+    std::uint16_t last{0};
+
+    bool operator==(const NfqwsPpePortRange& other) const noexcept {
+        return first == other.first && last == other.last;
+    }
+    bool operator!=(const NfqwsPpePortRange& other) const noexcept {
+        return !(*this == other);
+    }
+};
+
+// xt_multiport has 15 uint16 slots.  A single port consumes one slot; an
+// inclusive range consumes two.  `tcp_chunks` below is packed by this cost,
+// not by vector length.
+inline constexpr std::size_t kNfqwsPpeMultiportSlotsPerChunk = 15U;
+inline constexpr std::size_t kNfqwsPpeMaxTcpChunks = 16U;
+
+// Fail-closed description of the traffic that the *validated* active nfqws
+// configuration can process.  The firewall layer may use only an available
+// contract; `reason` is intentionally populated for every unavailable result.
+//
+// QUIC is a boolean rather than a general UDP selector by design.  The only
+// UDP PPE contract admitted in v1 is exactly destination port 443 from
+// NFQWS_ARGS_QUIC.  NFQWS_ARGS_UDP and custom/WebRTC UDP profiles never widen
+// it.
+struct NfqwsPpePortContract {
+    bool available{false};
+    std::string reason;
+    int queue_number{300};
+    std::vector<NfqwsPpePortRange> tcp_ranges;
+    std::vector<std::vector<NfqwsPpePortRange>> tcp_chunks;
+    bool quic_udp_443{false};
+};
+
 // Parses (but never sources) the Keenetic nfqws2 configuration and validates
 // the structural invariants which can be checked without invoking nfqws2.
 // The parser follows shell assignment quoting closely enough for the shipped
@@ -25,6 +64,22 @@ using NfqwsPathResolver =
 std::vector<ConfigValidationIssue> validate_nfqws_candidate(
     const std::string& content,
     const NfqwsPathResolver& resolve_path = {});
+
+// Parses and validates once, then derives a bounded, canonical PPE selector
+// from the same parsed candidate.  TCP filters from action-bearing active
+// profiles must exactly match TCP_PORTS.  Empty, malformed, ambiguous or
+// over-complex candidates are returned as unavailable instead of being
+// guessed at.
+NfqwsPpePortContract extract_nfqws_ppe_port_contract(
+    const std::string& content,
+    const NfqwsPathResolver& resolve_path = {});
+
+// Derives the same bounded selector from a live /proc/<pid>/cmdline argv.
+// This intentionally ignores strategy implementation details but proves the
+// queue and traffic selector shape that PPE relies on.  The runtime observer
+// compares it with the file-derived contract before publishing availability.
+NfqwsPpePortContract extract_nfqws_ppe_port_contract_from_argv(
+    const std::vector<std::string>& argv);
 
 // Reproduces nfqws2-keenetic's _startup_args profile order for the engine's
 // --dry-run mode.  Runtime-only flags are included when they are present in the

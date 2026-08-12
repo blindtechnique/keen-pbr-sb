@@ -603,6 +603,78 @@ TEST_CASE("an unmappable system-auth state never reports as usable") {
     CHECK(json["system_auth_state"].get<std::string>() == "endpoint_unproven");
 }
 
+TEST_CASE("PPE health keeps admissible distinct from active") {
+    RoutingHealthReport report;
+    report.overall_ok = true;
+    report.firewall_backend = FirewallBackend::iptables;
+    PpeDeoffloadSnapshot snapshot;
+    snapshot.mode = PpeDeoffloadMode::automatic;
+    snapshot.state = PpeDeoffloadState::admissible;
+    snapshot.supported = true;
+    snapshot.desired_tcp_ports = {"80,443"};
+    snapshot.desired_quic = true;
+    snapshot.last_reconcile_unix_seconds = 1234U;
+    report.ppe_deoffload = snapshot;
+
+    const auto json = routing_health_report_to_json(report);
+    REQUIRE(json.contains("ppe_deoffload"));
+    CHECK(json["ppe_deoffload"]["mode"] == "auto");
+    CHECK(json["ppe_deoffload"]["capability"] == "supported");
+    CHECK(json["ppe_deoffload"]["state"] == "admissible");
+    CHECK_FALSE(json["ppe_deoffload"]["tcp"]["active"].get<bool>());
+    CHECK(json["ppe_deoffload"]["tcp"]["applied_ports"].empty());
+    CHECK(json["ppe_deoffload"]["last_reconcile_ts"] == 1234);
+}
+
+TEST_CASE("PPE runtime inactivity retains proven capability") {
+    RoutingHealthReport report;
+    report.overall_ok = true;
+    report.firewall_backend = FirewallBackend::iptables;
+    PpeDeoffloadSnapshot snapshot;
+    snapshot.mode = PpeDeoffloadMode::automatic;
+    snapshot.state = PpeDeoffloadState::nfqueue_inactive;
+    snapshot.supported = true;
+    snapshot.detail = "active nfqws process was not observed";
+    report.ppe_deoffload = snapshot;
+
+    const auto json = routing_health_report_to_json(report);
+    CHECK(json["ppe_deoffload"]["capability"] == "supported");
+    CHECK(json["ppe_deoffload"]["state"] == "inactive");
+    CHECK(json["ppe_deoffload"]["reason"] == "nfqueue_inactive");
+    CHECK(json["ppe_deoffload"]["detail"] ==
+          "active nfqws process was not observed");
+}
+
+TEST_CASE("PPE active health publishes parent and protocol counters") {
+    RoutingHealthReport report;
+    report.overall_ok = true;
+    report.firewall_backend = FirewallBackend::iptables;
+    PpeDeoffloadSnapshot snapshot;
+    snapshot.mode = PpeDeoffloadMode::automatic;
+    snapshot.state = PpeDeoffloadState::active;
+    snapshot.supported = true;
+    snapshot.active = true;
+    snapshot.desired_tcp_ports = {"80,443"};
+    snapshot.applied_tcp_ports = {"80,443"};
+    snapshot.desired_quic = true;
+    snapshot.applied_quic = true;
+    snapshot.counters.available = true;
+    snapshot.counters.prerouting_packets = 11U;
+    snapshot.counters.forward_packets = 7U;
+    snapshot.counters.tcp_packets = 5U;
+    snapshot.counters.quic_packets = 3U;
+    snapshot.counters.observed_at_unix_seconds = 4321U;
+    report.ppe_deoffload = snapshot;
+
+    const auto json = routing_health_report_to_json(report);
+    CHECK(json["ppe_deoffload"]["state"] == "active");
+    CHECK(json["ppe_deoffload"]["prerouting"]["packets"] == 11);
+    CHECK(json["ppe_deoffload"]["forward"]["packets"] == 7);
+    CHECK(json["ppe_deoffload"]["tcp"]["counters"]["packets"] == 5);
+    CHECK(json["ppe_deoffload"]["quic"]["counters"]["packets"] == 3);
+    CHECK(json["ppe_deoffload"]["observed_at"] == 4321);
+}
+
 TEST_CASE("state names are stable for reporting") {
     CHECK(std::string(system_auth_capability_state_name(
               SystemAuthCapabilityState::usable)) == "usable");

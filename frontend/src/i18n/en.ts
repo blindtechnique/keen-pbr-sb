@@ -1298,6 +1298,42 @@ export const enTranslation = {
         routes: "Routes",
         policies: "Policies",
       },
+      ppe: {
+        title: "Hardware acceleration visibility",
+        states: {
+          verifiedActive: "Active and verified",
+          admissibleOnly: "Conditions met, not active",
+          degraded: "Needs attention",
+          inactive: "Inactive",
+          off: "Off",
+          unknown: "State unknown",
+        },
+        capabilities: {
+          supported: "supported",
+          unsupported: "not supported",
+          unknown: "not yet proven",
+        },
+        capability: "Hardware contract: {{value}}",
+        modes: {
+          auto: "automatic",
+          off: "off",
+        },
+        mode: "Configured mode: {{value}}",
+        protocolStates: {
+          active: "active",
+          inactive: "inactive",
+        },
+        connskipWindow: "CPU window: first {{count}} packets",
+        protocolPorts:
+          "{{protocol}} {{state}}; wanted: {{desired}}; applied: {{applied}}",
+        noPorts: "none",
+        rawCounter:
+          "{{chain}} raw: {{packets}} packets / {{bytes}} bytes",
+        lastReconcile: "last reconcile {{value}}",
+        observedAt: "observed {{value}}",
+        counterCaveat:
+          "These are raw rule hits, not a connection count and not proof that a flow returned to hardware acceleration after the CPU window.",
+      },
       chain: "chain",
       prerouting: "prerouting",
       defaultRoute: "default",
@@ -1995,6 +2031,16 @@ export const enTranslation = {
         title: "Advanced routing settings",
         description:
           "Advanced settings - only change these if you know what you're doing.",
+        ppeDeoffloadModeLabel: "Selective hardware acceleration visibility",
+        ppeDeoffloadModeHint:
+          "Automatic mode acts only when the full live Keenetic PPE contract is proven and nfqws2 is actively inspecting traffic. Passing those conditions does not by itself mean the rule is active; the Diagnostics card reports the verified runtime state. The system-wide hardware acceleration switch is never changed.",
+        ppeDeoffloadModeOptions: {
+          off: "Off (safe default)",
+          auto: "Automatic when supported",
+        },
+        ppeDeoffloadQuicEnabledLabel: "Also cover QUIC (UDP/443 only)",
+        ppeDeoffloadQuicEnabledHint:
+          "Applies only in automatic mode. High UDP and WebRTC ports are never added by this option.",
         reconnectUnmarkedFlowsOnRoutingChangeLabel:
           "Reconnect direct flows after routing changes",
         reconnectUnmarkedFlowsOnRoutingChangeHint:

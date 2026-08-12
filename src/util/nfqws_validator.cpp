@@ -602,6 +602,46 @@ void validate_strategy_actions(const ParsedCandidate& parsed,
     }
 }
 
+std::vector<ConfigValidationIssue> validate_parsed_candidate(
+    const ParsedCandidate& parsed,
+    const NfqwsPathResolver& resolve_path) {
+    auto issues = parsed.issues;
+
+    for (const auto* variable : {"NFQWS_BASE_ARGS", "NFQWS_ARGS",
+                                 "NFQWS_ARGS_QUIC", "NFQWS_ARGS_UDP",
+                                 "NFQWS_ARGS_IPSET", "NFQWS_EXTRA_ARGS",
+                                 "MODE_LIST", "MODE_ALL", "MODE_AUTO"}) {
+        validate_tokens(parsed, variable, true, resolve_path, issues);
+    }
+    validate_tokens(parsed, "NFQWS_ARGS_CUSTOM", false, resolve_path, issues);
+
+    const auto custom = split_fields(value_of(parsed, "NFQWS_ARGS_CUSTOM"));
+    validate_custom_boundaries(custom, issues);
+    validate_strategy_actions(parsed, issues);
+
+    const auto& queue = value_of(parsed, "NFQUEUE_NUM");
+    if (!queue.empty()) {
+        int number = 0;
+        const auto converted =
+            std::from_chars(queue.data(), queue.data() + queue.size(), number);
+        if (converted.ec != std::errc{} ||
+            converted.ptr != queue.data() + queue.size() || number < 0 ||
+            number > 65535) {
+            issues.push_back(
+                {"NFQUEUE_NUM", "queue number must be an integer from 0 to 65535"});
+        }
+    }
+
+    const auto& user = value_of(parsed, "USER");
+    if (!user.empty() &&
+        !std::all_of(user.begin(), user.end(), [](unsigned char ch) {
+            return std::isalnum(ch) != 0 || ch == '_' || ch == '-' || ch == '.';
+        })) {
+        issues.push_back({"USER", "nfqws user name contains unsafe characters"});
+    }
+    return issues;
+}
+
 int parsed_queue_number(const ParsedCandidate& parsed, int fallback) {
     const auto& value = value_of(parsed, "NFQUEUE_NUM");
     if (value.empty()) return fallback;
@@ -614,6 +654,157 @@ int parsed_queue_number(const ParsedCandidate& parsed, int fallback) {
         return fallback;
     }
     return queue;
+}
+
+std::optional<std::vector<NfqwsPpePortRange>> parse_ppe_port_ranges(
+    const std::string& spec,
+    bool allow_colon) {
+    if (spec.empty()) return std::nullopt;
+
+    std::vector<NfqwsPpePortRange> ranges;
+    std::size_t begin = 0;
+    while (begin <= spec.size()) {
+        const auto comma = spec.find(',', begin);
+        const auto end = comma == std::string::npos ? spec.size() : comma;
+        const auto item = spec.substr(begin, end - begin);
+        if (item.empty()) return std::nullopt;
+
+        const auto dash = item.find('-');
+        const auto colon = allow_colon ? item.find(':') : std::string::npos;
+        if (dash != std::string::npos && colon != std::string::npos)
+            return std::nullopt;
+        const auto separator =
+            dash != std::string::npos ? dash : colon;
+        if (separator != std::string::npos &&
+            (item.find(item[separator], separator + 1) != std::string::npos ||
+             separator == 0 || separator + 1 == item.size())) {
+            return std::nullopt;
+        }
+
+        const auto parse_port = [](const std::string& text,
+                                   std::uint16_t& output) {
+            int value = 0;
+            const auto converted =
+                std::from_chars(text.data(), text.data() + text.size(), value);
+            if (converted.ec != std::errc{} ||
+                converted.ptr != text.data() + text.size() || value < 1 ||
+                value > 65535) {
+                return false;
+            }
+            output = static_cast<std::uint16_t>(value);
+            return true;
+        };
+
+        NfqwsPpePortRange range;
+        if (separator == std::string::npos) {
+            if (!parse_port(item, range.first)) return std::nullopt;
+            range.last = range.first;
+        } else {
+            if (!parse_port(item.substr(0, separator), range.first) ||
+                !parse_port(item.substr(separator + 1), range.last) ||
+                range.first > range.last) {
+                return std::nullopt;
+            }
+        }
+        ranges.push_back(range);
+
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+
+    std::sort(ranges.begin(), ranges.end(),
+              [](const NfqwsPpePortRange& lhs,
+                 const NfqwsPpePortRange& rhs) {
+                  return lhs.first != rhs.first ? lhs.first < rhs.first
+                                                : lhs.last < rhs.last;
+              });
+    std::vector<NfqwsPpePortRange> canonical;
+    for (const auto& range : ranges) {
+        if (canonical.empty() ||
+            static_cast<unsigned int>(range.first) >
+                static_cast<unsigned int>(canonical.back().last) + 1U) {
+            canonical.push_back(range);
+        } else if (range.last > canonical.back().last) {
+            canonical.back().last = range.last;
+        }
+    }
+    return canonical;
+}
+
+void append_canonical_ranges(std::vector<NfqwsPpePortRange>& destination,
+                             const std::vector<NfqwsPpePortRange>& source) {
+    destination.insert(destination.end(), source.begin(), source.end());
+    if (destination.empty()) return;
+    std::sort(destination.begin(), destination.end(),
+              [](const NfqwsPpePortRange& lhs,
+                 const NfqwsPpePortRange& rhs) {
+                  return lhs.first != rhs.first ? lhs.first < rhs.first
+                                                : lhs.last < rhs.last;
+              });
+    std::vector<NfqwsPpePortRange> canonical;
+    canonical.reserve(destination.size());
+    for (const auto& range : destination) {
+        if (canonical.empty() ||
+            static_cast<unsigned int>(range.first) >
+                static_cast<unsigned int>(canonical.back().last) + 1U) {
+            canonical.push_back(range);
+        } else if (range.last > canonical.back().last) {
+            canonical.back().last = range.last;
+        }
+    }
+    destination = std::move(canonical);
+}
+
+bool append_tcp_filters(const std::vector<std::string>& tokens,
+                        std::vector<NfqwsPpePortRange>& output) {
+    bool found = false;
+    for (const auto& token : tokens) {
+        constexpr std::string_view prefix = "--filter-tcp=";
+        if (token.rfind(prefix, 0) != 0) continue;
+        const auto parsed = parse_ppe_port_ranges(token.substr(prefix.size()),
+                                                  false);
+        if (!parsed.has_value()) return false;
+        append_canonical_ranges(output, *parsed);
+        found = true;
+    }
+    return found;
+}
+
+bool range_set_contains(const std::vector<NfqwsPpePortRange>& ranges,
+                        std::uint16_t port) {
+    return std::any_of(ranges.begin(), ranges.end(), [port](const auto& range) {
+        return range.first <= port && port <= range.last;
+    });
+}
+
+NfqwsPpePortContract unavailable_ppe_contract(std::string reason,
+                                               int queue_number = 300) {
+    NfqwsPpePortContract result;
+    result.queue_number = queue_number;
+    result.reason = std::move(reason);
+    return result;
+}
+
+std::size_t multiport_slot_cost(const NfqwsPpePortRange& range) {
+    return range.first == range.last ? 1U : 2U;
+}
+
+std::optional<std::vector<std::vector<NfqwsPpePortRange>>>
+chunk_ppe_tcp_ranges(const std::vector<NfqwsPpePortRange>& ranges) {
+    std::vector<std::vector<NfqwsPpePortRange>> chunks;
+    std::size_t used_slots = 0;
+    for (const auto& range : ranges) {
+        const auto cost = multiport_slot_cost(range);
+        if (chunks.empty() ||
+            used_slots + cost > kNfqwsPpeMultiportSlotsPerChunk) {
+            if (chunks.size() >= kNfqwsPpeMaxTcpChunks) return std::nullopt;
+            chunks.emplace_back();
+            used_slots = 0;
+        }
+        chunks.back().push_back(range);
+        used_slots += cost;
+    }
+    return chunks;
 }
 
 std::string rewrite_input_path(const std::string& token,
@@ -645,43 +836,284 @@ void append_tokens(std::vector<std::string>& output,
 std::vector<ConfigValidationIssue> validate_nfqws_candidate(
     const std::string& content,
     const NfqwsPathResolver& resolve_path) {
-    auto parsed = parse_candidate(content);
-    auto issues = std::move(parsed.issues);
+    return validate_parsed_candidate(parse_candidate(content), resolve_path);
+}
 
-    for (const auto* variable : {"NFQWS_BASE_ARGS", "NFQWS_ARGS",
-                                 "NFQWS_ARGS_QUIC", "NFQWS_ARGS_UDP",
-                                 "NFQWS_ARGS_IPSET", "NFQWS_EXTRA_ARGS",
-                                 "MODE_LIST", "MODE_ALL", "MODE_AUTO"}) {
-        validate_tokens(parsed, variable, true, resolve_path, issues);
+NfqwsPpePortContract extract_nfqws_ppe_port_contract(
+    const std::string& content,
+    const NfqwsPathResolver& resolve_path) {
+    const auto parsed = parse_candidate(content);
+    const auto issues = validate_parsed_candidate(parsed, resolve_path);
+    if (!issues.empty()) {
+        const auto& issue = issues.front();
+        return unavailable_ppe_contract(
+            "candidate validation failed at " + issue.path + ": " +
+            issue.message,
+            parsed_queue_number(parsed, 300));
     }
-    validate_tokens(parsed, "NFQWS_ARGS_CUSTOM", false, resolve_path, issues);
+    const auto& queue_value = value_of(parsed, "NFQUEUE_NUM");
+    if (queue_value.empty()) {
+        return unavailable_ppe_contract(
+            "NFQUEUE_NUM is missing; the runtime queue cannot be inferred");
+    }
+
+    const int queue_number = parsed_queue_number(parsed, 300);
+    std::vector<NfqwsPpePortRange> active_tcp;
+
+    const auto collect_action_segment = [&](const std::vector<std::string>& segment,
+                                            const std::string& source,
+                                            std::string& error) {
+        if (!contains_strategy_action(segment)) return true;
+        const bool has_tcp = std::any_of(
+            segment.begin(), segment.end(), [](const std::string& token) {
+                return token.rfind("--filter-tcp=", 0) == 0;
+            });
+        const bool has_udp = std::any_of(
+            segment.begin(), segment.end(), [](const std::string& token) {
+                return token.rfind("--filter-udp=", 0) == 0;
+            });
+        if (!has_tcp && !has_udp) {
+            error = source +
+                    " has an action without a bounded protocol filter";
+            return false;
+        }
+        if (has_tcp && !append_tcp_filters(segment, active_tcp)) {
+            error = source + " has an invalid TCP filter";
+            return false;
+        }
+        return true;
+    };
+
+    std::string error;
+    const auto main = split_fields(value_of(parsed, "NFQWS_ARGS"));
+    if (!main.empty() && !collect_action_segment(main, "NFQWS_ARGS", error)) {
+        return unavailable_ppe_contract(std::move(error), queue_number);
+    }
 
     const auto custom = split_fields(value_of(parsed, "NFQWS_ARGS_CUSTOM"));
-    validate_custom_boundaries(custom, issues);
-
-    validate_strategy_actions(parsed, issues);
-
-    const auto& queue = value_of(parsed, "NFQUEUE_NUM");
-    if (!queue.empty()) {
-        int number = 0;
-        const auto converted =
-            std::from_chars(queue.data(), queue.data() + queue.size(), number);
-        if (converted.ec != std::errc{} ||
-            converted.ptr != queue.data() + queue.size() || number < 0 ||
-            number > 65535) {
-            issues.push_back(
-                {"NFQUEUE_NUM", "queue number must be an integer from 0 to 65535"});
+    std::vector<std::string> segment;
+    std::size_t custom_segment = 1;
+    const auto collect_custom_segment = [&]() {
+        if (segment.empty()) return true;
+        return collect_action_segment(
+            segment,
+            "NFQWS_ARGS_CUSTOM profile " + std::to_string(custom_segment),
+            error);
+    };
+    for (const auto& token : custom) {
+        if (is_new_boundary(token)) {
+            if (!collect_custom_segment())
+                return unavailable_ppe_contract(std::move(error), queue_number);
+            segment.clear();
+            ++custom_segment;
+        } else {
+            segment.push_back(token);
         }
     }
+    if (!collect_custom_segment())
+        return unavailable_ppe_contract(std::move(error), queue_number);
 
-    const auto& user = value_of(parsed, "USER");
-    if (!user.empty() &&
-        !std::all_of(user.begin(), user.end(), [](unsigned char ch) {
-            return std::isalnum(ch) != 0 || ch == '_' || ch == '-' || ch == '.';
-        })) {
-        issues.push_back({"USER", "nfqws user name contains unsafe characters"});
+    if (active_tcp.empty()) {
+        return unavailable_ppe_contract(
+            "active nfqws profiles have no bounded TCP filter", queue_number);
     }
-    return issues;
+
+    const auto declared_tcp = parse_ppe_port_ranges(
+        value_of(parsed, "TCP_PORTS"), true);
+    if (!declared_tcp.has_value()) {
+        return unavailable_ppe_contract(
+            "TCP_PORTS is missing or invalid", queue_number);
+    }
+    if (active_tcp != *declared_tcp) {
+        return unavailable_ppe_contract(
+            "active TCP filters do not exactly match TCP_PORTS", queue_number);
+    }
+
+    const auto chunks = chunk_ppe_tcp_ranges(active_tcp);
+    if (!chunks.has_value()) {
+        return unavailable_ppe_contract(
+            "active TCP filters exceed the bounded multiport chunk limit",
+            queue_number);
+    }
+
+    bool quic_udp_443 = false;
+    const auto quic = split_fields(value_of(parsed, "NFQWS_ARGS_QUIC"));
+    if (!quic.empty()) {
+        std::vector<NfqwsPpePortRange> quic_ports;
+        bool has_quic_filter = false;
+        bool has_quic_l7 = false;
+        for (const auto& token : quic) {
+            constexpr std::string_view filter = "--filter-udp=";
+            if (token.rfind(filter, 0) == 0) {
+                const auto ranges = parse_ppe_port_ranges(
+                    token.substr(filter.size()), false);
+                if (!ranges.has_value()) {
+                    return unavailable_ppe_contract(
+                        "NFQWS_ARGS_QUIC has an invalid UDP filter",
+                        queue_number);
+                }
+                append_canonical_ranges(quic_ports, *ranges);
+                has_quic_filter = true;
+            }
+            constexpr std::string_view l7 = "--filter-l7=";
+            if (token.rfind(l7, 0) == 0) {
+                const auto value = token.substr(l7.size());
+                std::size_t begin = 0;
+                while (begin <= value.size()) {
+                    const auto comma = value.find(',', begin);
+                    const auto end = comma == std::string::npos
+                                         ? value.size()
+                                         : comma;
+                    if (value.substr(begin, end - begin) == "quic")
+                        has_quic_l7 = true;
+                    if (comma == std::string::npos) break;
+                    begin = comma + 1;
+                }
+            }
+        }
+        if (!contains_strategy_action(quic) || !has_quic_filter ||
+            !has_quic_l7 || quic_ports.size() != 1U ||
+            quic_ports.front() != NfqwsPpePortRange{443, 443}) {
+            return unavailable_ppe_contract(
+                "NFQWS_ARGS_QUIC must be an action-bearing exact UDP/443 QUIC profile",
+                queue_number);
+        }
+        const auto declared_udp = parse_ppe_port_ranges(
+            value_of(parsed, "UDP_PORTS"), true);
+        if (!declared_udp.has_value() ||
+            !range_set_contains(*declared_udp, 443)) {
+            return unavailable_ppe_contract(
+                "UDP_PORTS does not include NFQWS_ARGS_QUIC UDP/443",
+                queue_number);
+        }
+        quic_udp_443 = true;
+    }
+
+    NfqwsPpePortContract result;
+    result.available = true;
+    result.queue_number = queue_number;
+    result.tcp_ranges = active_tcp;
+    result.tcp_chunks = *chunks;
+    result.quic_udp_443 = quic_udp_443;
+    return result;
+}
+
+NfqwsPpePortContract extract_nfqws_ppe_port_contract_from_argv(
+    const std::vector<std::string>& argv) {
+    int queue_number = -1;
+    std::size_t queue_tokens = 0;
+    for (std::size_t index = 0; index < argv.size(); ++index) {
+        std::string value;
+        if (argv[index].rfind("--qnum=", 0) == 0) {
+            value = argv[index].substr(std::string("--qnum=").size());
+        } else if (argv[index] == "--qnum" && index + 1U < argv.size()) {
+            value = argv[++index];
+        } else {
+            continue;
+        }
+        int parsed_queue = -1;
+        const auto converted = std::from_chars(
+            value.data(), value.data() + value.size(), parsed_queue);
+        if (converted.ec != std::errc{} ||
+            converted.ptr != value.data() + value.size() || parsed_queue < 0 ||
+            parsed_queue > 65535) {
+            return unavailable_ppe_contract(
+                "live nfqws argv has an invalid --qnum value");
+        }
+        ++queue_tokens;
+        if (queue_number >= 0 && queue_number != parsed_queue) {
+            return unavailable_ppe_contract(
+                "live nfqws argv has conflicting --qnum values");
+        }
+        queue_number = parsed_queue;
+    }
+    if (queue_tokens != 1U || queue_number < 0) {
+        return unavailable_ppe_contract(
+            "live nfqws argv must contain exactly one --qnum value");
+    }
+
+    std::vector<NfqwsPpePortRange> active_tcp;
+    bool quic_udp_443 = false;
+    std::vector<std::string> segment;
+    const auto inspect_segment = [&]() -> std::optional<std::string> {
+        if (segment.empty() || !contains_strategy_action(segment))
+            return std::nullopt;
+
+        bool has_tcp = false;
+        bool has_udp = false;
+        bool has_quic_l7 = false;
+        std::vector<NfqwsPpePortRange> udp_ranges;
+        for (const auto& token : segment) {
+            constexpr std::string_view tcp_filter = "--filter-tcp=";
+            if (token.rfind(tcp_filter, 0) == 0) has_tcp = true;
+
+            constexpr std::string_view udp_filter = "--filter-udp=";
+            if (token.rfind(udp_filter, 0) == 0) {
+                const auto parsed = parse_ppe_port_ranges(
+                    token.substr(udp_filter.size()), false);
+                if (!parsed.has_value())
+                    return "live nfqws argv has an invalid UDP filter";
+                append_canonical_ranges(udp_ranges, *parsed);
+                has_udp = true;
+            }
+
+            constexpr std::string_view l7 = "--filter-l7=";
+            if (token.rfind(l7, 0) == 0) {
+                const auto value = token.substr(l7.size());
+                std::size_t begin = 0;
+                while (begin <= value.size()) {
+                    const auto comma = value.find(',', begin);
+                    const auto end = comma == std::string::npos
+                                         ? value.size()
+                                         : comma;
+                    if (value.substr(begin, end - begin) == "quic")
+                        has_quic_l7 = true;
+                    if (comma == std::string::npos) break;
+                    begin = comma + 1;
+                }
+            }
+        }
+        if (!has_tcp && !has_udp)
+            return "live nfqws argv has an action without a bounded protocol filter";
+        if (has_tcp && !append_tcp_filters(segment, active_tcp))
+            return "live nfqws argv has an invalid TCP filter";
+        if (has_udp && has_quic_l7 && udp_ranges.size() == 1U &&
+            udp_ranges.front() == NfqwsPpePortRange{443, 443}) {
+            quic_udp_443 = true;
+        }
+        return std::nullopt;
+    };
+
+    for (const auto& token : argv) {
+        if (is_new_boundary(token)) {
+            if (const auto error = inspect_segment())
+                return unavailable_ppe_contract(*error, queue_number);
+            segment.clear();
+        } else {
+            segment.push_back(token);
+        }
+    }
+    if (const auto error = inspect_segment())
+        return unavailable_ppe_contract(*error, queue_number);
+
+    if (active_tcp.empty()) {
+        return unavailable_ppe_contract(
+            "live nfqws argv has no bounded TCP filter", queue_number);
+    }
+    const auto chunks = chunk_ppe_tcp_ranges(active_tcp);
+    if (!chunks.has_value()) {
+        return unavailable_ppe_contract(
+            "live nfqws argv exceeds the bounded multiport chunk limit",
+            queue_number);
+    }
+
+    NfqwsPpePortContract result;
+    result.available = true;
+    result.queue_number = queue_number;
+    result.tcp_ranges = active_tcp;
+    result.tcp_chunks = *chunks;
+    result.quic_udp_443 = quic_udp_443;
+    return result;
 }
 
 std::vector<std::string> build_nfqws_dry_run_args(

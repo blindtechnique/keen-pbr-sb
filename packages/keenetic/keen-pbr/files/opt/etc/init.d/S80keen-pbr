@@ -113,6 +113,7 @@ KEENETIC_RCI_PROBE_SECONDS="${KEENETIC_RCI_PROBE_SECONDS:-1}"
 META_XTABLES_RESTORE_FILE="${META_XTABLES_RESTORE_FILE:-/opt/var/run/keen-pbr.meta-udp443-restore.$$}"
 META_UDP443_OWNERSHIP_FILE="${META_UDP443_OWNERSHIP_FILE:-/opt/var/run/keen-pbr.meta-udp443-backends}"
 META_UDP443_OWNERSHIP_TMP="${META_UDP443_OWNERSHIP_TMP:-${META_UDP443_OWNERSHIP_FILE}.$$}"
+PPE_DEOFFLOAD_OWNERSHIP_FILE="${PPE_DEOFFLOAD_OWNERSHIP_FILE:-/opt/var/run/keen-pbr.ppe-backend}"
 case "$IPTABLES_BARE_WAIT_SECONDS" in
     ''|*[!0-9]*|0) IPTABLES_BARE_WAIT_SECONDS=10 ;;
 esac
@@ -630,6 +631,7 @@ guard_meta_udp443_start_ownership() {
             return 0
         fi
     elif cleanup_stale_tcp_rst_firewall &&
+         cleanup_stale_ppe_deoffload_firewall &&
          cleanup_stale_meta_udp443_firewall &&
          record_meta_udp443_possible_backends; then
         return 0
@@ -881,6 +883,366 @@ cleanup_stale_tcp_rst_firewall() {
         STOP_KEEN_PBR_SAFE=no
         : > "$FASTNAT_UNSAFE_STOP_FILE" 2>/dev/null || true
         log_error "Stale KeenPbrTcpRst artifacts remained after cleanup"
+        return 1
+    fi
+    return 0
+}
+
+ppe_deoffload_load_ownership() {
+    local metadata
+    local marker_hex
+
+    PPE_DEOFFLOAD_RECORDED=no
+    if [ -L "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        log_error "PPE de-offload backend marker is a symbolic link"
+        return 1
+    fi
+    if [ ! -e "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        return 0
+    fi
+    if [ ! -f "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        log_error "PPE de-offload backend marker is not a regular file"
+        return 1
+    fi
+    metadata=$(stat -c '%u:%g:%a' "$PPE_DEOFFLOAD_OWNERSHIP_FILE" \
+        2>/dev/null) || {
+        log_error "PPE de-offload backend marker metadata is unavailable"
+        return 1
+    }
+    if [ "$metadata" != '0:0:600' ]; then
+        log_error "PPE de-offload backend marker ownership or mode is invalid"
+        return 1
+    fi
+    marker_hex=$(od -An -tx1 -v "$PPE_DEOFFLOAD_OWNERSHIP_FILE" \
+        2>/dev/null | tr -d '[:space:]') || {
+        log_error "PPE de-offload backend marker content is unreadable"
+        return 1
+    }
+    if [ "$marker_hex" != 69707461626c65730a ]; then
+        log_error "PPE de-offload backend marker is invalid"
+        return 1
+    fi
+    PPE_DEOFFLOAD_RECORDED=yes
+    return 0
+}
+
+ppe_deoffload_snapshot() {
+    PPE_DEOFFLOAD_COMMAND_OUTPUT=""
+    if PPE_DEOFFLOAD_COMMAND_OUTPUT=$(
+        iptables_with_wait -t mangle -S 2>&1
+    ); then
+        PPE_DEOFFLOAD_SNAPSHOT="$PPE_DEOFFLOAD_COMMAND_OUTPUT"
+        return 0
+    fi
+    META_XTABLES_COMMAND_OUTPUT="$PPE_DEOFFLOAD_COMMAND_OUTPUT"
+    if meta_xtables_filter_is_unavailable; then
+        PPE_DEOFFLOAD_SNAPSHOT=""
+        return 0
+    fi
+    return 1
+}
+
+ppe_deoffload_snapshot_has_artifacts() {
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" |
+        grep -Eq -- '(^-N KeenPbrPpe4$)|([[:space:]](-j|--jump|-g|--goto)[[:space:]]+KeenPbrPpe4([[:space:]]|$))|(keen-pbr-sb:ppe:)'
+}
+
+# Validate the complete owned graph semantically before deleting anything.
+# Quotes around a comment are presentation-only in `iptables -S`; every other
+# selector, target and ownership tag remains exact.  A foreign reference or an
+# extra rule inside our named chain makes cleanup fail closed.
+ppe_deoffload_snapshot_is_owned() {
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" | awk \
+        -v recorded="$PPE_DEOFFLOAD_RECORDED" '
+        function unquote(value) {
+            if (value ~ /^".*"$/) {
+                return substr(value, 2, length(value) - 2)
+            }
+            return value
+        }
+        function digits(value) {
+            return value != "" && value !~ /[^0-9]/
+        }
+        function numeric_port(value) {
+            return digits(value) && value + 0 >= 1 && value + 0 <= 65535 &&
+                value == sprintf("%d", value + 0)
+        }
+        function ports(value,   count,items,i,bounds,parts,low,high,last_high,slots) {
+            if (value == "" || value ~ /[^0-9,:]/) return 0
+            count = split(value, items, ",")
+            if (count < 1 || count > 15) return 0
+            last_high = 0
+            slots = 0
+            for (i = 1; i <= count; ++i) {
+                parts = split(items[i], bounds, ":")
+                if (parts == 1) {
+                    if (!numeric_port(bounds[1])) return 0
+                    low = bounds[1] + 0
+                    high = low
+                    slots++
+                } else if (parts == 2) {
+                    if (!numeric_port(bounds[1]) ||
+                        !numeric_port(bounds[2])) return 0
+                    low = bounds[1] + 0
+                    high = bounds[2] + 0
+                    if (low >= high) return 0
+                    slots += 2
+                } else {
+                    return 0
+                }
+                if (slots > 15) return 0
+                # Runtime canonicalization sorts and coalesces overlapping or
+                # adjacent selectors before publication. A non-canonical
+                # lookalike must not become lifecycle cleanup authority.
+                if (i > 1 && low <= last_high + 1) return 0
+                last_high = high
+            }
+            return 1
+        }
+        function parse_rule(   i,key,value) {
+            proto = ""; match_tcp = 0; match_udp = 0
+            match_multiport = 0; match_connskip = 0; match_comment = 0
+            dports = ""; dport = ""; skip = ""; comment = ""; target = ""
+            goto_target = 0
+            invalid = 0
+            for (i = 3; i <= NF; ++i) {
+                key = $i
+                if (key == "-p" || key == "--protocol") {
+                    if (++i > NF || proto != "") { invalid = 1; break }
+                    proto = $i
+                } else if (key == "-m" || key == "--match") {
+                    if (++i > NF) { invalid = 1; break }
+                    value = $i
+                    if (value == "tcp") match_tcp++
+                    else if (value == "udp") match_udp++
+                    else if (value == "multiport") match_multiport++
+                    else if (value == "connskip") match_connskip++
+                    else if (value == "comment") match_comment++
+                    else { invalid = 1; break }
+                } else if (key == "--dports") {
+                    if (++i > NF || dports != "") { invalid = 1; break }
+                    dports = $i
+                } else if (key == "--dport") {
+                    if (++i > NF || dport != "") { invalid = 1; break }
+                    dport = $i
+                } else if (key == "--connskip") {
+                    if (++i > NF || skip != "") { invalid = 1; break }
+                    skip = $i
+                } else if (key == "--comment") {
+                    if (++i > NF || comment != "") { invalid = 1; break }
+                    comment = unquote($i)
+                } else if (key == "-j" || key == "--jump") {
+                    if (++i > NF || target != "") { invalid = 1; break }
+                    target = $i
+                } else if (key == "-g" || key == "--goto") {
+                    if (++i > NF || target != "") { invalid = 1; break }
+                    target = $i
+                    goto_target = 1
+                } else {
+                    invalid = 1
+                    break
+                }
+            }
+        }
+        $1 == "-N" && $2 == "KeenPbrPpe4" {
+            chain_count++
+            next
+        }
+        $1 == "-A" {
+            origin = $2
+            # Inspect the raw rule as well as parsed tokens.  `iptables -S`
+            # keeps comments containing spaces quoted, so field-wise unquote
+            # cannot reliably see a reserved prefix in such a comment.
+            reserved_tag = index($0, "keen-pbr-sb:ppe:") > 0
+            parse_rule()
+            if (origin == "KeenPbrPpe4") {
+                chain_rules++
+                if (invalid || match_comment != 1) exit 1
+                if (comment == "keen-pbr-sb:ppe:return") {
+                    if (phase == 2 || goto_target || proto != "" ||
+                        match_tcp || match_udp ||
+                        match_multiport || match_connskip || dports != "" ||
+                        dport != "" || skip != "" || target != "RETURN") exit 1
+                    phase = 2
+                    return_rules++
+                    next
+                }
+                if (comment == "keen-pbr-sb:ppe:quic") {
+                    if (phase > 0 || goto_target || proto != "udp" ||
+                        match_udp != 1 ||
+                        match_multiport || match_connskip != 1 ||
+                        dports != "" || dport != "443" || skip != "30" ||
+                        target != "PPE") exit 1
+                    phase = 1
+                    quic_rules++
+                    next
+                }
+                prefix = "keen-pbr-sb:ppe:tcp:"
+                if (index(comment, prefix) == 1 &&
+                    digits(substr(comment, length(prefix) + 1))) {
+                    tcp_index_text = substr(comment, length(prefix) + 1)
+                    if ((tcp_index_text != "0" &&
+                         substr(tcp_index_text, 1, 1) == "0") ||
+                        tcp_index_text + 0 != tcp_rules ||
+                        tcp_index_text + 0 >= 16 || phase != 0 ||
+                        goto_target || proto != "tcp" || match_tcp > 1 ||
+                        match_multiport != 1 || match_connskip != 1 ||
+                        !ports(dports) || dport != "" || skip != "30" ||
+                        target != "PPE") exit 1
+                    tcp_rules++
+                    next
+                }
+                exit 1
+            }
+            if (target == "KeenPbrPpe4") {
+                if (invalid || goto_target || proto != "" || match_tcp || match_udp ||
+                    match_multiport || match_connskip || match_comment != 1 ||
+                    dports != "" || dport != "" || skip != "") exit 1
+                if (origin == "PREROUTING" &&
+                    comment == "keen-pbr-sb:ppe:prerouting") {
+                    prerouting_hooks++
+                    next
+                }
+                if (origin == "FORWARD" &&
+                    comment == "keen-pbr-sb:ppe:forward") {
+                    forward_hooks++
+                    next
+                }
+                exit 1
+            }
+            # No rule outside the exact owned graph may borrow the reserved
+            # tag namespace. Otherwise lifecycle cleanup could report success
+            # while a direct tagged -j PPE rule remained active.
+            if (reserved_tag) exit 1
+        }
+        END {
+            if (chain_count != 1) exit 1
+            if (chain_rules == 0) {
+                if (recorded != "yes" &&
+                    !(prerouting_hooks > 0 && forward_hooks > 0)) exit 1
+            } else if (chain_rules < 2 || return_rules != 1 || tcp_rules < 1 ||
+                       prerouting_hooks < 1 || forward_hooks < 1 ||
+                       quic_rules > 1) {
+                exit 1
+            }
+        }
+    '
+}
+
+ppe_deoffload_owned_hook_count() {
+    local chain="$1"
+    local tag="$2"
+
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" | awk \
+        -v chain="$chain" -v tag="$tag" '
+        function unquote(value) {
+            if (value ~ /^".*"$/) return substr(value, 2, length(value) - 2)
+            return value
+        }
+        $1 == "-A" && $2 == chain {
+            comment = ""; target = ""; valid = 1
+            for (i = 3; i <= NF; ++i) {
+                if ($i == "-m" && $(i + 1) == "comment") { i++; continue }
+                if ($i == "--comment" && i < NF) {
+                    comment = unquote($(++i)); continue
+                }
+                if (($i == "-j" || $i == "--jump") && i < NF) {
+                    target = $(++i); continue
+                }
+                valid = 0
+            }
+            if (valid && comment == tag && target == "KeenPbrPpe4") count++
+        }
+        END { print count + 0 }
+    '
+}
+
+ppe_deoffload_owned_chain_delete_commands() {
+    printf '%s\n' "$PPE_DEOFFLOAD_SNAPSHOT" | awk '
+        $1 == "-A" && $2 == "KeenPbrPpe4" {
+            line = $0
+            sub(/^-A[[:space:]]+/, "-D ", line)
+            deletes[++count] = line
+        }
+        END {
+            # Reverse order also works for future rule shapes with positional
+            # dependencies. Never flush: a rule appended after the ownership
+            # snapshot must make -X/COMMIT fail and remain untouched.
+            for (i = count; i >= 1; --i) print deletes[i]
+        }
+    '
+}
+
+cleanup_stale_ppe_deoffload_firewall() {
+    local prerouting_hooks
+    local forward_hooks
+    local chain_deletes
+    local script
+
+    # The daemon is the only live PPE writer. Lifecycle recovery may inspect
+    # and remove its graph only after that writer is proven absent.
+    if [ -n "$(pidof "${PROCS:-keen-pbr}" 2>/dev/null || true)" ]; then
+        log_error "Refusing to remove KeenPbrPpe4 while keen-pbr is running"
+        return 1
+    fi
+    if ! ppe_deoffload_load_ownership; then
+        return 1
+    fi
+    if ! command -v iptables >/dev/null 2>&1; then
+        if [ "$PPE_DEOFFLOAD_RECORDED" = yes ]; then
+            log_error "Required PPE de-offload cleanup tool iptables is missing"
+            return 1
+        fi
+        return 0
+    fi
+    if ! ppe_deoffload_snapshot; then
+        log_error "Failed to inspect stale PPE de-offload artifacts"
+        return 1
+    fi
+    if ppe_deoffload_snapshot_has_artifacts; then
+        if ! ppe_deoffload_snapshot_is_owned; then
+            log_error "Refusing to remove ambiguous or foreign PPE de-offload artifacts"
+            return 1
+        fi
+        prerouting_hooks=$(ppe_deoffload_owned_hook_count \
+            PREROUTING keen-pbr-sb:ppe:prerouting) || return 1
+        forward_hooks=$(ppe_deoffload_owned_hook_count \
+            FORWARD keen-pbr-sb:ppe:forward) || return 1
+        chain_deletes=$(ppe_deoffload_owned_chain_delete_commands) || return 1
+        script='*mangle
+'
+        while [ "$prerouting_hooks" -gt 0 ]; do
+            script="${script}-D PREROUTING -m comment --comment keen-pbr-sb:ppe:prerouting -j KeenPbrPpe4
+"
+            prerouting_hooks=$((prerouting_hooks - 1))
+        done
+        while [ "$forward_hooks" -gt 0 ]; do
+            script="${script}-D FORWARD -m comment --comment keen-pbr-sb:ppe:forward -j KeenPbrPpe4
+"
+            forward_hooks=$((forward_hooks - 1))
+        done
+        if [ -n "$chain_deletes" ]; then
+            script="${script}${chain_deletes}
+"
+        fi
+        script="${script}-X KeenPbrPpe4
+COMMIT
+"
+        if ! meta_xtables_restore_transaction iptables "$script" \
+            >/dev/null 2>&1; then
+            log_error "Atomic PPE de-offload cleanup failed with iptables-restore"
+            return 1
+        fi
+        if ! ppe_deoffload_snapshot ||
+           ppe_deoffload_snapshot_has_artifacts; then
+            log_error "Stale PPE de-offload artifacts remained after cleanup"
+            return 1
+        fi
+    fi
+    if ! rm -f "$PPE_DEOFFLOAD_OWNERSHIP_FILE" 2>/dev/null ||
+       [ -e "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ] ||
+       [ -L "$PPE_DEOFFLOAD_OWNERSHIP_FILE" ]; then
+        log_error "Verified PPE de-offload backend marker could not be cleared"
         return 1
     fi
     return 0
@@ -3857,6 +4219,8 @@ stop_service_for_action() {
             elif ! stop_keen_pbr "$mode"; then
                 result=1
             elif ! cleanup_stale_tcp_rst_firewall; then
+                result=1
+            elif ! cleanup_stale_ppe_deoffload_firewall; then
                 result=1
             elif ! cleanup_stale_meta_udp443_firewall; then
                 result=1

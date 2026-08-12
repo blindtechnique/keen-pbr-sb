@@ -11,6 +11,9 @@ Makefile text eol=lf
 *.yaml text eol=lf
 /src/api/generated/api_types.hpp text eol=lf
 
+# The zapret2 semantic fixture is hash-pinned to exact upstream LF bytes.
+/tests/fixtures/zapret2-v1.0.3/** text eol=lf
+
 /packages/**/files/** text eol=lf
 # nfqws packet captures are opaque binary protocol fixtures.  The broader
 # package-files rule above must never normalize their embedded CRLF bytes.

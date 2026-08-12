@@ -1234,6 +1234,7 @@ components:
           deprecated: true
           description: Legacy mixed carrier/framing field. New clients use path.
         state:
+          title: State
           type: string
           enum: [down, starting, up, degraded]
         pid:
@@ -1509,6 +1510,29 @@ components:
           enum: [auto, iptables, nftables]
           default: auto
           example: auto
+        ppe_deoffload_mode:
+          $ref: "#/components/schemas/PpeDeoffloadMode"
+          nullable: true
+          default: off
+          description: >
+            Selective per-flow hardware PPE de-offload policy. `off` removes
+            only the graph owned by keen-pbr. `auto` may install that graph
+            only after the live iptables backend, PPE target, connskip match,
+            active NFQUEUE path and validated strategy ports are all proven.
+            Omitting the field or setting it to `null` is fail-safe `off`
+            until the hardware acceptance matrix allows a different default.
+            This setting never writes `net.hwnat.ppe_enabled`.
+          example: off
+        ppe_deoffload_quic_enabled:
+          type: boolean
+          nullable: true
+          default: false
+          description: >
+            Whether automatic PPE de-offload may also cover QUIC. Version 1
+            is restricted to UDP/443; high UDP/WebRTC ports are never inferred
+            from this switch. Effective only when `ppe_deoffload_mode` is
+            `auto`. Omitting the field or setting it to `null` means `false`.
+          example: false
         firewall_verify_max_bytes:
           type: integer
           minimum: 0
@@ -4188,6 +4212,95 @@ components:
           type: string
           description: Human-readable detail. Omitted when empty.
 
+    PpeDeoffloadMode:
+      type: string
+      enum: [off, auto]
+
+    PpeDeoffloadCapability:
+      type: string
+      enum: [supported, unsupported, unknown]
+
+    PpeDeoffloadCounter:
+      type: object
+      properties:
+        packets:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raw packet counter read from the verified owned rule.
+        bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raw byte counter read from the verified owned rule.
+
+    PpeDeoffloadProtocolHealth:
+      title: PpeDeoffloadProtocolHealth
+      type: object
+      required: [desired_ports, applied_ports, active]
+      properties:
+        desired_ports:
+          type: array
+          items:
+            type: string
+          description: Ports derived from the validated active nfqws2 strategy.
+        applied_ports:
+          type: array
+          items:
+            type: string
+          description: Ports semantically verified in the live owned graph.
+        active:
+          type: boolean
+          description: Whether this protocol is verified active in the owned graph.
+        counters:
+          $ref: "#/components/schemas/PpeDeoffloadCounter"
+
+    PpeDeoffloadHealth:
+      type: object
+      required: [mode, capability, state, tcp, quic]
+      properties:
+        mode:
+          $ref: "#/components/schemas/PpeDeoffloadMode"
+          description: Configured desired mode; this alone never means active.
+        capability:
+          $ref: "#/components/schemas/PpeDeoffloadCapability"
+          description: Whether the complete live PPE contract was proven.
+        state:
+          title: PpeDeoffloadHealthState
+          type: string
+          enum: [off, inactive, admissible, active, degraded, unknown]
+          description: >
+            Reconciled runtime state. `admissible` means only that all
+            preconditions currently hold; it must never be presented as
+            `active`. `active` requires semantic verification of the live
+            owned graph.
+        reason:
+          type: string
+          description: Stable machine-readable reason for a non-active state.
+        detail:
+          type: string
+          description: Optional operator-facing diagnostic detail.
+        connskip_packets:
+          type: integer
+          minimum: 1
+          description: Per-flow packet window retained on the CPU, when known.
+        tcp:
+          $ref: "#/components/schemas/PpeDeoffloadProtocolHealth"
+        quic:
+          $ref: "#/components/schemas/PpeDeoffloadProtocolHealth"
+        prerouting:
+          $ref: "#/components/schemas/PpeDeoffloadCounter"
+        forward:
+          $ref: "#/components/schemas/PpeDeoffloadCounter"
+        last_reconcile_ts:
+          type: integer
+          format: int64
+          description: Unix timestamp of the last completed reconcile attempt.
+        observed_at:
+          type: integer
+          format: int64
+          description: Unix timestamp when the live graph and counters were observed.
+
     RoutingHealthResponse:
       type: object
       required: [overall, firewall_backend, firewall, firewall_rules, route_tables, policy_rules]
@@ -4205,6 +4318,8 @@ components:
           enum: [iptables, nftables]
           description: Active firewall backend.
           example: "nftables"
+        ppe_deoffload:
+          $ref: "#/components/schemas/PpeDeoffloadHealth"
         ttl_bypass_state:
           type: string
           enum:

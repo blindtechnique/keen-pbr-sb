@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 
@@ -143,6 +144,124 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+Config staged_transaction_config();
+
+TEST_CASE("PPE remains fail-safe off during ordinary firewall staging") {
+    const auto config = staged_transaction_config();
+    CacheManager cache{"/nonexistent/keen-pbr-test-cache"};
+    RecordingFirewall firewall{FirewallBackend::iptables};
+
+    (void)stage_runtime_firewall(
+        config,
+        {{"vpn", 0x00070000U}},
+        {},
+        cache,
+        firewall,
+        FirewallApplyMode::PreserveSets);
+
+    CHECK(firewall.ppe_deoffload_desired().mode ==
+          PpeDeoffloadMode::off);
+    CHECK_FALSE(firewall.ppe_deoffload_desired().nfqueue_active);
+    CHECK(firewall.ppe_deoffload_desired().tcp_ports.empty());
+    CHECK_FALSE(firewall.ppe_deoffload_desired().quic_enabled);
+}
+
+TEST_CASE("PPE runtime desired comparison ignores diagnostics, not live facts") {
+    Config config;
+    config.daemon = DaemonConfig{};
+    config.daemon->ppe_deoffload_mode = api::PpeDeoffloadMode::AUTO;
+    config.daemon->ppe_deoffload_quic_enabled = true;
+
+    NfqwsPpeRuntimeContractObservation observation;
+    observation.available = true;
+    observation.diagnostic = "first wording";
+    observation.contract.available = true;
+    observation.contract.queue_number = 301;
+    observation.contract.tcp_ranges = {
+        {80U, 90U}, {443U, 443U}};
+    observation.contract.quic_udp_443 = true;
+    const auto desired = ppe_deoffload_desired_from_observation(
+        config, observation);
+    CHECK(desired.mode == PpeDeoffloadMode::automatic);
+    CHECK(desired.nfqueue_number == 301);
+    CHECK(desired.tcp_ports ==
+          std::vector<std::string>{"80:90", "443"});
+    CHECK(desired.quic_443_active);
+
+    auto diagnostic_only = desired;
+    diagnostic_only.runtime_contract_detail = "new wording";
+    CHECK(ppe_deoffload_desired_semantically_equal(
+        desired, diagnostic_only));
+
+    auto queue_changed = diagnostic_only;
+    queue_changed.nfqueue_number = 302;
+    CHECK_FALSE(ppe_deoffload_desired_semantically_equal(
+        desired, queue_changed));
+
+    auto process_gone = diagnostic_only;
+    process_gone.nfqueue_active = false;
+    process_gone.strategy_ports_available = false;
+    process_gone.nfqueue_number = -1;
+    process_gone.tcp_ports.clear();
+    process_gone.quic_443_active = false;
+    CHECK_FALSE(ppe_deoffload_desired_semantically_equal(
+        desired, process_gone));
+}
+
+TEST_CASE("late PPE observation cannot reuse a staged live NFQWS tuple") {
+    NfqwsPpeRuntimeContractObservation staged_live;
+    staged_live.available = true;
+    staged_live.contract.available = true;
+    staged_live.contract.queue_number = 300;
+    staged_live.contract.tcp_ranges = {{443U, 443U}};
+    staged_live.contract.quic_udp_443 = true;
+    const auto staged = ppe_deoffload_desired_from_observation(
+        PpeDeoffloadMode::automatic,
+        /*quic_enabled=*/true,
+        staged_live);
+
+    NfqwsPpeRuntimeContractObservation late_dead;
+    late_dead.diagnostic = "nfqws process is not running";
+    const auto dead = ppe_deoffload_desired_from_observation(
+        PpeDeoffloadMode::automatic,
+        /*quic_enabled=*/true,
+        late_dead);
+    CHECK_FALSE(ppe_deoffload_desired_semantically_equal(staged, dead));
+    CHECK_FALSE(dead.nfqueue_active);
+    CHECK(build_ppe_deoffload_graph_spec(dead).empty());
+
+    auto queue_changed = staged_live;
+    queue_changed.contract.queue_number = 301;
+    queue_changed.contract.tcp_ranges = {{80U, 80U}};
+    queue_changed.contract.quic_udp_443 = false;
+    const auto changed = ppe_deoffload_desired_from_observation(
+        PpeDeoffloadMode::automatic,
+        /*quic_enabled=*/true,
+        queue_changed);
+    CHECK_FALSE(ppe_deoffload_desired_semantically_equal(
+        staged, changed));
+    CHECK(changed.nfqueue_number == 301);
+    const auto changed_graph = build_ppe_deoffload_graph_spec(changed);
+    REQUIRE(changed_graph.tcp_chunks.size() == 1U);
+    CHECK(changed_graph.tcp_chunks[0] == "80");
+    CHECK_FALSE(changed_graph.quic);
+}
+
+TEST_CASE("PPE desired state is returned by value for concurrent health reads") {
+    static_assert(!std::is_reference_v<decltype(
+        std::declval<const RecordingFirewall&>()
+            .ppe_deoffload_desired())>);
+
+    RecordingFirewall firewall;
+    PpeDeoffloadDesired desired;
+    desired.mode = PpeDeoffloadMode::automatic;
+    firewall.set_ppe_deoffload_desired(desired);
+    auto copy = firewall.ppe_deoffload_desired();
+    firewall.set_ppe_deoffload_desired({});
+    CHECK(copy.mode == PpeDeoffloadMode::automatic);
+    CHECK(firewall.ppe_deoffload_snapshot().mode == PpeDeoffloadMode::off);
+}
 
 class FirewallScopedPath final {
 public:

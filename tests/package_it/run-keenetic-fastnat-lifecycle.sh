@@ -340,6 +340,10 @@ restore_hwnat_if_safe() { printf '%s\n' restore >> "$order"; }
 cleanup_stale_tcp_rst_firewall() {
     printf '%s\n' cleanup-tcp-rst >> "$order"
 }
+cleanup_stale_ppe_deoffload_firewall() {
+    printf '%s\n' cleanup-ppe-deoffload >> "$order"
+    return "${PPE_CLEANUP_STATUS:-0}"
+}
 cleanup_stale_meta_udp443_firewall() {
     printf '%s\n' cleanup-meta-udp443 >> "$order"
 }
@@ -396,6 +400,7 @@ stop_service_for_action stop no
 [ "$(cat "$order")" = "prepare
 stop:stop
 cleanup-tcp-rst
+cleanup-ppe-deoffload
 cleanup-meta-udp443" ]
 
 : > "$order"
@@ -403,8 +408,24 @@ stop_service_for_action stop yes
 [ "$(cat "$order")" = "prepare
 stop:stop
 cleanup-tcp-rst
+cleanup-ppe-deoffload
 cleanup-meta-udp443
 restore" ]
+
+# PPE cleanup is part of the fail-closed stop boundary.  An unverified graph
+# must prevent later Meta cleanup and FastNAT restoration from making the
+# partially stopped runtime look safe.
+: > "$order"
+PPE_CLEANUP_STATUS=1
+if stop_service_for_action stop yes; then
+    echo "stop succeeded after PPE cleanup failure" >&2
+    exit 1
+fi
+unset PPE_CLEANUP_STATUS
+[ "$(cat "$order")" = "prepare
+stop:stop
+cleanup-tcp-rst
+cleanup-ppe-deoffload" ]
 
 # Dispatcher authority is created after acquisition for both ordinary start
 # and restart; neither pre-lease path may infer ownership from shared state.

@@ -485,6 +485,7 @@ set(SOURCES
   src/daemon/daemon_dns_probe.cpp
   src/daemon/list_service.cpp
   src/runtime/list_refresh_task.cpp
+  src/runtime/nfqws_runtime_contract.cpp
   src/daemon/resolver_health.cpp
   src/daemon/resolver_sync_state_machine.cpp
   src/daemon/runtime_state_store.cpp

@@ -11,6 +11,8 @@ add_executable(keen-pbr-tests
   ../src/util/nfqws_config_migration.cpp
   test_nfqws_runtime_state.cpp
   ../src/util/nfqws_runtime_state.cpp
+  test_nfqws_runtime_contract.cpp
+  ../src/runtime/nfqws_runtime_contract.cpp
   test_component_transaction_journal.cpp
   ../src/update/component_transaction_journal.cpp
   test_component_capture.cpp
@@ -766,11 +768,13 @@ add_executable(keen-pbr-firewall-it
   ../src/routing/route_table.cpp
   ../src/routing/routing_verifier.cpp
   ../src/routing/target.cpp
+  ../src/runtime/nfqws_runtime_contract.cpp
   ../src/util/blocking_executor.cpp
   ../src/util/firewall_backend_utils.cpp
   ../src/util/ipv6_support.cpp
   ../src/util/last_command_failure.cpp
   ../src/util/network_routes.cpp
+  ../src/util/nfqws_validator.cpp
   ../src/util/system_info.cpp
   ../src/util/traced_mutex.cpp
 )

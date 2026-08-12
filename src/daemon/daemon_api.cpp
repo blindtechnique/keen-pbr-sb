@@ -847,6 +847,7 @@ void Daemon::setup_api() {
                 report.ttl_bypass_state = firewall_->ttl_bypass_state_name();
                 report.ttl_bypass_detail =
                     firewall_->ttl_bypass_state_detail();
+                report.ppe_deoffload = firewall_->ppe_deoffload_snapshot();
                 return report;
             };
 
@@ -1002,6 +1003,30 @@ void Daemon::setup_api() {
             replace_interface_traffic_targets(
                 std::move(source), std::move(names));
         };
+    api_ctx_->request_netfilter_runtime_refresh_fn = [this]() {
+        bool admitted = false;
+        try {
+            enqueue_control_task(
+                [this, &admitted]() {
+                    schedule_netfilter_runtime_refresh(
+                        NetfilterRefreshReason::full);
+                    // The scheduler owns a retained reason before publishing
+                    // its timer.  Even timer admission failure is therefore
+                    // recoverable by the existing periodic control owner.
+                    admitted = true;
+                },
+                /*wait_for_completion=*/true,
+                "nfqws-ppe-netfilter-refresh",
+                /*require_active_event_loop=*/true);
+        } catch (...) {
+            // During startup rollback or shutdown the HTTP worker must never
+            // fall back to inline firewall work.  Final daemon cleanup owns
+            // the graph in that window; report that no runtime refresh was
+            // admitted instead.
+            return false;
+        }
+        return admitted;
+    };
     refresh_interface_traffic_config_targets(config_);
     lifecycle_operation_store_.set_publish_callback([this]() {
         if (status_stream_) status_stream_->reconcile();

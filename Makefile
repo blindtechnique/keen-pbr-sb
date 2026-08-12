@@ -94,6 +94,7 @@ check-warnings: ## Build with -Wall -Wextra -Werror (native compilers only)
 	cmake --build build/cmake-werror --parallel $(BUILD_JOBS) --target keen-pbr
 
 check-shell: ## Parse every shipped shell script with the target BusyBox and scan for bashisms
+	python3 -m unittest build_scripts.tests.test_mask_awk_for_shell_scan -v
 	bash build_scripts/check-shell-busybox.sh
 
 check-openapi-parity: ## Fail when a registered API route is missing from docs/openapi.yaml
@@ -103,7 +104,7 @@ check-nfqws-assets: ## Verify nfqws2 preset/blob invariants and their exact-waiv
 	python3 build_scripts/check-nfqws-assets.py
 	python3 -m unittest build_scripts.tests.test_check_nfqws_assets -v
 
-check-nfqws-rotator-lua: ## Execute the Lua companion; nfqws2 --dry-run does not initialize Lua
+check-nfqws-rotator-lua: ## Check telemetry and pinned zapret2 circular semantics
 	bash build_scripts/check-nfqws-rotator-lua.sh
 
 # Отдельный каталог сборки: санитайзеры не должны попасть в router/IPK binary.

@@ -148,6 +148,12 @@ struct ApiContext {
     // exists - the fields are simply omitted.
     std::function<std::optional<SystemAuthHealthSnapshot>()>
         get_system_auth_health_fn;
+    // Successful nfqws service/strategy mutations must re-evaluate the PPE
+    // de-offload graph from the active process contract.  The HTTP worker may
+    // only request the existing coalesced control-loop reconciliation; it
+    // never runs firewall commands itself.  Optional tail placement preserves
+    // aggregate initializers used by tests and embedders.
+    std::function<bool()> request_netfilter_runtime_refresh_fn;
 
     Config get_visible_config() const {
         return get_visible_config_fn();
@@ -335,6 +341,11 @@ struct ApiContext {
         response.capacity = 0;
         response.tracked = 0;
         return response;
+    }
+
+    bool request_netfilter_runtime_refresh() const {
+        return request_netfilter_runtime_refresh_fn &&
+               request_netfilter_runtime_refresh_fn();
     }
 };
 

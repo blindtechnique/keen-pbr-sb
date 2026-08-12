@@ -1138,6 +1138,7 @@ arm-731-42'
         STOP_KEEN_PBR_SAFE=yes
     }
     cleanup_stale_tcp_rst_firewall() { echo tcp-cleanup >> "$lifecycle"; }
+    cleanup_stale_ppe_deoffload_firewall() { echo ppe-cleanup >> "$lifecycle"; }
     cleanup_stale_meta_udp443_firewall() { echo meta-cleanup >> "$lifecycle"; }
     restore_hwnat_if_safe() { echo fastnat-restore >> "$lifecycle"; }
     discard_control_mailbox_after_successful_stop() { echo discard >> "$lifecycle"; }
@@ -1158,6 +1159,7 @@ lease-check
 prepare
 stop
 tcp-cleanup
+ppe-cleanup
 meta-cleanup
 fastnat-restore
 discard

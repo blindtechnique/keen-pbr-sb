@@ -1,6 +1,9 @@
 #include "iptables.hpp"
+#include "firewall_runtime.hpp"
 #include "ipset_restore_pipe.hpp"
 #include "port_spec_util.hpp"
+#include "ppe_deoffload.hpp"
+#include "../config/config_writer.hpp"
 #include "../log/logger.hpp"
 #include "../util/format_compat.hpp"
 #include "../util/ipv6_support.hpp"
@@ -11,11 +14,13 @@
 #include <arpa/inet.h>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <fcntl.h>
 #include <iterator>
 #include <mutex>
 #include <optional>
@@ -25,6 +30,8 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <thread>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace keen_pbr3 {
 
@@ -1169,6 +1176,145 @@ bool xtables_match_registered(
         }
     }
     return false;
+}
+
+PpeCapabilityState xtables_inventory_capability(
+    std::string_view inventory_path,
+    std::string_view extension) {
+    std::ifstream inventory{std::string{inventory_path}};
+    if (!inventory.is_open()) return PpeCapabilityState::unknown;
+    std::string registered;
+    while (inventory >> registered) {
+        if (registered == extension) return PpeCapabilityState::available;
+    }
+    if (inventory.bad()) return PpeCapabilityState::unknown;
+    return PpeCapabilityState::unavailable;
+}
+
+PpeCapabilityState read_enabled_sysctl(std::string_view path) {
+    std::ifstream input{std::string{path}};
+    std::string value;
+    if (!(input >> value)) return PpeCapabilityState::unknown;
+    std::string extra;
+    if (input >> extra) return PpeCapabilityState::unknown;
+    if (value == "1") return PpeCapabilityState::available;
+    if (value == "0") return PpeCapabilityState::unavailable;
+    return PpeCapabilityState::unknown;
+}
+
+enum class PpeOwnerMarkerState {
+    absent,
+    valid,
+    invalid,
+};
+
+PpeOwnerMarkerState inspect_ppe_owner_marker() {
+    struct stat before {};
+    if (::lstat(kPpeDeoffloadOwnerMarker, &before) != 0) {
+        return errno == ENOENT
+            ? PpeOwnerMarkerState::absent
+            : PpeOwnerMarkerState::invalid;
+    }
+    if (!S_ISREG(before.st_mode) || S_ISLNK(before.st_mode) ||
+        before.st_uid != 0 || before.st_gid != 0 ||
+        (before.st_mode & 0777) != 0600) {
+        return PpeOwnerMarkerState::invalid;
+    }
+
+    const int fd = ::open(
+        kPpeDeoffloadOwnerMarker,
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return PpeOwnerMarkerState::invalid;
+    struct stat after {};
+    const bool same_file = ::fstat(fd, &after) == 0 &&
+        S_ISREG(after.st_mode) && after.st_uid == 0 && after.st_gid == 0 &&
+        (after.st_mode & 0777) == 0600 &&
+        before.st_dev == after.st_dev && before.st_ino == after.st_ino;
+    char body[10]{};
+    const ssize_t size = same_file ? ::read(fd, body, sizeof(body)) : -1;
+    const int saved_errno = errno;
+    const int close_status = ::close(fd);
+    errno = saved_errno;
+    if (!same_file || size != 9 || close_status != 0 ||
+        std::string_view{body, 9U} != "iptables\n") {
+        return PpeOwnerMarkerState::invalid;
+    }
+    return PpeOwnerMarkerState::valid;
+}
+
+void publish_ppe_owner_marker() {
+    AtomicFileWriteOptions options;
+    options.create_parent_directories = true;
+    options.created_directory_mode = 0755;
+    options.default_file_mode = 0600;
+    options.file_mode = 0600;
+    options.owner = 0;
+    options.group = 0;
+    write_file_atomically(kPpeDeoffloadOwnerMarker, "iptables\n", options);
+    if (inspect_ppe_owner_marker() != PpeOwnerMarkerState::valid) {
+        throw FirewallError(
+            "published PPE owner marker failed exact verification");
+    }
+}
+
+// A timed-out restore or failed post-restore inspection can leave an active
+// graph whose exact shape is unknowable. Keep the durable lifecycle owner in
+// that case so stop/uninstall remains fail-closed. Never overwrite an invalid
+// object: its ownership is itself ambiguous and must be repaired explicitly.
+void retain_ppe_owner_marker_best_effort() noexcept {
+    try {
+        if (inspect_ppe_owner_marker() == PpeOwnerMarkerState::absent) {
+            publish_ppe_owner_marker();
+        }
+    } catch (...) {
+    }
+}
+
+void remove_ppe_owner_marker_after_verified_absence() {
+    const auto marker = inspect_ppe_owner_marker();
+    if (marker == PpeOwnerMarkerState::invalid) {
+        throw FirewallError(
+            "refusing to remove an invalid PPE owner marker");
+    }
+    if (marker == PpeOwnerMarkerState::absent) return;
+    const int directory_fd = ::open(
+        "/opt/var/run", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory_fd < 0) {
+        throw FirewallError(
+            "failed to open PPE marker directory for verified removal");
+    }
+    if (::unlink(kPpeDeoffloadOwnerMarker) != 0) {
+        const int saved_errno = errno;
+        (void)::close(directory_fd);
+        errno = saved_errno;
+        throw FirewallError(
+            keen_pbr3::format(
+                "failed to remove PPE owner marker: {}", std::strerror(errno)));
+    }
+    if (::fsync(directory_fd) != 0) {
+        const int saved_errno = errno;
+        (void)::close(directory_fd);
+        // Keep a visible fail-closed marker after an uncertain durable unlink.
+        try {
+            publish_ppe_owner_marker();
+        } catch (...) {
+        }
+        errno = saved_errno;
+        throw FirewallError(
+            keen_pbr3::format(
+                "failed to make PPE owner marker removal durable: {}",
+                std::strerror(errno)));
+    }
+    if (::close(directory_fd) != 0) {
+        throw FirewallError(
+            "failed to close PPE marker directory after verified removal");
+    }
+}
+
+std::uint64_t unix_time_seconds() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 bool physdev_match_available(
@@ -3416,6 +3562,629 @@ void IptablesFirewall::reconcile_ttl_bypass() const {
     }
 }
 
+namespace {
+
+ExecCaptureResult inspect_ppe_table() {
+    return run_iptables_control({"iptables", "-t", "mangle", "-S"});
+}
+
+PpeGraphInspection require_ppe_inspection(
+    const ExecCaptureResult& result,
+    const PpeDeoffloadGraphSpec* expected = nullptr) {
+    if (classify_iptables_command(result) !=
+        IptablesCommandOutcome::Success) {
+        record_iptables_control_failure(
+            {"iptables", "-t", "mangle", "-S"}, result);
+        throw TransientFirewallError(
+            "could not inspect the IPv4 PPE de-offload graph");
+    }
+    const auto marker = inspect_ppe_owner_marker();
+    if (marker == PpeOwnerMarkerState::invalid) {
+        throw FirewallError(
+            "PPE owner marker is not an exact root-owned iptables marker");
+    }
+    return inspect_ppe_deoffload_graph(
+        result.stdout_output,
+        expected,
+        marker == PpeOwnerMarkerState::valid);
+}
+
+void validate_ppe_userspace(const PpeDeoffloadGraphSpec& desired,
+                            const PpeGraphInspection& before) {
+    const auto script = build_ppe_deoffload_apply_script(
+        before, desired);
+    if (restore_test_option_supported("iptables-restore")) {
+        pipe_to_cmd(
+            {"iptables-restore", "--test", "--noflush", "--counters"},
+            script);
+        return;
+    }
+
+    static std::atomic<std::uint32_t> validation_sequence{0U};
+    std::string validation_chain;
+    for (std::size_t attempt = 0U; attempt < 8U; ++attempt) {
+        const auto candidate = keen_pbr3::format(
+            "KpPpeV{:x}{:x}",
+            static_cast<unsigned long>(::getpid()),
+            validation_sequence.fetch_add(1U, std::memory_order_relaxed));
+        const auto table = inspect_ppe_table();
+        if (classify_iptables_command(table) !=
+            IptablesCommandOutcome::Success) {
+            throw TransientFirewallError(
+                "could not prove a PPE validation chain name unused");
+        }
+        if (!chain_declared(table.stdout_output, candidate) &&
+            jump_reference_count(table.stdout_output, candidate) == 0U &&
+            table.stdout_output.find("-g " + candidate) ==
+                std::string::npos) {
+            validation_chain = candidate;
+            break;
+        }
+    }
+    if (validation_chain.empty()) {
+        throw FirewallError(
+            "could not allocate a collision-free PPE validation chain");
+    }
+
+    const auto created = run_iptables_control(
+        {"iptables", "-t", "mangle", "-N", validation_chain});
+    if (classify_iptables_command(created) !=
+        IptablesCommandOutcome::Success) {
+        throw TransientFirewallError(
+            "create-only PPE validation chain allocation failed");
+    }
+    const auto created_chain = run_iptables_control(
+        {"iptables", "-t", "mangle", "-S", validation_chain});
+    bool exact_empty_chain = false;
+    if (classify_iptables_command(created_chain) ==
+        IptablesCommandOutcome::Success) {
+        std::istringstream lines{created_chain.stdout_output};
+        std::string line;
+        std::size_t line_count = 0U;
+        while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            ++line_count;
+            exact_empty_chain = line == "-N " + validation_chain;
+        }
+        exact_empty_chain = exact_empty_chain && line_count == 1U;
+    }
+    if (!exact_empty_chain) {
+        throw FirewallError(
+            "new PPE validation chain was not empty and exclusively owned");
+    }
+
+    const auto cleanup_validation = [&desired, &validation_chain](
+                                        bool require_complete_graph) {
+        const auto table = inspect_ppe_table();
+        if (classify_iptables_command(table) !=
+            IptablesCommandOutcome::Success) {
+            throw TransientFirewallError(
+                "could not inspect the PPE validation chain for cleanup");
+        }
+        if (!chain_declared(table.stdout_output, validation_chain)) {
+            return;
+        }
+        if (jump_reference_count(table.stdout_output, validation_chain) != 0U ||
+            table.stdout_output.find("-g " + validation_chain) !=
+                std::string::npos) {
+            throw FirewallError(
+                "PPE validation chain gained a foreign reference");
+        }
+
+        const auto chain = run_iptables_control(
+            {"iptables", "-t", "mangle", "-S", validation_chain});
+        if (classify_iptables_command(chain) !=
+            IptablesCommandOutcome::Success) {
+            throw TransientFirewallError(
+                "could not inspect the PPE validation rules for cleanup");
+        }
+        bool exact_owned_state = ppe_deoffload_validation_chain_is_exact(
+            chain.stdout_output, desired, validation_chain);
+        if (!exact_owned_state && !require_complete_graph) {
+            std::istringstream lines{chain.stdout_output};
+            std::string line;
+            std::size_t count = 0U;
+            bool exact_empty = false;
+            while (std::getline(lines, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                ++count;
+                exact_empty = line == "-N " + validation_chain;
+            }
+            exact_owned_state = exact_empty && count == 1U;
+        }
+        if (!exact_owned_state) {
+            throw FirewallError(
+                "PPE validation chain no longer has the exact owned graph");
+        }
+        const std::string cleanup_script =
+            build_ppe_deoffload_validation_cleanup_script(
+                desired,
+                validation_chain,
+                require_complete_graph);
+        pipe_to_cmd(
+            {"iptables-restore", "--noflush", "--counters"},
+            cleanup_script);
+        const auto after = inspect_ppe_table();
+        if (classify_iptables_command(after) !=
+                IptablesCommandOutcome::Success ||
+            chain_declared(after.stdout_output, validation_chain) ||
+            jump_reference_count(after.stdout_output, validation_chain) != 0U ||
+            after.stdout_output.find("-g " + validation_chain) !=
+                std::string::npos) {
+            throw TransientFirewallError(
+                "PPE validation chain remained after exact cleanup");
+        }
+    };
+
+    // The unique temporary chain is never hooked, so even a legacy restore
+    // without --test cannot send live packets through the validation target.
+    try {
+        pipe_to_cmd(
+            {"iptables-restore", "--noflush", "--counters"},
+            build_ppe_deoffload_validation_script(
+                desired, validation_chain));
+    } catch (...) {
+        cleanup_validation(/*require_complete_graph=*/false);
+        throw;
+    }
+    cleanup_validation(/*require_complete_graph=*/true);
+}
+
+} // namespace
+
+void IptablesFirewall::publish_ppe_deoffload_snapshot(
+    PpeDeoffloadSnapshot snapshot) const {
+    std::lock_guard<std::mutex> lock(ppe_deoffload_mutex_);
+    ppe_deoffload_snapshot_ = std::move(snapshot);
+}
+
+void IptablesFirewall::remove_ppe_deoffload_strict() {
+    const auto before = require_ppe_inspection(inspect_ppe_table());
+    if (before.state == PpeGraphState::ambiguous) {
+        throw FirewallError(
+            "refusing to remove an ambiguous IPv4 PPE de-offload graph: " +
+            before.detail);
+    }
+    if (before.state != PpeGraphState::absent) {
+        const auto cleanup_script =
+            build_ppe_deoffload_cleanup_script(before);
+        pipe_to_cmd(
+            {"iptables-restore", "--noflush", "--counters"},
+            cleanup_script);
+    }
+    const auto after = require_ppe_inspection(inspect_ppe_table());
+    if (after.state != PpeGraphState::absent) {
+        throw TransientFirewallError(
+            "IPv4 PPE de-offload graph remained after atomic cleanup");
+    }
+    remove_ppe_owner_marker_after_verified_absence();
+    {
+        std::lock_guard<std::mutex> lock(ppe_deoffload_mutex_);
+        published_ppe_deoffload_spec_.reset();
+    }
+}
+
+void IptablesFirewall::reconcile_ppe_deoffload() noexcept try {
+    PpeDeoffloadSnapshot snapshot;
+    const auto configured_desired = ppe_deoffload_desired();
+    snapshot.mode = configured_desired.mode;
+    snapshot.state = PpeDeoffloadState::unknown;
+    snapshot.detail = "PPE reconciliation has not completed";
+    snapshot.last_reconcile_unix_seconds = unix_time_seconds();
+
+    try {
+        try {
+            const auto configured_spec =
+                build_ppe_deoffload_graph_spec(configured_desired);
+            snapshot.desired_tcp_ports = configured_spec.tcp_chunks;
+            snapshot.desired_quic = configured_spec.quic;
+        } catch (const std::invalid_argument& error) {
+            snapshot.detail = error.what();
+        }
+        if (inspect_ppe_owner_marker() == PpeOwnerMarkerState::invalid) {
+            snapshot.state = PpeDeoffloadState::unknown;
+            snapshot.detail =
+                "PPE owner marker is invalid; refusing live graph mutation";
+            snapshot.degraded = true;
+            publish_ppe_deoffload_snapshot(std::move(snapshot));
+            return;
+        }
+        auto before = require_ppe_inspection(inspect_ppe_table());
+        if (before.state == PpeGraphState::ambiguous) {
+            snapshot.state = PpeDeoffloadState::graph_conflict;
+            snapshot.detail = before.detail;
+            snapshot.degraded = true;
+            publish_ppe_deoffload_snapshot(std::move(snapshot));
+            return;
+        }
+
+        PpeDeoffloadInputs inputs;
+        inputs.desired = configured_desired;
+        inputs.backend_compatible = true;
+
+        PpeDeoffloadGraphSpec desired;
+        try {
+            desired = build_ppe_deoffload_graph_spec(inputs.desired);
+        } catch (const std::invalid_argument& error) {
+            inputs.desired.strategy_ports_available = false;
+            snapshot.detail = error.what();
+        }
+
+        // Off still inspects and removes stale owned state, but it must not
+        // probe /proc capability files. Besides avoiding unnecessary work,
+        // this keeps "off" a pure configuration decision rather than an
+        // accidental degraded state on kernels without PPE.
+        if (inputs.desired.mode == PpeDeoffloadMode::off) {
+            const auto assessment = evaluate_ppe_deoffload(inputs);
+            snapshot.state = assessment.state;
+            snapshot.detail = assessment.detail;
+            if (before.state != PpeGraphState::absent ||
+                inspect_ppe_owner_marker() == PpeOwnerMarkerState::valid) {
+                remove_ppe_deoffload_strict();
+            }
+            publish_ppe_deoffload_snapshot(std::move(snapshot));
+            return;
+        }
+
+        inputs.ppe_target = xtables_inventory_capability(
+            "/proc/net/ip_tables_targets", "PPE");
+        inputs.connskip_match = xtables_inventory_capability(
+            "/proc/net/ip_tables_matches", "connskip");
+        inputs.conntrack_accounting = read_enabled_sysctl(
+            "/proc/sys/net/netfilter/nf_conntrack_acct");
+        inputs.ppe_enabled = read_enabled_sysctl(
+            "/proc/sys/net/hwnat/ppe_enabled");
+
+        // Evaluate every read-only prerequisite before a userspace probe. If
+        // any one fails, desired state is absence and stale owned state must
+        // still be removed below.
+        inputs.userspace = PpeCapabilityState::available;
+        auto assessment = evaluate_ppe_deoffload(inputs);
+        if (assessment.state == PpeDeoffloadState::admissible) {
+            try {
+                validate_ppe_userspace(desired, before);
+            } catch (const TransientFirewallError&) {
+                inputs.userspace = PpeCapabilityState::unknown;
+            } catch (const FirewallError&) {
+                inputs.userspace = PpeCapabilityState::unavailable;
+            }
+            assessment = evaluate_ppe_deoffload(inputs);
+            if (assessment.state == PpeDeoffloadState::admissible) {
+                PpeDeoffloadDesired mutation_observed;
+                try {
+                    mutation_observed = observe_ppe_deoffload_desired(
+                        configured_desired.mode,
+                        configured_desired.quic_enabled);
+                } catch (const std::exception& error) {
+                    mutation_observed.mode = configured_desired.mode;
+                    mutation_observed.quic_enabled =
+                        configured_desired.quic_enabled;
+                    mutation_observed.runtime_contract_detail =
+                        std::string{
+                            "final NFQWS observation failed: "} +
+                        error.what();
+                } catch (...) {
+                    mutation_observed.mode = configured_desired.mode;
+                    mutation_observed.quic_enabled =
+                        configured_desired.quic_enabled;
+                    mutation_observed.runtime_contract_detail =
+                        "final NFQWS observation failed";
+                }
+                if (!ppe_deoffload_desired_semantically_equal(
+                        inputs.desired, mutation_observed)) {
+                    PpeDeoffloadGraphSpec observed_desired;
+                    try {
+                        observed_desired =
+                            build_ppe_deoffload_graph_spec(
+                                mutation_observed);
+                    } catch (const std::invalid_argument&) {
+                    }
+                    snapshot.state = PpeDeoffloadState::reconcile_failed;
+                    snapshot.detail = mutation_observed
+                            .runtime_contract_detail.empty()
+                        ? "NFQWS runtime contract changed during PPE "
+                          "preflight; publication deferred"
+                        : mutation_observed.runtime_contract_detail;
+                    snapshot.supported = true;
+                    snapshot.degraded = true;
+                    snapshot.desired_tcp_ports =
+                        observed_desired.tcp_chunks;
+                    snapshot.desired_quic = observed_desired.quic;
+                    if (before.state != PpeGraphState::absent ||
+                        inspect_ppe_owner_marker() ==
+                            PpeOwnerMarkerState::valid) {
+                        remove_ppe_deoffload_strict();
+                    }
+                    publish_ppe_deoffload_snapshot(std::move(snapshot));
+                    return;
+                }
+            }
+        }
+
+        snapshot.state = assessment.state;
+        snapshot.detail = assessment.detail;
+        snapshot.supported = assessment.supported;
+        snapshot.degraded = assessment.degraded;
+        snapshot.desired_tcp_ports = desired.tcp_chunks;
+        snapshot.desired_quic =
+            inputs.desired.quic_enabled &&
+            inputs.desired.quic_443_active;
+        snapshot.applied_quic = false;
+
+        if (assessment.state != PpeDeoffloadState::admissible) {
+            if (before.state != PpeGraphState::absent ||
+                inspect_ppe_owner_marker() == PpeOwnerMarkerState::valid) {
+                remove_ppe_deoffload_strict();
+            }
+            publish_ppe_deoffload_snapshot(std::move(snapshot));
+            return;
+        }
+
+        // Semantic no-op is important: rewriting an already exact graph would
+        // zero the very counters used to validate this feature on hardware.
+        before = require_ppe_inspection(inspect_ppe_table(), &desired);
+        if (before.state != PpeGraphState::exact) {
+            if (before.state == PpeGraphState::ambiguous) {
+                throw FirewallError(
+                    "PPE graph became ambiguous before publication");
+            }
+            const auto previous = before.state == PpeGraphState::absent
+                ? std::optional<PpeDeoffloadGraphSpec>{}
+                : std::optional<PpeDeoffloadGraphSpec>{before.observed};
+            std::exception_ptr publication_error;
+            bool rollback_verified = false;
+            try {
+                pipe_to_cmd(
+                    {"iptables-restore", "--noflush", "--counters"},
+                    build_ppe_deoffload_apply_script(before, desired));
+                const auto after = require_ppe_inspection(
+                    inspect_ppe_table(), &desired);
+                if (after.state != PpeGraphState::exact) {
+                    throw TransientFirewallError(
+                        "published PPE graph failed semantic verification");
+                }
+                // Durable ownership is published only after the graph is
+                // freshly proven active.
+                publish_ppe_owner_marker();
+            } catch (...) {
+                publication_error = std::current_exception();
+                // A restore may time out after COMMIT. Freshly inspect before
+                // compensating, then restore the exact previous known graph or
+                // exact absence. The marker remains on any uncertainty.
+                try {
+                    const auto current = require_ppe_inspection(
+                        inspect_ppe_table());
+                    if (current.state != PpeGraphState::ambiguous) {
+                        if (previous.has_value()) {
+                            pipe_to_cmd(
+                                {"iptables-restore", "--noflush", "--counters"},
+                                build_ppe_deoffload_apply_script(
+                                    current, *previous));
+                            const auto rolled_back = require_ppe_inspection(
+                                inspect_ppe_table(), &*previous);
+                            if (rolled_back.state != PpeGraphState::exact) {
+                                throw TransientFirewallError(
+                                    "PPE rollback verification failed");
+                            }
+                            publish_ppe_owner_marker();
+                            rollback_verified = true;
+                        } else {
+                            const auto cleanup =
+                                build_ppe_deoffload_cleanup_script(current);
+                            if (!cleanup.empty()) {
+                                pipe_to_cmd(
+                                    {"iptables-restore", "--noflush", "--counters"},
+                                    cleanup);
+                            }
+                            const auto rolled_back = require_ppe_inspection(
+                                inspect_ppe_table());
+                            if (rolled_back.state != PpeGraphState::absent) {
+                                throw TransientFirewallError(
+                                    "PPE absence rollback verification failed");
+                            }
+                            remove_ppe_owner_marker_after_verified_absence();
+                            rollback_verified = true;
+                        }
+                    } else {
+                        retain_ppe_owner_marker_best_effort();
+                    }
+                } catch (const std::exception& rollback_error) {
+                    retain_ppe_owner_marker_best_effort();
+                    try {
+                        Logger::instance().warn(
+                            "PPE de-offload rollback remains unverified: {}",
+                            rollback_error.what());
+                    } catch (...) {
+                    }
+                } catch (...) {
+                    retain_ppe_owner_marker_best_effort();
+                }
+                if (rollback_verified) {
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            ppe_deoffload_mutex_);
+                        published_ppe_deoffload_spec_ = previous;
+                    }
+                    snapshot.active = previous.has_value();
+                    snapshot.applied_tcp_ports = previous.has_value()
+                        ? previous->tcp_chunks
+                        : std::vector<std::string>{};
+                    snapshot.applied_quic =
+                        previous.has_value() && previous->quic;
+                    snapshot.counters = {};
+                }
+                std::rethrow_exception(publication_error);
+            }
+        } else if (inspect_ppe_owner_marker() ==
+                   PpeOwnerMarkerState::absent) {
+            // Adopt only a semantically exact, fully tagged graph. A marker
+            // failure cannot leave an unowned active graph.
+            try {
+                publish_ppe_owner_marker();
+            } catch (...) {
+                remove_ppe_deoffload_strict();
+                throw;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(ppe_deoffload_mutex_);
+            published_ppe_deoffload_spec_ = desired;
+        }
+        snapshot.state = PpeDeoffloadState::active;
+        snapshot.active = true;
+        snapshot.supported = true;
+        snapshot.degraded = false;
+        snapshot.detail.clear();
+        snapshot.applied_tcp_ports = desired.tcp_chunks;
+        snapshot.applied_quic = desired.quic;
+        const auto counter_result = run_iptables_control(
+            {"iptables-save", "-c", "-t", "mangle"});
+        if (classify_iptables_command(counter_result) ==
+            IptablesCommandOutcome::Success) {
+            snapshot.counters = parse_ppe_deoffload_counters(
+                counter_result.stdout_output,
+                desired,
+                unix_time_seconds());
+        }
+        publish_ppe_deoffload_snapshot(std::move(snapshot));
+    } catch (const std::exception& error) {
+        try {
+            snapshot.state = PpeDeoffloadState::reconcile_failed;
+            snapshot.detail = error.what();
+            snapshot.degraded = true;
+            publish_ppe_deoffload_snapshot(std::move(snapshot));
+        } catch (...) {
+        }
+        try {
+            Logger::instance().warn(
+                "PPE de-offload reconciliation degraded: {}", error.what());
+        } catch (...) {
+        }
+    } catch (...) {
+        try {
+            snapshot.state = PpeDeoffloadState::reconcile_failed;
+            snapshot.detail = "unknown PPE reconciliation failure";
+            snapshot.degraded = true;
+            publish_ppe_deoffload_snapshot(std::move(snapshot));
+        } catch (...) {
+        }
+    }
+} catch (...) {
+    // Function-try-block also covers snapshot/default construction and the
+    // mutex-protected desired-state copy, both of which can allocate before
+    // the inner reconciliation guard exists.
+}
+
+PpeDeoffloadSnapshot IptablesFirewall::ppe_deoffload_snapshot() const {
+    std::lock_guard<std::mutex> lock(ppe_deoffload_mutex_);
+    return ppe_deoffload_snapshot_;
+}
+
+PpeObservationRefreshResult
+IptablesFirewall::refresh_ppe_deoffload_observation() noexcept {
+    try {
+        std::lock_guard<std::mutex> pair_lock(pair_state_mutex_);
+        std::optional<PpeDeoffloadGraphSpec> published;
+        bool snapshot_was_active = false;
+        {
+            std::lock_guard<std::mutex> snapshot_lock(
+                ppe_deoffload_mutex_);
+            if (!published_ppe_deoffload_spec_.has_value()) {
+                return PpeObservationRefreshResult::inactive;
+            }
+            published = published_ppe_deoffload_spec_;
+            snapshot_was_active = ppe_deoffload_snapshot_.active;
+        }
+
+        const auto result = run_iptables_control(
+            {"iptables-save", "-c", "-t", "mangle"});
+        if (classify_iptables_command(result) !=
+            IptablesCommandOutcome::Success) {
+            return PpeObservationRefreshResult::unavailable;
+        }
+        const auto marker = inspect_ppe_owner_marker();
+        if (marker == PpeOwnerMarkerState::invalid) {
+            return PpeObservationRefreshResult::unavailable;
+        }
+        const auto graph = inspect_ppe_deoffload_graph(
+            result.stdout_output,
+            &*published,
+            marker == PpeOwnerMarkerState::valid);
+        const auto observation = classify_ppe_deoffload_observation(
+            graph.state,
+            marker == PpeOwnerMarkerState::valid,
+            snapshot_was_active);
+        if (observation == PpeObservationRefreshResult::unavailable) {
+            std::lock_guard<std::mutex> snapshot_lock(
+                ppe_deoffload_mutex_);
+            if (published_ppe_deoffload_spec_ == published) {
+                ppe_deoffload_snapshot_.state =
+                    PpeDeoffloadState::graph_conflict;
+                ppe_deoffload_snapshot_.detail = graph.detail;
+                ppe_deoffload_snapshot_.active = false;
+                ppe_deoffload_snapshot_.degraded = true;
+                ppe_deoffload_snapshot_.applied_tcp_ports.clear();
+                ppe_deoffload_snapshot_.applied_quic = false;
+                ppe_deoffload_snapshot_.counters = {};
+            }
+            return PpeObservationRefreshResult::unavailable;
+        }
+        if (observation == PpeObservationRefreshResult::semantic_drift) {
+            std::lock_guard<std::mutex> snapshot_lock(
+                ppe_deoffload_mutex_);
+            if (published_ppe_deoffload_spec_ == published) {
+                ppe_deoffload_snapshot_.state =
+                    PpeDeoffloadState::graph_conflict;
+                ppe_deoffload_snapshot_.detail = graph.state ==
+                        PpeGraphState::exact
+                    ? (marker == PpeOwnerMarkerState::absent
+                           ? "PPE owner marker is absent; a fresh verified "
+                             "reconciliation is required"
+                           : "PPE graph needs a fresh verified reconciliation")
+                    : graph.detail;
+                ppe_deoffload_snapshot_.active = false;
+                ppe_deoffload_snapshot_.degraded = true;
+                ppe_deoffload_snapshot_.applied_tcp_ports.clear();
+                ppe_deoffload_snapshot_.applied_quic = false;
+                ppe_deoffload_snapshot_.counters = {};
+            }
+            return PpeObservationRefreshResult::semantic_drift;
+        }
+        const auto counters = parse_ppe_deoffload_counters(
+            result.stdout_output,
+            *published,
+            unix_time_seconds());
+        if (!counters.available) {
+            return PpeObservationRefreshResult::semantic_drift;
+        }
+
+        std::lock_guard<std::mutex> snapshot_lock(ppe_deoffload_mutex_);
+        if (ppe_deoffload_snapshot_.active &&
+            published_ppe_deoffload_spec_ == published) {
+            ppe_deoffload_snapshot_.counters = counters;
+            return PpeObservationRefreshResult::refreshed;
+        }
+        return PpeObservationRefreshResult::inactive;
+    } catch (...) {
+        // Observation is optional health data. The existing stored timestamp
+        // remains truthful and visibly stale until a later control-loop tick.
+        return PpeObservationRefreshResult::unavailable;
+    }
+}
+
+#ifdef KEEN_PBR3_TESTING
+void IptablesFirewall::reconcile_ppe_deoffload_for_test() {
+    reconcile_ppe_deoffload();
+}
+
+void IptablesFirewall::remove_ppe_deoffload_for_test() {
+    remove_ppe_deoffload_strict();
+}
+#endif
+
 void IptablesFirewall::remove_ttl_bypass() const {
     // We inserted into a chain we do not own, so teardown must take it back
     // out. Leaving it behind would abandon a modification to firmware state
@@ -5195,6 +5964,36 @@ void IptablesFirewall::apply(FirewallApplyMode mode) {
         forward_reject_v6_created_ = false;
     }
 
+    // Staging may take long enough for an externally owned nfqws process or
+    // queue binding to change. Re-observe at the last possible point under
+    // this backend's single-writer mutex, carrying forward only immutable
+    // operator intent (mode + QUIC switch). Never publish a graph from the
+    // earlier staged runtime tuple.
+    const auto ppe_intent = ppe_deoffload_desired();
+    try {
+        set_ppe_deoffload_desired(observe_ppe_deoffload_desired(
+            ppe_intent.mode, ppe_intent.quic_enabled));
+    } catch (const std::exception& error) {
+        PpeDeoffloadDesired unavailable;
+        unavailable.mode = ppe_intent.mode;
+        unavailable.quic_enabled = ppe_intent.quic_enabled;
+        unavailable.runtime_contract_detail =
+            std::string{"late NFQWS observation failed: "} + error.what();
+        set_ppe_deoffload_desired(std::move(unavailable));
+    } catch (...) {
+        PpeDeoffloadDesired unavailable;
+        unavailable.mode = ppe_intent.mode;
+        unavailable.quic_enabled = ppe_intent.quic_enabled;
+        unavailable.runtime_contract_detail =
+            "late NFQWS observation failed";
+        set_ppe_deoffload_desired(std::move(unavailable));
+    }
+
+    // Optional owned PPE is reconciled last. A failure cannot roll back the
+    // already verified routing/NAT policy and is therefore published as
+    // degraded health internally; its own graph is compensated separately.
+    reconcile_ppe_deoffload();
+
     // Pending declarations become live authority only after rules, hooks, and
     // the independent NAT contract have all converged successfully.
     published_udp_peer_classifiers_ = candidate_udp_peer_classifiers;
@@ -5232,6 +6031,11 @@ void IptablesFirewall::cleanup_rules_impl(bool sweep_live_state) {
     // not own. Everything below deletes KeenPbr* objects, which would leave
     // that rule stranded in firmware state.
     remove_ttl_bypass();
+
+    // PPE has two tagged parent hooks and one owned chain. Teardown is strict:
+    // stop/uninstall may not claim success until their exact absence is
+    // observed. This also sweeps verified crash residue after daemon restart.
+    remove_ppe_deoffload_strict();
 
     auto remove_chain = [](const char* command,
                            const char* table,
@@ -5538,6 +6342,21 @@ void IptablesFirewall::cleanup() {
 
 FirewallBackend IptablesFirewall::backend() const {
     return FirewallBackend::iptables;
+}
+
+void cleanup_stale_iptables_ppe_deoffload_strict() {
+    const auto marker = inspect_ppe_owner_marker();
+    if (marker == PpeOwnerMarkerState::invalid) {
+        throw FirewallError(
+            "invalid PPE owner marker blocks firewall backend transition");
+    }
+    const auto inventory = inspect_ppe_table();
+    if (inventory.exit_code == 127 && !inventory.timed_out &&
+        marker == PpeOwnerMarkerState::absent) {
+        return;
+    }
+    IptablesFirewall cleanup_only;
+    cleanup_only.remove_ppe_deoffload_strict();
 }
 
 std::unique_ptr<Firewall> create_iptables_firewall(

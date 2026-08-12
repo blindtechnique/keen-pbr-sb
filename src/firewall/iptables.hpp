@@ -320,11 +320,20 @@ public:
     std::string ttl_bypass_state_name() const override;
     std::string ttl_bypass_state_detail() const override;
     std::string ttl_bypass_detail() const;
+    PpeDeoffloadSnapshot ppe_deoffload_snapshot() const override;
+    PpeObservationRefreshResult
+    refresh_ppe_deoffload_observation() noexcept override;
 #ifdef KEEN_PBR3_TESTING
     void remove_ttl_bypass_for_test() const;
+    void reconcile_ppe_deoffload_for_test();
+    void remove_ppe_deoffload_for_test();
 #endif
 
 private:
+    void reconcile_ppe_deoffload() noexcept;
+    void remove_ppe_deoffload_strict();
+    void publish_ppe_deoffload_snapshot(
+        PpeDeoffloadSnapshot snapshot) const;
     void verify_applied_generation(
         bool ipv6,
         FirewallSetGeneration target) const;
@@ -469,6 +478,10 @@ private:
     mutable std::mutex ttl_bypass_mutex_;
     mutable TtlBypassState ttl_bypass_state_{TtlBypassState::chain_absent};
     mutable std::string ttl_bypass_detail_;
+    mutable std::mutex ppe_deoffload_mutex_;
+    mutable PpeDeoffloadSnapshot ppe_deoffload_snapshot_;
+    mutable std::optional<PpeDeoffloadGraphSpec>
+        published_ppe_deoffload_spec_;
 
     // DNS redirect (client DNS enforcement) state
     bool dns_redirect_requested_ = false;
@@ -520,10 +533,17 @@ private:
     // Allow test access to build_proto_port_fragment
     friend struct IptablesBuilderTestHelper;
 #endif
+    friend void cleanup_stale_iptables_ppe_deoffload_strict();
 };
 
 // Factory function called from firewall.cpp
 std::unique_ptr<Firewall> create_iptables_firewall(
     bool use_raw_prerouting = false);
+
+// Backend-transition/lifecycle bridge. nftables uses this inside the same
+// serialized firewall apply so an owned legacy IPv4 iptables PPE graph cannot
+// survive a backend switch. A missing iptables tool is a no-op only when no
+// durable PPE owner marker exists.
+void cleanup_stale_iptables_ppe_deoffload_strict();
 
 } // namespace keen_pbr3

@@ -2660,6 +2660,62 @@ TEST_CASE("daemon.meta_udp443_policy: rejects malformed values") {
     CHECK(wrong_type.front().path == "daemon.meta_udp443_policy");
 }
 
+TEST_CASE("daemon PPE de-offload defaults stay fail-safe when omitted or null") {
+    for (const auto* input : {
+             R"({"daemon":{}})",
+             R"({"daemon":{"ppe_deoffload_mode":null,"ppe_deoffload_quic_enabled":null}})",
+         }) {
+        const auto cfg = parse_test_config(input);
+        REQUIRE(cfg.daemon.has_value());
+        CHECK_FALSE(cfg.daemon->ppe_deoffload_mode.has_value());
+        CHECK_FALSE(cfg.daemon->ppe_deoffload_quic_enabled.has_value());
+    }
+}
+
+TEST_CASE("daemon PPE de-offload policy round-trips explicit values") {
+    for (const auto& [value, expected] :
+         std::vector<std::pair<std::string, api::PpeDeoffloadMode>>{
+             {"off", api::PpeDeoffloadMode::OFF},
+             {"auto", api::PpeDeoffloadMode::AUTO},
+         }) {
+        const auto parsed = parse_test_config(
+            nlohmann::json{
+                {"daemon",
+                 {{"ppe_deoffload_mode", value},
+                  {"ppe_deoffload_quic_enabled", value == "auto"}}},
+            }
+                .dump());
+        REQUIRE(parsed.daemon.has_value());
+        REQUIRE(parsed.daemon->ppe_deoffload_mode.has_value());
+        REQUIRE(parsed.daemon->ppe_deoffload_quic_enabled.has_value());
+        CHECK(*parsed.daemon->ppe_deoffload_mode == expected);
+        CHECK(*parsed.daemon->ppe_deoffload_quic_enabled == (value == "auto"));
+
+        const auto serialized = nlohmann::json(parsed);
+        CHECK(serialized.at("daemon").at("ppe_deoffload_mode") == value);
+        CHECK(serialized.at("daemon").at("ppe_deoffload_quic_enabled") ==
+              (value == "auto"));
+    }
+}
+
+TEST_CASE("daemon PPE de-offload policy rejects malformed values") {
+    const auto unsupported = parse_issues(
+        R"({"daemon":{"ppe_deoffload_mode":"on"}})");
+    REQUIRE(unsupported.size() == 1U);
+    CHECK(unsupported.front().path == "daemon.ppe_deoffload_mode");
+
+    const auto wrong_mode_type = parse_issues(
+        R"({"daemon":{"ppe_deoffload_mode":true}})");
+    REQUIRE(wrong_mode_type.size() == 1U);
+    CHECK(wrong_mode_type.front().path == "daemon.ppe_deoffload_mode");
+
+    const auto wrong_quic_type = parse_issues(
+        R"({"daemon":{"ppe_deoffload_quic_enabled":"yes"}})");
+    REQUIRE(wrong_quic_type.size() == 1U);
+    CHECK(wrong_quic_type.front().path ==
+          "daemon.ppe_deoffload_quic_enabled");
+}
+
 TEST_CASE("daemon.skip_marked_packets: defaults to true behavior when absent") {
     auto cfg = parse_test_config(R"({"daemon":{}})");
     REQUIRE(cfg.daemon.has_value());

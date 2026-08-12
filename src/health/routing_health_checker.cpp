@@ -7,6 +7,7 @@
 #include "../util/string_compat.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace keen_pbr3 {
@@ -228,6 +229,112 @@ static api::TtlBypassState to_api_ttl_bypass_state(const std::string& state) {
     return api::TtlBypassState::UNKNOWN;
 }
 
+static std::int64_t ppe_counter_value(std::uint64_t value) {
+    return value > static_cast<std::uint64_t>(
+                       std::numeric_limits<std::int64_t>::max())
+        ? std::numeric_limits<std::int64_t>::max()
+        : static_cast<std::int64_t>(value);
+}
+
+static api::PpeDeoffloadCounter to_api_ppe_counter(
+    std::uint64_t packets,
+    std::uint64_t bytes) {
+    api::PpeDeoffloadCounter counter;
+    counter.packets = ppe_counter_value(packets);
+    counter.bytes = ppe_counter_value(bytes);
+    return counter;
+}
+
+static api::PpeDeoffloadHealth to_api_ppe_deoffload_health(
+    const PpeDeoffloadSnapshot& snapshot) {
+    api::PpeDeoffloadHealth health;
+    health.mode = snapshot.mode == PpeDeoffloadMode::automatic
+        ? api::PpeDeoffloadMode::AUTO
+        : api::PpeDeoffloadMode::OFF;
+    switch (snapshot.state) {
+        case PpeDeoffloadState::ppe_target_missing:
+        case PpeDeoffloadState::connskip_match_missing:
+        case PpeDeoffloadState::backend_incompatible:
+        case PpeDeoffloadState::conntrack_accounting_disabled:
+        case PpeDeoffloadState::ppe_already_disabled:
+        case PpeDeoffloadState::userspace_incompatible:
+            health.capability = api::PpeDeoffloadCapability::UNSUPPORTED;
+            break;
+        case PpeDeoffloadState::active:
+        case PpeDeoffloadState::admissible:
+        case PpeDeoffloadState::nfqueue_inactive:
+        case PpeDeoffloadState::strategy_ports_unavailable:
+            health.capability = snapshot.supported
+                ? api::PpeDeoffloadCapability::SUPPORTED
+                : api::PpeDeoffloadCapability::UNKNOWN;
+            break;
+        default:
+            health.capability = api::PpeDeoffloadCapability::UNKNOWN;
+            break;
+    }
+    switch (snapshot.state) {
+        case PpeDeoffloadState::disabled:
+            health.state = api::PpeDeoffloadHealthState::OFF;
+            break;
+        case PpeDeoffloadState::active:
+            health.state = api::PpeDeoffloadHealthState::ACTIVE;
+            break;
+        case PpeDeoffloadState::admissible:
+            health.state = api::PpeDeoffloadHealthState::ADMISSIBLE;
+            break;
+        case PpeDeoffloadState::nfqueue_inactive:
+        case PpeDeoffloadState::ppe_already_disabled:
+        case PpeDeoffloadState::ppe_target_missing:
+        case PpeDeoffloadState::backend_incompatible:
+            health.state = api::PpeDeoffloadHealthState::INACTIVE;
+            break;
+        case PpeDeoffloadState::unknown:
+        case PpeDeoffloadState::conntrack_accounting_unknown:
+        case PpeDeoffloadState::ppe_state_unknown:
+            health.state = api::PpeDeoffloadHealthState::UNKNOWN;
+            break;
+        default:
+            health.state = api::PpeDeoffloadHealthState::DEGRADED;
+            break;
+    }
+    if (snapshot.state != PpeDeoffloadState::active) {
+        health.reason = ppe_deoffload_state_name(snapshot.state);
+    }
+    if (!snapshot.detail.empty()) health.detail = snapshot.detail;
+    if (snapshot.mode == PpeDeoffloadMode::automatic) {
+        health.connskip_packets =
+            static_cast<std::int64_t>(snapshot.connskip_window);
+    }
+    health.tcp.desired_ports = snapshot.desired_tcp_ports;
+    health.tcp.applied_ports = snapshot.applied_tcp_ports;
+    health.tcp.active = snapshot.active &&
+        !snapshot.applied_tcp_ports.empty();
+    if (snapshot.desired_quic) health.quic.desired_ports = {"443"};
+    if (snapshot.applied_quic) health.quic.applied_ports = {"443"};
+    health.quic.active = snapshot.active && snapshot.applied_quic;
+    if (snapshot.counters.available) {
+        health.tcp.counters = to_api_ppe_counter(
+            snapshot.counters.tcp_packets,
+            snapshot.counters.tcp_bytes);
+        health.quic.counters = to_api_ppe_counter(
+            snapshot.counters.quic_packets,
+            snapshot.counters.quic_bytes);
+        health.prerouting = to_api_ppe_counter(
+            snapshot.counters.prerouting_packets,
+            snapshot.counters.prerouting_bytes);
+        health.forward = to_api_ppe_counter(
+            snapshot.counters.forward_packets,
+            snapshot.counters.forward_bytes);
+        health.observed_at = ppe_counter_value(
+            snapshot.counters.observed_at_unix_seconds);
+    }
+    if (snapshot.last_reconcile_unix_seconds != 0U) {
+        health.last_reconcile_ts = ppe_counter_value(
+            snapshot.last_reconcile_unix_seconds);
+    }
+    return health;
+}
+
 // Same shape and same reason as the TTL mapping above: the health layer names
 // a state without linking against the API server that produced it. An
 // unrecognised value becomes `endpoint_unproven` rather than `usable`, because
@@ -285,6 +392,10 @@ nlohmann::json routing_health_report_to_json(const RoutingHealthReport& r) {
     }
     if (!r.ttl_bypass_detail.empty()) {
         resp.ttl_bypass_detail = r.ttl_bypass_detail;
+    }
+    if (r.ppe_deoffload.has_value()) {
+        resp.ppe_deoffload =
+            to_api_ppe_deoffload_health(*r.ppe_deoffload);
     }
 
     if (!r.system_auth_state.empty()) {

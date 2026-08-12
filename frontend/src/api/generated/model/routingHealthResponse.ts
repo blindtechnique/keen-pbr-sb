@@ -8,6 +8,7 @@
 import type { FirewallChain } from './firewallChain';
 import type { FirewallRuleCheck } from './firewallRuleCheck';
 import type { PolicyRuleCheck } from './policyRuleCheck';
+import type { PpeDeoffloadHealth } from './ppeDeoffloadHealth';
 import type { RouteTableCheck } from './routeTableCheck';
 import type { RoutingHealthResponseFirewallBackend } from './routingHealthResponseFirewallBackend';
 import type { RoutingHealthResponseOverall } from './routingHealthResponseOverall';
@@ -20,6 +21,7 @@ export interface RoutingHealthResponse {
   overall: RoutingHealthResponseOverall;
   /** Active firewall backend. */
   firewall_backend: RoutingHealthResponseFirewallBackend;
+  ppe_deoffload?: PpeDeoffloadHealth;
   /** State of the owned RETURN keen-pbr keeps first in the firmware's TTL chain so a packet nfqws2 already handled is not stripped of the TTL its desync depends on.
   The values are deliberately distinct because they call for different responses:
   - chain_absent: the firmware chain is not there, so there is

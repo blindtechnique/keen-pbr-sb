@@ -33,6 +33,9 @@ mark_stopping_mutation_started() { return 0; }
 discard_control_mailbox_after_successful_stop() { return 0; }
 finish_stopping_marker() { return 0; }
 drain_control_runtime() { return 0; }
+# PPE has its own exact lifecycle-cleanup contract suite. Keep this fixture
+# focused on Meta/TCP rollback and stop ordering.
+cleanup_stale_ppe_deoffload_firewall() { return 0; }
 EOF
 
 mkdir -p "$work/bin" "$work/state"

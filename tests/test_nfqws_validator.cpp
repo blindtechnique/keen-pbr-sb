@@ -57,6 +57,137 @@ TEST_CASE("nfqws validator: candidate accepts a structurally sound Keenetic prof
     CHECK(issues.empty());
 }
 
+TEST_CASE("nfqws PPE contract canonicalizes validated TCP and admits only QUIC UDP 443") {
+    const auto contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=443,81,80\n"
+        "UDP_PORTS=443,49152:65535\n"
+        "NFQWS_ARGS=\"--filter-tcp=443,80-81 --lua-desync=fake\"\n"
+        "NFQWS_ARGS_QUIC=\"--filter-udp=443 --filter-l7=quic "
+        "--lua-desync=fake\"\n"
+        "NFQWS_ARGS_UDP=\"--filter-udp=49152-65535 --filter-l7=stun "
+        "--lua-desync=fake\"\n"
+        "NFQUEUE_NUM=411\n");
+
+    REQUIRE(contract.available);
+    CHECK(contract.reason.empty());
+    CHECK(contract.queue_number == 411);
+    CHECK(contract.tcp_ranges ==
+          std::vector<NfqwsPpePortRange>{{80, 81}, {443, 443}});
+    REQUIRE(contract.tcp_chunks.size() == 1U);
+    CHECK(contract.tcp_chunks.front() == contract.tcp_ranges);
+    CHECK(contract.quic_udp_443);
+}
+
+TEST_CASE("nfqws PPE contract fails closed for empty malformed and mismatched candidates") {
+    auto contract = extract_nfqws_ppe_port_contract("");
+    CHECK_FALSE(contract.available);
+    CHECK_FALSE(contract.reason.empty());
+
+    contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=443\n"
+        "NFQWS_ARGS=\"--filter-tcp=bad --lua-desync=fake\"\n"
+        "NFQUEUE_NUM=300\n");
+    CHECK_FALSE(contract.available);
+    CHECK(contract.reason.find("validation failed") != std::string::npos);
+
+    contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=80,443\n"
+        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n"
+        "NFQUEUE_NUM=300\n");
+    CHECK_FALSE(contract.available);
+    CHECK(contract.reason.find("exactly match") != std::string::npos);
+
+    contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=443\n"
+        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n");
+    CHECK_FALSE(contract.available);
+    CHECK(contract.reason.find("NFQUEUE_NUM is missing") != std::string::npos);
+}
+
+TEST_CASE("nfqws PPE contract never promotes general UDP or WebRTC to QUIC") {
+    const auto contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=443\n"
+        "UDP_PORTS=443,49152:65535\n"
+        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n"
+        "NFQWS_ARGS_UDP=\"--filter-udp=443,49152-65535 --filter-l7=stun "
+        "--lua-desync=fake\"\n"
+        "NFQWS_ARGS_CUSTOM=\"--filter-tcp=443 --lua-desync=fake "
+        "--new=webrtc_passthrough --filter-udp=49152-65535 "
+        "--filter-l7=stun\"\n"
+        "NFQUEUE_NUM=300\n");
+    REQUIRE(contract.available);
+    CHECK_FALSE(contract.quic_udp_443);
+
+    const auto widened_quic = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=443\n"
+        "UDP_PORTS=443,49152:65535\n"
+        "NFQWS_ARGS=\"--filter-tcp=443 --lua-desync=fake\"\n"
+        "NFQWS_ARGS_QUIC=\"--filter-udp=443,49152-65535 "
+        "--filter-l7=quic --lua-desync=fake\"\n"
+        "NFQUEUE_NUM=300\n");
+    CHECK_FALSE(widened_quic.available);
+    CHECK(widened_quic.reason.find("exact UDP/443") != std::string::npos);
+}
+
+TEST_CASE("nfqws PPE contract chunks multiport entries and bounds graph complexity") {
+    std::string sixteen;
+    for (int port = 1; port <= 31; port += 2) {
+        if (!sixteen.empty()) sixteen += ',';
+        sixteen += std::to_string(port);
+    }
+    auto contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=" + sixteen + "\nNFQWS_ARGS=\"--filter-tcp=" +
+        sixteen + " --lua-desync=fake\"\nNFQUEUE_NUM=300\n");
+    REQUIRE(contract.available);
+    REQUIRE(contract.tcp_chunks.size() == 2U);
+    CHECK(contract.tcp_chunks.front().size() ==
+          kNfqwsPpeMultiportSlotsPerChunk);
+    CHECK(contract.tcp_chunks.back().size() == 1U);
+
+    std::string over_limit;
+    const auto entries = kNfqwsPpeMultiportSlotsPerChunk *
+                             kNfqwsPpeMaxTcpChunks +
+                         1U;
+    for (std::size_t index = 0; index < entries; ++index) {
+        if (!over_limit.empty()) over_limit += ',';
+        over_limit += std::to_string(index * 2U + 1U);
+    }
+    contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=" + over_limit + "\nNFQWS_ARGS=\"--filter-tcp=" +
+        over_limit + " --lua-desync=fake\"\nNFQUEUE_NUM=300\n");
+    CHECK_FALSE(contract.available);
+    CHECK(contract.reason.find("chunk limit") != std::string::npos);
+
+    contract = extract_nfqws_ppe_port_contract(
+        "TCP_PORTS=1:2,4:5,7:8,10:11,13:14,16:17,19:20,22,24:25\n"
+        "NFQWS_ARGS=\"--filter-tcp=1-2,4-5,7-8,10-11,13-14,16-17,19-20,22,24-25 "
+        "--lua-desync=fake\"\nNFQUEUE_NUM=300\n");
+    REQUIRE(contract.available);
+    REQUIRE(contract.tcp_chunks.size() == 2U);
+    CHECK(contract.tcp_chunks.front().size() == 8U); // 7 ranges + 1 port = 15 slots
+    CHECK(contract.tcp_chunks.back().size() == 1U);
+}
+
+TEST_CASE("nfqws PPE contract is available for every managed generated profile") {
+    namespace fs = std::filesystem;
+    const auto root = fs::path(__FILE__).parent_path().parent_path() /
+                      "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/"
+                      "nfqws-strategies";
+    for (const auto* profile : {"01 safe", "02 balanced", "03 max"}) {
+        std::ifstream input(root / profile / "nfqws2.conf", std::ios::binary);
+        REQUIRE(input.good());
+        const std::string content{std::istreambuf_iterator<char>(input),
+                                  std::istreambuf_iterator<char>()};
+        const auto contract = extract_nfqws_ppe_port_contract(content);
+        INFO(profile);
+        INFO(contract.reason);
+        REQUIRE(contract.available);
+        CHECK(contract.queue_number == 300);
+        CHECK(contract.tcp_ranges.size() == 9U);
+        CHECK(contract.quic_udp_443);
+    }
+}
+
 TEST_CASE("nfqws validator: candidate rejects empty filters and malformed ranges") {
     const auto issues = validate_nfqws_candidate(
         "NFQWS_ARGS=\"--filter-tcp= --lua-desync=fake\"\n"

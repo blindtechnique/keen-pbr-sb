@@ -427,6 +427,44 @@ void print_firewall_section(const std::vector<DisplayFirewallRule>& firewall_rul
     }
 }
 
+void print_ppe_deoffload_section(const RoutingHealthReport& report) {
+    if (!report.ppe_deoffload.has_value()) return;
+    const auto& ppe = *report.ppe_deoffload;
+    std::cout << "\nPPE de-offload:\n";
+    std::cout << "  mode=" << ppe_deoffload_mode_name(ppe.mode)
+              << " state=" << ppe_deoffload_state_name(ppe.state)
+              << "\n";
+    if (!ppe.desired_tcp_ports.empty() || !ppe.applied_tcp_ports.empty()) {
+        std::cout << "  TCP desired=";
+        for (std::size_t i = 0; i < ppe.desired_tcp_ports.size(); ++i) {
+            if (i != 0U) std::cout << ",";
+            std::cout << ppe.desired_tcp_ports[i];
+        }
+        std::cout << " applied=";
+        for (std::size_t i = 0; i < ppe.applied_tcp_ports.size(); ++i) {
+            if (i != 0U) std::cout << ",";
+            std::cout << ppe.applied_tcp_ports[i];
+        }
+        std::cout << "\n";
+    }
+    if (ppe.desired_quic || ppe.applied_quic) {
+        std::cout << "  QUIC/443 desired="
+                  << (ppe.desired_quic ? "yes" : "no")
+                  << " applied=" << (ppe.applied_quic ? "yes" : "no")
+                  << "\n";
+    }
+    if (ppe.counters.available) {
+        std::cout << "  packets prerouting="
+                  << ppe.counters.prerouting_packets
+                  << " forward=" << ppe.counters.forward_packets
+                  << " tcp=" << ppe.counters.tcp_packets
+                  << " quic=" << ppe.counters.quic_packets
+                  << " observed_at="
+                  << ppe.counters.observed_at_unix_seconds << "\n";
+    }
+    print_detail_if_needed(ppe.detail, "  ");
+}
+
 void print_overall_summary(const RoutingHealthReport& report,
                             const std::vector<DisplayFirewallRule>& firewall_rules,
                             bool runtime_ok) {
@@ -463,6 +501,7 @@ int render_status_report(const Config& config,
     print_runtime_status(runtime);
     print_outbound_section(config, marks, report);
     print_firewall_section(display_firewall_rules, report);
+    print_ppe_deoffload_section(report);
     print_overall_summary(report, display_firewall_rules, runtime_ok);
     return runtime_ok && report.overall_ok &&
                    count_failed_checks(report, display_firewall_rules) == 0
@@ -507,6 +546,138 @@ uint32_t uint32_from_api(int64_t value, const char* field_name) {
     return static_cast<uint32_t>(value);
 }
 
+std::uint64_t uint64_from_api(int64_t value, const char* field_name) {
+    if (value < 0) {
+        throw std::runtime_error(
+            std::string("invalid value for ") + field_name +
+            " in status response");
+    }
+    return static_cast<std::uint64_t>(value);
+}
+
+PpeDeoffloadState ppe_state_from_api(
+    const api::PpeDeoffloadHealth& health) {
+    if (health.reason.has_value()) {
+        const std::string& reason = *health.reason;
+        const PpeDeoffloadState states[] = {
+            PpeDeoffloadState::disabled,
+            PpeDeoffloadState::admissible,
+            PpeDeoffloadState::active,
+            PpeDeoffloadState::unknown,
+            PpeDeoffloadState::ppe_target_missing,
+            PpeDeoffloadState::connskip_match_missing,
+            PpeDeoffloadState::backend_incompatible,
+            PpeDeoffloadState::nfqueue_inactive,
+            PpeDeoffloadState::strategy_ports_unavailable,
+            PpeDeoffloadState::conntrack_accounting_unknown,
+            PpeDeoffloadState::conntrack_accounting_disabled,
+            PpeDeoffloadState::ppe_state_unknown,
+            PpeDeoffloadState::ppe_already_disabled,
+            PpeDeoffloadState::userspace_incompatible,
+            PpeDeoffloadState::graph_conflict,
+            PpeDeoffloadState::reconcile_failed,
+        };
+        for (const auto state : states) {
+            if (reason == ppe_deoffload_state_name(state)) return state;
+        }
+    }
+    switch (health.state) {
+        case api::PpeDeoffloadHealthState::OFF:
+            return PpeDeoffloadState::disabled;
+        case api::PpeDeoffloadHealthState::INACTIVE:
+            return PpeDeoffloadState::nfqueue_inactive;
+        case api::PpeDeoffloadHealthState::ADMISSIBLE:
+            return PpeDeoffloadState::admissible;
+        case api::PpeDeoffloadHealthState::ACTIVE:
+            return PpeDeoffloadState::active;
+        case api::PpeDeoffloadHealthState::DEGRADED:
+            return PpeDeoffloadState::reconcile_failed;
+        case api::PpeDeoffloadHealthState::UNKNOWN:
+            return PpeDeoffloadState::unknown;
+    }
+    return PpeDeoffloadState::unknown;
+}
+
+void copy_ppe_counter(
+    const std::optional<api::PpeDeoffloadCounter>& source,
+    std::uint64_t& packets,
+    std::uint64_t& bytes,
+    const char* field_name) {
+    if (!source.has_value()) return;
+    if (source->packets.has_value()) {
+        packets = uint64_from_api(
+            *source->packets,
+            (std::string{field_name} + " packets").c_str());
+    }
+    if (source->bytes.has_value()) {
+        bytes = uint64_from_api(
+            *source->bytes,
+            (std::string{field_name} + " bytes").c_str());
+    }
+}
+
+PpeDeoffloadSnapshot ppe_snapshot_from_api(
+    const api::PpeDeoffloadHealth& health) {
+    PpeDeoffloadSnapshot snapshot;
+    snapshot.mode = health.mode == api::PpeDeoffloadMode::AUTO
+        ? PpeDeoffloadMode::automatic
+        : PpeDeoffloadMode::off;
+    snapshot.state = ppe_state_from_api(health);
+    snapshot.detail = health.detail.value_or("");
+    snapshot.supported =
+        health.capability == api::PpeDeoffloadCapability::SUPPORTED;
+    snapshot.active = health.state == api::PpeDeoffloadHealthState::ACTIVE;
+    snapshot.degraded =
+        health.state == api::PpeDeoffloadHealthState::DEGRADED ||
+        health.state == api::PpeDeoffloadHealthState::UNKNOWN;
+    snapshot.desired_tcp_ports = health.tcp.desired_ports;
+    snapshot.applied_tcp_ports = health.tcp.applied_ports;
+    snapshot.desired_quic = std::find(
+        health.quic.desired_ports.begin(),
+        health.quic.desired_ports.end(),
+        "443") != health.quic.desired_ports.end();
+    snapshot.applied_quic = std::find(
+        health.quic.applied_ports.begin(),
+        health.quic.applied_ports.end(),
+        "443") != health.quic.applied_ports.end();
+    if (health.connskip_packets.has_value()) {
+        snapshot.connskip_window = uint32_from_api(
+            *health.connskip_packets, "PPE connskip_packets");
+    }
+    if (health.last_reconcile_ts.has_value()) {
+        snapshot.last_reconcile_unix_seconds = uint64_from_api(
+            *health.last_reconcile_ts, "PPE last_reconcile_ts");
+    }
+    copy_ppe_counter(
+        health.prerouting,
+        snapshot.counters.prerouting_packets,
+        snapshot.counters.prerouting_bytes,
+        "PPE prerouting");
+    copy_ppe_counter(
+        health.forward,
+        snapshot.counters.forward_packets,
+        snapshot.counters.forward_bytes,
+        "PPE forward");
+    copy_ppe_counter(
+        health.tcp.counters,
+        snapshot.counters.tcp_packets,
+        snapshot.counters.tcp_bytes,
+        "PPE TCP");
+    copy_ppe_counter(
+        health.quic.counters,
+        snapshot.counters.quic_packets,
+        snapshot.counters.quic_bytes,
+        "PPE QUIC");
+    snapshot.counters.available = health.prerouting.has_value() ||
+        health.forward.has_value() || health.tcp.counters.has_value() ||
+        health.quic.counters.has_value();
+    if (health.observed_at.has_value()) {
+        snapshot.counters.observed_at_unix_seconds = uint64_from_api(
+            *health.observed_at, "PPE observed_at");
+    }
+    return snapshot;
+}
+
 RoutingHealthReport routing_health_report_from_api(
     const api::RoutingHealthResponse& health) {
     RoutingHealthReport report;
@@ -521,6 +692,10 @@ RoutingHealthReport routing_health_report_from_api(
     report.firewall_chain.prerouting_hook_present =
         health.firewall.prerouting_hook_present;
     report.firewall_chain.detail = health.firewall.detail.value_or("");
+    if (health.ppe_deoffload.has_value()) {
+        report.ppe_deoffload =
+            ppe_snapshot_from_api(*health.ppe_deoffload);
+    }
 
     for (const auto& item : health.firewall_rules) {
         FirewallRuleCheck check;

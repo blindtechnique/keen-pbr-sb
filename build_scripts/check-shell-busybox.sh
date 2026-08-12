@@ -120,16 +120,22 @@ echo "== bashisms =="
 for index in "${!bashism_patterns[@]}"; do
   pattern="${bashism_patterns[$index]}"
   reason="${bashism_reasons[$index]}"
-  if hits="$(grep -nE "$pattern" "${scripts[@]}" 2>/dev/null)"; then
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      echo "FAIL bashism: $line"
-      echo "    reason: $reason"
-      failures=$((failures + 1))
-    done <<EOF
+  for file in "${scripts[@]}"; do
+    # Awk's portable `function name(...)` syntax is not shell code. Mask only
+    # a lexically identified single-quoted awk program, preserving every line
+    # number and all surrounding shell text for the normal bashism scan.
+    if hits="$(python3 build_scripts/mask_awk_for_shell_scan.py "$file" |
+               grep -nE "$pattern" 2>/dev/null)"; then
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        echo "FAIL bashism: $file:$line"
+        echo "    reason: $reason"
+        failures=$((failures + 1))
+      done <<EOF
 $hits
 EOF
-  fi
+    fi
+  done
 done
 
 # Keenetic CLI не должен наследовать LD_LIBRARY_PATH Entware: в /opt/lib лежит

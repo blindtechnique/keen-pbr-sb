@@ -190,6 +190,37 @@ class NfqwsAssetsGateFixture(unittest.TestCase):
                     self.assertEqual(generated, checked_in)
                     self.assertNotIn(b"\r\n", generated)
 
+    def test_generated_profiles_use_conservative_tcp_retransmission_baseline(self) -> None:
+        generator = REPO_ROOT / "build_scripts" / "build-nfqws-strategies.py"
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            result = subprocess.run(
+                [sys.executable, str(generator), str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for profile in ("01 safe", "02 balanced", "03 max"):
+                config = (output / profile / "nfqws2.conf").read_text(
+                    encoding="utf-8"
+                )
+                tcp_general = re.findall(
+                    r"circular:[^\s\"]*retrans=([0-9]+)[^\s\"]*key=tcp_general",
+                    config,
+                )
+                self.assertEqual(tcp_general, ["2"], profile)
+                self.assertNotIn("retrans=1", config, profile)
+                for key in ("quic_general", "udp_general", "yt_quic", "discord_udp"):
+                    circulars = re.findall(
+                        rf"circular:[^\s\"]*key={re.escape(key)}", config
+                    )
+                    for circular in circulars:
+                        self.assertNotIn("retrans=", circular, (profile, key))
+                        self.assertIn("udp_in=1", circular, (profile, key))
+                        self.assertIn("udp_out=4", circular, (profile, key))
+
     def test_git_attributes_keep_http_packet_bytes_binary(self) -> None:
         relative = Path(
             "packages/keenetic/keen-pbr/files/opt/usr/share/keen-pbr/"

@@ -255,6 +255,30 @@ TEST_CASE("periodic health owns URLTEST recovery when its timer is missing") {
         /*refresh_reason_pending=*/false));
 }
 
+TEST_CASE("periodic PPE liveness coalesces only confirmed drift") {
+    CHECK(should_schedule_periodic_ppe_full_refresh(
+        true, false, false, true,
+        /*desired_contract_drift=*/true,
+        /*live_graph_semantic_drift=*/false));
+    CHECK(should_schedule_periodic_ppe_full_refresh(
+        true, false, false, true,
+        /*desired_contract_drift=*/false,
+        /*live_graph_semantic_drift=*/true));
+
+    // A healthy counter refresh is a no-op, so the 60-second owner cannot
+    // cause a full apply loop on a stable router.
+    CHECK_FALSE(should_schedule_periodic_ppe_full_refresh(
+        true, false, false, true, false, false));
+    CHECK_FALSE(should_schedule_periodic_ppe_full_refresh(
+        true, false, false, false, true, true));
+    CHECK_FALSE(should_schedule_periodic_ppe_full_refresh(
+        false, false, false, true, true, false));
+    CHECK_FALSE(should_schedule_periodic_ppe_full_refresh(
+        true, true, false, true, true, false));
+    CHECK_FALSE(should_schedule_periodic_ppe_full_refresh(
+        true, false, true, true, false, true));
+}
+
 TEST_CASE("remote-access runtime events preserve an armed retry backoff") {
     CHECK(should_coalesce_remote_access_runtime_refresh(
         /*retry_timer_armed=*/true,

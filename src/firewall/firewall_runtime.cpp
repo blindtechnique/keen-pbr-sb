@@ -1,4 +1,5 @@
 #include "firewall_runtime.hpp"
+#include "../runtime/nfqws_runtime_contract.hpp"
 
 #include "../runtime/meta_udp_443_policy.hpp"
 
@@ -60,6 +61,67 @@ bool needs_native_vpn_direct_egress_snat(std::string_view stable_id) {
 }
 
 } // namespace
+
+PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
+    PpeDeoffloadMode mode,
+    bool quic_enabled,
+    const NfqwsPpeRuntimeContractObservation& observation) {
+    PpeDeoffloadDesired desired;
+    desired.mode = mode;
+    desired.quic_enabled = quic_enabled;
+    if (desired.mode == PpeDeoffloadMode::off) return desired;
+
+    desired.nfqueue_active = observation.available;
+    desired.strategy_ports_available = observation.available;
+    desired.runtime_contract_detail = observation.diagnostic;
+    if (!observation.available) return desired;
+
+    desired.nfqueue_number = observation.contract.queue_number;
+    for (const auto& range : observation.contract.tcp_ranges) {
+        desired.tcp_ports.push_back(
+            range.first == range.last
+                ? std::to_string(range.first)
+                : std::to_string(range.first) + ":" +
+                      std::to_string(range.last));
+    }
+    desired.quic_443_active = observation.contract.quic_udp_443;
+    return desired;
+}
+
+PpeDeoffloadDesired ppe_deoffload_desired_from_observation(
+    const Config& config,
+    const NfqwsPpeRuntimeContractObservation& observation) {
+    const auto daemon_config = config.daemon.value_or(DaemonConfig{});
+    return ppe_deoffload_desired_from_observation(
+        daemon_config.ppe_deoffload_mode.value_or(
+            api::PpeDeoffloadMode::OFF) == api::PpeDeoffloadMode::AUTO
+            ? PpeDeoffloadMode::automatic
+            : PpeDeoffloadMode::off,
+        daemon_config.ppe_deoffload_quic_enabled.value_or(false),
+        observation);
+}
+
+PpeDeoffloadDesired observe_ppe_deoffload_desired(
+    PpeDeoffloadMode mode,
+    bool quic_enabled) {
+    if (mode == PpeDeoffloadMode::off) {
+        return ppe_deoffload_desired_from_observation(
+            mode, quic_enabled, {});
+    }
+    return ppe_deoffload_desired_from_observation(
+        mode, quic_enabled, observe_nfqws_ppe_runtime_contract());
+}
+
+PpeDeoffloadDesired observe_ppe_deoffload_desired(const Config& config) {
+    const auto daemon_config = config.daemon.value_or(DaemonConfig{});
+    if (daemon_config.ppe_deoffload_mode.value_or(
+            api::PpeDeoffloadMode::OFF) != api::PpeDeoffloadMode::AUTO) {
+        // Preserve the explicit no-observation contract for mode=off.
+        return ppe_deoffload_desired_from_observation(config, {});
+    }
+    return ppe_deoffload_desired_from_observation(
+        config, observe_nfqws_ppe_runtime_contract());
+}
 
 std::vector<FirewallSourceEgressSnatSelector>
 select_native_vpn_direct_egress_snat_selectors(
@@ -161,6 +223,8 @@ StagedRuntimeFirewall stage_runtime_firewall(
         config.daemon.value_or(DaemonConfig{}).clear_dynamic_sets_on_apply.value_or(true));
     firewall.set_ttl_bypass_enabled(
         config.daemon.value_or(DaemonConfig{}).ttl_bypass_enabled.value_or(true));
+    firewall.set_ppe_deoffload_desired(
+        observe_ppe_deoffload_desired(config));
     auto prefilter = effective_internal_vpn_targets != nullptr
         ? build_firewall_global_prefilter_for_runtime_targets(
               config, *effective_internal_vpn_targets)

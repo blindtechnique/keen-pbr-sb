@@ -137,6 +137,30 @@ void validate_meta_udp443_policy_field(
     }
 }
 
+void validate_ppe_deoffload_mode_field(
+    const json& root,
+    std::vector<ConfigValidationIssue>& issues) {
+    const auto daemon_it = root.find("daemon");
+    if (daemon_it == root.end() || !daemon_it->is_object()) return;
+
+    const auto mode_it = daemon_it->find("ppe_deoffload_mode");
+    if (mode_it == daemon_it->end() || mode_it->is_null()) return;
+
+    constexpr const char* path = "daemon.ppe_deoffload_mode";
+    if (!mode_it->is_string()) {
+        add_issue(issues, path, std::string(path) + " must be a string");
+        return;
+    }
+
+    const auto& mode = mode_it->get_ref<const std::string&>();
+    if (mode != "off" && mode != "auto") {
+        add_issue(
+            issues,
+            path,
+            std::string(path) + " must be one of: off, auto");
+    }
+}
+
 void validate_optional_hex_string_field(const json& root,
                                         const char* parent_key,
                                         const char* child_key,
@@ -1008,8 +1032,12 @@ Config parse_config(const std::string& json_str) {
     validate_optional_string_field(
         parsed_json, "daemon", "firewall_backend", "daemon.firewall_backend", issues);
     validate_meta_udp443_policy_field(parsed_json, issues);
+    validate_ppe_deoffload_mode_field(parsed_json, issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "skip_marked_packets", "daemon.skip_marked_packets", issues);
+    validate_optional_boolean_field(
+        parsed_json, "daemon", "ppe_deoffload_quic_enabled",
+        "daemon.ppe_deoffload_quic_enabled", issues);
     validate_optional_boolean_field(
         parsed_json, "daemon", "clear_dynamic_sets_on_apply",
         "daemon.clear_dynamic_sets_on_apply", issues);

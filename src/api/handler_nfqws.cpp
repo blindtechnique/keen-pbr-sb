@@ -82,6 +82,42 @@ constexpr const char* kDurabilityWarning =
     "Warning: the nfqws file is visible, but directory durability could not "
     "be confirmed. Runtime reconciliation continued.";
 
+class NfqwsNetfilterRefreshGuard final {
+public:
+    explicit NfqwsNetfilterRefreshGuard(ApiContext& context,
+                                        bool armed = true) noexcept
+        : context_(context), armed_(armed) {}
+
+    ~NfqwsNetfilterRefreshGuard() noexcept {
+        if (!armed_) return;
+        try {
+            (void)context_.request_netfilter_runtime_refresh();
+        } catch (...) {
+            // The service/config mutation is already visible.  An exception
+            // from an embedder callback must not mask its real result; the
+            // production callback is itself fail-closed and non-throwing.
+        }
+    }
+
+    NfqwsNetfilterRefreshGuard(const NfqwsNetfilterRefreshGuard&) = delete;
+    NfqwsNetfilterRefreshGuard& operator=(
+        const NfqwsNetfilterRefreshGuard&) = delete;
+
+    bool request_now() noexcept {
+        if (!armed_) return false;
+        armed_ = false;
+        try {
+            return context_.request_netfilter_runtime_refresh();
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    ApiContext& context_;
+    bool armed_{true};
+};
+
 struct ApplyStrategyHooks {
     std::function<bool()> installed;
     std::function<std::vector<ConfigValidationIssue>(
@@ -1366,13 +1402,24 @@ void register_nfqws_handler_impl(
             if (create_only && fs::exists(path)) {
                 throw ApiError("nfqws file already exists", 409);
             }
+            const bool active_config =
+                path == fs::path(kConfigDir) / "nfqws2.conf";
+            // Saving the active file does not restart nfqws2.  It can
+            // therefore make the durable configuration disagree with the
+            // live process argv.  Reconcile immediately so PPE is removed on
+            // that mismatch instead of retaining a graph derived from stale
+            // selectors until an unrelated firewall event.
+            NfqwsNetfilterRefreshGuard refresh_guard(ctx, active_config);
             AtomicFileWriteOptions write_options;
             write_options.replace_existing = !create_only;
             const auto saved = save_nfqws_file(
                 path,
                 request.value("content", std::string{}),
                 write_options);
-            return successful_write_response(saved.durable).dump();
+            auto response = successful_write_response(saved.durable);
+            response["firewall_reconcile_pending"] =
+                active_config ? refresh_guard.request_now() : false;
+            return response.dump();
         }
         if (action == "delete_file") {
             const auto [path, category] = file_path(request.value("category", ""), request.value("name", ""));
@@ -1395,9 +1442,21 @@ void register_nfqws_handler_impl(
                 throw ApiError("unsupported nfqws service command", 400);
             if (!fs::exists(kInit)) throw ApiError("nfqws2 is not installed", 409);
             const std::lock_guard lock(nfqws_operation_mutex());
+            NfqwsNetfilterRefreshGuard refresh_guard(ctx);
             int status = 0;
             const auto output = run_nfqws_service_command(command, status);
-            return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status}}.dump();
+            // A terminal service action may change both the live queue and
+            // the process argv from which PPE derives its active port
+            // contract.  Request the existing coalesced control-loop writer;
+            // never execute firewall commands on this HTTP worker.
+            const bool firewall_reconcile_pending =
+                refresh_guard.request_now();
+            return nlohmann::json{{"ok", status == 0},
+                                  {"output", output},
+                                  {"status", status},
+                                  {"firewall_reconcile_pending",
+                                   firewall_reconcile_pending}}
+                .dump();
         }
         if (action == "upgrade") {
             // Fail closed before the maintenance lease, backup, journal,
@@ -1746,6 +1805,7 @@ void register_nfqws_handler_impl(
             write_component_transaction(kNfqwsJournal, record);
 
             TransactionProgress progress(ctx, "restore");
+            NfqwsNetfilterRefreshGuard refresh_guard(ctx);
             std::string output;
             if (record.runtime_was_running) {
                 progress.step("stop");
@@ -1756,6 +1816,8 @@ void register_nfqws_handler_impl(
                         "nfqws2 could not be verified stopped; no captured "
                         "file was written. The transaction record was kept.\n";
                     progress.finish("stop_failed");
+                    const bool firewall_reconcile_pending =
+                        refresh_guard.request_now();
                     return nlohmann::json{
                         {"ok", false},
                         {"output", output},
@@ -1763,7 +1825,9 @@ void register_nfqws_handler_impl(
                         {"failed", 0},
                         {"runtime_verified", false},
                         {"journal_retained", true},
-                        {"exact_package_state", false}}
+                        {"exact_package_state", false},
+                        {"firewall_reconcile_pending",
+                         firewall_reconcile_pending}}
                         .dump();
                 }
             }
@@ -1826,13 +1890,17 @@ void register_nfqws_handler_impl(
             const bool ok =
                 restored.complete && runtime_verified && journal_cleared;
             progress.finish(ok ? std::string{} : "incomplete");
+            const bool firewall_reconcile_pending =
+                refresh_guard.request_now();
             return nlohmann::json{{"ok", ok},
                                   {"output", output},
                                   {"restored", restored.restored},
                                   {"failed", restored.failed.size()},
                                   {"runtime_verified", runtime_verified},
                                   {"journal_retained", !journal_cleared},
-                                  {"exact_package_state", false}}
+                                  {"exact_package_state", false},
+                                  {"firewall_reconcile_pending",
+                                   firewall_reconcile_pending}}
                 .dump();
         }
         if (action == "save_strategy") {
@@ -1873,6 +1941,7 @@ void register_nfqws_handler_impl(
                 validate_candidate_or_throw(name, content);
             }
 
+            NfqwsNetfilterRefreshGuard refresh_guard(ctx);
             bool durable = true;
             const auto assets = apply_hooks.has_value()
                                     ? apply_hooks->provision(name)
@@ -1896,6 +1965,8 @@ void register_nfqws_handler_impl(
                 output = details.str() + output;
             }
             append_durability_warning(output, durable);
+            const bool firewall_reconcile_pending =
+                refresh_guard.request_now();
             return nlohmann::json{{"ok", status == 0},
                                   {"output", output},
                                   {"status", status},
@@ -1904,7 +1975,9 @@ void register_nfqws_handler_impl(
                                                   ? ""
                                                   : kDurabilityWarning},
                                   {"installed_blobs", assets.installed},
-                                  {"preserved_blobs", assets.preserved}}
+                                  {"preserved_blobs", assets.preserved},
+                                  {"firewall_reconcile_pending",
+                                   firewall_reconcile_pending}}
                 .dump();
         }
         if (action == "save_files") {
@@ -1945,14 +2018,23 @@ void register_nfqws_handler_impl(
             }
             std::string output = "Saved " + std::to_string(pending.size()) + " nfqws file(s).\n";
             int status = 0;
-            if (request.value("restart", false)) {
+            const bool restart_requested = request.value("restart", false);
+            NfqwsNetfilterRefreshGuard refresh_guard(
+                ctx, restart_requested);
+            if (restart_requested) {
                 output += run_nfqws_service_command("restart", status);
             }
             append_durability_warning(output, durable);
+            const bool firewall_reconcile_pending =
+                restart_requested
+                    ? refresh_guard.request_now()
+                    : false;
             return nlohmann::json{{"ok", status == 0}, {"output", output}, {"status", status},
                                   {"saved", pending.size()},
                                   {"durable", durable},
-                                  {"warning", durable ? "" : kDurabilityWarning}}.dump();
+                                  {"warning", durable ? "" : kDurabilityWarning},
+                                  {"firewall_reconcile_pending",
+                                   firewall_reconcile_pending}}.dump();
         }
         if (action == "delete_strategy") {
             const auto name = request.value("name", std::string{});
@@ -2010,12 +2092,26 @@ void register_nfqws_handler_impl(
             // Validate the entire bundle before the first write. Each file is
             // then replaced atomically by save_nfqws_file().
             const std::lock_guard lock(nfqws_operation_mutex());
+            const auto active_config = fs::path(kConfigDir) / "nfqws2.conf";
+            const bool replaces_active_config = std::any_of(
+                pending.begin(), pending.end(),
+                [&active_config](const PendingFile& item) {
+                    return item.path == active_config;
+                });
+            // Import, like save_file, can replace the active durable config
+            // without restarting nfqws2. Reconcile the existing control-loop
+            // owner so a file/cmdline mismatch removes a stale PPE graph.
+            NfqwsNetfilterRefreshGuard refresh_guard(
+                ctx, replaces_active_config);
             bool durable = true;
             for (const auto& item : pending) {
                 merge_durability(
                     durable, save_nfqws_file(item.path, item.content));
             }
-            return successful_write_response(durable).dump();
+            auto response = successful_write_response(durable);
+            response["firewall_reconcile_pending"] =
+                replaces_active_config ? refresh_guard.request_now() : false;
+            return response.dump();
         }
         if (action == "check_url") {
             const auto url = request.value("url", std::string{});

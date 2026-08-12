@@ -9,6 +9,7 @@ import type { ApiError } from "@/api/client"
 import type { ConfigObject } from "@/api/generated/model/configObject"
 import type { InternalVpnServer } from "@/api/generated/model/internalVpnServer"
 import type { InternalVpnService } from "@/api/generated/model/internalVpnService"
+import type { PpeDeoffloadMode } from "@/api/generated/model/ppeDeoffloadMode"
 import { usePostConfigMutation } from "@/api/mutations"
 import { queryKeys } from "@/api/query-keys"
 import {
@@ -116,6 +117,8 @@ type SettingsDraft = {
   skipMarkedPackets: boolean
   clearDynamicSetsOnApply: boolean
   ttlBypassEnabled: boolean
+  ppeDeoffloadMode: PpeDeoffloadMode
+  ppeDeoffloadQuicEnabled: boolean
   reconnectUnmarkedFlowsOnRoutingChange: boolean
   reconnectOwnedFlowsOnRoutingChangeLists: string[] | undefined
   metaUdp443Policy: MetaUdp443Policy
@@ -138,6 +141,8 @@ const fallbackDraft: SettingsDraft = {
   skipMarkedPackets: true,
   clearDynamicSetsOnApply: true,
   ttlBypassEnabled: true,
+  ppeDeoffloadMode: "off",
+  ppeDeoffloadQuicEnabled: false,
   reconnectUnmarkedFlowsOnRoutingChange: true,
   reconnectOwnedFlowsOnRoutingChangeLists: undefined,
   metaUdp443Policy: "balanced",
@@ -158,6 +163,8 @@ const SETTINGS_FIELD_NAMES = {
   skipMarkedPackets: "skipMarkedPackets",
   clearDynamicSetsOnApply: "clearDynamicSetsOnApply",
   ttlBypassEnabled: "ttlBypassEnabled",
+  ppeDeoffloadMode: "ppeDeoffloadMode",
+  ppeDeoffloadQuicEnabled: "ppeDeoffloadQuicEnabled",
   reconnectUnmarkedFlowsOnRoutingChange:
     "reconnectUnmarkedFlowsOnRoutingChange",
   reconnectOwnedFlowsOnRoutingChangeLists:
@@ -1321,6 +1328,112 @@ function LoadedGeneralConfigPage({
           </CardHeader>
           <CardContent>
             <FieldGroup>
+              <form.Field name={SETTINGS_FIELD_NAMES.ppeDeoffloadMode}>
+                {(field) => (
+                  <Field width="short">
+                    <FieldLabel htmlFor="ppe-deoffload-mode">
+                      {t("pages.settings.advanced.ppeDeoffloadModeLabel")}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Select
+                        items={[
+                          {
+                            value: "off",
+                            label: t(
+                              "pages.settings.advanced.ppeDeoffloadModeOptions.off"
+                            ),
+                          },
+                          {
+                            value: "auto",
+                            label: t(
+                              "pages.settings.advanced.ppeDeoffloadModeOptions.auto"
+                            ),
+                          },
+                        ]}
+                        onValueChange={(value) => {
+                          if (value !== "off" && value !== "auto") return
+                          field.handleChange(value)
+                          if (value === "off") {
+                            form.setFieldValue(
+                              SETTINGS_FIELD_NAMES.ppeDeoffloadQuicEnabled,
+                              false
+                            )
+                          }
+                        }}
+                        value={field.state.value}
+                      >
+                        <SelectTrigger id="ppe-deoffload-mode">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="off">
+                              {t(
+                                "pages.settings.advanced.ppeDeoffloadModeOptions.off"
+                              )}
+                            </SelectItem>
+                            <SelectItem value="auto">
+                              {t(
+                                "pages.settings.advanced.ppeDeoffloadModeOptions.auto"
+                              )}
+                            </SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FieldHint
+                        description={t(
+                          "pages.settings.advanced.ppeDeoffloadModeHint"
+                        )}
+                      />
+                    </FieldContent>
+                  </Field>
+                )}
+              </form.Field>
+
+              <FieldSeparator />
+
+              <form.Field
+                name={SETTINGS_FIELD_NAMES.ppeDeoffloadQuicEnabled}
+              >
+                {(field) => (
+                  <form.Subscribe
+                    selector={(state) => state.values.ppeDeoffloadMode}
+                  >
+                    {(mode) => (
+                      <Field width="short">
+                        <FieldContent>
+                          <div className="flex items-center space-x-3">
+                            <Checkbox
+                              checked={field.state.value}
+                              disabled={mode !== "auto"}
+                              id="ppe-deoffload-quic-enabled"
+                              onCheckedChange={(checked) =>
+                                field.handleChange(checked === true)
+                              }
+                            />
+                            <FieldLabel
+                              className="cursor-pointer flex-col items-start gap-0"
+                              htmlFor="ppe-deoffload-quic-enabled"
+                            >
+                              {t(
+                                "pages.settings.advanced.ppeDeoffloadQuicEnabledLabel"
+                              )}
+                            </FieldLabel>
+                          </div>
+                          <FieldHint
+                            description={t(
+                              "pages.settings.advanced.ppeDeoffloadQuicEnabledHint"
+                            )}
+                          />
+                        </FieldContent>
+                      </Field>
+                    )}
+                  </form.Subscribe>
+                )}
+              </form.Field>
+
+              <FieldSeparator />
+
               <form.Field
                 name={
                   SETTINGS_FIELD_NAMES.reconnectUnmarkedFlowsOnRoutingChange
@@ -1864,6 +1977,9 @@ function getFirstFieldError(errors: unknown[]) {
 }
 
 function getDraftFromConfig(config: ConfigObject): SettingsDraft {
+  const ppeDeoffloadMode =
+    config.daemon?.ppe_deoffload_mode ?? fallbackDraft.ppeDeoffloadMode
+
   return {
     strictEnforcement:
       config.daemon?.strict_enforcement === undefined
@@ -1878,6 +1994,11 @@ function getDraftFromConfig(config: ConfigObject): SettingsDraft {
       fallbackDraft.clearDynamicSetsOnApply,
     ttlBypassEnabled:
       config.daemon?.ttl_bypass_enabled ?? fallbackDraft.ttlBypassEnabled,
+    ppeDeoffloadMode,
+    ppeDeoffloadQuicEnabled:
+      ppeDeoffloadMode === "auto" &&
+      (config.daemon?.ppe_deoffload_quic_enabled ??
+        fallbackDraft.ppeDeoffloadQuicEnabled),
     reconnectUnmarkedFlowsOnRoutingChange:
       config.daemon?.reconnect_unmarked_flows_on_routing_change ??
       fallbackDraft.reconnectUnmarkedFlowsOnRoutingChange,
@@ -1937,6 +2058,10 @@ function buildUpdatedConfig(
         skip_marked_packets: draft.skipMarkedPackets,
         clear_dynamic_sets_on_apply: draft.clearDynamicSetsOnApply,
         ttl_bypass_enabled: draft.ttlBypassEnabled,
+        ppe_deoffload_mode: draft.ppeDeoffloadMode,
+        ppe_deoffload_quic_enabled:
+          draft.ppeDeoffloadMode === "auto" &&
+          draft.ppeDeoffloadQuicEnabled,
         reconnect_unmarked_flows_on_routing_change:
           draft.reconnectUnmarkedFlowsOnRoutingChange,
         reconnect_owned_flows_on_routing_change_lists:
@@ -2069,6 +2194,10 @@ function resolveSettingsFieldPath(path: string): SettingsFieldName | undefined {
       return SETTINGS_FIELD_NAMES.clearDynamicSetsOnApply
     case "daemon.ttl_bypass_enabled":
       return SETTINGS_FIELD_NAMES.ttlBypassEnabled
+    case "daemon.ppe_deoffload_mode":
+      return SETTINGS_FIELD_NAMES.ppeDeoffloadMode
+    case "daemon.ppe_deoffload_quic_enabled":
+      return SETTINGS_FIELD_NAMES.ppeDeoffloadQuicEnabled
     case "daemon.reconnect_unmarked_flows_on_routing_change":
       return SETTINGS_FIELD_NAMES.reconnectUnmarkedFlowsOnRoutingChange
     case "daemon.meta_udp443_policy":
