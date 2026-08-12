@@ -121,6 +121,12 @@ keen_pbr_stat_value() {
                 "$KEEN_PBR_STAT_UID" \
                 "$KEEN_PBR_STAT_GID"
             ;;
+        %u:%g:%a)
+            printf '%s:%s:%s\n' \
+                "$KEEN_PBR_STAT_UID" \
+                "$KEEN_PBR_STAT_GID" \
+                "$KEEN_PBR_STAT_MODE"
+            ;;
         *) return 1 ;;
     esac
 }

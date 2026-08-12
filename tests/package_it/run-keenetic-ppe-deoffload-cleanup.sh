@@ -11,9 +11,16 @@ init_script=${1:-}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' 0 HUP INT TERM
 
-# Source the bounded xtables transaction and the production PPE ownership
-# parser without executing rc.func's dispatcher.
-sed -n '/^run_bounded_command()/,/^is_module_loaded()/p' \
+# Source the portable metadata helper, bounded xtables transaction and the
+# production PPE ownership parser without executing rc.func's dispatcher.
+portable_stat_helper="$(dirname "$init_script")/../../usr/lib/keen-pbr/portable-stat.sh"
+[ -f "$portable_stat_helper" ] || {
+    echo "portable stat helper is missing: $portable_stat_helper" >&2
+    exit 1
+}
+. "$portable_stat_helper"
+KEEN_PBR_PORTABLE_STAT_LOADED=yes
+sed -n '/^path_owner_group_mode()/,/^is_module_loaded()/p' \
     "$init_script" | sed '$d' > "$work/functions.sh"
 
 mkdir -p "$work/bin" "$work/state"

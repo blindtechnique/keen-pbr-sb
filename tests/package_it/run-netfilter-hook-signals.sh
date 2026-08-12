@@ -146,9 +146,22 @@ stop_function="$work/stop-service-for-action.sh"
 runtime_function="$work/control-runtime-drain.sh"
 preserve_function="$work/preserve-control-work.sh"
 delayed_action="$work/delayed-control-drain-action.sh"
+portable_stat_helper="$(dirname "$keenetic_init")/../../usr/lib/keen-pbr/portable-stat.sh"
+[ -f "$portable_stat_helper" ] || {
+    echo "portable stat helper is missing: $portable_stat_helper" >&2
+    exit 1
+}
+if grep -Fq "stat -c '%u:%g:%a'" "$keenetic_init"; then
+    echo "init script bypasses the portable metadata helper" >&2
+    exit 1
+fi
+cat "$portable_stat_helper" > "$marker_functions"
+printf '%s\n' 'KEEN_PBR_PORTABLE_STAT_LOADED=yes' >> "$marker_functions"
+sed -n '/^path_owner_group_mode()/,/^}/p' \
+    "$keenetic_init" >> "$marker_functions"
 sed -n \
     '/^# Netfilter stop admission marker/,/^# End netfilter stop admission marker/p' \
-    "$keenetic_init" > "$marker_functions"
+    "$keenetic_init" >> "$marker_functions"
 awk '
     /^stop_service_for_action\(\)/ { capture = 1 }
     capture { print }
@@ -173,6 +186,75 @@ awk '
         print
     }
 ' "$keenetic_init" > "$delayed_action"
+
+# Keenetic's reduced Entware BusyBox supports `stat -t` but rejects GNU
+# `stat -c`. Stop-for-upgrade must still obtain exact root-owned metadata;
+# otherwise prerm cannot stop the live daemon and opkg can never replace it.
+reduced_stat_root="$work/reduced-stat-root"
+reduced_runtime="$work/reduced-stat-runtime"
+mkdir -p "$reduced_stat_root/opt/bin" "$reduced_runtime"
+chmod 0700 "$reduced_runtime"
+cat > "$reduced_stat_root/opt/bin/stat" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -t ] || exit 1
+shift
+exec /bin/busybox stat -t "$@"
+EOF
+chmod +x "$reduced_stat_root/opt/bin/stat"
+(
+    ROOT="$reduced_stat_root"
+    export ROOT
+    . "$marker_functions"
+    STOPPING_RUNTIME_DIR="$reduced_runtime"
+    STOPPING_MARKER="$STOPPING_RUNTIME_DIR/stopping"
+    STOPPING_CONTROL_LEASE_DIR="$STOPPING_RUNTIME_DIR/control-lease"
+    STOPPING_CONTROL_LEASE_OWNER="$STOPPING_CONTROL_LEASE_DIR/owner"
+    STOPPING_CONTROL_RECOVERY_GATE_DIR="$STOPPING_RUNTIME_DIR/control-lease-recovery"
+    STOPPING_CONTROL_RECOVERY_GATE_OWNER="$STOPPING_CONTROL_RECOVERY_GATE_DIR/owner"
+    STOPPING_CONTROL_MAILBOX="$STOPPING_RUNTIME_DIR/control-pending"
+    STOPPING_CONTROL_DRAIN_TOKEN="$STOPPING_RUNTIME_DIR/control-drain-token"
+    STOPPING_PROC_ROOT=/proc
+    STOPPING_MARKER_MAGIC=keen-pbr-stopping-v3
+    STOPPING_CONTROL_LEASE_MAGIC=keen-pbr-control-lease-v1
+    STOPPING_CONTROL_RECOVERY_GATE_MAGIC=keen-pbr-control-recovery-v1
+    STOPPING_CONTROL_WORK_MAGIC=keen-pbr-control-work-v1
+    STOPPING_CONTROL_LEASE_PID=""
+    STOPPING_CONTROL_LEASE_STARTTICKS=""
+    STOPPING_CONTROL_LEASE_ROLE=""
+    STOPPING_CONTROL_RECOVERY_GATE_PID=""
+    STOPPING_CONTROL_RECOVERY_GATE_STARTTICKS=""
+    STOPPING_CONTROL_ACQUIRE_RESULT=1
+    STOPPING_TRAILING_SIGNAL=""
+    STOPPING_TRAILING_DNS=no
+    STOPPING_TRAILING_HUP=no
+    STOPPING_RECOVERY_CLOSING_DIRS=""
+    STOPPING_CONTROL_WORK_PATH=""
+    STOPPING_CONTROL_WORK_PID=""
+    STOPPING_CONTROL_WORK_STARTTICKS=""
+    STOPPING_CONTROL_WORK_SIGNAL=""
+    STOPPING_CONTROL_WORK_DNS=no
+    STOPPING_CONTROL_WORK_HUP=no
+    PIDFILE="$work/reduced-stat.pid"
+    PROCS=keen-pbr-test
+    VALIDATED_SERVICE_PID=""
+    log() { :; }
+    log_error() { :; }
+    pidof() { return 1; }
+    validate_service_pid() { VALIDATED_SERVICE_PID=$hook_pid; }
+    printf '%s\n' "$hook_pid" > "$PIDFILE"
+    stopping_stat_capability_available
+    [ "$(path_owner_group_mode "$reduced_runtime")" = '0:0:700' ]
+    stopping_runtime_dir_is_protected
+    acquire_control_lease stop
+    control_lease_owned_by_self
+    begin_stopping_marker
+    mark_stopping_mutation_started
+    stopping_marker_authorizes_runtime_suppression
+    finish_stopping_marker
+    release_control_lease
+    [ ! -e "$STOPPING_CONTROL_LEASE_DIR" ]
+    [ ! -e "$STOPPING_MARKER" ]
+)
 
 (
     . "$marker_functions"

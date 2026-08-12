@@ -153,6 +153,18 @@ log_error() {
     logger -s -t "keen-pbr" -p "user.err" "$1"
 }
 
+PORTABLE_STAT_HELPER=/opt/usr/lib/keen-pbr/portable-stat.sh
+KEEN_PBR_PORTABLE_STAT_LOADED=no
+if [ -f "$PORTABLE_STAT_HELPER" ] && [ ! -L "$PORTABLE_STAT_HELPER" ] &&
+   . "$PORTABLE_STAT_HELPER"; then
+    KEEN_PBR_PORTABLE_STAT_LOADED=yes
+fi
+
+path_owner_group_mode() {
+    [ "$KEEN_PBR_PORTABLE_STAT_LOADED" = yes ] || return 1
+    keen_pbr_stat_value '%u:%g:%a' "$1"
+}
+
 run_bounded_command() {
     local limit="$1"
     local command_pid
@@ -904,8 +916,7 @@ ppe_deoffload_load_ownership() {
         log_error "PPE de-offload backend marker is not a regular file"
         return 1
     fi
-    metadata=$(stat -c '%u:%g:%a' "$PPE_DEOFFLOAD_OWNERSHIP_FILE" \
-        2>/dev/null) || {
+    metadata=$(path_owner_group_mode "$PPE_DEOFFLOAD_OWNERSHIP_FILE") || {
         log_error "PPE de-offload backend marker metadata is unavailable"
         return 1
     }
@@ -1703,7 +1714,7 @@ stopping_runtime_dir_is_protected() {
 
     [ -d "$STOPPING_RUNTIME_DIR" ] || return 1
     [ ! -L "$STOPPING_RUNTIME_DIR" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$STOPPING_RUNTIME_DIR" 2>/dev/null) ||
+    metadata=$(path_owner_group_mode "$STOPPING_RUNTIME_DIR") ||
         return 1
     case "$metadata" in
         0:0:700|0:0:750) return 0 ;;
@@ -1747,13 +1758,13 @@ control_lease_dir_is_protected() {
 
     [ -d "$lease_dir" ] || return 1
     [ ! -L "$lease_dir" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$lease_dir" 2>/dev/null) ||
+    metadata=$(path_owner_group_mode "$lease_dir") ||
         return 1
     [ "$metadata" = "0:0:700" ]
 }
 
 stopping_stat_capability_available() {
-    stat -c '%u:%g:%a' / >/dev/null 2>&1
+    path_owner_group_mode / >/dev/null 2>&1
 }
 
 read_control_lease_owner() {
@@ -1773,7 +1784,7 @@ read_control_lease_owner() {
     control_lease_dir_is_protected "$lease_dir" || return 1
     [ -f "$owner_file" ] || return 1
     [ ! -L "$owner_file" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$owner_file" 2>/dev/null) ||
+    metadata=$(path_owner_group_mode "$owner_file") ||
         return 1
     [ "$metadata" = "0:0:600" ] || return 1
     IFS=' ' read -r magic role pid startticks extra < "$owner_file" ||
@@ -1831,7 +1842,7 @@ read_control_recovery_gate_owner() {
         "$STOPPING_CONTROL_RECOVERY_GATE_DIR" || return 1
     [ -f "$owner_file" ] || return 1
     [ ! -L "$owner_file" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$owner_file" 2>/dev/null) ||
+    metadata=$(path_owner_group_mode "$owner_file") ||
         return 1
     [ "$metadata" = "0:0:600" ] || return 1
     IFS=' ' read -r magic pid startticks extra < "$owner_file" ||
@@ -1983,7 +1994,7 @@ read_control_work_file() {
     stopping_runtime_dir_is_protected || return 1
     [ -f "$work_file" ] || return 1
     [ ! -L "$work_file" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$work_file" 2>/dev/null) || return 1
+    metadata=$(path_owner_group_mode "$work_file") || return 1
     [ "$metadata" = "0:0:600" ] || return 1
     IFS=' ' read -r magic role pid startticks signal dns hup extra \
         < "$work_file" || return 1
@@ -2706,7 +2717,7 @@ control_intent_dir_is_protected() {
 
     [ -d "$intent_dir" ] || return 1
     [ ! -L "$intent_dir" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$intent_dir" 2>/dev/null) || return 1
+    metadata=$(path_owner_group_mode "$intent_dir") || return 1
     [ "$metadata" = "0:0:700" ]
 }
 
@@ -2947,7 +2958,7 @@ read_stopping_marker() {
     stopping_runtime_dir_is_protected || return 1
     [ -f "$STOPPING_MARKER" ] || return 1
     [ ! -L "$STOPPING_MARKER" ] || return 1
-    metadata=$(stat -c '%u:%g:%a' "$STOPPING_MARKER" 2>/dev/null) ||
+    metadata=$(path_owner_group_mode "$STOPPING_MARKER") ||
         return 1
     [ "$metadata" = "0:0:600" ] || return 1
     IFS=' ' read -r magic phase pid startticks controller_pid \
