@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   ArchiveIcon,
+  BookmarkIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   DownloadIcon,
@@ -15,6 +16,7 @@ import {
   RotateCcwIcon,
   SaveIcon,
   UploadIcon,
+  WrenchIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 
@@ -42,6 +44,11 @@ import { SectionTabs, type SectionTab } from "@/components/shared/section-tabs"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 import {
   Select,
   SelectContent,
@@ -537,11 +544,11 @@ export function NfqwsPage() {
         <>
           <NfqwsSection
             title={
-              // Пять кнопок в ряд, и по подписям не видно, чем «Перезапустить»
-              // отличается от «Перечитать конфигурацию», а «Обновить» — от
-              // «Обновить пакет». Знак вопроса у названия раздела — тот же
-              // приём, что у KeeneticOS: объяснение под рукой, но не занимает
-              // экран у того, кто и так знает.
+              // Знак вопроса у названия раздела — приём KeeneticOS: объяснение
+              // под рукой, но не занимает экран у того, кто и так знает. По
+              // подписям не видно, чем «Перезапустить» отличается от
+              // «Перечитать конфигурацию», а «Обновить данные» — от «Обновить
+              // пакет», и держать это в голове человек не обязан.
               <span className="inline-flex flex-wrap items-center gap-1">
                 {t("nfqws.service")}
                 <HelpHint
@@ -550,11 +557,17 @@ export function NfqwsPage() {
                 />
               </span>
             }
-            description={t("nfqws.version", {
-              version: status.version || "—",
-            })}
-            action={
-              <div className="flex flex-wrap items-center justify-end gap-2">
+            // Версия и обе плашки — одной строкой под заголовком. Раньше
+            // версия стояла слева, а плашки уезжали в правый угол секции, и
+            // одно состояние службы читалось по разным углам экрана.
+            description={
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>
+                  {t("nfqws.version", { version: status.version || "—" })}
+                </span>
+                <KeeneticStatus tone={status.running ? "success" : "neutral"}>
+                  {status.running ? t("nfqws.running") : t("nfqws.stopped")}
+                </KeeneticStatus>
                 <KeeneticStatus
                   tone={updateQuery.data?.available ? "success" : "neutral"}
                 >
@@ -564,13 +577,13 @@ export function NfqwsPage() {
                       ? t("common.updateStatus.current")
                       : t("common.updateStatus.checking")}
                 </KeeneticStatus>
-                <KeeneticStatus tone={status.running ? "success" : "neutral"}>
-                  {status.running ? t("nfqws.running") : t("nfqws.stopped")}
-                </KeeneticStatus>
-              </div>
+              </span>
             }
           >
-            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-2">
+            {/* Выключатель и три кнопки — одной строкой слева. Пока кнопок
+                было семь, ряд разводился `justify-between`; с тремя это
+                оставляло посреди блока пустоту в пол-экрана. */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
               <label className="flex cursor-pointer items-center gap-2">
                 <Switch
                   aria-label={
@@ -625,6 +638,13 @@ export function NfqwsPage() {
                   </AlertDescription>
                 </Alert>
               ) : null}
+              {/* Ежедневных действий здесь два: перезапустить службу и
+                  перечитать состояние. Остальные пять — про обслуживание
+                  пакета и про то, как вернуться назад; они редкие и лежат
+                  под одной кнопкой. Семь равнозначных кнопок в два ряда
+                  занимали 190 px на широком экране и 358 px на телефоне
+                  раньше, чем начиналось содержимое, и не давали понять, что
+                  из этого делают каждый день. */}
               <div className="grid grid-cols-2 items-stretch gap-2 *:h-auto *:min-h-8 *:w-full *:py-1 *:leading-tight *:whitespace-normal sm:flex sm:flex-wrap sm:items-center sm:*:h-8 sm:*:w-auto sm:*:py-0 sm:*:whitespace-nowrap">
                 <Button
                   disabled={operation.pending}
@@ -642,90 +662,11 @@ export function NfqwsPage() {
                   title={t("nfqws.serviceHelp.restart")}
                   variant="outline"
                 >
-                  {/* Своя иконка у каждой кнопки: «Перезапустить» и «Обновить»
-                      стояли рядом с одной и той же RefreshCwIcon, и по значку
-                      их было не отличить. Перезапуск — это выключение и
-                      включение службы, отсюда знак питания. */}
+                  {/* Перезапуск — это выключение и включение службы, отсюда
+                      знак питания. С RefreshCwIcon он был неотличим от
+                      «Обновить данные». */}
                   <PowerIcon />
                   {t("nfqws.restart")}
-                </Button>
-                <Button
-                  disabled={operation.pending}
-                  onClick={() =>
-                    void runOperation(
-                      t("nfqws.reload"),
-                      () =>
-                        nfqwsAction({ action: "service", command: "reload" }),
-                      t("nfqws.operationCompleted")
-                    )
-                  }
-                  title={t("nfqws.serviceHelp.reload")}
-                  variant="outline"
-                >
-                  <FileCogIcon />
-                  {t("nfqws.reload")}
-                </Button>
-                <Button
-                  disabled={
-                    operation.pending ||
-                    updateQuery.isFetching ||
-                    !nfqwsUpgradeAllowed(status.upgrade_capability)
-                  }
-                  onClick={() => setUpgradeOpen(true)}
-                  title={
-                    status.upgrade_capability?.available === false
-                      ? t("nfqws.upgradeUnavailableDescription")
-                      : t("nfqws.serviceHelp.upgrade")
-                  }
-                  variant="outline"
-                >
-                  <DownloadIcon />
-                  {t("nfqws.upgrade")}
-                </Button>
-                <Button
-                  disabled={operation.pending || !status?.installed}
-                  onClick={() =>
-                    void runOperation(
-                      t("nfqws.captureRestorePoint"),
-                      () => nfqwsAction({ action: "capture_restore_point" }),
-                      t("nfqws.operationCompleted"),
-                      true
-                    )
-                  }
-                  title={t("nfqws.serviceHelp.captureRestorePoint")}
-                  variant="outline"
-                >
-                  <ArchiveIcon />
-                  {t("nfqws.captureRestorePoint")}
-                </Button>
-                <Button
-                  disabled={
-                    operation.pending ||
-                    !status?.installed ||
-                    // Only enabled when the backend says there is something to
-                    // restore. A control that is always clickable and always
-                    // refuses teaches the operator that it never works.
-                    status?.restore_point !== "usable"
-                  }
-                  onClick={() => setRestoreOpen(true)}
-                  title={
-                    status?.restore_point === "usable"
-                      ? t("nfqws.serviceHelp.restoreComponent")
-                      : t("nfqws.restorePointMissing")
-                  }
-                  variant="outline"
-                >
-                  <RotateCcwIcon />
-                  {t("nfqws.restoreComponent")}
-                </Button>
-                <Button
-                  disabled={!status?.installed || backupPending !== null}
-                  onClick={() => setBackupOpen(true)}
-                  title={t("nfqws.serviceHelp.backup")}
-                  variant="outline"
-                >
-                  <ArchiveIcon />
-                  {t("nfqws.backup.button")}
                 </Button>
                 <Button
                   disabled={
@@ -746,6 +687,82 @@ export function NfqwsPage() {
                   />
                   {t("nfqws.refresh")}
                 </Button>
+                <NfqwsMaintenanceMenu
+                  items={[
+                    {
+                      key: "reload",
+                      icon: FileCogIcon,
+                      label: t("nfqws.reload"),
+                      hint: t("nfqws.serviceHelp.reload"),
+                      disabled: operation.pending,
+                      onSelect: () =>
+                        void runOperation(
+                          t("nfqws.reload"),
+                          () =>
+                            nfqwsAction({
+                              action: "service",
+                              command: "reload",
+                            }),
+                          t("nfqws.operationCompleted")
+                        ),
+                    },
+                    {
+                      key: "upgrade",
+                      icon: DownloadIcon,
+                      label: t("nfqws.upgrade"),
+                      hint: t("nfqws.serviceHelp.upgrade"),
+                      disabled:
+                        operation.pending ||
+                        updateQuery.isFetching ||
+                        !nfqwsUpgradeAllowed(status.upgrade_capability),
+                      // Честная причина вместо объяснения, зачем кнопка,
+                      // когда нажать её всё равно нельзя.
+                      disabledReason:
+                        status.upgrade_capability?.available === false
+                          ? t("nfqws.upgradeUnavailableDescription")
+                          : undefined,
+                      onSelect: () => setUpgradeOpen(true),
+                    },
+                    {
+                      key: "captureRestorePoint",
+                      icon: BookmarkIcon,
+                      label: t("nfqws.captureRestorePoint"),
+                      hint: t("nfqws.serviceHelp.captureRestorePoint"),
+                      disabled: operation.pending || !status?.installed,
+                      onSelect: () =>
+                        void runOperation(
+                          t("nfqws.captureRestorePoint"),
+                          () =>
+                            nfqwsAction({ action: "capture_restore_point" }),
+                          t("nfqws.operationCompleted"),
+                          true
+                        ),
+                    },
+                    {
+                      key: "restoreComponent",
+                      icon: RotateCcwIcon,
+                      label: t("nfqws.restoreComponent"),
+                      hint: t("nfqws.serviceHelp.restoreComponent"),
+                      disabled:
+                        operation.pending ||
+                        !status?.installed ||
+                        status?.restore_point !== "usable",
+                      disabledReason:
+                        status?.restore_point === "usable"
+                          ? undefined
+                          : t("nfqws.restorePointMissing"),
+                      onSelect: () => setRestoreOpen(true),
+                    },
+                    {
+                      key: "backup",
+                      icon: ArchiveIcon,
+                      label: t("nfqws.backup.button"),
+                      hint: t("nfqws.serviceHelp.backup"),
+                      disabled: !status?.installed || backupPending !== null,
+                      onSelect: () => setBackupOpen(true),
+                    },
+                  ]}
+                />
               </div>
             </div>
           </NfqwsSection>
@@ -2581,6 +2598,81 @@ function NfqwsSection({
 /** Порог, после которого строка запуска сворачивается. Восемь строк сплошного
  *  цветного текста прочитать невозможно, а короткую — можно и нужно. */
 /**
+ * Редкие действия под одной кнопкой: обновление пакета, точки возврата,
+ * резервные копии, перечитывание конфигурации.
+ *
+ * Пояснение стоит у самого пункта, а не только под знаком вопроса у
+ * заголовка: решение принимается здесь, и разница между «Сохранить точку
+ * возврата» и «Резервные копии» должна читаться в момент выбора. Недоступный
+ * пункт говорит причину вместо объяснения, зачем он нужен, — иначе человек
+ * читает, что кнопка делает, и не понимает, почему она не нажимается.
+ */
+function NfqwsMaintenanceMenu({
+  items,
+}: {
+  items: readonly {
+    key: string
+    icon: typeof ArchiveIcon
+    label: string
+    hint: string
+    disabled?: boolean
+    disabledReason?: string
+    onSelect: () => void
+  }[]
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+
+  return (
+    <Popover onOpenChange={setOpen} open={open}>
+      <PopoverTrigger
+        render={
+          <Button
+            aria-label={t("nfqws.maintenance")}
+            title={t("nfqws.maintenanceHint")}
+            variant="outline"
+          />
+        }
+      >
+        <WrenchIcon />
+        {t("nfqws.maintenance")}
+        <ChevronDownIcon className="size-3.5 opacity-60" />
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 p-0 py-1">
+        <div className="flex flex-col">
+          {items.map((item) => {
+            const Icon = item.icon
+            const reason = item.disabled ? item.disabledReason : undefined
+            return (
+              <button
+                className="flex w-full items-start gap-2.5 px-3 py-2 text-left outline-none hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-50"
+                disabled={item.disabled}
+                key={item.key}
+                onClick={() => {
+                  setOpen(false)
+                  item.onSelect()
+                }}
+                type="button"
+              >
+                <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium">
+                    {item.label}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {reason ?? item.hint}
+                  </span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+/**
  * Что делает каждая кнопка службы — списком «подпись → объяснение».
  *
  * Развёрнуто, потому что разница между «Перезапустить службу» и «Перечитать
@@ -2594,33 +2686,27 @@ function ServiceActionsHelp() {
   return (
     <dl className="grid gap-2.5">
       <div>
+        <dt className="font-medium">{t("nfqws.stop")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.toggle")}
+        </dd>
+      </div>
+      <div>
         <dt className="font-medium">{t("nfqws.restart")}</dt>
         <dd className="text-muted-foreground">
           {t("nfqws.serviceHelp.restart")}
         </dd>
       </div>
       <div>
-        <dt className="font-medium">{t("nfqws.reload")}</dt>
-        <dd className="text-muted-foreground">
-          {t("nfqws.serviceHelp.reload")}
-        </dd>
-      </div>
-      <div>
-        <dt className="font-medium">{t("nfqws.upgrade")}</dt>
-        <dd className="text-muted-foreground">
-          {t("nfqws.serviceHelp.upgrade")}
-        </dd>
-      </div>
-      <div>
-        <dt className="font-medium">{t("nfqws.backup.button")}</dt>
-        <dd className="text-muted-foreground">
-          {t("nfqws.serviceHelp.backup")}
-        </dd>
-      </div>
-      <div>
         <dt className="font-medium">{t("nfqws.refresh")}</dt>
         <dd className="text-muted-foreground">
           {t("nfqws.serviceHelp.refresh")}
+        </dd>
+      </div>
+      <div>
+        <dt className="font-medium">{t("nfqws.maintenance")}</dt>
+        <dd className="text-muted-foreground">
+          {t("nfqws.serviceHelp.maintenance")}
         </dd>
       </div>
     </dl>

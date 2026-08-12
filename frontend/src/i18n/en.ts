@@ -32,8 +32,14 @@ export const enTranslation = {
     restoreComponentLimitTitle: "What this does not do",
     restoreComponentLimitDescription:
       "Files the newer package added are left in place. This returns nfqws2 to the saved files, not the router to its exact earlier state.",
+    maintenance: "Maintenance",
+    maintenanceHint: "Rare actions: package, restore points, backups",
     serviceHelp: {
       label: "What the service buttons do",
+      toggle:
+        "The service switch. While nfqws2 is stopped, censorship circumvention does not run at all — the settings are kept.",
+      maintenance:
+        "Rare actions behind one button: package upgrade, restore points around it, backups, and reloading the configuration without a stop. Each one is explained in the menu itself.",
       restart:
         "Stops nfqws and starts it again with the current configuration. Connections drop for a second, but everything you changed takes effect.",
       reload:
