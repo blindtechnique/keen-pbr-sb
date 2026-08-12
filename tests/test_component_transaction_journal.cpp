@@ -72,6 +72,77 @@ TEST_CASE("no record means nothing was in flight") {
     CHECK_FALSE(status.record.has_value());
 }
 
+TEST_CASE("a record this process owns is running, not abandoned") {
+    // The regression this case exists for: without an owner, every record read
+    // as "did not finish", so the panel told the operator their upgrade had
+    // failed for the whole time it was correctly running. A warning that fires
+    // during the normal case is one that stops being read before the abnormal
+    // case arrives.
+    TempDirectory directory;
+    const auto path = directory.path / "transaction.json";
+    write_component_transaction(path, sample_record());
+
+    const auto status = read_component_transaction(path);
+    CHECK(status.state == ComponentTransactionState::in_flight);
+    REQUIRE(status.record.has_value());
+    CHECK(status.record->owner_pid == static_cast<std::int64_t>(::getpid()));
+    CHECK_FALSE(status.record->owner_start.empty());
+}
+
+TEST_CASE("a record whose owner is gone is abandoned") {
+    TempDirectory directory;
+    const auto path = directory.path / "transaction.json";
+    auto record = sample_record();
+    // This process, with somebody else's start time. Alive, so liveness alone
+    // would call it running; the start time is what says otherwise.
+    //
+    // That distinction is not decoration. Pids are reused, and a reboot makes
+    // reuse near-certain: without this check any process that happened to land
+    // on the recorded number would make an interrupted operation look like a
+    // running one, and the operator would be told to wait for something that
+    // is never going to finish.
+    //
+    // An earlier version of this case used pid 1, which proves nothing: it is
+    // rejected by the pid<=1 guard before the start time is ever compared, and
+    // a mutation deleting the comparison passed the suite.
+    record.owner_pid = static_cast<std::int64_t>(::getpid());
+    record.owner_start = "999999999";
+    write_component_transaction(path, record);
+    CHECK(read_component_transaction(path).state ==
+          ComponentTransactionState::abandoned);
+
+    // And pid 1 for the guard that does reject it: init is alive, and is not
+    // the owner of anything we wrote.
+    record.owner_pid = 1;
+    record.owner_start = "1";
+    write_component_transaction(path, record);
+    CHECK(read_component_transaction(path).state ==
+          ComponentTransactionState::abandoned);
+
+    // A pid that can own nothing, written raw: the writer substitutes this
+    // process when the caller names none, so this state cannot be produced
+    // through it - and that substitution is deliberate, since the process
+    // writing the record is by definition the one doing the work.
+    write_raw(path,
+              "{\"version\":1,\"component\":\"nfqws2-keenetic\","
+              "\"operation\":\"upgrade\",\"phase\":\"mutating\","
+              "\"owner_pid\":0,\"owner_start\":\"1\"}");
+    CHECK(read_component_transaction(path).state ==
+          ComponentTransactionState::abandoned);
+}
+
+TEST_CASE("a record from before owners were written is abandoned, not running") {
+    // An older keen-pbr wrote no owner. Reading that as "running" would let a
+    // genuinely interrupted operation hide behind the benign state.
+    TempDirectory directory;
+    const auto path = directory.path / "old.json";
+    write_raw(path,
+              "{\"version\":1,\"component\":\"nfqws2-keenetic\","
+              "\"operation\":\"upgrade\",\"phase\":\"mutating\"}");
+    CHECK(read_component_transaction(path).state ==
+          ComponentTransactionState::abandoned);
+}
+
 TEST_CASE("a written record survives and reads back exactly") {
     TempDirectory directory;
     const auto path = directory.path / "nested" / "transaction.json";
@@ -164,7 +235,9 @@ TEST_CASE("optional detail is allowed to be missing without losing the record") 
               "{\"version\":1,\"component\":\"nfqws2-keenetic\","
               "\"operation\":\"upgrade\",\"phase\":\"started\"}");
     const auto status = read_component_transaction(path);
-    REQUIRE(status.state == ComponentTransactionState::in_flight);
+    // Readable, so a record - abandoned rather than running, because no owner
+    // was named. Which of the two it is does not change that it was read.
+    REQUIRE(status.state == ComponentTransactionState::abandoned);
     REQUIRE(status.record.has_value());
     CHECK(status.record->started_at == 0);
     CHECK(status.record->binary_sha256.empty());
@@ -216,6 +289,7 @@ TEST_CASE("every journal name is distinct and stable") {
     std::set<std::string> states;
     for (const auto state : {ComponentTransactionState::none,
                              ComponentTransactionState::in_flight,
+                             ComponentTransactionState::abandoned,
                              ComponentTransactionState::unreadable}) {
         CHECK(states.insert(component_transaction_state_name(state)).second);
     }

@@ -46,13 +46,29 @@ struct ComponentTransactionRecord {
     std::string binary_sha256;
     std::string config_sha256;
     bool runtime_was_running{false};
+    // Who is doing this, so a record left behind can be told from one that is
+    // being written right now. Filled by the writer; a record without them is
+    // readable but can only ever be classified as abandoned.
+    //
+    // The start time is carried with the pid because pids are reused, and a
+    // reboot makes reuse near-certain: without it, any live process that
+    // happens to land on the recorded number would make an interrupted
+    // operation look like a running one.
+    std::int64_t owner_pid{0};
+    std::string owner_start;
 };
 
 enum class ComponentTransactionState {
     // No record. Nothing was in flight.
     none,
-    // A well-formed record. A mutation started and never reported an end.
+    // A well-formed record whose owning process is alive. Something is
+    // happening right now. Another operation must still wait, but nothing is
+    // wrong, and telling an operator their upgrade "did not finish" while it
+    // is running is how a warning stops being read.
     in_flight,
+    // A well-formed record whose owner is gone. A mutation started and never
+    // reported an end - the case a reboot in the middle produces.
+    abandoned,
     // A record exists and cannot be read. Reported as its own state and never
     // as `none`: a journal we cannot parse is the one case where assuming
     // "nothing happened" is most likely to be wrong, because a torn write is

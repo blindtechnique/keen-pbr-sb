@@ -581,8 +581,8 @@ export function NfqwsPage() {
                   and not only when the next upgrade refuses: a reboot in the
                   middle of one leaves this record, and the moment to learn
                   about it is before deciding what to do next. */}
-              {status?.transaction_state &&
-              status.transaction_state !== "none" ? (
+              {status?.transaction_state === "abandoned" ||
+              status?.transaction_state === "unreadable" ? (
                 <Alert variant="destructive">
                   <AlertTitle>
                     {t("nfqws.interruptedTransactionTitle")}
