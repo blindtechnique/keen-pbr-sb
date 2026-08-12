@@ -958,6 +958,24 @@ TEST_CASE("corrupt previous IPK hash fails closed before services stop") {
           std::string::npos);
 }
 
+TEST_CASE("rescue status preserves its exact JSON boolean contract") {
+    TempDirectory directory;
+    const auto root = directory.path;
+    install_runtime_mocks(root);
+    prepare_two_generations(root);
+
+    const auto output = root / "status.json";
+    REQUIRE(run_script(root,
+                       KEEN_PBR_RESCUE_SCRIPT_PATH,
+                       {"status"},
+                       0,
+                       0,
+                       output) == 0);
+    CHECK(read_file(output) ==
+          "{\"ready\":true,\"rollback_available\":true,"
+          "\"pending\":false,\"unknown\":false}\n");
+}
+
 TEST_CASE("health failure after opkg success compensates package and live config") {
     TempDirectory directory;
     const auto root = directory.path;

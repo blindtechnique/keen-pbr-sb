@@ -243,14 +243,14 @@ validate_snapshot() {
     [ -d "$source_dir" ] && [ ! -L "$source_dir" ] ||
         return 1
     manifest="$source_dir/$SNAPSHOT_MANIFEST"
-    ready="$source_dir/$SNAPSHOT_READY"
+    snapshot_ready="$source_dir/$SNAPSHOT_READY"
     [ -f "$manifest" ] && [ ! -L "$manifest" ] &&
-        [ -f "$ready" ] && [ ! -L "$ready" ] ||
+        [ -f "$snapshot_ready" ] && [ ! -L "$snapshot_ready" ] ||
         return 1
 
     expected_manifest_hash=""
-    IFS= read -r expected_manifest_hash < "$ready" || return 1
-    [ "$(wc -l < "$ready" 2>/dev/null)" -eq 1 ] 2>/dev/null || return 1
+    IFS= read -r expected_manifest_hash < "$snapshot_ready" || return 1
+    [ "$(wc -l < "$snapshot_ready" 2>/dev/null)" -eq 1 ] 2>/dev/null || return 1
     [ "${#expected_manifest_hash}" -eq 64 ] || return 1
     case "$expected_manifest_hash" in
         *[!0-9a-f]*) return 1 ;;
